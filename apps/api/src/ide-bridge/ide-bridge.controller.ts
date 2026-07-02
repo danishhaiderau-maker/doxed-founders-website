@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Param } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { IdeBridgeService } from './ide-bridge.service';
@@ -25,6 +25,14 @@ export class IdeBridgeController {
   @Get('sessions')
   getSessions(@CurrentUser() user: AuthUser) {
     return this.ideBridge.getSessions(user.id);
+  }
+
+  @Get('sessions/:sessionId/messages')
+  getSessionMessages(
+    @CurrentUser() user: AuthUser,
+    @Param('sessionId') sessionId: string,
+  ) {
+    return this.ideBridge.getSessionMessages(user.id, sessionId);
   }
 }
 

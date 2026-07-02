@@ -5478,6 +5478,7 @@ export function fetchDesktopBridge(token: string) {
 
 export type BridgeWorkspace = import('@dcf/utils').BridgeWorkspace;
 export type BridgeSession = import('@dcf/utils').BridgeSession;
+export type BridgeMessage = import('@dcf/utils').BridgeMessage;
 
 export function fetchIdeBridgeWorkspaces(token: string) {
   return apiFetch<BridgeWorkspace[]>('/ide-bridge/workspaces', undefined, token);
@@ -5485,6 +5486,14 @@ export function fetchIdeBridgeWorkspaces(token: string) {
 
 export function fetchIdeBridgeSessions(token: string) {
   return apiFetch<BridgeSession[]>('/ide-bridge/sessions', undefined, token);
+}
+
+export function fetchIdeBridgeSessionMessages(token: string, sessionId: string) {
+  return apiFetch<BridgeMessage[] | null>(
+    `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/messages`,
+    undefined,
+    token,
+  );
 }
 export type PlatformBrainStatus = { configured: boolean; updatedAt: string | null };
 

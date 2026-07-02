@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import type {
   BridgeAgent,
   BridgeGitState,
+  BridgeMessage,
   BridgeSession,
   BridgeWorkspace,
 } from '@dcf/utils';
@@ -354,6 +355,9 @@ type AgentProject = {
 const SESSION_DB_TIMEOUT_MS = 5_000;
 const MAX_SESSIONS = 20;
 const SUBTITLE_MAX = 100;
+const MAX_MESSAGES_PER_SESSION = 30;
+const MAX_SESSIONS_WITH_MESSAGES = 8;
+const MESSAGE_TEXT_MAX = 1000;
 
 function getCursorGlobalStateDbPath(): string | null {
   const appdata =
@@ -414,6 +418,153 @@ function readAgentProjects(
     if (!row || typeof row.value !== 'string') return [];
     const parsed = JSON.parse(row.value) as unknown;
     return Array.isArray(parsed) ? (parsed as AgentProject[]) : [];
+  } catch {
+    return [];
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+type BubbleRow = { key?: string; value?: string };
+
+/**
+ * Shape of a Cursor chat bubble stored under `cursorDiskKV` key
+ * `bubbleId:<composerId>:<bubbleId>`. Cursor's schema is not documented and
+ * varies between versions, so every field is optional and we extract
+ * defensively.
+ */
+type CursorBubble = {
+  type?: number;
+  text?: string;
+  content?: string;
+  richText?: string;
+  context?: { text?: string } | string;
+  message?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  timestamp?: number;
+  ts?: number;
+  model?: string;
+};
+
+/**
+ * Cursor stores message bodies as a Lexical editor JSON string in `richText`.
+ * Walk the `root.children[].children[].text` tree and concatenate text nodes.
+ * Returns '' if the input isn't a Lexical document.
+ */
+function extractTextFromLexical(raw: unknown): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return '';
+  }
+  if (!doc || typeof doc !== 'object') return '';
+  const out: string[] = [];
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    const n = node as Record<string, unknown>;
+    if (typeof n.text === 'string') {
+      out.push(n.text);
+      return;
+    }
+    const children = n.children;
+    if (Array.isArray(children)) {
+      for (const c of children) visit(c);
+    }
+  };
+  const root = (doc as Record<string, unknown>).root;
+  visit(root);
+  return out.join('').trim();
+}
+
+/**
+ * Pull the human-readable text out of a bubble using every known field, in
+ * priority order. `richText` (Lexical JSON) is parsed and flattened as a
+ * fallback when no plain `text`/`content` is present.
+ */
+function extractBubbleText(b: CursorBubble): string {
+  const candidates = [
+    b.text,
+    b.content,
+    typeof b.context === 'string' ? b.context : b.context?.text,
+    b.message,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim();
+  }
+  const fromLexical = extractTextFromLexical(b.richText);
+  if (fromLexical) return fromLexical;
+  return '';
+}
+
+function bubbleRole(b: CursorBubble): BridgeMessage['role'] | null {
+  if (b.type === 1) return 'user';
+  if (b.type === 2) return 'assistant';
+  return null;
+}
+
+function bubbleTimestamp(b: CursorBubble): string | undefined {
+  const ms = b.updatedAt ?? b.createdAt ?? b.timestamp ?? b.ts;
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return new Date(ms).toISOString();
+}
+
+/**
+ * Read up to `MAX_MESSAGES_PER_SESSION` most-recent bubbles for a single
+ * composer session from `cursorDiskKV`. Returns [] on any failure so session
+ * discovery still works even if the bubble table is missing or locked.
+ *
+ * Sorted oldest → newest so the UI can render the thread in conversation order.
+ */
+function readComposerBubbles(
+  DatabaseSync: typeof import('node:sqlite').DatabaseSync,
+  dbPath: string,
+  composerId: string,
+): BridgeMessage[] {
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const stmt = db.prepare(
+      "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' ORDER BY key DESC LIMIT ?",
+    );
+    const prefix = `bubbleId:${composerId}:%`;
+    const rows = stmt.all(prefix, MAX_MESSAGES_PER_SESSION) as BubbleRow[];
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+
+    const messages: Array<{ msg: BridgeMessage; ts: number }> = [];
+    for (const row of rows) {
+      if (!row || typeof row.value !== 'string') continue;
+      let parsed: CursorBubble;
+      try {
+        parsed = JSON.parse(row.value) as CursorBubble;
+      } catch {
+        continue;
+      }
+      const role = bubbleRole(parsed);
+      if (!role) continue;
+      const text = extractBubbleText(parsed).slice(0, MESSAGE_TEXT_MAX);
+      if (!text) continue;
+      const isoTs = bubbleTimestamp(parsed);
+      messages.push({
+        msg: {
+          role,
+          content: text,
+          timestamp: isoTs,
+          ...(parsed.model ? { model: parsed.model.slice(0, 60) } : {}),
+        },
+        ts: isoTs ? new Date(isoTs).getTime() : 0,
+      });
+    }
+
+    // Newest-first from the DESC key scan → flip to chronological, then trim.
+    messages.sort((a, b) => a.ts - b.ts);
+    return messages.slice(-MAX_MESSAGES_PER_SESSION).map((m) => m.msg);
   } catch {
     return [];
   } finally {
@@ -499,7 +650,23 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
       (a, b) =>
         new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
     );
-    return sessions.slice(0, MAX_SESSIONS);
+    const top = sessions.slice(0, MAX_SESSIONS);
+
+    // Attach the recent message thread to the most recent sessions so the
+    // dashboard can show what was actually said without an extra round trip.
+    // Only the top N sessions get messages — reading bubbles for every
+    // session would balloon the heartbeat payload and the SQLite scan time.
+    const withMessages = top.slice(0, MAX_SESSIONS_WITH_MESSAGES);
+    for (const s of withMessages) {
+      const msgs = readComposerBubbles(sqlite.DatabaseSync, dbPath, s.id);
+      if (msgs.length > 0) {
+        s.messages = msgs;
+        if (typeof s.messageCount !== 'number') s.messageCount = msgs.length;
+      }
+      if (Date.now() - started > SESSION_DB_TIMEOUT_MS) break;
+    }
+
+    return top;
   } catch {
     return null;
   }

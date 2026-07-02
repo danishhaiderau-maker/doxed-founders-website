@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   sanitizeDesktopBridge,
+  type BridgeMessage,
   type BridgeSession,
   type BridgeWorkspace,
   type DesktopBridgeInput,
@@ -15,6 +16,8 @@ const SESSIONS_KEY = '_sessionsByNode';
 const MAX_WORKSPACES = 10;
 const MAX_SESSIONS = 20;
 const MAX_STR_LEN = 200;
+const MAX_MESSAGES_PER_SESSION = 30;
+const MESSAGE_TEXT_MAX = 1000;
 
 @Injectable()
 export class DesktopBridgeService {
@@ -281,6 +284,7 @@ export class DesktopBridgeService {
         ideProvider: this.optString(s.ideProvider) ?? 'cursor',
         restorable: Boolean(s.restorable),
         lastActiveAt,
+        messages: this.sanitizeMessages(s.messages),
         messageCount:
           typeof s.messageCount === 'number' && Number.isFinite(s.messageCount)
             ? Math.max(0, Math.floor(s.messageCount))
@@ -302,5 +306,32 @@ export class DesktopBridgeService {
       if (out.length >= MAX_SESSIONS) break;
     }
     return out;
+  }
+
+  private sanitizeMessages(input: unknown): BridgeMessage[] | undefined {
+    if (!Array.isArray(input)) return undefined;
+    const out: BridgeMessage[] = [];
+    for (const raw of input) {
+      if (!raw || typeof raw !== 'object') continue;
+      const m = raw as Record<string, unknown>;
+      const role = m.role;
+      const content = typeof m.content === 'string' ? m.content : '';
+      if (role !== 'user' && role !== 'assistant' && role !== 'system') continue;
+      if (!content.trim()) continue;
+      const ts =
+        typeof m.timestamp === 'string' && !Number.isNaN(Date.parse(m.timestamp))
+          ? m.timestamp
+          : undefined;
+      out.push({
+        role,
+        content: content.slice(0, MESSAGE_TEXT_MAX),
+        ...(ts ? { timestamp: ts } : {}),
+        ...(typeof m.model === 'string' && m.model.trim()
+          ? { model: m.model.trim().slice(0, 60) }
+          : {}),
+      });
+      if (out.length >= MAX_MESSAGES_PER_SESSION) break;
+    }
+    return out.length > 0 ? out : undefined;
   }
 }
