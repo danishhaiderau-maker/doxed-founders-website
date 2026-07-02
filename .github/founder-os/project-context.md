@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+﻿feat(web): spread hard-gate toggle UI on conservative-btc Agent Hub
 
 ## Last Activity
 
