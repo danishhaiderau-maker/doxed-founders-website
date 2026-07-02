@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-fix(bot): emergency AI-key drain protection — rate limit + admin auth on all bot HTTP endpoints
+feat(reconcile): Phase 2 — Layer B (NestJS) reconcile-adopt loop + stop re-arm + clientOrderId match key
 
 ## Last Activity
 
