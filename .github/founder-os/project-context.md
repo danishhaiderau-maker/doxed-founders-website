@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(brain): remove roadmap constraints — Founder OS is fully dynamic
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
