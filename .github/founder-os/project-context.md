@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(wall): Telegram-style Founder Chat wall + project page redesign
 
 ## Last Activity
 
