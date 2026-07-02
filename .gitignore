@@ -203,3 +203,5 @@ services/btc-conservative-agent/*_funnel.json
 services/btc-conservative-agent/*_audit.json
 services/btc-conservative-agent/research_*.txt
 services/btc-conservative-agent/research_*.json
+
+*.tmp.py
