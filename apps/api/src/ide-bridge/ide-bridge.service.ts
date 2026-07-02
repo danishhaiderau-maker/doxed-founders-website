@@ -347,11 +347,10 @@ export class IdeBridgeService {
    * heartbeat, so we can serve them straight from the persisted sessions[]
    * without an extra round trip back to the desktop.
    */
-  async getSessionMessages(userId: string, sessionId: string): Promise<BridgeMessage[] | null> {
+  async getSessionMessages(userId: string, sessionId: string): Promise<BridgeMessage[]> {
     const sessions = await this.desktopBridge.listSessions(userId);
     const s = sessions.find((x) => x.id === sessionId);
-    if (!s) return null;
-    return s.messages ?? null;
+    return s?.messages ?? [];
   }
 
   /**
