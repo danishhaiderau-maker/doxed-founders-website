@@ -286,6 +286,7 @@ LANE_TRACKING_LANES = tuple(
 lane_open_positions: Dict[str, List] = {ln: [] for ln in LANE_TRACKING_LANES}
 lane_pending_orders: Dict[str, List] = {ln: [] for ln in LANE_TRACKING_LANES}
 LANE_PNL_LEDGER_FILE = "lane_pnl_ledger.json"
+LANE_LAB_PNL_LEDGER_FILE = "lane_lab_pnl_ledger.json"  # LAB (OFF-combo) simulated PnL — kept separate from real ledger
 AI_FUNNEL_REPORT_FILE = "ai_funnel_report.json"
 # Binance USDT-M VIP0 reference (for dashboard fee-stress box — bot sim uses BITFINEX_ZERO)
 BINANCE_USDT_M_TAKER_FEE = 0.0005   # 0.05% per side
@@ -2664,6 +2665,66 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
                 )
         except Exception:
             pass
+
+
+def update_lane_lab_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None):
+    """Parallel ledger for LAB (OFF-combo) simulated trades — never feeds live decisions.
+
+    Mirrors `update_lane_pnl_ledger` but writes to `state["lane_lab_pnl_ledger"]` +
+    `LANE_LAB_PNL_LEDGER_FILE`. Every entry is tagged `mode: "lab"` / `pnl_source:
+    "lab_simulated"` so the dashboard can distinguish lab PnL from real PnL.
+    """
+    ln = _normalize_lane_key(lane)
+    with state_lock:
+        ledger = state.setdefault("lane_lab_pnl_ledger", {})
+        bucket = ledger.setdefault(ln, {
+            "lane": ln,
+            "mode": "lab",
+            "net_pnl_usd": 0.0,
+            "gross_wins_usd": 0.0,
+            "gross_losses_usd": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "closes": 0,
+            "long_closes": 0,
+            "short_closes": 0,
+            "long_pnl_usd": 0.0,
+            "short_pnl_usd": 0.0,
+            "pnl_source": "lab_simulated",
+        })
+        if event == "CLOSE":
+            bucket["closes"] = int(bucket.get("closes", 0)) + 1
+            bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + float(net_pnl_usd or 0), 2)
+            if net_pnl_usd > 0:
+                bucket["wins"] = int(bucket.get("wins", 0)) + 1
+                bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + net_pnl_usd, 2)
+            elif net_pnl_usd < 0:
+                bucket["losses"] = int(bucket.get("losses", 0)) + 1
+                bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + net_pnl_usd, 2)
+            d = str(direction or "").upper()
+            if d == "LONG":
+                bucket["long_closes"] = int(bucket.get("long_closes", 0)) + 1
+                bucket["long_pnl_usd"] = round(float(bucket.get("long_pnl_usd", 0)) + net_pnl_usd, 2)
+            elif d == "SHORT":
+                bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
+                bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + net_pnl_usd, 2)
+        try:
+            with open(LANE_LAB_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"schema": "lane_lab_pnl_ledger_v1", "ts": utc_iso(), "lanes": ledger},
+                    f,
+                    indent=2,
+                )
+        except Exception:
+            pass
+
+
+def get_lane_lab_pnl_ledger(lane: str = None) -> dict:
+    with state_lock:
+        ledger = copy.deepcopy(state.get("lane_lab_pnl_ledger") or {})
+    if lane:
+        return dict(ledger.get(_normalize_lane_key(lane), {}))
+    return ledger
 
 
 def _ai_context_fingerprint(ctx: dict) -> str:
@@ -10057,12 +10118,13 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
     if not guard_retired_lane_execution(target_lane, "spawn_combo_lane", (ctx or {}).get("trade_id")):
         return
     if not is_research_lane_enabled(target_lane):
-        logger.info(f"[{target_lane}] spawn skipped - lane OFF [PIPELINE ENFORCEMENT]")
+        logger.info(f"[{target_lane}] spawn LAB mode - lane OFF [PIPELINE ENFORCEMENT]")
         log_lane_opportunity_event(
-            target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
+            target_lane, "SPAWN_LAB", (ctx or {}).get("trade_id"),
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-            block_reason="LANE_TOGGLE_OFF",
+            block_reason="LANE_TOGGLE_OFF_LAB",
         )
+        _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane)
         return
     spawn_ctx = copy.deepcopy(ctx)
     spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
@@ -10083,6 +10145,67 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "pre_ai": copy.deepcopy(ai),
         "pre_ctx": spawn_ctx,
     })
+
+
+def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str):
+    """LAB mode for an OFF combo tile — run the FULL strategy pipeline in telemetry/simulation:
+    virtual chase fill + Scenario C exit ladder (thesis stop / early-fail / SL / TP / profit-lock),
+    WITHOUT placing any real exchange order. Reuses the shadow-collecting replay engine
+    (`start_replay_buffer` + `tick_all_replay_buffers` + `simulate_replay_outcome` +
+    `finalize_shadow_lane_collecting`). Simulated PnL is recorded into `lane_lab_pnl_ledger`
+    on buffer finalization, tagged `mode: "lab"` so it never contaminates the real
+    `lane_pnl_ledger` used for live decisions.
+
+    Safety: this path never calls submit_limit / submit_stop / any order API. The existing
+    `lane_orders_allowed` gate (False for OFF combo tiles) is the secondary defense at every
+    order-submission site.
+    """
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(target_lane):
+        return
+    study_id = f"lab-{str(target_lane).lower()}-{uuid.uuid4().hex[:12]}"
+    ai_dir = str((ai or {}).get("direction") or "LONG").upper()
+    direction = ai_dir
+    if state.get("invert_signal", False):
+        if direction == "LONG":
+            direction = "SHORT"
+        elif direction == "SHORT":
+            direction = "LONG"
+    price = float(nz(state.get("price")) or 0)
+    if price <= 0:
+        return
+    exit_cfg = get_exit_config_for_lane(target_lane)
+    # Belt-and-braces no-real-order guard: LAB mode must NEVER place a real order.
+    # This branch only starts a replay buffer; the real order path (process_signal →
+    # submit_limit/submit_stop) is never entered for OFF tiles. Assert defensively.
+    if lane_orders_allowed(target_lane):
+        logger.error(
+            f"[LAB_GUARD] lane={target_lane} unexpectedly orders-allowed in LAB spawn "
+            f"— aborting LAB shadow to avoid real orders [PIPELINE ENFORCEMENT]"
+        )
+        return
+    start_replay_buffer(
+        study_id,
+        price,
+        lane=f"shadow_collect_{target_lane}",  # reuse prefix so finalize_shadow_lane_collecting handles TTL
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(FIXED_MARGIN_USDT),
+        pullback_pct=float(state.get("pullback_threshold", 0.001)),
+        early_fail_enabled=bool(state.get("early_fail_enabled", True)),
+        exit_config=exit_cfg,
+        ai_win_prob=(ai or {}).get("win_prob"),
+        edge_score=round(float(edge_score), 1),
+        research_lane=target_lane,
+        source_trade_id=(ctx or {}).get("trade_id"),
+        collection_mode="LAB",
+    )
+    append_replay_tick(study_id, price, None)
+    logger.info(
+        f"[{target_lane}] LAB shadow study_id={study_id} dir={direction} edge={float(edge_score):.1f} "
+        f"— simulating full pipeline (virtual fill + Scenario C exit), no real orders [PIPELINE ENFORCEMENT]"
+    )
 
 
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
@@ -10344,6 +10467,23 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
         f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
     )
+    # LAB mode (OFF combo tile): record simulated PnL into the parallel lab ledger so the
+    # Pathway Lab dashboard can pre-flight a strategy without real orders. Tagged `mode: "lab"`
+    # and kept strictly separate from the real `lane_pnl_ledger` used for live decisions.
+    if str(buf.get("collection_mode") or "") == "LAB" and outcome.get("filled") and lane:
+        try:
+            update_lane_lab_pnl_ledger(
+                lane, "CLOSE",
+                float(outcome.get("net_pnl_usd") or 0.0),
+                str(buf.get("direction") or "").upper(),
+            )
+            logger.info(
+                f"[LAB] lane={lane} study_id={study_id} simulated close recorded "
+                f"net_pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+        except Exception as e:
+            logger.error(f"[LAB] ledger update failed lane={lane} study_id={study_id}: {e}")
     close_replay_buffer(study_id)
 
 
@@ -15870,7 +16010,6 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
 
 def build_static_pathway_lane_specs() -> dict:
     """Combo Pathway Lab v2 — tile specs for dashboard (architecture frozen; change tiles only)."""
-    scenario_c = _scenario_c_exit_spec()
     shared = _pathway_shared_execution_spec()
     chase_detail = shared["limit_chase_label"]
     ai_cadence = shared["ai_scan_cadence_label"]
@@ -16115,6 +16254,7 @@ def _load_lane_metrics_from_disk() -> dict:
     """Benchmark report + ledger — PnL/fills for live tiles and retired archive."""
     bench_lanes = {}
     ledger = {}
+    lab_ledger = {}
     try:
         bench_path = os.path.join(os.getcwd(), "benchmark_vs_lanes_report.json")
         if os.path.isfile(bench_path):
@@ -16128,16 +16268,27 @@ def _load_lane_metrics_from_disk() -> dict:
                 ledger = (json.load(f) or {}).get("lanes") or {}
     except Exception as e:
         logger.debug(f"[LANE_METRICS] ledger read failed: {e}")
+    try:
+        if os.path.isfile(LANE_LAB_PNL_LEDGER_FILE):
+            with open(LANE_LAB_PNL_LEDGER_FILE, encoding="utf-8") as f:
+                lab_ledger = (json.load(f) or {}).get("lanes") or {}
+    except Exception as e:
+        logger.debug(f"[LANE_METRICS] lab ledger read failed: {e}")
     out = {}
-    for lane in set(bench_lanes.keys()) | set(ledger.keys()):
+    for lane in set(bench_lanes.keys()) | set(ledger.keys()) | set(lab_ledger.keys()):
         bm = bench_lanes.get(lane) or {}
         lb = ledger.get(lane) or {}
+        lab = lab_ledger.get(lane) or {}
         fills = int(bm.get("real_fills") or bm.get("fills") or lb.get("closes") or 0)
         pnl = float(bm.get("net_pnl_real") or bm.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
         approves = int(bm.get("approves") or 0)
         fill_pct = bm.get("approve_to_fill_pct")
         if approves and fill_pct is None:
             fill_pct = round(100.0 * fills / approves, 1)
+        lab_closes = int(lab.get("closes") or 0)
+        lab_pnl = float(lab.get("net_pnl_usd") or 0)
+        lab_wins = int(lab.get("wins") or 0)
+        lab_losses = int(lab.get("losses") or 0)
         out[lane] = {
             "approves": approves,
             "real_fills": fills,
@@ -16146,6 +16297,14 @@ def _load_lane_metrics_from_disk() -> dict:
             "net_pnl_real": round(pnl, 2),
             "per_approve_ev": round(float(bm.get("per_approve_ev") or 0), 2),
             "verdict": bm.get("verdict"),
+            # LAB (OFF-combo) simulated metrics — parallel to real metrics, never mixed.
+            "lab_mode": bool(lab_closes or lab_pnl),
+            "lab_closes": lab_closes,
+            "lab_net_pnl": round(lab_pnl, 2),
+            "lab_wins": lab_wins,
+            "lab_losses": lab_losses,
+            "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
+            "lab_per_close_ev": round(lab_pnl / lab_closes, 2) if lab_closes else 0.0,
         }
     # CONTINUOUS benchmark proxy from Direct COMBO lanes
     if COMPARISON_BENCHMARK_LANE not in out or not int(out.get(COMPARISON_BENCHMARK_LANE, {}).get("real_fills") or 0):
@@ -16178,6 +16337,15 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     fill_pct = m.get("approve_to_fill_pct")
     if approves and fill_pct is None:
         fill_pct = round(100.0 * fills / approves, 1)
+    lab_closes = int(m.get("lab_closes") or 0)
+    lab_pnl = float(m.get("lab_net_pnl") or 0)
+    lab_wins = int(m.get("lab_wins") or 0)
+    lab_win_rate = float(m.get("lab_win_rate") or 0.0)
+    lab_ev = float(m.get("lab_per_close_ev") or 0.0)
+    lab_line = (
+        f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
+        if lab_closes else "LAB sim · collecting…"
+    )
     return {
         "approves": approves,
         "real_fills": fills,
@@ -16190,6 +16358,15 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
             f"n={approves} approves · {fills} trades · "
             f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
         ),
+        # LAB (OFF-combo) simulated metrics — surfaced on the tile when OFF; never mixed into real.
+        "lab_mode": bool(m.get("lab_mode")),
+        "lab_closes": lab_closes,
+        "lab_net_pnl": round(lab_pnl, 2),
+        "lab_wins": lab_wins,
+        "lab_losses": int(m.get("lab_losses") or 0),
+        "lab_win_rate": lab_win_rate,
+        "lab_per_close_ev": lab_ev,
+        "lab_summary_line": lab_line,
     }
 
 
@@ -16235,6 +16412,25 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
                 "net_pnl_real": round(pnl, 2),
                 "per_approve_ev": float(prev.get("per_approve_ev") or 0),
                 "verdict": prev.get("verdict"),
+            }
+    # Fold live LAB (OFF-combo) simulated ledger into the per-lane metrics so the dashboard
+    # reflects simulated PnL in real time. Kept under lab_* keys; never merged into real_*.
+    live_lab_ledger = get_lane_lab_pnl_ledger()
+    for lane, lb in live_lab_ledger.items():
+        lab_closes = int(lb.get("closes") or 0)
+        lab_pnl = float(lb.get("net_pnl_usd") or 0)
+        if lab_closes or lab_pnl:
+            prev = disk_metrics.get(lane) or {}
+            lab_wins = int(lb.get("wins") or 0)
+            disk_metrics[lane] = {
+                **prev,
+                "lab_mode": True,
+                "lab_closes": lab_closes,
+                "lab_net_pnl": round(lab_pnl, 2),
+                "lab_wins": lab_wins,
+                "lab_losses": int(lb.get("losses") or 0),
+                "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
+                "lab_per_close_ev": round(lab_pnl / lab_closes, 2) if lab_closes else 0.0,
             }
     merged = []
     for spec in static_payload.get("lanes") or []:
@@ -17391,12 +17587,24 @@ DASHBOARD_JS = """(function () {
           };
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
           const pnlCol = pnl >= 0 ? '#3fb950' : '#f85149';
+          // LAB (OFF-combo) simulated metrics — shown alongside real stats so the user can
+          // pre-flight a strategy/ladder without real orders. Sim PnL is colour-coded the
+          // same as real PnL but prefixed "LAB" so it is never confused with live money.
+          const labOn = !on && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned && stats.lab_mode;
+          const labPnl = stats.lab_net_pnl != null ? stats.lab_net_pnl : 0;
+          const labPnlCol = labPnl >= 0 ? '#3fb950' : '#f85149';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
             + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
             + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
-            + '</div>';
+            + '</div>'
+            + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
+              + statRow('LAB sim', '🧪 ' + (stats.lab_closes != null ? stats.lab_closes : 0), '#58a6ff')
+              + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
+              + statRow('LAB win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
+              + statRow('LAB EV/close', '$' + Number(stats.lab_per_close_ev || 0).toFixed(2), '#58a6ff')
+              + '</div>') : '');
           const chips = (spec.filter_chips || []).map(function (c) {
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
           }).join('');
@@ -17420,7 +17628,7 @@ DASHBOARD_JS = """(function () {
           } else if (on) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — independent tile</div>';
           } else {
-            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#2a0f0f;border:1px solid #da3633;border-radius:6px;color:#f85149;font-size:0.82em;font-weight:700;">✕ ORDERS BLOCKED — toggle ON to trade</div>';
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">LAB MODE — simulating full pipeline · no real orders · toggle ON to trade</div>';
           }
           let toggleHtml = '';
           if (spec.planned || spec.status === 'RETIRED') {
@@ -17460,6 +17668,7 @@ DASHBOARD_JS = """(function () {
               return html + '</div>';
             })()
             + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
+            + (labOn && stats.lab_summary_line ? ('<div style="margin-top:4px;font-size:0.76em;color:#58a6ff;">' + stats.lab_summary_line + '</div>') : '')
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
