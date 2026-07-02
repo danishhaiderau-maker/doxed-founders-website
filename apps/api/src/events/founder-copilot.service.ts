@@ -1779,7 +1779,7 @@ export class FounderCopilotService {
     if (specialIntent) {
       emit({ type: 'thinking' });
       const result = (await this.ask(userId, text, options)) as CopilotAskResult;
-      this.emitNonStreamingResult(result, emit);
+      await this.emitNonStreamingResult(result, emit);
       return;
     }
     if (!isFounderRepoStatusPrompt(text)) {
@@ -1787,7 +1787,7 @@ export class FounderCopilotService {
       if (intent) {
         emit({ type: 'thinking' });
         const result = (await this.ask(userId, text, options)) as CopilotAskResult;
-        this.emitNonStreamingResult(result, emit);
+        await this.emitNonStreamingResult(result, emit);
         return;
       }
     }
@@ -1802,7 +1802,7 @@ export class FounderCopilotService {
       if (cursorCred || openHandsCred) {
         emit({ type: 'thinking' });
         const result = (await this.ask(userId, text, options)) as CopilotAskResult;
-        this.emitNonStreamingResult(result, emit);
+        await this.emitNonStreamingResult(result, emit);
         return;
       }
     }
@@ -1959,7 +1959,10 @@ export class FounderCopilotService {
         model: options?.provider ?? null,
         routedAgent: routeLabel,
       });
-      for (const chunk of this.chunkText(full)) emit({ type: 'token', text: chunk });
+      for (const chunk of this.chunkText(full)) {
+        emit({ type: 'token', text: chunk });
+        await new Promise((r) => setTimeout(r, 35));
+      }
       emit({ type: 'done', answer: full, answerProvider: 'FOUNDER_BRAIN', missingConnections });
       return;
     }
@@ -1998,7 +2001,10 @@ export class FounderCopilotService {
         model: options?.provider ?? null,
         routedAgent: routeLabel,
       });
-      for (const chunk of this.chunkText(answer)) emit({ type: 'token', text: chunk });
+      for (const chunk of this.chunkText(answer)) {
+        emit({ type: 'token', text: chunk });
+        await new Promise((r) => setTimeout(r, 35));
+      }
       emit({
         type: 'done',
         answer,
@@ -2055,15 +2061,18 @@ export class FounderCopilotService {
     return out;
   }
 
-  /** Emits a non-streaming ask() result as a single token burst + done. */
-  private emitNonStreamingResult(
+  /** Emits a non-streaming ask() result as a token stream with small delays to simulate typing. */
+  private async emitNonStreamingResult(
     result: CopilotAskResult,
     emit: (event: CopilotStreamEvent) => void,
   ) {
     const answer = String(result.answer ?? '');
     const provider = String(result.answerProvider ?? 'RULE_BASED');
     emit({ type: 'attribution', provider, model: null, routedAgent: result.routedAgent?.label ?? null });
-    for (const chunk of this.chunkText(answer)) emit({ type: 'token', text: chunk });
+    for (const chunk of this.chunkText(answer)) {
+      emit({ type: 'token', text: chunk });
+      await new Promise((r) => setTimeout(r, 35));
+    }
     emit({ type: 'done', answer, answerProvider: provider });
   }
 
