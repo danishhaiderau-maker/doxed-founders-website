@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpException, Post, Res, HttpStatus } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpException, Post, Res, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
 import type { DeviceMemoryPayload } from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -151,6 +151,7 @@ export class EventsController {
   async ask(
     @CurrentUser() user: AuthUser,
     @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
+    @Headers('x-user-api-key') userApiKey: string | undefined,
   ) {
     const rateCheck = await this.rateLimiter.checkLimit(user.id, 'copilot:ask');
     if (!rateCheck.allowed) {
@@ -168,6 +169,7 @@ export class EventsController {
     return this.copilot.ask(user.id, body.prompt, {
       agentTemplate: body.agentTemplate,
       provider: body.provider,
+      userApiKey: userApiKey?.trim() || undefined,
     });
   }
 
@@ -176,6 +178,7 @@ export class EventsController {
     @CurrentUser() user: AuthUser,
     @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
     @Res({ passthrough: false }) res: Response,
+    @Headers('x-user-api-key') userApiKey: string | undefined,
   ) {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -206,7 +209,11 @@ export class EventsController {
       await this.copilot.askStream(
         user.id,
         body.prompt,
-        { agentTemplate: body.agentTemplate, provider: body.provider },
+        {
+          agentTemplate: body.agentTemplate,
+          provider: body.provider,
+          userApiKey: userApiKey?.trim() || undefined,
+        },
         (event) => {
           // Strip the discriminator `type` from the payload — it's encoded as
           // the SSE event name, keeping `data:` clean for the frontend parser.

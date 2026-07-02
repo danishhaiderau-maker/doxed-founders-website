@@ -1017,6 +1017,7 @@ export class BuilderService {
       forceProvider?: AiProvider;
       skipMemoryPrefix?: boolean;
       founderBrainTask?: FounderBrainTask;
+      userApiKey?: string;
     },
   ): Promise<
     | { ok: true; text: string; provider: AiProvider; founderBrainTask: FounderBrainTask }
@@ -1034,6 +1035,7 @@ export class BuilderService {
         effectiveSystem,
         userPrompt,
         options.forceProvider,
+        options.userApiKey,
       );
       if (forced.ok) {
         return {
@@ -1224,6 +1226,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     forceProvider: AiProvider,
+    userApiKey?: string,
   ): Promise<
     | { ok: true; text: string; provider: AiProvider }
     | { ok: false; llmErrors: string[] }
@@ -1301,6 +1304,38 @@ export class BuilderService {
     const cfg = aiProviderConfig(forceProvider);
     if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') {
       return { ok: false, llmErrors: [`${forceProvider}: not available as chat provider`] };
+    }
+
+    // BYOK: caller supplied their own API key (e.g. a Z.ai/OpenAI-compatible
+    // key pasted in the chat UI). Use it directly — skip BYOK/promo resolution
+    // and bill as user_supplied so it never touches platform quota.
+    if (userApiKey && userApiKey.trim().length >= 8) {
+      const model =
+        settings.defaultProvider === forceProvider
+          ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+          : cfg.defaultModel ?? undefined;
+      try {
+        const result = await this.completionWithProvider(forceProvider, userApiKey.trim(), system, userPrompt, model);
+        if (result?.text?.trim()) {
+          await this.logAiTokenUsage(
+            userId,
+            forceProvider,
+            system,
+            userPrompt,
+            result.text.trim(),
+            'copilot_forced',
+            result.usage,
+            'byok',
+          );
+          return { ok: true, text: result.text.trim(), provider: forceProvider };
+        }
+        return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
+      } catch (err) {
+        return {
+          ok: false,
+          llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`],
+        };
+      }
     }
 
     const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
@@ -1803,6 +1838,7 @@ export class BuilderService {
       forceProvider?: AiProvider;
       skipMemoryPrefix?: boolean;
       founderBrainTask?: FounderBrainTask;
+      userApiKey?: string;
     },
   ): Promise<{
     ok: true;
@@ -1825,6 +1861,7 @@ export class BuilderService {
         effectiveSystem,
         userPrompt,
         options.forceProvider,
+        options.userApiKey,
       );
       if (forced.ok) {
         return { ...forced, founderBrainTask };
@@ -2068,6 +2105,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     forceProvider: AiProvider,
+    userApiKey?: string,
   ): Promise<
     | { ok: true; provider: AiProvider; stream: AsyncGenerator<string, AiProvider> }
     | { ok: false; llmErrors: string[] }
@@ -2121,6 +2159,33 @@ export class BuilderService {
     const cfg = aiProviderConfig(forceProvider);
     if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') {
       return { ok: false, llmErrors: [`${forceProvider}: not available as chat provider`] };
+    }
+
+    // BYOK: caller supplied their own API key. Use it directly, bill as byok.
+    if (userApiKey && userApiKey.trim().length >= 8) {
+      const byokKey = userApiKey.trim();
+      const model =
+        settings.defaultProvider === forceProvider
+          ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+          : cfg.defaultModel ?? undefined;
+      try {
+        const gen = this.completionWithProviderStream(forceProvider, byokKey, system, userPrompt, model);
+        const first = await gen.next();
+        if (first.done) {
+          if (first.value?.text) {
+            await this.logAiTokenUsage(userId, forceProvider, system, userPrompt, first.value.text, 'copilot_forced', first.value.usage, 'byok');
+            return { ok: true, provider: forceProvider, stream: this.singleChunkStream(first.value.text, forceProvider) };
+          }
+          return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
+        }
+        return {
+          ok: true,
+          provider: forceProvider,
+          stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, forceProvider, system, userPrompt, 'byok'),
+        };
+      } catch (err) {
+        return { ok: false, llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`] };
+      }
     }
 
     const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);

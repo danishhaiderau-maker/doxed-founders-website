@@ -7,6 +7,7 @@ import {
   connectGitHubRepo,
   copilotAskStream,
   type CopilotMissingConnection,
+  fetchAvailableBrains,
   fetchConnectedWorkspaces,
   fetchDesktopBridge,
   type BridgeMessage,
@@ -33,18 +34,11 @@ type ChatMsg = {
 
 type BrainOption = { key: string; label: string; hint: string };
 
-const BRAINS: BrainOption[] = [
-  { key: 'GLM', label: 'GLM 5.2', hint: 'Promo - fast' },
-  { key: 'DEEPSEEK', label: 'DeepSeek V3', hint: 'Platform fallback' },
-  { key: 'ANTHROPIC', label: 'Claude', hint: 'Anthropic' },
-  { key: 'OPENAI', label: 'GPT', hint: 'OpenAI' },
-  { key: 'GEMINI', label: 'Gemini', hint: 'Google' },
-  { key: 'OLLAMA', label: 'Ollama', hint: 'Local - Founder Node' },
-  { key: 'OPENROUTER', label: 'OpenRouter', hint: 'Multi-model' },
-  { key: 'PHALA', label: 'PHA', hint: 'Phala Network' },
-  { key: 'JATEVO', label: 'JATEVO', hint: 'Jatevo AI' },
-  { key: 'SURPLUS', label: 'Surplus', hint: 'Surplus Compute' },
-];
+const FOUNDERS_RELEASES_URL = 'https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest';
+
+const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
+const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };
+const RULE_BASED_BRAIN: BrainOption = { key: 'RULE_BASED', label: 'Rule-based', hint: 'Free fallback' };
 
 type IdeOption = { key: string; label: string };
 
@@ -220,6 +214,9 @@ export function MinimalDevWorkspace({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
+  const [brains, setBrains] = useState<BrainOption[] | null>(null);
+  const [byokKey, setByokKey] = useState<string>('');
+  const [byokDraft, setByokDraft] = useState<string>('');
   const [selectedBrain, setSelectedBrain] = useState<string>('GLM');
   const [selectedIde, setSelectedIde] = useState<string>('cursor');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -262,6 +259,45 @@ export function MinimalDevWorkspace({
     return () => clearInterval(id);
   }, [refresh]);
 
+  // Load BYOK key from localStorage (never sent to the DB) and fetch the
+  // dynamic brain list from the API (reflects which promo keys are configured).
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(BYOK_STORAGE_KEY);
+      if (stored && stored.trim().length >= 8) setByokKey(stored.trim());
+    } catch {
+      // localStorage may be unavailable (private mode) — BYOK just won't persist.
+    }
+    if (!accessToken) return;
+    let cancelled = false;
+    fetchAvailableBrains(accessToken)
+      .then((available) => {
+        if (cancelled || !Array.isArray(available)) return;
+        const opts: BrainOption[] = available
+          .filter((b) => b.available)
+          .map((b) => ({ key: b.key, label: b.label, hint: b.hint }));
+        // Always append BYOK so users with their own Z.ai/OpenAI key can use it.
+        if (!opts.some((b) => b.key === 'BYOK')) opts.push(BYOK_BRAIN);
+        setBrains(opts);
+        // If the currently-selected brain isn't in the new list, fall back to
+        // the first real provider or RULE_BASED.
+        setSelectedBrain((curr) => {
+          if (opts.some((b) => b.key === curr)) return curr;
+          const firstReal = opts.find((b) => b.key !== 'RULE_BASED' && b.key !== 'BYOK');
+          return firstReal?.key ?? 'RULE_BASED';
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Endpoint unreachable — degrade to rule-based only so chat still works.
+        setBrains([RULE_BASED_BRAIN, BYOK_BRAIN]);
+        setSelectedBrain((curr) => (curr === 'GLM' ? 'RULE_BASED' : curr));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken]);
+
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
@@ -303,7 +339,10 @@ export function MinimalDevWorkspace({
   const isNodeLive = nodeStatus.founderNodeOnline || !!bridge?.latest || !!bridge?.nodes?.length;
   const cursorConnected = nodeStatus.cursorConnected;
   const agentCount = agents.length;
-  const brainLabel = BRAINS.find((b) => b.key === selectedBrain)?.label || selectedBrain;
+  const resolvedBrains = brains ?? [RULE_BASED_BRAIN];
+  const brainLabel = resolvedBrains.find((b) => b.key === selectedBrain)?.label || selectedBrain;
+  const realBrainsAvailable = resolvedBrains.some((b) => b.key !== 'RULE_BASED' && b.key !== 'BYOK');
+  const byokConfigured = byokKey.trim().length >= 8;
   const repoFullName =
     ideWorkspaces.find((w) => w.repository?.trim())?.repository ||
     connected.find((c) => c.repository?.trim())?.repository ||
@@ -446,10 +485,14 @@ export function MinimalDevWorkspace({
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? mut(msg) : msg)));
 
     try {
+      const effectiveProvider = selectedBrain === 'BYOK' ? 'BYOK' : selectedBrain;
       await copilotAskStream(
         prompt,
         accessToken,
-        { provider: selectedBrain },
+        {
+          provider: effectiveProvider,
+          userApiKey: selectedBrain === 'BYOK' ? byokKey : null,
+        },
         {
           onAttribution: ({ provider }) => {
             providerLabel = provider;
@@ -494,7 +537,7 @@ export function MinimalDevWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -573,7 +616,7 @@ export function MinimalDevWorkspace({
                   {IDES.map((ide) => (<option key={ide.key} value={ide.key}>{ide.label}</option>))}
                 </select>
                 <select value={selectedBrain} onChange={(e) => setSelectedBrain(e.target.value)} className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'>
-                  {BRAINS.map((b) => (<option key={b.key} value={b.key}>{b.label} - {b.hint}</option>))}
+                  {resolvedBrains.map((b) => (<option key={b.key} value={b.key}>{b.label} - {b.hint}</option>))}
                 </select>
               </div>
             </div>
@@ -586,6 +629,59 @@ export function MinimalDevWorkspace({
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Active Agents</span><span className='ml-auto text-zinc-200'>{agentCount}</span></div>
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Last Sync</span><span className='ml-auto text-zinc-400'>{timeAgo(lastSync)}</span></div>
             </div>
+            {!realBrainsAvailable && (
+              <div className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
+                No AI key configured — using free fallback. Pick <span className='font-semibold'>Bring Your Own Key</span> below to paste a Z.ai/OpenAI key, or ask an admin to enable the promo pool.
+              </div>
+            )}
+            {selectedBrain === 'BYOK' && (
+              <div className='mt-3 rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2.5 text-xs'>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <span className='font-medium text-violet-200'>Your API key (Z.ai / OpenAI-compatible)</span>
+                  {byokConfigured && <span className='rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300'>Saved in browser</span>}
+                </div>
+                <p className='mt-1 text-zinc-400'>Stored locally in your browser only — never sent to the Founder OS database. Get a GLM 5.2 key from <a href='https://z.ai' target='_blank' rel='noreferrer' className='text-violet-300 underline hover:text-violet-200'>z.ai</a>; the OpenAI-compatible endpoint is <code className='text-zinc-300'>https://api.z.ai/api/coding/paas/v4</code>.</p>
+                <div className='mt-2 flex flex-wrap items-center gap-2'>
+                  <input
+                    type='password'
+                    value={byokDraft}
+                    onChange={(e) => setByokDraft(e.target.value)}
+                    placeholder={byokConfigured ? 'Enter a new key to replace…' : 'Paste your Z.ai / OpenAI key'}
+                    className='min-w-0 flex-1 rounded-lg border border-white/10 bg-[#12121a] px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-400/40'
+                  />
+                  <button
+                    type='button'
+                    disabled={!byokDraft.trim()}
+                    onClick={() => {
+                      const v = byokDraft.trim();
+                      if (v.length < 8) return;
+                      try { window.localStorage.setItem(BYOK_STORAGE_KEY, v); } catch { /* private mode */ }
+                      setByokKey(v);
+                      setByokDraft('');
+                    }}
+                    className='rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-violet-500 disabled:opacity-40'
+                  >
+                    Save key
+                  </button>
+                  {byokConfigured && (
+                    <button
+                      type='button'
+                      onClick={() => {
+                        try { window.localStorage.removeItem(BYOK_STORAGE_KEY); } catch { /* private mode */ }
+                        setByokKey('');
+                        setByokDraft('');
+                      }}
+                      className='rounded-lg bg-white/5 px-3 py-2 text-xs text-zinc-300 transition hover:bg-white/10'
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                {!byokConfigured && (
+                  <p className='mt-2 text-[0.65rem] text-amber-300/80'>Paste and save a key before sending — BYOK routes your prompt directly through your key.</p>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -595,9 +691,23 @@ export function MinimalDevWorkspace({
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
               <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.2+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               <ol className='mt-4 space-y-2 text-left text-sm text-zinc-300'>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'><span className='font-semibold text-emerald-400'>1.</span> Download Founder Node v0.7.2 from GitHub Releases</li>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'><span className='font-semibold text-emerald-400'>2.</span> Sign in with the same account</li>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'><span className='font-semibold text-emerald-400'>3.</span> Open Cursor - workspaces appear here automatically</li>
+                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                  <span className='font-semibold text-emerald-400'>1.</span>{' '}
+                  <a
+                    href={FOUNDERS_RELEASES_URL}
+                    target='_blank'
+                    rel='noreferrer'
+                    className='text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200'
+                  >
+                    Download Founder Node v0.7.2 from GitHub Releases
+                  </a>
+                </li>
+                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                  <span className='font-semibold text-emerald-400'>2.</span> Pair it with your account using the pairing code shown in the Founder Node tray menu (no sign-in required).
+                </li>
+                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                  <span className='font-semibold text-emerald-400'>3.</span> Open Cursor — workspaces appear here automatically.
+                </li>
               </ol>
               <p className='mt-3 text-xs text-zinc-500'>Meanwhile, chat below works with any Brain - no Cursor key needed.</p>
             </div>

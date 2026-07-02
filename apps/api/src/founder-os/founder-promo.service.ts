@@ -320,4 +320,79 @@ export class FounderPromoService {
     return map.glm ?? null;
   }
 
+  /**
+   * Returns the list of AI "brains" the calling user can pick from in the
+   * workspace chat dropdown. Reflects what is actually wired up:
+   *   - GLM / Gemini / DeepSeek: available when an admin has saved a platform
+   *     promo key for that provider (any signed-up founder can use them while
+   *     the promo window is open).
+   *   - DeepSeek is also available when the legacy platform-brain DeepSeek key
+   *     is configured (separate column on PlatformSettings).
+   *   - OLLAMA: available when the user's own Founder Node has heartbeated in
+   *     the last 3 minutes (user-scoped, requires userId).
+   *   - RULE_BASED: always available as the free deterministic fallback.
+   * The frontend merges this with a locally-stored BYOK option.
+   */
+  async getAvailableBrains(userId?: string): Promise<AvailableBrain[]> {
+    const [settings, platformBrain] = await Promise.all([
+      this.getPlatformPromoSettings(),
+      this.getPlatformBrainStatus(),
+    ]);
+
+    const creds = settings.credentialsStatus;
+    const brains: AvailableBrain[] = [
+      {
+        key: 'GLM',
+        label: 'GLM 5.2',
+        hint: 'Promo - fast',
+        available: Boolean(creds.glm),
+      },
+      {
+        key: 'DEEPSEEK',
+        label: 'DeepSeek',
+        hint: 'Platform brain',
+        available: Boolean(creds.deepseek) || platformBrain.configured,
+      },
+      {
+        key: 'GEMINI',
+        label: 'Gemini',
+        hint: 'Google',
+        available: Boolean(creds.gemini),
+      },
+    ];
+
+    if (userId) {
+      const node = await this.prisma.founderNode.findFirst({
+        where: { userId },
+        orderBy: { lastSeenAt: 'desc' },
+        select: { lastSeenAt: true },
+      });
+      const nodeOnline = Boolean(
+        node?.lastSeenAt && Date.now() - node.lastSeenAt.getTime() < 180_000,
+      );
+      brains.push({
+        key: 'OLLAMA',
+        label: 'Ollama',
+        hint: 'Local - Founder Node',
+        available: nodeOnline,
+      });
+    }
+
+    brains.push({
+      key: 'RULE_BASED',
+      label: 'Rule-based',
+      hint: 'Free fallback',
+      available: true,
+    });
+
+    return brains;
+  }
+
 }
+
+export type AvailableBrain = {
+  key: string;
+  label: string;
+  hint: string;
+  available: boolean;
+};
