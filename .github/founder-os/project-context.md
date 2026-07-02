@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(onboarding): add collapsible info section to IDE setup wizard
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
