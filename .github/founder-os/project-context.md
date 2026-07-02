@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (14 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(ci): refresh bitfinex policy lock for Phase 1/2 signal-subscriber changes
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
