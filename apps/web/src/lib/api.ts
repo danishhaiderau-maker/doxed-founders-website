@@ -3054,7 +3054,7 @@ export interface WallPinResult {
   spentDdollar: number;
 }
 
-export const WALL_PIN_COST_DDOLLAR = 500;
+export const WALL_PIN_COST_DDOLLAR = 10;
 /** DDollar cost per month to keep the Chat Summarizer agent active on a project wall. */
 export const WALL_SUMMARIZER_COST_DDOLLAR = 1000;
 
