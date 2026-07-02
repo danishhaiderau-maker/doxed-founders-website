@@ -71,7 +71,10 @@ while ((Get-Date) -lt $portDeadline) {
 
 $launcher = Join-Path $scriptDir "home-stack-launcher.ps1"
 Remove-Item (Join-Path $repoRoot ".home-bridge.err.log") -Force -ErrorAction SilentlyContinue
-Start-VisibleConsole $launcher @() -Title "Doxed Home Bridge :$Port"
+# -Force tells the launcher to bind even if :$Port still answers (we already
+# killed the old bridge above); without it the launcher's duplicate-guard would
+# no-op on a still-healthy bridge.
+Start-VisibleConsole $launcher @("-Force") -Title "Doxed Home Bridge :$Port"
 
 $deadline = (Get-Date).AddSeconds(35)
 while ((Get-Date) -lt $deadline) {

@@ -5,7 +5,8 @@
 param(
   [int]$Port = 7810,
   [int]$BotPort = 0,
-  [int]$AnalyzerPort = 0
+  [int]$AnalyzerPort = 0,
+  [switch]$Force
 )
 
 $ErrorActionPreference = "Continue"
@@ -17,6 +18,33 @@ if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 $prefix = "http://127.0.0.1:$Port/"
+
+# Defense-in-depth: if another launcher instance already has :$Port bound and
+# healthy, skip the bind instead of crashing on http.sys prefix conflict. This
+# handles duplicate launches (e.g. user runs Start Everything again, or opens a
+# second bridge window) without needing admin urlacl fixes. ensure-home-bridge.ps1
+# passes -Force after killing the old bridge, so genuine restarts still bind.
+function Test-BridgeAlreadyBound([int]$ProbePort) {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ProbePort/health")
+    $req.Method = "GET"
+    $req.Timeout = 1500
+    $req.ReadWriteTimeout = 1500
+    $resp = $req.GetResponse()
+    $ok = ($resp.StatusCode -eq 200)
+    $resp.Close()
+    return $ok
+  } catch {
+    return $false
+  }
+}
+
+if (-not $Force -and (Test-BridgeAlreadyBound $Port)) {
+  $Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port (already running)"
+  Write-Host "Bridge already OK on :$Port (skipping reload) - close this window." -ForegroundColor Green
+  Start-Sleep -Seconds 4
+  exit 0
+}
 
 function Write-Cors {
   param(
