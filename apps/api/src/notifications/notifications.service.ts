@@ -36,6 +36,13 @@ function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | 
       return {
         type: { in: [NotificationType.TRENDING_BUYS, NotificationType.TRADER_WIN, NotificationType.TRADER_LOSS] },
       };
+    case 'trades':
+      // Significant-trade-close alerts (>=20% gain/loss) emitted by the BTC conservative
+      // agent. These are TRADING_AGENT_UPDATE rows tagged with metadata.kind.
+      return {
+        type: NotificationType.TRADING_AGENT_UPDATE,
+        metadata: { path: ['kind'], equals: 'SIGNIFICANT_TRADE_CLOSE' },
+      };
     case 'platform':
       return {
         type: {

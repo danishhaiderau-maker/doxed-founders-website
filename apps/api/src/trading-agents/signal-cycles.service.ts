@@ -8,6 +8,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import {
+  NotificationType,
   SignalCycleSettlementStatus,
   SignalCycleStatus,
   UserRole,
@@ -94,6 +95,7 @@ export class SignalCyclesService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly botBridge: BotBridgeService,
     private readonly points: PointsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   onModuleInit() {
@@ -958,14 +960,15 @@ export class SignalCyclesService implements OnModuleInit {
 
     if (event === 'EXIT' || event === 'EXPIRED') {
       const pnlUsd = typeof body.pnl_usd === 'number' ? body.pnl_usd : 0;
+      const pnlMarginPct = typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null;
+      const exitPrice = typeof body.exit_price === 'number' ? body.exit_price : null;
       await this.prisma.signalCycleParticipant.update({
         where: { id: participant.id },
         data: {
           status: event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED,
-          exitPrice: typeof body.exit_price === 'number' ? body.exit_price : null,
+          exitPrice,
           pnlUsd,
-          pnlMarginPct:
-            typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null,
+          pnlMarginPct,
           settlementStatus: SignalCycleSettlementStatus.WAIVED,
           feeUsd: 0,
           settledAt: new Date(),
@@ -980,9 +983,120 @@ export class SignalCyclesService implements OnModuleInit {
           },
         });
       }
+
+      // Significant-trade alert: only emit on real closures (not EXPIRED/no-fill) where the
+      // realized margin PnL magnitude is >= 20% (gain OR loss). Position opens, small moves,
+      // and expiries never create Alerts. Full trade detail is attached in metadata for the
+      // Alerts card to render.
+      if (event === 'EXIT' && pnlMarginPct != null && Math.abs(pnlMarginPct) >= 20) {
+        await this.maybeNotifySignificantTradeClose({
+          userId,
+          agentId,
+          cycleId,
+          participantId: participant.id,
+          pnlMarginPct,
+          pnlUsd,
+          exitPrice,
+          exitReason: typeof body.exit_reason === 'string' ? body.exit_reason : null,
+          qtyClosed: typeof body.qty_closed === 'number' ? body.qty_closed : null,
+        });
+      }
     }
 
     return { ok: true, participantId: participant.id };
+  }
+
+  /**
+   * Build + send the significant-trade-close Alerts notification. Pulls entry price, side,
+   * symbol, and leverage from the cycle's intent envelope + agent row; close price, PnL %,
+   * PnL $, trigger, and size come from the EXIT event payload. Trigger is mapped from the
+   * bot relay-state exit_reason (PROFIT_LOCK / THESIS_FAST_CUT → Take Profit; HARD_STOP /
+   * EXCHANGE_STOP → Stop Loss; MANUAL_* / IMMEDIATE_EXCHANGE_FLAT → Manual; everything else
+   * → Signal).
+   */
+  private async maybeNotifySignificantTradeClose(input: {
+    userId: string;
+    agentId: string;
+    cycleId: string;
+    participantId: string;
+    pnlMarginPct: number;
+    pnlUsd: number;
+    exitPrice: number | null;
+    exitReason: string | null;
+    qtyClosed: number | null;
+  }) {
+    try {
+      const agent = await this.prisma.tradingAgent.findUnique({
+        where: { id: input.agentId },
+        select: { name: true, assetSymbol: true, slug: true },
+      });
+      if (!agent) return;
+
+      const participant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: input.participantId },
+        select: { fillPrice: true },
+      });
+      const cycle = await this.prisma.signalCycle.findUnique({
+        where: { id: input.cycleId },
+        select: { intentEnvelope: true, tradeId: true },
+      });
+      if (!cycle) return;
+
+      const intent = (cycle.intentEnvelope ?? {}) as {
+        direction?: 'LONG' | 'SHORT';
+        risk?: { leverage_hint?: number };
+      };
+      const side = intent.direction ?? null;
+      const leverage = intent.risk?.leverage_hint ?? null;
+      const entryPrice = participant?.fillPrice != null ? Number(participant.fillPrice) : null;
+      const symbol = agent.assetSymbol ?? 'BTC';
+
+      const trigger = mapExitReasonToTrigger(input.exitReason);
+
+      const isGain = input.pnlMarginPct >= 0;
+      const sign = isGain ? '+' : '−';
+      const roundedPct = Math.round(Math.abs(input.pnlMarginPct));
+      const title = `${isGain ? '🚀' : '📉'} ${agent.name} closed ${side ?? ''} ${sign}${roundedPct}% on ${symbol}`;
+      const pnlUsdDisplay = input.pnlUsd ? `${isGain ? '+' : '−'}$${Math.abs(input.pnlUsd).toFixed(2)}` : null;
+      const bodyParts = [
+        `${side ?? '—'} ${symbol}`,
+        entryPrice != null ? `Entry $${entryPrice.toFixed(2)}` : null,
+        input.exitPrice != null ? `Close $${input.exitPrice.toFixed(2)}` : null,
+        `PnL ${sign}${roundedPct}%${pnlUsdDisplay ? ` (${pnlUsdDisplay})` : ''}`,
+        `Trigger: ${trigger}`,
+        input.qtyClosed != null ? `Size ${input.qtyClosed.toFixed(5)} ${symbol}` : null,
+      ].filter(Boolean);
+      const body = bodyParts.join(' · ');
+
+      await this.notifications.notifyUser(input.userId, {
+        type: NotificationType.TRADING_AGENT_UPDATE,
+        title,
+        body,
+        link: `/agent-hub/${agent.slug}`,
+        metadata: {
+          kind: 'SIGNIFICANT_TRADE_CLOSE',
+          symbol,
+          side,
+          entryPrice,
+          closePrice: input.exitPrice,
+          pnlPct: Math.round(input.pnlMarginPct * 100) / 100,
+          pnlUsd: input.pnlUsd || null,
+          trigger,
+          exitReason: input.exitReason,
+          size: input.qtyClosed,
+          leverage,
+          tradeId: cycle.tradeId,
+          cycleId: input.cycleId,
+          agentSlug: agent.slug,
+          agentName: agent.name,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Significant-trade alert failed cycle=${input.cycleId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   requireApiKey(ctx: SignalApiKeyContext | null): SignalApiKeyContext {
@@ -1066,4 +1180,22 @@ export class SignalCyclesService implements OnModuleInit {
       },
     };
   }
+}
+
+/**
+ * Map the bot relay-state exit_reason to a user-facing trigger label for the trade alert.
+ * Relay-state reasons come from signal-subscriber-execution.service.ts EXIT recordings:
+ *  - PROFIT_LOCK / THESIS_FAST_CUT → Take Profit (Scenario C profit-lock or thesis cut)
+ *  - HARD_STOP / EXCHANGE_STOP → Stop Loss (protective stop fired)
+ *  - MANUAL_PARTIAL_CLOSE / MANUAL_OR_EXCHANGE_CLOSE / IMMEDIATE_EXCHANGE_FLAT → Manual
+ *  - SHOWCASE_MIRROR / SHOWCASE_MIRROR_ALREADY_FLAT / anything else → Signal (showcase-driven)
+ */
+function mapExitReasonToTrigger(exitReason: string | null): 'Take Profit' | 'Stop Loss' | 'Manual' | 'Signal' {
+  const r = (exitReason ?? '').toUpperCase();
+  if (r === 'PROFIT_LOCK' || r === 'THESIS_FAST_CUT') return 'Take Profit';
+  if (r === 'HARD_STOP' || r === 'EXCHANGE_STOP') return 'Stop Loss';
+  if (r.startsWith('MANUAL') || r === 'IMMEDIATE_EXCHANGE_FLAT' || r === 'ORPHAN_LEDGER_RECONCILE') {
+    return 'Manual';
+  }
+  return 'Signal';
 }
