@@ -90,6 +90,9 @@ export type BotApiState = {
     unreal_usd?: number;
     current_price?: number;
     trade_id?: string;
+    /** Accrued funding on the raw open_positions object (present even on /api/relay-state). */
+    funding_fees?: number;
+    leverage?: number;
   }>;
   orders?: Array<{
     side?: string;
@@ -265,6 +268,30 @@ function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
   return rows.slice(-max).reverse();
 }
 
+/**
+ * Resolve a single position's unrealized USD P&L.
+ *
+ * `/api/state` enriches each position with `unreal_usd` (mark-based, funding-adjusted).
+ * `/api/relay-state` (and the Railway cache of it) ship the RAW `open_positions` objects
+ * without that field. When it's absent we derive it from `(current - entry) * qty * dirSign
+ * - funding_fees` -- which matches the bot's own unreal_usd formula exactly (since
+ * qty = margin * leverage / entry). This keeps the Positions table and equity/session
+ * aggregations correct regardless of which endpoint served the state.
+ */
+function positionUnrealUsd(
+  p: NonNullable<BotApiState['positions']>[number],
+  fallbackPrice?: number,
+): number {
+  const botUnreal = p.unreal_usd;
+  if (typeof botUnreal === 'number' && Number.isFinite(botUnreal)) return botUnreal;
+  const entry = Number(p.entry ?? 0);
+  const current = Number(p.current_price ?? fallbackPrice ?? 0);
+  const qty = Number(p.qty ?? 0);
+  const dirSign = String(p.dir ?? p.side ?? 'LONG').toUpperCase() === 'SHORT' ? -1 : 1;
+  const derived = (current - entry) * qty * dirSign - Number(p.funding_fees ?? 0);
+  return Number.isFinite(derived) ? derived : 0;
+}
+
 function isMelbourneDisplayString(value: unknown): value is string {
   return (
     typeof value === 'string' &&
@@ -326,16 +353,23 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
   const positions = takeLatest(
     (bot.positions ?? [])
       .filter((p) => inBotSession(p as Record<string, unknown>, sessionStart))
-      .map((p, i) => ({
-      leg: String(p.leg ?? (i === 0 ? 'Main' : `Leg ${i + 1}`)),
-      side: String(p.dir ?? p.side ?? 'LONG').toUpperCase(),
-      qty: Number(p.qty ?? 0),
-      entry: Number(p.entry ?? 0),
-      current: Number(p.current_price ?? bot.price ?? 0),
-      stopLoss: Number(p.sl ?? 0),
-      takeProfit: Number(p.tp ?? 0),
-      pnlUsd: Number(p.unreal_usd ?? 0),
-    })),
+      .map((p, i) => {
+      const side = String(p.dir ?? p.side ?? 'LONG').toUpperCase();
+      const entry = Number(p.entry ?? 0);
+      const current = Number(p.current_price ?? bot.price ?? 0);
+      const qty = Number(p.qty ?? 0);
+      const pnlUsd = positionUnrealUsd(p, bot.price ?? undefined);
+      return {
+        leg: String(p.leg ?? (i === 0 ? 'Main' : `Leg ${i + 1}`)),
+        side,
+        qty,
+        entry,
+        current,
+        stopLoss: Number(p.sl ?? 0),
+        takeProfit: Number(p.tp ?? 0),
+        pnlUsd: Number(pnlUsd.toFixed(4)),
+      };
+    }),
   );
 
   const pendingOrders = takeLatest(
@@ -593,7 +627,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
 
   const balance = researchSessionBalance(bot, STARTING_BALANCE);
   const openUnrealForEquity = (bot.positions ?? []).reduce(
-    (sum, p) => sum + Number(p.unreal_usd ?? 0),
+    (sum, p) => sum + positionUnrealUsd(p, price || undefined),
     0,
   );
   const equity = balance + openUnrealForEquity;
@@ -764,7 +798,7 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
 
   const balance = researchSessionBalance(bot, startingBalance);
   const openUnreal = (bot.positions ?? []).reduce(
-    (sum, p) => sum + Number(p.unreal_usd ?? 0),
+    (sum, p) => sum + positionUnrealUsd(p, bot.price ?? undefined),
     0,
   );
   const equity = balance + openUnreal;
