@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import {
   SignalCycleStatus,
   TradingAgentInstanceStatus,
@@ -74,6 +75,15 @@ type ExecutionPayload = {
   fillPrice?: number;
   leverage?: number;
   stopLossMarginPct?: number;
+  /**
+   * Bitfinex client order id (`cid`) — int32. Set on every limit submit
+   * (placeEntry + applyLimitChase replacement orders) as a deterministic
+   * hash of cycleId|participantId|tradeId so future reconcile-adopt
+   * passes can match orders even when bitfinexOrderId was not persisted.
+   * BitfinexActiveOrder does not surface cid on read today, so this is
+   * forward-looking infrastructure.
+   */
+  clientOrderId?: number;
 };
 
 type PositionRuntime = {
@@ -85,6 +95,35 @@ type PositionRuntime = {
 
 function executionEnabled(): boolean {
   return process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
+}
+
+/**
+ * Phase 2 reconcile-adopt write window. Re-arming a protective stop is a
+ * Bitfinex write (submitStopOrder). When disabled, the reconcile-adopt
+ * loop surfaces the participant in dashboardState.orphanPositionIds and
+ * logs RECONCILE_STOP_REARM_SKIPPED but does NOT write to the exchange.
+ * Default "1" (enabled) — set RECONCILE_WRITE_WINDOW=0 to gate off.
+ */
+function reconcileWriteWindowEnabled(): boolean {
+  return process.env.RECONCILE_WRITE_WINDOW !== '0';
+}
+
+/**
+ * Deterministic Bitfinex client order id (`cid`) for a participant's entry
+ * order. Bitfinex v2 `cid` is a 32-bit signed integer; we derive a stable
+ * positive int32 from sha256(cycleId|participantId|tradeId). The full
+ * 32-char hex digest is NOT used because Bitfinex rejects non-int cids.
+ * Collisions are astronomically unlikely (2^31 bucket, ~tens of participants).
+ */
+function computeClientOrderId(
+  cycleId: string,
+  participantId: string,
+  tradeId?: string | null,
+): number {
+  const digest = createHash('sha256')
+    .update(`${cycleId}|${participantId}|${tradeId ?? ''}`)
+    .digest('hex');
+  return parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
 }
 
 type EntryEligibility = {
@@ -289,6 +328,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
 
     await this.reconcileImmediateExchangeFlat(agentId, instance.userId, creds, participantSince);
+
+    // Phase 2 — Layer B (NestJS Live Copy) reconcile-adopt pass. Re-arms
+    // protective stops for OPEN participants whose meta.stopOrderId died
+    // (filled or cancelled) on restart, re-hydrates positionRuntime so
+    // monitorOpenPosition resumes Scenario C mirroring next tick, and
+    // surfaces PENDING_ENTRY / OPEN participants missing critical meta
+    // into dashboardState.orphanPositionIds for manual decision. Gated
+    // by RECONCILE_WRITE_WINDOW for the stop re-arm write itself.
+    await this.reconcileAdoptLoop(
+      agentId,
+      instance.userId,
+      instance.id,
+      creds,
+      participantSince,
+    );
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -1382,11 +1436,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const prePosition = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
 
+    // Phase 2: deterministic Bitfinex `cid` so a future reconcile-adopt pass
+    // can match this order even if bitfinexOrderId was not persisted in the
+    // ORDER_PLACED event payload. claimParticipantId is set above after the
+    // atomic claim succeeded.
+    const clientOrderId = claimParticipantId
+      ? computeClientOrderId(cycleId, claimParticipantId, tradeId)
+      : undefined;
+
     const orderId = await this.activeTrading.submitLimitOrder(creds, {
       direction: intent.direction,
       qty,
       price: limitPrice,
         leverage,
+      ...(clientOrderId != null ? { clientOrderId } : {}),
     });
 
     const payload: ExecutionPayload = {
@@ -1401,6 +1464,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       source: 'hire',
         lastChaseAtMs: 0,
         limitChaseCount: 0,
+      ...(clientOrderId != null ? { clientOrderId } : {}),
     };
 
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
@@ -1987,6 +2051,301 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
+  /**
+   * Phase 2 — Layer B (NestJS Live Copy) reconcile-adopt pass.
+   *
+   * The NestJS Live Copy keeps per-participant runtime state in the in-memory
+   * `positionRuntime` Map (volatile, lost on API restart) while Neon
+   * `SignalCycleParticipant` rows + `SignalCycleEvent` payloads persist. On
+   * restart, OPEN participants whose `meta.stopOrderId` was filled or cancelled
+   * by the exchange lose their protective stop and never get re-armed by the
+   * normal tick (monitorOpenPosition only arms when `meta.stopOrderId` is
+   * missing — it does NOT verify the persisted id is still live on the
+   * exchange). This loop closes that gap.
+   *
+   * Per tick, for each OPEN + PENDING_ENTRY participant of an active hire:
+   *  1. OPEN: verify meta.stopOrderId is still live via findOrder; if gone,
+   *     re-arm via ensureProtectiveStop (gated by RECONCILE_WRITE_WINDOW).
+   *     Re-hydrate positionRuntime if missing so monitorOpenPosition resumes
+   *     Scenario C mirroring (the exit ladder comes from intent.risk on the
+   *     cycle's intentEnvelope, preserved in Neon — no re-decision needed).
+   *  2. PENDING_ENTRY: verify meta.bitfinexOrderId is still on the exchange.
+   *     The existing monitorEntry/applyLimitChase path already reprices every
+   *     chase window — no re-placement here. If meta.bitfinexOrderId is
+   *     missing entirely, surface in orphanPositionIds for manual decision.
+   *  3. Idempotent: skip participants already in positionRuntime with a
+   *     verified-live stop. try/catch per participant so one failure doesn't
+   *     abort the loop. Each action appends a RECONCILE_ADOPT_* audit event
+   *     to the SignalCycleEvent stream.
+   */
+  private async reconcileAdoptLoop(
+    agentId: string,
+    userId: string,
+    instanceId: string,
+    creds: ExchangeCredentials,
+    participantScope: { createdAt?: { gte: Date } } = {},
+  ) {
+    const writeWindow = reconcileWriteWindowEnabled();
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        cycle: { agentId },
+        ...participantScope,
+      },
+      include: {
+        cycle: { select: { id: true, intentEnvelope: true, tradeId: true } },
+      },
+    });
+
+    const orphanPositionIds: Array<{
+      participantId: string;
+      cycleId: string;
+      status: string;
+      reason: string;
+      bitfinexOrderId?: number;
+      stopOrderId?: number;
+      fillPrice?: number;
+    }> = [];
+
+    for (const p of participants) {
+      try {
+        const meta = await this.loadExecutionMeta(p.id);
+        const cycleId = p.cycleId;
+        const tradeId = p.cycle?.tradeId ?? undefined;
+        const intent = p.cycle?.intentEnvelope as SignalIntentEnvelope | null;
+
+        if (p.status === SignalCycleStatus.OPEN) {
+          // Re-hydrate runtime if missing so monitorOpenPosition resumes
+          // Scenario C mirroring (peak/profit-lock tracking + exit ladder).
+          if (!this.positionRuntime.has(p.id)) {
+            const runtime = this.hydrateRuntime(p.id, meta);
+            this.positionRuntime.set(p.id, runtime);
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=rehydrate reason=runtime_missing_after_restart`,
+            );
+            await this.cycles
+              .recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_ADOPT_REHYDRATE', {
+                venue: p.venue ?? 'bitfinex',
+                participant_id: p.id,
+                peak_margin_pct: runtime.peakMarginPct,
+                profit_lock_floor: runtime.lastProfitLockFloor,
+                source: 'hire',
+              })
+              .catch(() => {
+                /* audit-only — never abort the loop on event write failure */
+              });
+          }
+
+          // No stopOrderId in meta → monitorOpenPosition will arm it on the
+          // next tick (line ~2269). Nothing to adopt here.
+          if (!meta.stopOrderId) {
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=no_persisted_stop_order_id`,
+            );
+            continue;
+          }
+
+          // Verify the persisted stop is still live on the exchange.
+          const liveStop = await this.activeTrading
+            .findOrder(creds, meta.stopOrderId)
+            .catch(() => null);
+
+          if (liveStop) {
+            // Idempotent skip — stop is live and runtime is hydrated.
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=stop_live stopOrderId=${meta.stopOrderId}`,
+            );
+            continue;
+          }
+
+          // Stop is GONE (filled or cancelled). Re-arm via ensureProtectiveStop,
+          // which itself checks for an existing live stop before re-submitting
+          // (no double-arm). Money-path: require a verified fillPrice — refuse
+          // to re-arm with a stale or zero price.
+          const fillPrice =
+            meta.fillPrice && meta.fillPrice > 0
+              ? meta.fillPrice
+              : (p.fillPrice && Number(p.fillPrice) > 0 ? Number(p.fillPrice) : 0);
+
+          if (!fillPrice || fillPrice <= 0) {
+            this.logger.warn(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=refuse reason=no_verified_fill_price stopOrderId=${meta.stopOrderId}`,
+            );
+            await this.cycles
+              .recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_STOP_REARM_REFUSED', {
+                venue: p.venue ?? 'bitfinex',
+                participant_id: p.id,
+                stop_order_id: meta.stopOrderId,
+                fill_price: fillPrice,
+                source: 'hire',
+              })
+              .catch(() => {});
+            orphanPositionIds.push({
+              participantId: p.id,
+              cycleId,
+              status: p.status,
+              reason: 'RECONCILE_STOP_REARM_REFUSED_NO_FILL_PRICE',
+              stopOrderId: meta.stopOrderId,
+              fillPrice,
+            });
+            continue;
+          }
+
+          if (!writeWindow) {
+            this.logger.warn(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=reconcile_write_window_disabled stopOrderId=${meta.stopOrderId}`,
+            );
+            await this.cycles
+              .recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_STOP_REARM_SKIPPED', {
+                venue: p.venue ?? 'bitfinex',
+                participant_id: p.id,
+                stop_order_id: meta.stopOrderId,
+                fill_price: fillPrice,
+                reason: 'RECONCILE_WRITE_WINDOW_DISABLED',
+                source: 'hire',
+              })
+              .catch(() => {});
+            orphanPositionIds.push({
+              participantId: p.id,
+              cycleId,
+              status: p.status,
+              reason: 'RECONCILE_STOP_REARM_SKIPPED_WRITE_WINDOW_DISABLED',
+              stopOrderId: meta.stopOrderId,
+              fillPrice,
+            });
+            continue;
+          }
+
+          if (!intent) {
+            this.logger.warn(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=refuse reason=no_intent_envelope_for_stop_rearm`,
+            );
+            orphanPositionIds.push({
+              participantId: p.id,
+              cycleId,
+              status: p.status,
+              reason: 'RECONCILE_STOP_REARM_REFUSED_NO_INTENT',
+              stopOrderId: meta.stopOrderId,
+              fillPrice,
+            });
+            continue;
+          }
+
+          // ensureProtectiveStop uses fillPrice ?? meta.limitPrice as the entry
+          // reference for stop placement; pass the verified fillPrice
+          // explicitly so it never falls back to a stale limitPrice.
+          await this.ensureProtectiveStop(
+            agentId,
+            userId,
+            cycleId,
+            p.id,
+            meta,
+            creds,
+            intent,
+            fillPrice,
+          );
+          this.logger.log(
+            `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=rearm_stop reason=stop_gone stopOrderId=${meta.stopOrderId} fillPrice=${fillPrice.toFixed(2)}`,
+          );
+          await this.cycles
+            .recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_ADOPT_REARM', {
+              venue: p.venue ?? 'bitfinex',
+              participant_id: p.id,
+              prior_stop_order_id: meta.stopOrderId,
+              fill_price: fillPrice,
+              source: 'hire',
+            })
+            .catch(() => {});
+          continue;
+        }
+
+        // PENDING_ENTRY — verify the resting bitfinexOrderId is still on the
+        // exchange. The existing monitorEntry/applyLimitChase path handles
+        // repricing every chase window (cancel+replace); no re-placement here.
+        if (p.status === SignalCycleStatus.PENDING_ENTRY) {
+          if (!meta.bitfinexOrderId) {
+            this.logger.warn(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=refuse reason=pending_entry_no_bitfinex_order_id`,
+            );
+            orphanPositionIds.push({
+              participantId: p.id,
+              cycleId,
+              status: p.status,
+              reason: 'RECONCILE_PENDING_ENTRY_NO_ORDER_ID',
+            });
+            continue;
+          }
+          const stillThere = await this.activeTrading
+            .findOrder(creds, meta.bitfinexOrderId)
+            .catch(() => null);
+          if (stillThere) {
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=pending_entry_order_resting bitfinexOrderId=${meta.bitfinexOrderId}`,
+            );
+          } else {
+            // Order gone — either filled (reconcileUnattributedExchangeFills /
+            // healStuckPendingFill handles that) or cancelled
+            // (reconcileCancelByExchange handles that). Surface + log; do NOT
+            // re-place here (would risk duplicate fills on a race).
+            this.logger.warn(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=pending_entry_order_gone bitfinexOrderId=${meta.bitfinexOrderId}`,
+            );
+          }
+          continue;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[RECONCILE-ADOPT] participant=${p.id} cycle=${p.cycleId} action=error reason=${msg}`,
+        );
+      }
+    }
+
+    if (orphanPositionIds.length > 0) {
+      await this.persistOrphanPositionIds(instanceId, orphanPositionIds).catch(() => {
+        /* surfacing is best-effort — never abort the tick on a dashboard patch failure */
+      });
+    }
+  }
+
+  /**
+   * Surface participants that the reconcile-adopt loop could NOT auto-heal
+   * (missing fill price for stop re-arm, write window disabled, missing
+   * intent envelope, PENDING_ENTRY with no order id) into
+   * dashboardState.orphanPositionIds so the operator can decide. Surface-
+   * only — does NOT auto-cancel or auto-close. dashboardState is JSON so no
+   * schema migration is required. Sibling to persistOrphanOrderIds.
+   */
+  private async persistOrphanPositionIds(
+    instanceId: string,
+    orphans: Array<{
+      participantId: string;
+      cycleId: string;
+      status: string;
+      reason: string;
+      bitfinexOrderId?: number;
+      stopOrderId?: number;
+      fillPrice?: number;
+    }>,
+  ) {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          orphanPositionIds: orphans,
+          orphanPositionDetectedAt: new Date().toISOString(),
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
   private async healStuckPendingFill(
     participantId: string,
     cycleId: string,
@@ -2085,6 +2444,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           now,
           chaseLabel: `bot=${botLimit.toFixed(2)}`,
           event: 'BOT_ANCHOR_CHASE',
+          tradeId,
         });
         return;
       }
@@ -2110,6 +2470,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       now,
       chaseLabel: '',
       event: 'LIMIT_CHASE',
+      tradeId,
     });
   }
 
@@ -2127,12 +2488,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       now: number;
       chaseLabel: string;
       event: 'LIMIT_CHASE' | 'BOT_ANCHOR_CHASE';
+      /** Showcase trade id — included in the cid hash so chase replacement
+       *  orders share the same deterministic clientOrderId as the entry. */
+      tradeId?: string | null;
     },
   ) {
     if (!meta.direction || !meta.bitfinexOrderId || !meta.limitPrice) return;
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
+    const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
 
     try {
       await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
@@ -2141,6 +2506,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         qty,
         price: opts.newLimit,
         leverage,
+        clientOrderId,
       });
       const chaseCount = (meta.limitChaseCount ?? 0) + 1;
       this.logger.log(
@@ -2153,6 +2519,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         new_limit: opts.newLimit,
         limitPrice: opts.newLimit,
         bitfinexOrderId: newOrderId,
+        clientOrderId,
         local_mark: opts.mark,
         lastChaseAtMs: opts.now,
         limitChaseCount: chaseCount,
