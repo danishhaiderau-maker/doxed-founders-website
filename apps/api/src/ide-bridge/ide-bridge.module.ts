@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { IdeBridgeController, CursorBridgeAliasController } from './ide-bridge.controller';
 import { IdeBridgeService } from './ide-bridge.service';
 import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
@@ -10,7 +10,8 @@ import { ConnectedWorkspaceModule } from '../connected-workspace/connected-works
   imports: [
     DesktopBridgeModule,
     FounderAgentRunModule,
-    BuilderModule,
+    // forwardRef: breaks IdeBridgeModule -> BuilderModule -> FounderNodeModule -> IdeBridgeModule cycle.
+    forwardRef(() => BuilderModule),
     ConnectedWorkspaceModule,
   ],
   controllers: [IdeBridgeController, CursorBridgeAliasController],
