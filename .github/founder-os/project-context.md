@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (10 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: bump Founder Node to v0.7.2 with Cursor history fix
+feat: track AI token usage in share paraphrase + wall summarizer via PlatformAdoptionService
 
 ## Last Activity
 
