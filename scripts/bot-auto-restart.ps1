@@ -29,6 +29,7 @@ $agentDir  = Join-Path $repoRoot "services\btc-conservative-agent"
 $logsDir   = Join-Path $repoRoot "logs"
 $pidFile   = Join-Path $repoRoot ".home-bot.pid"
 $lockFile  = Join-Path $repoRoot ".home-bot-auto-restart.lock"
+$heartbeatFile = Join-Path $repoRoot ".home-bot-auto-restart.heartbeat"
 $restartLog = Join-Path $logsDir "bot_restarts.log"
 
 # Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
@@ -141,70 +142,95 @@ try {
   $currentPid = $BotPid
   $restartTimes = [System.Collections.Generic.List[datetime]]::new()
   $consecutiveCrashes = 0
+  $lastHeartbeat = [datetime]::MinValue
 
   while ($true) {
-    if ($currentPid -le 0) {
-      # No PID to watch (shouldn't happen on first pass since start-home-bot passes one).
-      Write-RestartLog "no_pid_watched	exiting"
-      break
+    try {
+      # --- Heartbeat: every ~2 min, log + touch a heartbeat file so an external
+      # checker can detect a silently-dead monitor. Without this, a transient
+      # .NET exception could escape the loop and the monitor would vanish with
+      # no observable trace.
+      $hbNow = Get-Date
+      if (($hbNow - $lastHeartbeat).TotalSeconds -ge 120) {
+        $lastHeartbeat = $hbNow
+        Write-RestartLog "watching	pid=$currentPid"
+        try {
+          Set-Content -Path $heartbeatFile -Value ($hbNow.ToString("o")) -Encoding UTF8
+        } catch { }
+      }
+
+      if ($currentPid -le 0) {
+        # No PID to watch (shouldn't happen on first pass since start-home-bot passes one).
+        Write-RestartLog "no_pid_watched	exiting"
+        break
+      }
+
+      $p = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
+      if (-not $p) {
+        # Already gone before we could attach. Treat as a crash with unknown exit code.
+        $code = -1
+        Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"
+      } else {
+        $p.WaitForExit()
+        $code = $p.ExitCode
+      }
+
+      # Exit code 0 = intentional shutdown (e.g. user stop-home-bot). Don't restart.
+      if ($code -eq 0) {
+        Write-RestartLog "clean_exit	pid=$currentPid	code=0	no_restart"
+        break
+      }
+
+      # Crash path: report already written above (or by Write-CrashReport for the gone case).
+      $consecutiveCrashes++
+
+      # Rate cap: prune restart timestamps older than 1 hour, then check the cap.
+      $now = Get-Date
+      for ($i = $restartTimes.Count - 1; $i -ge 0; $i--) {
+        if (($now - $restartTimes[$i]).TotalHours -ge 1.0) { $restartTimes.RemoveAt($i) }
+      }
+      if ($restartTimes.Count -ge $MaxRestartsPerHour) {
+        Write-RestartLog "rate_capped	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code	stopping_monitor"
+        try { msg * /TIME:60 "Doxed bot crash-loop on port ${Port}: $MaxRestartsPerHour restarts in 1h. Auto-restart HALTED to protect disk. See logs\bot_restarts.log" 2>$null } catch { }
+        break
+      }
+
+      # Exponential backoff: 5s, 10s, 20s, 40s, 60s, 60s, ...
+      $cooldown = [math]::Min($BaseCooldownSec * [math]::Pow(2, $consecutiveCrashes - 1), $MaxCooldownSec)
+      $cooldown = [int]$cooldown
+      Write-RestartLog "crashed	pid=$currentPid	code=$code	consecutive=$consecutiveCrashes	cooldown=${cooldown}s	restarting"
+
+      Start-Sleep -Seconds $cooldown
+
+      # User clicked Stop while we were in cooldown -> stand down instead of relaunching.
+      # Stop force-kills python (non-zero exit) so without this guard we would treat the
+      # user's Stop as a crash and immediately undo it. Mirrors home-stack-supervisor.ps1.
+      if (Test-HomeStackUserStopped) {
+        Write-RestartLog "user_stopped	pid=$currentPid	code=$code	standing_down_no_relaunch"
+        break
+      }
+
+      # Re-launch.
+      $newPid = Start-BotHidden
+      if ($newPid -le 0) {
+        Write-RestartLog "relaunch_failed	pid=$currentPid	code=$code	stopping_monitor"
+        break
+      }
+      $restartTimes.Add((Get-Date))
+      Write-RestartLog "restarted	old_pid=$currentPid	new_pid=$newPid	code=$code	cooldown=${cooldown}s"
+      $currentPid = $newPid
+      # Give the new process a moment to settle before we start watching it.
+      Start-Sleep -Seconds 2
+    } catch {
+      # Inner guard: any transient .NET exception (Get-Process on a PID that just
+      # vanished, Get-NetTCPConnection under port-table contention, etc.) is logged
+      # and swallowed so the watch loop continues. Previously these escaped straight
+      # to the outer finally, silently killing the monitor and leaving the bot
+      # unwatched. Intentional break-paths above still break out of the while loop
+      # (a break inside a try inside a while breaks the while).
+      Write-RestartLog "watch_loop_error	$_"
+      Start-Sleep -Seconds 5
     }
-
-    $p = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
-    if (-not $p) {
-      # Already gone before we could attach. Treat as a crash with unknown exit code.
-      $code = -1
-      Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"
-    } else {
-      $p.WaitForExit()
-      $code = $p.ExitCode
-    }
-
-    # Exit code 0 = intentional shutdown (e.g. user stop-home-bot). Don't restart.
-    if ($code -eq 0) {
-      Write-RestartLog "clean_exit	pid=$currentPid	code=0	no_restart"
-      break
-    }
-
-    # Crash path: report already written above (or by Write-CrashReport for the gone case).
-    $consecutiveCrashes++
-
-    # Rate cap: prune restart timestamps older than 1 hour, then check the cap.
-    $now = Get-Date
-    for ($i = $restartTimes.Count - 1; $i -ge 0; $i--) {
-      if (($now - $restartTimes[$i]).TotalHours -ge 1.0) { $restartTimes.RemoveAt($i) }
-    }
-    if ($restartTimes.Count -ge $MaxRestartsPerHour) {
-      Write-RestartLog "rate_capped	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code	stopping_monitor"
-      try { msg * /TIME:60 "Doxed bot crash-loop on port ${Port}: $MaxRestartsPerHour restarts in 1h. Auto-restart HALTED to protect disk. See logs\bot_restarts.log" 2>$null } catch { }
-      break
-    }
-
-    # Exponential backoff: 5s, 10s, 20s, 40s, 60s, 60s, ...
-    $cooldown = [math]::Min($BaseCooldownSec * [math]::Pow(2, $consecutiveCrashes - 1), $MaxCooldownSec)
-    $cooldown = [int]$cooldown
-    Write-RestartLog "crashed	pid=$currentPid	code=$code	consecutive=$consecutiveCrashes	cooldown=${cooldown}s	restarting"
-
-    Start-Sleep -Seconds $cooldown
-
-    # User clicked Stop while we were in cooldown -> stand down instead of relaunching.
-    # Stop force-kills python (non-zero exit) so without this guard we would treat the
-    # user's Stop as a crash and immediately undo it. Mirrors home-stack-supervisor.ps1.
-    if (Test-HomeStackUserStopped) {
-      Write-RestartLog "user_stopped	pid=$currentPid	code=$code	standing_down_no_relaunch"
-      break
-    }
-
-    # Re-launch.
-    $newPid = Start-BotHidden
-    if ($newPid -le 0) {
-      Write-RestartLog "relaunch_failed	pid=$currentPid	code=$code	stopping_monitor"
-      break
-    }
-    $restartTimes.Add((Get-Date))
-    Write-RestartLog "restarted	old_pid=$currentPid	new_pid=$newPid	code=$code	cooldown=${cooldown}s"
-    $currentPid = $newPid
-    # Give the new process a moment to settle before we start watching it.
-    Start-Sleep -Seconds 2
   }
 } finally {
   if ($lockHeld) {

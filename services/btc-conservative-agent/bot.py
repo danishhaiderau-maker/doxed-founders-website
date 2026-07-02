@@ -14487,17 +14487,27 @@ def state_monitor_loop():
                         )
                 except Exception as e:
                     logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
-            global _last_research_kpi_ts, _cached_research_kpis
-            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+            global _last_research_kpi_ts, _cached_research_kpis, _research_kpi_disabled
+            if _research_kpi_disabled:
+                pass
+            elif is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+                # Stamp the interval BEFORE the import attempt so a missing module
+                # doesn't re-trigger this every loop tick (was the 12k-lines/2h spam).
+                _last_research_kpi_ts = time.time()
                 try:
                     from research_kpi_engine import refresh_all_research_kpis
                     _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
-                    _last_research_kpi_ts = time.time()
                     fr = (_cached_research_kpis.get("false_reject") or {})
                     logger.info(
                         f"[RESEARCH_KPI] rejects={fr.get('rejects')} false_reject_rate="
                         f"{fr.get('false_reject_rate_pct')}% missed=${fr.get('missed_profit_usd')} "
                         f"[PIPELINE ENFORCEMENT]"
+                    )
+                except ModuleNotFoundError as e:
+                    _research_kpi_disabled = True
+                    logger.info(
+                        "RESEARCH_KPI module missing — disabling periodic KPI refresh "
+                        f"(missing={getattr(e, 'name', 'research_kpi_engine')}) [PIPELINE ENFORCEMENT]"
                     )
                 except Exception as e:
                     logger.warning(f"[RESEARCH_KPI] periodic run failed: {e}")
@@ -15900,6 +15910,9 @@ _last_feature_drift_ts = 0.0
 _last_research_kpi_ts = 0.0
 _cached_research_kpis = {}
 RESEARCH_KPI_INTERVAL_SEC = 300
+# One-shot disable: set True the first time `research_kpi_engine` import fails
+# so the periodic worker stops trying every tick (was ~12k warning lines / 2h).
+_research_kpi_disabled = False
 _cached_pathway_scorecard = {}
 _last_pathway_scorecard_api_ts = 0.0
 PATHWAY_SCORECARD_API_MIN_SEC = 90
@@ -16554,7 +16567,9 @@ def refresh_pathway_scorecard_live() -> dict:
 
 def get_research_kpis_cached(for_api: bool = False) -> dict:
     """Dashboard KPIs — false reject rate, calibration, AI vs shadow."""
-    global _last_research_kpi_ts, _cached_research_kpis
+    global _last_research_kpi_ts, _cached_research_kpis, _research_kpi_disabled
+    if _research_kpi_disabled:
+        return _cached_research_kpis or {}
     if not is_research_data_collection():
         return {}
     if for_api:
@@ -16562,10 +16577,18 @@ def get_research_kpis_cached(for_api: bool = False) -> dict:
     now = time.time()
     if now - _last_research_kpi_ts < RESEARCH_KPI_INTERVAL_SEC and _cached_research_kpis:
         return _cached_research_kpis
+    # Stamp the interval BEFORE the import attempt so a missing module doesn't
+    # re-trigger this every call.
+    _last_research_kpi_ts = now
     try:
         from research_kpi_engine import refresh_all_research_kpis
         _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
-        _last_research_kpi_ts = now
+    except ModuleNotFoundError as e:
+        _research_kpi_disabled = True
+        logger.info(
+            "RESEARCH_KPI module missing — disabling periodic KPI refresh "
+            f"(missing={getattr(e, 'name', 'research_kpi_engine')}) [PIPELINE ENFORCEMENT]"
+        )
     except Exception as e:
         logger.warning(f"[RESEARCH_KPI] refresh failed: {e}")
     return _cached_research_kpis or {}
@@ -19425,21 +19448,15 @@ def _snapshot_trades_for_api(session_start: float):
     return list(src)
 
 
-@app.route('/api/state')
-def api_state():
+def _build_api_state_snapshot():
+    """Build the full /api/state payload dict.
+
+    Runs on a background refresher thread (~1.5s cadence) so the HTTP route
+    handler stays O(1) — this is the thread-exhaustion OOM fix. Kept as a
+    standalone function so the route handler's cold-start fallback and the
+    background refresher share one code path (identical JSON shape).
+    """
     t0 = time.perf_counter()
-    now_wall = time.time()
-    with _api_state_cache_lock:
-        cached = _api_state_cache.get("payload")
-        if cached is not None and now_wall - _api_state_cache["built_at"] < _API_STATE_CACHE_TTL_SEC:
-            resp = jsonify(cached)
-            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-            resp.headers["Pragma"] = "no-cache"
-            resp.headers["X-Api-State-Cache"] = "hit"
-            return resp
-        if _api_state_cache.get("building"):
-            return ("", 204)
-        _api_state_cache["building"] = True
     try:
         # Never block HTTP on Bitfinex REST here — state_monitor_loop refreshes price/funding in background.
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
@@ -19674,18 +19691,71 @@ def api_state():
         elif fund_out.get("next_time_iso"):
             fund_out["next_time_melbourne"] = _format_melbourne_hm(fund_out["next_time_iso"])
         snapshot["funding"] = fund_out
+        snapshot["state_integrity"] = build_state_integrity()
         logger.info(
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
             f"elapsed_ms={int((time.perf_counter() - t0) * 1000)} [PIPELINE ENFORCEMENT]"
         )
+        return snapshot
+    except Exception:
+        # Let the caller (background refresher or route fallback) handle/log.
+        raise
+
+
+_api_state_refresher_started = False
+_api_state_refresher_start_lock = threading.Lock()
+
+
+def _start_api_state_cache_refresher():
+    """Start the daemon background thread that rebuilds the /api/state snapshot
+    every 1.5s so the HTTP route handler stays O(1). Idempotent — safe to call
+    from multiple startup paths."""
+    global _api_state_refresher_started
+    with _api_state_refresher_start_lock:
+        if _api_state_refresher_started:
+            return
+        _api_state_refresher_started = True
+        threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
+        logger.info("[API STATE] background cache refresher started (1.5s cadence)")
+
+
+def _api_state_cache_refresher_loop():
+    while not shutdown_event.is_set():
+        try:
+            snap = _build_api_state_snapshot()
+            with _api_state_cache_lock:
+                _api_state_cache["payload"] = snap
+                _api_state_cache["built_at"] = time.time()
+        except Exception as e:
+            logger.error(f"/api/state background refresher error: {e}")
+        shutdown_event.wait(1.5)
+
+
+@app.route('/api/state')
+def api_state():
+    # O(1) cache return — the heavy ~108KB snapshot rebuild runs on a background
+    # refresher thread (see _api_state_cache_refresher_loop) so request threads
+    # never block on it. This is the thread-exhaustion OOM fix.
+    with _api_state_cache_lock:
+        cached = _api_state_cache.get("payload")
+        if cached is not None:
+            resp = jsonify(cached)
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["X-Api-State-Cache"] = "hit"
+            return resp
+    # Cold-start fallback: cache empty before the refresher has populated it.
+    # Build once synchronously so the first dashboard poll still works, and seed
+    # the cache so subsequent polls hit.
+    try:
+        snap = _build_api_state_snapshot()
         with _api_state_cache_lock:
-            _api_state_cache["payload"] = snapshot
+            _api_state_cache["payload"] = snap
             _api_state_cache["built_at"] = time.time()
-        snapshot["state_integrity"] = build_state_integrity()
-        resp = jsonify(snapshot)
+        resp = jsonify(snap)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
-        resp.headers["X-Api-State-Cache"] = "miss"
+        resp.headers["X-Api-State-Cache"] = "miss-fallback"
         return resp
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
@@ -19704,9 +19774,6 @@ def api_state():
         resp = jsonify(err_payload)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp, 500
-    finally:
-        with _api_state_cache_lock:
-            _api_state_cache["building"] = False
 
 
 @app.route('/health')
@@ -22135,7 +22202,58 @@ def _ensure_flask_port_available(port: int = None):
 
 def run_flask():
     _ensure_flask_port_available(DASHBOARD_PORT)
-    app.run(host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, use_reloader=False, threaded=True)
+    # Thread-exhaustion OOM prevention: Flask's dev server with threaded=True
+    # spawns one uncapped OS thread per request. When /api/state slowed to ~8s,
+    # threads piled up to 720+ over ~2h and the bot got hard OOM-killed. We host
+    # the app on a bounded werkzeug server instead — at most 8 concurrent request
+    # threads (BoundedSemaphore); the socket backlog (request_queue_size=64)
+    # queues overflow in the OS before accept(). waitress is NOT available on
+    # Python 3.14 here, so we use werkzeug (ships with Flask, no new dependency).
+    from werkzeug.serving import ThreadedWSGIServer
+
+    class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
+        request_queue_size = 64
+        _thread_cap = threading.BoundedSemaphore(8)
+
+        def process_request(self, request, client_address):
+            # Block until a thread slot is free; the socket backlog holds the
+            # pending connection so the client waits instead of the server
+            # spawning a new thread per request (the OOM root cause).
+            self._thread_cap.acquire()
+            try:
+                t = threading.Thread(
+                    target=self._release_and_process,
+                    args=(request, client_address),
+                )
+                if self.daemon_threads:
+                    t.daemon = True
+                t.start()
+            except Exception:
+                self._thread_cap.release()
+                raise
+
+        def _release_and_process(self, request, client_address):
+            try:
+                self.process_request_thread(request, client_address)
+            finally:
+                self._thread_cap.release()
+
+    try:
+        httpd = _BoundedThreadedWSGIServer(
+            host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, app=app
+        )
+    except Exception as e:
+        logger.error(f"[FLASK] failed to bind {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT}: {e}")
+        raise SystemExit(1)
+    logger.info(
+        f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
+        f"(bounded werkzeug server, max_threads=8, backlog=64) [PIPELINE ENFORCEMENT]"
+    )
+    try:
+        httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"[FLASK] server error: {e}")
+        raise SystemExit(1)
 
 def is_ai_active():
     return state.get("ai_enabled", False) and bool(_deepseek_api_key())
@@ -22461,6 +22579,7 @@ def main():
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
+    _start_api_state_cache_refresher()
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
