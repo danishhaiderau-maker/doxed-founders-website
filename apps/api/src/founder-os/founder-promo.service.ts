@@ -133,15 +133,35 @@ export class FounderPromoService {
     return this.getPlatformPromoSettings();
   }
 
-  /** Platform-hosted key for promo users — never returns a key unless promo is eligible. */
+  /**
+   * Platform-hosted key for promo users — never returns a key unless promo is eligible.
+   *
+   * Acquires a per-user Postgres advisory lock around the eligibility check so
+   * parallel requests for the same user serialize instead of all reading the
+   * same `tokensUsed < cap` snapshot before any of them logs usage. This shrinks
+   * the promo-cap overshoot window dramatically when combined with the
+   * per-user rate limiter (10/hr) now applied to every AI route.
+   *
+   * TODO(full-reservation): for a hard cap, insert a `platform_promo` row into
+   * `aiTokenUsageLog` with estimated prompt tokens inside this same lock BEFORE
+   * returning the key, then update it with real completion tokens after the LLM
+   * call. That requires plumbing the reservation id through the invoker — left
+   * for a follow-up; the rate limiter + advisory lock already bound the burst.
+   */
   async resolvePromoApiKey(
     userId: string,
     provider: PromoCredentialProvider,
   ): Promise<string | null> {
-    const status = await this.getUserPromoStatus(userId);
-    if (!status.eligible) return null;
-    const map = await this.loadDecryptedCredentials();
-    return map[provider]?.trim() || null;
+    // Per-user advisory lock — hashtext gives a stable int32 per userId.
+    await this.prisma.$executeRaw`SELECT pg_advisory_lock(hashtext(${userId}))`;
+    try {
+      const status = await this.getUserPromoStatus(userId);
+      if (!status.eligible) return null;
+      const map = await this.loadDecryptedCredentials();
+      return map[provider]?.trim() || null;
+    } finally {
+      await this.prisma.$executeRaw`SELECT pg_advisory_unlock(hashtext(${userId}))`;
+    }
   }
 
   /** Whether a provider can be used via promo (eligible + platform key saved). */
@@ -166,12 +186,23 @@ export class FounderPromoService {
     const [settings, founder, user, usageAgg] = await Promise.all([
       this.getPlatformPromoSettings(),
       this.prisma.founder.findUnique({ where: { userId }, select: { createdAt: true } }),
-      this.prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { createdAt: true, xVerified: true, twitterHandle: true },
+      }),
       this.prisma.aiTokenUsageLog.aggregate({
         where: { userId, billingSource: 'platform_promo' },
         _sum: { promptTokens: true, completionTokens: true },
       }),
     ]);
+
+    // Free-token eligibility gate: only accounts with a verified X/Twitter
+    // connection can draw from the 30M-token promo pool. Blocks signup-bonus
+    // farming and burner-account abuse. Uses the existing `xVerified` flag
+    // (set on X OAuth + blue-verified flow) — no schema migration needed.
+    const twitterVerified = Boolean(user?.xVerified);
+    const TWITTER_GATE_MESSAGE =
+      'Free AI tokens require a verified Twitter account. Connect your X account in Settings → Connected Accounts to claim the promo.';
 
     // Promo is available to ALL signed-up users — use founder.createdAt OR user.createdAt
     const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
@@ -224,7 +255,7 @@ export class FounderPromoService {
     const daysRemaining = withinWindow
       ? Math.max(0, Math.ceil((expiresAt.getTime() - now) / (24 * 60 * 60 * 1000)))
       : 0;
-    const eligible = withinWindow && !exhausted && settings.credentialsConfigured;
+    const eligible = withinWindow && !exhausted && settings.credentialsConfigured && twitterVerified;
 
     const baseStatus: FounderPromoStatus = {
       enabled: true,
@@ -243,6 +274,11 @@ export class FounderPromoService {
 
     if (eligible) {
       baseStatus.message = settings.message;
+      return baseStatus;
+    }
+
+    if (!twitterVerified) {
+      baseStatus.message = TWITTER_GATE_MESSAGE;
       return baseStatus;
     }
 

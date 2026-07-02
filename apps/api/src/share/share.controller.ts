@@ -1,11 +1,9 @@
 import { Body, Controller, Post } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { ShareService } from './share.service';
 import { ParaphraseShareDto } from './dto/paraphrase.dto';
 
-@SkipThrottle()
 @Controller('share')
 export class ShareController {
   constructor(private readonly share: ShareService) {}
