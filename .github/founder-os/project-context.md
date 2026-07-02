@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(wall): Telegram-style Founder Chat wall + project page redesign
+feat(ide-bridge): surface full Cursor chat history in Founder OS
 
 ## Last Activity
 
