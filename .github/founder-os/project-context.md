@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(monitor): use timed WaitForExit so heartbeat refreshes while bot is alive
+feat(share,admin): founder-onboarding X share + AI paraphrase, consolidated AI keys
 
 ## Last Activity
 
