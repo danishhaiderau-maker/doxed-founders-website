@@ -12988,6 +12988,25 @@ def process_limit_chase(price: float):
             if _virtual_chase_lane_chase_on_order(order, signal, price, now):
                 chased += 1
             continue
+        # Phase 3 reconcile-adopt guards (Q2 + Q7) — only apply to re-adopted orders.
+        if order.get("adopt_source") == "RECONCILE":
+            # Q2: degraded chase budget. Cancel once the re-adopted cap is exhausted
+            # so a stale resting order doesn't chase aggressively with a full budget.
+            cap = int(order.get("max_chase_count_adopted") or MAX_CHASE_COUNT_ADOPTED)
+            if int(order.get("limit_chase_count") or 0) >= cap:
+                logger.info(
+                    f"[RECONCILE-ADOPT] chase budget exhausted tid={tid} cap={cap} "
+                    f"— cancelling pending [PIPELINE ENFORCEMENT]"
+                )
+                _cancel_pending_for_chase_gate(order, "RECONCILE_CHASE_BUDGET_EXHAUSTED")
+                _reconcile_adopt_audit(order.get("bitfinex_order_id"), "CANCEL_PENDING",
+                                       "RECONCILE_CHASE_BUDGET_EXHAUSTED", {"trade_id": tid})
+                continue
+            # Q7: write window gate. Adoption still happened (entry is in
+            # pending_orders so cleanup_expired_orders + fills still flow) but
+            # repricing is skipped — the order rests as-is until fill / TTL expire.
+            if not bool(order.get("reconcile_write_window", RECONCILE_WRITE_WINDOW)):
+                continue
         if not _limit_chase_eligible_order(order, price, now):
             continue
         if _apply_limit_chase(order, signal, price, now):
@@ -19214,6 +19233,315 @@ def _maybe_bitfinex_cancel(source: dict) -> None:
         logger.warning(f"[BITFINEX LIVE] cancel hook failed: {exc} [PIPELINE ENFORCEMENT]")
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — Layer A (showcase bot) reconcile-adopt
+# ---------------------------------------------------------------------------
+# These run ONCE at startup (called synchronously from main() after the rebuild
+# payload is stored, before any worker thread spins up) and fold exchange-truth
+# open orders + positions back into the bot's in-memory pending_orders /
+# open_positions so the existing chase / position_manager loops pick them up
+# automatically. No new lifecycle code is added — adoption just (re)inserts the
+# dict entries in the exact shape process_limit_chase / process_positions read.
+#
+# Money-path contract:
+#   - Idempotent: every insert checks the bitfinex_order_id / position id is not
+#     already present under trade_lock before inserting (safe if reconcile fires
+#     twice or the startup call re-runs).
+#   - Foreign orders/positions that match NOTHING are surfaced on
+#     state["orphan_order_ids"] / state["orphan_position_ids"] for the operator
+#     (Q1: surface-only, NO auto-cancel).
+#   - Re-arm stop carefully: if fill_price cannot be recovered from recent_trades
+#     matching the cid, the position is surfaced as an orphan with reason
+#     RECONCILE_STOP_REARM_REFUSED instead of arming a stop off a stale price.
+#   - Every adoption / cancel / surface appends to state["reconcile_adopt_log"].
+#
+# Q2: re-adopted pending limits are capped at MAX_CHASE_COUNT_ADOPTED (default 2)
+#   chase ticks; once exceeded they're cancelled via _cancel_pending_for_chase_gate
+#   with reason RECONCILE_CHASE_BUDGET_EXHAUSTED.
+# Q3/Q4: re-adopted positions reset peak_margin_pct=0 and tag profit_lock_floor
+#   with the first ladder rung as a degraded "take profit fast" audit marker; the
+#   trailing ladder starts fresh (accepted trade-off — original peak was lost).
+# Q7: write window — when RECONCILE_WRITE_WINDOW env is "0", adoption still
+#   inserts entries but the chase loop will skip repricing (orders rest as-is).
+
+
+def _reconcile_adopt_audit(oid, action: str, reason: str, extra: dict = None) -> None:
+    """Append one row to the reconcile_adopt_log ring buffer (last 50)."""
+    now = time.time()
+    row = {"ts": now, "oid": oid, "action": action, "reason": reason}
+    if extra:
+        row.update(extra)
+    try:
+        with state_lock:
+            buf = state.setdefault("reconcile_adopt_log", [])
+            buf.append(row)
+            if len(buf) > 50:
+                del buf[: len(buf) - 50]
+    except Exception as exc:
+        logger.debug(f"[RECONCILE-ADOPT] audit log append failed: {exc}")
+
+
+def _adopted_pending_order_view(exch_order: dict, trade_id: str) -> dict:
+    """Build a pending_orders entry mirroring what process_limit_chase /
+    _apply_limit_chase read, seeded from a Bitfinex open-order view."""
+    px = float(exch_order.get("price") or 0)
+    side_raw = str(exch_order.get("side") or "").lower()
+    signal_dir = "buy" if side_raw == "buy" else "sell"
+    created_ts = exch_order.get("created_at")
+    if created_ts:
+        try:
+            created_ts = float(created_ts) / 1000.0  # ccxt timestamp is ms epoch
+        except (TypeError, ValueError):
+            created_ts = time.time()
+    else:
+        created_ts = time.time()
+    return {
+        "trade_id": trade_id,
+        "bitfinex_order_id": str(exch_order.get("id") or ""),
+        "signal_dir": signal_dir,
+        "side": side_raw,
+        "limit_price": px,
+        "original_limit_price": px,
+        "planned_limit_price": px,
+        "qty": float(exch_order.get("amount") or 0),
+        "created_ts": created_ts,
+        "limit_chase_count": 0,
+        "last_chase_ts": 0,
+        "status": "PENDING",
+        "entry_type": "RECONCILE_ADOPT",
+        "research_lane": RESEARCH_LANE_CONTINUOUS,
+        "adopted_at": time.time(),
+        "adopt_source": "RECONCILE",
+        # Q7: when write window is disabled, chase loops still pick the order up
+        # but should NOT reprice. Flagged here so process_limit_chase can short-
+        # circuit repricing without touching the legacy path.
+        "reconcile_write_window": bool(RECONCILE_WRITE_WINDOW),
+    }
+
+
+def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
+    """Fold exchange open orders into pending_orders (idempotent, under trade_lock).
+
+    For each exchange open order NOT already in pending_orders (matched by
+    bitfinex_order_id), build a pending_orders entry in the shape
+    process_limit_chase / _apply_limit_chase read. Orders that match nothing
+    recoverable (no clientOrderId / cid) are surfaced on state["orphan_order_ids"]
+    instead of being auto-cancelled (Q1 surface-only).
+    """
+    if not isinstance(rebuilt, dict):
+        return {"adopted": 0, "orphaned": 0, "skipped": 0}
+    ex_orders = rebuilt.get("open_orders") or []
+    recent = rebuilt.get("recent_trades") or []
+    # Map cid -> trade_id from recent fills (second match key for attribution).
+    cid_to_tid = {}
+    for t in recent:
+        cid = (t or {}).get("client_order_id") or (t or {}).get("cid")
+        tid = (t or {}).get("id")
+        if cid and tid:
+            cid_to_tid[str(cid)] = str(tid)
+
+    adopted = 0
+    orphaned = 0
+    skipped = 0
+    with trade_lock:
+        existing_oids = {
+            str(o.get("bitfinex_order_id") or "")
+            for o in pending_orders
+            if isinstance(o, dict) and o.get("bitfinex_order_id")
+        }
+        existing_oids.discard("")
+        existing_tids = {
+            str(o.get("trade_id") or "")
+            for o in pending_orders
+            if isinstance(o, dict) and o.get("trade_id")
+        }
+        for exo in ex_orders:
+            oid = str(exo.get("id") or "")
+            if not oid:
+                skipped += 1
+                continue
+            if oid in existing_oids:
+                skipped += 1
+                continue
+            cid = str(exo.get("cid") or exo.get("client_order_id") or "")
+            tid = cid_to_tid.get(cid) or (cid if cid else None)
+            if not tid:
+                tid = f"reconcile-{oid}"
+            if tid in existing_tids:
+                # Same trade already tracked under a different exchange id — skip
+                # rather than double-counting exposure.
+                skipped += 1
+                continue
+            entry = _adopted_pending_order_view(exo, tid)
+            # Q2 cap: pre-stamp a degraded chase budget so _apply_limit_chase's
+            # chase_bucket_allowed gate cancels it via _cancel_pending_for_chase_gate
+            # once MAX_CHASE_COUNT_ADOPTED is exceeded (handled in chase loop, but
+            # the audit marker lives here so operators can see the cap was applied).
+            entry["max_chase_count_adopted"] = int(MAX_CHASE_COUNT_ADOPTED)
+            pending_orders.append(entry)
+            lane_pending_orders[_ensure_lane_bucket(entry)].append(entry)
+            existing_oids.add(oid)
+            existing_tids.add(tid)
+            adopted += 1
+            logger.info(
+                f"[RECONCILE-ADOPT] adopting pending limit oid={oid} price={entry['limit_price']} "
+                f"dir={entry['signal_dir']} tid={tid} cid={cid or '-'} chase_cap={MAX_CHASE_COUNT_ADOPTED} "
+                f"write_window={RECONCILE_WRITE_WINDOW} [PIPELINE ENFORCEMENT]"
+            )
+            _reconcile_adopt_audit(oid, "ADOPT_PENDING", "RECONCILE",
+                                   {"trade_id": tid, "price": entry["limit_price"],
+                                    "dir": entry["signal_dir"]})
+            # Truly foreign (no cid, no recoverable trade_id beyond our generated
+            # placeholder) — surface on orphan_order_ids for the operator.
+            if not cid and tid.startswith("reconcile-"):
+                with state_lock:
+                    orphans = state.setdefault("orphan_order_ids", [])
+                    if oid not in orphans:
+                        orphans.append(oid)
+                        if len(orphans) > 200:
+                            del orphans[: len(orphans) - 200]
+                orphaned += 1
+                _reconcile_adopt_audit(oid, "ORPHAN_SURFACE", "RECONCILE_FOREIGN_NO_CID",
+                                       {"trade_id": tid})
+    if adopted or orphaned:
+        pipeline_state_sync()
+    return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
+
+
+def _adopted_open_position_view(exch_pos: dict, trade_id: str, fill_price: float,
+                                fill_ts: float) -> dict:
+    """Build an open_positions entry mirroring what process_positions /
+    _apply_position_exits read, seeded from a Bitfinex position view."""
+    info = exch_pos.get("info") or {}
+    side_raw = str(exch_pos.get("side") or "").lower()
+    direction = "LONG" if side_raw in ("long", "buy") else "SHORT"
+    entry = float(fill_price or exch_pos.get("entry") or 0)
+    qty = abs(float(exch_pos.get("contracts") or exch_pos.get("amount") or 0))
+    lev = int(exch_pos.get("leverage") or state.get("leverage", 20) or 20)
+    sl_pct = sl_price_pct(lev)
+    sl_price = entry * (1 - sl_pct) if direction == "LONG" else entry * (1 + sl_pct)
+    exit_cfg = get_exit_config_for_lane(RESEARCH_LANE_CONTINUOUS)
+    ladder = exit_cfg.get("trail_ladder") or TRAIL_LADDER
+    return {
+        "trade_id": trade_id,
+        "dir": direction,
+        "entry": entry,
+        "fill_price": entry,
+        "qty": qty,
+        "leverage": lev,
+        "entry_ts": fill_ts,
+        "fill_ts": fill_ts,
+        "sl": sl_price,
+        "tp": compute_tp(entry, direction, TP_TARGET_PCT, lev),
+        "status": "OPEN",
+        "regime_birth": state.get("regime", "UNKNOWN"),
+        "strategy_birth": "SR",
+        "research_lane": RESEARCH_LANE_CONTINUOUS,
+        "exit_config": copy.deepcopy(exit_cfg),
+        # Q3/Q4: degraded "take profit fast" profile — peak was lost on restart so
+        # the trailing ladder starts fresh; tag the first rung as the audit marker
+        # for profit_lock_floor so operators can see the degraded profile was applied.
+        "max_pnl_pct": 0.0,
+        "peak_margin_pct": 0.0,
+        "profit_lock_floor": float(ladder[0][0]) if ladder else 0.0,
+        "thesis_state": {},
+        "stop_loss_armed": False,
+        "adopted_at": time.time(),
+        "adopt_source": "RECONCILE",
+    }
+
+
+def _adopt_position_from_rebuild(rebuilt: dict) -> dict:
+    """Fold exchange open positions into open_positions (idempotent, under
+    trade_lock). For each exchange position NOT already in open_positions:
+      - recover fill_price from recent_trades matching the cid (when available)
+      - if fill_price cannot be recovered, surface the position on
+        state["orphan_position_ids"] with reason RECONCILE_STOP_REARM_REFUSED
+        and DO NOT re-arm a stop with a stale price (money-path safety).
+    """
+    if not isinstance(rebuilt, dict):
+        return {"adopted": 0, "orphaned": 0, "skipped": 0}
+    ex_positions = rebuilt.get("positions") or []
+    recent = rebuilt.get("recent_trades") or []
+    # Map cid -> {price, ts} from recent fills for fill_price recovery.
+    cid_to_fill = {}
+    for t in recent:
+        cid = (t or {}).get("client_order_id") or (t or {}).get("cid")
+        if cid:
+            cid_to_fill[str(cid)] = {
+                "price": float((t or {}).get("price") or 0),
+                "ts": float((t or {}).get("timestamp") or 0) / 1000.0 if (t or {}).get("timestamp") else time.time(),
+            }
+
+    adopted = 0
+    orphaned = 0
+    skipped = 0
+    with trade_lock:
+        existing_pids = {
+            str(p.get("bitfinex_position_id") or p.get("trade_id") or "")
+            for p in open_positions
+            if isinstance(p, dict)
+        }
+        existing_pids.discard("")
+        existing_tids = {str(p.get("trade_id") or "") for p in open_positions if isinstance(p, dict)}
+        for exp in ex_positions:
+            pid = str(exp.get("id") or "")
+            contracts = float(exp.get("contracts") or exp.get("amount") or 0)
+            if abs(contracts) < 1e-9:
+                # Closed / flat row from fetch_positions — skip.
+                skipped += 1
+                continue
+            info = exp.get("info") or {}
+            cid = str((info.get("cid") if isinstance(info, dict) else None) or exp.get("client_order_id") or "")
+            tid = cid or pid or f"reconcile-pos-{pid}"
+            key = pid or tid
+            if key and key in existing_pids:
+                skipped += 1
+                continue
+            if tid in existing_tids:
+                skipped += 1
+                continue
+            fill = cid_to_fill.get(cid)
+            fill_price = (fill or {}).get("price") or float(exp.get("entry") or 0)
+            fill_ts = (fill or {}).get("ts") or time.time()
+            # Money-path safety: refuse to re-arm a stop with a stale / missing
+            # entry price. Surface as orphan for manual decision instead.
+            if fill_price <= 0:
+                with state_lock:
+                    orphans = state.setdefault("orphan_position_ids", [])
+                    if pid and pid not in orphans:
+                        orphans.append(pid)
+                        if len(orphans) > 200:
+                            del orphans[: len(orphans) - 200]
+                orphaned += 1
+                logger.warning(
+                    f"[RECONCILE-ADOPT] REFUSED stop re-arm pid={pid} cid={cid or '-'} "
+                    f"— fill_price unrecoverable, surfacing as orphan [PIPELINE ENFORCEMENT]"
+                )
+                _reconcile_adopt_audit(pid or tid, "ORPHAN_SURFACE", "RECONCILE_STOP_REARM_REFUSED",
+                                       {"cid": cid or "-"})
+                continue
+            entry = _adopted_open_position_view(exp, tid, fill_price, fill_ts)
+            entry["bitfinex_position_id"] = pid
+            open_positions.append(entry)
+            lane_open_positions[_ensure_lane_bucket(entry)].append(entry)
+            existing_pids.add(key)
+            existing_tids.add(tid)
+            adopted += 1
+            logger.warning(
+                f"[RECONCILE-ADOPT] adopting open position pid={pid} dir={entry['dir']} "
+                f"qty={entry['qty']} entry={entry['entry']} tid={tid} cid={cid or '-'} "
+                f"peak_reset=0 profit_lock_floor={entry['profit_lock_floor']} (degraded ladder) "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            _reconcile_adopt_audit(pid or tid, "ADOPT_POSITION", "RECONCILE",
+                                   {"trade_id": tid, "dir": entry["dir"], "qty": entry["qty"],
+                                    "entry": entry["entry"]})
+    if adopted or orphaned:
+        pipeline_state_sync()
+    return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
+
+
 # Background reconciliation loop: pulls fills, detects manual closes, and reports
 # drift so the bot snapshot stays in sync with Bitfinex truth. Only acts when live
 # execution is armed + keys present; otherwise sleeps cheaply.
@@ -23241,6 +23569,20 @@ def main():
                     f"orders={len(rebuilt.get('open_orders', []))} trades={len(rebuilt.get('recent_trades', []))} "
                     f"[PIPELINE ENFORCEMENT]"
                 )
+                # Phase 3 — Layer A adoption: synchronously fold exchange-truth open
+                # orders + positions back into pending_orders / open_positions BEFORE
+                # any worker thread spins up (chase / position_manager loops pick them
+                # up automatically on their first tick). Idempotent under trade_lock.
+                try:
+                    adopt_o = _adopt_from_rebuild(None, rebuilt)
+                    adopt_p = _adopt_position_from_rebuild(rebuilt)
+                    logger.warning(
+                        f"[RECONCILE-ADOPT] startup adoption pending={adopt_o} positions={adopt_p} "
+                        f"write_window={RECONCILE_WRITE_WINDOW} chase_cap_adopted={MAX_CHASE_COUNT_ADOPTED} "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[RECONCILE-ADOPT] startup adoption failed: {exc} [PIPELINE ENFORCEMENT]")
             except Exception as exc:
                 logger.warning(f"[BITFINEX LIVE] startup rebuild failed: {exc} [PIPELINE ENFORCEMENT]")
     except Exception as exc:
