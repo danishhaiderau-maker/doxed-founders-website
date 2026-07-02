@@ -268,6 +268,17 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
             Create one
           </Link>
         </p>
+        <p className="mt-4 text-center text-xs text-[var(--color-muted)]">
+          By signing in you agree to our{' '}
+          <Link href="/legal/terms" className="text-violet-300 hover:underline">
+            Terms
+          </Link>{' '}
+          and{' '}
+          <Link href="/legal/privacy" className="text-violet-300 hover:underline">
+            Privacy Policy
+          </Link>
+          .
+        </p>
       </div>
     </main>
   );

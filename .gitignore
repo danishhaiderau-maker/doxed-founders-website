@@ -205,3 +205,5 @@ services/btc-conservative-agent/research_*.txt
 services/btc-conservative-agent/research_*.json
 
 *.tmp.py
+.commit-msg-tmp.txt
+.home-stack-user-stopped
