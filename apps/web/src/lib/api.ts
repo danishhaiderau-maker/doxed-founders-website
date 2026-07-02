@@ -673,6 +673,24 @@ export function fetchMyTrustWeight(token: string) {
   return apiFetch<{ weight: number }>('/trust-center/my-weight', undefined, token);
 }
 
+/**
+ * Paraphrase a draft share tweet into a clean, Twitter-ready founder-onboarding
+ * message via the platform DeepSeek key. JWT-auth on the server.
+ */
+export function paraphraseShareTweet(
+  input: { text: string; projectName?: string; ticker?: string; slug?: string },
+  token: string,
+) {
+  return apiFetch<{ text: string }>(
+    '/share/paraphrase',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    token,
+  );
+}
+
 export function fetchPendingApplications(token: string) {
   return apiFetch<PendingApplication[]>('/listing-applications/pending', undefined, token);
 }

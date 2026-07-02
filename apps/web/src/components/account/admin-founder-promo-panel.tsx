@@ -10,6 +10,10 @@ import {
 
 type Props = {
   accessToken: string;
+  /** When true, hides the platform API-key cards (they are managed elsewhere,
+   * e.g. the consolidated Admin → AI Keys panel). Promo toggle/cap/window/message
+   * remain editable. Defaults to false (preserves connected-accounts behavior). */
+  hideKeyCards?: boolean;
 };
 
 const PROMO_KEY_FIELDS = [
@@ -18,7 +22,7 @@ const PROMO_KEY_FIELDS = [
   { key: 'deepseek' as const, label: 'DeepSeek API key', placeholder: 'sk-…' },
 ];
 
-export function AdminFounderPromoPanel({ accessToken }: Props) {
+export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Props) {
   const [settings, setSettings] = useState<FounderPromoPlatformSettings | null>(null);
   const [message, setMessage] = useState('');
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
@@ -159,47 +163,65 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
       </label>
 
       <div className="mt-5 border-t border-zinc-800 pt-4">
-        <p className="text-xs font-semibold text-white">Platform API keys (promo only)</p>
-        <p className="mt-1 text-[11px] text-zinc-500">
-          These keys are used only for eligible founders during the promo window. Never shared with users. Usage is logged
-          as <code className="text-zinc-400">platform_promo</code> billing.
-        </p>
-        <ul className="mt-3 space-y-3">
-          {PROMO_KEY_FIELDS.map((field) => {
-            const configured = settings.credentialsStatus?.[field.key] ?? false;
-            return (
-              <li key={field.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-zinc-300">{field.label}</span>
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      configured ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-500'
-                    }`}
-                  >
-                    {configured ? 'Saved' : 'Not set'}
-                  </span>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <input
-                    type="password"
-                    value={keyDrafts[field.key] ?? ''}
-                    onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                    placeholder={configured ? 'Enter new key to replace…' : field.placeholder}
-                    className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
-                  />
-                  <button
-                    type="button"
-                    disabled={busy || !keyDrafts[field.key]?.trim()}
-                    onClick={() => saveKey(field.key)}
-                    className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-40"
-                  >
-                    Save key
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-white">Platform API keys (promo pool)</p>
+          {hideKeyCards && (
+            <span className="text-[11px] text-violet-300">
+              Managed in Admin → AI Keys
+            </span>
+          )}
+        </div>
+        {hideKeyCards ? (
+          <p className="mt-2 text-[11px] text-zinc-500">
+            These keys are managed on the consolidated{' '}
+            <span className="text-zinc-300">Admin → AI Keys</span> panel. Promo
+            eligibility, token cap, free window, and the flash message below stay
+            here.
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-[11px] text-zinc-500">
+              These keys are used only for eligible founders during the promo window. Never shared with users. Usage is logged
+              as <code className="text-zinc-400">platform_promo</code> billing.
+            </p>
+            <ul className="mt-3 space-y-3">
+              {PROMO_KEY_FIELDS.map((field) => {
+                const configured = settings.credentialsStatus?.[field.key] ?? false;
+                return (
+                  <li key={field.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-zinc-300">{field.label}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          configured ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-500'
+                        }`}
+                      >
+                        {configured ? 'Saved' : 'Not set'}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <input
+                        type="password"
+                        value={keyDrafts[field.key] ?? ''}
+                        onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        placeholder={configured ? 'Enter new key to replace…' : field.placeholder}
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
+                      />
+                      <button
+                        type="button"
+                        disabled={busy || !keyDrafts[field.key]?.trim()}
+                        onClick={() => saveKey(field.key)}
+                        className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-40"
+                      >
+                        Save key
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
       </div>
 
       {msg && <p className="mt-2 text-xs text-emerald-300">{msg}</p>}

@@ -6,7 +6,8 @@ import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { extractPoolAddressFromDexUrl, buildSiteUrl, buildListingShareMessage } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
-import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
+import { useShareOrigin } from '@/components/share-on-x-button';
+import { ShareOnXPreviewButton } from '@/components/share-on-x-preview-button';
 import { FounderBadges } from '@/components/founder-badges';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ProjectMetricsGrid } from '@/components/project-card';
@@ -215,11 +216,15 @@ export default function ProjectDetailPage() {
                     Paper trade
                   </Link>
                   <WatchlistButton slug={project.slug} />
-                  <ShareOnXButton
+                  <ShareOnXPreviewButton
                     text={shareText}
                     url={buildSiteUrl(origin, `/project/${project.slug}`)}
                     label="Share"
                     className="px-3 py-2"
+                    projectName={project.name}
+                    ticker={project.ticker}
+                    slug={project.slug}
+                    accessToken={session?.accessToken}
                   />
                   {claimProfile?.isOwner && session?.accessToken && (
                     <ProjectProfileLockButton

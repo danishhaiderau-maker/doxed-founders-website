@@ -262,6 +262,16 @@ export function buildFounderClaimOutreachLine(projectTwitterHandle?: string | nu
   ].join(' ');
 }
 
+/**
+ * Founder-onboarding share body — project-agnostic, no pump language.
+ * Keeps the message concise so the project header, claim/handle line,
+ * link and hashtags still append within a comfortable tweet length.
+ */
+export const FOUNDER_ONBOARDING_SHARE_BODY =
+  'Manage your community here. AI agents coming soon — talk to investors directly, ' +
+  'and an AI summarizer auto-posts what you\'re building, turning code commits into ' +
+  'plain language anyone can follow.';
+
 export function buildListingShareMessage(input: {
   projectName: string;
   ticker: string;
@@ -272,18 +282,10 @@ export function buildListingShareMessage(input: {
   projectTwitterHandle?: string | null;
 }): string {
   const line = formatShareProjectLine(input.projectName, input.ticker);
-  const blurb = pickListingShareBlurb({
-    scoutHighlight: input.scoutHighlight,
-    scoutThesis: input.scoutThesis,
-    whyDoxxed: input.whyDoxxed,
-    summary: input.summary,
-    projectName: input.projectName,
-  });
   const outreach = buildFounderClaimOutreachLine(input.projectTwitterHandle);
   return [
-    `🚀 New listing: ${line}`,
-    blurb,
-    'Predict · paper trade · scout the founder 👇',
+    line,
+    FOUNDER_ONBOARDING_SHARE_BODY,
     outreach,
     '#Crypto #FounderOS @DoxxedCrypto',
   ].join('\n');
