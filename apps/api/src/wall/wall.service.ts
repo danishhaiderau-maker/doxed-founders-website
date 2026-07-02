@@ -1,10 +1,10 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { FounderPromoService, GLM_PROMO_BASE_URL, GLM_PROMO_DEFAULT_MODEL } from '../founder-os/founder-promo.service';
 
-/** DDollar cost to upgrade (pin/highlight/promote) a subtopic on a wall. */
-export const WALL_PIN_COST_DDOLLAR = 500;
+/** DDollar cost to upgrade (pin/highlight/promote) a subtopic on a wall. Flat for all three kinds. */
+export const WALL_PIN_COST_DDOLLAR = 10;
 /** DDollar cost per month to keep the Chat Summarizer agent active on a project wall. */
 export const WALL_SUMMARIZER_COST_DDOLLAR = 1000;
 /** Subscription window length for the summarizer. */
@@ -15,6 +15,12 @@ const SUMMARIZER_WINDOW = 500;
 const MESSAGE_PAGE_LIMIT = 100;
 /** Small DDollar reward for posting a constructive wall message (anti-spam: only for non-cross-posted). */
 const WALL_POST_REWARD = 5;
+
+/** Email of the platform admin account that receives wall upgrade revenue. Overridable via env. */
+const PLATFORM_ADMIN_EMAIL = process.env.PLATFORM_ADMIN_EMAIL ?? 'admin@doxedcryptofounder.local';
+
+/** Module-level memo for the resolved admin userId so we don't query every pin call. */
+let cachedAdminUserId: string | null | undefined = undefined;
 
 export interface WallAuthor {
   id: string;
@@ -77,6 +83,7 @@ export interface WallUnreadDto {
 
 @Injectable()
 export class WallService {
+  private readonly logger = new Logger(WallService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
@@ -486,6 +493,19 @@ export class WallService {
     // Spend DDollar first — throws if balance too low.
     await this.points.spend(userId, amount, `WALL_PIN:${kind}`);
 
+    // Best-effort revenue routing: credit the same amount to the platform admin.
+    // If the credit fails, log but don't refund — the pin still succeeds.
+    try {
+      const adminId = await this.resolveAdminUserId();
+      if (adminId) {
+        await this.points.award(adminId, amount, `WALL_PIN_REVENUE:${kind}`);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `WALL_PIN revenue credit to admin failed (kind=${kind}, amount=${amount}): ${String(err)}`,
+      );
+    }
+
     // Replace any existing pin (1:1) so the latest upgrade wins.
     const pin = await this.prisma.projectWallPin.upsert({
       where: { messageId: message.id },
@@ -650,6 +670,25 @@ export class WallService {
   // ────────────────────────────────────────────────────────────────────────────
   // Helpers
   // ────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the platform admin userId (cached at module scope).
+   * Returns null if the admin account doesn't exist (e.g. seed not run yet).
+   */
+  private async resolveAdminUserId(): Promise<string | null> {
+    if (cachedAdminUserId !== undefined) return cachedAdminUserId;
+    try {
+      const admin = await this.prisma.user.findUnique({
+        where: { email: PLATFORM_ADMIN_EMAIL },
+        select: { id: true },
+      });
+      cachedAdminUserId = admin?.id ?? null;
+    } catch (err) {
+      this.logger.warn(`Failed to resolve platform admin by email ${PLATFORM_ADMIN_EMAIL}: ${String(err)}`);
+      cachedAdminUserId = null;
+    }
+    return cachedAdminUserId;
+  }
 
   private founderVerified(founder: { presenceLevel: string } | null | undefined): boolean {
     return Boolean(founder && founder.presenceLevel !== 'UNVERIFIED');
