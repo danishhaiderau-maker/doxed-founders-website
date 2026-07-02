@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   formatPercent,
   formatUsd,
@@ -12,6 +12,7 @@ import {
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
   type TradingAgentDashboardState,
+  type TradingAgentSessionStats,
 } from '@dcf/utils';
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
@@ -37,10 +38,24 @@ function readStoredDesk(slug: string): AgentDeskId | null {
   if (raw === 'showcase' || raw === 'live' || raw === 'relay-sim') return raw;
   return null;
 }
+
+function sessionSummaryToStats(
+  summary: AnalyzerSessionSummary | null,
+): TradingAgentSessionStats {
+  if (!summary) return {};
+  return {
+    pnlUsd: summary.total_pnl_usd ?? null,
+    pnlPct: summary.total_pnl_pct ?? null,
+    winRate: summary.win_rate ?? null,
+    trades: summary.executed_count ?? null,
+  };
+}
 import {
   type PublicAgentStatus,
   type TradingAgentActivityEntry,
   type TradingAgentSummary,
+  type AnalyzerSessionSummary,
+  fetchAnalyzerSessionSummary,
 } from '@/lib/api';
 
 const STRATEGY_TAGS = ['BTC Markets', 'Low Risk', 'Trend Following', 'Long Bias'];
@@ -612,6 +627,27 @@ export function AgentPublicProfile({
   const relaySimDeskAvailable = isLiveSession && exchangeProvider === 'bitfinex';
   const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() => readStoredDesk(slug) ?? 'showcase');
 
+  // Full-session stats (Total P&L, P&L %, Win Rate, Trades) — same source the
+  // Analyzer panel renders. Reused for the hero "Share to X" text so the tweet
+  // matches the dashboard instead of the stale "WAITING / Edge Score: 0/0".
+  const [sessionSummary, setSessionSummary] = useState<AnalyzerSessionSummary | null>(null);
+  const loadSessionSummary = useCallback(
+    async (s: string) => {
+      try {
+        const value = await fetchAnalyzerSessionSummary(s);
+        setSessionSummary(value);
+      } catch {
+        setSessionSummary((prev) => prev ?? { ok: false, error: 'summary fetch failed' });
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    void loadSessionSummary(slug);
+    const id = setInterval(() => void loadSessionSummary(slug), 60_000);
+    return () => clearInterval(id);
+  }, [slug, loadSessionSummary]);
+
   useEffect(() => {
     localStorage.setItem(deskStorageKey(slug), activeDesk);
   }, [activeDesk, slug]);
@@ -695,6 +731,7 @@ export function AgentPublicProfile({
     edgeRequired: dashboard.latestAiVerdict?.requiredEdge ?? dashboard.requiredEdge,
     marketRegime: dashboard.latestAiVerdict?.marketRegime ?? dashboard.currentThinking.market,
     hubUrl: `https://doxxedcrypto.digital/agent-hub/${slug}`,
+    sessionStats: sessionSummaryToStats(sessionSummary),
   });
   const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
   const showcaseBook = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
@@ -894,7 +931,7 @@ export function AgentPublicProfile({
 
           {slug === 'conservative-btc' && (
             <div className="mt-6">
-              <AgentAnalyzerPanel slug={slug} />
+              <AgentAnalyzerPanel slug={slug} summary={sessionSummary} />
             </div>
           )}
 

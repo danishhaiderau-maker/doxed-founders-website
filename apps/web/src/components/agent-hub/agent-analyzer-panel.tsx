@@ -46,9 +46,15 @@ function Metric({ label, value, accent }: { label: string; value: string; accent
   );
 }
 
-export function AgentAnalyzerPanel({ slug }: { slug: string }) {
-  const [summary, setSummary] = useState<AnalyzerSessionSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+export function AgentAnalyzerPanel({
+  slug,
+  summary: summaryProp,
+}: {
+  slug: string;
+  summary?: AnalyzerSessionSummary | null;
+}) {
+  const [summary, setSummary] = useState<AnalyzerSessionSummary | null>(summaryProp ?? null);
+  const [loading, setLoading] = useState(summaryProp === undefined);
 
   const load = useCallback(async () => {
     const results = await Promise.allSettled([fetchAnalyzerSessionSummary(slug)]);
@@ -58,10 +64,19 @@ export function AgentAnalyzerPanel({ slug }: { slug: string }) {
   }, [slug]);
 
   useEffect(() => {
+    if (summaryProp !== undefined) {
+      setSummary(summaryProp);
+      setLoading(false);
+    }
+  }, [summaryProp]);
+
+  useEffect(() => {
+    // Parent owns the fetch when it passes a summary prop (even null while loading).
+    if (summaryProp !== undefined) return;
     void load();
     const id = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, summaryProp]);
 
   const sessionStart = summary?.session_start ?? null;
   const sessionStartLabel = formatSessionStart(sessionStart);
