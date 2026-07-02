@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(web): Share to X uses full-session stats; add read-only Live Copy watcher
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
