@@ -57,8 +57,9 @@ $killed = New-Object System.Collections.Generic.List[string]
 #    Start button keeps its command path; it is restarted fresh below anyway.
 $scriptHosts = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe' OR Name='cmd.exe'" -ErrorAction SilentlyContinue |
   Where-Object {
-    $_.CommandLine -and -not $excludeHash.ContainsKey($_.ProcessId) -and
-    ($scriptPatterns | Where-Object { $_.CommandLine -like "*$($_)*" })
+    $cmd = $_.CommandLine
+    $cmd -and -not $excludeHash.ContainsKey($_.ProcessId) -and
+    (($scriptPatterns | Where-Object { $cmd -like "*$_*" }).Count -gt 0)
   })
 foreach ($proc in $scriptHosts) {
   # Spare the live bridge launcher itself if requested (we restart it cleanly below).
