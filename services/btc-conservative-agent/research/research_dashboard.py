@@ -133,6 +133,7 @@ REPORT_NAV = (
     ("chase-delay", "Chase Delay", "chase_delay_report.json"),
     ("chase-iso", "Chase Isolation", "lane_chase_isolation_report.json"),
     ("combos", "Top Combos", "top_combinations_report.json"),
+    ("spread-perf", "Spread Performance", "top_combinations_report.json"),
     ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
     ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
     ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
@@ -614,6 +615,44 @@ def _combos_payload():
     }
 
 
+def _spread_performance_payload():
+    """Aggregate Top Combos by directional spread bucket -> P&L / WR / EV per bucket.
+    Reuses the same top_combinations_report.json the Top Combos tab reads, grouped by
+    spread_bucket so the user can see whether higher directional conviction books more profit.
+    """
+    rep = _read_report("top_combinations_report.json")
+    rows = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
+    buckets = {}
+    for c in rows:
+        b = str(c.get("spread_bucket") or "unknown")
+        acc = buckets.setdefault(b, {"spread_bucket": b, "trades": 0, "pnl_usd": 0.0, "wins": 0.0})
+        n = int(c.get("trades") or 0)
+        acc["trades"] += n
+        acc["pnl_usd"] += float(c.get("pnl_usd") or 0.0)
+        acc["wins"] += n * (float(c.get("wr_pct") or 0.0) / 100.0)
+    out = []
+    for acc in buckets.values():
+        n = acc["trades"]
+        pnl = acc["pnl_usd"]
+        wr = (acc["wins"] / n * 100.0) if n else 0.0
+        ev = (pnl / n) if n else 0.0
+        out.append({
+            "spread_bucket": acc["spread_bucket"],
+            "trades": n,
+            "wr_pct": round(wr, 1),
+            "pnl_usd": round(pnl, 2),
+            "ev_usd": round(ev, 2),
+        })
+    order = {"0": 0, "1-2": 1, "3-4": 2, "5+": 3}
+    out.sort(key=lambda x: (order.get(x["spread_bucket"], 99), x["spread_bucket"]))
+    return {
+        "generated_at": rep.get("generated_at"),
+        "total_combos": len(rows),
+        "filter_note": rep.get("filter_note") or "Aggregated by directional spread bucket (bull_score - bear_score). Higher spread = stronger one-sided conviction.",
+        "buckets": out,
+    }
+
+
 def _typeb_payload():
     rep = _read_report("type_b_predictor_report.json")
     cohorts = rep.get("cohorts") or {}
@@ -965,6 +1004,11 @@ def api_chase():
 @app.route("/api/combos")
 def api_combos():
     return jsonify(_combos_payload())
+
+
+@app.route("/api/spread-performance")
+def api_spread_performance():
+    return jsonify(_spread_performance_payload())
 
 
 @app.route("/api/typeb")
@@ -1638,6 +1682,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="combos-kpis"></div>
     <table><thead><tr><th>Combo</th><th>AI</th><th>Spread</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
   </section>
+  <section id="sec-spread-perf">
+    <h2>Spread Performance</h2>
+    <p class="note" id="spread-perf-note">P&L / WR / EV by directional spread bucket (bull_score - bear_score). Higher spread = stronger one-sided conviction.</p>
+    <div class="kpis" id="spread-perf-kpis"></div>
+    <table><thead><tr><th>Spread bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spread-perf-body"></tbody></table>
+  </section>
   <section id="sec-pathway-audit">
     <h2>Pathway Audit</h2>
     <p class="note">Startup validation — tile independence, version sync, exit reports.</p>
@@ -1896,6 +1946,23 @@ async function loadCombos() {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
     return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
+}
+
+async function loadSpreadPerf() {
+  const r = await fetch('/api/spread-performance');
+  const d = await r.json();
+  const note = document.getElementById('spread-perf-note');
+  if (note) note.textContent = d.filter_note || 'P&L by directional spread bucket.';
+  const totalTrades = (d.buckets||[]).reduce((s,b)=>s+(b.trades||0),0);
+  document.getElementById('spread-perf-kpis').innerHTML = [
+    ['Buckets', (d.buckets||[]).length],
+    ['Combos aggregated', d.total_combos ?? 0],
+    ['Total trades', totalTrades],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
+    const cls = (b.pnl_usd ?? 0) >= 0 ? 'green' : 'red';
+    return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${b.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(b.pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5">No spread performance data - run analyzer after fresh collection.</td></tr>';
 }
 
 async function loadChaseThreshold() {
@@ -2311,6 +2378,7 @@ async function refreshAll() {
   await loadChaseDelay();
   await loadChaseIso();
   await loadCombos();
+  await loadSpreadPerf();
   await loadExitCombos();
   await loadExitReasonLeak();
   await loadLadderSim();
