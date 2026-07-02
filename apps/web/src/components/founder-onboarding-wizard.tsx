@@ -75,6 +75,7 @@ export function FounderOnboardingWizard({
   const [selectedIde, setSelectedIde] = useState<IdeAdapterId | null>(null);
   const [brainChoice, setBrainChoice] = useState<BrainChoice | null>(null);
   const [showExternalBrain, setShowExternalBrain] = useState(false);
+  const [showIdeInfo, setShowIdeInfo] = useState(true);
   const [buildInPublic, setBuildInPublic] = useState(true);
 
   const [projectName, setProjectName] = useState('');
@@ -288,6 +289,66 @@ export function FounderOnboardingWizard({
             <p className="mt-1 text-sm text-zinc-500">
               Connect your IDE to Founder OS so you can continue your work remotely from any browser.
             </p>
+
+            {/* Collapsible info — how IDE integration works */}
+            <div className="mt-4 overflow-hidden rounded-lg border border-violet-500/20 bg-violet-500/5">
+              <button
+                type="button"
+                onClick={() => setShowIdeInfo((v) => !v)}
+                className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-medium text-violet-200 hover:bg-violet-500/10"
+              >
+                <span className="flex items-center gap-2">
+                  <span className="text-violet-400">&#9432;</span>
+                  How this works — read before choosing
+                </span>
+                <span className="text-xs text-violet-400">{showIdeInfo ? 'Collapse ▲' : 'Expand ▼'}</span>
+              </button>
+              {showIdeInfo && (
+                <div className="space-y-3 px-4 py-3 text-xs leading-relaxed text-zinc-300">
+                  <p>
+                    <span className="font-semibold text-emerald-300">No paid IDE subscription needed.</span>{' '}
+                    You can start coding right now using the platform&apos;s free{' '}
+                    <span className="font-semibold text-emerald-300">GLM 5.2</span> brain — it handles code
+                    generation, specs, and chat without any IDE subscription.
+                  </p>
+                  <p>
+                    <span className="font-semibold text-white">What the IDE connection does:</span> It bridges
+                    your local development environment to Founder OS. Your chats, agents, workspaces, git
+                    branches, and file changes are synced so you can continue work from any browser, anywhere.
+                  </p>
+                  <ul className="ml-4 list-disc space-y-1.5 text-zinc-400">
+                    <li>
+                      <span className="text-zinc-200">Use any external agent</span> — plug in any LLM key
+                      (DeepSeek, Claude, GPT, GLM, Ollama) and Founder OS routes your instructions through it.
+                    </li>
+                    <li>
+                      <span className="text-zinc-200">Use your own Cursor agent</span> — if you have a paid
+                      Cursor subscription, your inbuilt Cursor agent works as-is. Founder OS sends messages
+                      directly into your Cursor chat, activating the agent to start working on your idea on the
+                      go.
+                    </li>
+                    <li>
+                      <span className="text-zinc-200">Remote control, local execution</span> — you
+                      can&apos;t change the AI model inside Cursor remotely, but you can send instructions and
+                      the agent will work with whatever model is configured. Changes are committed to GitHub
+                      and Cursor recognizes them automatically.
+                    </li>
+                    <li>
+                      <span className="text-zinc-200">Plugins welcome</span> — use any Cursor plugin or
+                      extension you have a key for. Founder OS doesn&apos;t restrict your toolchain.
+                    </li>
+                  </ul>
+                  <div className="mt-2 rounded-md border border-zinc-700/50 bg-black/20 px-3 py-2">
+                    <p>
+                      <span className="font-semibold text-violet-300">Cursor is recommended</span> because
+                      it&apos;s fully tested and battle-ready. OpenHands is also available. Windsurf, VS Code,
+                      and Claude Code are in the pipeline — being tested now. You can start with Cursor today
+                      and switch later without losing your work.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {ideList.map((ide) => (
