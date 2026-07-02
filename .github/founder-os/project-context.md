@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(alerts): ≥20% significant-trade alerts + spam feed backstop
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
