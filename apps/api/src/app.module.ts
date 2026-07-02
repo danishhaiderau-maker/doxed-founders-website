@@ -45,6 +45,8 @@ import { ConnectedWorkspaceModule } from './connected-workspace/connected-worksp
 import { IdeBridgeModule } from './ide-bridge/ide-bridge.module';
 import { WallModule } from './wall/wall.module';
 import { ShareModule } from './share/share.module';
+import { AiRoutingModule } from './ai-routing/ai-routing.module';
+import { RateLimitModule } from './events/rate-limit.module';
 
 @Module({
   imports: [
@@ -95,6 +97,8 @@ import { ShareModule } from './share/share.module';
     IdeBridgeModule,
     WallModule,
     ShareModule,
+    AiRoutingModule,
+    RateLimitModule,
   ],
   providers: [
     {

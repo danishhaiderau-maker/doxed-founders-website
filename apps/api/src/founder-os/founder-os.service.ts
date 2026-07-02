@@ -669,9 +669,20 @@ export class FounderOsService {
     const dayNumber = publicBuildDayNumberForFounder(founder);
     const suggested = buildSuggestionFromBuildPrompt(input.prompt, dayNumber);
 
-    const updated = await this.prisma.founder.update({
-      where: { id: founder.id },
+    // Atomic conditional decrement — closes the parallel-request race where
+    // N concurrent build-room calls all read the same balance and all decrement.
+    const spend = await this.prisma.founder.updateMany({
+      where: { id: founder.id, founderCredits: { gte: CURSOR_BUILD_SESSION_CREDITS } },
       data: { founderCredits: { decrement: CURSOR_BUILD_SESSION_CREDITS } },
+    });
+    if (spend.count === 0) {
+      throw new BadRequestException(
+        `Need ${CURSOR_BUILD_SESSION_CREDITS} Founder Credits for a build room session`,
+      );
+    }
+    const updated = await this.prisma.founder.findUnique({
+      where: { id: founder.id },
+      select: { founderCredits: true },
     });
 
     await this.prisma.founderCreditLedger.create({
@@ -680,7 +691,7 @@ export class FounderOsService {
         founderId: founder.id,
         projectId: founder.projects[0]?.id,
         delta: -CURSOR_BUILD_SESSION_CREDITS,
-        balanceAfter: updated.founderCredits,
+        balanceAfter: updated?.founderCredits ?? 0,
         reason: 'CURSOR_BUILD_ROOM',
       },
     });
@@ -1076,9 +1087,17 @@ export class FounderOsService {
       throw new BadRequestException('Insufficient Founder Credits');
     }
 
-    const updated = await this.prisma.founder.update({
-      where: { id: founder.id },
+    // Atomic conditional decrement — closes the parallel-request race.
+    const spend = await this.prisma.founder.updateMany({
+      where: { id: founder.id, founderCredits: { gte: input.rewardCredits } },
       data: { founderCredits: { decrement: input.rewardCredits } },
+    });
+    if (spend.count === 0) {
+      throw new BadRequestException('Insufficient Founder Credits');
+    }
+    const updated = await this.prisma.founder.findUnique({
+      where: { id: founder.id },
+      select: { founderCredits: true },
     });
 
     await this.prisma.founderCreditLedger.create({
@@ -1087,7 +1106,7 @@ export class FounderOsService {
         founderId: founder.id,
         projectId,
         delta: -input.rewardCredits,
-        balanceAfter: updated.founderCredits,
+        balanceAfter: updated?.founderCredits ?? 0,
         reason: `BOUNTY_CREATE:${input.title.slice(0, 40)}`,
       },
     });

@@ -1,15 +1,16 @@
 import {
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { estimateLlmTokensFromText, parseOpenAiStyleUsage } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
-import { FounderPromoService } from '../founder-os/founder-promo.service';
-import { PlatformAdoptionService } from '../projects/platform-adoption.service';
+import { AiInvokerService } from '../ai-routing/ai-invoker.service';
+import { RateLimiterService } from '../events/rate-limiter.service';
 
 /**
- * System prompt for the DeepSeek paraphrase pass.
+ * System prompt for the share-paraphrase pass.
  *
  * Goal: turn the founder's draft (or the default onboarding template) into a
  * clean, Twitter-ready founder-onboarding message. No hype / pump language.
@@ -31,39 +32,44 @@ const PARAPHRASE_SYSTEM_PROMPT = [
   '7. Mention AI agents coming soon to help run the community (talk to investors directly + an AI summarizer that turns code commits into plain language).',
 ].join('\n');
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
-const DEEPSEEK_DEFAULT_MODEL = 'deepseek-chat';
-const DEEPSEEK_TIMEOUT_MS = 60_000;
-
 @Injectable()
 export class ShareService {
   private readonly logger = new Logger(ShareService.name);
 
   constructor(
-    private readonly founderPromo: FounderPromoService,
     private readonly prisma: PrismaService,
-    private readonly adoption: PlatformAdoptionService,
+    private readonly aiInvoker: AiInvokerService,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   /**
    * Paraphrase a draft tweet into a Twitter-ready founder-onboarding message
-   * using the platform DeepSeek key. Reuses `FounderPromoService.getDecryptedPlatformDeepseekKey`
-   * (the same accessor the BuilderService platform-brain fallback uses).
+   * via the routed AI provider for section `share_paraphrase` (admin-configurable
+   * in /admin/control → AI Routing). Token usage is logged centrally by the
+   * AiInvokerService (billingSource = 'platform_routed').
    */
   async paraphraseTweet(
     userId: string,
     input: { text: string; projectName?: string; ticker?: string; slug?: string },
   ): Promise<{ text: string }> {
-    const apiKey = await this.founderPromo.getDecryptedPlatformDeepseekKey();
-    if (!apiKey) {
-      throw new ServiceUnavailableException(
-        'AI paraphrase is not configured. Ask an admin to set the platform DeepSeek key in Connected Accounts.',
-      );
-    }
-
     const draft = input.text?.trim();
     if (!draft) {
       return { text: '' };
+    }
+
+    // Per-user DB-backed rate limit. Default cap is the platform-wide
+    // `rateLimitHourly` (10/hr) — a hard floor on this previously wide-open
+    // platform-DeepSeek-key path. Admin can tighten via PlatformSettings.
+    const rateCheck = await this.rateLimiter.checkLimit(userId, 'share:paraphrase');
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(rateCheck.resetInMs / 1000)}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     const contextBits: string[] = [];
@@ -74,70 +80,35 @@ export class ShareService {
 
     const userPrompt = `Draft tweet to paraphrase:\n"""\n${draft}\n"""${contextLine}\n\nReturn the rewritten tweet now.`;
 
-    let text: string | null = null;
-    let usage: { promptTokens: number; completionTokens: number } | null = null;
+    const projectId = await this.resolveProjectId(input.slug);
+
+    let text: string;
     try {
-      const res = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: DEEPSEEK_DEFAULT_MODEL,
-          messages: [
-            { role: 'system', content: PARAPHRASE_SYSTEM_PROMPT },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.4,
-        }),
-        signal: AbortSignal.timeout(DEEPSEEK_TIMEOUT_MS),
+      const result = await this.aiInvoker.invoke({
+        section: 'share_paraphrase',
+        messages: [
+          { role: 'system', content: PARAPHRASE_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.4,
+        userId,
+        projectId,
+        // Preserve the conventional billing source for share paraphrase so the
+        // adoption chart's existing bucketing continues to work.
+        billingSource: 'platform_brain',
       });
-
-      if (res.ok) {
-        const data = (await res.json()) as {
-          choices?: { message?: { content?: string } }[];
-          usage?: { prompt_tokens?: number; completion_tokens?: number };
-        };
-        text = data.choices?.[0]?.message?.content ?? null;
-        usage = parseOpenAiStyleUsage(data);
-      } else {
-        const body = await res.text().catch(() => '');
-        this.logger.warn(
-          `DeepSeek paraphrase HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}`,
-        );
-      }
+      text = result.content;
     } catch (err) {
+      // Re-raise ServiceUnavailableException (carries the admin-friendly message
+      // from the invoker); wrap anything unexpected.
+      if (err instanceof ServiceUnavailableException) throw err;
       this.logger.warn(
-        `DeepSeek paraphrase call failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Paraphrase call failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      text = null;
-    }
-
-    if (!text) {
       throw new ServiceUnavailableException(
         'AI paraphrase call failed. Try again in a moment.',
       );
     }
-
-    // Log token usage so the Platform Adoption chart counts share-paraphrase
-    // inference. Falls back to a conservative char/4 estimate when the
-    // provider omits usage.
-    const promptTokens =
-      usage?.promptTokens ?? estimateLlmTokensFromText(`${PARAPHRASE_SYSTEM_PROMPT}\n${userPrompt}`);
-    const completionTokens = usage?.completionTokens ?? estimateLlmTokensFromText(text);
-    const projectId = await this.resolveProjectId(input.slug);
-    void this.adoption
-      .recordAiUsage({
-        userId,
-        projectId,
-        provider: 'DEEPSEEK',
-        source: 'share_paraphrase',
-        billingSource: 'platform_brain',
-        promptTokens,
-        completionTokens,
-      })
-      .catch(() => undefined);
 
     // Strip any stray markdown fences / surrounding quotes the model sometimes adds.
     const cleaned = text

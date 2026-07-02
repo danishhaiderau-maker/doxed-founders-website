@@ -73,6 +73,7 @@ import {
   GLM_PROMO_DEFAULT_MODEL,
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
+import { AiInvokerService } from '../ai-routing/ai-invoker.service';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -113,6 +114,7 @@ export class BuilderService {
     private readonly agentRuns: FounderAgentRunService,
     private readonly agentRuntime: AgentRuntimeService,
     private readonly founderPromo: FounderPromoService,
+    private readonly aiInvoker: AiInvokerService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -1006,6 +1008,79 @@ export class BuilderService {
   }
 
   /**
+   * AI Routing hook — if an admin has routed `section` to an enabled
+   * AiRoutingProvider with a key set, run the call through the generic
+   * AiInvokerService (centralised token logging, OpenAI-compatible + adapter
+   * dispatch). Returns null when the section is not routed or the routed
+   * provider is disabled / missing a key, so the existing cascade runs
+   * unchanged. This is intentionally surgical: the cascade below is NOT
+   * rewritten, only short-circuited when routing is configured.
+   */
+  private async tryRoutedInvoker(
+    section: 'copilot' | 'quick_build' | 'founder_draft',
+    userId: string,
+    system: string,
+    userPrompt: string,
+    options?: { founderBrainTask?: FounderBrainTask },
+  ): Promise<
+    | { ok: true; text: string; provider: AiProvider; founderBrainTask: FounderBrainTask }
+    | { ok: false }
+    | null
+  > {
+    try {
+      const routedKey = await this.aiInvoker.resolveProviderKey(section);
+      if (!routedKey) return null;
+      // Only short-circuit when the routed provider is actually enabled + keyed.
+      // resolveProviderKey does not check enabled/key, so probe via invoke; if
+      // it throws ServiceUnavailableException (disabled / no key), fall through.
+      const result = await this.aiInvoker.invoke({
+        section,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.4,
+        userId,
+        billingSource: 'platform_routed',
+      });
+      return {
+        ok: true,
+        text: result.content,
+        // The cascade returns an AiProvider enum; routing is provider-key based
+        // so map the routed provider key back to the closest enum value for
+        // downstream label compatibility. Unknown keys collapse to DEEPSEEK.
+        provider: this.enumProviderForRoutingKey(routedKey),
+        founderBrainTask: options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt),
+      };
+    } catch (err) {
+      // ServiceUnavailableException = admin hasn't configured the routed
+      // provider yet → fall through to the cascade silently.
+      const name = err?.constructor?.name;
+      if (name === 'ServiceUnavailableException') return null;
+      this.logger.warn(
+        `tryRoutedInvoker(${section}) failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /** Map a routing provider key slug to the AiProvider enum used by the cascade. */
+  private enumProviderForRoutingKey(key: string): AiProvider {
+    const up = key.toUpperCase();
+    switch (up) {
+      case 'OPENAI': return AiProvider.OPENAI;
+      case 'ANTHROPIC':
+      case 'CLAUDE': return AiProvider.ANTHROPIC;
+      case 'GEMINI': return AiProvider.GEMINI;
+      case 'DEEPSEEK': return AiProvider.DEEPSEEK;
+      case 'GLM': return AiProvider.GLM;
+      case 'OLLAMA':
+      case 'OLLAMA_LOCAL': return AiProvider.OLLAMA_LOCAL;
+      default: return AiProvider.DEEPSEEK;
+    }
+  }
+
+  /**
    * Chat completion for Founder Copilot — uses default LLM when set, otherwise any
    * connected API key (DeepSeek, OpenAI, etc.) even if default is Cursor/OpenHands.
    */
@@ -1027,6 +1102,19 @@ export class BuilderService {
     if (!options?.skipMemoryPrefix && !system.includes('Founder Memory Graph')) {
       const prefix = await this.memoryGraph.getPrefixForUser(userId);
       effectiveSystem = `${prefix}${system}`;
+    }
+
+    // AI Routing hook: if an admin routed the `copilot` section to an enabled
+    // provider with a key, prefer the generic invoker and skip the cascade.
+    if (!options?.forceProvider && !options?.userApiKey) {
+      const routed = await this.tryRoutedInvoker(
+        'copilot',
+        userId,
+        effectiveSystem,
+        userPrompt,
+        { founderBrainTask: options?.founderBrainTask },
+      );
+      if (routed?.ok) return routed;
     }
 
     if (options?.forceProvider) {
@@ -1066,14 +1154,9 @@ export class BuilderService {
         settings.preferredModel,
       );
       if (nodeResult.ok) {
-        await this.logAiTokenUsage(
-          userId,
-          AiProvider.OLLAMA_LOCAL,
-          effectiveSystem,
-          userPrompt,
-          nodeResult.text,
-          'copilot',
-        );
+        // Token usage for the Founder Node Ollama path is logged by the node
+        // itself via POST /founder-node/inference-usage (real Ollama usage
+        // counts). Logging here too would double-count the same inference.
         return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL, founderBrainTask };
       }
       llmErrors.push(...nodeResult.errors);
@@ -1091,7 +1174,9 @@ export class BuilderService {
           effectiveSystem,
           userPrompt,
           direct.text,
-          'copilot',
+          'founder_node_local',
+          direct.usage,
+          'founder_os_local',
         );
         return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL, founderBrainTask };
       }
@@ -1261,7 +1346,9 @@ export class BuilderService {
           system,
           userPrompt,
           direct.text,
-          'copilot_forced',
+          'founder_node_local',
+          direct.usage,
+          'founder_os_local',
         );
         return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
       }
@@ -1898,7 +1985,7 @@ export class BuilderService {
       llmErrors.push(...nodeResult.errors);
       const direct = await this.tryDirectOllama(userId, effectiveSystem, userPrompt, settings.preferredModel);
       if (direct.ok) {
-        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, effectiveSystem, userPrompt, direct.text, 'copilot');
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, effectiveSystem, userPrompt, direct.text, 'founder_node_local', direct.usage, 'founder_os_local');
         return {
           ok: true,
           provider: AiProvider.OLLAMA_LOCAL,
@@ -2063,7 +2150,7 @@ export class BuilderService {
     provider: AiProvider,
     system: string,
     userPrompt: string,
-    billingSource: 'byok' | 'platform_promo' | 'platform_brain',
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'founder_os_local',
   ): AsyncGenerator<string, AiProvider> {
     yield firstChunk;
     let result: { text: string; usage: LlmUsage | null } | null = null;
@@ -2127,7 +2214,7 @@ export class BuilderService {
       llmErrors.push(...nodeResult.errors);
       const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
       if (direct.ok) {
-        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, system, userPrompt, direct.text, 'copilot_forced');
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, system, userPrompt, direct.text, 'founder_node_local', direct.usage, 'founder_os_local');
         return { ok: true, provider: AiProvider.OLLAMA_LOCAL, stream: this.singleChunkStream(direct.text, AiProvider.OLLAMA_LOCAL) };
       }
       if (direct.error) llmErrors.push(direct.error);
@@ -2342,7 +2429,7 @@ export class BuilderService {
     text: string,
     source: string,
     usage?: LlmUsage | null,
-    billingSource: 'byok' | 'platform_promo' | 'platform_brain' = 'byok',
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'founder_os_local' = 'byok',
   ) {
     const promptTokens =
       usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
@@ -2376,7 +2463,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     preferredModel?: string | null,
-  ): Promise<{ ok: true; text: string } | { ok: false; error?: string }> {
+  ): Promise<{ ok: true; text: string; usage: LlmUsage | null } | { ok: false; error?: string }> {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'ollama' } },
     });
@@ -2385,13 +2472,13 @@ export class BuilderService {
     if (!baseUrl) return { ok: false };
 
     try {
-      const text = await this.callOllama(
+      const { text, usage } = await this.callOllama(
         baseUrl,
         system,
         userPrompt,
         preferredModel?.trim() || meta?.model || 'llama3.2',
       );
-      if (text?.trim()) return { ok: true, text: text.trim() };
+      if (text?.trim()) return { ok: true, text: text.trim(), usage };
       return { ok: false, error: 'Ollama returned empty response' };
     } catch (err) {
       return {
@@ -2403,11 +2490,24 @@ export class BuilderService {
 
   async enhanceQuickBuild(userId: string, prompt: string, projectName?: string): Promise<QuickBuildResult> {
     const fallback = processQuickBuild(prompt, projectName);
-    const aiText = await this.tryAiCompletion(
+    // AI Routing hook: if `quick_build` is routed to an enabled provider, use
+    // the generic invoker instead of the cascade. Falls through on any error.
+    const routed = await this.tryRoutedInvoker(
+      'quick_build',
       userId,
       QUICK_BUILD_AI_SYSTEM,
       `Project: ${projectName ?? 'startup'}\nFounder request: ${prompt}`,
     );
+    let aiText: string | null = null;
+    if (routed?.ok) {
+      aiText = routed.text;
+    } else {
+      aiText = await this.tryAiCompletion(
+        userId,
+        QUICK_BUILD_AI_SYSTEM,
+        `Project: ${projectName ?? 'startup'}\nFounder request: ${prompt}`,
+      );
+    }
     if (!aiText) return fallback;
 
     try {
@@ -2940,7 +3040,12 @@ export class BuilderService {
     return { text, usage: parseOpenAiStyleUsage(data) };
   }
 
-  private async callOllama(baseUrl: string, system: string, user: string, model: string) {
+  private async callOllama(
+    baseUrl: string,
+    system: string,
+    user: string,
+    model: string,
+  ): Promise<{ text: string; usage: LlmUsage | null }> {
     const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2958,7 +3063,21 @@ export class BuilderService {
       const body = await res.text().catch(() => '');
       throw new Error(`Ollama HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
     }
-    const data = (await res.json()) as { message?: { content?: string } };
-    return data.message?.content ?? null;
+    const data = (await res.json()) as {
+      message?: { content?: string };
+      prompt_eval_count?: number;
+      eval_count?: number;
+    };
+    const text = data.message?.content ?? null;
+    if (!text) return { text: '', usage: null };
+    const promptTokens =
+      data.prompt_eval_count != null && data.prompt_eval_count > 0
+        ? data.prompt_eval_count
+        : estimateLlmTokensFromText(`${system}\n${user}`);
+    const completionTokens =
+      data.eval_count != null && data.eval_count > 0
+        ? data.eval_count
+        : estimateLlmTokensFromText(text);
+    return { text, usage: { promptTokens, completionTokens } };
   }
 }

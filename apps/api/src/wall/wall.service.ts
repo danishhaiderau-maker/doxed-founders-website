@@ -1,9 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { estimateLlmTokensFromText, parseOpenAiStyleUsage } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
-import { PlatformAdoptionService } from '../projects/platform-adoption.service';
-import { FounderPromoService, GLM_PROMO_BASE_URL, GLM_PROMO_DEFAULT_MODEL } from '../founder-os/founder-promo.service';
+import { AiInvokerService } from '../ai-routing/ai-invoker.service';
 
 /** DDollar cost to upgrade (pin/highlight/promote) a subtopic on a wall. Flat for all three kinds. */
 export const WALL_PIN_COST_DDOLLAR = 10;
@@ -89,8 +87,7 @@ export class WallService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
-    private readonly founderPromo: FounderPromoService,
-    private readonly adoption: PlatformAdoptionService,
+    private readonly aiInvoker: AiInvokerService,
   ) {}
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -744,9 +741,12 @@ export class WallService {
   }
 
   /**
-   * Call the platform GLM 5.2 promo endpoint to summarize + sentiment-analyze a
-   * message window. Reuses the same OpenAI-compatible request shape as
-   * BuilderService.callGlm. Returns a parsed {summary, sentimentLabel, reasoning}.
+   * Call the routed AI provider for section `wall_summarizer` to summarize +
+   * sentiment-analyze a message window. The provider/key is admin-configurable
+   * in /admin/control → AI Routing (default: GLM 5.2). Token usage is logged
+   * centrally by the AiInvokerService (billingSource = 'platform_promo' to
+   * preserve the existing adoption-chart bucketing for the summarizer).
+   * Returns a parsed {summary, sentimentLabel, reasoning}.
    */
   private async runSummarizerLlm(
     projectName: string,
@@ -754,13 +754,6 @@ export class WallService {
     messages: { body: string; createdAt: Date; author: { name: string | null; platformHandle: string | null } }[],
     ctx: { userId: string; projectId: string },
   ): Promise<{ summary: string; sentimentLabel: string; reasoning: string }> {
-    const apiKey = await this.founderPromo.getDecryptedPlatformGlmKey();
-    if (!apiKey) {
-      throw new ServiceUnavailableException(
-        'Chat Summarizer LLM is not configured. Ask an admin to set the platform GLM promo key in Connected Accounts.',
-      );
-    }
-
     if (messages.length === 0) {
       return {
         summary: 'No messages on this wall yet — be the first to start the conversation.',
@@ -791,53 +784,29 @@ export class WallService {
       `Transcript of the last ${messages.length} messages (oldest first):\n\n${transcript}\n\n` +
       `Return the JSON object now.`;
 
-    let text: string | null = null;
-    let usage: { promptTokens: number; completionTokens: number } | null = null;
+    let text: string;
     try {
-      const res = await fetch(`${GLM_PROMO_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: GLM_PROMO_DEFAULT_MODEL,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.3,
-        }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          choices?: { message?: { content?: string } }[];
-          usage?: { prompt_tokens?: number; completion_tokens?: number };
-        };
-        text = data.choices?.[0]?.message?.content ?? null;
-        usage = parseOpenAiStyleUsage(data);
-      }
-    } catch {
-      text = null;
-    }
-
-    if (!text) {
-      throw new ServiceUnavailableException('Chat Summarizer LLM call failed. Try again in a moment.');
-    }
-
-    // Log token usage so the Platform Adoption chart counts summarizer inference.
-    // Falls back to a conservative char/4 estimate when the provider omits usage.
-    const promptTokens = usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
-    const completionTokens = usage?.completionTokens ?? estimateLlmTokensFromText(text);
-    void this.adoption
-      .recordAiUsage({
+      const result = await this.aiInvoker.invoke({
+        section: 'wall_summarizer',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.3,
         userId: ctx.userId,
         projectId: ctx.projectId,
-        provider: 'GLM',
-        source: 'wall_summarizer',
+        // Preserve the conventional billing source for the summarizer so the
+        // adoption chart's existing platform_promo bucketing continues to work.
         billingSource: 'platform_promo',
-        promptTokens,
-        completionTokens,
-      })
-      .catch(() => undefined);
+      });
+      text = result.content;
+    } catch (err) {
+      if (err instanceof ServiceUnavailableException) throw err;
+      this.logger.warn(
+        `Summarizer call failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new ServiceUnavailableException('Chat Summarizer LLM call failed. Try again in a moment.');
+    }
 
     return this.parseSummarizerResponse(text);
   }

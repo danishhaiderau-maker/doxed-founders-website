@@ -18,6 +18,7 @@ import {
   type FounderPromoPlatformSettings,
   type PlatformBrainStatus,
 } from '@/lib/api';
+import { AdminAiRoutingPanel } from './admin-ai-routing-panel';
 
 type Props = {
   token: string;
@@ -488,6 +489,8 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
           </div>
         </div>
       ))}
+
+      <AdminAiRoutingPanel token={token} />
     </section>
   );
 }
