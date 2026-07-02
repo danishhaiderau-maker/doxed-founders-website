@@ -25,6 +25,42 @@ function parseBuyerMeta(raw: unknown): NotificationBuyerMeta | null {
   return m;
 }
 
+type TradeCloseMeta = {
+  kind?: string;
+  symbol?: string;
+  side?: 'LONG' | 'SHORT' | string | null;
+  entryPrice?: number | null;
+  closePrice?: number | null;
+  pnlPct?: number | null;
+  pnlUsd?: number | null;
+  trigger?: 'Take Profit' | 'Stop Loss' | 'Manual' | 'Signal' | string | null;
+  exitReason?: string | null;
+  size?: number | null;
+  leverage?: number | null;
+  tradeId?: string | null;
+  agentName?: string | null;
+  agentSlug?: string | null;
+  timestamp?: string | null;
+};
+
+function parseTradeCloseMeta(raw: unknown): TradeCloseMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const m = raw as TradeCloseMeta;
+  if (m.kind !== 'SIGNIFICANT_TRADE_CLOSE') return null;
+  return m;
+}
+
+function fmtPrice(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return v >= 1000 ? `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `$${v.toFixed(2)}`;
+}
+
+function fmtSize(v: number | null | undefined, symbol?: string | null): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const sym = symbol ?? '';
+  return `${v.toFixed(5)} ${sym}`.trim();
+}
+
 export default function NotificationsPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -41,6 +77,7 @@ export default function NotificationsPage() {
     { id: 'following', label: 'Following' },
     { id: 'projects', label: 'Projects' },
     { id: 'market', label: 'Market' },
+    { id: 'trades', label: 'Trades' },
     { id: 'platform', label: 'Platform' },
   ] as const;
 
@@ -163,7 +200,10 @@ export default function NotificationsPage() {
             const isBuild = n.type === 'BUILD_QUEUE';
             const isAgent = n.type === 'AGENT_RESULT';
             const buyerMeta = parseBuyerMeta(n.metadata);
+            const tradeMeta = parseTradeCloseMeta(n.metadata);
             const traderMeta = n.metadata as { traderUserId?: string; displayName?: string } | null;
+            const isTradeClose = tradeMeta != null;
+            const tradeIsGain = tradeMeta?.pnlPct != null && tradeMeta.pnlPct >= 0;
             const displayBody =
               buyerMeta?.buyers?.length && isHotBuy
                 ? `${buyerMeta.buyers.map((b) => b.displayName).slice(0, 5).join(', ')} paper-traded $${buyerMeta.projectTicker ?? 'token'}`
@@ -199,13 +239,17 @@ export default function NotificationsPage() {
                 ? 'border-violet-500/40 bg-violet-950/20'
                 : isAgent
                   ? 'border-purple-500/40 bg-purple-950/20'
-                  : isWin
-                    ? 'border-emerald-500/40 bg-emerald-950/20'
-                    : isLoss
-                      ? 'border-red-500/40 bg-red-950/20'
-                      : n.readAt
-                        ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
-                        : 'border-emerald-500/30 bg-[var(--color-card)]';
+                  : isTradeClose
+                    ? tradeIsGain
+                      ? 'border-emerald-500/40 bg-emerald-950/20'
+                      : 'border-red-500/40 bg-red-950/20'
+                    : isWin
+                      ? 'border-emerald-500/40 bg-emerald-950/20'
+                      : isLoss
+                        ? 'border-red-500/40 bg-red-950/20'
+                        : n.readAt
+                          ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
+                          : 'border-emerald-500/30 bg-[var(--color-card)]';
 
             return (
               <article key={n.id} className={`rounded-xl border p-4 ${accent}`}>
@@ -213,6 +257,47 @@ export default function NotificationsPage() {
                   <div className="min-w-0 flex-1">
                     <h2 className="font-semibold">{n.title}</h2>
                     <p className="mt-1 text-sm text-[var(--color-muted)]">{displayBody}</p>
+
+                    {isTradeClose && tradeMeta && (
+                      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-lg border border-[var(--color-border)] bg-black/30 p-3 text-xs sm:grid-cols-3">
+                        <DetailRow label="Side" value={tradeMeta.side ?? '—'} />
+                        <DetailRow label="Symbol" value={tradeMeta.symbol ?? '—'} />
+                        <DetailRow label="Trigger" value={tradeMeta.trigger ?? '—'} />
+                        <DetailRow label="Entry" value={fmtPrice(tradeMeta.entryPrice)} />
+                        <DetailRow label="Close" value={fmtPrice(tradeMeta.closePrice)} />
+                        <DetailRow
+                          label="PnL %"
+                          value={
+                            tradeMeta.pnlPct != null
+                              ? `${tradeMeta.pnlPct >= 0 ? '+' : '−'}${Math.abs(tradeMeta.pnlPct).toFixed(2)}%`
+                              : '—'
+                          }
+                          tone={tradeIsGain ? 'gain' : 'loss'}
+                        />
+                        <DetailRow
+                          label="PnL $"
+                          value={
+                            tradeMeta.pnlUsd != null
+                              ? `${tradeMeta.pnlUsd >= 0 ? '+' : '−'}$${Math.abs(tradeMeta.pnlUsd).toFixed(2)}`
+                              : '—'
+                          }
+                          tone={tradeIsGain ? 'gain' : 'loss'}
+                        />
+                        <DetailRow label="Size" value={fmtSize(tradeMeta.size, tradeMeta.symbol)} />
+                        <DetailRow
+                          label="Leverage"
+                          value={tradeMeta.leverage != null ? `${tradeMeta.leverage}x` : '—'}
+                        />
+                        <DetailRow
+                          label="Time"
+                          value={
+                            tradeMeta.timestamp
+                              ? new Date(tradeMeta.timestamp).toLocaleString()
+                              : new Date(n.createdAt).toLocaleString()
+                          }
+                        />
+                      </div>
+                    )}
 
                     {buyerMeta && (
                       <NotificationBuyersPanel
@@ -270,6 +355,29 @@ export default function NotificationsPage() {
           })}
         </div>
       </main>
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: 'gain' | 'loss';
+}) {
+  const valueColor =
+    tone === 'gain'
+      ? 'text-emerald-400'
+      : tone === 'loss'
+        ? 'text-red-400'
+        : 'text-white';
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">{label}</span>
+      <span className={`font-mono text-sm font-medium ${valueColor}`}>{value}</span>
     </div>
   );
 }

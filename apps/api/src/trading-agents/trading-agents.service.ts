@@ -38,6 +38,7 @@ import {
   filterActivityToExecutedTrades,
   mapBotStateToExecutedTradesActivity,
   mapBotStateToActivity,
+  normalizeBotSessionTrades,
   type BotActivityEntry,
   type BotApiState,
 } from './bot-state.mapper';
@@ -1562,30 +1563,58 @@ export class TradingAgentsService implements OnModuleInit {
     this.lastBotPosition = position;
 
     if (prev === 'NONE' && position !== 'NONE') {
-      await this.notifyAgentFollowers(agent, {
-        title: `${agent.name} opened ${position}`,
-        body: `Live position detected at $${(bot.price ?? 0).toLocaleString()} — edge ${bot.debug_state?.last_edge_score ?? bot.last_edge ?? 0}/${bot.edge_threshold ?? 3}.`,
-      });
+      // Position opens must NOT create Alerts (per spec — only significant closures do).
+      // The previous "opened LONG" follower notification is intentionally dropped.
       return;
     }
 
     if (prev !== 'NONE' && position === 'NONE') {
-      const lastTrade = bot.trades?.[0];
-      const pnl = lastTrade?.pnl ?? lastTrade?.net_pnl_usd;
-      await this.notifyAgentFollowers(agent, {
-        title: `${agent.name} closed ${prev}`,
-        body:
-          pnl != null
-            ? `Position closed · PnL ${Number(pnl) >= 0 ? '+' : ''}${Number(pnl).toFixed(2)}%`
-            : 'Position closed — check mission control for details.',
-      });
+      // Significant-trade alert: only notify followers on closures with >= 20% gain or loss.
+      const lastTrade = normalizeBotSessionTrades(bot)[0] ?? bot.trades?.[0];
+      const pnlPct = lastTrade?.pnl;
+      if (pnlPct == null || !Number.isFinite(Number(pnlPct))) return;
+      const pnlNum = Number(pnlPct);
+      if (Math.abs(pnlNum) < 20) return;
+
+      await this.notifyAgentFollowersOfSignificantClose(agent, lastTrade, pnlNum);
     }
   }
 
-  private async notifyAgentFollowers(
-    agent: { id: string; slug: string; name: string },
-    alert: { title: string; body: string },
+  private async notifyAgentFollowersOfSignificantClose(
+    agent: { id: string; slug: string; name: string; assetSymbol: string | null },
+    trade: {
+      dir?: string | null;
+      final_direction?: string | null;
+      entry?: number | null;
+      exit?: number | null;
+      pnl?: number | null;
+      net_pnl_usd?: number | null;
+      exit_reason?: string | null;
+      trade_id?: string | null;
+    } | undefined,
+    pnlPct: number,
   ) {
+    const symbol = agent.assetSymbol ?? 'BTC';
+    const side = String(trade?.final_direction ?? trade?.dir ?? '').toUpperCase() || null;
+    const entry = trade?.entry != null ? Number(trade.entry) : null;
+    const exit = trade?.exit != null ? Number(trade.exit) : null;
+    const pnlUsd = trade?.net_pnl_usd != null ? Number(trade.net_pnl_usd) : null;
+    const trigger = mapShowcaseExitReasonToTrigger(trade?.exit_reason ?? null);
+    const isGain = pnlPct >= 0;
+    const sign = isGain ? '+' : '−';
+    const roundedPct = Math.round(Math.abs(pnlPct));
+    const title = `${isGain ? '🚀' : '📉'} ${agent.name} closed ${side ?? ''} ${sign}${roundedPct}% on ${symbol}`;
+    const pnlUsdDisplay = pnlUsd != null ? `${isGain ? '+' : '−'}$${Math.abs(pnlUsd).toFixed(2)}` : null;
+    const body = [
+      side ?? '—',
+      entry != null ? `Entry $${entry.toFixed(2)}` : null,
+      exit != null ? `Close $${exit.toFixed(2)}` : null,
+      `PnL ${sign}${roundedPct}%${pnlUsdDisplay ? ` (${pnlUsdDisplay})` : ''}`,
+      `Trigger: ${trigger}`,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
     const followers = await this.prisma.tradingAgentFollow.findMany({
       where: { agentId: agent.id },
       select: { userId: true },
@@ -1596,13 +1625,28 @@ export class TradingAgentsService implements OnModuleInit {
       followers.map((row) =>
         this.notifications.notifyUser(row.userId, {
           type: NotificationType.TRADING_AGENT_UPDATE,
-          title: alert.title,
-          body: alert.body,
+          title,
+          body,
           link: `/agent-hub/${agent.slug}`,
+          metadata: {
+            kind: 'SIGNIFICANT_TRADE_CLOSE',
+            symbol,
+            side,
+            entryPrice: entry,
+            closePrice: exit,
+            pnlPct: Math.round(pnlPct * 100) / 100,
+            pnlUsd: pnlUsd ?? null,
+            trigger,
+            exitReason: trade?.exit_reason ?? null,
+            tradeId: trade?.trade_id ?? null,
+            agentSlug: agent.slug,
+            agentName: agent.name,
+            timestamp: new Date().toISOString(),
+          },
         }),
       ),
     );
-    this.logger.log(`Notified ${followers.length} follower(s): ${alert.title}`);
+    this.logger.log(`Notified ${followers.length} follower(s): ${title}`);
   }
 
   /** Full Bitfinex live-copy history for the signed-in user's hired instance (no row cap). */
@@ -1708,4 +1752,24 @@ export class TradingAgentsService implements OnModuleInit {
     }
     return { filename, csv: liveTradesToCsv(payload), payload };
   }
+}
+
+/**
+ * Map a showcase bot trade exit_reason to a user-facing trigger label for the trade alert.
+ * Showcase exit reasons (from bot session trades / signal_ref) typically include
+ * TAKE_PROFIT, STOP_LOSS, MANUAL, SIGNAL, EXPIRED, etc. Unknown / signal-driven outcomes
+ * fall back to "Signal".
+ */
+function mapShowcaseExitReasonToTrigger(
+  exitReason: string | null,
+): 'Take Profit' | 'Stop Loss' | 'Manual' | 'Signal' {
+  const r = (exitReason ?? '').toUpperCase();
+  if (r.includes('TAKE_PROFIT') || r.includes('PROFIT_LOCK') || r.includes('THESIS')) {
+    return 'Take Profit';
+  }
+  if (r.includes('STOP_LOSS') || r.includes('HARD_STOP') || r.includes('EXCHANGE_STOP')) {
+    return 'Stop Loss';
+  }
+  if (r.includes('MANUAL') || r.includes('CLOSE')) return 'Manual';
+  return 'Signal';
 }
