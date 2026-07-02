@@ -91,6 +91,11 @@ COMBO_LANE_SPECS = {
         "is_primary_production": False,
         "is_research_candidate": True,
         "id_prefix": "vc603",
+        # Per-lane Scenario C ladder override (profile_30 profit-capture test).
+        # Omitted on other lanes → they fall back to the global TRAIL_LADDER_SCENARIO_C.
+        "ladder": [(30, 20), (40, 30), (50, 40), (60, 50)],
+        "ladder_label": "30→20, 40→30, 50→40, 60→50",
+        "ladder_profile_id": "SCENARIO_C_PROFILE_30_v1",
         "promotion_criteria": (
             "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS "
             "over same period · stable DNA Quality · positive across multiple market regimes"
@@ -197,6 +202,24 @@ def is_benchmark_lane(lane: str) -> bool:
 def is_research_candidate_lane(lane: str) -> bool:
     spec = COMBO_LANE_SPECS.get(str(lane or "").upper(), {})
     return bool(spec.get("is_research_candidate"))
+
+
+def get_lane_ladder_override(lane: str):
+    """Per-lane Scenario C ladder override, or None to fall back to the global ladder.
+
+    Returns a tuple (ladder, ladder_label, ladder_profile_id) when the lane spec declares
+    a `ladder` override; otherwise None. Kept optional — lanes without an override use the
+    shared global TRAIL_LADDER_SCENARIO_C.
+    """
+    spec = COMBO_LANE_SPECS.get(str(lane or "").upper(), {})
+    ladder = spec.get("ladder")
+    if not ladder:
+        return None
+    return (
+        list(ladder),
+        str(spec.get("ladder_label") or ""),
+        str(spec.get("ladder_profile_id") or ""),
+    )
 
 
 def combo_toggle_defaults() -> dict:
