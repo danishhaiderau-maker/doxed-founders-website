@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
 import { FounderPromoSignupBanner } from '@/components/founder-promo-signup-banner';
+import { FounderTokenRulesCollapsible } from '@/components/founder-token-rules-collapsible';
 import { registerAccount } from '@/lib/api';
 import { persistReferralCode, readReferralCode } from '@/lib/referral-storage';
 
@@ -71,6 +72,7 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
           <strong className="text-white">Sign in with X</strong> to unlock your public @handle, referrals, and 1-click
           Proof of Conviction. Email signups get a legacy platform ID (animal · country) until X is connected.
         </p>
+        <FounderTokenRulesCollapsible />
         {referralCode && (
           <p className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
             Referral code <strong className="text-white">{referralCode}</strong> saved — rewards unlock when you sign in with X.

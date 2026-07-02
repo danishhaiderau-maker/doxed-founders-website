@@ -7,6 +7,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
 import { FounderPromoSignupBanner } from '@/components/founder-promo-signup-banner';
+import { FounderTokenRulesCollapsible } from '@/components/founder-token-rules-collapsible';
 import { persistReferralCode, readReferralCode } from '@/lib/referral-storage';
 import {
   loginAccount,
@@ -144,6 +145,7 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
           To <strong className="text-white">list a project</strong>, sign in with <strong className="text-white">X (Twitter)</strong>.
           Admins send proof requests through Account → Messages. Email sign-in works for trading and voting.
         </p>
+        <FounderTokenRulesCollapsible />
 
         {!pendingToken ? (
           <>
