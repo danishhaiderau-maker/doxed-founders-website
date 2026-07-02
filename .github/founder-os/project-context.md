@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(agent-desk): redesign showcase drift for sim + live copy
 
 ## Last Activity
 
