@@ -1323,6 +1323,9 @@ model PlatformSettings {
   agentShowcaseDefaultSettings String? @db.Text
   /** Max USD margin per hire/signal trade (platform-enforced; default $20). */
   subscriberMaxMarginUsd       Int      @default(20)
+  /** Copilot rate limits (platform-enforced guardrails). */
+  rateLimitDaily               Int      @default(50)
+  rateLimitHourly              Int      @default(10)
   updatedByUserId          String?
   updatedAt                DateTime @updatedAt
 }
@@ -2620,4 +2623,15 @@ model ProjectWallReadCursor {
 
   @@unique([userId, projectId])
   @@index([projectId])
+}
+
+model RateLimit {
+  id          String   @id @default(uuid())
+  userId      String
+  endpoint    String
+  count       Int      @default(0)
+  windowStart DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@unique([userId, endpoint, windowStart])
 }
