@@ -226,6 +226,11 @@ export class FounderOsController {
   ) {
     return this.founderOs.awardBounty(user.id, bountyId, body.awardeeUserId);
   }
+  @Get('available-brains')
+  availableBrains(@CurrentUser() user: AuthUser) {
+    return this.founderPromo.getAvailableBrains(user.id);
+  }
+
   @Get('platform-brain')
   platformBrainStatus() { return this.founderPromo.getPlatformBrainStatus(); }
   @Post('platform-brain')

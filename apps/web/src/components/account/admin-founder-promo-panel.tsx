@@ -187,6 +187,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
             <ul className="mt-3 space-y-3">
               {PROMO_KEY_FIELDS.map((field) => {
                 const configured = settings.credentialsStatus?.[field.key] ?? false;
+                const isGlm = field.key === 'glm';
                 return (
                   <li key={field.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -199,6 +200,15 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
                         {configured ? 'Saved' : 'Not set'}
                       </span>
                     </div>
+                    {isGlm && (
+                      <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
+                        This is your <span className="text-zinc-200">Z.ai API key</span> (not a Cursor key). Get it from{' '}
+                        <a href="https://z.ai" target="_blank" rel="noreferrer" className="text-violet-300 underline hover:text-violet-200">z.ai</a>
+                        {' '}— GLM 5.2 is accessed through Z.ai&apos;s OpenAI-compatible API at{' '}
+                        <code className="text-zinc-300">https://api.z.ai/api/coding/paas/v4</code>. A Cursor subscription does
+                        <span className="text-zinc-200"> not</span> provide external API access; you need a separate Z.ai key.
+                      </p>
+                    )}
                     <div className="mt-2 flex flex-wrap gap-2">
                       <input
                         type="password"

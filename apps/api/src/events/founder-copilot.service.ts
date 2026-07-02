@@ -1440,7 +1440,7 @@ export class FounderCopilotService {
     }
   }
 
-  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null; provider?: string | null }) {
+  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null; provider?: string | null; userApiKey?: string | null }) {
     const text = prompt.trim();
     if (!text) throw new BadRequestException('Prompt required');
 
@@ -1671,6 +1671,7 @@ export class FounderCopilotService {
           {
             founderBrainTask: brainTask,
             ...(forcedProvider ? { forceProvider: forcedProvider } : {}),
+            ...(options?.userApiKey ? { userApiKey: options.userApiKey } : {}),
           },
         );
 
@@ -1768,7 +1769,7 @@ export class FounderCopilotService {
   async askStream(
     userId: string,
     prompt: string,
-    options: { agentTemplate?: string | null; provider?: string | null } | undefined,
+    options: { agentTemplate?: string | null; provider?: string | null; userApiKey?: string | null } | undefined,
     emit: (event: CopilotStreamEvent) => void,
   ): Promise<void> {
     const text = prompt.trim();
@@ -1973,6 +1974,7 @@ export class FounderCopilotService {
       {
         founderBrainTask: brainTask,
         ...(forcedProvider ? { forceProvider: forcedProvider } : {}),
+        ...(options?.userApiKey ? { userApiKey: options.userApiKey } : {}),
       },
     );
 
@@ -2324,6 +2326,7 @@ export class FounderCopilotService {
     const IDE_KEYS = new Set(['CURSOR', 'OPENHANDS', 'CLAUDE_CODE', 'VS_CODE', 'WINDSURF']);
     if (IDE_KEYS.has(key)) return null;
     const map: Record<string, AiProvider> = {
+      BYOK: AiProvider.GLM,
       GLM: AiProvider.GLM,
       OLLAMA: AiProvider.OLLAMA_LOCAL,
       ANTHROPIC: AiProvider.ANTHROPIC,
