@@ -44,6 +44,7 @@ import { WorkspaceSessionModule } from './workspace-session/workspace-session.mo
 import { ConnectedWorkspaceModule } from './connected-workspace/connected-workspace.module';
 import { IdeBridgeModule } from './ide-bridge/ide-bridge.module';
 import { WallModule } from './wall/wall.module';
+import { ShareModule } from './share/share.module';
 
 @Module({
   imports: [
@@ -93,6 +94,7 @@ import { WallModule } from './wall/wall.module';
     ConnectedWorkspaceModule,
     IdeBridgeModule,
     WallModule,
+    ShareModule,
   ],
   providers: [
     {

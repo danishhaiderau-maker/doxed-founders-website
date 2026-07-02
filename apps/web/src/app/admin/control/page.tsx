@@ -4,12 +4,12 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PROVIDERS, TRADING_AGENT_AI_PROVIDER_LABELS, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS, EXCHANGE_CREDENTIAL_CONFIG, type ExchangeProvider } from '@dcf/utils';
+import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS, EXCHANGE_CREDENTIAL_CONFIG, type ExchangeProvider } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
-import { AdminPlatformBrain } from '@/components/admin-platform-brain';
+import { AdminAiKeysPanel } from '@/components/admin/admin-ai-keys-panel';
 import {
   AdminControlOverview,
   fetchAccountOverview,
@@ -27,12 +27,12 @@ import {
 } from '@/lib/api';
 
 const SECTIONS = [
+  { id: 'ai-keys', label: 'AI Keys' },
   { id: 'agent', label: 'Agent Control' },
   { id: 'research', label: 'Research Dashboard' },
   { id: 'social', label: 'Social Messaging' },
   { id: 'platform', label: 'Platform & Treasury' },
   { id: 'moderation', label: 'Moderation' },
-  { id: 'brain', label: 'Platform Brain' },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]['id'];
@@ -386,24 +386,30 @@ export default function AdminControlPage() {
                       </div>
                     </div>
                     <div className="rounded-lg border border-zinc-800 bg-black/20 p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Showcase AI</p>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {TRADING_AGENT_AI_PROVIDERS.map((id) => (
-                          <button
-                            key={id}
-                            type="button"
-                            disabled={busy != null}
-                            onClick={() => void handleShowcaseConfig('aiProvider', id)}
-                            className={`rounded-full px-3 py-1 text-xs ${
-                              showcase?.aiProvider === id
-                                ? 'bg-violet-500/20 text-violet-100 ring-1 ring-violet-500/40'
-                                : 'border border-zinc-700 text-zinc-400 hover:text-white'
-                            }`}
-                          >
-                            {TRADING_AGENT_AI_PROVIDER_LABELS[id]}
-                          </button>
-                        ))}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Showcase AI</p>
+                        <Link
+                          href="/admin/control"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setSection('ai-keys');
+                          }}
+                          className="text-[11px] text-violet-300 hover:underline"
+                        >
+                          Manage key in AI Keys →
+                        </Link>
                       </div>
+                      <p className="text-xs text-zinc-400">
+                        Provider: <span className="text-zinc-200">{showcase?.aiLabel ?? showcase?.aiProvider ?? 'deepseek'}</span>{' '}
+                        {showcase?.aiConfigured ? (
+                          <span className="text-emerald-400">· saved</span>
+                        ) : (
+                          <span className="text-amber-300">· not set</span>
+                        )}
+                      </p>
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        The actual API key + provider switching live in the AI Keys tab.
+                      </p>
                     </div>
                   </div>
 
@@ -470,22 +476,17 @@ export default function AdminControlPage() {
                       {exchangeFields.helpText ? (
                         <p className="text-xs text-zinc-500 lg:col-span-2">{exchangeFields.helpText}</p>
                       ) : null}
-                      <label className="block text-sm lg:col-span-2">
-                        <span className="text-zinc-400">
-                          {showcase?.aiLabel ?? 'AI'} API key
-                          {showcase?.aiConfigured ? (
-                            <span className="ml-2 text-emerald-400">· saved</span>
-                          ) : null}
-                        </span>
-                        <input
-                          type="password"
-                          autoComplete="off"
-                          value={aiApiKey}
-                          onChange={(e) => setAiApiKey(e.target.value)}
-                          placeholder={showcase?.aiConfigured ? 'Leave blank to keep' : 'Required for live AI'}
-                          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
-                        />
-                      </label>
+                      <div className="rounded-lg border border-violet-500/30 bg-violet-950/10 p-3 text-xs text-violet-200 lg:col-span-2">
+                        Showcase AI key moved to the{' '}
+                        <button
+                          type="button"
+                          onClick={() => setSection('ai-keys')}
+                          className="font-semibold underline"
+                        >
+                          AI Keys
+                        </button>{' '}
+                        tab. Exchange credentials and Bot URL stay here.
+                      </div>
                       <label className="block text-sm lg:col-span-2">
                         <span className="text-zinc-400">Bot public URL (Railway)</span>
                         <input
@@ -769,7 +770,7 @@ export default function AdminControlPage() {
 
           {section === 'platform' && (
             <section className="space-y-4">
-              {token && <AdminFounderPromoPanel accessToken={token} />}
+              {token && <AdminFounderPromoPanel accessToken={token} hideKeyCards />}
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Treasury & top-ups</h2>
                 <p className="mt-1 text-sm text-zinc-500">
@@ -813,8 +814,12 @@ export default function AdminControlPage() {
               </Link>
             </section>
           )}
-          {section === 'brain' && token && (
-            <AdminPlatformBrain token={token} />
+          {section === 'ai-keys' && token && (
+            <AdminAiKeysPanel
+              token={token}
+              overview={overview}
+              onOverviewChange={setOverview}
+            />
           )}
         </div>
       </main>
