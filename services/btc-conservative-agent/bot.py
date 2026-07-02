@@ -5559,6 +5559,14 @@ SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
 REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(30 * 60)))
+# Phase 3 reconcile-adopt: re-adopted pending limits get a MORE CONSERVATIVE chase
+# budget than a fresh signal (full budget would re-arm a stale order aggressively).
+MAX_CHASE_COUNT_ADOPTED = int(os.getenv("MAX_CHASE_COUNT_ADOPTED", "2"))
+# Phase 3 reconcile-adopt: write window gate. When disabled, adoption still happens
+# (entries inserted into pending_orders / open_positions) but chase repricing is
+# skipped — re-adopted orders rest as-is until they fill / expire. Operator escape
+# hatch for nonce pressure against the running Live Copy.
+RECONCILE_WRITE_WINDOW = str(os.getenv("RECONCILE_WRITE_WINDOW", "1")).strip().lower() not in ("0", "false", "off", "no", "")
 # Limit chase — patient maker entry then gradual convergence toward market (research sim).
 LIMIT_CHASE_START_SEC_DEFAULT = 0  # v1.1.23 fills-first: chase from order creation
 FIRST_CHASE_DELAY_SEC = 0  # v1.1.38: immediate re-anchor at order create (research)
@@ -5884,7 +5892,14 @@ state = {
     "last_edge_trigger_candle_bucket": -1,
     "edge_threshold": 3.0,
     "last_pipeline_stage": "IDLE",
-    "warmup_mode": True
+    "warmup_mode": True,
+    # Phase 3 reconcile-adopt (in-memory only — NOT in _persistent_config_keys, so
+    # they reset every restart which is correct: orphans / adopt log are session-
+    # scoped. Surfaced on /api/state automatically because the route deep-copies
+    # the whole state dict).
+    "orphan_order_ids": [],          # exchange order ids that could not be attributed
+    "orphan_position_ids": [],       # exchange position ids with no recoverable fill price (stop re-arm refused)
+    "reconcile_adopt_log": [],       # ring buffer (last 50) of {ts, oid, action, reason}
 }
 shutdown_event = threading.Event()
 PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
@@ -15751,6 +15766,149 @@ expired_orders: List[Dict] = []
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
+
+# ============================================================================
+# EMERGENCY HARDENING — AI-key drain protection (2026-07-03)
+# ----------------------------------------------------------------------------
+# The bot is a separate Flask app on bot.doxxedcrypto.digital:7002 with its own
+# DEEPSEEK_API_KEY. It is NOT behind the apps/api rate limiter. Unauthenticated
+# POSTs to AI-influencing endpoints (toggle_continuous_ai_research, set_threshold,
+# toggle_continuous_ai_direct, ...) let an attacker crank the trading loop into
+# calling DeepSeek every cycle, draining the key. This block adds:
+#   1. Per-IP in-memory rate limiting on all /api/* requests
+#   2. Tight per-IP cap on AI-influencing POST endpoints (10/hour/IP)
+#   3. Optional admin-token gate (env BOT_ADMIN_TOKEN): if set, all state-mutating
+#      POST/PUT/DELETE /api/* endpoints require the token via cookie or
+#      X-Bot-Admin-Token header. The / route sets the cookie when visited with
+#      ?admin_token=... so the user's own dashboard keeps working.
+# This does NOT touch trading logic — only the HTTP ingress policy.
+# ============================================================================
+from collections import defaultdict as _dd
+from time import time as _now
+
+_BOT_ADMIN_TOKEN = (os.getenv("BOT_ADMIN_TOKEN") or "").strip()
+_API_RATE_LOG = _dd(deque)          # ip -> deque[timestamps] for general /api/
+_AI_RATE_LOG = _dd(deque)           # ip -> deque[timestamps] for AI-influencing POSTs
+_API_RATE_WINDOW_S = 60             # 1 minute
+_API_RATE_MAX_PER_IP = 60           # 60 general /api/ calls per minute per IP
+_AI_RATE_WINDOW_S = 3600            # 1 hour
+_AI_RATE_MAX_PER_IP = 10            # 10 AI-influencing POSTs per hour per IP
+_AI_RATE_LOCK = threading.Lock()
+
+# Endpoints whose mutation causes the trading loop to call DeepSeek more often
+# (enabling continuous AI research, lowering thresholds, arming live, etc.).
+_AI_INFLUENCING_POST_PATHS = {
+    "/api/toggle_continuous_ai_research",
+    "/api/toggle_continuous_ai_direct",
+    "/api/toggle_research_lane",
+    "/api/toggle_profit_gates",
+    "/api/toggle_fresh_collection",
+    "/api/toggle_early_fail",
+    "/api/toggle_invert_signal",
+    "/api/toggle_duplicate_limit_block",
+    "/api/set_threshold",
+    "/api/set_ai_bands",
+    "/api/set_edge_threshold",
+    "/api/set_edge_range",
+    "/api/set_pullback_threshold",
+    "/api/set_max_active_signals",
+    "/api/set_chase_buckets",
+    "/api/set_spread_gate",
+    "/api/spread-gate",
+    "/api/live_arm",
+    "/api/bitfinex_live",
+    "/api/reset",
+    "/api/pause",
+    "/api/resume",
+}
+
+# Read-only GET endpoints that never mutate state and never trigger AI — safe to
+# leave open (still rate-limited) so the public dashboard / health checks work.
+_READ_ONLY_GET_PATHS = {
+    "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
+    "/api/build", "/api/relay-state", "/api/analyzer/summary",
+    "/api/analyzer/genome", "/api/download_debug_config", "/api/export_csv",
+    "/api/export_debug", "/debug_state", "/static/dashboard.js",
+}
+
+
+def _client_ip() -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()[:64]
+    return (request.remote_addr or "unknown")[:64]
+
+
+def _rate_check(log: dict, key: str, window_s: int, limit: int) -> bool:
+    """Sliding-window per-key rate check. True = allowed, False = over limit."""
+    now = _now()
+    with _AI_RATE_LOCK:
+        q = log[key]
+        while q and q[0] < now - window_s:
+            q.popleft()
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        return True
+
+
+def _admin_authed() -> bool:
+    """True if the request carries the admin token (cookie or header)."""
+    if not _BOT_ADMIN_TOKEN:
+        return True  # gate disabled when no token configured (backward compatible)
+    if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
+        return True
+    if request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
+        return True
+    return False
+
+
+@app.before_request
+def _emergency_api_guard():
+    path = request.path or ""
+    method = (request.method or "GET").upper()
+
+    # Only police /api/* (plus /debug_state and /). Static assets untouched.
+    is_api = path.startswith("/api/") or path in ("/debug_state",)
+    if not is_api and path != "/":
+        return None
+
+    ip = _client_ip()
+
+    # General per-IP rate limit on every /api/* hit (read + write).
+    if path.startswith("/api/"):
+        if not _rate_check(_API_RATE_LOG, ip, _API_RATE_WINDOW_S, _API_RATE_MAX_PER_IP):
+            resp = jsonify({"error": "rate limit exceeded", "retry_after_s": _API_RATE_WINDOW_S})
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(_API_RATE_WINDOW_S)
+            return resp
+
+    # Read-only GETs are allowed without a token (still rate-limited above).
+    if method == "GET" and path in _READ_ONLY_GET_PATHS:
+        return None
+    if method == "OPTIONS":
+        return None  # CORS preflight — let route handlers respond
+
+    # Everything else (POST/PUT/DELETE, or GETs not in the safe list) requires
+    # the admin token when BOT_ADMIN_TOKEN is configured.
+    if not _admin_authed():
+        resp = jsonify({"error": "unauthorized — admin token required"})
+        resp.status_code = 401
+        return resp
+
+    # Tighter cap on AI-influencing POSTs (10/hour/IP) even when authed.
+    if method == "POST" and path in _AI_INFLUENCING_POST_PATHS:
+        if not _rate_check(_AI_RATE_LOG, ip, _AI_RATE_WINDOW_S, _AI_RATE_MAX_PER_IP):
+            resp = jsonify({
+                "error": "AI-influencing endpoint rate limit exceeded",
+                "limit": f"{_AI_RATE_MAX_PER_IP} per hour per IP",
+            })
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(_AI_RATE_WINDOW_S)
+            return resp
+
+    return None
+
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
@@ -18936,7 +19094,16 @@ def dashboard():
         .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
     )
-    return render_template_string(page)
+    resp = make_response(render_template_string(page))
+    # If the owner visits /?admin_token=XXX, mint an http-only cookie so the
+    # dashboard's own fetch() calls pass the _emergency_api_guard admin gate.
+    tok = request.args.get("admin_token", "")
+    if _BOT_ADMIN_TOKEN and tok == _BOT_ADMIN_TOKEN:
+        resp.set_cookie(
+            "bot_admin_token", _BOT_ADMIN_TOKEN,
+            httponly=True, samesite="Lax", path="/", max_age=60 * 60 * 24 * 30,
+        )
+    return resp
 
 
 def _relay_mirror(event: str, payload: dict, source_ts: float | None = None) -> None:
