@@ -125,17 +125,62 @@ if ($NoWait) {
     # Mirrors the Fly restart loop (fly-entrypoint.sh) for the local showcase bot.
     # Pass -VaultEnv so the monitor can re-seed env vars on each relaunch.
     $monitorScript = Join-Path $scriptDir "bot-auto-restart.ps1"
-    # Build the argument list as a single string with backtick-quoted paths. The
-    # repo path contains a space ("Final Bots"), and Start-Process -ArgumentList
-    # @("-File",$path) splits the path on the space -> "Processing -File
-    # 'C:\...\Final' failed because the file does not have a '.ps1' extension"
-    # and the monitor never starts (so the bot has NO auto-restart). Quoting the
-    # -File value inside one argument string is the reliable fix.
-    $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -BotPid $($botProc.Id) -Port $BotListenPort"
-    if ($VaultEnv) { $monitorArgString += " -VaultEnv `"$VaultEnv`"" }
-    $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
-    if ($mon -and $mon.Id -gt 0) {
-      Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
+    $heartbeatFile = Join-Path $repoRoot ".home-bot-auto-restart.heartbeat"
+    $lockFile = Join-Path $repoRoot ".home-bot-auto-restart.lock"
+
+    # --- Monitor health check + respawn ---------------------------------------
+    # The monitor has died silently in the past (transient .NET exception escaped
+    # the watch loop before it was hardened with an inner try/catch). Detect a
+    # stale/missing heartbeat and respawn a fresh monitor instead of leaving the
+    # bot unwatched. A healthy monitor writes the heartbeat file every ~2 min, so
+    # treat anything older than 5 min (or missing) as dead.
+    $monitorHealthy = $false
+    if (Test-Path $heartbeatFile) {
+      try {
+        $hbRaw = (Get-Content $heartbeatFile -Raw -ErrorAction SilentlyContinue)
+        if ($hbRaw) {
+          # Heartbeat file holds an ISO 8601 timestamp written by the monitor every
+          # ~2 min. Parse it (AdjustToUniversal normalizes any offset) and compare
+          # against current UTC. Anything <= 5 min old counts as healthy.
+          $hbTime = [datetime]::Parse($hbRaw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+          $ageMin = ((Get-Date).ToUniversalTime() - $hbTime).TotalMinutes
+          if ($ageMin -ge 0 -and $ageMin -le 5) {
+            $monitorHealthy = $true
+          }
+        }
+      } catch { $monitorHealthy = $false }
+    }
+
+    if ($monitorHealthy) {
+      Write-Host "Auto-restart monitor already running and healthy (heartbeat fresh) - skipping respawn." -ForegroundColor DarkGray
+    } else {
+      # Stale or missing heartbeat: kill any orphan monitor process matching the
+      # script name, then start a fresh one. Also clear the stale lock so the new
+      # monitor's single-instance check does not exit silently.
+      try {
+        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+          Where-Object { $_.CommandLine -and $_.CommandLine -like "*bot-auto-restart*" } |
+          ForEach-Object {
+            try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+          }
+      } catch { }
+      if (Test-Path $lockFile) {
+        try { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue } catch { }
+      }
+      Write-Host "Auto-restart monitor stale/missing - respawning fresh monitor." -ForegroundColor Yellow
+
+      # Build the argument list as a single string with backtick-quoted paths. The
+      # repo path contains a space ("Final Bots"), and Start-Process -ArgumentList
+      # @("-File",$path) splits the path on the space -> "Processing -File
+      # 'C:\...\Final' failed because the file does not have a '.ps1' extension"
+      # and the monitor never starts (so the bot has NO auto-restart). Quoting the
+      # -File value inside one argument string is the reliable fix.
+      $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -BotPid $($botProc.Id) -Port $BotListenPort"
+      if ($VaultEnv) { $monitorArgString += " -VaultEnv `"$VaultEnv`"" }
+      $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
+      if ($mon -and $mon.Id -gt 0) {
+        Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
+      }
     }
   }
   Start-Sleep -Seconds 2
