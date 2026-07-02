@@ -5,6 +5,7 @@ import {
   DEFAULT_CAPABILITIES,
   OPENHANDS_CAPABILITIES,
   type BridgeCapabilityReport,
+  type BridgeMessage,
   type BridgeSession,
   type BridgeWorkspace,
 } from '@dcf/utils';
@@ -326,5 +327,20 @@ export class IdeBridgeService {
    */
   async getSessions(userId: string): Promise<BridgeSession[]> {
     return this.desktopBridge.listSessions(userId);
+  }
+
+  /**
+   * Return the persisted message thread for a single session, or null when
+   * the session isn't known to this user / has no messages.
+   *
+   * Founder Node attaches the last ~30 messages to each session in the
+   * heartbeat, so we can serve them straight from the persisted sessions[]
+   * without an extra round trip back to the desktop.
+   */
+  async getSessionMessages(userId: string, sessionId: string): Promise<BridgeMessage[] | null> {
+    const sessions = await this.desktopBridge.listSessions(userId);
+    const s = sessions.find((x) => x.id === sessionId);
+    if (!s) return null;
+    return s.messages ?? null;
   }
 }

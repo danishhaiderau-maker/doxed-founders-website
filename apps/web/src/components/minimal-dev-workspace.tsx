@@ -9,6 +9,8 @@ import {
   type CopilotMissingConnection,
   fetchConnectedWorkspaces,
   fetchDesktopBridge,
+  type BridgeMessage,
+  fetchIdeBridgeSessionMessages,
   fetchIdeBridgeSessions,
   fetchIdeBridgeWorkspaces,
   fetchRecentAgents,
@@ -126,6 +128,80 @@ function SessionRow({
   );
 }
 
+const HISTORY_MSG_COLLAPSED_LEN = 280;
+
+function HistoryMessage({ msg }: { msg: BridgeMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const isUser = msg.role === 'user';
+  const text = msg.content || '';
+  const overLimit = text.length > HISTORY_MSG_COLLAPSED_LEN;
+  const shown = expanded || !overLimit ? text : text.slice(0, HISTORY_MSG_COLLAPSED_LEN) + '…';
+  const timeLabel = msg.timestamp ? timeAgo(msg.timestamp) : null;
+  return (
+    <div className={'flex ' + (isUser ? 'justify-end' : 'justify-start')}>
+      <div className={'max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ' + (isUser ? 'bg-violet-500/15 text-violet-50' : 'bg-white/5 text-zinc-100')}>
+        <div className='mb-1 flex items-center gap-2 text-[0.65rem] uppercase tracking-wider text-zinc-500'>
+          <span>{isUser ? 'You' : msg.role === 'system' ? 'System' : 'Assistant'}</span>
+          {msg.model && <span className='text-zinc-600'>· {msg.model}</span>}
+          {timeLabel && <span className='text-zinc-600'>· {timeLabel}</span>}
+        </div>
+        <p className='whitespace-pre-wrap break-words'>{shown}</p>
+        {overLimit && (
+          <button
+            type='button'
+            onClick={() => setExpanded((v) => !v)}
+            className='mt-1 text-[0.65rem] text-violet-300/80 hover:text-violet-200'
+          >
+            {expanded ? 'Show less' : 'Show more'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HistoryThread({
+  messages,
+  loading,
+  error,
+}: {
+  messages: BridgeMessage[] | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading && (!messages || messages.length === 0)) {
+    return (
+      <div className='mb-4 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-4 text-center text-xs text-zinc-500'>
+        Loading conversation…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className='mb-4 rounded-lg border border-rose-400/20 bg-rose-500/[0.06] px-3 py-2 text-xs text-rose-300'>
+        Couldn&apos;t load messages: {error}
+      </div>
+    );
+  }
+  if (!messages || messages.length === 0) {
+    return (
+      <div className='mb-4 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-4 text-center text-xs text-zinc-500'>
+        No messages stored for this session yet.
+      </div>
+    );
+  }
+  return (
+    <div className='mb-4 space-y-2.5'>
+      <div className='px-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>
+        Conversation history
+      </div>
+      {messages.map((m, i) => (
+        <HistoryMessage key={i} msg={m} />
+      ))}
+    </div>
+  );
+}
+
 export function MinimalDevWorkspace({
   accessToken,
   socialPanel,
@@ -139,6 +215,9 @@ export function MinimalDevWorkspace({
   const [agents, setAgents] = useState<RecentAgent[]>([]);
   const [sessions, setSessions] = useState<BridgeSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [history, setHistory] = useState<BridgeMessage[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
   const [selectedBrain, setSelectedBrain] = useState<string>('GLM');
   const [selectedIde, setSelectedIde] = useState<string>('cursor');
@@ -254,6 +333,41 @@ export function MinimalDevWorkspace({
   }, [sessions]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+
+  // Load the conversation thread whenever the user picks a session. We show
+  // whatever was already embedded in the session list immediately (no network
+  // wait), then refresh from the dedicated endpoint so the user sees the
+  // latest messages even if the heartbeat payload was truncated.
+  useEffect(() => {
+    if (!selectedSessionId || !accessToken) {
+      setHistory(null);
+      setHistoryError(null);
+      return;
+    }
+    let cancelled = false;
+    const embedded = selectedSession?.messages ?? null;
+
+    setHistory(embedded);
+    setHistoryError(null);
+    setHistoryLoading(true);
+
+    fetchIdeBridgeSessionMessages(accessToken, selectedSessionId)
+      .then((msgs) => {
+        if (cancelled) return;
+        if (Array.isArray(msgs)) setHistory(msgs);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setHistoryError(e instanceof Error ? e.message : 'Failed to load messages');
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSessionId, accessToken, selectedSession?.messages]);
 
   const handleSelectSession = useCallback(
     (session: BridgeSession) => {
@@ -472,6 +586,9 @@ export function MinimalDevWorkspace({
               )}
               <div className='mt-1.5 pl-3.5 text-zinc-500'>Resume this Cursor session — your prompt below is pre-filled with its context.</div>
             </div>
+          )}
+          {selectedSession && (
+            <HistoryThread messages={history} loading={historyLoading} error={historyError} />
           )}
           {messages.length === 0 && !showConnectWizard && <div className='flex h-full items-center justify-center text-sm text-zinc-600'>Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.</div>}
           <div className='mx-auto max-w-3xl space-y-3'>
