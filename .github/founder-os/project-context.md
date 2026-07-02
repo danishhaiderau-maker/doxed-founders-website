@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(admin): correct founder-promo credentials type to glm/gemini/deepseek
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
