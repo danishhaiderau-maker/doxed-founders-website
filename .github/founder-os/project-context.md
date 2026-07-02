@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(analyzer): add Spread performance tab (PnL/WR/EV by directional spread bucket)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
