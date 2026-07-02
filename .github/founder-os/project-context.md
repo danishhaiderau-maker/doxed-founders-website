@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(ide-bridge): relay messages from Founder OS to local Cursor IDE via Founder Node
 
 ## Last Activity
 
