@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: message loading JSON error + mobile responsive sidebar layout
+fix(wall): pin upgrade cost 500 -> 10 DDollar + route revenue to platform admin
 
 ## Last Activity
 
