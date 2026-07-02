@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(web): add founder token rules collapsible to signup + login pages
 
 ## Last Activity
 
