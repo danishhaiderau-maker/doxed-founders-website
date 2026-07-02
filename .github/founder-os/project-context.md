@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(reconcile): Phase 1 — orphan-order cancel on orphan exit + foreign surfacing + cancel-by-exchange detection + conformance spec
+fix(bot): emergency AI-key drain protection — rate limit + admin auth on all bot HTTP endpoints
 
 ## Last Activity
 
