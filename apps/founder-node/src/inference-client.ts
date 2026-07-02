@@ -1,6 +1,7 @@
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import { ollamaChat, type OllamaConfig } from './ollama-client';
 import { throwIfFounderNodeAuthResponse } from './sync-client';
+import { InferenceUsageReporter } from './inference-usage-reporter';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -54,19 +55,36 @@ export async function completeInferenceJob(
   }
 }
 
+/**
+ * Pull one pending inference job from the cloud, run it through Ollama, and
+ * report the real token usage back to the platform. Usage is enqueued into the
+ * shared `InferenceUsageReporter` regardless of whether `completeInferenceJob`
+ * succeeds, so local inference always counts toward the adoption chart even if
+ * the result upload fails.
+ */
 export async function processPendingInference(
   apiBaseUrl: string,
   nodeId: string,
   nodeToken: string,
   ollama: OllamaConfig,
+  usageReporter?: InferenceUsageReporter,
 ): Promise<boolean> {
   const job = await fetchPendingInferenceJob(apiBaseUrl, nodeId, nodeToken);
   if (!job) return false;
 
   const model = job.model?.trim() || ollama.model;
   try {
-    const result = await ollamaChat({ ...ollama, model }, job.system, job.userPrompt);
-    await completeInferenceJob(apiBaseUrl, nodeId, nodeToken, job.id, { result });
+    const { text, usage } = await ollamaChat({ ...ollama, model }, job.system, job.userPrompt);
+    if (usageReporter) {
+      usageReporter.enqueue({
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        provider: 'ollama',
+        model: usage.model,
+        source: 'founder_node_local',
+      });
+    }
+    await completeInferenceJob(apiBaseUrl, nodeId, nodeToken, job.id, { result: text });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ollama inference failed';
     await completeInferenceJob(apiBaseUrl, nodeId, nodeToken, job.id, { error: message });

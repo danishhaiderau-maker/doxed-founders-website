@@ -1,3 +1,5 @@
+import { estimateLlmTokensFromText } from '@dcf/utils';
+
 const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
 const DEFAULT_MODEL = 'llama3.2';
 
@@ -5,6 +7,19 @@ export type OllamaConfig = {
   enabled: boolean;
   baseUrl: string;
   model: string;
+};
+
+export type OllamaUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  model: string;
+};
+
+type OllamaChatResponse = {
+  message?: { content?: string };
+  prompt_eval_count?: number;
+  eval_count?: number;
+  model?: string;
 };
 
 export function defaultOllamaConfig(): OllamaConfig {
@@ -32,7 +47,7 @@ export async function ollamaChat(
   config: OllamaConfig,
   system: string,
   userPrompt: string,
-): Promise<string> {
+): Promise<{ text: string; usage: OllamaUsage }> {
   const res = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -50,8 +65,17 @@ export async function ollamaChat(
     const text = await res.text().catch(() => '');
     throw new Error(`Ollama ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}`);
   }
-  const data = (await res.json()) as { message?: { content?: string } };
+  const data = (await res.json()) as OllamaChatResponse;
   const content = data.message?.content?.trim();
   if (!content) throw new Error('Empty Ollama response');
-  return content;
+  const model = data.model ?? config.model;
+  const promptTokens =
+    data.prompt_eval_count != null && data.prompt_eval_count > 0
+      ? data.prompt_eval_count
+      : estimateLlmTokensFromText(`${system}\n${userPrompt}`);
+  const completionTokens =
+    data.eval_count != null && data.eval_count > 0
+      ? data.eval_count
+      : estimateLlmTokensFromText(content);
+  return { text: content, usage: { promptTokens, completionTokens, model } };
 }
