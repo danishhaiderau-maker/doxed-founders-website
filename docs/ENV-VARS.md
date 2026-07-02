@@ -91,6 +91,62 @@ npx prisma migrate deploy
 (after the schema change is merged to main). Until the migration runs, the
 gate uses the fallback derivation.
 
+## `PARASITE_DAILY_TOKEN_CAP`
+
+**Default:** `25000` (tokens/day)
+**Added:** 2026-07-03 (two-tier builder protection)
+
+Per-day token cap for parasite-tier accounts (the default tier for new
+signups without verification). When a parasite-tier user's platform-promo +
+platform-brain token usage in the last 24h reaches this cap, the next AI
+call is rejected with `429 Daily parasite-tier token cap reached`. Enforced
+both in `FounderPromoService.resolvePromoApiKey` (before the LLM call) and
+in `PointsService.spend` (for AI-gated spends like the wall summarizer).
+
+## `BUILDER_DAILY_TOKEN_CAP`
+
+**Default:** `500000` (tokens/day)
+**Added:** 2026-07-03 (two-tier builder protection)
+
+Per-day token cap for verified-builder-tier accounts (xVerified + GitHub or
+Cursor connected + ≥1 commit in last 14d, score ≥ `BUILDER_SCORE_THRESHOLD`).
+20× the parasite cap. When exceeded, the AI call is rejected with
+`429 Daily builder token cap reached. Connect your own API key to continue.`
+
+## `PROMO_POOL_PRESERVATION_PCT`
+
+**Default:** `0.30` (30%)
+**Added:** 2026-07-03 (two-tier builder protection)
+
+When the global promo pool remaining drops below this fraction of the cap
+(default 30M tokens), parasite-tier accounts are cut off entirely with
+`429 Promo pool reserved for verified builders.` Verified builders keep full
+access — the remaining pool is reserved for them. Set to `0` to disable
+pool preservation (not recommended).
+
+## `BUILDER_SCORE_THRESHOLD`
+
+**Default:** `50`
+**Added:** 2026-07-03 (two-tier builder protection)
+
+Composite builder score ≥ this value → `VERIFIED_BUILDER` tier; below →
+`PARASITE`. Score formula: +30 xVerified, +25 GitHub connected, +25 Cursor
+connected, +1 per commit/PR in last 14d (cap +20), +10 account age > 7d,
+−50 abuse flag (rate-limited 10+ times in 24h OR balance < 0 OR >100 AI
+calls in 1h). Lower the threshold to be more permissive; raise it to be
+stricter.
+
+## `BUILDER_SCORE_REFRESH_TTL_MS`
+
+**Default:** `3600000` (1 hour)
+**Added:** 2026-07-03 (two-tier builder protection)
+
+How stale a cached `User.builderScore` / `User.builderTier` can be before
+`BuilderScoreService.getTier` recomputes it. Lower = fresher but more DB
+load; higher = cheaper but slower to reflect tier changes (e.g. a user
+connecting GitHub won't upgrade until the TTL elapses or
+`refreshUserScore` is called explicitly).
+
 ## See also
 
 - `docs/API-ABUSE-AUDIT.md` — the full audit that motivated these vars

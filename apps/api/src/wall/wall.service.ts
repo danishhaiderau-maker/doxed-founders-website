@@ -572,8 +572,10 @@ export class WallService {
       }
     }
 
-    // Charge 1,000 DDollar for the month. Throws if balance too low.
-    await this.points.spend(userId, WALL_SUMMARIZER_COST_DDOLLAR, 'WALL_SUMMARIZER_MONTHLY');
+    // Charge 1,000 DDollar for the month. Throws if balance too low. The
+    // aiSpend flag runs the tier-cap pre-check so parasite-tier accounts are
+    // rejected before the GLM summarizer call fires.
+    await this.points.spend(userId, WALL_SUMMARIZER_COST_DDOLLAR, 'WALL_SUMMARIZER_MONTHLY', true);
 
     // Subscription date math: extend an active sub by 30d; otherwise start fresh.
     const now = new Date();

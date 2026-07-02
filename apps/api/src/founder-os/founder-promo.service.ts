@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { BuilderScoreService } from './builder-score.service';
 
 export type FounderPromoStatus = {
   enabled: boolean;
@@ -48,6 +49,7 @@ export class FounderPromoService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
+    private readonly builderScore: BuilderScoreService,
   ) {}
 
   async getPlatformPromoSettings() {
@@ -157,10 +159,74 @@ export class FounderPromoService {
     try {
       const status = await this.getUserPromoStatus(userId);
       if (!status.eligible) return null;
+
+      // Tier-based daily token cap + pool preservation. Happens AFTER the
+      // xVerified gate + advisory lock, so every other gate still applies.
+      await this.enforceTierCap(userId, status.tokensRemaining, status.tokenCap);
+
       const map = await this.loadDecryptedCredentials();
       return map[provider]?.trim() || null;
     } finally {
       await this.prisma.$executeRaw`SELECT pg_advisory_unlock(hashtext(${userId}))`;
+    }
+  }
+
+  /**
+   * Two-tier builder protection gate. Throws 429 if:
+   *  - the user's daily platform-token usage exceeds their tier cap, OR
+   *  - the global promo pool is below the preservation threshold and the
+   *    user is PARASITE-tier (pool reserved for verified builders when low).
+   *
+   * PARASITE_DAILY_TOKEN_CAP default 25000, BUILDER_DAILY_TOKEN_CAP default
+   * 500000, PROMO_POOL_PRESERVATION_PCT default 0.30.
+   */
+  private async enforceTierCap(
+    userId: string,
+    tokensRemaining: number,
+    tokenCap: number,
+  ): Promise<void> {
+    const PARASITE_CAP = Number.parseInt(process.env.PARASITE_DAILY_TOKEN_CAP ?? '25000', 10);
+    const BUILDER_CAP = Number.parseInt(process.env.BUILDER_DAILY_TOKEN_CAP ?? '500000', 10);
+    const POOL_PRESERVATION_PCT = Number.parseFloat(
+      process.env.PROMO_POOL_PRESERVATION_PCT ?? '0.30',
+    );
+
+    const [tier, dailyUsage] = await Promise.all([
+      this.builderScore.getTier(userId),
+      this.builderScore.dailyTokenUsage(userId),
+    ]);
+
+    const cap = tier === 'VERIFIED_BUILDER' ? BUILDER_CAP : PARASITE_CAP;
+    if (dailyUsage >= cap) {
+      const upgradeHint =
+        tier === 'VERIFIED_BUILDER'
+          ? 'Daily builder token cap reached. Connect your own API key to continue.'
+          : 'Daily parasite-tier token cap reached. Connect GitHub + Cursor + push a commit to upgrade to Verified Builder.';
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: upgradeHint,
+          tier,
+          dailyUsage,
+          cap,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    // Pool preservation: when remaining < threshold, starve parasite tier.
+    const poolRemainingFraction = tokenCap > 0 ? tokensRemaining / tokenCap : 0;
+    if (tier === 'PARASITE' && poolRemainingFraction < POOL_PRESERVATION_PCT) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message:
+            'Promo pool reserved for verified builders. Connect GitHub + Cursor + push a commit to upgrade.',
+          tier,
+          poolRemainingFraction,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
   }
 

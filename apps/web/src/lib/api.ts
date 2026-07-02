@@ -3545,6 +3545,41 @@ export function saveAdminFounderPromoCredentials(
   );
 }
 
+export type BuilderTierBreakdown = {
+  poolRemaining: number;
+  poolCap: number;
+  poolRemainingFraction: number;
+  spendTodayByTier: { tier: 'PARASITE' | 'VERIFIED_BUILDER'; tokens: number }[];
+  accountCountsByTier: { tier: 'PARASITE' | 'VERIFIED_BUILDER'; count: number }[];
+  topParasitesBy24h: {
+    userId: string;
+    email: string;
+    twitterHandle: string | null;
+    tokens: number;
+    calls: number;
+    builderScore: number;
+  }[];
+  env: {
+    PARASITE_DAILY_TOKEN_CAP: number;
+    BUILDER_DAILY_TOKEN_CAP: number;
+    PROMO_POOL_PRESERVATION_PCT: number;
+    BUILDER_SCORE_THRESHOLD: number;
+    BUILDER_SCORE_REFRESH_TTL_MS: number;
+  };
+};
+
+export function fetchAdminBuilderBreakdown(token: string) {
+  return apiFetch<BuilderTierBreakdown>('/admin-control/builder-breakdown', undefined, token);
+}
+
+export function flagParasite(token: string, userId: string) {
+  return apiFetch<{ ok: boolean }>(
+    '/admin-control/builder-breakdown/flag',
+    { method: 'POST', body: JSON.stringify({ userId }) },
+    token,
+  );
+}
+
 export function fetchAccountPointLedger(token: string, limit = 50) {
   return apiFetch<AccountPointLedgerEntry[]>(`/account/point-ledger?limit=${limit}`, undefined, token);
 }

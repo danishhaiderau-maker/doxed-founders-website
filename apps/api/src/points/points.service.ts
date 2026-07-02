@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -7,6 +9,7 @@ import {
 import { contributorLevelFromPoints, pointActionLabel } from '@dcf/utils';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { BuilderScoreService } from '../founder-os/builder-score.service';
 
 const DB_DOWN_RE = /connection|timeout|unreachable|refused|terminated/i;
 
@@ -24,7 +27,10 @@ function isDbDownError(err: unknown): boolean {
 export class PointsService {
   private readonly logger = new Logger(PointsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly builderScore: BuilderScoreService,
+  ) {}
 
   async award(userId: string, amount: number, actionKey?: string) {
     if (amount <= 0) return;
@@ -64,8 +70,16 @@ export class PointsService {
    * Fail CLOSED on DB-down: a Neon outage throws (503) instead of silently
    * letting the AI call proceed against an unverifiable balance.
    */
-  async spend(userId: string, amount: number, actionKey?: string) {
+  async spend(userId: string, amount: number, actionKey?: string, aiSpend = false) {
     if (amount <= 0) return;
+
+    // Tier pre-check: for spends that gate an AI call (e.g. wall summarizer),
+    // reject parasites before they burn a single token. Stops the spend AND
+    // the downstream LLM call. Tier-cap reads degrade to PARASITE (i.e. the
+    // tighter cap) when the builderTier column is missing pre-migration.
+    if (aiSpend) {
+      await this.enforceTierCap(userId);
+    }
 
     let result;
     try {
@@ -119,6 +133,38 @@ export class PointsService {
           label: pointActionLabel(actionKey),
         },
       });
+    }
+  }
+
+  /**
+   * Per-tier daily token cap pre-check. Mirrors the gate in
+   * `FounderPromoService.enforceTierCap` so parasite accounts are stopped at
+   * the spend step (before the LLM call fires) rather than after. Throws 429.
+   */
+  private async enforceTierCap(userId: string): Promise<void> {
+    const PARASITE_CAP = Number.parseInt(process.env.PARASITE_DAILY_TOKEN_CAP ?? '25000', 10);
+    const BUILDER_CAP = Number.parseInt(process.env.BUILDER_DAILY_TOKEN_CAP ?? '500000', 10);
+
+    const [tier, dailyUsage] = await Promise.all([
+      this.builderScore.getTier(userId),
+      this.builderScore.dailyTokenUsage(userId),
+    ]);
+    const cap = tier === 'VERIFIED_BUILDER' ? BUILDER_CAP : PARASITE_CAP;
+    if (dailyUsage >= cap) {
+      const message =
+        tier === 'VERIFIED_BUILDER'
+          ? 'Daily builder token cap reached. Connect your own API key to continue.'
+          : 'Daily parasite-tier token cap reached. Connect GitHub + Cursor + push a commit to upgrade to Verified Builder.';
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message,
+          tier,
+          dailyUsage,
+          cap,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
   }
 

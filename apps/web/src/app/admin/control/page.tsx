@@ -10,6 +10,7 @@ import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 import { AdminAiKeysPanel } from '@/components/admin/admin-ai-keys-panel';
+import { AdminBuilderBreakdownPanel } from '@/components/admin/admin-builder-breakdown-panel';
 import {
   AdminControlOverview,
   fetchAccountOverview,
@@ -28,6 +29,7 @@ import {
 
 const SECTIONS = [
   { id: 'ai-keys', label: 'AI Keys' },
+  { id: 'builders', label: 'Builders' },
   { id: 'agent', label: 'Agent Control' },
   { id: 'research', label: 'Research Dashboard' },
   { id: 'social', label: 'Social Messaging' },
@@ -821,6 +823,7 @@ export default function AdminControlPage() {
               onOverviewChange={setOverview}
             />
           )}
+          {section === 'builders' && token && <AdminBuilderBreakdownPanel accessToken={token} />}
         </div>
       </main>
     </div>
