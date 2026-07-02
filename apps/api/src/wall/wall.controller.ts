@@ -1,16 +1,32 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
+import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { Public } from '../auth/public.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import { AuthUser } from '../auth/auth.types';
 import { WallService } from './wall.service';
 import { PinWallMessageDto, PostWallMessageDto } from './dto/wall.dto';
+import { RateLimiterService } from '../events/rate-limiter.service';
 
-@SkipThrottle()
 @Controller('wall')
 export class WallController {
-  constructor(private readonly wall: WallService) {}
+  constructor(
+    private readonly wall: WallService,
+    private readonly rateLimiter: RateLimiterService,
+  ) {}
+
+  private async enforceLimit(userId: string, endpoint: string): Promise<void> {
+    const rateCheck = await this.rateLimiter.checkLimit(userId, endpoint);
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(rateCheck.resetInMs / 1000)}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
 
   /** Public wall for a single project — Telegram-style message stream (cursor-paginated). */
   @Public()
@@ -43,7 +59,8 @@ export class WallController {
 
   /** Activate (or renew) the Chat Summarizer — spends 1,000 DDollar for a 30-day window. */
   @Post('projects/:slug/summarize')
-  summarize(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+  async summarize(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    await this.enforceLimit(user.id, 'wall:summarize');
     return this.wall.activateSummarizer(user.id, slug);
   }
 
@@ -90,11 +107,12 @@ export class WallController {
 
   /** Upgrade a subtopic (pin / highlight / promote) — spends DDollar. */
   @Post('messages/:messageId/pin')
-  pin(
+  async pin(
     @CurrentUser() user: AuthUser,
     @Param('messageId') messageId: string,
     @Body() dto: PinWallMessageDto,
   ) {
+    await this.enforceLimit(user.id, 'wall:pin');
     return this.wall.pinMessage(user.id, messageId, dto.kind ?? 'pin', dto.amount);
   }
 }

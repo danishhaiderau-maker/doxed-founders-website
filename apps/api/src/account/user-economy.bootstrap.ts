@@ -9,7 +9,18 @@ export async function bootstrapUserEconomy(
   points: PointsService,
   userId: string,
 ) {
-  await points.awardOnce(userId, 'REGISTER', POINTS.REGISTER);
+  // Free DDollar signup bonus is gated on a verified Twitter account (matches
+  // the free-token eligibility gate in FounderPromoService). `awardOnce` is
+  // idempotent, and `auth.service` re-invokes `bootstrapUserEconomy` on every
+  // X-link / X-verify path, so the deferred REGISTER bonus lands automatically
+  // the moment `xVerified` flips to true.
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { xVerified: true },
+  });
+  if (user?.xVerified) {
+    await points.awardOnce(userId, 'REGISTER', POINTS.REGISTER);
+  }
 
   const existing = await prisma.paperPortfolio.findUnique({ where: { userId } });
   if (existing) return existing;

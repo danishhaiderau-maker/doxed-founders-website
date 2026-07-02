@@ -135,15 +135,17 @@ export class EventsController {
   }
 
   @Post('copilot/resume')
-  resume(@CurrentUser() user: AuthUser) {
+  async resume(@CurrentUser() user: AuthUser) {
+    await this.enforceCopilotLimit(user.id);
     return this.copilot.resumeWork(user.id);
   }
 
   @Post('copilot/mission-build')
-  missionBuild(
+  async missionBuild(
     @CurrentUser() user: AuthUser,
     @Body() body: { worker?: 'CURSOR' | 'OPENHANDS' },
   ) {
+    await this.enforceCopilotLimit(user.id);
     return this.copilot.runMissionBuild(user.id, body);
   }
 
@@ -234,7 +236,7 @@ export class EventsController {
   }
 
   @Post('copilot/social-draft')
-  socialDraft(
+  async socialDraft(
     @CurrentUser() user: AuthUser,
     @Body()
     body: {
@@ -243,6 +245,7 @@ export class EventsController {
       achievement?: { title: string; detail: string; kind?: string };
     },
   ) {
+    await this.enforceCopilotLimit(user.id);
     return this.copilot.draftSocialUpdate(user.id, {
       provider: body.provider,
       audience: body.audience,
@@ -251,7 +254,8 @@ export class EventsController {
   }
 
   @Post('copilot/hands-free')
-  handsFree(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
+  async handsFree(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
+    await this.enforceCopilotLimit(user.id);
     return this.copilot.handsFree(user.id, body.prompt);
   }
 
@@ -261,7 +265,8 @@ export class EventsController {
   }
 
   @Post('copilot/autopilot')
-  runAutopilot(@CurrentUser() user: AuthUser, @Body() body: { prompt?: string }) {
+  async runAutopilot(@CurrentUser() user: AuthUser, @Body() body: { prompt?: string }) {
+    await this.enforceCopilotLimit(user.id);
     return this.autopilot.runAutopilot(user.id, body.prompt);
   }
 
@@ -273,5 +278,26 @@ export class EventsController {
   @Post('copilot/memory/device-sync')
   deviceMemorySave(@CurrentUser() user: AuthUser, @Body() body: DeviceMemoryPayload) {
     return this.copilot.saveDeviceMemorySync(user.id, body);
+  }
+
+  /**
+   * Shared per-user rate-limit gate for every Copilot POST endpoint that funnels
+   * into `FounderCopilotService.ask()` / `BuilderService.tryCopilotChatCompletion`.
+   * Matches the existing `copilot:ask` limiter (default 10/hr, 50/day per user).
+   */
+  private async enforceCopilotLimit(userId: string): Promise<void> {
+    const rateCheck = await this.rateLimiter.checkLimit(userId, 'copilot:ask');
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(
+            rateCheck.resetInMs / 1000,
+          )}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
   }
 }
