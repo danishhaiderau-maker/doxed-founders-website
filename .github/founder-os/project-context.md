@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(bot): Scenario C exit ladder -> profile_30 (30->20, 40->30, 50->40, 60->50) for profit-capture test
+feat(analyzer): add Spread performance tab (PnL/WR/EV by directional spread bucket)
 
 ## Last Activity
 
