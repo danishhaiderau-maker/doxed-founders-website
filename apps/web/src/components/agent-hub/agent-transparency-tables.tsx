@@ -133,17 +133,27 @@ export function AgentTransparencyTables({
     o.mode,
   ]);
 
-  const tradeRows = book.trades.slice(0, cap).map((t) => [
-    displayMelbourneTime(t.time),
-    t.tradeId,
-    t.direction,
-    fmtPrice(t.entry),
-    fmtPrice(t.exit),
-    String(t.durationMin),
-    `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%`,
-    formatUsd(t.netUsd),
-    ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd), t.aiBand]),
-  ]);
+  const tradeRows = book.trades.slice(0, cap).map((t) => {
+    // pnlPct defaults to 0 when the close path didn't record pnl_margin_pct
+    // (already-flat / immediate-flat reconciles). Showing "+0.00%" for a trade
+    // that actually lost/won cash is misleading — render "—" when the pct is 0
+    // but real cash P&L (netUsd) is non-zero, so the Net USD column stays truthful.
+    const pnlPctCell =
+      t.pnlPct === 0 && t.netUsd !== 0
+        ? '—'
+        : `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%`;
+    return [
+      displayMelbourneTime(t.time),
+      t.tradeId,
+      t.direction,
+      fmtPrice(t.entry),
+      fmtPrice(t.exit),
+      String(t.durationMin),
+      pnlPctCell,
+      formatUsd(t.netUsd),
+      ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd), t.aiBand]),
+    ];
+  });
 
   if (executionOnly) {
     return (

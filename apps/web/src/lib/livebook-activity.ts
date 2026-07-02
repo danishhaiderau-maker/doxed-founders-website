@@ -45,7 +45,12 @@ export function liveBookToActivity(
   const items: TradingAgentActivityEntry[] = [];
 
   for (const t of book.trades ?? []) {
-    const won = (t.pnlPct ?? 0) >= 0;
+    // Net USD (realized cash) is the authoritative win/loss signal. pnlPct can be
+    // null/0 for already-flat closes whose margin pct wasn't recorded — treating
+    // 0 as a win mislabels real losses as wins. Fall back to pnlPct only when netUsd
+    // is absent.
+    const winSignal = t.netUsd != null ? t.netUsd : (t.pnlPct ?? 0);
+    const won = winSignal >= 0;
     items.push({
       id: `${prefix}-trade-${t.tradeId}`,
       type: 'POSITION_CLOSED',

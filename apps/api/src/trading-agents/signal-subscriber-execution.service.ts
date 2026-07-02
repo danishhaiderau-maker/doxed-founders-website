@@ -2317,12 +2317,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             ? (exitPrice - fillPrice) * meta.qty
             : (fillPrice - exitPrice) * meta.qty
           : 0;
+      const pnlMarginPct =
+        fillPrice && fillPrice > 0
+          ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
+          : 0;
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
         venue: 'bitfinex',
         exit_price: exitPrice,
         exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
         pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         pnl_source: 'reconstructed',
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',

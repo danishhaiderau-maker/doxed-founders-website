@@ -951,6 +951,7 @@ export function AgentPublicProfile({
               onSelectDesk={setActiveDesk}
               hireHref={hireHref}
               botConnected={botConnected}
+              exchangeLiveBook={exchangeLiveBook}
             />
           </div>
 

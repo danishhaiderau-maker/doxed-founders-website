@@ -19,6 +19,7 @@ import {
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
 import type { TradingAgentSummary } from '@/lib/api';
+import type { TradingAgentDashboardState } from '@dcf/utils';
 
 export function CopyTradeDetailsStrip({
   agent,
@@ -203,6 +204,7 @@ export function CopyTradeHub({
   hireHref,
   slug,
   botConnected,
+  exchangeLiveBook,
 }: {
   slug?: string;
   signedIn: boolean;
@@ -218,6 +220,7 @@ export function CopyTradeHub({
   onSelectDesk: (desk: AgentDeskId) => void;
   hireHref: string;
   botConnected?: boolean;
+  exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
   const isLive = hired && instanceMode === 'live';
@@ -319,6 +322,7 @@ export function CopyTradeHub({
           exchangeLabel={exchangeLabel}
           isLiveSession={isLive}
           instanceStatus={instanceStatus}
+          liveBook={exchangeLiveBook}
         />
       )}
     </section>
