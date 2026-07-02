@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(home-stack): crash monitors respect user-stopped flag + Stop kills monitors (a+b)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
