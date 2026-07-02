@@ -8,6 +8,7 @@ import { AdminControlService } from './admin-control.service';
 import { ShowcaseRuntimeService } from './showcase-runtime.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
+import { BuilderScoreService } from '../founder-os/builder-score.service';
 
 @SkipThrottle()
 @Controller('admin-control')
@@ -17,6 +18,7 @@ export class AdminControlController {
     private readonly showcaseRuntime: ShowcaseRuntimeService,
     private readonly tradingAgents: TradingAgentsService,
     private readonly founderPromo: FounderPromoService,
+    private readonly builderScore: BuilderScoreService,
   ) {}
 
   @Public()
@@ -159,5 +161,17 @@ export class AdminControlController {
     },
   ) {
     return this.founderPromo.savePromoCredentials(user.id, body);
+  }
+
+  @UseGuards(AdminGuard)
+  @Get('builder-breakdown')
+  builderBreakdown() {
+    return this.builderScore.getTierBreakdown();
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('builder-breakdown/flag')
+  flagParasite(@Body() body: { userId: string }) {
+    return this.builderScore.flagParasite(body.userId).then(() => ({ ok: true }));
   }
 }

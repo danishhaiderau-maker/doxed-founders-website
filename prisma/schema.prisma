@@ -173,6 +173,14 @@ enum UserProgressTier {
   PROVEN_FOUNDER
 }
 
+/// Two-tier builder protection — gates free-token pool access.
+/// PARASITE = default for new signups (email only, no verification).
+/// VERIFIED_BUILDER = xVerified + (GitHub | Cursor) + recent commit activity.
+enum BuilderTier {
+  PARASITE
+  VERIFIED_BUILDER
+}
+
 enum FounderApplicationStatus {
   DRAFT
   SUBMITTED
@@ -394,6 +402,12 @@ model User {
   reputationPoints Int    @default(0)
   contributorLevel Int    @default(1)
   progressTier     UserProgressTier @default(EXPLORER)
+  /// Composite builder-score (0-100ish). Refreshed lazily by BuilderScoreService.
+  builderScore      Int       @default(0)
+  /// Tier derived from builderScore. PARASITE = default. Gates promo pool access.
+  builderTier       BuilderTier @default(PARASITE)
+  /// When builderScore/builderTier were last recomputed. Null = never.
+  scoreRefreshedAt  DateTime?
   notificationPrefs Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt

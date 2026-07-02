@@ -47,6 +47,7 @@ import { WallModule } from './wall/wall.module';
 import { ShareModule } from './share/share.module';
 import { AiRoutingModule } from './ai-routing/ai-routing.module';
 import { RateLimitModule } from './events/rate-limit.module';
+import { BuilderScoreModule } from './founder-os/builder-score.service';
 
 @Module({
   imports: [
@@ -99,6 +100,7 @@ import { RateLimitModule } from './events/rate-limit.module';
     ShareModule,
     AiRoutingModule,
     RateLimitModule,
+    BuilderScoreModule,
   ],
   providers: [
     {
