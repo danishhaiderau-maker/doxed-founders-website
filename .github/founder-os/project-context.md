@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(bot): spread hard-gate toggle — block limit orders per spread bucket
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
