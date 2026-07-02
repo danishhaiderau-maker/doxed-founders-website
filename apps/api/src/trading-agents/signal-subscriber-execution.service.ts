@@ -273,7 +273,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
-    await this.reconcileFilledParticipants(instance.userId, agentId, participantSince);
+    await this.reconcileFilledParticipants(
+      instance.userId,
+      agentId,
+      participantSince,
+      instance.exchangeProvider === 'bitfinex' ? creds : undefined,
+      instance.exchangeProvider === 'bitfinex' ? activeOrderIdSet : undefined,
+    );
 
     await this.reconcileGhostOpenLots(
       agentId,
@@ -533,6 +539,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         marginCap,
         maxConcurrent,
         intent.direction,
+        instance,
       );
       if (!eligibility.canEnter) {
         this.cycleAudit.stage('CAPACITY_REJECT', {
@@ -586,6 +593,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         managedOrderIds,
         marginCap,
         maxConcurrent,
+        undefined,
+        instance,
       );
       if (!eligibility.canEnter) {
         await this.prisma.tradingAgentInstance.update({
@@ -772,6 +781,62 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
   }
 
+  /**
+   * Surface foreign (unmanaged) Bitfinex order ids into dashboardState.orphanOrderIds
+   * so the operator can see WHICH order to cancel on the exchange UI. Surface-only —
+   * does NOT auto-cancel. dashboardState is JSON so no schema migration is required.
+   */
+  private async persistOrphanOrderIds(
+    instanceId: string,
+    foreignOrders: Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string }>,
+  ) {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const orphanOrderIds = foreignOrders.map((o) => ({
+      id: o.id,
+      // BitfinexActiveOrder.clientOrderId is not exposed by the REST parser today;
+      // surface what we have so the operator can identify the order on the UI.
+      amountRemaining: o.amount ?? null,
+      amountOrig: o.amountOrig ?? null,
+      price: o.price ?? null,
+      status: o.status ?? null,
+      orderType: o.orderType ?? null,
+    }));
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          orphanOrderIds,
+          orphanOrderDetectedAt: new Date().toISOString(),
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  /** Clear stale orphanOrderIds once no foreign orders remain. */
+  private async clearOrphanOrderIds(instanceId: string) {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    if (!Array.isArray(dash.orphanOrderIds) && dash.orphanOrderDetectedAt == null) return;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          orphanOrderIds: [],
+          orphanOrderDetectedAt: null,
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
   private async reconcileLotLedger(
     agentId: string,
     instance: TradingAgentInstance,
@@ -937,6 +1002,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? (flat.pnlUsd / (fillPrice * meta.qty)) * 100 * leverage
           : 0;
 
+      // Money-path safety: cancel any leftover Bitfinex orders on this orphan lot
+      // before recording the EXIT. Without this, a resting limit or stop left on
+      // the exchange freezes new Live Copy entries (real incident: orphaned
+      // Bitfinex order blocked entries for 60+ min until manual UI cancel).
+      // Mirror the normal exit path (~L2391) but with a pre-fill guard: if the
+      // order has already executed any quantity, leave it alone so
+      // reconcileFilledParticipants can heal it as a fill instead of double-counting.
+      const cancelledOids: number[] = [];
+      for (const oid of [meta.bitfinexOrderId, meta.stopOrderId]) {
+        if (oid == null) continue;
+        let orderResting: { amount: number; amountOrig: number } | null = null;
+        try {
+          orderResting = await this.activeTrading.findOrder(creds, oid).catch(() => null);
+        } catch {
+          orderResting = null;
+        }
+        if (!orderResting) {
+          // Already gone (filled, cancelled, or expired) — nothing to cancel.
+          this.logger.log(
+            `[RECONCILE-ADOPT] orphan oid=${oid} not resting (gone) — skip cancel ${userId} participant=${row.id}`,
+          );
+          continue;
+        }
+        const filledQty =
+          (orderResting.amountOrig ?? 0) - (orderResting.amount ?? 0);
+        if (filledQty > MIN_QTY_BTC) {
+          // Partial/full fill — let reconcileFilledParticipants heal as a fill.
+          this.logger.warn(
+            `[RECONCILE-ADOPT] orphan oid=${oid} has filled qty=${filledQty.toFixed(5)} — NOT cancelling (defer to fill reconcile) ${userId} participant=${row.id}`,
+          );
+          continue;
+        }
+        try {
+          this.logger.log(
+            `[RECONCILE-ADOPT] cancelling orphan oid=${oid} reason=ORPHAN_LEDGER_RECONCILE ${userId} participant=${row.id}`,
+          );
+          await this.activeTrading.cancelOrder(creds, oid);
+          cancelledOids.push(oid);
+          this.logger.log(
+            `[RECONCILE-ADOPT] cancelled orphan oid=${oid} ${userId} participant=${row.id}`,
+          );
+        } catch (err) {
+          // Idempotent: a 404 "already gone" or nonce error must not crash the
+          // reconcile loop. The order may have filled/cancelled between the
+          // findOrder check and the cancel.
+          this.logger.warn(
+            `[RECONCILE-ADOPT] cancel orphan oid=${oid} failed (idempotent, continuing): ${
+              err instanceof Error ? err.message : err
+            } ${userId} participant=${row.id}`,
+          );
+        }
+      }
+
       await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
         venue,
         exit_price: mark || fillPrice,
@@ -947,10 +1065,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         pnl_source: flat.pnlSource,
         source: 'hire',
         event: 'ORPHAN_LEDGER_RECONCILE',
+        cancelled_order_ids: cancelledOids,
       });
 
+      if (cancelledOids.length > 0) {
+        // Dedicated audit event so operators can see exactly which oids were
+        // cancelled at orphan-exit time (separate from the EXIT row).
+        await this.cycles.recordHireExecutionEvent(
+          userId,
+          agentId,
+          participant.cycleId,
+          'EXIT',
+          {
+            venue,
+            source: 'hire',
+            event: 'ORPHAN_LEDGER_RECONCILE_CANCEL',
+            cancelled_order_ids: cancelledOids,
+            participant_id: row.id,
+          },
+        );
+      }
+
       this.logger.warn(
-        `Orphan ledger lot closed ${userId} participant=${row.id} qty=${meta.qty} (ledger > exchange)`,
+        `Orphan ledger lot closed ${userId} participant=${row.id} qty=${meta.qty} cancelledOids=[${cancelledOids.join(
+          ',',
+        )}] (ledger > exchange)`,
       );
       remaining -= meta.qty;
     }
@@ -1001,6 +1140,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
     maxConcurrent: number,
     newDirection?: 'LONG' | 'SHORT',
+    instance?: { id: string },
   ): Promise<EntryEligibility> {
     let available = 0;
     try {
@@ -1020,12 +1160,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const pendingOrders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     const foreignPending = pendingOrders.filter((o) => !managedOrderIds.has(o.id));
     if (foreignPending.length > 0) {
+      // Surface the specific foreign order ids into dashboardState so the operator
+      // can see WHICH order to cancel on the Bitfinex UI instead of a vague count.
+      // Q1 default = surface-only — do NOT auto-cancel here. The block on new
+      // entries stays in place (returned below).
+      if (instance?.id) {
+        await this.persistOrphanOrderIds(instance.id, foreignPending).catch(() => {
+          /* dashboard surfacing is best-effort; must not block the entry gate */
+        });
+      }
       return {
         canEnter: false,
-        reason: `${foreignPending.length} unmanaged Bitfinex order(s) — cancel manually or wait before new copy entries.`,
+        reason: `${foreignPending.length} unmanaged Bitfinex order(s) — cancel manually or wait before new copy entries. (ids: ${foreignPending
+          .map((o) => o.id)
+          .join(', ')})`,
         availableUsd: available,
         slotsRemaining: 0,
       };
+    }
+
+    // No foreign orders — clear any stale orphanOrderIds so the dashboard
+    // doesn't show a ghost warning after the operator cancels.
+    if (instance?.id) {
+      await this.clearOrphanOrderIds(instance.id).catch(() => {
+        /* best-effort */
+      });
     }
 
     if (
@@ -1710,6 +1869,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     userId: string,
     agentId: string,
     participantScope: { createdAt?: { gte: Date } } = {},
+    creds?: ExchangeCredentials,
+    activeOrderIdSet?: Set<number>,
   ) {
     const stuck = await this.prisma.signalCycleParticipant.findMany({
       where: {
@@ -1735,6 +1896,94 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? payload.fill_price
           : 0;
       await this.healStuckPendingFill(row.id, row.cycleId, fill);
+    }
+
+    // Cancel-by-exchange detection: a PENDING_ENTRY participant with no FILLED
+    // event whose resting bitfinexOrderId is no longer in listActiveOrders was
+    // cancelled/expired by the exchange without ever filling. Without this, the
+    // row hangs forever and consumes a capacity slot. Heal it to EXIT with $0
+    // PnL (no fill = no PnL) and an audit event so operators can see why.
+    if (creds && activeOrderIdSet) {
+      await this.reconcileCancelByExchange(userId, agentId, creds, activeOrderIdSet, participantScope);
+    }
+  }
+
+  /**
+   * Heal PENDING_ENTRY participants whose bitfinexOrderId vanished from the
+   * exchange's active order list without ever recording a FILLED event. The
+   * exchange cancelled/expired the order; we close the ledger row at $0 PnL.
+   */
+  private async reconcileCancelByExchange(
+    userId: string,
+    agentId: string,
+    creds: ExchangeCredentials,
+    activeOrderIdSet: Set<number>,
+    participantScope: { createdAt?: { gte: Date } } = {},
+  ) {
+    // Only consider participants older than 120s so we don't race with order
+    // placement (the entry limit may take a few seconds to land on the book).
+    const candidates = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+        // NOT having a FILLED event is the discriminator — a FILLED row that
+        // vanished from the book is healed by healStuckPendingFill above.
+        events: { none: { eventType: 'FILLED' } },
+        updatedAt: { lt: new Date(Date.now() - 120_000) },
+        ...participantScope,
+      },
+      include: {
+        events: {
+          where: { eventType: 'FILLED' },
+          take: 1,
+        },
+      },
+    });
+
+    for (const row of candidates) {
+      // Still has a FILLED event? skip (covered by healStuckPendingFill).
+      if (row.events.length > 0) continue;
+      const meta = await this.loadExecutionMeta(row.id);
+      const oid = meta.bitfinexOrderId;
+      if (oid == null) continue;
+      // If the order is still resting on the exchange, it has NOT been
+      // cancelled — leave it alone.
+      if (activeOrderIdSet.has(oid)) continue;
+
+      // Double-check via a direct findOrder so we don't mis-classify an order
+      // that returned to the book between listActiveOrders and now. If the
+      // direct lookup finds it (e.g. transient nonce gap on the list call),
+      // skip — better to leave a false-positive hanging than to wrongly EXIT.
+      const stillThere = await this.activeTrading.findOrder(creds, oid).catch(() => null);
+      if (stillThere) continue;
+
+      const venue = row.venue ?? 'bitfinex';
+
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: row.id },
+        data: {
+          status: SignalCycleStatus.CLOSED,
+          exitPrice: null,
+          pnlUsd: 0,
+          pnlMarginPct: 0,
+        },
+      });
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+        venue,
+        exit_reason: 'RECONCILE_CANCEL_BY_EXCHANGE',
+        pnl_usd: 0,
+        pnl_margin_pct: 0,
+        source: 'hire',
+        event: 'RECONCILE_CANCEL_BY_EXCHANGE',
+        bitfinex_order_id: oid,
+        participant_id: row.id,
+      });
+
+      this.logger.warn(
+        `[RECONCILE-ADOPT] cancel-by-exchange detected ${userId} participant=${row.id} cycle=${row.cycleId} bitfinexOrderId=${oid} — order vanished with no FILLED event, marking EXIT @ $0`,
+      );
     }
   }
 

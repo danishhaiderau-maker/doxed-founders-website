@@ -1,0 +1,245 @@
+{
+  "$schema": "reconcile-spec.v1",
+  "title": "Reconcile-and-Adopt Conformance Spec",
+  "version": "1.0.0",
+  "status": "Phase 1 implemented (foundation + bleeding-stop). Adoption = Phase 2/3, TODO.",
+  "description": "Typed contract both layers (Layer A: bot.py, Layer B: NestJS) implement against. Defines order/position field shapes, match keys, adoption states, and the canonical event names emitted into the SignalCycleEvent stream and bot.py audit log. Phase 1 implements the bleeding-stop subset (cancel orphan orders, surface foreign orders, heal cancel-by-exchange). Adoption states RECONCILE_ADOPT_* are declared here as the contract for Phase 2/3.",
+  "layers": {
+    "layerA": {
+      "id": "layer-a",
+      "name": "Layer A — showcase trading bot (bot.py)",
+      "location": "services/btc-conservative-agent/bot.py",
+      "runtime": "python :7002 (https://bot.doxxedcrypto.digital)",
+      "ownership": "canonical showcase signal source. Phase 3 will add adoption hooks here. NOT edited in Phase 1."
+    },
+    "layerB": {
+      "id": "layer-b",
+      "name": "Layer B — NestJS Live Copy relay (signal-subscriber-execution.service.ts)",
+      "location": "apps/api/src/trading-agents/signal-subscriber-execution.service.ts",
+      "runtime": "node :7800 (Live Copy subscriber), reads bot bridge :7810",
+      "ownership": "subscriber-side reconciliation. Phase 1 + Phase 2 live here."
+    }
+  },
+  "orderFields": {
+    "bitfinexOrderId": {
+      "type": "integer",
+      "source": "Bitfinex v2 REST order id (row[0] of /auth/r/orders)",
+      "usedBy": ["Layer A", "Layer B"],
+      "notes": "Primary match key for resting limit orders and stop orders. Stored in ExecutionPayload.bitfinexOrderId / stopOrderId and in bot.py order ledger."
+    },
+    "clientOrderId": {
+      "type": "integer|null",
+      "source": "Bitfinex v2 cid (row[2] of /auth/r/orders)",
+      "usedBy": ["Layer A"],
+      "notes": "Client-assigned order id. Surface-only in Phase 1 (BitfinexActiveOrder parser does not currently expose cid). Phase 2 may extend the parser to surface cid for cross-layer matching."
+    },
+    "amount": {
+      "type": "number",
+      "source": "Bitfinex v2 row[6] — REMAINING amount on the book",
+      "notes": "amount == 0 means fully filled or cancelled. amount < amountOrig means partial fill."
+    },
+    "amountOrig": {
+      "type": "number",
+      "source": "Bitfinex v2 row[7] — ORIGINAL amount",
+      "notes": "filled = amountOrig - amount. Used by Phase 1 money-path guard: if filled > 0 do NOT cancel (defer to fill reconcile)."
+    },
+    "price": {
+      "type": "number",
+      "source": "Bitfinex v2 row[16]|row[14] — limit / aux limit price"
+    },
+    "status": {
+      "type": "string",
+      "source": "Bitfinex v2 row[13] — order status (ACTIVE, PARTIALLY FILLED, CANCELED, EXECUTED, etc.)",
+      "notes": "Phase 1 only inspects presence in listActiveOrders (active set); the status string is surfaced to operators via dashboardState.orphanOrderIds but not yet branched on."
+    }
+  },
+  "positionFields": {
+    "symbol": { "type": "string", "source": "Bitfinex v2 /auth/r/positions row[0]" },
+    "amount": {
+      "type": "number",
+      "source": "row[2] — signed position amount (long > 0, short < 0)",
+      "notes": "abs(amount) compared against ledger open qty to compute reconcile delta."
+    },
+    "basePrice": { "type": "number", "source": "row[3] — entry base price" },
+    "pnlUsd": { "type": "number", "source": "row[6] — unrealized PnL (USD)" },
+    "pnlPct": { "type": "number", "source": "row[7] — unrealized PnL (%)" }
+  },
+  "matchKeys": {
+    "bitfinexOrderId": {
+      "rank": 1,
+      "description": "Exact Bitfinex order id match. Highest confidence. Used by Phase 1 cancel logic and the orphan-exit guard.",
+      "fields": ["order.bitfinexOrderId", "order.stopOrderId"]
+    },
+    "clientOrderId": {
+      "rank": 2,
+      "description": "Client-assigned cid match. Phase 2/3 may use this to adopt orders placed by the other layer without a shared server-side id.",
+      "fields": ["order.clientOrderId"],
+      "phase": "TODO (Phase 2)"
+    },
+    "cycleIdUserId": {
+      "rank": 3,
+      "description": "Composite (cycleId, userId) match against SignalCycleParticipant. Used to attribute fills to ledger rows.",
+      "fields": ["participant.cycleId", "participant.userId"]
+    },
+    "fuzzy": {
+      "rank": 4,
+      "description": "Side + qty + price-band match for unattributed fills (reconcileUnattributedExchangeFills). Last resort.",
+      "fields": ["participant.direction", "participant.qty", "fill.price"],
+      "phase": "existing (Layer B)"
+    }
+  },
+  "adoptionStates": {
+    "WILD": {
+      "description": "Order/position exists on the exchange but no layer claims it. Surface-only in Phase 1 (dashboardState.orphanOrderIds).",
+      "phase1Action": "surface to dashboardState.orphanOrderIds; block new Live Copy entries; do NOT auto-cancel."
+    },
+    "CLAIMED_BY_A": {
+      "description": "Order placed by Layer A (bot.py). Layer B should mirror, not adopt, while A is alive.",
+      "phase1Action": "n/a (Layer A orders are not Layer B's to cancel)"
+    },
+    "CLAIMED_BY_B": {
+      "description": "Order placed by Layer B (NestJS Live Copy). Tracked via managedOrderIds set in evaluateEntryEligibility / reconcileLotLedger.",
+      "phase1Action": "tracked; cancels on normal exit and on orphan-exit (Item 1)."
+    },
+    "ORPHAN_LEDGER": {
+      "description": "Ledger open qty > exchange position qty. The exchange-side lot is gone (stop fired, partial external close, or cancel-by-exchange) but the ledger row is still OPEN.",
+      "phase1Action": "closeOrphanLedgerLots cancels leftover bitfinexOrderId + stopOrderId (with fill guard) and records ORPHAN_LEDGER_RECONCILE EXIT + ORPHAN_LEDGER_RECONCILE_CANCEL audit event."
+    },
+    "CANCEL_BY_EXCHANGE": {
+      "description": "PENDING_ENTRY participant whose bitfinexOrderId vanished from listActiveOrders with no FILLED event. The exchange cancelled/expired the order without filling.",
+      "phase1Action": "reconcileCancelByExchange marks participant CLOSED at $0 PnL and records RECONCILE_CANCEL_BY_EXCHANGE EXIT event."
+    },
+    "RECONCILE_ADOPT_A_TO_B": {
+      "description": "Layer B adopts an order originally placed by Layer A (e.g. bot.py crashed mid-place, NestJS continues managing it).",
+      "phase": "TODO (Phase 2)"
+    },
+    "RECONCILE_ADOPT_B_TO_A": {
+      "description": "Layer A adopts an order originally placed by Layer B (e.g. Live Copy relay died, bot.py takes over the resting order).",
+      "phase": "TODO (Phase 3)"
+    },
+    "RECONCILE_ADOPT_FILLED": {
+      "description": "Adoption of an already-filled order whose PnL must be attributed to the correct layer/ledger.",
+      "phase": "TODO (Phase 2/3)"
+    }
+  },
+  "events": {
+    "ORPHAN_LEDGER_RECONCILE": {
+      "layer": "Layer B",
+      "eventTypeStored": "EXIT",
+      "payloadFields": {
+        "event": "ORPHAN_LEDGER_RECONCILE",
+        "exit_reason": "MANUAL_PARTIAL_CLOSE",
+        "exit_price": "number",
+        "pnl_usd": "number",
+        "pnl_margin_pct": "number",
+        "qty_closed": "number",
+        "pnl_source": "'reconstructed' | 'already_flat'",
+        "source": "'hire'",
+        "cancelled_order_ids": "number[] (Phase 1 addition)"
+      },
+      "phase": "existing + Phase 1 (added cancelled_order_ids)"
+    },
+    "ORPHAN_LEDGER_RECONCILE_CANCEL": {
+      "layer": "Layer B",
+      "eventTypeStored": "EXIT",
+      "payloadFields": {
+        "event": "ORPHAN_LEDGER_RECONCILE_CANCEL",
+        "cancelled_order_ids": "number[]",
+        "participant_id": "string",
+        "venue": "string",
+        "source": "'hire'"
+      },
+      "emittedBy": "closeOrphanLedgerLots",
+      "phase": "Phase 1 (done)",
+      "purpose": "Dedicated audit row recording exactly which Bitfinex oids were cancelled at orphan-exit time, separate from the EXIT row."
+    },
+    "RECONCILE_FOREIGN": {
+      "layer": "Layer B",
+      "eventTypeStored": "n/a (dashboardState surfacing, not a SignalCycleEvent)",
+      "payloadFields": {
+        "dashboardState.orphanOrderIds": "Array<{ id, amountRemaining, amountOrig, price, status, orderType }>",
+        "dashboardState.orphanOrderDetectedAt": "ISO8601 string | null"
+      },
+      "emittedBy": "persistOrphanOrderIds / clearOrphanOrderIds (called from evaluateEntryEligibility)",
+      "phase": "Phase 1 (done, surface-only)",
+      "purpose": "Surface WHICH foreign Bitfinex order to cancel so the operator doesn't have to guess from a count. Auto-cancel is intentionally NOT performed in Phase 1."
+    },
+    "RECONCILE_CANCEL_BY_EXCHANGE": {
+      "layer": "Layer B",
+      "eventTypeStored": "EXIT",
+      "payloadFields": {
+        "event": "RECONCILE_CANCEL_BY_EXCHANGE",
+        "exit_reason": "RECONCILE_CANCEL_BY_EXCHANGE",
+        "pnl_usd": "0",
+        "pnl_margin_pct": "0",
+        "bitfinex_order_id": "number",
+        "participant_id": "string",
+        "venue": "string",
+        "source": "'hire'"
+      },
+      "emittedBy": "reconcileCancelByExchange",
+      "phase": "Phase 1 (done)",
+      "purpose": "Heal PENDING_ENTRY rows that hang forever when the exchange cancels/expired an order the API expected to fill. Marks CLOSED at $0 PnL (no fill = no PnL)."
+    },
+    "RECONCILE_ADOPT_A_TO_B": {
+      "layer": "Layer B",
+      "eventTypeStored": "TODO",
+      "phase": "TODO (Phase 2)",
+      "purpose": "Record that Layer B adopted an order originally placed by Layer A."
+    },
+    "RECONCILE_ADOPT_B_TO_A": {
+      "layer": "Layer A",
+      "eventTypeStored": "TODO (bot.py audit log)",
+      "phase": "TODO (Phase 3)",
+      "purpose": "Record that Layer A adopted an order originally placed by Layer B."
+    },
+    "RECONCILE_ADOPT_FILLED": {
+      "layer": "both",
+      "eventTypeStored": "TODO",
+      "phase": "TODO (Phase 2/3)",
+      "purpose": "Attribute a fill to the adopting layer for PnL/success-fee accounting."
+    }
+  },
+  "scenarios": {
+    "S1": {
+      "name": "Orphan ledger lot (ledger > exchange)",
+      "phase1Coverage": "Item 1 — closeOrphanLedgerLots cancels leftover bitfinexOrderId + stopOrderId with fill guard, emits ORPHAN_LEDGER_RECONCILE + ORPHAN_LEDGER_RECONCILE_CANCEL."
+    },
+    "S2": {
+      "name": "Foreign/unmanaged resting order on the exchange",
+      "phase1Coverage": "Item 2 — evaluateEntryEligibility surfaces ids into dashboardState.orphanOrderIds (surface-only). New entries blocked. No auto-cancel."
+    },
+    "S3": {
+      "name": "Cancel-by-exchange on a PENDING_ENTRY with no fill",
+      "phase1Coverage": "Item 3 — reconcileCancelByExchange marks CLOSED at $0 PnL, emits RECONCILE_CANCEL_BY_EXCHANGE."
+    },
+    "S4": {
+      "name": "Stuck PENDING_ENTRY with a FILLED event (heal to OPEN)",
+      "phase1Coverage": "existing — healStuckPendingFill (unchanged in Phase 1)."
+    },
+    "S5": {
+      "name": "Ghost OPEN lot missing qty/direction",
+      "phase1Coverage": "existing — reconcileGhostOpenLots (unchanged in Phase 1)."
+    },
+    "S6": {
+      "name": "Immediate exchange flat (manual or stop close)",
+      "phase1Coverage": "existing — reconcileImmediateExchangeFlat (unchanged in Phase 1)."
+    },
+    "S7": {
+      "name": "Adopt Layer A order into Layer B ledger",
+      "phase1Coverage": "TODO (Phase 2)."
+    },
+    "S8": {
+      "name": "Adopt Layer B order into Layer A bot.py ledger",
+      "phase1Coverage": "TODO (Phase 3)."
+    }
+  },
+  "moneyPathInvariants": [
+    "Every cancel is preceded by a findOrder state check; if filled > 0 the order is NOT cancelled (defer to fill reconcile).",
+    "Every cancel is wrapped in try/catch — a 404/nonce error must not crash the reconcile loop.",
+    "Every cancel emits an audit event with the cancelled oids.",
+    "Cancel-by-exchange healing only fires for participants older than 120s to avoid racing order placement.",
+    "Cancel-by-exchange healing requires the bitfinexOrderId to be absent from BOTH listActiveOrders AND a direct findOrder (defense against transient nonce gaps).",
+    "Cancel-by-exchange healing requires NO FILLED event in the participant's history (filled rows are healed by healStuckPendingFill with real PnL)."
+  ]
+}
