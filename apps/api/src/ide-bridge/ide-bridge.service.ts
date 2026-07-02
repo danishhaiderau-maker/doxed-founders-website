@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { FounderEventType } from '@prisma/client';
 import {
+  CLAUDE_CODE_CAPABILITIES,
   CURSOR_CAPABILITIES,
   DEFAULT_CAPABILITIES,
   OPENHANDS_CAPABILITIES,
@@ -14,6 +15,13 @@ import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import { BuilderService } from '../builder/builder.service';
 import { ConnectedWorkspaceService } from '../connected-workspace/connected-workspace.service';
+
+export type PendingIdeDispatchRow = {
+  id: string;
+  sessionId: string;
+  prompt: string;
+  ideProvider: string;
+};
 
 export type RecentAgentMessage = {
   role: 'user' | 'assistant';
@@ -220,11 +228,13 @@ export class IdeBridgeService {
   async getCapabilities(userId: string): Promise<{
     cursor: BridgeCapabilityReport;
     openHands: BridgeCapabilityReport;
+    claudeCode: BridgeCapabilityReport;
   }> {
     const connections = await this.builderService.getBuildWorkerConnections(userId);
     return {
       cursor: connections.cursor ? CURSOR_CAPABILITIES : DEFAULT_CAPABILITIES,
       openHands: connections.openHands ? OPENHANDS_CAPABILITIES : DEFAULT_CAPABILITIES,
+      claudeCode: CLAUDE_CODE_CAPABILITIES,
     };
   }
 
@@ -342,5 +352,72 @@ export class IdeBridgeService {
     const s = sessions.find((x) => x.id === sessionId);
     if (!s) return null;
     return s.messages ?? null;
+  }
+
+  /**
+   * Create a pending IDE dispatch row. The web UI calls this when a user
+   * selects a Cursor chat session and sends a message — Founder Node polls
+   * {@link getPendingDispatches} and types the prompt into the local Cursor.
+   */
+  async createDispatch(
+    userId: string,
+    sessionId: string,
+    prompt: string,
+    ideProvider: string,
+  ) {
+    const trimmed = prompt?.trim();
+    if (!trimmed) throw new Error('Prompt required');
+    return this.prisma.pendingIdeDispatch.create({
+      data: {
+        userId,
+        sessionId,
+        prompt: trimmed,
+        ideProvider: ideProvider || 'cursor',
+        status: 'PENDING',
+      },
+    });
+  }
+
+  /**
+   * Return up to `take` PENDING dispatches for a user, oldest first.
+   * Called by Founder Node on each sync cycle.
+   */
+  async getPendingDispatches(userId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
+    const rows = await this.prisma.pendingIdeDispatch.findMany({
+      where: { userId, status: 'PENDING' },
+      orderBy: { createdAt: 'asc' },
+      take,
+      select: { id: true, sessionId: true, prompt: true, ideProvider: true },
+    });
+    return rows;
+  }
+
+  /**
+   * Mark a dispatch as claimed by a Founder Node. Atomically flips PENDING →
+   * DISPATCHED only if the row still belongs to this user and is PENDING,
+   * returning the claimed row (or null if another node already claimed it).
+   */
+  async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
+    const existing = await this.prisma.pendingIdeDispatch.findFirst({
+      where: { id: dispatchId, userId, status: 'PENDING' },
+      select: { id: true, sessionId: true, prompt: true, ideProvider: true },
+    });
+    if (!existing) return null;
+    await this.prisma.pendingIdeDispatch.update({
+      where: { id: dispatchId },
+      data: { status: 'DISPATCHED', dispatchedAt: new Date() },
+    });
+    return existing;
+  }
+
+  async markDispatched(id: string, result?: string): Promise<void> {
+    await this.prisma.pendingIdeDispatch.update({
+      where: { id },
+      data: {
+        status: 'DISPATCHED',
+        dispatchedAt: new Date(),
+        ...(result ? { result: result.slice(0, 4000) } : {}),
+      },
+    });
   }
 }

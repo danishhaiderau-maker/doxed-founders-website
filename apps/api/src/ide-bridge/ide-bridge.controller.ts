@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { IdeBridgeService } from './ide-bridge.service';
@@ -33,6 +33,20 @@ export class IdeBridgeController {
     @Param('sessionId') sessionId: string,
   ) {
     return this.ideBridge.getSessionMessages(user.id, sessionId);
+  }
+
+  @Post('sessions/:sessionId/dispatch')
+  dispatchToIde(
+    @CurrentUser() user: AuthUser,
+    @Param('sessionId') sessionId: string,
+    @Body() body: { prompt: string; ideProvider?: string },
+  ) {
+    return this.ideBridge.createDispatch(
+      user.id,
+      sessionId,
+      body.prompt,
+      body.ideProvider ?? 'cursor',
+    );
   }
 }
 

@@ -50,10 +50,10 @@ export const IDE_ADAPTERS: IdeAdapter[] = [
   {
     id: 'claude_code',
     label: 'Claude Code',
-    available: false,
-    supportsResume: false,
-    supportsDispatch: false,
-    supportsEventStream: false,
+    available: true,
+    supportsResume: true,
+    supportsDispatch: true,
+    supportsEventStream: true,
   },
   {
     id: 'windsurf',

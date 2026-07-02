@@ -29,6 +29,7 @@ import type {
  */
 export type FounderNodeHeartbeatExt = FounderNodeHeartbeat & {
   capabilities?: BridgeCapabilityReport;
+  ideCapabilities?: Record<string, BridgeCapabilityReport>;
   desktop?: {
     online: boolean;
     platform: string;

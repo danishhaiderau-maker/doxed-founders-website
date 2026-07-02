@@ -11,6 +11,12 @@ const GITHUB_RELEASES =
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const STARTUP_CHECK_DELAYS_MS = [5_000, 90_000];
 
+let updateApiBaseUrl: string | null = null;
+
+export function configureUpdateChecks(opts: { apiBaseUrl: string }) {
+  updateApiBaseUrl = opts.apiBaseUrl.replace(/\/$/, '');
+}
+
 export type UpdateAssetKind = 'win-installer' | 'mac-dmg' | 'linux-appimage';
 
 export type UpdateInfo = {
@@ -94,6 +100,32 @@ function findAsset(
 }
 
 export async function fetchLatestRelease(): Promise<UpdateInfo | null> {
+  if (updateApiBaseUrl) {
+    const proxyRes = await fetch(`${updateApiBaseUrl}/api/founder-node/latest-release`, {
+      headers: { Accept: 'application/json', 'User-Agent': 'Founder-Node-Updater' },
+    });
+    if (!proxyRes.ok) throw new Error(`Release check failed (${proxyRes.status})`);
+    const release = (await proxyRes.json()) as {
+      tag_name?: string;
+      html_url?: string;
+      assets?: Array<{ name: string; browser_download_url: string }>;
+    };
+    if (!release?.tag_name || !release.assets?.length) return null;
+    const kind = pickAssetForThisPlatform(release.assets);
+    if (!kind) return null;
+    const asset = findAsset(release.assets, kind);
+    if (!asset?.browser_download_url) return null;
+    const version = release.tag_name.replace(/^founder-node-v/i, '');
+    return {
+      version,
+      tag: release.tag_name,
+      downloadUrl: asset.browser_download_url,
+      releasePageUrl: release.html_url ?? asset.browser_download_url,
+      assetName: asset.name,
+      kind,
+    };
+  }
+
   const res = await fetch(GITHUB_RELEASES, {
     headers: {
       Accept: 'application/vnd.github+json',

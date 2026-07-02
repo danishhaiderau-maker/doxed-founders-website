@@ -3,15 +3,18 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, X, Loader2, MessageSquare, Hash, ShieldCheck } from 'lucide-react';
+import { Send, X, Loader2, MessageSquare, Hash, ShieldCheck, ChevronDown } from 'lucide-react';
 import {
   fetchAggregatedWall,
   fetchMyWallGroups,
+  fetchMyWallUnread,
   fetchProjectWall,
   joinProjectWall,
+  markWallRead,
   postProjectWallMessage,
   type WallGroupEntry,
   type WallMessage,
+  type WallUnreadEntry,
 } from '@/lib/api';
 
 function fmtTime(ts: string): string {
@@ -27,10 +30,12 @@ function fmtTime(ts: string): string {
 function GroupRow({
   entry,
   active,
+  unread,
   onClick,
 }: {
   entry: WallGroupEntry;
   active: boolean;
+  unread: number;
   onClick: () => void;
 }) {
   const last = entry.lastMessage;
@@ -39,25 +44,30 @@ function GroupRow({
       type="button"
       onClick={onClick}
       className={`flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition ${
-        active ? 'border-violet-500/50 bg-violet-500/10' : 'border-transparent hover:bg-zinc-900/70'
+        active ? 'border-violet-500/50 bg-violet-500/10' : unread > 0 ? 'border-emerald-500/20 bg-emerald-500/[0.04]' : 'border-transparent hover:bg-zinc-900/70'
       }`}
     >
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-violet-300">
+      <div className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-violet-300`}>
         {entry.project.logoUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={entry.project.logoUrl} alt="" className="h-9 w-9 rounded-lg object-cover" />
         ) : (
           entry.project.ticker.slice(0, 2)
         )}
+        {unread > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-[#0B0B0B] bg-red-500 px-1 text-[9px] font-bold leading-none text-white">
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-sm font-medium text-white">{entry.project.name}</p>
+          <p className={`truncate text-sm ${unread > 0 ? 'font-semibold text-white' : 'font-medium text-white'}`}>{entry.project.name}</p>
           <span className="shrink-0 text-[10px] text-zinc-600">
             {last ? fmtTime(last.createdAt) : ''}
           </span>
         </div>
-        <p className="truncate text-[11px] text-zinc-500">
+        <p className={`truncate text-[11px] ${unread > 0 ? 'text-zinc-300' : 'text-zinc-500'}`}>
           {last ? last.body : `${entry.project.ticker} · join the conversation`}
         </p>
       </div>
@@ -126,6 +136,10 @@ export function FounderChatLauncher() {
   const [postError, setPostError] = useState<string | null>(null);
   const [needsJoin, setNeedsJoin] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [unread, setUnread] = useState<WallUnreadEntry[]>([]);
+  const [unreadTotal, setUnreadTotal] = useState(0);
+  const [jumpOpen, setJumpOpen] = useState(false);
+  const jumpRef = useRef<HTMLDivElement>(null);
 
   const loadGroups = useCallback(async () => {
     if (!token) return;
@@ -151,6 +165,17 @@ export function FounderChatLauncher() {
     }
   }, [token]);
 
+  const loadUnread = useCallback(async () => {
+    if (!token) return;
+    try {
+      const data = await fetchMyWallUnread(token);
+      setUnread(data.projects);
+      setUnreadTotal(data.total);
+    } catch {
+      /* non-fatal */
+    }
+  }, [token]);
+
   const loadRoom = useCallback(async (slug: string) => {
     setRoomLoading(true);
     try {
@@ -169,8 +194,9 @@ export function FounderChatLauncher() {
     if (open && token) {
       void loadGroups();
       void loadAggregated();
+      void loadUnread();
     }
-  }, [open, token, loadGroups, loadAggregated]);
+  }, [open, token, loadGroups, loadAggregated, loadUnread]);
 
   useEffect(() => {
     if (open && activeSlug) void loadRoom(activeSlug);
@@ -183,9 +209,31 @@ export function FounderChatLauncher() {
     const id = setInterval(() => {
       if (activeSlug) void loadRoom(activeSlug);
       else void loadAggregated();
+      void loadUnread();
     }, 9000);
     return () => clearInterval(id);
-  }, [open, token, activeSlug, loadRoom, loadAggregated]);
+  }, [open, token, activeSlug, loadRoom, loadAggregated, loadUnread]);
+
+  // Mark a project read when it becomes the active room (clears its unread badge).
+  useEffect(() => {
+    if (!token || !activeSlug) return;
+    setUnread((prev) => prev.filter((u) => u.slug !== activeSlug));
+    setUnreadTotal((prev) => Math.max(0, prev - (unread.find((u) => u.slug === activeSlug)?.unreadCount ?? 0)));
+    void markWallRead(activeSlug, token).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlug, token]);
+
+  // Close the quick-jump dropdown on outside click.
+  useEffect(() => {
+    if (!jumpOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (jumpRef.current && !jumpRef.current.contains(e.target as Node)) setJumpOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [jumpOpen]);
+
+  const unreadFor = (slug: string) => unread.find((u) => u.slug === slug)?.unreadCount ?? 0;
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -267,21 +315,84 @@ export function FounderChatLauncher() {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="relative inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-zinc-200 transition hover:bg-violet-500/10 hover:text-white"
-        title="Founder Chat — your project groups"
-        aria-label="Founder Chat"
-      >
-        <Send className="h-4 w-4 text-violet-300" />
-        <span className="hidden text-xs font-semibold lg:inline">Chat</span>
-        {groups.length > 0 && (
-          <span className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-violet-300/40 bg-violet-600 px-1 text-[9px] font-bold leading-none text-white">
-            {groups.length > 9 ? '9+' : groups.length}
-          </span>
+      <div ref={jumpRef} className="relative inline-flex items-center">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="relative inline-flex items-center gap-1.5 rounded-l-lg px-2.5 py-1.5 text-zinc-200 transition hover:bg-violet-500/10 hover:text-white"
+          title="Founder Chat — your project groups"
+          aria-label="Founder Chat"
+        >
+          <Send className="h-4 w-4 text-violet-300" />
+          <span className="hidden text-xs font-semibold lg:inline">Chat</span>
+          {unreadTotal > 0 && (
+            <span className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-red-400/40 bg-red-500 px-1 text-[9px] font-bold leading-none text-white">
+              {unreadTotal > 9 ? '9+' : unreadTotal}
+            </span>
+          )}
+          {groups.length > 0 && unreadTotal === 0 && (
+            <span className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-violet-300/40 bg-violet-600 px-1 text-[9px] font-bold leading-none text-white">
+              {groups.length > 9 ? '9+' : groups.length}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setJumpOpen((v) => !v);
+            if (!groups.length && token) void loadGroups();
+          }}
+          className="inline-flex items-center rounded-r-lg border-l border-zinc-700/60 px-1 py-1.5 text-zinc-300 transition hover:bg-violet-500/10 hover:text-white"
+          title="Quick jump to a project wall"
+          aria-label="Quick jump to project wall"
+        >
+          <ChevronDown className="h-3.5 w-3.5" />
+        </button>
+
+        {jumpOpen && (
+          <div className="absolute right-0 top-full z-[80] mt-1 w-64 overflow-hidden rounded-xl border border-zinc-700 bg-[#0B0B0B] shadow-2xl">
+            <div className="border-b border-zinc-800 px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+              Jump to project wall
+            </div>
+            <div className="max-h-72 overflow-y-auto py-1">
+              {groups.length === 0 && (
+                <p className="px-3 py-3 text-xs text-zinc-600">
+                  No groups yet.{' '}
+                  <Link href="/projects" className="text-violet-400 hover:underline" onClick={() => setJumpOpen(false)}>
+                    Browse projects
+                  </Link>
+                </p>
+              )}
+              {groups.map((g) => {
+                const u = unreadFor(g.project.slug);
+                return (
+                  <Link
+                    key={g.project.id}
+                    href={`/project/${g.project.slug}`}
+                    onClick={() => setJumpOpen(false)}
+                    className="flex items-center gap-2 px-3 py-2 text-left transition hover:bg-zinc-900"
+                  >
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-[10px] font-bold text-violet-300">
+                      {g.project.logoUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={g.project.logoUrl} alt="" className="h-7 w-7 rounded-md object-cover" />
+                      ) : (
+                        g.project.ticker.slice(0, 2)
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-zinc-200">{g.project.name}</span>
+                    {u > 0 && (
+                      <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-bold leading-none text-white">
+                        {u > 9 ? '9+' : u}
+                      </span>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
         )}
-      </button>
+      </div>
 
       {open && (
         <div className="fixed inset-0 z-[75] flex">
@@ -348,6 +459,7 @@ export function FounderChatLauncher() {
                       key={g.project.id}
                       entry={g}
                       active={activeSlug === g.project.slug}
+                      unread={unreadFor(g.project.slug)}
                       onClick={() => setActiveSlug(g.project.slug)}
                     />
                   ))}

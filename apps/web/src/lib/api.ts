@@ -3032,6 +3032,20 @@ export interface WallGroupEntry {
   } | null;
 }
 
+export interface WallUnreadEntry {
+  projectId: string;
+  slug: string;
+  name: string;
+  ticker: string;
+  logoUrl: string | null;
+  unreadCount: number;
+}
+
+export interface WallUnread {
+  total: number;
+  projects: WallUnreadEntry[];
+}
+
 export interface WallPinResult {
   success: boolean;
   pin: { id: string; kind: string; cost: number; messageId: string };
@@ -3093,6 +3107,18 @@ export function activateWallSummarizer(slug: string, token: string) {
 
 export function fetchMyWallGroups(token: string) {
   return apiFetch<WallGroupEntry[]>('/wall/me/groups', undefined, token);
+}
+
+export function fetchMyWallUnread(token: string) {
+  return apiFetch<WallUnread>('/wall/me/unread', undefined, token);
+}
+
+export function markWallRead(slug: string, token: string) {
+  return apiFetch<{ success: true; projectId: string; unreadCount: 0 }>(
+    `/wall/me/read/${encodeURIComponent(slug)}`,
+    { method: 'POST' },
+    token,
+  );
 }
 
 export function fetchAggregatedWall(token: string, limit = 60) {

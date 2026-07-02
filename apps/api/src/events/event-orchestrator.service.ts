@@ -3,12 +3,10 @@ import {
   FounderEvent,
   FounderEventStatus,
   FounderEventType,
-  NotificationType,
   Prisma,
   SuggestedUpdateStatus,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { NotificationsService } from '../notifications/notifications.service';
 import { FounderMetricsService } from './founder-metrics.service';
 
 @Injectable()
@@ -17,7 +15,6 @@ export class EventOrchestratorService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly notifications: NotificationsService,
     private readonly metrics: FounderMetricsService,
   ) {}
 
@@ -58,27 +55,15 @@ export class EventOrchestratorService {
     }
   }
 
+  /**
+   * Build/dev events (commits, deploys, build publishes) are founder-internal telemetry —
+   * they were previously surfaced as user-facing FOUNDER_EVENT notifications ("Day 34 — 8
+   * commits pushed", "Launch readiness updated", etc.) which spammed the Alerts feed.
+   * They are now cut at source: no notifyUser. The metrics refresh + auto-publish side
+   * effects remain so the founder-den dashboard still updates.
+   */
   private async onBuildSignal(event: FounderEvent) {
     const payload = event.payload as { suggestionId?: string; autoPublish?: boolean };
-    if (event.userId) {
-      const duplicateWindow = new Date(Date.now() - 4 * 60 * 60 * 1000);
-      const recent = await this.prisma.notification.findFirst({
-        where: {
-          userId: event.userId,
-          type: NotificationType.FOUNDER_EVENT,
-          title: event.title,
-          createdAt: { gte: duplicateWindow },
-        },
-      });
-      if (!recent) {
-        await this.notifications.notifyUser(event.userId, {
-          type: NotificationType.FOUNDER_EVENT,
-          title: event.title,
-          body: 'Review the suggested update in Founder Copilot — publish everywhere when ready.',
-          link: '/founder-den?tab=build',
-        });
-      }
-    }
 
     if (payload.autoPublish && payload.suggestionId && event.userId) {
       await this.tryAutoPublish(event.userId, payload.suggestionId);
@@ -92,31 +77,19 @@ export class EventOrchestratorService {
   private async onBuildPublished(event: FounderEvent) {
     if (!event.projectId) return;
 
-    const { score, previous } = await this.metrics.refreshLaunchReadiness(event.projectId);
+    await this.metrics.refreshLaunchReadiness(event.projectId);
     await this.metrics.refreshBubbleScore(event.projectId);
-
-    const delta = score - previous;
-    if (event.userId && delta !== 0) {
-      await this.notifications.notifyUser(event.userId, {
-        type: NotificationType.FOUNDER_EVENT,
-        title: 'Launch readiness updated',
-        body: `Now at ${score}% (${delta > 0 ? '+' : ''}${delta}% from this publish).`,
-        link: '/founder-den?tab=funding',
-      });
-    }
   }
 
-  private async onActivity(event: FounderEvent) {
-    if (!event.userId) return;
-    const payload = event.payload as { silent?: boolean };
-    if (payload.silent) return;
-
-    await this.notifications.notifyUser(event.userId, {
-      type: NotificationType.FOUNDER_EVENT,
-      title: event.title,
-      body: `Via ${event.source} — coordinated by Founder OS event bus.`,
-      link: '/founder-den?tab=build',
-    });
+  /**
+   * Agent-activity events (BUILD_QUEUE_CAPTURED, AGENT_RUN_COMPLETE, GITHUB_ISSUE_CREATED,
+   * COPILOT_COMMAND, QUICK_COMMAND, RAISE_ALLOCATION) were previously surfaced as
+   * FOUNDER_EVENT notifications with body "Via <source> — coordinated by Founder OS event
+   * bus." — pure agent-activity spam. Cut at source: no notifyUser.
+   */
+  private async onActivity(_event: FounderEvent) {
+    // Intentionally no-op for the Alerts feed. Event is still marked PROCESSED below so
+    // the orchestrator queue drains.
   }
 
   private async tryAutoPublish(userId: string, suggestionId: string) {
