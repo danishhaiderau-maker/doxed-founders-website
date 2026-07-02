@@ -57,7 +57,7 @@ export class FounderNodeController {
   @Public()
   @Get('latest-release')
   async getLatestRelease() {
-    const repo = process.env.FOUNDER_NODE_REPO || 'danishhaiderau-maker/founder-node';
+    const repo = process.env.FOUNDER_NODE_REPO || 'danishhaiderau-maker/doxed-founders-website';
     const token = process.env.GITHUB_TOKEN;
     const headers: Record<string, string> = { 'User-Agent': 'founder-os-api' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
