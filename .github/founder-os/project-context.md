@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(share,admin): founder-onboarding X share + AI paraphrase, consolidated AI keys
+fix(copilot): real typing stream + full Cursor history + model logging
 
 ## Last Activity
 
