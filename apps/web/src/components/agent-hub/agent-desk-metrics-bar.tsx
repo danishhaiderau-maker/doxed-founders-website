@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { formatPercent, formatUsd } from '@dcf/utils';
-import type { CopyRelaySimState } from '@dcf/utils';
+import type { CopyRelaySimState, TradingAgentDashboardState } from '@dcf/utils';
 import type { TradingAgentSummary } from '@/lib/api';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 
@@ -83,6 +83,16 @@ function useShowcaseDeltaSinceLiveStart(
 
     prevAnchorRef.current = anchorKey;
     if (capturedRef.current === anchorKey) return;
+    // Wait for the showcase bot's session P&L to load before anchoring. On a
+    // fresh arm (page load / resume), the first poll may report
+    // currentShowcasePnl = 0 before the showcase agent summary arrives.
+    // Anchoring at 0 makes the drift = currentShowcasePnl − 0 = the showcase's
+    // full session P&L, which looks like unreset drift after a restart. Skip
+    // capture until a non-zero value arrives; the showcase bot is essentially
+    // never at exactly 0 session P&L, so this only delays anchoring by one
+    // poll. A genuine 0 (brand-new showcase session) will anchor on the next
+    // non-zero poll, and if it stays 0 the drift stays 0 — which is correct.
+    if (currentShowcasePnl === 0) return;
     try {
       // Always capture fresh for a new anchor (overwrite any stale entry for
       // this key). A new key has no entry; an existing key only re-occurs if
@@ -112,6 +122,7 @@ export function AgentDeskMetricsBar({
   exchangeLabel,
   isLiveSession,
   instanceStatus,
+  liveBook,
 }: {
   activeDesk: AgentDeskId;
   userAgent: TradingAgentSummary;
@@ -120,6 +131,9 @@ export function AgentDeskMetricsBar({
   exchangeLabel?: string | null;
   isLiveSession: boolean;
   instanceStatus?: string | null;
+  /** Live-copy exchange book — used to recover real-trade realized P&L when the
+   *  backend `sessionPnlUsd` hasn't captured it yet (already-flat reconcile race). */
+  liveBook?: TradingAgentDashboardState['liveBook'] | null;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
   let title = '';
@@ -206,9 +220,22 @@ export function AgentDeskMetricsBar({
   } else if (isLiveSession) {
     const freeMargin = userAgent.exchangeBalanceUsd ?? 0;
     const equity = userAgent.equityUsd ?? freeMargin;
-    const sessionPnl = userAgent.sessionPnlUsd ?? 0;
-    const unrealized = userAgent.unrealizedPnlUsd ?? 0;
     const paused = instanceStatus === 'PAUSED';
+    // Real-trade realized P&L recovered from the live book when the backend
+    // `sessionPnlUsd` hasn't captured it yet. The already-flat reconcile path
+    // can lag the dashboard poll, leaving sessionPnlUsd at 0 while closed trades
+    // with real netUsd exist in the book. Sum those trades' Net USD so the
+    // Session P&L reflects actual exchange results. The book is session-scoped
+    // (buildSubscriberExchangeLiveBook filters participants by createdAt >=
+    // sessionStart), so this sum is the session's realized P&L.
+    const realizedFromBook = (liveBook?.trades ?? []).reduce(
+      (sum, t) => sum + (Number.isFinite(t.netUsd) ? t.netUsd : 0),
+      0,
+    );
+    const backendSessionPnl = userAgent.sessionPnlUsd ?? 0;
+    const usedBookFallback = backendSessionPnl === 0 && Math.abs(realizedFromBook) > 0.0001;
+    const sessionPnl = usedBookFallback ? realizedFromBook : backendSessionPnl;
+    const unrealized = userAgent.unrealizedPnlUsd ?? 0;
     // Drift = showcase session P&L (since the user's explicit live-copy arm)
     // − live copy P&L, on the SAME equity basis. The showcase side
     // (`showcaseDeltaSinceLiveStart`) is the bot's equity-based session P&L
@@ -225,7 +252,9 @@ export function AgentDeskMetricsBar({
       ? 'Paused — open positions remain'
       : userAgent.openPositionSide
         ? `${userAgent.openPositionSide} open · unreal ${unrealized >= 0 ? '+' : ''}${formatUsd(unrealized, 2)}`
-        : 'Since live start';
+        : usedBookFallback
+          ? 'Realized from closed trades'
+          : 'Since live start';
     title = paused ? `${exchange} live relay · paused` : `${exchange} live copy`;
     borderClass = paused ? 'border-amber-500/30 from-amber-950/15' : 'border-emerald-500/30 from-emerald-950/20';
     badgeClass = paused ? 'text-amber-300' : 'text-emerald-300';

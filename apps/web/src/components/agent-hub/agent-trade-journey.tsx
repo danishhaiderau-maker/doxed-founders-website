@@ -71,9 +71,12 @@ function classifyJourneyPhase(item: TradingAgentActivityEntry): JourneyPhase {
 }
 
 function resolvedPnl(item: TradingAgentActivityEntry, phase: JourneyPhase): number | null {
+  // Net USD (realized cash) is authoritative for win/loss. profitPct can be 0/null
+  // for already-flat closes whose margin pct wasn't recorded — using it would treat
+  // a real loss (netUsd < 0) as a win. Prefer netPnlUsd; fall back to profitPct.
+  if (item.netPnlUsd != null) return item.netPnlUsd >= 0 ? 1 : -1;
   if (item.profitPct != null) return item.profitPct;
-  if (phase === 'open' && item.netPnlUsd != null) return item.netPnlUsd >= 0 ? 1 : -1;
-  if (phase === 'closed' && item.netPnlUsd != null) return item.netPnlUsd >= 0 ? 1 : -1;
+  if (phase === 'open' || phase === 'closed') return null;
   return null;
 }
 
@@ -136,9 +139,14 @@ function formatJourneyPnl(item: TradingAgentActivityEntry, phase: JourneyPhase):
     const pctText = formatPercent(item.profitPct);
     const usd =
       item.netPnlUsd != null ? ` · ${formatUsd(item.netPnlUsd, 2)}` : '';
+    // Tone follows the authoritative Net USD sign when available: a 0% pnlPct
+    // paired with a negative netUsd is a real loss (already-flat close whose
+    // margin pct wasn't recorded) and must render red, not green.
+    const toneSignal =
+      item.netPnlUsd != null ? item.netPnlUsd : item.profitPct;
     return {
       text: `${pctText}${usd}`,
-      tone: item.profitPct >= 0 ? 'up' : 'down',
+      tone: toneSignal >= 0 ? 'up' : 'down',
     };
   }
   if (item.netPnlUsd != null) {
