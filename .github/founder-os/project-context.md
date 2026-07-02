@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(policy): re-lock Bitfinex policy after P&L attribution fix
+fix(home-stack): crash monitors respect user-stopped flag + Stop kills monitors (a+b)
 
 ## Last Activity
 
