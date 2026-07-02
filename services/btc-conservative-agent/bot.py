@@ -71,6 +71,7 @@ from combo_pathway_config import (
     is_combo_execution_lane,
     is_immediate_entry_lane,
     is_research_candidate_lane,
+    get_lane_ladder_override,
     is_virtual_chase_entry_lane,
 )
 from legacy_pathway_config import (
@@ -1357,6 +1358,22 @@ def capture_entry_gate_snapshot(signal: dict, ai: dict, edge_score: float, featu
         "research_adx_min": RESEARCH_ADX_MIN if research_max else None,
     }
 
+def get_lane_ladder(research_lane: str = None):
+    """Per-lane Scenario C profit-lock ladder — override if the lane declares one, else the global.
+
+    Returns a tuple (ladder, ladder_label, profile_id). Lanes without a `ladder` override in
+    COMBO_LANE_SPECS (e.g. the CONTINUOUS benchmark) fall back to the shared global
+    TRAIL_LADDER_SCENARIO_C. Used by the per-trade exit path (via get_exit_config_snapshot ->
+    pos.exit_config.trail_ladder) and by the LAB simulation so an OFF tile is pre-flighted with
+    its OWN ladder, not the global one.
+    """
+    override = get_lane_ladder_override(research_lane)
+    if override:
+        ladder, label, profile_id = override
+        return list(ladder), label or SCENARIO_C_LADDER_LABEL, profile_id or SCENARIO_C_PROFILE_ID
+    return list(TRAIL_LADDER_SCENARIO_C), SCENARIO_C_LADDER_LABEL, SCENARIO_C_PROFILE_ID
+
+
 def get_exit_config_snapshot(research_lane: str = None) -> dict:
     """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
@@ -1373,8 +1390,10 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
         thesis_pct = RECOVERY_MONSTER_THESIS_PCT
         mfe_protect = RECOVERY_MONSTER_MFE_PROTECT_PCT
     else:
-        ladder = list(TRAIL_LADDER_SCENARIO_C)
-        profile_id = SCENARIO_C_PROFILE_ID
+        # Per-lane Scenario C ladder override (e.g. AI60_SP3_VIRTUAL_CHASE = profile_30);
+        # falls back to the global TRAIL_LADDER_SCENARIO_C for the CONTINUOUS benchmark
+        # and any lane without an explicit override.
+        ladder, _lane_ladder_label, profile_id = get_lane_ladder(lane)
         scenario_c = SCENARIO_C_EXIT_PROFILE
     return {
         "trail_ladder": ladder,
@@ -15160,9 +15179,9 @@ def close_position(pos: dict, exit_reason: str):
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
             "final_direction": pos.get("dir"),
-            **{f"cfg_{k}": v for k, v in get_exit_config_snapshot().items() if not isinstance(v, (list, tuple))},
-            "cfg_trail_ladder_json": json.dumps(TRAIL_LADDER),
-            "exit_config_json": json.dumps(get_exit_config_snapshot()),
+            **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
+            "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
+            "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),
         }
     pos["status"] = "CLOSED"
     lane_unregister_open_position(pos)
@@ -15770,10 +15789,11 @@ def _pathway_lanes_live() -> dict:
     return live
 
 
-def _scenario_c_exit_spec():
+def _scenario_c_exit_spec(research_lane: str = None):
+    _, ladder_label, _ = get_lane_ladder(research_lane)
     return {
         "profile": "Scenario C",
-        "ladder": SCENARIO_C_LADDER_LABEL,
+        "ladder": ladder_label,
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
@@ -15894,6 +15914,8 @@ def build_static_pathway_lane_specs() -> dict:
         lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
         lane_promote = spec.get("promotion_criteria") or promote
         lane_kill = spec.get("kill_criteria") or kill
+        scenario_c = _scenario_c_exit_spec(lane_id)
+        _, lane_ladder_label, _ = get_lane_ladder(lane_id)
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
@@ -15911,7 +15933,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Spread {spread_label}",
                 entry_mode_label,
                 "25% chase",
-                f"Ladder {SCENARIO_C_LADDER_LABEL}",
+                f"Ladder {lane_ladder_label}",
             ] + (["Hide 1–2", "Market @6+60s"] if virtual_chase else []),
             "toggle_key": "research_lane_enabled",
             "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
@@ -15948,6 +15970,7 @@ def build_static_pathway_lane_specs() -> dict:
                 [f"Independence: {shared['independence']}"],
             ),
         })
+    scenario_c_continuous = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
     lanes.append({
         "lane": RESEARCH_LANE_CONTINUOUS,
         "label": RESEARCH_LANE_LABELS.get(RESEARCH_LANE_CONTINUOUS, "Continuous AI Research"),
@@ -15962,7 +15985,7 @@ def build_static_pathway_lane_specs() -> dict:
         "filter_chips": [
             f"AI ~{shared['ai_scan_cadence_sec']}s",
             "AI_SCAN mirror",
-            f"Ladder {SCENARIO_C_LADDER_LABEL}",
+            f"Ladder {get_lane_ladder(RESEARCH_LANE_CONTINUOUS)[1]}",
             "25% chase",
             "Toggle orders",
         ],
@@ -15983,7 +16006,7 @@ def build_static_pathway_lane_specs() -> dict:
             "orders": "Toggle ON → limit orders; OFF → shadow/data only (no limits)",
             "filters": {"spawn": "AI_SCAN_MIRROR", "entry_mode": "IMMEDIATE"},
         },
-        "exit": scenario_c,
+        "exit": scenario_c_continuous,
         "exit_path": "Scenario C frozen — ladder + thesis + MFE (see strategy block)",
         "promotion_criteria": "N/A — benchmark index (other tiles beat this)",
         "kill_criteria": "N/A — benchmark index",
@@ -16000,7 +16023,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "chase_detail": chase_detail,
                 "margin_usd": shared["margin_usd"],
             },
-            scenario_c,
+            scenario_c_continuous,
             [
                 "Orders: dashboard toggle ON → limits; OFF → shadow replay only",
                 f"Independence: {shared['independence']}",
@@ -16011,7 +16034,7 @@ def build_static_pathway_lane_specs() -> dict:
     exp_tile_start = len(COMBO_TILE_DISPLAY_ORDER) + 2
     for tile_offset, lane_id in enumerate(EXPERIMENTAL_TILE_DISPLAY_ORDER):
         spec = EXPERIMENTAL_LANE_SPECS[lane_id]
-        exit_spec = recovery_exit if spec.get("exit_profile") == "RECOVERY_MONSTER" else scenario_c
+        exit_spec = recovery_exit if spec.get("exit_profile") == "RECOVERY_MONSTER" else _scenario_c_exit_spec(lane_id)
         exit_path = (
             "Recovery Monster — thesis −40% · ladder 18→14 · MFE 2%"
             if spec.get("exit_profile") == "RECOVERY_MONSTER"
