@@ -19,6 +19,7 @@ import { FounderNodeInferenceService } from './founder-node-inference.service';
 import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
+import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
 
 @Controller('founder-node')
 export class FounderNodeController {
@@ -27,6 +28,7 @@ export class FounderNodeController {
     private readonly inference: FounderNodeInferenceService,
     private readonly syncJobs: FounderNodeSyncService,
     private readonly vaultSync: FounderNodeVaultSyncService,
+    private readonly ideBridge: IdeBridgeService,
   ) {}
 
   @Post('pairing-code')
@@ -210,5 +212,33 @@ export class FounderNodeController {
       body.sourceNodeId.trim(),
       body.vaultSyncVersion,
     );
+  }
+
+  /**
+   * Founder Node polls this on each sync cycle to pick up prompts the user
+   * typed into the Founder OS sidebar while a Cursor chat session was
+   * selected. Each returned dispatch should be opened in the local Cursor
+   * IDE and then reported via /dispatch/:id/complete.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Get('pending-dispatches')
+  pendingDispatches(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.ideBridge.getPendingDispatches(req.founderNode.userId);
+  }
+
+  /**
+   * Founder Node calls this after it has typed the prompt into Cursor (or
+   * given up). Atomically flips the dispatch row PENDING → DISPATCHED and
+   * records a short result string.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('dispatch/:id/complete')
+  completeDispatch(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('id') id: string,
+    @Body() body: { result?: string; error?: string },
+  ) {
+    const result = body.error ? `error: ${body.error}` : body.result;
+    return this.ideBridge.markDispatched(id, result);
   }
 }
