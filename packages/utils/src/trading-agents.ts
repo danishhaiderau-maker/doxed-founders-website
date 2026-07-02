@@ -199,6 +199,27 @@ export const TRADING_AGENT_STATUS_LABELS: Record<string, string> = {
   RETIRED: 'Retired',
 };
 
+export type TradingAgentSessionStats = {
+  pnlUsd?: number | null;
+  pnlPct?: number | null;
+  winRate?: number | null;
+  trades?: number | null;
+};
+
+function formatShareUsd(value: number, decimals = 2): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(value);
+}
+
+function formatSignedPct(value: number, decimals = 1): string {
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}${value.toFixed(decimals)}%`;
+}
+
 export function buildTradingAgentActionShareText(input: {
   agentName: string;
   action: string;
@@ -207,12 +228,36 @@ export function buildTradingAgentActionShareText(input: {
   edgeRequired?: number | null;
   marketRegime?: string | null;
   hubUrl?: string;
+  /** When provided, the action + Edge Score lines are replaced with real
+   *  full-session stats (Total P&L, P&L %, Win Rate, Trades). Pass an empty
+   *  object (or null fields) while stats are loading to render a neutral
+   *  "—" line instead of the stale "WAITING / Edge Score: 0/0" placeholder. */
+  sessionStats?: TradingAgentSessionStats | null;
 }): string {
-  const lines = [`🤖 ${input.agentName}`, input.action];
-  if (input.reason?.trim()) lines.push(`Reason: ${input.reason.trim()}`);
-  if (input.edgeScore != null && input.edgeRequired != null) {
-    lines.push(`Edge Score: ${input.edgeScore}/${input.edgeRequired}`);
+  const lines = [`🤖 ${input.agentName}`];
+  if (input.sessionStats) {
+    const s = input.sessionStats;
+    const pnlUsd =
+      typeof s.pnlUsd === 'number' && Number.isFinite(s.pnlUsd) ? s.pnlUsd : null;
+    const pnlPct =
+      typeof s.pnlPct === 'number' && Number.isFinite(s.pnlPct) ? s.pnlPct : null;
+    const winRate =
+      typeof s.winRate === 'number' && Number.isFinite(s.winRate) ? s.winRate : null;
+    const trades =
+      typeof s.trades === 'number' && Number.isFinite(s.trades) ? s.trades : null;
+    const pnlStr = pnlUsd == null ? '—' : `${pnlUsd >= 0 ? '+' : ''}${formatShareUsd(pnlUsd, 2)}`;
+    const pnlPctStr = pnlPct == null ? '—' : formatSignedPct(pnlPct, 1);
+    lines.push(`Session P&L: ${pnlStr} (${pnlPctStr})`);
+    const winRateStr = winRate == null ? '—' : `${winRate.toFixed(1)}%`;
+    const tradesStr = trades == null ? '—' : String(trades);
+    lines.push(`Win Rate: ${winRateStr} · Trades: ${tradesStr}`);
+  } else {
+    lines.push(input.action);
+    if (input.edgeScore != null && input.edgeRequired != null) {
+      lines.push(`Edge Score: ${input.edgeScore}/${input.edgeRequired}`);
+    }
   }
+  if (input.reason?.trim()) lines.push(`Reason: ${input.reason.trim()}`);
   if (input.marketRegime?.trim()) lines.push(`Market: ${input.marketRegime.trim()}`);
   lines.push('', 'Watch transparent AI trading live on Doxxed Crypto 👇');
   lines.push('#AgentHub #Crypto @DoxxedCrypto');
