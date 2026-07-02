@@ -239,7 +239,16 @@ export default function ProjectDetailPage() {
                 <h2 className="text-sm font-semibold uppercase tracking-widest text-violet-300">Community wall</h2>
                 <p className="text-[11px] text-zinc-600">Telegram-style group chat · founders & investors</p>
               </div>
-              <ProjectWall slug={slug} ddollarBalance={ddollarBalance} />
+              <ProjectWall
+                slug={slug}
+                ddollarBalance={ddollarBalance}
+                summarizerEligible={
+                  project.listingKind === 'verified' &&
+                  (project.founder?.verifications?.length ?? 0) > 0 &&
+                  (Boolean(project.isLiveToken) || project.lifecycleStage === 'LIVE_TRADING')
+                }
+                shareOrigin={origin}
+              />
             </section>
 
             {/* ── Collapsible details panel (everything else tucked away) ── */}
