@@ -1,6 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { estimateLlmTokensFromText, parseOpenAiStyleUsage } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
+import { PlatformAdoptionService } from '../projects/platform-adoption.service';
 import { FounderPromoService, GLM_PROMO_BASE_URL, GLM_PROMO_DEFAULT_MODEL } from '../founder-os/founder-promo.service';
 
 /** DDollar cost to upgrade (pin/highlight/promote) a subtopic on a wall. Flat for all three kinds. */
@@ -88,6 +90,7 @@ export class WallService {
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly founderPromo: FounderPromoService,
+    private readonly adoption: PlatformAdoptionService,
   ) {}
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -595,7 +598,10 @@ export class WallService {
       select: { body: true, createdAt: true, author: { select: { name: true, platformHandle: true } } },
     });
 
-    const analysis = await this.runSummarizerLlm(project.name, project.ticker, recent);
+    const analysis = await this.runSummarizerLlm(project.name, project.ticker, recent, {
+      userId,
+      projectId: project.id,
+    });
     const sentiment = this.normalizeSentiment(analysis.sentimentLabel);
 
     const row = await this.prisma.projectWallSummary.upsert({
@@ -746,6 +752,7 @@ export class WallService {
     projectName: string,
     ticker: string,
     messages: { body: string; createdAt: Date; author: { name: string | null; platformHandle: string | null } }[],
+    ctx: { userId: string; projectId: string },
   ): Promise<{ summary: string; sentimentLabel: string; reasoning: string }> {
     const apiKey = await this.founderPromo.getDecryptedPlatformGlmKey();
     if (!apiKey) {
@@ -785,6 +792,7 @@ export class WallService {
       `Return the JSON object now.`;
 
     let text: string | null = null;
+    let usage: { promptTokens: number; completionTokens: number } | null = null;
     try {
       const res = await fetch(`${GLM_PROMO_BASE_URL}/chat/completions`, {
         method: 'POST',
@@ -802,8 +810,10 @@ export class WallService {
       if (res.ok) {
         const data = (await res.json()) as {
           choices?: { message?: { content?: string } }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
         };
         text = data.choices?.[0]?.message?.content ?? null;
+        usage = parseOpenAiStyleUsage(data);
       }
     } catch {
       text = null;
@@ -812,6 +822,22 @@ export class WallService {
     if (!text) {
       throw new ServiceUnavailableException('Chat Summarizer LLM call failed. Try again in a moment.');
     }
+
+    // Log token usage so the Platform Adoption chart counts summarizer inference.
+    // Falls back to a conservative char/4 estimate when the provider omits usage.
+    const promptTokens = usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
+    const completionTokens = usage?.completionTokens ?? estimateLlmTokensFromText(text);
+    void this.adoption
+      .recordAiUsage({
+        userId: ctx.userId,
+        projectId: ctx.projectId,
+        provider: 'GLM',
+        source: 'wall_summarizer',
+        billingSource: 'platform_promo',
+        promptTokens,
+        completionTokens,
+      })
+      .catch(() => undefined);
 
     return this.parseSummarizerResponse(text);
   }

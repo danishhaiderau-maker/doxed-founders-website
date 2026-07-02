@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { FounderOsModule } from '../founder-os/founder-os.module';
+import { ProjectsModule } from '../projects/projects.module';
 import { ShareController } from './share.controller';
 import { ShareService } from './share.service';
 
 @Module({
-  imports: [FounderOsModule],
+  imports: [FounderOsModule, ProjectsModule],
   controllers: [ShareController],
   providers: [ShareService],
 })
