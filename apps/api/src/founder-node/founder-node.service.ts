@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
-import { parseFounderCloudState, type BridgeWorkspace } from '@dcf/utils';
+import { parseFounderCloudState, type BridgeSession, type BridgeWorkspace } from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
 import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -180,6 +180,14 @@ export class FounderNodeService {
     }).workspaces;
     if (Array.isArray(workspaces) && workspaces.length > 0) {
       void this.desktopBridge.saveWorkspaces(node.userId, node.nodeId, workspaces);
+    }
+    // Founder Node v0.6.1+ sends sessions[] — real Cursor chat/agent sessions
+    // read from state.vscdb. Persisted for /ide-bridge/sessions.
+    const sessions = (input as FounderNodeHeartbeat & {
+      sessions?: BridgeSession[];
+    }).sessions;
+    if (Array.isArray(sessions) && sessions.length > 0) {
+      void this.desktopBridge.saveSessions(node.userId, node.nodeId, sessions);
     }
     if (input.founderCloud) {
       void this.persistFounderCloudFromHeartbeat(node.userId, input.label, input.founderCloud);

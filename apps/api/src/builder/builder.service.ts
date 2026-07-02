@@ -1498,6 +1498,765 @@ export class BuilderService {
     }
   }
 
+  /**
+   * Streaming variant of completionWithProvider. Yields text deltas as they
+   * arrive from the LLM. Only OpenAI-compatible (DeepSeek, GLM, OpenAI,
+   * OpenRouter) and Anthropic + Gemini stream natively; other providers fall
+   * back to a single chunk with the full text so the SSE contract still works.
+   */
+  private async *completionWithProviderStream(
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model?: string,
+  ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
+    switch (provider) {
+      case AiProvider.OPENAI:
+        return yield* this.streamOpenAiCompatible(
+          'https://api.openai.com/v1/chat/completions',
+          apiKey,
+          system,
+          userPrompt,
+          model ?? 'gpt-4o-mini',
+        );
+      case AiProvider.GLM:
+        return yield* this.streamOpenAiCompatible(
+          `${GLM_PROMO_BASE_URL}/chat/completions`,
+          apiKey,
+          system,
+          userPrompt,
+          model ?? GLM_PROMO_DEFAULT_MODEL,
+        );
+      case AiProvider.DEEPSEEK:
+        return yield* this.streamOpenAiCompatible(
+          'https://api.deepseek.com/chat/completions',
+          apiKey,
+          system,
+          userPrompt,
+          model ?? 'deepseek-chat',
+        );
+      case AiProvider.OPENROUTER:
+        return yield* this.streamOpenAiCompatible(
+          'https://openrouter.ai/api/v1/chat/completions',
+          apiKey,
+          system,
+          userPrompt,
+          model ?? 'openrouter/auto',
+          {
+            'HTTP-Referer': 'https://doxxedcrypto.digital',
+            'X-Title': 'Doxxed Founder OS',
+          },
+        );
+      case AiProvider.ANTHROPIC:
+        return yield* this.streamAnthropic(apiKey, system, userPrompt, model);
+      case AiProvider.GEMINI:
+        return yield* this.streamGemini(apiKey, system, userPrompt, model);
+      default: {
+        // Non-streaming providers: emit one chunk with the full text.
+        const result = await this.completionWithProvider(
+          provider,
+          apiKey,
+          system,
+          userPrompt,
+          model,
+        );
+        if (result?.text) yield result.text;
+        return result;
+      }
+    }
+  }
+
+  /** Streams an OpenAI-compatible chat completion (DeepSeek, GLM, OpenAI, OpenRouter). */
+  private async *streamOpenAiCompatible(
+    url: string,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model: string,
+    extraHeaders: Record<string, string> = {},
+  ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.4,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let full = '';
+    let usage: LlmUsage | null = null;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const rawLine = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!rawLine || !rawLine.startsWith('data:')) continue;
+          const payload = rawLine.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const json = JSON.parse(payload) as {
+              choices?: { delta?: { content?: string } }[];
+              usage?: { prompt_tokens?: number; completion_tokens?: number };
+            };
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) {
+              full += delta;
+              yield delta;
+            }
+            if (json.usage) usage = parseOpenAiStyleUsage(json);
+          } catch {
+            // ignore malformed keepalive lines
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return full ? { text: full, usage } : null;
+  }
+
+  /** Streams an Anthropic messages completion. */
+  private async *streamAnthropic(
+    apiKey: string,
+    system: string,
+    user: string,
+    model?: string,
+  ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: model ?? 'claude-3-5-haiku-latest',
+        max_tokens: 2048,
+        system,
+        messages: [{ role: 'user', content: user }],
+        stream: true,
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let full = '';
+    let usage: LlmUsage | null = null;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const rawLine = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!rawLine.startsWith('data:')) continue;
+          const payload = rawLine.slice(5).trim();
+          try {
+            const json = JSON.parse(payload) as {
+              type: string;
+              delta?: { type: string; text?: string };
+              message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+              usage?: { input_tokens?: number; output_tokens?: number };
+            };
+            if (json.type === 'content_block_delta' && json.delta?.text) {
+              full += json.delta.text;
+              yield json.delta.text;
+            }
+            if (json.type === 'message_start' && json.message?.usage) {
+              usage = parseAnthropicUsage({ usage: json.message.usage });
+            }
+            if (json.type === 'message_delta' && json.usage) {
+              usage = parseAnthropicUsage({ usage: json.usage });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return full ? { text: full, usage } : null;
+  }
+
+  /** Streams a Gemini generateContent completion (SSE alt format). */
+  private async *streamGemini(
+    apiKey: string,
+    system: string,
+    user: string,
+    model?: string,
+  ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
+    const modelId = model ?? 'gemini-2.0-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: user }] }],
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let full = '';
+    let usage: LlmUsage | null = null;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const rawLine = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!rawLine.startsWith('data:')) continue;
+          const payload = rawLine.slice(5).trim();
+          try {
+            const json = JSON.parse(payload) as {
+              candidates?: { content?: { parts?: { text?: string }[] } }[];
+              usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+            };
+            const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) {
+              full += text;
+              yield text;
+            }
+            if (json.usageMetadata) {
+              usage = {
+                promptTokens: json.usageMetadata.promptTokenCount ?? 0,
+                completionTokens: json.usageMetadata.candidatesTokenCount ?? 0,
+              };
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return full ? { text: full, usage } : null;
+  }
+
+  /**
+   * Streaming variant of tryCopilotChatCompletion. Resolves provider routing
+   * up front, then returns an async generator that yields text deltas. The
+   * final return value of the generator is the resolved provider (for
+   * attribution). Falls back to non-streaming chunk emission when the chosen
+   * provider doesn't support native streaming. Mirrors the routing in
+   * tryCopilotChatCompletion so DeepSeek platform fallback + promo keys work.
+   */
+  async tryCopilotChatCompletionStream(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    options?: {
+      forceProvider?: AiProvider;
+      skipMemoryPrefix?: boolean;
+      founderBrainTask?: FounderBrainTask;
+    },
+  ): Promise<{
+    ok: true;
+    provider: AiProvider;
+    founderBrainTask: FounderBrainTask;
+    stream: AsyncGenerator<string, AiProvider>;
+  } | { ok: false; llmErrors: string[]; founderBrainTask: FounderBrainTask }> {
+    let effectiveSystem = system;
+    if (!options?.skipMemoryPrefix && !system.includes('Founder Memory Graph')) {
+      const prefix = await this.memoryGraph.getPrefixForUser(userId);
+      effectiveSystem = `${prefix}${system}`;
+    }
+
+    const founderBrainTask =
+      options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt);
+
+    if (options?.forceProvider) {
+      const forced = await this.tryCopilotChatCompletionForcedStream(
+        userId,
+        effectiveSystem,
+        userPrompt,
+        options.forceProvider,
+      );
+      if (forced.ok) {
+        return { ...forced, founderBrainTask };
+      }
+      return { ok: false, llmErrors: forced.llmErrors, founderBrainTask };
+    }
+
+    const settings = await this.ensureSettings(userId);
+    const usable = await this.listUsableLlmCredentialProviders(userId);
+    const routedKeys = buildFounderBrainProviderOrder(
+      founderBrainTask,
+      settings.defaultProvider as import('@dcf/utils').AiProviderKey,
+    );
+    const order = routedKeys as AiProvider[];
+    const llmErrors: string[] = [];
+
+    // Ollama / Phala: stream not wired — fall back to single-chunk non-streaming.
+    if (settings.defaultProvider === AiProvider.OLLAMA_LOCAL) {
+      const nodeResult = await this.founderNodeInference.runViaFounderNode(
+        userId,
+        effectiveSystem,
+        userPrompt,
+        settings.preferredModel,
+      );
+      if (nodeResult.ok) {
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, effectiveSystem, userPrompt, nodeResult.text, 'copilot');
+        return {
+          ok: true,
+          provider: AiProvider.OLLAMA_LOCAL,
+          founderBrainTask,
+          stream: this.singleChunkStream(nodeResult.text, AiProvider.OLLAMA_LOCAL),
+        };
+      }
+      llmErrors.push(...nodeResult.errors);
+      const direct = await this.tryDirectOllama(userId, effectiveSystem, userPrompt, settings.preferredModel);
+      if (direct.ok) {
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, effectiveSystem, userPrompt, direct.text, 'copilot');
+        return {
+          ok: true,
+          provider: AiProvider.OLLAMA_LOCAL,
+          founderBrainTask,
+          stream: this.singleChunkStream(direct.text, AiProvider.OLLAMA_LOCAL),
+        };
+      }
+      if (direct.error) llmErrors.push(direct.error);
+    }
+
+    if (settings.defaultProvider === AiProvider.PHALA) {
+      const phala = await this.resolvePhalaCredentials(userId);
+      if (phala) {
+        try {
+          const chat = await callPhalaChat({
+            apiKey: phala.apiKey,
+            inferenceUrl: phala.inferenceUrl,
+            model: settings.preferredModel ?? phala.model,
+            system: effectiveSystem,
+            userPrompt,
+          });
+          if (chat?.text) {
+            await this.recordPhalaChat(userId, chat);
+            await this.logAiTokenUsage(userId, AiProvider.PHALA, effectiveSystem, userPrompt, chat.text, 'copilot');
+            return {
+              ok: true,
+              provider: AiProvider.PHALA,
+              founderBrainTask,
+              stream: this.singleChunkStream(chat.text, AiProvider.PHALA),
+            };
+          }
+          llmErrors.push('PHALA: empty response');
+        } catch (err) {
+          llmErrors.push(`PHALA: ${err instanceof Error ? err.message : 'request failed'}`);
+        }
+      } else {
+        llmErrors.push('PHALA: connect Phala Private AI or enable platform credits');
+      }
+    }
+
+    for (const provider of order) {
+      const cfg = aiProviderConfig(provider);
+      if (!cfg?.credentialProvider) continue;
+      if (provider === AiProvider.PHALA) {
+        const phala = await this.resolvePhalaCredentials(userId);
+        if (!phala) continue;
+        const model =
+          provider === settings.defaultProvider
+            ? settings.preferredModel ?? phala.model
+            : phala.model;
+        try {
+          const chat = await callPhalaChat({
+            apiKey: phala.apiKey,
+            inferenceUrl: phala.inferenceUrl,
+            model,
+            system: effectiveSystem,
+            userPrompt,
+          });
+          if (chat?.text) {
+            await this.recordPhalaChat(userId, chat);
+            await this.logAiTokenUsage(userId, provider, effectiveSystem, userPrompt, chat.text, 'copilot');
+            return {
+              ok: true,
+              provider,
+              founderBrainTask,
+              stream: this.singleChunkStream(chat.text, provider),
+            };
+          }
+          llmErrors.push(`${provider}: empty response`);
+        } catch (err) {
+          llmErrors.push(`${provider}: ${err instanceof Error ? err.message : 'request failed'}`);
+        }
+        continue;
+      }
+      if (cfg.connectMode !== 'api_key') continue;
+
+      const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
+      if (!resolved) continue;
+      const { apiKey, billingSource } = resolved;
+      const model =
+        provider === settings.defaultProvider
+          ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+          : cfg.defaultModel ?? undefined;
+
+      try {
+        const gen = this.completionWithProviderStream(provider, apiKey, effectiveSystem, userPrompt, model);
+        const first = await gen.next();
+        if (first.done) {
+          // No content emitted at all — treat as empty.
+          if (first.value?.text) {
+            await this.logAiTokenUsage(userId, provider, effectiveSystem, userPrompt, first.value.text, 'copilot', first.value.usage, billingSource);
+            return {
+              ok: true,
+              provider,
+              founderBrainTask,
+              stream: this.singleChunkStream(first.value.text, provider),
+            };
+          }
+          llmErrors.push(`${provider}: empty response`);
+          continue;
+        }
+        // We have a live stream. Wrap it so the caller keeps consuming and we
+        // log usage on completion.
+        const firstChunk = first.value as string;
+        return {
+          ok: true,
+          provider,
+          founderBrainTask,
+          stream: this.wrapStreamWithUsageLog(
+            gen,
+            firstChunk,
+            userId,
+            provider,
+            effectiveSystem,
+            userPrompt,
+            billingSource,
+          ),
+        };
+      } catch (err) {
+        llmErrors.push(`${provider}: ${err instanceof Error ? err.message : 'request failed'}`);
+      }
+    }
+
+    const platformBrain = await this.tryPlatformDeepseekFallbackStream(
+      userId,
+      effectiveSystem,
+      userPrompt,
+      llmErrors,
+    );
+    if (platformBrain) {
+      return { ok: true, provider: AiProvider.DEEPSEEK, founderBrainTask, stream: platformBrain };
+    }
+
+    const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+    if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
+      llmErrors.push(this.founderPromo.promoEndedMessage(promoStatus));
+    }
+
+    return {
+      ok: false,
+      llmErrors: llmErrors.length > 0 ? llmErrors : ['No LLM API key configured'],
+      founderBrainTask,
+    };
+  }
+
+  /** Single-chunk async generator for non-streaming providers. */
+  private async *singleChunkStream(text: string, provider: AiProvider): AsyncGenerator<string, AiProvider> {
+    if (text) yield text;
+    return provider;
+  }
+
+  /** Resume a streaming generator after the first chunk has been pulled. */
+  private async *wrapStreamWithUsageLog(
+    gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>,
+    firstChunk: string,
+    userId: string,
+    provider: AiProvider,
+    system: string,
+    userPrompt: string,
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain',
+  ): AsyncGenerator<string, AiProvider> {
+    yield firstChunk;
+    let result: { text: string; usage: LlmUsage | null } | null = null;
+    try {
+      // Pull remaining chunks.
+      while (true) {
+        const { done, value } = await gen.next();
+        if (done) {
+          result = value;
+          break;
+        }
+        yield value as string;
+      }
+    } finally {
+      try {
+        await gen.return(null);
+      } catch {
+        // ignore
+      }
+    }
+    if (result?.text) {
+      await this.logAiTokenUsage(
+        userId,
+        provider,
+        system,
+        userPrompt,
+        result.text,
+        'copilot',
+        result.usage,
+        billingSource,
+      );
+    }
+    return provider;
+  }
+
+  /** Forced-provider streaming variant. */
+  private async tryCopilotChatCompletionForcedStream(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    forceProvider: AiProvider,
+  ): Promise<
+    | { ok: true; provider: AiProvider; stream: AsyncGenerator<string, AiProvider> }
+    | { ok: false; llmErrors: string[] }
+  > {
+    const settings = await this.ensureSettings(userId);
+    const llmErrors: string[] = [];
+
+    if (forceProvider === AiProvider.OLLAMA_LOCAL) {
+      const nodeResult = await this.founderNodeInference.runViaFounderNode(
+        userId,
+        system,
+        userPrompt,
+        settings.preferredModel,
+      );
+      if (nodeResult.ok) {
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, system, userPrompt, nodeResult.text, 'copilot_forced');
+        return { ok: true, provider: AiProvider.OLLAMA_LOCAL, stream: this.singleChunkStream(nodeResult.text, AiProvider.OLLAMA_LOCAL) };
+      }
+      llmErrors.push(...nodeResult.errors);
+      const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
+      if (direct.ok) {
+        await this.logAiTokenUsage(userId, AiProvider.OLLAMA_LOCAL, system, userPrompt, direct.text, 'copilot_forced');
+        return { ok: true, provider: AiProvider.OLLAMA_LOCAL, stream: this.singleChunkStream(direct.text, AiProvider.OLLAMA_LOCAL) };
+      }
+      if (direct.error) llmErrors.push(direct.error);
+      return { ok: false, llmErrors };
+    }
+
+    if (forceProvider === AiProvider.PHALA) {
+      const phala = await this.resolvePhalaCredentials(userId);
+      if (!phala) return { ok: false, llmErrors: ['PHALA: not connected'] };
+      try {
+        const chat = await callPhalaChat({
+          apiKey: phala.apiKey,
+          inferenceUrl: phala.inferenceUrl,
+          model: settings.preferredModel ?? phala.model,
+          system,
+          userPrompt,
+        });
+        if (chat?.text) {
+          await this.recordPhalaChat(userId, chat);
+          await this.logAiTokenUsage(userId, AiProvider.PHALA, system, userPrompt, chat.text, 'copilot_forced');
+          return { ok: true, provider: AiProvider.PHALA, stream: this.singleChunkStream(chat.text, AiProvider.PHALA) };
+        }
+        return { ok: false, llmErrors: ['PHALA: empty response'] };
+      } catch (err) {
+        return { ok: false, llmErrors: [`PHALA: ${err instanceof Error ? err.message : 'request failed'}`] };
+      }
+    }
+
+    const cfg = aiProviderConfig(forceProvider);
+    if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') {
+      return { ok: false, llmErrors: [`${forceProvider}: not available as chat provider`] };
+    }
+
+    const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
+    if (!resolved) {
+      // Promo fallback (non-streaming).
+      const promoFallback = await this.tryPromoFallbackForcedCompletionStream(
+        userId,
+        system,
+        userPrompt,
+        forceProvider,
+        settings,
+      );
+      if (promoFallback) return promoFallback;
+
+      const platformBrain = await this.tryPlatformDeepseekFallbackStream(userId, system, userPrompt, llmErrors);
+      if (platformBrain) return { ok: true, provider: AiProvider.DEEPSEEK, stream: platformBrain };
+
+      const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+      if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
+        return { ok: false, llmErrors: [this.founderPromo.promoEndedMessage(promoStatus)] };
+      }
+      return { ok: false, llmErrors: [`${forceProvider}: connect API key in AI Stack`] };
+    }
+
+    const { apiKey, billingSource } = resolved;
+    const model =
+      settings.defaultProvider === forceProvider
+        ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+        : cfg.defaultModel ?? undefined;
+
+    try {
+      const gen = this.completionWithProviderStream(forceProvider, apiKey, system, userPrompt, model);
+      const first = await gen.next();
+      if (first.done) {
+        if (first.value?.text) {
+          await this.logAiTokenUsage(userId, forceProvider, system, userPrompt, first.value.text, 'copilot_forced', first.value.usage, billingSource);
+          return { ok: true, provider: forceProvider, stream: this.singleChunkStream(first.value.text, forceProvider) };
+        }
+        return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
+      }
+      return {
+        ok: true,
+        provider: forceProvider,
+        stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, forceProvider, system, userPrompt, billingSource),
+      };
+    } catch (err) {
+      return { ok: false, llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`] };
+    }
+  }
+
+  /** Promo fallback (non-streaming) for the forced stream path. */
+  private async tryPromoFallbackForcedCompletionStream(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    forcedProvider: AiProvider,
+    settings: { preferredModel?: string | null; defaultProvider?: AiProvider | null },
+  ): Promise<{ ok: true; provider: AiProvider; stream: AsyncGenerator<string, AiProvider> } | { ok: false; llmErrors: string[] } | null> {
+    const forcedPromoProvider = promoProviderForAi(forcedProvider);
+    if (!forcedPromoProvider) return null;
+
+    const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+    if (!promoStatus.eligible) return null;
+
+    const order: PromoCredentialProvider[] = [];
+    order.push(forcedPromoProvider);
+    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
+      if (!order.includes(p)) order.push(p);
+    }
+
+    const llmErrors: string[] = [];
+    for (const p of order) {
+      const promoKey = await this.founderPromo.resolvePromoApiKey(userId, p);
+      if (!promoKey) continue;
+      const actualProvider = aiProviderForPromoProvider(p);
+      const cfg = aiProviderConfig(actualProvider);
+      const model =
+        settings.defaultProvider === actualProvider
+          ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
+          : cfg?.defaultModel ?? undefined;
+      try {
+        const gen = this.completionWithProviderStream(actualProvider, promoKey, system, userPrompt, model);
+        const first = await gen.next();
+        if (first.done) {
+          if (first.value?.text) {
+            await this.logAiTokenUsage(userId, actualProvider, system, userPrompt, first.value.text, 'copilot_forced_promo', first.value.usage, 'platform_promo');
+            return { ok: true, provider: forcedProvider, stream: this.singleChunkStream(first.value.text, forcedProvider) };
+          }
+          llmErrors.push(`${actualProvider}: empty response`);
+          continue;
+        }
+        return {
+          ok: true,
+          provider: forcedProvider,
+          stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, actualProvider, system, userPrompt, 'platform_promo'),
+        };
+      } catch (err) {
+        llmErrors.push(`${actualProvider}: ${err instanceof Error ? err.message : 'request failed'}`);
+      }
+    }
+    return llmErrors.length > 0 ? { ok: false, llmErrors } : null;
+  }
+
+  /** Platform DeepSeek brain fallback (streaming). */
+  private async tryPlatformDeepseekFallbackStream(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    existingErrors: string[],
+  ): Promise<AsyncGenerator<string, AiProvider> | null> {
+    let platformKey: string | null = null;
+    try {
+      platformKey = await this.founderPromo.getDecryptedPlatformDeepseekKey();
+    } catch {
+      return null;
+    }
+    if (!platformKey) return null;
+
+    try {
+      const gen = this.completionWithProviderStream(
+        AiProvider.DEEPSEEK,
+        platformKey,
+        system,
+        userPrompt,
+        undefined,
+      );
+      const first = await gen.next();
+      if (first.done) {
+        if (first.value?.text) {
+          void this.logAiTokenUsage(userId, AiProvider.DEEPSEEK, system, userPrompt, first.value.text, 'copilot_platform_brain', first.value.usage, 'platform_brain');
+          return this.singleChunkStream(first.value.text, AiProvider.DEEPSEEK);
+        }
+        existingErrors.push('DEEPSEEK (platform brain): empty response');
+        return null;
+      }
+      return this.wrapStreamWithUsageLog(gen, first.value as string, userId, AiProvider.DEEPSEEK, system, userPrompt, 'platform_brain');
+    } catch (err) {
+      existingErrors.push(`DEEPSEEK (platform brain): ${err instanceof Error ? err.message : 'request failed'}`);
+      return null;
+    }
+  }
+
   private async logAiTokenUsage(
     userId: string,
     provider: AiProvider | string,

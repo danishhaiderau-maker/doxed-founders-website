@@ -4866,6 +4866,194 @@ export function copilotAsk(
   );
 }
 
+export type CopilotMissingConnection = {
+  kind: 'github' | 'cursor' | 'ai_key' | 'founder_node' | 'vault';
+  label: string;
+  detail: string;
+  action: 'connect_github' | 'connect_cursor' | 'connect_ai' | 'open_founder_node';
+};
+
+export type CopilotStreamHandlers = {
+  onThinking?: () => void;
+  onContext?: (steps: unknown[]) => void;
+  onLiveSnapshot?: (snapshot: {
+    repoFullName?: string | null;
+    githubLinked?: boolean;
+    branch?: string | null;
+    recentCommitCount?: number;
+    openFileCount?: number;
+    sourcesConsulted?: string[];
+    missingConnections?: CopilotMissingConnection[];
+  }) => void;
+  onAttribution?: (info: { provider: string; model: string | null; routedAgent: string | null }) => void;
+  onToken?: (text: string) => void;
+  onDone?: (info: {
+    answer: string;
+    answerProvider: string;
+    missingConnections?: CopilotMissingConnection[];
+    llmErrors?: string[];
+  }) => void;
+  onError?: (message: string) => void;
+};
+
+/**
+ * Streams a Founder Copilot response over SSE. Parses `event: <name>\ndata: <json>`
+ * frames and dispatches to the matching handler. Falls back to non-streaming
+ * `copilotAsk` if `fetch` returns a non-streamable body or a non-2xx status so
+ * the chat still works on older proxies.
+ */
+export async function copilotAskStream(
+  prompt: string,
+  token: string,
+  options: { agentTemplate?: string | null; provider?: string | null } | undefined,
+  handlers: CopilotStreamHandlers,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(apiUrl('/copilot/ask/stream'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        prompt,
+        agentTemplate: options?.agentTemplate ?? undefined,
+        provider: options?.provider ?? undefined,
+      }),
+    });
+  } catch {
+    // Network failure — fall back to non-streaming ask.
+    try {
+      const result = await copilotAsk(prompt, token, options);
+      const answer = result.answer || '';
+      handlers.onAttribution?.({
+        provider: result.answerProvider || 'RULE_BASED',
+        model: options?.provider ?? null,
+        routedAgent: result.routedAgent?.label ?? null,
+      });
+      if (answer) handlers.onToken?.(answer);
+      handlers.onDone?.({
+        answer,
+        answerProvider: result.answerProvider || 'RULE_BASED',
+        llmErrors: result.llmErrors,
+      });
+    } catch (err) {
+      handlers.onError?.(err instanceof Error ? err.message : 'Chat request failed');
+    }
+    return;
+  }
+
+  if (!res.ok || !res.body) {
+    // Non-2xx or no stream body — fall back to non-streaming ask.
+    try {
+      const result = await copilotAsk(prompt, token, options);
+      const answer = result.answer || '';
+      handlers.onAttribution?.({
+        provider: result.answerProvider || 'RULE_BASED',
+        model: options?.provider ?? null,
+        routedAgent: result.routedAgent?.label ?? null,
+      });
+      if (answer) handlers.onToken?.(answer);
+      handlers.onDone?.({
+        answer,
+        answerProvider: result.answerProvider || 'RULE_BASED',
+        llmErrors: result.llmErrors,
+      });
+    } catch (err) {
+      handlers.onError?.(err instanceof Error ? err.message : `Chat request failed (${res.status})`);
+    }
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = 'message';
+
+  const dispatch = (eventName: string, dataRaw: string) => {
+    const data = dataRaw.trim();
+    if (!data) return;
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      // ignore malformed
+      return;
+    }
+    switch (eventName) {
+      case 'thinking':
+        handlers.onThinking?.();
+        break;
+      case 'context':
+        handlers.onContext?.((payload.steps as unknown[]) ?? []);
+        break;
+      case 'liveSnapshot':
+        handlers.onLiveSnapshot?.(payload as Parameters<NonNullable<CopilotStreamHandlers['onLiveSnapshot']>>[0]);
+        break;
+      case 'attribution':
+        handlers.onAttribution?.({
+          provider: String(payload.provider ?? 'RULE_BASED'),
+          model: (payload.model as string | null) ?? null,
+          routedAgent: (payload.routedAgent as string | null) ?? null,
+        });
+        break;
+      case 'token':
+        handlers.onToken?.(String(payload.text ?? ''));
+        break;
+      case 'done':
+        handlers.onDone?.({
+          answer: String(payload.answer ?? ''),
+          answerProvider: String(payload.answerProvider ?? 'RULE_BASED'),
+          missingConnections: payload.missingConnections as CopilotMissingConnection[] | undefined,
+          llmErrors: payload.llmErrors as string[] | undefined,
+        });
+        break;
+      case 'error':
+        handlers.onError?.(String(payload.message ?? 'stream error'));
+        break;
+      default:
+        break;
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line. Process all complete frames.
+      let frameEnd: number;
+      while ((frameEnd = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, frameEnd);
+        buffer = buffer.slice(frameEnd + 2);
+
+        let dataLines: string[] = [];
+        let eventName = 'message';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).replace(/^\s/, ''));
+          } else if (line.startsWith(':')) {
+            // comment / keepalive
+            continue;
+          }
+        }
+        if (dataLines.length > 0) {
+          dispatch(eventName, dataLines.join('\n'));
+        }
+        currentEvent = 'message';
+      }
+      void currentEvent;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function copilotHandsFree(prompt: string, token: string) {
   return apiFetch<{ action: string; answer: string; cursorCopy?: string }>(
     '/copilot/hands-free',
@@ -5189,9 +5377,14 @@ export function fetchDesktopBridge(token: string) {
 }
 
 export type BridgeWorkspace = import('@dcf/utils').BridgeWorkspace;
+export type BridgeSession = import('@dcf/utils').BridgeSession;
 
 export function fetchIdeBridgeWorkspaces(token: string) {
   return apiFetch<BridgeWorkspace[]>('/ide-bridge/workspaces', undefined, token);
+}
+
+export function fetchIdeBridgeSessions(token: string) {
+  return apiFetch<BridgeSession[]>('/ide-bridge/sessions', undefined, token);
 }
 export type PlatformBrainStatus = { configured: boolean; updatedAt: string | null };
 

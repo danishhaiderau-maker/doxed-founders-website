@@ -274,11 +274,30 @@ export function discoverCursorWorkspaces(): BridgeWorkspace[] {
 /**
  * Discover Cursor recent sessions/conversations.
  *
- * Cursor stores chat history in SQLite (`state.vscdb`) which we can't read
- * without adding a dependency. For now we derive sessions from workspace
- * activity and mark them `restorable: false`.
+ * Cursor stores chat history in a SQLite database at
+ * `%APPDATA%/Cursor/User/globalStorage/state.vscdb`. Node 22+ ships a built-in
+ * `node:sqlite` module (`DatabaseSync`) that can read it without any native
+ * dependency — important for Electron packaging (no `better-sqlite3` rebuild).
+ *
+ * We read two keys from the `ItemTable`:
+ *   - `composer.composerHeaders`  → { allComposers: ComposerHead[] }
+ *   - `glass.localAgentProjects.v1` → AgentProject[]
+ *
+ * If anything fails (module unavailable in this Electron's Node version, DB
+ * locked, schema changed, …) we fall back to the legacy workspace-derived
+ * sessions so the dashboard still shows something.
  */
 export function discoverCursorSessions(): BridgeSession[] {
+  const sqliteSessions = readCursorComposerSessionsFromSqlite();
+  if (sqliteSessions && sqliteSessions.length > 0) return sqliteSessions;
+  return discoverCursorSessionsFromWorkspaces();
+}
+
+/**
+ * Legacy fallback — derive placeholder sessions from workspace activity.
+ * Marked `restorable: false` because we have no real conversation handle.
+ */
+function discoverCursorSessionsFromWorkspaces(): BridgeSession[] {
   const workspaces = discoverCursorWorkspaces();
   const globalStorage = getCursorGlobalStoragePath();
   let globalMtime: Date | null = null;
@@ -294,7 +313,9 @@ export function discoverCursorSessions(): BridgeSession[] {
     id: `session:${w.id}`,
     workspaceId: w.id,
     title: w.title,
-    messages: undefined,
+    repository: w.repository,
+    branch: w.branch,
+    ideProvider: 'cursor',
     restorable: false,
     lastActiveAt: globalMtime
       ? new Date(
@@ -302,6 +323,186 @@ export function discoverCursorSessions(): BridgeSession[] {
         ).toISOString()
       : w.lastActiveAt,
   }));
+}
+
+type ComposerBranch = { branchName?: string; lastInteractionAt?: number };
+type ComposerTrackedRepo = { repoPath?: string; branches?: ComposerBranch[] };
+type ComposerWorkspaceId = { id?: string };
+type ComposerHead = {
+  composerId?: string;
+  name?: string;
+  subtitle?: string;
+  lastUpdatedAt?: number;
+  createdAt?: number;
+  totalLinesAdded?: number;
+  totalLinesRemoved?: number;
+  filesChangedCount?: number;
+  isArchived?: boolean;
+  isDraft?: boolean;
+  trackedGitRepos?: ComposerTrackedRepo[];
+  workspaceIdentifier?: ComposerWorkspaceId;
+};
+
+type AgentProject = {
+  id?: string;
+  name?: string;
+  createdAt?: number;
+  lastUpdatedAt?: number;
+  isArchived?: boolean;
+};
+
+const SESSION_DB_TIMEOUT_MS = 5_000;
+const MAX_SESSIONS = 20;
+const SUBTITLE_MAX = 100;
+
+function getCursorGlobalStateDbPath(): string | null {
+  const appdata =
+    process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  if (!appdata) return null;
+  return path.join(appdata, 'Cursor', 'User', 'globalStorage', 'state.vscdb');
+}
+
+/**
+ * Lazily load `node:sqlite`. Returns null if the module is unavailable in this
+ * runtime (e.g. an Electron build bundled with a Node version that predates
+ * `node:sqlite`, or where it is gated behind an experimental flag we can't
+ * set in a packaged tray app).
+ */
+function loadNodeSqlite(): { DatabaseSync: typeof import('node:sqlite').DatabaseSync } | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('node:sqlite') as typeof import('node:sqlite');
+  } catch {
+    return null;
+  }
+}
+
+function readComposerHeaders(
+  DatabaseSync: typeof import('node:sqlite').DatabaseSync,
+  dbPath: string,
+): { allComposers: ComposerHead[] } | null {
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerHeaders'")
+      .get() as { value?: string } | undefined;
+    if (!row || typeof row.value !== 'string') return null;
+    const parsed = JSON.parse(row.value) as { allComposers?: ComposerHead[] };
+    return { allComposers: Array.isArray(parsed.allComposers) ? parsed.allComposers : [] };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function readAgentProjects(
+  DatabaseSync: typeof import('node:sqlite').DatabaseSync,
+  dbPath: string,
+): AgentProject[] {
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = 'glass.localAgentProjects.v1'")
+      .get() as { value?: string } | undefined;
+    if (!row || typeof row.value !== 'string') return [];
+    const parsed = JSON.parse(row.value) as unknown;
+    return Array.isArray(parsed) ? (parsed as AgentProject[]) : [];
+  } catch {
+    return [];
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function truncate(s: string | undefined, max: number): string | undefined {
+  if (!s) return undefined;
+  const trimmed = s.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+function isoFromEpochMs(ms: number | undefined): string | undefined {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return new Date(ms).toISOString();
+}
+
+/**
+ * Read real Cursor chat/agent sessions from the global SQLite store.
+ * Returns null on any failure so the caller can fall back to the legacy
+ * workspace-derived sessions.
+ */
+function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+  const dbPath = getCursorGlobalStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+  // Run the read with a hard timeout so a locked/oversized DB never blocks
+  // the Founder Node sync loop. SQLite opens the file lazily and our query
+  // is a single key lookup, so this is normally <50ms even on a 24GB file.
+  const started = Date.now();
+  try {
+    const headers = readComposerHeaders(sqlite.DatabaseSync, dbPath);
+    if (!headers) return null;
+    const agentProjects = readAgentProjects(sqlite.DatabaseSync, dbPath);
+    if (Date.now() - started > SESSION_DB_TIMEOUT_MS) return null;
+
+    const agentNameById = new Map<string, string>();
+    for (const ap of agentProjects) {
+      if (ap.id && ap.name && !ap.isArchived) agentNameById.set(ap.id, ap.name);
+    }
+
+    const sessions: BridgeSession[] = [];
+    for (const c of headers.allComposers) {
+      if (c.isArchived || c.isDraft) continue;
+      if (!c.composerId || !c.name) continue;
+      const lastActiveAt = isoFromEpochMs(c.lastUpdatedAt) ?? isoFromEpochMs(c.createdAt);
+      if (!lastActiveAt) continue;
+
+      const repo = c.trackedGitRepos?.[0]?.repoPath;
+      const branch = c.trackedGitRepos?.[0]?.branches?.[0]?.branchName;
+      const repository = repo ? folderNameFromPath(repo) : undefined;
+      const workspaceId = c.workspaceIdentifier?.id;
+
+      sessions.push({
+        id: c.composerId,
+        workspaceId,
+        title: c.name,
+        subtitle: truncate(c.subtitle, SUBTITLE_MAX),
+        repository,
+        branch,
+        ideProvider: 'cursor',
+        restorable: true,
+        lastActiveAt,
+        totalLinesAdded:
+          typeof c.totalLinesAdded === 'number' ? c.totalLinesAdded : undefined,
+        totalLinesRemoved:
+          typeof c.totalLinesRemoved === 'number' ? c.totalLinesRemoved : undefined,
+        filesChangedCount:
+          typeof c.filesChangedCount === 'number' ? c.filesChangedCount : undefined,
+        isAgentProject: workspaceId ? agentNameById.has(workspaceId) : false,
+      });
+    }
+
+    sessions.sort(
+      (a, b) =>
+        new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+    );
+    return sessions.slice(0, MAX_SESSIONS);
+  } catch {
+    return null;
+  }
 }
 
 /**

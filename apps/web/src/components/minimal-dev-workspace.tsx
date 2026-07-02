@@ -2,17 +2,31 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  copilotAsk,
+  connectAiProvider,
+  connectCursorCloud,
+  connectGitHubRepo,
+  copilotAskStream,
+  type CopilotMissingConnection,
   fetchConnectedWorkspaces,
   fetchDesktopBridge,
+  fetchIdeBridgeSessions,
   fetchIdeBridgeWorkspaces,
   fetchRecentAgents,
+  type BridgeSession,
   type ConnectedWorkspace,
   type DesktopBridgeResponse,
   type RecentAgent,
 } from '@/lib/api';
 
-type ChatMsg = { id: string; role: 'user' | 'assistant'; text: string; provider?: string; pending?: boolean };
+type ChatMsg = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  provider?: string;
+  pending?: boolean;
+  thinking?: boolean;
+  missingConnections?: CopilotMissingConnection[];
+};
 
 type BrainOption = { key: string; label: string; hint: string };
 
@@ -81,6 +95,37 @@ function timeAgo(iso?: string | null): string {
   return Math.floor(s / 86400) + ' day ago';
 }
 
+function SessionRow({
+  session,
+  selected,
+  onSelect,
+  dotClass,
+}: {
+  session: BridgeSession;
+  selected: boolean;
+  onSelect: (s: BridgeSession) => void;
+  dotClass: string;
+}) {
+  const repoLabel = [session.repository, session.branch].filter(Boolean).join(' · ');
+  return (
+    <button
+      type='button'
+      onClick={() => onSelect(session)}
+      className={
+        'mb-0.5 block w-full rounded-lg px-3 py-2 text-left transition ' +
+        (selected ? 'bg-violet-500/15 ring-1 ring-violet-400/30' : 'hover:bg-white/5')
+      }
+    >
+      <div className='flex items-center gap-2'>
+        <span className={'h-1.5 w-1.5 shrink-0 rounded-full ' + dotClass} />
+        <span className='truncate text-sm font-medium text-zinc-100'>{session.title}</span>
+      </div>
+      {session.subtitle && <div className='mt-0.5 truncate pl-3.5 text-xs text-zinc-500'>{session.subtitle}</div>}
+      {repoLabel && <div className='mt-0.5 truncate pl-3.5 text-[0.65rem] text-zinc-600'>{repoLabel}</div>}
+    </button>
+  );
+}
+
 export function MinimalDevWorkspace({
   accessToken,
   socialPanel,
@@ -92,6 +137,8 @@ export function MinimalDevWorkspace({
   const [ideWorkspaces, setIdeWorkspaces] = useState<IdeWorkspace[]>([]);
   const [connected, setConnected] = useState<ConnectedWorkspace[]>([]);
   const [agents, setAgents] = useState<RecentAgent[]>([]);
+  const [sessions, setSessions] = useState<BridgeSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
   const [selectedBrain, setSelectedBrain] = useState<string>('GLM');
   const [selectedIde, setSelectedIde] = useState<string>('cursor');
@@ -108,16 +155,18 @@ export function MinimalDevWorkspace({
   const refresh = useCallback(async () => {
     if (!accessToken) return;
     try {
-      const [b, iw, c, a] = await Promise.all([
+      const [b, iw, c, a, ss] = await Promise.all([
         fetchDesktopBridge(accessToken).catch(() => null),
         fetchIdeBridgeWorkspaces(accessToken).catch(() => [] as IdeWorkspace[]),
         fetchConnectedWorkspaces(accessToken).catch(() => [] as ConnectedWorkspace[]),
         fetchRecentAgents(accessToken).catch(() => null),
+        fetchIdeBridgeSessions(accessToken).catch(() => [] as BridgeSession[]),
       ]);
       if (b) { setBridge(b); setLastSync(b.latest?.updatedAt || 'never'); }
       if (iw) setIdeWorkspaces(iw);
       if (c) setConnected(c);
       if (a) { setAgents(a.agents); setNodeStatus({ desktopOnline: a.desktopOnline, cursorConnected: a.cursorConnected, founderNodeOnline: a.founderNodeOnline }); }
+      if (ss) setSessions(ss);
       setError(null);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load workspace state';
@@ -187,35 +236,122 @@ export function MinimalDevWorkspace({
     connected.find((c) => c.branch?.trim())?.branch ||
     'unknown';
 
+  // Bucket Cursor chat sessions by recency for the sidebar grouping.
+  // "Today" = since local midnight; "Last 7 Days" = within 7 days excl. today.
+  const sessionBuckets = useMemo<{ today: BridgeSession[]; last7: BridgeSession[] }>(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const sevenDaysAgo = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+    const today: BridgeSession[] = [];
+    const last7: BridgeSession[] = [];
+    for (const s of sessions) {
+      const ts = new Date(s.lastActiveAt).getTime();
+      if (!Number.isFinite(ts)) continue;
+      if (ts >= startOfToday) today.push(s);
+      else if (ts >= sevenDaysAgo) last7.push(s);
+    }
+    return { today, last7 };
+  }, [sessions]);
+
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+
+  const handleSelectSession = useCallback(
+    (session: BridgeSession) => {
+      setSelectedSessionId(session.id);
+      const lines: string[] = [];
+      lines.push(`Continuing Cursor session: ${session.title}`);
+      if (session.subtitle) lines.push(`Last work: ${session.subtitle}`);
+      const repoLabel = session.repository || session.branch;
+      if (repoLabel) {
+        const parts: string[] = [];
+        if (session.repository) parts.push(session.repository);
+        if (session.branch) parts.push(session.branch);
+        lines.push(`Repo: ${parts.join(' · ')}`);
+      }
+      const add = session.totalLinesAdded;
+      const rem = session.totalLinesRemoved;
+      const files = session.filesChangedCount;
+      if (typeof files === 'number' || typeof add === 'number' || typeof rem === 'number') {
+        lines.push(
+          `Diff: ${typeof files === 'number' ? files + ' file(s)' : ''}${
+            typeof add === 'number' || typeof rem === 'number'
+              ? ` (+${add ?? 0} -${rem ?? 0})`
+              : ''
+          }`.trim(),
+        );
+      }
+      lines.push('Pick up where this left off.');
+      setInput(lines.join('\n'));
+    },
+    [],
+  );
+
   const handleSend = useCallback(async () => {
     const prompt = input.trim();
     if (!prompt || busy) return;
     const userMsg: ChatMsg = { id: 'u-' + Date.now(), role: 'user', text: prompt };
     const assistantId = 'a-' + Date.now();
-    const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true };
+    const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
     setMessages((m) => [...m, userMsg, assistantMsg]);
     setInput('');
     setBusy(true);
     setError(null);
+
+    let firstTokenSeen = false;
+    let providerLabel = selectedBrain;
+
+    const patch = (mut: (msg: ChatMsg) => ChatMsg) =>
+      setMessages((m) => m.map((msg) => (msg.id === assistantId ? mut(msg) : msg)));
+
     try {
-      const result = await copilotAsk(prompt, accessToken, { provider: selectedBrain });
-      const answer = result.answer || '';
-      const provider = result.answerProvider || selectedBrain;
-      setMessages((m) =>
-        m.map((msg) =>
-          msg.id === assistantId
-            ? { ...msg, text: answer || 'No response.', provider, pending: false }
-            : msg,
-        ),
+      await copilotAskStream(
+        prompt,
+        accessToken,
+        { provider: selectedBrain },
+        {
+          onAttribution: ({ provider }) => {
+            providerLabel = provider;
+            patch((msg) => ({ ...msg, provider }));
+          },
+          onToken: (text) => {
+            if (!firstTokenSeen) {
+              firstTokenSeen = true;
+              patch((msg) => ({ ...msg, thinking: false, text }));
+            } else {
+              patch((msg) => ({ ...msg, thinking: false, text: msg.text + text }));
+            }
+          },
+          onDone: ({ answer, answerProvider, missingConnections, llmErrors }) => {
+            patch((msg) => ({
+              ...msg,
+              pending: false,
+              thinking: false,
+              provider: answerProvider || providerLabel,
+              text: answer || msg.text || 'No response.',
+              missingConnections: missingConnections?.length ? missingConnections : undefined,
+            }));
+            if (llmErrors?.length && !answer) {
+              setError(llmErrors.join(', '));
+            }
+          },
+          onError: (message) => {
+            patch((msg) => ({
+              ...msg,
+              pending: false,
+              thinking: false,
+              text: msg.text || ('Warning: ' + message),
+            }));
+            setError(message);
+          },
+        },
       );
-      if (result.llmErrors?.length && !answer) {
-        setError(result.llmErrors.join(', '));
-      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Chat request failed';
-      setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: 'Warning: ' + msg, pending: false } : msg)));
+      patch((m2) => ({ ...m2, pending: false, thinking: false, text: m2.text || ('Warning: ' + msg) }));
       setError(msg);
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   }, [input, busy, accessToken, selectedBrain]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
@@ -240,6 +376,28 @@ export function MinimalDevWorkspace({
               {w.agentStatus && <div className='mt-0.5 pl-3.5 text-xs text-emerald-400/80'>- {w.agentStatus}</div>}
             </button>
           ))}
+
+          {sessions.length > 0 && (
+            <div className='mt-3'>
+              <div className='px-3 pb-1 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>Cursor Chats</div>
+              {sessionBuckets.today.length > 0 && (
+                <div className='mb-1'>
+                  <div className='px-3 py-1 text-[0.65rem] font-medium uppercase tracking-wider text-emerald-400/80'>Today</div>
+                  {sessionBuckets.today.map((s) => (
+                    <SessionRow key={'t-' + s.id} session={s} selected={selectedSessionId === s.id} onSelect={handleSelectSession} dotClass='bg-emerald-400' />
+                  ))}
+                </div>
+              )}
+              {sessionBuckets.last7.length > 0 && (
+                <div className='mb-1'>
+                  <div className='px-3 py-1 text-[0.65rem] font-medium uppercase tracking-wider text-violet-400/80'>Last 7 Days</div>
+                  {sessionBuckets.last7.map((s) => (
+                    <SessionRow key={'l7-' + s.id} session={s} selected={selectedSessionId === s.id} onSelect={handleSelectSession} dotClass='bg-violet-400' />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div className='border-t border-white/5 px-2 py-2'>
           <button onClick={() => setFullScreenPanel('social')} className='mb-1 block w-full rounded-md px-3 py-1.5 text-left text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-200'>Show social</button>
@@ -290,14 +448,55 @@ export function MinimalDevWorkspace({
         )}
 
         <div ref={scrollRef} className='min-h-0 flex-1 overflow-y-auto px-4 py-4'>
-          {selectedWs && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
+          {selectedWs && !selectedSession && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
+          {selectedSession && (
+            <div className='mb-3 rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2.5 text-xs text-zinc-300'>
+              <div className='flex items-center gap-2'>
+                <span className={'h-1.5 w-1.5 shrink-0 rounded-full ' + (Date.now() - new Date(selectedSession.lastActiveAt).getTime() < 86400000 ? 'bg-emerald-400' : 'bg-violet-400')} />
+                <span className='font-medium text-zinc-100'>{selectedSession.title}</span>
+                {selectedSession.isAgentProject && <span className='rounded bg-violet-500/20 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider text-violet-300'>Agent</span>}
+                <span className='ml-auto text-zinc-500'>{timeAgo(selectedSession.lastActiveAt)}</span>
+              </div>
+              {selectedSession.subtitle && <div className='mt-1 pl-3.5 text-zinc-400'>{selectedSession.subtitle}</div>}
+              {(selectedSession.repository || selectedSession.branch) && (
+                <div className='mt-1 flex items-center gap-2 pl-3.5 text-zinc-500'>
+                  {selectedSession.repository && <span className='rounded bg-white/5 px-1.5 py-0.5 text-[0.65rem] text-zinc-300'>{selectedSession.repository}</span>}
+                  {selectedSession.branch && <span className='rounded bg-white/5 px-1.5 py-0.5 text-[0.65rem] text-zinc-300'>{selectedSession.branch}</span>}
+                  {(typeof selectedSession.filesChangedCount === 'number' || typeof selectedSession.totalLinesAdded === 'number') && (
+                    <span className='text-[0.65rem] text-emerald-400/80'>
+                      {typeof selectedSession.filesChangedCount === 'number' ? `${selectedSession.filesChangedCount} file(s)` : ''}
+                      {typeof selectedSession.totalLinesAdded === 'number' || typeof selectedSession.totalLinesRemoved === 'number' ? ` +${selectedSession.totalLinesAdded ?? 0} -${selectedSession.totalLinesRemoved ?? 0}` : ''}
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className='mt-1.5 pl-3.5 text-zinc-500'>Resume this Cursor session — your prompt below is pre-filled with its context.</div>
+            </div>
+          )}
           {messages.length === 0 && !showConnectWizard && <div className='flex h-full items-center justify-center text-sm text-zinc-600'>Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.</div>}
           <div className='mx-auto max-w-3xl space-y-3'>
             {messages.map((m) => (
               <div key={m.id} className={'flex ' + (m.role === 'user' ? 'justify-end' : 'justify-start')}>
                 <div className={'max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ' + (m.role === 'user' ? 'bg-emerald-500/15 text-emerald-50' : 'bg-white/5 text-zinc-100')}>
-                  <p className='whitespace-pre-wrap break-words'>{m.text || (m.pending ? '...' : '')}</p>
+                  <p className='whitespace-pre-wrap break-words'>
+                    {m.text || (m.thinking ? 'Thinking…' : m.pending ? '…' : '')}
+                    {m.thinking && <span className='ml-1 inline-block animate-pulse text-zinc-500'>▋</span>}
+                  </p>
                   {m.provider && !m.pending && m.role === 'assistant' && <p className='mt-1 text-xs text-zinc-500'>via {m.provider}</p>}
+                  {m.role === 'assistant' && !m.pending && m.missingConnections && m.missingConnections.length > 0 && (
+                    <InlineOnboarding
+                      connections={m.missingConnections}
+                      accessToken={accessToken}
+                      onConnected={() => {
+                        setMessages((prev) =>
+                          prev.map((msg) =>
+                            msg.id === m.id ? { ...msg, missingConnections: undefined } : msg,
+                          ),
+                        );
+                        refresh();
+                      }}
+                    />
+                  )}
                 </div>
               </div>
             ))}
@@ -331,6 +530,110 @@ export function MinimalDevWorkspace({
           <div className='min-h-0 flex-1 overflow-y-auto p-4'>{settingsPanel}</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Inline onboarding panel rendered under an assistant message when the backend
+ * reports missing connections (GitHub, AI key, Cursor). Shows ONE thing at a
+ * time — the first missing connection — with a conversational prompt and an
+ * input to paste the key / repo. On submit, calls the matching connect API.
+ */
+function InlineOnboarding({
+  connections,
+  accessToken,
+  onConnected,
+}: {
+  connections: CopilotMissingConnection[];
+  accessToken: string;
+  onConnected: () => void;
+}) {
+  const first = connections[0];
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  if (!first) return null;
+
+  const placeholder =
+    first.action === 'connect_github'
+      ? 'owner/repo (e.g. danishhaiderau-maker/doxed-founders-website)'
+      : first.action === 'connect_ai'
+        ? 'Paste your AI API key (GLM / DeepSeek / OpenAI …)'
+        : first.action === 'connect_cursor'
+          ? 'Paste your Cursor Cloud API key'
+          : '';
+
+  const providerKey = 'GLM';
+
+  const submit = async () => {
+    const v = value.trim();
+    if (!v || busy) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      if (first.action === 'connect_github') {
+        await connectGitHubRepo(v, accessToken);
+        setMsg(`Linked ${v}. I can now read your commits and push code.`);
+      } else if (first.action === 'connect_ai') {
+        await connectAiProvider(providerKey.toLowerCase(), v, accessToken);
+        setMsg('AI key saved. GLM is now your brain — ask me anything.');
+      } else if (first.action === 'connect_cursor') {
+        await connectCursorCloud(v, accessToken);
+        setMsg('Cursor Cloud connected. I can now dispatch code tasks to your IDE.');
+      } else {
+        setErr('Open Founder Node on your machine to continue.');
+      }
+      setValue('');
+      onConnected();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Could not save that — try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className='mt-3 rounded-xl border border-emerald-400/20 bg-emerald-500/[0.06] px-3 py-2.5 text-xs'>
+      <div className='flex items-center gap-2'>
+        <span className='h-1.5 w-1.5 rounded-full bg-emerald-400' />
+        <span className='font-medium text-emerald-200'>{first.label} not connected</span>
+      </div>
+      <p className='mt-1 text-zinc-300'>{first.detail}</p>
+      {first.action !== 'open_founder_node' && (
+        <div className='mt-2 flex items-end gap-2'>
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            placeholder={placeholder}
+            type={first.action === 'connect_ai' || first.action === 'connect_cursor' ? 'password' : 'text'}
+            className='min-w-0 flex-1 rounded-lg border border-white/10 bg-[#12121a] px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'
+          />
+          <button
+            onClick={submit}
+            disabled={busy || !value.trim()}
+            className='rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40'
+          >
+            {busy ? 'Saving…' : 'Connect'}
+          </button>
+        </div>
+      )}
+      {connections.length > 1 && (
+        <p className='mt-2 text-[0.65rem] text-zinc-500'>
+          +{connections.length - 1} more to set up later.
+        </p>
+      )}
+      {msg && <p className='mt-2 text-emerald-300'>{msg}</p>}
+      {err && <p className='mt-2 text-rose-400'>{err}</p>}
     </div>
   );
 }
