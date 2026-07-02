@@ -171,8 +171,19 @@ try {
         $code = -1
         Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"
       } else {
-        $p.WaitForExit()
-        $code = $p.ExitCode
+        # Timed wait (2s) instead of blocking WaitForExit(). The blocking form
+        # never returned while the bot was alive, so the watch loop never
+        # iterated and the heartbeat block above went stale — causing
+        # start-home-bot.ps1's >5min-stale health check to false-positive on
+        # a healthy monitor. With a 2s timeout, WaitForExit returns $true if
+        # the bot died within 2s (fall through to crash/restart path) or
+        # $false if still alive (continue the loop, refreshing heartbeat).
+        if ($p.WaitForExit(2000)) {
+          $code = $p.ExitCode
+        } else {
+          # Bot still alive — re-loop so heartbeat + pid liveness refresh regularly.
+          continue
+        }
       }
 
       # Exit code 0 = intentional shutdown (e.g. user stop-home-bot). Don't restart.
