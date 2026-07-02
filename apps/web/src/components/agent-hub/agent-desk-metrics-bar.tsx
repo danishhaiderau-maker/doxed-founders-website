@@ -15,14 +15,26 @@ function pnlColor(value: number) {
 type MetricCell = { label: string; value: string; hint?: string; accent?: string };
 
 /**
- * Showcase bot session-P&L delta since an anchor moment (live-copy start).
- * Captures the showcase bot's cumulative session P&L at the first moment we
- * see a valid `anchorKey` (the live session's `userSessionStartedAt`) and
- * persists it in localStorage keyed by that timestamp so it survives reloads.
+ * Showcase bot session-P&L delta since an anchor moment (the user's explicit
+ * "Start Live Copy" / "Resume" arm). Captures the showcase bot's cumulative
+ * equity-based session P&L the first time it sees a valid `anchorKey` and
+ * persists it in localStorage keyed by that anchor so it survives reloads.
+ *
+ * Semantics:
+ * - `anchorKey` MUST be null when the live copy is not actively armed (e.g.
+ *   PAUSED-with-stale-session, or not hired). Returning null drives the drift
+ *   cell to render "—".
+ * - On a fresh Start (new anchorKey), a fresh baseline is captured, so the
+ *   drift reads 0 immediately. A new key has no persisted entry, so capture
+ *   always overwrites stale data for that key.
+ * - On Stop (anchorKey transitions non-null → null), the persisted baseline
+ *   for the previous anchor is removed so the next Start begins at 0.
+ * - On mount, any persisted `dcf:showcase-live-baseline:*` keys that don't
+ *   match the current anchor are garbage-collected (one-time sweep).
+ *
  * Returns the delta = current showcase session P&L − baseline, or null when
- * no live session is active / baseline not yet captured. Mirrors the
- * sim-start anchoring the backend does for relay sim, but lives in the
- * frontend because the live copy has no backend sim-state to store it in.
+ * no active arm / baseline not yet captured. Lives in the frontend because
+ * the live copy has no backend sim-state to store it in (unlike relay sim).
  */
 const LIVE_BASELINE_PREFIX = 'dcf:showcase-live-baseline:';
 
@@ -32,24 +44,49 @@ function useShowcaseDeltaSinceLiveStart(
 ): number | null {
   const [baseline, setBaseline] = useState<number | null>(null);
   const capturedRef = useRef<string | null>(null);
+  const prevAnchorRef = useRef<string | null>(null);
+  const gcRanRef = useRef(false);
 
   useEffect(() => {
-    if (!anchorKey) {
-      setBaseline(null);
-      capturedRef.current = null;
-      return;
+    // One-time garbage collection of stale persisted baselines on mount.
+    if (!gcRanRef.current) {
+      gcRanRef.current = true;
+      try {
+        const keep = anchorKey ? LIVE_BASELINE_PREFIX + anchorKey : null;
+        for (let i = window.localStorage.length - 1; i >= 0; i--) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith(LIVE_BASELINE_PREFIX) && k !== keep) {
+            window.localStorage.removeItem(k);
+          }
+        }
+      } catch {
+        // localStorage unavailable — nothing to GC.
+      }
     }
-    if (capturedRef.current === anchorKey) return;
-    try {
-      const raw = window.localStorage.getItem(LIVE_BASELINE_PREFIX + anchorKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { pnlUsd?: unknown };
-        if (typeof parsed.pnlUsd === 'number') {
-          setBaseline(parsed.pnlUsd);
-          capturedRef.current = anchorKey;
-          return;
+
+    if (!anchorKey) {
+      // Stop / not armed: clear the persisted baseline for the previous anchor
+      // so the next Start begins fresh at 0.
+      const prev = prevAnchorRef.current;
+      if (prev) {
+        try {
+          window.localStorage.removeItem(LIVE_BASELINE_PREFIX + prev);
+        } catch {
+          // ignore
         }
       }
+      setBaseline(null);
+      capturedRef.current = null;
+      prevAnchorRef.current = null;
+      return;
+    }
+
+    prevAnchorRef.current = anchorKey;
+    if (capturedRef.current === anchorKey) return;
+    try {
+      // Always capture fresh for a new anchor (overwrite any stale entry for
+      // this key). A new key has no entry; an existing key only re-occurs if
+      // the same session was re-armed, in which case re-anchoring is correct.
       window.localStorage.setItem(
         LIVE_BASELINE_PREFIX + anchorKey,
         JSON.stringify({ pnlUsd: currentShowcasePnl, capturedAt: new Date().toISOString() }),
@@ -90,9 +127,14 @@ export function AgentDeskMetricsBar({
   let badgeClass = '';
   let cells: MetricCell[] = [];
 
-  // Live-copy showcase baseline (anchored to live-copy start). Hook must be
-  // called unconditionally; only consumed by the isLiveSession branch below.
-  const liveAnchorKey = isLiveSession ? (userAgent.userSessionStartedAt ?? null) : null;
+  // Live-copy showcase baseline (anchored to an EXPLICIT live-copy arm). The
+  // hook must be called unconditionally; only the isLiveSession branch below
+  // consumes its result. We only pass a non-null anchor when the relay is
+  // ACTIVELY running (instanceStatus === 'ACTIVE') — a PAUSED relay carries a
+  // stale `userSessionStartedAt` from days ago and must NOT anchor a drift
+  // baseline (it would produce phantom drift with zero input from the copy).
+  const liveArmed = isLiveSession && instanceStatus === 'ACTIVE';
+  const liveAnchorKey = liveArmed ? (userAgent.userSessionStartedAt ?? null) : null;
   const showcaseDeltaSinceLiveStart = useShowcaseDeltaSinceLiveStart(
     liveAnchorKey,
     showcaseAgent.sessionPnlUsd ?? 0,
@@ -125,14 +167,21 @@ export function AgentDeskMetricsBar({
   } else if (activeDesk === 'relay-sim') {
     const sim = copyRelaySim;
     // `sim.showcasePnlUsd` is the showcase bot's session P&L DELTA since sim
-    // start (anchored at Start, reset to 0 on Stop). The "ref" cell is the
-    // DRIFT between the showcase bot and the sim's own P&L — positive means the
-    // sim is lagging a winning bot, negative means the sim lost while the bot
-    // was flat. NOT the same as Session P&L.
+    // start (anchored at Start server-side, reset to 0 on Stop). The "ref"
+    // cell is the DRIFT between the showcase bot and the sim's own session
+    // P&L — positive means the sim is lagging a winning bot, negative means
+    // the sim lost while the bot was flat. NOT the same as Session P&L.
+    //
+    // Both sides are equity-based: the sim's `sessionPnlUsd` is computed
+    // server-side as realized + unrealized − fees (see BitfinexSimTradingClient
+    // .sessionPnlUsd), and the showcase `showcasePnlUsd` delta is derived from
+    // the bot's equity-based session P&L, so the comparison is a true
+    // mirror-fidelity measure including open positions.
     const showcaseDelta = sim?.showcasePnlUsd ?? 0;
-    const startingUsd = sim?.ledger?.startingUsd ?? 500;
     const simPnl = sim?.sessionPnlUsd ?? 0;
-    const drift = showcaseDelta - simPnl;
+    const simActive = Boolean(sim?.active);
+    const drift = simActive ? showcaseDelta - simPnl : null;
+    const startingUsd = sim?.ledger?.startingUsd ?? 500;
     const cashWallet = Math.max(0, sim?.ledger?.derivativesUsd ?? startingUsd);
     const paperEquity = startingUsd + simPnl;
     title = `${exchange} relay simulation`;
@@ -145,13 +194,13 @@ export function AgentDeskMetricsBar({
         label: 'Sim session P&L',
         value: `${simPnl >= 0 ? '+' : ''}${formatUsd(simPnl, 2)}`,
         accent: pnlColor(simPnl),
-        hint: sim?.active ? 'Simulation running' : 'Start sim to track',
+        hint: simActive ? 'Simulation running' : 'Start sim to track',
       },
       {
         label: 'Showcase P&L (ref)',
-        value: `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
-        accent: pnlColor(drift),
-        hint: 'Drift vs admin bot · 0 = perfect mirror',
+        value: drift == null ? '—' : `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
+        accent: drift == null ? 'text-zinc-300' : pnlColor(drift),
+        hint: drift == null ? 'Start sim to track' : 'Drift vs showcase · 0 = perfect mirror',
       },
     ];
   } else if (isLiveSession) {
@@ -160,11 +209,18 @@ export function AgentDeskMetricsBar({
     const sessionPnl = userAgent.sessionPnlUsd ?? 0;
     const unrealized = userAgent.unrealizedPnlUsd ?? 0;
     const paused = instanceStatus === 'PAUSED';
-    // Drift = showcase session P&L (since live start) − live copy P&L.
-    // Both sides reset to 0 when a new live session starts (new anchor key),
-    // so drift starts at 0 and stays ~0 if the copy mirrors the bot perfectly.
-    const showcaseDelta = showcaseDeltaSinceLiveStart ?? 0;
-    const drift = showcaseDelta - sessionPnl;
+    // Drift = showcase session P&L (since the user's explicit live-copy arm)
+    // − live copy P&L, on the SAME equity basis. The showcase side
+    // (`showcaseDeltaSinceLiveStart`) is the bot's equity-based session P&L
+    // delta (realized + unrealized, since the bot reports session P&L that
+    // way). The live side must match that basis, so we add unrealized P&L of
+    // the user's open exchange position to the realized-only `sessionPnlUsd`
+    // — otherwise drift swings purely from the showcase's unrealized while
+    // the live copy is flat. `null` when no arm is active (PAUSED or no
+    // baseline yet) → the cell renders "—".
+    const showcaseDelta = showcaseDeltaSinceLiveStart;
+    const liveEquityPnl = sessionPnl + unrealized;
+    const drift = showcaseDelta == null ? null : showcaseDelta - liveEquityPnl;
     const sessionHint = paused
       ? 'Paused — open positions remain'
       : userAgent.openPositionSide
@@ -184,9 +240,9 @@ export function AgentDeskMetricsBar({
       },
       {
         label: 'Showcase P&L (ref)',
-        value: `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
-        accent: pnlColor(drift),
-        hint: 'Drift vs admin bot · 0 = perfect mirror',
+        value: drift == null ? '—' : `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
+        accent: drift == null ? 'text-zinc-300' : pnlColor(drift),
+        hint: drift == null ? 'Start Live Copy to track' : 'Drift vs showcase · 0 = perfect mirror',
       },
     ];
   } else {
