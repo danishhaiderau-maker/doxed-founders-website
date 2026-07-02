@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat: track AI token usage in share paraphrase + wall summarizer via PlatformAdoptionService
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
