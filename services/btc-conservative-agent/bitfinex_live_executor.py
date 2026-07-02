@@ -532,6 +532,13 @@ def _pos_view(p):
 
 
 def _order_view(o):
+    # created_at + cid (clientOrderId) are captured so Phase 3 reconcile-adopt can
+    # (a) compute real TTL age from the exchange creation timestamp and
+    # (b) use clientOrderId as a second match key when attributing orphan orders
+    # back to a bot trade_id. reconcile_exchange_state itself is unchanged.
+    cid = getattr(o, "clientOrderId", None)
+    if cid is None and isinstance(o, dict):
+        cid = o.get("clientOrderId") or (o.get("info") or {}).get("cid")
     return {
         "id": getattr(o, "id", None),
         "symbol": getattr(o, "symbol", None),
@@ -541,7 +548,9 @@ def _order_view(o):
         "price": getattr(o, "price", None),
         "status": getattr(o, "status", None),
         "filled": getattr(o, "filled", None),
-        "client_order_id": getattr(o, "clientOrderId", None),
+        "client_order_id": cid,
+        "cid": cid,
+        "created_at": getattr(o, "timestamp", None),
     }
 
 
