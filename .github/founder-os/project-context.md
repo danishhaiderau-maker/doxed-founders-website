@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(ai-routing): decoupled AI routing layer + admin panel + centralized token logging
+docs(env): document RATE_LIMIT_FAIL_OPEN + TWITTER_VERIFIED_FREE_TOKEN_GATE env vars
 
 ## Last Activity
 
