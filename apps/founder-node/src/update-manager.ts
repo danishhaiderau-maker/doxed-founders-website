@@ -101,29 +101,37 @@ function findAsset(
 
 export async function fetchLatestRelease(): Promise<UpdateInfo | null> {
   if (updateApiBaseUrl) {
-    const proxyRes = await fetch(`${updateApiBaseUrl}/api/founder-node/latest-release`, {
-      headers: { Accept: 'application/json', 'User-Agent': 'Founder-Node-Updater' },
-    });
-    if (!proxyRes.ok) throw new Error(`Release check failed (${proxyRes.status})`);
-    const release = (await proxyRes.json()) as {
-      tag_name?: string;
-      html_url?: string;
-      assets?: Array<{ name: string; browser_download_url: string }>;
-    };
-    if (!release?.tag_name || !release.assets?.length) return null;
-    const kind = pickAssetForThisPlatform(release.assets);
-    if (!kind) return null;
-    const asset = findAsset(release.assets, kind);
-    if (!asset?.browser_download_url) return null;
-    const version = release.tag_name.replace(/^founder-node-v/i, '');
-    return {
-      version,
-      tag: release.tag_name,
-      downloadUrl: asset.browser_download_url,
-      releasePageUrl: release.html_url ?? asset.browser_download_url,
-      assetName: asset.name,
-      kind,
-    };
+    try {
+      const proxyRes = await fetch(`${updateApiBaseUrl}/api/founder-node/latest-release`, {
+        headers: { Accept: 'application/json', 'User-Agent': 'Founder-Node-Updater' },
+      });
+      if (proxyRes.ok) {
+        const release = (await proxyRes.json()) as {
+          tag_name?: string;
+          html_url?: string;
+          assets?: Array<{ name: string; browser_download_url: string }>;
+        };
+        if (release?.tag_name && release.assets?.length) {
+          const kind = pickAssetForThisPlatform(release.assets);
+          if (kind) {
+            const asset = findAsset(release.assets, kind);
+            if (asset?.browser_download_url) {
+              const version = release.tag_name.replace(/^founder-node-v/i, '');
+              return {
+                version,
+                tag: release.tag_name,
+                downloadUrl: asset.browser_download_url,
+                releasePageUrl: release.html_url ?? asset.browser_download_url,
+                assetName: asset.name,
+                kind,
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      // Proxy failed — fall through to direct GitHub check below
+    }
   }
 
   const res = await fetch(GITHUB_RELEASES, {
