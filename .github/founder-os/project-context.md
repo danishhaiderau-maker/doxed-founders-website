@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(wall): pin upgrade cost 500 -> 10 DDollar + route revenue to platform admin
+fix(admin): correct founder-promo credentials type to glm/gemini/deepseek
 
 ## Last Activity
 
