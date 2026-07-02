@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(ide-bridge): relay messages from Founder OS to local Cursor IDE via Founder Node
+feat(alerts): ≥20% significant-trade alerts + spam feed backstop
 
 ## Last Activity
 
