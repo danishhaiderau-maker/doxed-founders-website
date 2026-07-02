@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: gitignore *.tmp.py (orphaned python temp copies) + remove stale dashboard backup
+feat(onboarding): add collapsible info section to IDE setup wizard
 
 ## Last Activity
 
