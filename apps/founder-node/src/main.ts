@@ -37,6 +37,7 @@ import {
 } from './sync-client';
 import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
+import { InferenceUsageReporter } from './inference-usage-reporter';
 import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
 import { processPendingDispatches } from './cursor-dispatch';
 import {
@@ -121,6 +122,8 @@ let syncPausedUntil = 0;
 let authRecoveryHandled = false;
 let lastAuthDialogAt = 0;
 const AUTH_DIALOG_COOLDOWN_MS = 5 * 60 * 1000;
+
+const inferenceUsageReporter = new InferenceUsageReporter();
 
 function notifyDesktop(title: string, body: string): void {
   if (!Notification.isSupported()) return;
@@ -299,7 +302,19 @@ async function runInferenceCycle(vaultRoot: string): Promise<void> {
   if (!ollama) return;
 
   try {
-    await processPendingInference(config.apiBaseUrl, config.nodeId, config.nodeToken, ollama);
+    await processPendingInference(
+      config.apiBaseUrl,
+      config.nodeId,
+      config.nodeToken,
+      ollama,
+      inferenceUsageReporter,
+    );
+    // Best-effort flush of any accumulated local-inference token usage.
+    if (inferenceUsageReporter.pendingCount() > 0) {
+      void inferenceUsageReporter
+        .flush(config.apiBaseUrl, config.nodeId, config.nodeToken)
+        .catch((err) => console.warn('Inference usage flush failed:', err));
+    }
   } catch (err) {
     if (classifySyncFailure(err) === 'auth') {
       handleAuthFailure(vaultRoot);

@@ -1,5 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { EventsModule } from '../events/events.module';
+import { ProjectsModule } from '../projects/projects.module';
 import { FounderNodeController } from './founder-node.controller';
 import { FounderNodeGuard } from './founder-node.guard';
 import { FounderNodeInferenceService } from './founder-node-inference.service';
@@ -12,6 +13,7 @@ import { IdeBridgeModule } from '../ide-bridge/ide-bridge.module';
 @Module({
   imports: [
     forwardRef(() => EventsModule),
+    forwardRef(() => ProjectsModule),
     DesktopBridgeModule,
     forwardRef(() => IdeBridgeModule),
   ],

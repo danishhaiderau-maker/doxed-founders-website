@@ -162,6 +162,46 @@ export class FounderNodeController {
     return this.inference.completeJob(req.founderNode.nodeId, jobId, body);
   }
 
+  /**
+   * Batched token-usage reports for local inference run on a paired Founder
+   * Node (Ollama / BYO local model). Each entry is persisted as an
+   * `AiTokenUsageLog` row so it counts toward the platform adoption chart.
+   * Authenticated via FounderNodeGuard (nodeToken). Best-effort: the endpoint
+   * always returns 200 even if some entries fail to record, so the node can
+   * clear its buffer without retry storms.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('inference-usage')
+  reportInferenceUsage(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body()
+    body: {
+      entries?: Array<{
+        promptTokens: number;
+        completionTokens: number;
+        provider?: string;
+        model?: string;
+        source?: string;
+        billingSource?: string;
+        projectId?: string | null;
+      }>;
+    },
+  ) {
+    const entries = Array.isArray(body?.entries) ? body.entries : [];
+    return this.inference.recordUsageBatch(
+      req.founderNode.userId,
+      entries.map((e) => ({
+        promptTokens: Number(e?.promptTokens ?? 0),
+        completionTokens: Number(e?.completionTokens ?? 0),
+        provider: e?.provider ?? 'ollama',
+        model: e?.model,
+        source: e?.source,
+        billingSource: e?.billingSource,
+        projectId: e?.projectId ?? null,
+      })),
+    );
+  }
+
   @UseGuards(FounderNodeGuard)
   @Get('sync-jobs/pending')
   pendingSyncJob(@Req() req: { founderNode: FounderNodeRequestUser }) {
