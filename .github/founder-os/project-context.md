@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-docs(env): document RATE_LIMIT_FAIL_OPEN + TWITTER_VERIFIED_FREE_TOKEN_GATE env vars
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
