@@ -1,16 +1,32 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpException, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
 import { AiProvider, ComputePlaneMode, ControlPlaneMode, MemoryStorageMode, OnboardingPath, SecretsStorageMode } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from './builder.service';
+import { RateLimiterService } from '../events/rate-limiter.service';
 
 @Controller('builder')
 export class BuilderController {
   constructor(
     private readonly builder: BuilderService,
     private readonly github: GitHubApiService,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
+
+  private async enforceCursorDispatchLimit(userId: string): Promise<void> {
+    const rateCheck = await this.rateLimiter.checkLimit(userId, 'cursor_build_dispatch');
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(rateCheck.resetInMs / 1000)}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
 
   @Get('settings')
   settings(@CurrentUser() user: AuthUser) {
@@ -67,10 +83,11 @@ export class BuilderController {
   }
 
   @Post('cursor/dispatch')
-  dispatchCursor(
+  async dispatchCursor(
     @CurrentUser() user: AuthUser,
     @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
   ) {
+    await this.enforceCursorDispatchLimit(user.id);
     return this.builder.dispatchCursorBuildTask(user.id, body);
   }
 

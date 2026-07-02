@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpException, HttpStatus, Param, Patch, Post, Req } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -7,6 +7,7 @@ import { Public } from '../auth/public.decorator';
 import { FounderOsService } from './founder-os.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
 import { FounderPromoService } from './founder-promo.service';
+import { RateLimiterService } from '../events/rate-limiter.service';
 
 @Controller('founder-os')
 export class FounderOsController {
@@ -14,7 +15,22 @@ export class FounderOsController {
     private readonly founderOs: FounderOsService,
     private readonly githubSync: GithubAutoSyncService,
     private readonly founderPromo: FounderPromoService,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
+
+  private async enforceCursorBuildLimit(userId: string): Promise<void> {
+    const rateCheck = await this.rateLimiter.checkLimit(userId, 'cursor_build_room');
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(rateCheck.resetInMs / 1000)}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
 
   @Get('dashboard')
   dashboard(@CurrentUser() user: AuthUser) {
@@ -142,10 +158,11 @@ export class FounderOsController {
   }
 
   @Post('build-room')
-  buildRoom(
+  async buildRoom(
     @CurrentUser() user: AuthUser,
     @Body() body: { title: string; prompt: string },
   ) {
+    await this.enforceCursorBuildLimit(user.id);
     return this.founderOs.runCursorBuildRoom(user.id, body);
   }
 
