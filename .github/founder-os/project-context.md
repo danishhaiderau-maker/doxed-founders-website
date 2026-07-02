@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (10 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(reconcile): Phase 2 — Layer B (NestJS) reconcile-adopt loop + stop re-arm + clientOrderId match key
+chore(ci): refresh bitfinex policy lock for Phase 1/2 signal-subscriber changes
 
 ## Last Activity
 
