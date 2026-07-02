@@ -384,6 +384,15 @@ export class BitfinexTradingClient {
       qty: number;
       price: number;
       leverage?: number;
+      /**
+       * Optional Bitfinex client order id (`cid` in v2/auth/w/order/submit).
+       * Bitfinex requires `cid` to be a 32-bit signed integer — callers MUST
+       * pre-hash any string key into that range. Setting `cid` gives a second
+       * independent match key (beyond the returned order id) so future
+       * reconcile-adopt passes can match orders even when `bitfinexOrderId`
+       * was not persisted.
+       */
+      clientOrderId?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
@@ -392,14 +401,21 @@ export class BitfinexTradingClient {
       input.direction === 'LONG'
         ? Math.abs(input.qty)
         : -Math.abs(input.qty);
-    const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', {
+    const body: Record<string, unknown> = {
       type: 'LIMIT',
       symbol,
       amount: amount.toFixed(5),
       price: input.price.toFixed(2),
       lev,
       meta: { aff_code: 'doxxedcrypto' },
-    });
+    };
+    if (input.clientOrderId != null && Number.isFinite(input.clientOrderId)) {
+      // Bitfinex cid range is signed 32-bit. Clamp to the positive half to
+      // avoid any sign-bit ambiguity on the exchange side.
+      const cid = Math.trunc(input.clientOrderId) & 0x7fffffff;
+      body.cid = cid;
+    }
+    const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', body);
     const id = parseBitfinexOrderId(res);
     if (!id) throw new Error('Bitfinex limit order submitted but no order id returned');
     return id;

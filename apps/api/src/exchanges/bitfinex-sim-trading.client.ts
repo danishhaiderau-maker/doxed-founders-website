@@ -164,6 +164,13 @@ export class BitfinexSimTradingClient {
       qty: number;
       price: number;
       leverage?: number;
+      /**
+       * Accepted for interface parity with BitfinexTradingClient. The sim
+       * ledger does not persist `cid` (CopyRelaySimOrder has no field for
+       * it) — it is intentionally ignored here. Real Bitfinex submits use
+       * the value as the v2 `cid` int32.
+       */
+      clientOrderId?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;

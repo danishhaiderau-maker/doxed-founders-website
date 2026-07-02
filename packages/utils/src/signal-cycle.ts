@@ -87,7 +87,16 @@ export type SignalCycleEventType =
   | 'STOP_LOSS_ARMED'
   | 'UPDATE_STOPS'
   | 'EXIT'
-  | 'EXPIRED';
+  | 'EXPIRED'
+  // Phase 2 reconcile-adopt audit events (Layer B / NestJS Live Copy).
+  // Persisted to SignalCycleEvent.payload — no participant status transition
+  // is attached to these; they exist for operator auditability of stop re-arm
+  // and runtime rehydrate actions taken by reconcileAdoptLoop.
+  | 'RECONCILE_ADOPT_REARM'
+  | 'RECONCILE_ADOPT_REHYDRATE'
+  | 'RECONCILE_ADOPT_SKIP'
+  | 'RECONCILE_STOP_REARM_REFUSED'
+  | 'RECONCILE_STOP_REARM_SKIPPED';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
