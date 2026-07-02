@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix: message loading JSON error + mobile responsive sidebar layout
 
 ## Last Activity
 
