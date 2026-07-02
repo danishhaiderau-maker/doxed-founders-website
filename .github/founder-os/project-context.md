@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(api): break IdeBridgeModule circular dep + main.ts useBodyParser TS errors (unblock Railway)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
