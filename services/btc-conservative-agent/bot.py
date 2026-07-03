@@ -19391,6 +19391,26 @@ def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
                 # rather than double-counting exposure.
                 skipped += 1
                 continue
+            # Truly foreign (no cid, no recoverable trade_id beyond our generated
+            # placeholder) — surface on orphan_order_ids for the operator and
+            # NEVER adopt into the managed book (Q1 surface-only, no auto-cancel).
+            # Adopting would hand a manual/foreign order to process_limit_chase,
+            # which may reprice or cancel it.
+            if not cid and tid.startswith("reconcile-"):
+                with state_lock:
+                    orphans = state.setdefault("orphan_order_ids", [])
+                    if oid not in orphans:
+                        orphans.append(oid)
+                        if len(orphans) > 200:
+                            del orphans[: len(orphans) - 200]
+                orphaned += 1
+                logger.warning(
+                    f"[RECONCILE-ADOPT] surfacing foreign no-cid order oid={oid} as orphan "
+                    f"(NOT adopted — Q1 surface-only) [PIPELINE ENFORCEMENT]"
+                )
+                _reconcile_adopt_audit(oid, "ORPHAN_SURFACE", "RECONCILE_FOREIGN_NO_CID",
+                                       {"trade_id": tid})
+                continue
             entry = _adopted_pending_order_view(exo, tid)
             # Q2 cap: pre-stamp a degraded chase budget so _apply_limit_chase's
             # chase_bucket_allowed gate cancels it via _cancel_pending_for_chase_gate
@@ -19410,18 +19430,6 @@ def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
             _reconcile_adopt_audit(oid, "ADOPT_PENDING", "RECONCILE",
                                    {"trade_id": tid, "price": entry["limit_price"],
                                     "dir": entry["signal_dir"]})
-            # Truly foreign (no cid, no recoverable trade_id beyond our generated
-            # placeholder) — surface on orphan_order_ids for the operator.
-            if not cid and tid.startswith("reconcile-"):
-                with state_lock:
-                    orphans = state.setdefault("orphan_order_ids", [])
-                    if oid not in orphans:
-                        orphans.append(oid)
-                        if len(orphans) > 200:
-                            del orphans[: len(orphans) - 200]
-                orphaned += 1
-                _reconcile_adopt_audit(oid, "ORPHAN_SURFACE", "RECONCILE_FOREIGN_NO_CID",
-                                       {"trade_id": tid})
     if adopted or orphaned:
         pipeline_state_sync()
     return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
