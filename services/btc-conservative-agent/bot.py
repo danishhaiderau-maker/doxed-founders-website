@@ -15884,6 +15884,23 @@ def _admin_authed() -> bool:
     return False
 
 
+def _admin_authed_strict() -> bool:
+    """Strict admin check for IP-sensitive endpoints.
+
+    Unlike `_admin_authed`, this FAILS CLOSED when no BOT_ADMIN_TOKEN is
+    configured — strategy internals are scrubbed unless a valid token is
+    presented. Used by /api/state and /debug_state to decide whether to
+    return the full state or the sanitized public view.
+    """
+    if not _BOT_ADMIN_TOKEN:
+        return False
+    if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
+        return True
+    if request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
+        return True
+    return False
+
+
 @app.before_request
 def _emergency_api_guard():
     path = request.path or ""
@@ -20500,18 +20517,123 @@ def _api_state_cache_refresher_loop():
         shutdown_event.wait(1.5)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# IP protection: public dashboard sanitization
+#
+# /api/state and /debug_state are on the read-only allowlist and bypass the
+# BOT_ADMIN_TOKEN gate. The snapshot they return includes strategy internals
+# (AI thresholds, edge/spread gates, lane names, exit policy, AI prompts,
+# chase buckets, golden-stack config, etc.). These whitelists strip everything
+# except marketing-safe fields (PnL, position, trades, bot status, market data)
+# before the response is sent to an unauthenticated viewer.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Top-level snapshot keys that are safe to show publicly. Everything else
+# (strategy, regime, edge_threshold*, ai_*, chase_*, spread_gate, lane specs,
+# golden_stack_config, research_config, signal_info internals, etc.) is omitted.
+_PUBLIC_STATE_SAFE_TOP_KEYS = {
+    # bot identity / status
+    "bot_status", "bot_pid", "bot_version", "bot_start_time",
+    "analyzer_sync_id",
+    # dashboard meta
+    "dashboard_url", "dashboard_port", "display_timezone",
+    "server_ts", "server_ts_melbourne",
+    # market data
+    "price", "price_ts", "price_age", "ws_age", "ws_last_tick",
+    "last_heartbeat", "heartbeat", "time_since_heartbeat",
+    # account / PnL (marketing)
+    "equity", "account_balance", "session_pnl_usd",
+    "trade_count", "trade_count_session", "trades_display_limit",
+    "funding",
+    # collections (each item sanitized further below)
+    "positions", "trades",
+}
+
+# Per-position keys safe for public display. Drops strategy/regime/lane/score
+# and any threshold/exit-policy metadata.
+_PUBLIC_POSITION_SAFE_KEYS = {
+    "trade_id", "dir", "side", "entry", "current_price", "qty",
+    "leverage", "status", "pnl_pct_margin", "unreal_usd",
+    "unreal_usd_gross", "funding_fees_accrued",
+    "funding_projected_to_settlement", "funding_side", "leg",
+    "created_ts", "age_min", "mark_side",
+}
+
+# Per-trade keys safe for public display. Drops research_lane, research_model,
+# ai_band, exit_reason (all reveal strategy internals).
+_PUBLIC_TRADE_SAFE_KEYS = {
+    "ts", "ts_melbourne", "trade_id", "final_direction", "dir",
+    "entry", "exit", "dur_min", "pnl", "net_pnl_usd",
+    "gross_pnl_usd", "trading_fees_usd", "fees_usd",
+    "funding_fees_usd", "close_ts_melbourne",
+}
+
+
+def _sanitize_public_state(state: dict) -> dict:
+    """Return a copy of `state` containing only marketing-safe fields.
+
+    Strategy internals (AI thresholds, edge/spread gates, lane names, exit
+    policy, chase params, AI prompts, golden-stack/research config, signal
+    reasoning) are stripped. Safe fields (PnL, position, recent trades, bot
+    status, market data, account equity) are preserved so the public
+    dashboard keeps working as a marketing surface.
+    """
+    if not isinstance(state, dict):
+        return {}
+
+    out = {k: state.get(k) for k in _PUBLIC_STATE_SAFE_TOP_KEYS if k in state}
+
+    # Sanitize positions — keep only the safe per-position keys.
+    positions_in = state.get("positions") or []
+    if isinstance(positions_in, list):
+        out["positions"] = [
+            {k: p.get(k) for k in _PUBLIC_POSITION_SAFE_KEYS if p.get(k) is not None}
+            for p in positions_in if isinstance(p, dict)
+        ]
+    else:
+        out["positions"] = []
+
+    # Sanitize trades — drop lane/model/ai_band/exit_reason.
+    trades_in = state.get("trades") or []
+    if isinstance(trades_in, list):
+        out["trades"] = [
+            {k: t.get(k) for k in _PUBLIC_TRADE_SAFE_KEYS if t.get(k) not in (None, "")}
+            for t in trades_in if isinstance(t, dict)
+        ]
+    else:
+        out["trades"] = []
+
+    # Funding is market data, but strip any debug/reason fields that may have
+    # been attached to it.
+    funding = out.get("funding")
+    if isinstance(funding, dict):
+        out["funding"] = {
+            k: v for k, v in funding.items()
+            if k in ("rate", "next_time", "next_time_melbourne", "mark_price",
+                     "next_funding_time", "ts", "predicted_rate")
+        }
+
+    # Explicit marker so observers know they're seeing the sanitized view.
+    out["public_sanitized"] = True
+    return out
+
+
 @app.route('/api/state')
 def api_state():
     # O(1) cache return — the heavy ~108KB snapshot rebuild runs on a background
     # refresher thread (see _api_state_cache_refresher_loop) so request threads
     # never block on it. This is the thread-exhaustion OOM fix.
+    admin_authed = _admin_authed_strict()
     with _api_state_cache_lock:
         cached = _api_state_cache.get("payload")
         if cached is not None:
-            resp = jsonify(cached)
+            payload = cached if admin_authed else _sanitize_public_state(cached)
+            resp = jsonify(payload)
             resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             resp.headers["Pragma"] = "no-cache"
             resp.headers["X-Api-State-Cache"] = "hit"
+            if not admin_authed:
+                resp.headers["X-Api-State-Sanitized"] = "1"
             return resp
     # Cold-start fallback: cache empty before the refresher has populated it.
     # Build once synchronously so the first dashboard poll still works, and seed
@@ -20521,10 +20643,13 @@ def api_state():
         with _api_state_cache_lock:
             _api_state_cache["payload"] = snap
             _api_state_cache["built_at"] = time.time()
-        resp = jsonify(snap)
+        payload = snap if admin_authed else _sanitize_public_state(snap)
+        resp = jsonify(payload)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["X-Api-State-Cache"] = "miss-fallback"
+        if not admin_authed:
+            resp.headers["X-Api-State-Sanitized"] = "1"
         return resp
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
@@ -20540,6 +20665,15 @@ def api_state():
             "research_lane_enabled": research_lane_enabled_map(),
             "continuous_ai_research_enabled": continuous_ai_research_enabled(),
         }
+        # Error payload contains only operational metadata, no strategy internals.
+        if not admin_authed:
+            err_payload = {
+                "api_state_error": err_payload["api_state_error"],
+                "bot_version": err_payload["bot_version"],
+                "bot_pid": err_payload["bot_pid"],
+                "dashboard_port": err_payload["dashboard_port"],
+                "dashboard_url": err_payload["dashboard_url"],
+            }
         resp = jsonify(err_payload)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp, 500
@@ -20566,6 +20700,16 @@ def health():
 
 @app.route('/debug_state')
 def get_debug_state():
+    # /debug_state exposes strategy internals (edge components, AI cooldown,
+    # block reasons, pipeline stage). Fail closed — admin token required.
+    if not _admin_authed_strict():
+        resp = jsonify({
+            "status": "auth_required",
+            "message": "strategy internals are admin-only — present X-Bot-Admin-Token",
+        })
+        resp.headers["X-Debug-State-Sanitized"] = "1"
+        resp.status_code = 401
+        return resp
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
