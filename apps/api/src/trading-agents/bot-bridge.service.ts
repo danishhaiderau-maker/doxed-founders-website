@@ -34,6 +34,9 @@ export class BotBridgeService {
   private cached: BotApiState | null = null;
   private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 5000);
   private dbUrlCache: { url: string | null; at: number } | null = null;
+  /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
+  private execCached: BotApiState | null = null;
+  private execFetchAt = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -142,9 +145,44 @@ export class BotBridgeService {
     }
   }
 
-  /** Execution + relay sim — always live bot; never Railway cache. */
+  /** Execution + relay sim — the CANONICAL showcase bot ONLY; never Railway cache, never Fly.
+   *  The Fly instance (doxed-btc-bot.fly.dev) is a SEPARATE, stale bot with its own book.
+   *  Racing it here (the old fetchState path) let the execution path — entry anchors, chase,
+   *  abandon checks, dedupe, capacity, mirror diff — act on a foreign book (split-brain).
+   *  Fail-closed: when the canonical showcase bot is unreachable this returns null and the
+   *  executor HOLDS; it must never trade on the Fly bot's state. Health/admin/public dashboard
+   *  reads keep the Fly race via fetchState / fetchStateForAdmin / fetchHealth. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
-    return this.fetchState(force, 'live');
+    const now = Date.now();
+    if (!force && this.execCached && now - this.execFetchAt < this.cacheMs) {
+      return this.execCached;
+    }
+    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    for (const path of ['/api/relay-state', '/api/state'] as const) {
+      const timeoutMs = path === '/api/relay-state' ? 20_000 : 30_000;
+      try {
+        const res = await fetch(`${cf}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Canonical bot ${cf}${path} HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as BotApiState;
+        if (!data || typeof data !== 'object') continue;
+        this.execCached = data;
+        this.execFetchAt = now;
+        return data;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Canonical bot ${cf}${path} fetch failed: ${msg}`);
+      }
+    }
+    // Canonical unreachable — execution must hold (no Fly fallback for money decisions).
+    this.execCached = null;
+    this.execFetchAt = 0;
+    return null;
   }
 
   /** Canonical showcase bot state for session-epoch tracking — DOES NOT race Fly.

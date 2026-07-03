@@ -220,6 +220,33 @@ export function parseBitfinexOrderId(response: unknown): number | null {
   return null;
 }
 
+/** One execution of an order — parsed from Bitfinex v2 auth order-trades rows. */
+export type BitfinexOrderTrade = {
+  /** Real execution price (EXEC_PRICE, index 5). */
+  execPrice: number;
+  /** Signed executed amount in BTC (EXEC_AMOUNT, index 4). */
+  execAmount: number;
+  /** Fee (signed, FEE index 9 — negative = charged). */
+  fee: number;
+  /** Execution timestamp ms (MTS_CREATE, index 2). */
+  mtsCreate: number;
+};
+
+/** Bitfinex v2 trade array: [ID, PAIR, MTS_CREATE, ORDER_ID, EXEC_AMOUNT, EXEC_PRICE,
+ *  ORDER_TYPE, ORDER_PRICE, MAKER, FEE, FEE_CURRENCY]. */
+export function parseOrderTrade(row: unknown): BitfinexOrderTrade | null {
+  if (!Array.isArray(row) || row.length < 11) return null;
+  const execAmount = Number(row[4] ?? 0);
+  const execPrice = Number(row[5] ?? 0);
+  if (!Number.isFinite(execPrice) || execPrice <= 0) return null;
+  return {
+    execPrice,
+    execAmount: Number.isFinite(execAmount) ? execAmount : 0,
+    fee: Number(row[9] ?? 0) || 0,
+    mtsCreate: Number(row[2] ?? 0) || 0,
+  };
+}
+
 export type BitfinexActiveOrder = {
   id: number;
   symbol: string;
@@ -502,6 +529,28 @@ export class BitfinexTradingClient {
 
   async cancelOrder(creds: ExchangeCredentials, orderId: number): Promise<void> {
     await bitfinexAuthPost(creds, 'v2/auth/w/order/cancel', { id: orderId });
+  }
+
+  /**
+   * Authoritative per-order executions — Bitfinex v2
+   * `POST /v2/auth/r/order/{symbol}:{orderId}/trades`. Read-only (`/r/` path,
+   * so the C6 testnet guard does not block it) and rides the same nonce lane /
+   * HMAC signing as every other authed call. Returns [] when the order has no
+   * recorded executions; callers fall back to their price approximation.
+   */
+  async fetchOrderTrades(
+    creds: ExchangeCredentials,
+    orderId: number,
+    symbol = BITFINEX_BTC_PERP_SYMBOL,
+  ): Promise<BitfinexOrderTrade[]> {
+    const rows = await bitfinexAuthPost<unknown[][]>(
+      creds,
+      `v2/auth/r/order/${symbol}:${orderId}/trades`,
+    );
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((row) => parseOrderTrade(row))
+      .filter((t): t is BitfinexOrderTrade => t != null);
   }
 
   async listActiveOrders(
