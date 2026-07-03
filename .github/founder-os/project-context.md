@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-fix(live-copy): canonical-only execution state, showcase-vanished close, restart continuity, exchange-truth fills, expiry surfacing, tick watchdog
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
