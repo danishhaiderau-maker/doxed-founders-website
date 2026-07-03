@@ -39,6 +39,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
+import {
+  cancelOrderWithRetry,
+  confirmOrderGone,
+  type CancelCapableClient,
+} from '../exchanges/bitfinex-cancel.util';
 import { SignalCyclesService } from './signal-cycles.service';
 import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
@@ -557,7 +562,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
-    await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
+    // Phase 6 fix 3 — per-tick orphan surfacer. Runs every tick (after
+    // reconcileLotLedger / reconcileAdoptOrphans) so dashboardState.orphanOrderIds
+    // stays current even when the bot is idle and no new signal arrives. The
+    // fetched foreign orders are handed to cleanupOrphanCopyOrders (fix 4) so we
+    // don't double-query the exchange. evaluateEntryEligibility now READS the
+    // persisted orphanOrderIds instead of re-querying listActiveOrders.
+    const foreignOrphanOrders = await this.surfaceOrphanOrders(instance, creds, managedOrderIds);
+
+    await this.cleanupOrphanCopyOrders(
+      instance.userId,
+      instance.id,
+      agentId,
+      creds,
+      managedOrderIds,
+      foreignOrphanOrders,
+    );
 
     const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
     const botStateForCap = this.botBridge.isEnabled()
@@ -894,6 +914,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }) as unknown as Prisma.InputJsonValue,
       },
     });
+  }
+
+  /**
+   * Phase 6 fix 3 — per-tick orphan surfacer. Lists active Bitfinex orders,
+   * filters to foreign (not in `managedOrderIds`), and persists/clears
+   * `dashboardState.orphanOrderIds` so the dashboard stays current even when
+   * the bot is idle and no new signal arrives (the legacy path only surfaced
+   * inside `evaluateEntryEligibility`, leaving orphans `undefined` for hours).
+   * Returns the foreign orders so `cleanupOrphanCopyOrders` (fix 4) can reuse
+   * them without a second `listActiveOrders` round-trip. Best-effort: never
+   * aborts the tick on a Bitfinex lookup failure.
+   */
+  private async surfaceOrphanOrders(
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    managedOrderIds: Set<number>,
+  ): Promise<Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string; cid?: number; createdAtMs?: number }>> {
+    if (instance.exchangeProvider !== 'bitfinex') return [];
+    const orders = await this.activeTrading.listActiveOrders(creds).catch((err) => {
+      this.logger.warn(
+        `Orphan surfacer ${instance.userId}: listActiveOrders failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return [] as Awaited<ReturnType<typeof this.activeTrading.listActiveOrders>>;
+    });
+    const foreign = orders.filter((o) => !managedOrderIds.has(o.id));
+    if (foreign.length > 0) {
+      await this.persistOrphanOrderIds(instance.id, foreign).catch(() => {
+        /* dashboard surfacing is best-effort */
+      });
+    } else {
+      await this.clearOrphanOrderIds(instance.id).catch(() => {
+        /* best-effort */
+      });
+    }
+    return foreign;
   }
 
   /**
@@ -1258,7 +1313,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
     maxConcurrent: number,
     newDirection?: 'LONG' | 'SHORT',
-    instance?: { id: string },
+    instance?: { id: string; dashboardState?: unknown },
   ): Promise<EntryEligibility> {
     let available = 0;
     try {
@@ -1275,18 +1330,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
 
-    const pendingOrders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
-    const foreignPending = pendingOrders.filter((o) => !managedOrderIds.has(o.id));
+    // Phase 6 fix 3 — read the already-persisted orphanOrderIds instead of
+    // re-querying listActiveOrders. The per-tick `surfaceOrphanOrders` pass in
+    // processInstance keeps this field current (even when idle), so the entry
+    // gate stays accurate without a second exchange round-trip per entry
+    // evaluation. `managedOrderIds` is retained for caller compatibility and
+    // as a secondary cross-check when the persisted state is missing.
+    const dashState = (instance?.dashboardState ?? {}) as Record<string, unknown>;
+    const persistedOrphanIds = Array.isArray(dashState.orphanOrderIds)
+      ? (dashState.orphanOrderIds as Array<{ id?: number; cid?: number | null }>)
+      : [];
+    const foreignPending = persistedOrphanIds.filter((o) => o && typeof o.id === 'number');
     if (foreignPending.length > 0) {
-      // Surface the specific foreign order ids into dashboardState so the operator
-      // can see WHICH order to cancel on the Bitfinex UI instead of a vague count.
-      // Q1 default = surface-only — do NOT auto-cancel here. The block on new
-      // entries stays in place (returned below).
-      if (instance?.id) {
-        await this.persistOrphanOrderIds(instance.id, foreignPending).catch(() => {
-          /* dashboard surfacing is best-effort; must not block the entry gate */
-        });
-      }
       return {
         canEnter: false,
         reason: `${foreignPending.length} unmanaged Bitfinex order(s) — cancel manually or wait before new copy entries. (ids: ${foreignPending
@@ -1298,12 +1353,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     // No foreign orders — clear any stale orphanOrderIds so the dashboard
-    // doesn't show a ghost warning after the operator cancels.
+    // doesn't show a ghost warning after the operator cancels. The per-tick
+    // surfacer already does this, but keep the clear here as a belt-and-braces
+    // fallback for the case where evaluateEntryEligibility runs without a
+    // preceding surfacer (e.g. the idle `entriesThisTick === 0` branch below).
     if (instance?.id) {
       await this.clearOrphanOrderIds(instance.id).catch(() => {
         /* best-effort */
       });
     }
+    void managedOrderIds;
 
     if (
       newDirection &&
@@ -1601,6 +1660,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
+  /**
+   * Money-path cancel helper. Retries the cancel with backoff via
+   * {@link cancelOrderWithRetry}, then — only if the cancel API reported a
+   * non-"gone" failure — verifies with {@link confirmOrderGone} whether the
+   * order is actually still on the active book. Returns `gone: true` when the
+   * cancel succeeded OR a follow-up `findOrder` confirms the order is no
+   * longer active; ONLY in that case may the caller record an EXPIRED ledger
+   * event. Returns `gone: false` when the cancel failed AND the order is
+   * confirmed still live — caller must leave the participant PENDING_ENTRY,
+   * set `instance.lastError = 'CANCEL_FAILED_ORDER_STILL_LIVE'`, audit
+   * `RECONCILE_CANCEL_FAILED`, and let the next tick retry.
+   */
+  private async cancelManagedOrderGone(
+    creds: ExchangeCredentials,
+    orderId: number,
+    label: string,
+  ): Promise<{ gone: boolean; reason?: string; attempts: number }> {
+    const client = this.activeTrading as CancelCapableClient;
+    const result = await cancelOrderWithRetry(client, creds, orderId, {
+      logger: this.logger,
+      label,
+    });
+    if (result.ok) {
+      return { gone: true, reason: result.reason, attempts: result.attempts };
+    }
+    const gone = await confirmOrderGone(client, creds, orderId);
+    return { gone, reason: result.reason, attempts: result.attempts };
+  }
+
+  /** Best-effort surface of a money-path cancel failure to the operator. */
+  private async setInstanceLastError(userId: string, agentId: string, msg: string) {
+    await this.prisma.tradingAgentInstance
+      .updateMany({
+        where: { userId, agentId },
+        data: { lastError: msg.slice(0, 500) },
+      })
+      .catch(() => {
+        /* best-effort — must not abort the tick */
+      });
+  }
+
   private async monitorEntry(
     agentId: string,
     userId: string,
@@ -1631,13 +1731,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // resting limit — otherwise it can chase/fill up to 30m TTL AFTER the showcase exited,
     // creating an orphan position with no showcase to mirror the exit on.
     if (cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED) {
-      try {
-        await this.activeTrading.cancelOrder(creds, orderId);
-      } catch {
-        /* may already be gone */
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        orderId,
+        `Hire expire ${userId} cycle=${cycle.id} (showcase ${cycle.status}) cancel relay limit ${orderId}`,
+      );
+      if (!cancel.gone) {
+        // CRITICAL money-path: cancel failed AND the order is still live. Do
+        // NOT mark the participant EXPIRED — that would orphan the order. Leave
+        // PENDING_ENTRY, surface the failure, audit, and let the next tick retry.
+        this.logger.error(
+          `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+        );
+        await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'SHOWCASE_CYCLE_CLOSED',
+          reason: cycle.status,
+          bitfinex_order_id: orderId,
+          cancel_attempts: cancel.attempts,
+          cancel_reason: cancel.reason ?? 'unknown',
+        });
+        return;
       }
       this.logger.log(
-        `Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status} — cancelled relay limit`,
+        `Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status} — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
       );
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
@@ -1655,13 +1774,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
-        try {
-          await this.activeTrading.cancelOrder(creds, orderId);
-        } catch {
-          /* may already be gone */
+        const cancel = await this.cancelManagedOrderGone(
+          creds,
+          orderId,
+          `Hire expire ${userId} cycle=${cycle.id} (showcase abandoned) cancel relay limit ${orderId}`,
+        );
+        if (!cancel.gone) {
+          this.logger.error(
+            `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+          );
+          await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'SHOWCASE_ABANDONED',
+            reason: abandon.reason,
+            bitfinex_order_id: orderId,
+            cancel_attempts: cancel.attempts,
+            cancel_reason: cancel.reason ?? 'unknown',
+          });
+          return;
         }
         this.logger.log(
-          `Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}) — cancelled relay limit`,
+          `Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}) — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
         );
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
           venue: 'bitfinex',
@@ -1675,10 +1810,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
-      try {
-        await this.activeTrading.cancelOrder(creds, orderId);
-      } catch {
-        /* may already be gone */
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        orderId,
+        `Hire expire ${userId} cycle=${cycle.id} (signal TTL expired) cancel relay limit ${orderId}`,
+      );
+      if (!cancel.gone) {
+        this.logger.error(
+          `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+        );
+        await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'SIGNAL_TTL_EXPIRED',
+          bitfinex_order_id: orderId,
+          cancel_attempts: cancel.attempts,
+          cancel_reason: cancel.reason ?? 'unknown',
+        });
+        return;
       }
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
@@ -2112,6 +2262,66 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(
         `[RECONCILE-ADOPT] cancel-by-exchange detected ${userId} participant=${row.id} cycle=${row.cycleId} bitfinexOrderId=${oid} — order vanished with no FILLED event, marking EXIT @ $0`,
       );
+    }
+
+    // Phase 6 fix 5 — defensive re-cancel of the inverse case: a participant
+    // already marked EXPIRED (or CLOSED with no fill) whose `meta.bitfinexOrderId`
+    // is STILL on the exchange's active book. This is the orphan-by-ledger state
+    // the original cancel-on-expiry path created by swallowing cancel failures.
+    // Re-attempt the cancel with retry + loud-fail, and only consider the orphan
+    // resolved once findOrder confirms the order is gone. Audit
+    // RECONCILE_RECANCEL_EXPIRED_STILL_LIVE on every re-attempt so the operator
+    // can see the ledger/exchange drift being healed.
+    const expiredCandidates = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.EXPIRED, SignalCycleStatus.CLOSED] },
+        cycle: { agentId },
+        events: { none: { eventType: 'FILLED' } },
+        updatedAt: { lt: new Date(Date.now() - 120_000) },
+        ...participantScope,
+      },
+      select: { id: true, cycleId: true, status: true, venue: true },
+    });
+
+    for (const row of expiredCandidates) {
+      const meta = await this.loadExecutionMeta(row.id);
+      const oid = meta.bitfinexOrderId;
+      if (oid == null) continue;
+      // Only act if the order is confirmed still on the active book.
+      if (!activeOrderIdSet.has(oid)) continue;
+
+      const venue = row.venue ?? 'bitfinex';
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        oid,
+        `[RECONCILE] re-cancel expired-still-live ${oid} for ${userId} participant=${row.id}`,
+      );
+      if (cancel.gone) {
+        this.logger.warn(
+          `[RECONCILE] re-cancelled expired-still-live order ${oid} for ${userId} participant=${row.id} (was ${row.status} on ledger) — order now confirmed gone`,
+        );
+      } else {
+        this.logger.error(
+          `[RECONCILE] re-cancel of expired-still-live order ${oid} for ${userId} participant=${row.id} FAILED (attempts=${cancel.attempts}, reason=${cancel.reason}) — order still live, will retry next tick`,
+        );
+      }
+      // Audit on every attempt (success or fail) so the operator has a
+      // complete trail of the ledger/exchange drift being healed.
+      await this.cycles
+        .recordHireExecutionEvent(userId, agentId, row.cycleId, 'RECONCILE_RECANCEL_EXPIRED_STILL_LIVE', {
+          venue,
+          source: 'hire',
+          bitfinex_order_id: oid,
+          participant_id: row.id,
+          participant_status: row.status,
+          cancel_attempts: cancel.attempts,
+          cancel_reason: cancel.reason ?? (cancel.gone ? 'cancelled' : 'unknown'),
+          order_confirmed_gone: cancel.gone,
+        })
+        .catch(() => {
+          /* audit-best-effort — must not abort the loop */
+        });
     }
   }
 
@@ -3252,34 +3462,160 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private async cleanupOrphanCopyOrders(
     userId: string,
+    instanceId: string,
+    agentId: string,
     creds: ExchangeCredentials,
     managedOrderIds: Set<number>,
+    preFetchedForeign?: Array<{
+      id: number;
+      amount?: number;
+      amountOrig?: number;
+      price?: number;
+      status?: string;
+      orderType?: string;
+      cid?: number;
+      createdAtMs?: number;
+    }>,
   ) {
     // REAL-MONEY SAFETY: never blanket-cancel every unmanaged order on the symbol.
     // The previous behavior cancelled a user's MANUAL orders/stops each tick because
     // they were not in `managedOrderIds` (which only tracks copy-relay orders placed
     // this session). Now we only cancel when aggressive cleanup is explicitly opted-in
-    // (RELAY_AGGRESSIVE_ORPHAN_CLEANUP=1) — default is to LOG orphans and leave them,
-    // so a real user's manual orders are never touched by the relay.
+    // (RELAY_AGGRESSIVE_ORPHAN_CLEANUP=1) OR the foreign order's `cid` matches a
+    // bot-computed `ExecutionPayload.clientOrderId` in the DB (Phase 6 fix 4 — those
+    // are definitively the bot's OWN orphaned orders, never user manual orders, so
+    // self-heal is default-on for them without the blanket aggressive flag).
     const aggressive =
       (this.config.get<string>('RELAY_AGGRESSIVE_ORPHAN_CLEANUP') ?? '').trim() === '1';
-    const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
-    for (const order of orders) {
-      if (managedOrderIds.has(order.id)) continue;
-      if (!aggressive) {
-        // Log only; do NOT cancel — could be a user's own manual order.
-        this.logger.debug(
-          `Unmanaged order ${order.id} (${order.orderType}) present for ${userId}; leaving untouched (aggressive cleanup off)`,
+
+    const orders = preFetchedForeign
+      ? preFetchedForeign.filter((o) => !managedOrderIds.has(o.id))
+      : (await this.activeTrading.listActiveOrders(creds).catch(() => [])).filter(
+          (o) => !managedOrderIds.has(o.id),
         );
+
+    if (orders.length === 0) return;
+
+    // Phase 6 fix 4 — build the cid → participant map for this user/agent by
+    // reading every participant's merged ExecutionPayload (which surfaces
+    // `clientOrderId` from ORDER_PLACED / UPDATE_STOPS events). A foreign
+    // active order whose `cid` matches one of these is, by construction, the
+    // bot's own orphaned limit (the participant is now terminal so its
+    // bitfinexOrderId left `managedOrderIds`, but the exchange order is still
+    // on the book). Auto-cancel those with retry + loud-fail + audit. cid-less
+    // / unknown-cid foreign orders are left for manual review (current
+    // behavior, gated by the aggressive flag).
+    const allParticipants = await this.prisma.signalCycleParticipant.findMany({
+      where: { userId, cycle: { agentId } },
+      select: { id: true, cycleId: true, status: true },
+    });
+    const cidToParticipant = new Map<number, { participantId: string; cycleId: string }>();
+    for (const p of allParticipants) {
+      const meta = await this.loadExecutionMeta(p.id);
+      if (meta.clientOrderId == null) continue;
+      // First-seen wins — a re-placement (applyLimitChase) reuses the same cid
+      // hash for the same (cycle, participant, tradeId) triple, so duplicates
+      // map to the same participant anyway.
+      if (!cidToParticipant.has(meta.clientOrderId)) {
+        cidToParticipant.set(meta.clientOrderId, { participantId: p.id, cycleId: p.cycleId });
+      }
+    }
+
+    const client = this.activeTrading as CancelCapableClient;
+    let autoCancelled = 0;
+    for (const order of orders) {
+      const matched = order.cid != null ? cidToParticipant.get(order.cid) : undefined;
+      if (!matched) {
+        if (aggressive) {
+          const cancel = await cancelOrderWithRetry(client, creds, order.id, {
+            logger: this.logger,
+            label: `Aggressive orphan cleanup cancel ${order.id} for ${userId}`,
+          });
+          if (cancel.ok) {
+            this.logger.warn(
+              `Cancelled orphan copy order ${order.id} (${order.orderType}) for ${userId} (aggressive cleanup)`,
+            );
+            autoCancelled += 1;
+          } else {
+            this.logger.error(
+              `Aggressive orphan cleanup: order ${order.id} cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) — leaving for next tick`,
+            );
+          }
+        } else {
+          // Log only; do NOT cancel — could be a user's own manual order.
+          this.logger.debug(
+            `Unmanaged order ${order.id} (cid=${order.cid ?? 'none'}, ${order.orderType}) present for ${userId}; leaving untouched (no cid match, aggressive cleanup off)`,
+          );
+        }
         continue;
       }
-      try {
-        await this.activeTrading.cancelOrder(creds, order.id);
+      // cid matched one of OUR participants — definitively the bot's own
+      // orphan. Auto-cancel with retry + audit, regardless of `aggressive`.
+      const cancel = await cancelOrderWithRetry(client, creds, order.id, {
+        logger: this.logger,
+        label: `Auto-cancel own orphan ${order.id} (cid=${order.cid}) for ${userId}`,
+      });
+      if (cancel.ok) {
+        autoCancelled += 1;
         this.logger.warn(
-          `Cancelled orphan copy order ${order.id} (${order.orderType}) for ${userId}`,
+          `[RECONCILE] auto-cancelled own orphan order ${order.id} (cid=${order.cid}) for ${userId} — matched participant ${matched.participantId}`,
         );
-      } catch {
-        /* already gone */
+        await this.cycles
+          .recordHireExecutionEvent(userId, agentId, matched.cycleId, 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN', {
+            venue: 'bitfinex',
+            source: 'hire',
+            bitfinex_order_id: order.id,
+            client_order_id: order.cid,
+            matched_participant_id: matched.participantId,
+            cancel_attempts: cancel.attempts,
+            cancel_reason: cancel.reason ?? 'cancelled',
+          })
+          .catch(() => {
+            /* audit-best-effort — must not abort cleanup */
+          });
+        // Re-verify the order is actually gone; if it still shows on the book
+        // (cancel API said NOT_FOUND but a stale listActiveOrders cached it),
+        // leave it — the next tick's surfacer will re-list and re-attempt.
+        const gone = await confirmOrderGone(client, creds, order.id);
+        if (!gone) {
+          this.logger.warn(
+            `[RECONCILE] own orphan ${order.id} for ${userId}: cancel returned ok but findOrder still locates it — deferring to next tick`,
+          );
+        }
+      } else {
+        this.logger.error(
+          `[RECONCILE] own orphan ${order.id} (cid=${order.cid}) for ${userId}: auto-cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) — leaving for next tick`,
+        );
+      }
+    }
+
+    if (autoCancelled > 0) {
+      // The surfacer already persisted orphanOrderIds for this tick; refresh
+      // it so the dashboard reflects the auto-cancellations immediately.
+      const remaining = orders
+        .filter((o) => {
+          if (o.cid == null) return true;
+          const m = cidToParticipant.get(o.cid);
+          return !m; // unmatched (manual / unknown) — keep surfaced
+        })
+        .map((o) => ({
+          id: o.id,
+          amount: o.amount,
+          amountOrig: o.amountOrig,
+          price: o.price,
+          status: o.status,
+          orderType: o.orderType,
+          ...(o.cid != null ? { cid: o.cid } : {}),
+          createdAtMs: o.createdAtMs,
+        }));
+      if (remaining.length === 0) {
+        await this.clearOrphanOrderIds(instanceId).catch(() => {
+          /* best-effort */
+        });
+      } else {
+        await this.persistOrphanOrderIds(instanceId, remaining).catch(() => {
+          /* best-effort */
+        });
       }
     }
   }
