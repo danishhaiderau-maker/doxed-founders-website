@@ -6,7 +6,6 @@ import {
   fetchAnalyzerSessionSummary,
   type AnalyzerSessionSummary,
 } from '@/lib/api';
-import { SpreadGateControl } from '@/components/agent-hub/spread-gate-control';
 
 const POLL_MS = 60_000;
 
@@ -140,8 +139,6 @@ export function AgentAnalyzerPanel({
           </div>
         )}
       </section>
-
-      {slug === 'conservative-btc' && <SpreadGateControl />}
     </div>
   );
 }
