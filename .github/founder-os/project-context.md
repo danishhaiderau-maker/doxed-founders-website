@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-fix(showcase-bot): surface-only for foreign no-cid orders in _adopt_from_rebuild - never adopt manual orders into chase loop
+fix(live-copy): adoption hardening - origin-price adoption, reset-proof budget, S6a TTL, double-adopt guard, fail-loud orphan close, realized flat P&L
 
 ## Last Activity
 
