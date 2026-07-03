@@ -186,7 +186,7 @@ function HistoryThread({
     );
   }
   return (
-    <div className='mb-4 space-y-2.5'>
+    <div className='mx-auto mb-4 max-w-3xl space-y-2.5'>
       <div className='px-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>
         Conversation history
       </div>
@@ -357,22 +357,64 @@ export function MinimalDevWorkspace({
     connected.find((c) => c.branch?.trim())?.branch ||
     'unknown';
 
-  // Bucket Cursor chat sessions by recency for the sidebar grouping.
-  // "Today" = since local midnight; "Last 7 Days" = within 7 days excl. today.
-  const sessionBuckets = useMemo<{ today: BridgeSession[]; last7: BridgeSession[] }>(() => {
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const sevenDaysAgo = now.getTime() - 7 * 24 * 60 * 60 * 1000;
-    const today: BridgeSession[] = [];
-    const last7: BridgeSession[] = [];
-    for (const s of sessions) {
-      const ts = new Date(s.lastActiveAt).getTime();
-      if (!Number.isFinite(ts)) continue;
-      if (ts >= startOfToday) today.push(s);
-      else if (ts >= sevenDaysAgo) last7.push(s);
+  // Group Cursor chat sessions by their owning workspace so the sidebar
+  // reads like WhatsApp's conversation list (chats grouped per workspace)
+  // rather than a flat task list. Cursor sessions carry a `workspaceId`
+  // matching the UUID in the workspaces list's `cursor:<uuid>` id; sessions
+  // we can't match fall back to their repository folder name, then to a
+  // catch-all "Other chats" bucket.
+  const sessionsByWorkspace = useMemo<
+    Array<{ key: string; label: string; sessions: BridgeSession[] }>
+  >(() => {
+    const wsByUuid = new Map<string, IdeWorkspace>();
+    for (const w of ideWorkspaces) {
+      if (w.ideProvider !== 'cursor') continue;
+      const uuid = w.id.startsWith('cursor:') ? w.id.slice('cursor:'.length) : w.id;
+      wsByUuid.set(uuid, w);
     }
-    return { today, last7 };
-  }, [sessions]);
+    const groups = new Map<string, { label: string; sessions: BridgeSession[] }>();
+    for (const s of sessions) {
+      let key: string;
+      let label: string;
+      const ws = s.workspaceId ? wsByUuid.get(s.workspaceId) : undefined;
+      if (ws) {
+        key = 'ws:' + ws.id;
+        label = ws.title;
+      } else if (s.repository) {
+        const repoName = s.repository.split('/').pop() || s.repository;
+        key = 'repo:' + repoName;
+        label = repoName;
+      } else {
+        key = 'other';
+        label = 'Other chats';
+      }
+      const g = groups.get(key);
+      if (g) g.sessions.push(s);
+      else groups.set(key, { label, sessions: [s] });
+    }
+    for (const g of groups.values()) {
+      g.sessions.sort(
+        (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+      );
+    }
+    return Array.from(groups.entries())
+      .map(([key, g]) => ({ key, ...g }))
+      .sort((a, b) => {
+        const aTop = a.sessions[0]?.lastActiveAt || '';
+        const bTop = b.sessions[0]?.lastActiveAt || '';
+        return new Date(bTop).getTime() - new Date(aTop).getTime();
+      });
+  }, [sessions, ideWorkspaces]);
+
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
+  const toggleWorkspace = useCallback((key: string) => {
+    setCollapsedWorkspaces((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
@@ -415,30 +457,10 @@ export function MinimalDevWorkspace({
     (session: BridgeSession) => {
       setSelectedSessionId(session.id);
       setSidebarOpen(false);
-      const lines: string[] = [];
-      lines.push(`Continuing Cursor session: ${session.title}`);
-      if (session.subtitle) lines.push(`Last work: ${session.subtitle}`);
-      const repoLabel = session.repository || session.branch;
-      if (repoLabel) {
-        const parts: string[] = [];
-        if (session.repository) parts.push(session.repository);
-        if (session.branch) parts.push(session.branch);
-        lines.push(`Repo: ${parts.join(' · ')}`);
-      }
-      const add = session.totalLinesAdded;
-      const rem = session.totalLinesRemoved;
-      const files = session.filesChangedCount;
-      if (typeof files === 'number' || typeof add === 'number' || typeof rem === 'number') {
-        lines.push(
-          `Diff: ${typeof files === 'number' ? files + ' file(s)' : ''}${
-            typeof add === 'number' || typeof rem === 'number'
-              ? ` (+${add ?? 0} -${rem ?? 0})`
-              : ''
-          }`.trim(),
-        );
-      }
-      lines.push('Pick up where this left off.');
-      setInput(lines.join('\n'));
+      // Don't prefill the input with a technical summary — the conversation
+      // thread above shows the full history; the user just continues typing
+      // as if replying in a chat app.
+      setInput('');
     },
     [],
   );
@@ -580,22 +602,50 @@ export function MinimalDevWorkspace({
           {sessions.length > 0 && (
             <div className='mt-3'>
               <div className='px-3 pb-1 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>Cursor Chats</div>
-              {sessionBuckets.today.length > 0 && (
-                <div className='mb-1'>
-                  <div className='px-3 py-1 text-[0.65rem] font-medium uppercase tracking-wider text-emerald-400/80'>Today</div>
-                  {sessionBuckets.today.map((s) => (
-                    <SessionRow key={'t-' + s.id} session={s} selected={selectedSessionId === s.id} onSelect={handleSelectSession} dotClass='bg-emerald-400' />
-                  ))}
-                </div>
-              )}
-              {sessionBuckets.last7.length > 0 && (
-                <div className='mb-1'>
-                  <div className='px-3 py-1 text-[0.65rem] font-medium uppercase tracking-wider text-violet-400/80'>Last 7 Days</div>
-                  {sessionBuckets.last7.map((s) => (
-                    <SessionRow key={'l7-' + s.id} session={s} selected={selectedSessionId === s.id} onSelect={handleSelectSession} dotClass='bg-violet-400' />
-                  ))}
-                </div>
-              )}
+              {sessionsByWorkspace.map((g) => {
+                const collapsed = collapsedWorkspaces.has(g.key);
+                return (
+                  <div key={g.key} className='mb-1'>
+                    <button
+                      type='button'
+                      onClick={() => toggleWorkspace(g.key)}
+                      className='flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left transition hover:bg-white/5'
+                    >
+                      <span
+                        className={
+                          'text-[0.6rem] text-zinc-500 transition-transform ' +
+                          (collapsed ? '' : 'rotate-90')
+                        }
+                      >
+                        ▶
+                      </span>
+                      <span className='truncate text-[0.7rem] font-semibold uppercase tracking-wider text-zinc-300'>
+                        {g.label}
+                      </span>
+                      <span className='ml-auto rounded-full bg-white/5 px-1.5 text-[0.6rem] text-zinc-500'>
+                        {g.sessions.length}
+                      </span>
+                    </button>
+                    {!collapsed && (
+                      <div className='ml-1'>
+                        {g.sessions.map((s) => (
+                          <SessionRow
+                            key={g.key + ':' + s.id}
+                            session={s}
+                            selected={selectedSessionId === s.id}
+                            onSelect={handleSelectSession}
+                            dotClass={
+                              Date.now() - new Date(s.lastActiveAt).getTime() < 86400000
+                                ? 'bg-emerald-400'
+                                : 'bg-violet-400'
+                            }
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -717,27 +767,25 @@ export function MinimalDevWorkspace({
         <div ref={scrollRef} className='min-h-0 flex-1 overflow-y-auto px-4 py-4'>
           {selectedWs && !selectedSession && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
           {selectedSession && (
-            <div className='mb-3 rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2.5 text-xs text-zinc-300'>
+            <div className='mx-auto mb-3 max-w-3xl rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300'>
               <div className='flex items-center gap-2'>
-                <span className={'h-1.5 w-1.5 shrink-0 rounded-full ' + (Date.now() - new Date(selectedSession.lastActiveAt).getTime() < 86400000 ? 'bg-emerald-400' : 'bg-violet-400')} />
+                <span
+                  className={
+                    'h-1.5 w-1.5 shrink-0 rounded-full ' +
+                    (Date.now() - new Date(selectedSession.lastActiveAt).getTime() < 86400000
+                      ? 'bg-emerald-400'
+                      : 'bg-violet-400')
+                  }
+                />
+                <span className='text-zinc-500'>Continuing chat:</span>
                 <span className='font-medium text-zinc-100'>{selectedSession.title}</span>
-                {selectedSession.isAgentProject && <span className='rounded bg-violet-500/20 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider text-violet-300'>Agent</span>}
+                {selectedSession.isAgentProject && (
+                  <span className='rounded bg-violet-500/20 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider text-violet-300'>
+                    Agent
+                  </span>
+                )}
                 <span className='ml-auto text-zinc-500'>{timeAgo(selectedSession.lastActiveAt)}</span>
               </div>
-              {selectedSession.subtitle && <div className='mt-1 pl-3.5 text-zinc-400'>{selectedSession.subtitle}</div>}
-              {(selectedSession.repository || selectedSession.branch) && (
-                <div className='mt-1 flex items-center gap-2 pl-3.5 text-zinc-500'>
-                  {selectedSession.repository && <span className='rounded bg-white/5 px-1.5 py-0.5 text-[0.65rem] text-zinc-300'>{selectedSession.repository}</span>}
-                  {selectedSession.branch && <span className='rounded bg-white/5 px-1.5 py-0.5 text-[0.65rem] text-zinc-300'>{selectedSession.branch}</span>}
-                  {(typeof selectedSession.filesChangedCount === 'number' || typeof selectedSession.totalLinesAdded === 'number') && (
-                    <span className='text-[0.65rem] text-emerald-400/80'>
-                      {typeof selectedSession.filesChangedCount === 'number' ? `${selectedSession.filesChangedCount} file(s)` : ''}
-                      {typeof selectedSession.totalLinesAdded === 'number' || typeof selectedSession.totalLinesRemoved === 'number' ? ` +${selectedSession.totalLinesAdded ?? 0} -${selectedSession.totalLinesRemoved ?? 0}` : ''}
-                    </span>
-                  )}
-                </div>
-              )}
-              <div className='mt-1.5 pl-3.5 text-zinc-500'>Resume this Cursor session — your prompt below is pre-filled with its context.</div>
             </div>
           )}
           {selectedSession && (
