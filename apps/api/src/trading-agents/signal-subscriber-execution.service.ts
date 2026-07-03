@@ -51,7 +51,7 @@ import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { applyDashboardPatch } from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
-import { mapBotStateToAgentStats } from './bot-state.mapper';
+import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -136,6 +136,56 @@ function reconcileAdoptBudget(): number {
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
 }
 
+/**
+ * Phase 1 — "100% mirror" state-convergence master switch. Default OFF
+ * (current behavior). When ON:
+ *  1. Book-state dedupe: entries mirror the showcase BOOK, not its per-lane
+ *     signal spawns — a second participant at an already-resting limit price
+ *     is expired ledger-side (DUPLICATE_LIMIT_SKIPPED) without a real order.
+ *  2. Chase convergence: bot-anchored replaces are clamped to max 1 per
+ *     order per second, and the showcase state fetch is memoised for 1s per
+ *     tick so all call sites share a single fresh pull (faster ticks, lower
+ *     effective reprice lag).
+ *  3. Cancel-race fill check: every entry-order cancel (chase replace,
+ *     showcase-close/abandon, TTL expiry) and the RECONCILE_CANCEL_BY_EXCHANGE
+ *     classification first verify the order did not (partially) fill; a real
+ *     fill is recorded as FILLED at the real price instead of closing at $0.
+ * Read per call so operators can flip it via Railway env without a redeploy.
+ */
+function mirrorConvergenceEnabled(): boolean {
+  const v = (process.env.MIRROR_CONVERGENCE_ENABLED ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true';
+}
+
+/**
+ * Phase 0 — shadow-diff observability (MIRROR_DIFF). Default ON; set
+ * MIRROR_DIFF_ENABLED=0 to disable. Pure observability: compares the showcase
+ * book (pending limits + open positions from the bot state the tick already
+ * fetched) against the copy's ledger (resting orders + OPEN lots) and
+ * persists divergences to dashboardState.mirrorDiff plus a throttled
+ * MIRROR_DIFF SignalCycleEvent. No exchange API calls, no behavior change.
+ */
+function mirrorDiffEnabled(): boolean {
+  return process.env.MIRROR_DIFF_ENABLED !== '0';
+}
+
+/** Two copy/showcase limits within this many USD are "the same book entry"
+ *  (showcase book dedupes duplicate lane spawns at the EXACT same price). */
+const DUPLICATE_LIMIT_EPSILON_USD = 0.01;
+
+/** Price delta below this (USD) is considered converged for MIRROR_DIFF. */
+const MIRROR_DIFF_PRICE_EPSILON_USD = 0.01;
+
+/** Max 1 MIRROR_DIFF SignalCycleEvent per participant per this window. */
+const MIRROR_DIFF_EVENT_THROTTLE_MS = 60_000;
+
+/** With MIRROR_CONVERGENCE_ENABLED: max 1 chase replace per order per second. */
+const MIRROR_CHASE_MIN_REPLACE_MS = 1_000;
+
+/** With MIRROR_CONVERGENCE_ENABLED: showcase state memo TTL for the execution
+ *  path — all call sites within ~1s share one fresh fetch. */
+const MIRROR_EXEC_STATE_MEMO_MS = 1_000;
+
 /** Phase 5 guardrail — refuse to adopt an orphan whose qty exceeds this multiple
  *  of the normal lot size (marginCap * leverage / price). A giant orphan is a
  *  red flag (manual position or wrong-symbol order), not a heal target. */
@@ -200,6 +250,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly exitingLots = new Set<string>();
   private running = false;
   private wakeQueued = false;
+  /** Phase 1 — 1s showcase-state memo for the execution path (flag-gated). */
+  private execStateMemo: { at: number; state: BotApiState | null } | null = null;
+  /** Phase 0 — MIRROR_DIFF event throttle: participantId → last event ms. */
+  private readonly mirrorDiffEventAt = new Map<string, number>();
+  /** Phase 0 — participantId → first-divergence ms (for reprice-lag EMA). */
+  private readonly mirrorDivergenceSince = new Map<string, number>();
+  /** Phase 0 — instanceId → showcase position trade_ids seen last snapshot (fill capture). */
+  private readonly mirrorSeenShowcasePositions = new Map<string, Set<string>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -542,11 +600,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ...participantSince,
       },
       orderBy: { createdAt: 'desc' },
+      include: { cycle: { select: { tradeId: true } } },
     });
 
     const managedOrderIds = new Set<number>();
+    // Phase 0: cache the metas loaded here so the mirror-diff pass below can
+    // reuse them without re-querying the event stream per participant.
+    const execMetaById = new Map<string, ExecutionPayload>();
     for (const p of openParticipantAfter) {
       const m = await this.loadExecutionMeta(p.id);
+      execMetaById.set(p.id, m);
       if (m.bitfinexOrderId) managedOrderIds.add(m.bitfinexOrderId);
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
     }
@@ -580,9 +643,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
 
     const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
-    const botStateForCap = this.botBridge.isEnabled()
-      ? await this.botBridge.fetchStateForExecution(true)
-      : null;
+    const botStateForCap = await this.fetchExecutionBotState();
     const botMaxRaw = botStateForCap?.max_active_signals;
     const botMax =
       typeof botMaxRaw === 'number'
@@ -590,6 +651,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         : typeof botMaxRaw === 'string'
           ? Number.parseInt(botMaxRaw, 10)
           : null;
+
+    // Phase 0 — shadow-diff observability. Compares the showcase book (from
+    // the state already fetched above) against the copy's ledger. Pure
+    // observability: no exchange calls, no behavior change, never throws.
+    await this.recordMirrorDiff(
+      agentId,
+      instance,
+      botStateForCap,
+      openParticipantAfter,
+      execMetaById,
+    ).catch((err) => {
+      this.logger.warn(
+        `[MIRROR-DIFF] snapshot failed ${instance.userId}: ${err instanceof Error ? err.message : err}`,
+      );
+    });
 
     if (exitOnly) {
       await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
@@ -745,6 +821,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
+  /**
+   * Showcase state for the execution path. With MIRROR_CONVERGENCE_ENABLED a
+   * 1s memo lets every call site in the same tick share ONE fresh pull
+   * (placeEntry defer check, monitorEntry abandon check, applyLimitChase
+   * anchor, capacity cap) instead of each paying a full tunnel round-trip —
+   * this is the main lever that cuts effective reprice lag. With the flag OFF
+   * the behavior is byte-identical to the legacy per-call fresh fetch.
+   */
+  private async fetchExecutionBotState(): Promise<BotApiState | null> {
+    if (!this.botBridge.isEnabled()) return null;
+    if (mirrorConvergenceEnabled()) {
+      const now = Date.now();
+      if (this.execStateMemo && now - this.execStateMemo.at < MIRROR_EXEC_STATE_MEMO_MS) {
+        return this.execStateMemo.state;
+      }
+    }
+    const state = await this.botBridge.fetchStateForExecution(true).catch(() => null);
+    this.execStateMemo = { at: Date.now(), state };
+    return state;
+  }
+
   /** Resolve showcase bot pending limit for chase sync. */
   private resolveBotLimitPrice(
     bot: { orders?: Array<{ trade_id?: string; limit_price?: number; status?: string }> } | null,
@@ -843,6 +940,301 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     return { abandoned: false };
+  }
+
+  /**
+   * Phase 0 — shadow-diff observability (MIRROR_DIFF). Compares desired
+   * (showcase book: pending limits + open positions, from the bot state the
+   * tick already fetched) vs actual (the copy's ledger: PENDING_ENTRY resting
+   * orders + OPEN lots, metas already loaded by the caller). Divergences are
+   * persisted compactly:
+   *  - dashboardState.mirrorDiff — latest snapshot + rolling counters
+   *    (divergent ticks, showcase fills seen vs captured, reprice-lag EMA).
+   *  - a MIRROR_DIFF SignalCycleEvent per diverged participant, throttled to
+   *    max 1 per participant per 60s.
+   * Cheap by design: no exchange API calls, DB-only. Never throws (caller
+   * catches). No behavior change — observability only.
+   */
+  private async recordMirrorDiff(
+    agentId: string,
+    instance: TradingAgentInstance,
+    botState: BotApiState | null,
+    participants: Array<{
+      id: string;
+      status: SignalCycleStatus;
+      cycleId: string;
+      cycle?: { tradeId: string | null } | null;
+    }>,
+    metaById: Map<string, ExecutionPayload>,
+  ) {
+    if (!mirrorDiffEnabled() || !botState) return;
+    const now = Date.now();
+
+    const showcaseOrders = (botState.orders ?? []).filter(
+      (o) =>
+        (o.status === 'PENDING' || o.status === 'ORDERED') &&
+        typeof o.trade_id === 'string' &&
+        (o.limit_price ?? 0) > 0,
+    );
+    const showcasePositions = (botState.positions ?? []).filter(
+      (p) => typeof p.trade_id === 'string' && p.trade_id.length > 0,
+    );
+
+    const copyPending = participants.filter((p) => p.status === SignalCycleStatus.PENDING_ENTRY);
+    const copyOpen = participants.filter((p) => p.status === SignalCycleStatus.OPEN);
+    const copyTradeIds = new Set(
+      participants
+        .map((p) => p.cycle?.tradeId)
+        .filter((t): t is string => typeof t === 'string' && t.length > 0),
+    );
+    const copyOpenTradeIds = new Set(
+      copyOpen
+        .map((p) => p.cycle?.tradeId)
+        .filter((t): t is string => typeof t === 'string' && t.length > 0),
+    );
+    const copyPendingTradeIds = new Set(
+      copyPending
+        .map((p) => p.cycle?.tradeId)
+        .filter((t): t is string => typeof t === 'string' && t.length > 0),
+    );
+
+    type MirrorDiffDivergence = {
+      type:
+        | 'PRICE_DELTA'
+        | 'COPY_ORDER_NO_SHOWCASE'
+        | 'SHOWCASE_ORDER_NOT_MIRRORED'
+        | 'SHOWCASE_FILLED_COPY_PENDING'
+        | 'SHOWCASE_POSITION_NOT_MIRRORED'
+        | 'COPY_POSITION_NO_SHOWCASE';
+      tradeId?: string;
+      participantId?: string;
+      cycleId?: string;
+      copyLimit?: number;
+      showcaseLimit?: number;
+      deltaUsd?: number;
+      showcaseDir?: string;
+      copyDir?: string;
+    };
+    const divergences: MirrorDiffDivergence[] = [];
+
+    // Copy resting orders vs showcase pending limits (per-order price delta).
+    for (const p of copyPending) {
+      const meta = metaById.get(p.id);
+      const tradeId = p.cycle?.tradeId ?? undefined;
+      const copyLimit = meta?.limitPrice;
+      if (!tradeId || !copyLimit || copyLimit <= 0 || !meta?.bitfinexOrderId) continue;
+      const showcaseOrder = showcaseOrders.find((o) => o.trade_id === tradeId);
+      if (showcaseOrder?.limit_price) {
+        const delta = copyLimit - showcaseOrder.limit_price;
+        if (Math.abs(delta) >= MIRROR_DIFF_PRICE_EPSILON_USD) {
+          divergences.push({
+            type: 'PRICE_DELTA',
+            tradeId,
+            participantId: p.id,
+            cycleId: p.cycleId,
+            copyLimit,
+            showcaseLimit: showcaseOrder.limit_price,
+            deltaUsd: Math.round(delta * 100) / 100,
+          });
+          if (!this.mirrorDivergenceSince.has(p.id)) {
+            this.mirrorDivergenceSince.set(p.id, now);
+          }
+        } else {
+          // Converged — close any open divergence window (reprice-lag sample).
+          this.mirrorDivergenceSince.delete(p.id);
+        }
+      } else {
+        const showcasePos = showcasePositions.find((x) => x.trade_id === tradeId);
+        if (showcasePos) {
+          // Showcase already filled this trade while the copy is still pending.
+          divergences.push({
+            type: 'SHOWCASE_FILLED_COPY_PENDING',
+            tradeId,
+            participantId: p.id,
+            cycleId: p.cycleId,
+            copyLimit,
+            showcaseDir: showcasePos.dir ?? showcasePos.side,
+          });
+        } else {
+          // Copy holds a resting order with no showcase counterpart (order or
+          // position) — showcase abandoned/expired this trade.
+          divergences.push({
+            type: 'COPY_ORDER_NO_SHOWCASE',
+            tradeId,
+            participantId: p.id,
+            cycleId: p.cycleId,
+            copyLimit,
+          });
+        }
+      }
+    }
+
+    // Showcase pending limits with no copy counterpart. Mirror the BOOK, not
+    // the per-lane spawns: dedupe showcase orders by limit price first (the
+    // showcase book expires same-price duplicates as DUPLICATE_LIMIT_PRICE).
+    const seenShowcasePrices = new Set<string>();
+    for (const o of showcaseOrders) {
+      const priceKey = (o.limit_price ?? 0).toFixed(2);
+      if (seenShowcasePrices.has(priceKey)) continue;
+      seenShowcasePrices.add(priceKey);
+      if (o.trade_id && copyTradeIds.has(o.trade_id)) continue;
+      // Another lane spawn of the same book entry may be the one mirrored.
+      const mirroredAtPrice = copyPending.some((p) => {
+        const meta = metaById.get(p.id);
+        return (
+          meta?.limitPrice != null &&
+          Math.abs(meta.limitPrice - (o.limit_price ?? 0)) < DUPLICATE_LIMIT_EPSILON_USD
+        );
+      });
+      if (mirroredAtPrice) continue;
+      divergences.push({
+        type: 'SHOWCASE_ORDER_NOT_MIRRORED',
+        tradeId: o.trade_id,
+        showcaseLimit: o.limit_price,
+        showcaseDir: o.side,
+      });
+    }
+
+    // Showcase open positions vs copy OPEN lots (present/missing).
+    for (const pos of showcasePositions) {
+      const tid = pos.trade_id as string;
+      if (copyOpenTradeIds.has(tid)) continue;
+      if (copyPendingTradeIds.has(tid)) continue; // reported as SHOWCASE_FILLED_COPY_PENDING
+      divergences.push({
+        type: 'SHOWCASE_POSITION_NOT_MIRRORED',
+        tradeId: tid,
+        showcaseDir: pos.dir ?? pos.side,
+      });
+    }
+    for (const p of copyOpen) {
+      const tradeId = p.cycle?.tradeId ?? undefined;
+      if (!tradeId) continue;
+      if (showcasePositions.some((x) => x.trade_id === tradeId)) continue;
+      const meta = metaById.get(p.id);
+      divergences.push({
+        type: 'COPY_POSITION_NO_SHOWCASE',
+        tradeId,
+        participantId: p.id,
+        cycleId: p.cycleId,
+        copyDir: meta?.direction,
+      });
+    }
+
+    // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const prev = (dash.mirrorDiff ?? {}) as {
+      rolling?: {
+        ticks?: number;
+        divergentTicks?: number;
+        lastDivergenceAt?: string | null;
+        showcaseFillsSeen?: number;
+        copyFillsCaptured?: number;
+        avgRepriceLagMs?: number | null;
+        repriceSamples?: number;
+      };
+    };
+    const rolling = {
+      ticks: (prev.rolling?.ticks ?? 0) + 1,
+      divergentTicks: (prev.rolling?.divergentTicks ?? 0) + (divergences.length > 0 ? 1 : 0),
+      lastDivergenceAt:
+        divergences.length > 0
+          ? new Date(now).toISOString()
+          : (prev.rolling?.lastDivergenceAt ?? null),
+      showcaseFillsSeen: prev.rolling?.showcaseFillsSeen ?? 0,
+      copyFillsCaptured: prev.rolling?.copyFillsCaptured ?? 0,
+      avgRepriceLagMs: prev.rolling?.avgRepriceLagMs ?? null,
+      repriceSamples: prev.rolling?.repriceSamples ?? 0,
+    };
+
+    // Fill-capture counter: a showcase position trade_id NEW since the last
+    // snapshot is a showcase fill; captured when the copy has an OPEN lot for it.
+    const seenSet = this.mirrorSeenShowcasePositions.get(instance.id) ?? new Set<string>();
+    const nextSeen = new Set<string>();
+    for (const pos of showcasePositions) {
+      const tid = pos.trade_id as string;
+      nextSeen.add(tid);
+      if (seenSet.has(tid)) continue;
+      rolling.showcaseFillsSeen += 1;
+      if (copyOpenTradeIds.has(tid)) rolling.copyFillsCaptured += 1;
+    }
+    this.mirrorSeenShowcasePositions.set(instance.id, nextSeen);
+
+    // Reprice-lag EMA: participants whose PRICE_DELTA divergence window just
+    // closed contribute a lag sample (first-divergence → convergence).
+    for (const [pid, since] of [...this.mirrorDivergenceSince.entries()]) {
+      const stillPending = copyPending.some((p) => p.id === pid);
+      const stillDiverged = divergences.some(
+        (d) => d.type === 'PRICE_DELTA' && d.participantId === pid,
+      );
+      if (stillDiverged) continue;
+      // Converged (or participant left PENDING_ENTRY) — close the window.
+      this.mirrorDivergenceSince.delete(pid);
+      if (!stillPending) continue; // fill/expiry, not a reprice — no sample
+      const lagMs = now - since;
+      const prevEma = rolling.avgRepriceLagMs;
+      rolling.avgRepriceLagMs =
+        prevEma != null && Number.isFinite(prevEma)
+          ? Math.round(prevEma * 0.8 + lagMs * 0.2)
+          : lagMs;
+      rolling.repriceSamples += 1;
+    }
+
+    const byType: Record<string, number> = {};
+    for (const d of divergences) byType[d.type] = (byType[d.type] ?? 0) + 1;
+
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          mirrorDiff: {
+            at: new Date(now).toISOString(),
+            botStateSource: botState.snapshot_source ?? 'live_bot',
+            showcasePendingOrders: showcaseOrders.length,
+            showcaseOpenPositions: showcasePositions.length,
+            copyPendingOrders: copyPending.length,
+            copyOpenLots: copyOpen.length,
+            divergences: divergences.slice(0, 20),
+            counts: { total: divergences.length, byType },
+            rolling,
+          },
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    // Throttled MIRROR_DIFF event per diverged participant (max 1/60s each).
+    for (const d of divergences) {
+      if (!d.participantId || !d.cycleId) continue;
+      const lastAt = this.mirrorDiffEventAt.get(d.participantId) ?? 0;
+      if (now - lastAt < MIRROR_DIFF_EVENT_THROTTLE_MS) continue;
+      this.mirrorDiffEventAt.set(d.participantId, now);
+      await this.cycles
+        .recordHireExecutionEvent(instance.userId, agentId, d.cycleId, 'MIRROR_DIFF', {
+          venue: 'bitfinex',
+          source: 'hire',
+          diff_type: d.type,
+          trade_id: d.tradeId,
+          copy_limit: d.copyLimit,
+          showcase_limit: d.showcaseLimit,
+          delta_usd: d.deltaUsd,
+          showcase_dir: d.showcaseDir,
+          copy_dir: d.copyDir,
+        })
+        .catch(() => {
+          /* observability only — never abort the tick */
+        });
+    }
+
+    // Bound the in-memory throttle maps.
+    if (this.mirrorDiffEventAt.size > 500) {
+      for (const [pid, at] of this.mirrorDiffEventAt) {
+        if (now - at > 60 * 60_000) this.mirrorDiffEventAt.delete(pid);
+      }
+    }
   }
 
   private async buildVirtualLotSummary(
@@ -1436,6 +1828,54 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     };
   }
 
+  /**
+   * Phase 1 book-state dedupe (MIRROR_CONVERGENCE_ENABLED). The showcase bot
+   * spawns the same signal into multiple research lanes (cont-/vc603-) but
+   * its own paper book holds only ONE order per limit price (duplicates are
+   * expired as DUPLICATE_LIMIT_PRICE). The copy must mirror the BOOK, not the
+   * spawns: if any other PENDING_ENTRY participant already owns a real
+   * resting order at (epsilon-)the same limit price — either its current
+   * copy-side limit or its showcase anchor — the new entry is a duplicate.
+   * Returns the mirror-owner participant, or null when the price is unique.
+   */
+  private async findDuplicateRestingLimit(
+    userId: string,
+    agentId: string,
+    cycleId: string,
+    limitPrice: number,
+    botState: BotApiState | null,
+  ): Promise<{ participantId: string; cycleId: string; tradeId: string | null; price: number } | null> {
+    const pendings = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+        NOT: { cycleId },
+      },
+      include: { cycle: { select: { tradeId: true } } },
+    });
+    for (const p of pendings) {
+      const meta = await this.loadExecutionMeta(p.id);
+      // Only a participant with a REAL resting order can be the mirror owner.
+      if (!meta.bitfinexOrderId) continue;
+      const anchor = p.cycle?.tradeId
+        ? this.resolveBotLimitPrice(botState, p.cycle.tradeId)
+        : null;
+      const prices = [meta.limitPrice, anchor].filter(
+        (x): x is number => x != null && Number.isFinite(x) && x > 0,
+      );
+      if (prices.some((price) => Math.abs(price - limitPrice) < DUPLICATE_LIMIT_EPSILON_USD)) {
+        return {
+          participantId: p.id,
+          cycleId: p.cycleId,
+          tradeId: p.cycle?.tradeId ?? null,
+          price: meta.limitPrice ?? limitPrice,
+        };
+      }
+    }
+    return null;
+  }
+
   private async placeEntry(
     agentId: string,
     instance: TradingAgentInstance,
@@ -1536,9 +1976,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return false;
       }
 
+      let botStateForEntry: BotApiState | null = null;
       if (tradeId && (await this.botBridge.isEnabledAsync())) {
-        const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
-        const defer = this.showcaseCopyEntryReady(botState, tradeId);
+        botStateForEntry = await this.fetchExecutionBotState();
+        const defer = this.showcaseCopyEntryReady(botStateForEntry, tradeId);
         if (!defer.ready) {
           await this.prisma.tradingAgentInstance.update({
             where: { id: instance.id },
@@ -1546,10 +1987,53 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           });
           return false;
         }
-        const botLimit = this.resolveBotLimitPrice(botState, tradeId);
+        const botLimit = this.resolveBotLimitPrice(botStateForEntry, tradeId);
         if (botLimit != null && botLimit > 0) {
           const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
           if (anchored != null) limitPrice = anchored;
+        }
+      }
+
+      // Phase 1 — book-state dedupe (flag-gated). If the copy already has a
+      // real resting order at this limit price (any lane/participant), do NOT
+      // place a second: the earlier participant is the mirror owner of this
+      // book entry. Expire this claim ledger-side WITHOUT touching the
+      // exchange (mirrors the showcase book's own DUPLICATE_LIMIT_PRICE).
+      if (mirrorConvergenceEnabled()) {
+        const dup = await this.findDuplicateRestingLimit(
+          instance.userId,
+          agentId,
+          cycleId,
+          limitPrice,
+          botStateForEntry,
+        );
+        if (dup) {
+          this.logger.log(
+            `Hire dedupe ${instance.userId} cycle=${cycleId}: limit ${limitPrice.toFixed(2)} duplicates mirror-owner participant=${dup.participantId} (trade=${dup.tradeId ?? 'n/a'}) — expiring ledger-side, no order placed`,
+          );
+          await this.cycles.recordHireExecutionEvent(
+            instance.userId,
+            agentId,
+            cycleId,
+            'DUPLICATE_LIMIT_SKIPPED',
+            {
+              venue,
+              source: 'hire',
+              limit_price: limitPrice,
+              duplicate_of_participant: dup.participantId,
+              duplicate_of_cycle: dup.cycleId,
+              duplicate_trade_id: dup.tradeId,
+              mirror_owner_price: dup.price,
+            },
+          );
+          await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'EXPIRED', {
+            venue,
+            pnl_usd: 0,
+            source: 'hire',
+            event: 'DUPLICATE_LIMIT_SKIPPED',
+            duplicate_of_participant: dup.participantId,
+          });
+          return false;
         }
       }
 
@@ -1689,6 +2173,204 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     return { gone, reason: result.reason, attempts: result.attempts };
   }
 
+  /**
+   * Phase 1 cancel-race fill check (MIRROR_CONVERGENCE_ENABLED). Before the
+   * copy cancels its own entry order — or classifies a vanished order as
+   * cancelled-by-exchange — verify the order did not actually (partially)
+   * fill:
+   *  - Order still resting: `|amountOrig| - |amount|` > MIN_QTY_BTC means a
+   *    partial execution the cancel would silently discard.
+   *  - Order gone entirely: the merged position grew by ~the lot qty vs the
+   *    `exchangeQtyAtOrder` baseline (same heuristic monitorEntry's fill
+   *    classifier uses) — the order FILLED, it was not cancelled.
+   * Returns null when it is safe to treat the order as unfilled.
+   */
+  private async detectEntryFillBeforeCancel(
+    creds: ExchangeCredentials,
+    meta: ExecutionPayload,
+  ): Promise<{
+    filledQty: number;
+    fillPrice: number;
+    source: 'ORDER_PARTIAL' | 'POSITION_DELTA';
+    orderResting: boolean;
+  } | null> {
+    const orderId = meta.bitfinexOrderId;
+    if (!orderId || !meta.direction) return null;
+
+    const order = await this.activeTrading.findOrder(creds, orderId).catch(() => null);
+    if (order) {
+      const filled = Math.abs(order.amountOrig) - Math.abs(order.amount);
+      if (filled > MIN_QTY_BTC) {
+        return {
+          filledQty: filled,
+          fillPrice: order.price > 0 ? order.price : (meta.limitPrice ?? 0),
+          source: 'ORDER_PARTIAL',
+          orderResting: true,
+        };
+      }
+      return null; // resting, unfilled — safe to cancel
+    }
+
+    // Order gone from the active book — filled or cancelled. Discriminate via
+    // the merged-position delta against the at-order baseline.
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const expectedLong = meta.direction === 'LONG';
+    const hasPosition =
+      position &&
+      ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
+    if (!hasPosition) return null;
+
+    const baseline = meta.exchangeQtyAtOrder ?? 0;
+    const lotQty = meta.qty ?? MIN_QTY_BTC;
+    const currentQty = Math.abs(position!.amount);
+    if (currentQty + MIN_QTY_BTC < baseline + lotQty * 0.85) return null;
+
+    return {
+      filledQty: lotQty,
+      fillPrice:
+        meta.limitPrice && meta.limitPrice > 0 ? meta.limitPrice : position!.basePrice,
+      source: 'POSITION_DELTA',
+      orderResting: false,
+    };
+  }
+
+  /**
+   * Phase 1 — record a fill detected by {@link detectEntryFillBeforeCancel}
+   * as a REAL fill instead of closing the participant at $0. Cancels any
+   * resting remainder first (never leaves a partial order live), arms the
+   * protective stop, records FILLED + STOP_LOSS_ARMED, and heals the
+   * participant to OPEN. When the enclosing cycle was already CLOSED/EXPIRED
+   * (showcase exited), the cycle status is restored after the FILLED handler
+   * force-sets it to OPEN, so monitorExit picks the lot up next tick and
+   * closes it mirror-side. Returns false when the resting remainder could not
+   * be cancelled — the caller must leave the participant PENDING_ENTRY and
+   * retry next tick.
+   */
+  private async recordCancelRaceFill(
+    agentId: string,
+    userId: string,
+    cycle: { id: string; status: SignalCycleStatus },
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope | null,
+    fill: {
+      filledQty: number;
+      fillPrice: number;
+      source: 'ORDER_PARTIAL' | 'POSITION_DELTA';
+      orderResting: boolean;
+    },
+    cancelContext: string,
+  ): Promise<boolean> {
+    if (!meta.direction) return false;
+
+    if (fill.orderResting && meta.bitfinexOrderId) {
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        meta.bitfinexOrderId,
+        `Cancel-race fill ${userId} cycle=${cycle.id}: cancel partial-fill remainder ${meta.bitfinexOrderId} (${cancelContext})`,
+      );
+      if (!cancel.gone) {
+        this.logger.error(
+          `Cancel-race fill ${userId} cycle=${cycle.id}: remainder cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) — leaving PENDING_ENTRY for next tick`,
+        );
+        await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
+        await this.cycles
+          .recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: cancelContext,
+            reason: 'CANCEL_RACE_FILL_REMAINDER_CANCEL_FAILED',
+            bitfinex_order_id: meta.bitfinexOrderId,
+            cancel_attempts: cancel.attempts,
+            cancel_reason: cancel.reason ?? 'unknown',
+          })
+          .catch(() => {});
+        return false;
+      }
+    }
+
+    const fillPrice =
+      fill.fillPrice > 0
+        ? fill.fillPrice
+        : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
+    if (!fillPrice || fillPrice <= 0) return false;
+    const qty = fill.filledQty;
+    const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
+    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+
+    const stopOrderId = await this.activeTrading
+      .submitStopOrder(creds, {
+        positionDirection: meta.direction,
+        qty,
+        stopPrice,
+        leverage,
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `Cancel-race fill stop placement ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+        );
+        return null;
+      });
+
+    const priorCycleStatus = cycle.status;
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
+      venue: 'bitfinex',
+      fill_price: fillPrice,
+      qty,
+      stop_loss_placed: stopOrderId != null,
+      stop_loss_margin_pct: stopLossMarginPct,
+      stopOrderId: stopOrderId ?? undefined,
+      source: 'hire',
+      event: 'CANCEL_RACE_FILL',
+      cancel_context: cancelContext,
+      fill_source: fill.source,
+    });
+    if (stopOrderId != null) {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
+        venue: 'bitfinex',
+        stop_price: stopPrice,
+        stopOrderId,
+        qty,
+        source: 'hire',
+      });
+    }
+    await this.healStuckPendingFill(participantId, cycle.id, fillPrice);
+
+    // The FILLED handler force-sets the cycle OPEN. If the showcase cycle was
+    // already terminal, restore it so monitorExit closes this lot next tick.
+    if (
+      priorCycleStatus === SignalCycleStatus.CLOSED ||
+      priorCycleStatus === SignalCycleStatus.EXPIRED
+    ) {
+      await this.prisma.signalCycle
+        .update({ where: { id: cycle.id }, data: { status: priorCycleStatus } })
+        .catch(() => {
+          /* best-effort restore — exit safety nets still cover the lot */
+        });
+    }
+
+    this.positionRuntime.set(participantId, {
+      peakMarginPct: 0,
+      lastChaseAtMs: 0,
+      filledRecorded: true,
+    });
+
+    this.cycleAudit.stage('FILLED', {
+      userId,
+      agentId,
+      cycleId: cycle.id,
+      participantId,
+      meta: { fillPrice, qty, cancelContext, fillSource: fill.source },
+    });
+
+    this.logger.warn(
+      `Cancel-race fill ${userId} cycle=${cycle.id} (${cancelContext}): order had REAL fill qty=${qty.toFixed(5)} @ ${fillPrice.toFixed(2)} (${fill.source}) — recorded FILLED instead of $0 close; stop armed=${stopOrderId != null}`,
+    );
+    return true;
+  }
+
   /** Best-effort surface of a money-path cancel failure to the operator. */
   private async setInstanceLastError(userId: string, agentId: string, msg: string) {
     await this.prisma.tradingAgentInstance
@@ -1731,6 +2413,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // resting limit — otherwise it can chase/fill up to 30m TTL AFTER the showcase exited,
     // creating an orphan position with no showcase to mirror the exit on.
     if (cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED) {
+      // Phase 1 cancel-race fill check: the order may have (partially) filled
+      // before the showcase closure reached us — record the REAL fill instead
+      // of cancelling and closing at $0 (orphan factory).
+      if (mirrorConvergenceEnabled()) {
+        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+        if (fill) {
+          const recorded = await this.recordCancelRaceFill(
+            agentId,
+            userId,
+            cycle,
+            participant.id,
+            meta,
+            creds,
+            intent,
+            fill,
+            'SHOWCASE_CYCLE_CLOSED',
+          );
+          if (recorded) return;
+        }
+      }
       const cancel = await this.cancelManagedOrderGone(
         creds,
         orderId,
@@ -1771,9 +2473,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cancelAbsurdPendingOrders(creds, userId);
 
     if (this.botBridge.isEnabled() && cycle.tradeId) {
-      const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
+      const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
+        // Phase 1 cancel-race fill check (see SHOWCASE_CYCLE_CLOSED branch).
+        if (mirrorConvergenceEnabled()) {
+          const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+          if (fill) {
+            const recorded = await this.recordCancelRaceFill(
+              agentId,
+              userId,
+              cycle,
+              participant.id,
+              meta,
+              creds,
+              intent,
+              fill,
+              'SHOWCASE_ABANDONED',
+            );
+            if (recorded) return;
+          }
+        }
         const cancel = await this.cancelManagedOrderGone(
           creds,
           orderId,
@@ -1810,6 +2530,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
+      // Phase 1 cancel-race fill check (see SHOWCASE_CYCLE_CLOSED branch).
+      if (mirrorConvergenceEnabled()) {
+        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+        if (fill) {
+          const recorded = await this.recordCancelRaceFill(
+            agentId,
+            userId,
+            cycle,
+            participant.id,
+            meta,
+            creds,
+            intent,
+            fill,
+            'SIGNAL_TTL_EXPIRED',
+          );
+          if (recorded) return;
+        }
+      }
       const cancel = await this.cancelManagedOrderGone(
         creds,
         orderId,
@@ -2216,6 +2954,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           where: { eventType: 'FILLED' },
           take: 1,
         },
+        cycle: { select: { id: true, status: true, intentEnvelope: true } },
       },
     });
 
@@ -2235,6 +2974,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // skip — better to leave a false-positive hanging than to wrongly EXIT.
       const stillThere = await this.activeTrading.findOrder(creds, oid).catch(() => null);
       if (stillThere) continue;
+
+      // Phase 1 cancel-race fill check (flag-gated): a vanished order is NOT
+      // necessarily cancelled — it may have FILLED. Check the merged-position
+      // delta before declaring RECONCILE_CANCEL_BY_EXCHANGE; a real fill is
+      // recorded as FILLED at the real price instead of a $0 close that
+      // orphans the position slice (the orphan-adoption loss factory).
+      if (mirrorConvergenceEnabled()) {
+        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+        if (fill) {
+          const intent = (row.cycle?.intentEnvelope ?? null) as SignalIntentEnvelope | null;
+          const recorded = await this.recordCancelRaceFill(
+            agentId,
+            userId,
+            { id: row.cycleId, status: row.cycle?.status ?? SignalCycleStatus.PENDING_ENTRY },
+            row.id,
+            meta,
+            creds,
+            intent,
+            fill,
+            'RECONCILE_CANCEL_BY_EXCHANGE',
+          );
+          if (!recorded) {
+            this.logger.warn(
+              `[RECONCILE-ADOPT] cancel-by-exchange ${userId} participant=${row.id}: fill detected but recording failed — leaving PENDING_ENTRY for next tick`,
+            );
+          }
+          continue;
+        }
+      }
 
       const venue = row.venue ?? 'bitfinex';
 
@@ -2711,11 +3479,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const now = Date.now();
     const mark = await this.activeTrading.getMarkPrice();
     const nearFill = isNearChaseFillZone(meta.direction, meta.limitPrice, mark);
-    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchStateForExecution(true) : null;
+    const botState = await this.fetchExecutionBotState();
     const botLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
+    // Phase 1 chase convergence (flag-gated): converge to the showcase's
+    // CURRENT pending limit every tick, but clamp cancel+replace churn to max
+    // 1 replacement per order per second. Legacy path keeps the raw
+    // CHASE_BOT_ANCHOR_MS cadence.
+    const botAnchorInterval = mirrorConvergenceEnabled()
+      ? Math.max(MIRROR_CHASE_MIN_REPLACE_MS, CHASE_BOT_ANCHOR_MS)
+      : CHASE_BOT_ANCHOR_MS;
     const chaseInterval =
       botLimit != null && botLimit > 0
-        ? CHASE_BOT_ANCHOR_MS
+        ? botAnchorInterval
         : nearFill
           ? CHASE_NEAR_FILL_INTERVAL_MS
           : CHASE_INTERVAL_MS;
@@ -2784,6 +3559,43 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
+
+    // Phase 1 cancel-race fill check (flag-gated): never cancel+replace an
+    // order that already (partially) executed — record the real fill instead.
+    // If the order is gone entirely, skip the replace and let monitorEntry's
+    // fill/cancel classifier handle it next tick.
+    if (mirrorConvergenceEnabled()) {
+      const resting = await this.activeTrading
+        .findOrder(creds, meta.bitfinexOrderId)
+        .catch(() => null);
+      if (!resting) {
+        this.logger.warn(
+          `Hire chase ${userId} cycle=${cycleId}: order ${meta.bitfinexOrderId} gone before replace — deferring to fill/cancel classification (no replacement placed)`,
+        );
+        return;
+      }
+      const filledQty = Math.abs(resting.amountOrig) - Math.abs(resting.amount);
+      if (filledQty > MIN_QTY_BTC) {
+        await this.recordCancelRaceFill(
+          agentId,
+          userId,
+          // Chase runs only on non-terminal cycles — no status restore needed.
+          { id: cycleId, status: SignalCycleStatus.PENDING_ENTRY },
+          participantId,
+          meta,
+          creds,
+          intent,
+          {
+            filledQty,
+            fillPrice: resting.price > 0 ? resting.price : meta.limitPrice,
+            source: 'ORDER_PARTIAL',
+            orderResting: true,
+          },
+          'LIMIT_CHASE_REPLACE',
+        );
+        return;
+      }
+    }
 
     try {
       await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
