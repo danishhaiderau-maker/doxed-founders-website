@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: firewall prompt only triggers on connection errors, not HTTP 4xx/5xx (fixes repeated dialogs on 413)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
