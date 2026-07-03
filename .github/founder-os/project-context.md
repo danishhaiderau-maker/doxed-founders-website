@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-﻿feat(founder-node): add Windows code-signing config + Certum purchase guide
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
