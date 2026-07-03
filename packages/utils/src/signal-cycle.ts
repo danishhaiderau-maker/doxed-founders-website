@@ -119,7 +119,18 @@ export type SignalCycleEventType =
   // exchange order was defensively re-ccancelled by reconcileCancelByExchange.
   | 'RECONCILE_CANCEL_FAILED'
   | 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN'
-  | 'RECONCILE_RECANCEL_EXPIRED_STILL_LIVE';
+  | 'RECONCILE_RECANCEL_EXPIRED_STILL_LIVE'
+  // Phase 0/1 — "100% mirror" state convergence. Additive audit events:
+  // MIRROR_DIFF is the shadow-diff observability snapshot (written only when a
+  // divergence between the showcase book and the copy's resting orders /
+  // position exists, throttled per participant). DUPLICATE_LIMIT_SKIPPED is
+  // recorded when book-state dedupe (MIRROR_CONVERGENCE_ENABLED) expires a
+  // duplicate-lane participant ledger-side WITHOUT placing a real order —
+  // the mirror owner participant keeps the single real resting limit.
+  // Neither transitions the participant on its own (the dedupe path emits a
+  // separate EXPIRED event for the status transition).
+  | 'MIRROR_DIFF'
+  | 'DUPLICATE_LIMIT_SKIPPED';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
