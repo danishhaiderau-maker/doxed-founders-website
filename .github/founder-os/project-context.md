@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-fix(live-copy): adoption hardening - origin-price adoption, reset-proof budget, S6a TTL, double-adopt guard, fail-loud orphan close, realized flat P&L
+fix(live-copy): canonical-only execution state, showcase-vanished close, restart continuity, exchange-truth fills, expiry surfacing, tick watchdog
 
 ## Last Activity
 
