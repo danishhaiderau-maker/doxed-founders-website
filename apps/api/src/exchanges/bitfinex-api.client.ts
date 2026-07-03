@@ -228,11 +228,32 @@ export type BitfinexActiveOrder = {
   price: number;
   status: string;
   orderType: string;
+  /**
+   * Bitfinex v2 client order id (`cid`) — int32 positive. Surfaces when the
+   * order was submitted with `cid` (Phase 2 placeEntry / replaceRestingLimit
+   * always set one). Used by the Phase 4 reconcile-adopt match logic to tie
+   * an unmanaged resting order back to a terminal participant's
+   * ExecutionPayload.clientOrderId. `0` / absent means the exchange did not
+   * record a cid (manual order or pre-Phase-2).
+   */
+  cid?: number;
+  /** Order creation timestamp (ms since epoch) — Bitfinex v2 index [4]. */
+  createdAtMs?: number;
 };
 
 /** Bitfinex order array indices (REST). */
 export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
   if (!Array.isArray(row) || row.length < 14) return null;
+  const cidRaw = row[2];
+  const createdAtRaw = row[4];
+  const cid =
+    cidRaw != null && Number.isFinite(Number(cidRaw)) && Number(cidRaw) !== 0
+      ? Number(cidRaw) & 0x7fffffff
+      : undefined;
+  const createdAtMs =
+    createdAtRaw != null && Number.isFinite(Number(createdAtRaw)) && Number(createdAtRaw) > 0
+      ? Number(createdAtRaw)
+      : undefined;
   return {
     id: Number(row[0]),
     symbol: String(row[3]),
@@ -241,6 +262,8 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
     orderType: String(row[8] ?? ''),
     price: Number(row[16] ?? row[14] ?? 0),
     status: String(row[13] ?? 'UNKNOWN'),
+    ...(cid != null ? { cid } : {}),
+    ...(createdAtMs != null ? { createdAtMs } : {}),
   };
 }
 

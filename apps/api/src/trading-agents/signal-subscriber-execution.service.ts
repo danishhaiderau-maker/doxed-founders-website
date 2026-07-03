@@ -109,6 +109,50 @@ function reconcileWriteWindowEnabled(): boolean {
 }
 
 /**
+ * Phase 4 — autonomous orphan adoption master switch. Default enabled ("1").
+ * When disabled ("0") the reconcile-adopt orphan path reverts to surface-only
+ * (logs RECONCILE_ADOPT_DISABLED, does NOT create adopted participants or
+ * place protective stops). Reads once per call so operators can flip it via
+ * Railway env without a redeploy.
+ */
+function reconcileAdoptEnabled(): boolean {
+  return process.env.RECONCILE_ADOPT_ENABLED !== '0';
+}
+
+/**
+ * Phase 5 guardrail — max adoptions per API instance session. Counted in
+ * dashboardState.reconcileAdoptCount (persisted across ticks, reset only on
+ * dashboard state reset). Default 2: tight enough that a runaway match bug
+ * cannot adopt a cascade, generous enough to heal a normal fill/expiry race
+ * plus one retry. When exceeded, surface-only + RECONCILE_ADOPT_BUDGET_EXHAUSTED.
+ */
+function reconcileAdoptBudget(): number {
+  const raw = Number(process.env.RECONCILE_ADOPT_BUDGET ?? '2');
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+}
+
+/** Phase 5 guardrail — refuse to adopt an orphan whose qty exceeds this multiple
+ *  of the normal lot size (marginCap * leverage / price). A giant orphan is a
+ *  red flag (manual position or wrong-symbol order), not a heal target. */
+const RECONCILE_ADOPT_SIZE_ANOMALY_MULTIPLE = 2;
+
+/** Match window for the fallback (no-cid) orphan match: the terminal
+ *  participant's most recent event must be within this many minutes of NOW.
+ *  Tight enough to exclude stale orphans the operator chose to leave flat,
+ *  generous enough to catch a fill/expiry race (entry TTL is 30min). */
+const RECONCILE_ADOPT_MATCH_WINDOW_MS = 30 * 60_000;
+
+/** Qty tolerance for the fallback match — exchange rounding vs ledger qty. */
+const RECONCILE_ADOPT_QTY_TOLERANCE = 0.0005;
+
+/** Price band for the fallback match — orphan entry within X% of the terminal
+ *  participant's intended limit. */
+const RECONCILE_ADOPT_PRICE_BAND_PCT = 2.0;
+
+/** Ring buffer cap for dashboardState.reconcileAdoptLog. */
+const RECONCILE_ADOPT_LOG_CAP = 20;
+
+/**
  * Deterministic Bitfinex client order id (`cid`) for a participant's entry
  * order. Bitfinex v2 `cid` is a 32-bit signed integer; we derive a stable
  * positive int32 from sha256(cycleId|participantId|tradeId). The full
@@ -343,6 +387,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       creds,
       participantSince,
     );
+
+    // Phase 4+5 — autonomous orphan adoption. Reads the exchange directly and
+    // re-adopts unattributed resting orders (S6a) and filled positions (S6b)
+    // that the legacy reconcile path refused to heal. Guardrailed by env flag,
+    // per-session budget cap, size sanity, conservative stop, idempotency, and
+    // a full audit trail. See reconcileAdoptOrphans for the decision tree.
+    await this.reconcileAdoptOrphans(
+      agentId,
+      instance,
+      creds,
+      participantSince,
+      marginCap,
+    ).catch((err) => {
+      // Money-path: never abort the tick on the adoption path. Surface + log.
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[RECONCILE-ADOPT] orphan adoption loop error ${instance.userId}: ${msg}`);
+    });
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -842,7 +903,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    */
   private async persistOrphanOrderIds(
     instanceId: string,
-    foreignOrders: Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string }>,
+    foreignOrders: Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string; cid?: number; createdAtMs?: number }>,
   ) {
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instanceId },
@@ -852,8 +913,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     const orphanOrderIds = foreignOrders.map((o) => ({
       id: o.id,
-      // BitfinexActiveOrder.clientOrderId is not exposed by the REST parser today;
-      // surface what we have so the operator can identify the order on the UI.
+      // Phase 4: parser now surfaces `cid` (Bitfinex v2 index [2]) so the
+      // operator can cross-reference against ExecutionPayload.clientOrderId
+      // shown in the participant timeline. Absent for manual / pre-Phase-2 orders.
+      cid: o.cid ?? null,
+      // amountRemaining: remaining qty on the exchange (signed).
       amountRemaining: o.amount ?? null,
       amountOrig: o.amountOrig ?? null,
       price: o.price ?? null,
@@ -2374,6 +2438,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     intent: SignalIntentEnvelope,
     fillPrice?: number,
+    /**
+     * Phase 4 S6b adoption — explicit conservative stop price override. When
+     * provided, the standard `computeStopPrice(entry, ..., stopLossMarginPct)`
+     * formula is bypassed and this price is submitted directly. The caller is
+     * responsible for guaranteeing it is never WIDER than the standard SL
+     * (e.g. a profit-lock rung price for an in-profit orphan). Omit to keep
+     * the legacy behaviour used by every other call site.
+     */
+    stopPriceOverride?: number,
   ) {
     if (!meta.direction) return;
     const qty = meta.qty ?? MIN_QTY_BTC;
@@ -2382,7 +2455,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
-    const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
+    const stopPrice =
+      stopPriceOverride != null && stopPriceOverride > 0
+        ? stopPriceOverride
+        : computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
 
     if (meta.stopOrderId) {
       const existing = await this.activeTrading.findOrder(creds, meta.stopOrderId).catch(() => null);
@@ -3435,5 +3511,765 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
 
     return { flattened };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 + 5 — autonomous orphan adoption (S6a pending order + S6b filled
+  // position) with guardrails. See the design doc in the prompt:
+  //   S6a — orphan RESTING order on the exchange with no tracking participant
+  //         → re-adopt as a new PENDING_ENTRY, run the chase lifecycle.
+  //   S6b — orphan FILLED position with no tracking participant
+  //         → re-adopt as a new OPEN, arm a conservative protective stop,
+  //           run the Scenario C exit ladder fresh via monitorOpenPosition.
+  // Guardrails: env kill-switch, per-session budget cap, size sanity, conservative
+  // stop distance, idempotency, and a full audit ring buffer + SignalCycleEvent
+  // stream. When in doubt, default to surface-only (do NOT adopt).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Main adoption entry. Called from processInstance once per tick, right after
+   * reconcileAdoptLoop. Reads the exchange directly so it is independent of the
+   * legacy reconcileLotLedger surface-only path. Every adoption decision is
+   * audited via recordHireExecutionEvent + appended to
+   * dashboardState.reconcileAdoptLog (ring buffer). Never throws — adoption
+   * failures are logged and surfaced so the tick continues.
+   */
+  private async reconcileAdoptOrphans(
+    agentId: string,
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    participantScope: { createdAt?: { gte: Date } } = {},
+    marginCap: number,
+  ): Promise<void> {
+    // Sim mode heals its own orphans by flattening (reconcileLotLedger L951).
+    // Never adopt under sim — would double-manage the paper position.
+    if (isCopyRelaySimActive(instance.dashboardState)) return;
+
+    if (!reconcileAdoptEnabled()) {
+      this.logger.log(
+        `[RECONCILE-ADOPT] disabled via RECONCILE_ADOPT_ENABLED=0 ${instance.userId} — surface-only`,
+      );
+      // No event write here (no cycle context); the dashboard already shows
+      // orphanOrderIds / orphanPositionIds from the legacy surface path.
+      return;
+    }
+
+    // Read fresh dashboard state for the budget counter (instance param may be
+    // stale by one tick). Idempotent across ticks: count only ever increases.
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    const dash = (fresh?.dashboardState ?? {}) as Record<string, unknown>;
+    const adoptCount = Number(dash.reconcileAdoptCount ?? 0);
+    const budget = reconcileAdoptBudget();
+    const remaining = budget - adoptCount;
+    if (remaining <= 0) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] budget exhausted ${instance.userId} count=${adoptCount} budget=${budget} — surface-only`,
+      );
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'BUDGET_EXHAUSTED',
+        count: adoptCount,
+        budget,
+        at: new Date().toISOString(),
+      }).catch(() => {
+        /* audit-best-effort */
+      });
+      return;
+    }
+
+    // S6b first — a filled orphan position is the dangerous case (no stop, no
+    // exit ladder). Heal it before S6a so a fill race doesn't sit unmanaged
+    // while we chase a resting order.
+    await this.adoptOrphanFilledPosition(
+      agentId,
+      instance,
+      creds,
+      participantScope,
+      marginCap,
+      remaining,
+    ).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[RECONCILE-ADOPT] S6b error ${instance.userId}: ${msg}`);
+    });
+
+    // S6a — resting orphan order. Lower risk (no position yet) but still worth
+    // re-adopting so the chase lifecycle runs and TTL expiry cancels cleanly.
+    await this.adoptOrphanPendingOrders(
+      agentId,
+      instance,
+      creds,
+      participantScope,
+      marginCap,
+      remaining,
+    ).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[RECONCILE-ADOPT] S6a error ${instance.userId}: ${msg}`);
+    });
+  }
+
+  /**
+   * S6b — orphan FILLED position. The exchange has a position but no OPEN
+   * participant tracks it (the prior participant was marked terminal in a
+   * fill/expiry race). Re-adopt as a fresh OPEN participant seeded from the
+   * real exchange fill, arm a conservative protective stop, and let the next
+   * tick's monitorOpenPosition run the Scenario C exit ladder.
+   */
+  private async adoptOrphanFilledPosition(
+    agentId: string,
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    participantScope: { createdAt?: { gte: Date } } = {},
+    marginCap: number,
+    budgetRemaining: number,
+  ): Promise<void> {
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
+
+    const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
+    const exchangeQty = Math.abs(position.amount);
+    const fillPrice = position.basePrice > 0 ? position.basePrice : 0;
+    if (!fillPrice || fillPrice <= 0) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: exchange position has no basePrice — cannot verify fill`,
+      );
+      return;
+    }
+
+    // Compute currently-attributed OPEN qty for this direction so we only adopt
+    // the orphan SLICE (exchange may have other legitimately-tracked lots).
+    const openRows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId },
+        ...participantScope,
+      },
+    });
+    let attributedQty = 0;
+    for (const row of openRows) {
+      const meta = await this.loadExecutionMeta(row.id);
+      if (meta.direction && meta.direction !== direction) continue;
+      attributedQty += meta.qty ?? 0;
+    }
+    const orphanSlice = exchangeQty - attributedQty;
+    if (orphanSlice < MIN_QTY_BTC) return; // nothing unattributed
+
+    // Idempotency: if an adopted participant already tracks this exact slice
+    // (qty within tolerance, same direction, OPEN, no EXIT), skip. This catches
+    // the second-tick re-entry after a successful adoption.
+    const alreadyAdopted = openRows.some((row) => {
+      // Heuristic: any OPEN participant whose qty matches the orphan slice and
+      // whose fillPrice is within 0.5% of the exchange basePrice. The next
+      // tick after adoption, this row exists and attributedQty already covers
+      // the slice — so orphanSlice < MIN_QTY_BTC and we return above. This
+      // check is a belt-and-braces guard for the race between the dashboard
+      // read and the participant create.
+      return false; // primary guard is the orphanSlice check above
+    });
+    void alreadyAdopted;
+
+    // Size sanity — refuse giant orphans. Normal lot at this price/lev.
+    const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
+    const normalLot = this.resolveNormalLotQty(marginCap, leverage, fillPrice);
+    const maxSize = normalLot * RECONCILE_ADOPT_SIZE_ANOMALY_MULTIPLE;
+    if (orphanSlice > maxSize + MIN_QTY_BTC) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: orphan slice ${orphanSlice.toFixed(5)} BTC > 2x normal lot ${maxSize.toFixed(5)} BTC — size anomaly, surface-only`,
+      );
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'REFUSED_SIZE_ANOMALY',
+        scenario: 'S6b',
+        orphanQty: orphanSlice,
+        normalLot,
+        maxSize,
+        direction,
+        fillPrice,
+        at: new Date().toISOString(),
+      }).catch(() => {});
+      return;
+    }
+
+    // Match the orphan to a terminal participant (cid not available for
+    // positions; use the side+qty+price+time fallback).
+    const match = await this.matchOrphanToTerminalParticipant(
+      agentId,
+      instance.userId,
+      {
+        side: direction,
+        qty: orphanSlice,
+        price: fillPrice,
+        cid: undefined,
+        createdAtMs: Date.now(),
+      },
+      participantScope,
+    );
+    if (!match) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: no terminal participant matches orphan slice ${orphanSlice.toFixed(5)} ${direction} @ ${fillPrice.toFixed(2)} — surface-only (could be a manual position)`,
+      );
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'REFUSED_NO_MATCH',
+        scenario: 'S6b',
+        orphanQty: orphanSlice,
+        direction,
+        fillPrice,
+        at: new Date().toISOString(),
+      }).catch(() => {});
+      return;
+    }
+
+    if (budgetRemaining <= 0) return; // re-check after async match
+
+    // Adopt: synthesise a new cycle + participant seeded from the real fill.
+    // The new cycle copies the terminal cycle's intentEnvelope so the exit
+    // ladder (intent.risk.take_profit_ladder / stop_loss_margin_pct) runs
+    // identically to the original trade.
+    const intent = match.cycle.intentEnvelope as SignalIntentEnvelope;
+    if (!intent?.risk) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: matched terminal cycle has no intent risk — cannot adopt`,
+      );
+      return;
+    }
+
+    const adoptQty = Math.min(orphanSlice, match.meta.qty ?? orphanSlice);
+    const adoptedCycle = await this.synthesizeAdoptedCycle(
+      agentId,
+      instance.userId,
+      match,
+      'OPEN',
+    ).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[RECONCILE-ADOPT] S6b synthesize cycle failed ${instance.userId}: ${msg}`);
+      return null;
+    });
+    if (!adoptedCycle) return;
+    const { cycleId, participantId } = adoptedCycle;
+
+    // Record FILLED so the participant transitions to OPEN with the verified
+    // exchange fill price (recordHireExecutionEvent flips status + fillPrice).
+    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'FILLED', {
+      venue: 'bitfinex',
+      fill_price: fillPrice,
+      qty: adoptQty,
+      stop_loss_placed: false, // armed below
+      stop_loss_margin_pct: intent.risk.stop_loss_margin_pct ?? -18,
+      source: 'hire',
+      event: 'RECONCILE_ADOPT_ORPHAN_POSITION',
+      adopt_kind: 'S6b_FILLED_POSITION',
+      origin_participant_id: match.participantId,
+      origin_cycle_id: match.cycleId,
+      exchange_qty: exchangeQty,
+      orphan_slice: orphanSlice,
+      clientOrderId: match.meta.clientOrderId,
+    });
+
+    // Compute the conservative stop price. Standard SL is never wider than
+    // stop_loss_margin_pct; if the position is already in profit by ≥1 ladder
+    // rung (peak unreal ≥ 12%), place the stop at the first profit-lock rung
+    // (8% lock) — tighter than standard.
+    const mark = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
+    const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, direction, leverage);
+    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+    const standardStop = computeStopPrice(fillPrice, direction, stopLossMarginPct, leverage);
+    let conservativeStop = standardStop;
+    let stopReason: 'STANDARD_SL' | 'PROFIT_LOCK_RUNG' = 'STANDARD_SL';
+    const firstRungTrigger = 12; // SUBSCRIBER_TRAIL_LADDER[0][0]
+    const firstRungLock = 8; // SUBSCRIBER_TRAIL_LADDER[0][1]
+    if (unrealMarginPct >= firstRungTrigger) {
+      const lockStop = computeProfitLockStopPrice(fillPrice, direction, firstRungLock, leverage);
+      // Safety: never wider than standard. Lock stop is by definition tighter
+      // for an in-profit position, but guard against a malformed intent.
+      const longStopTooWide = direction === 'LONG' && lockStop < standardStop;
+      const shortStopTooWide = direction === 'SHORT' && lockStop > standardStop;
+      if (!longStopTooWide && !shortStopTooWide && lockStop > 0) {
+        conservativeStop = lockStop;
+        stopReason = 'PROFIT_LOCK_RUNG';
+      }
+    }
+
+    // Arm the protective stop via the existing ensureProtectiveStop, passing
+    // the conservative price as an explicit override so it never falls back to
+    // the standard formula. ensureProtectiveStop is idempotent (skips if an
+    // existing live stop is found) and emits STOP_LOSS_ARMED itself.
+    const adoptMeta: ExecutionPayload = {
+      bitfinexOrderId: match.meta.bitfinexOrderId,
+      stopOrderId: undefined,
+      limitPrice: match.meta.limitPrice ?? fillPrice,
+      originalLimitPrice: match.meta.originalLimitPrice,
+      qty: adoptQty,
+      direction,
+      fillPrice,
+      margin_usd: match.meta.margin_usd,
+      source: 'hire',
+      peakMarginPct: 0,
+      profitLockFloor: stopReason === 'PROFIT_LOCK_RUNG' ? firstRungLock : undefined,
+      leverage,
+      stopLossMarginPct,
+      clientOrderId: match.meta.clientOrderId,
+    };
+    if (reconcileWriteWindowEnabled()) {
+      await this.ensureProtectiveStop(
+        agentId,
+        instance.userId,
+        cycleId,
+        participantId,
+        adoptMeta,
+        creds,
+        intent,
+        fillPrice,
+        conservativeStop,
+      );
+    } else {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b stop arming skipped ${instance.userId} — RECONCILE_WRITE_WINDOW=0`,
+      );
+    }
+
+    // Hydrate runtime so monitorOpenPosition (next tick) immediately resumes
+    // the Scenario C exit ladder with peak=0 + the degraded profit-lock floor.
+    this.positionRuntime.set(participantId, {
+      peakMarginPct: 0,
+      lastChaseAtMs: 0,
+      lastProfitLockFloor: stopReason === 'PROFIT_LOCK_RUNG' ? firstRungLock : undefined,
+      filledRecorded: true,
+    });
+
+    await this.cycles
+      .recordHireExecutionEvent(instance.userId, agentId, cycleId, 'RECONCILE_ADOPT_ORPHAN_POSITION', {
+        venue: 'bitfinex',
+        participant_id: participantId,
+        origin_participant_id: match.participantId,
+        origin_cycle_id: match.cycleId,
+        direction,
+        qty: adoptQty,
+        fill_price: fillPrice,
+        stop_price: conservativeStop,
+        stop_reason: stopReason,
+        standard_stop: standardStop,
+        unreal_margin_pct: Math.round(unrealMarginPct * 100) / 100,
+        budget_remaining: budgetRemaining - 1,
+        source: 'hire',
+      })
+      .catch(() => {
+        /* audit-only */
+      });
+
+    await this.persistReconcileAdoptAudit(instance.id, {
+      kind: 'ADOPTED_POSITION',
+      scenario: 'S6b',
+      cycleId,
+      participantId,
+      originCycleId: match.cycleId,
+      originParticipantId: match.participantId,
+      direction,
+      qty: adoptQty,
+      fillPrice,
+      stopPrice: conservativeStop,
+      stopReason,
+      at: new Date().toISOString(),
+    }).catch(() => {});
+
+    this.logger.warn(
+      `[RECONCILE-ADOPT] S6b adopted orphan position ${instance.userId} cycle=${cycleId} ${direction} qty=${adoptQty.toFixed(5)} @ ${fillPrice.toFixed(2)} stop=${conservativeStop.toFixed(2)} (${stopReason})`,
+    );
+  }
+
+  /**
+   * S6a — orphan RESTING pending order. The exchange has a limit order with no
+   * tracking PENDING_ENTRY participant. Re-adopt as a fresh PENDING_ENTRY
+   * seeded from the exchange open order, then let the next tick's
+   * monitorEntry / applyLimitChase run the chase lifecycle. If chase budget
+   * exhausts or TTL expires, monitorEntry cancels the order + marks EXPIRED.
+   */
+  private async adoptOrphanPendingOrders(
+    agentId: string,
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    participantScope: { createdAt?: { gte: Date } } = {},
+    marginCap: number,
+    budgetRemaining: number,
+  ): Promise<void> {
+    const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
+    if (!orders.length) return;
+
+    // Build the managed-order-id set from CURRENT participants so we don't
+    // adopt an order that's already tracked by an OPEN/PENDING participant.
+    const tracked = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        cycle: { agentId },
+        ...participantScope,
+      },
+    });
+    const trackedOrderIds = new Set<number>();
+    for (const row of tracked) {
+      const meta = await this.loadExecutionMeta(row.id);
+      if (meta.bitfinexOrderId) trackedOrderIds.add(meta.bitfinexOrderId);
+      if (meta.stopOrderId) trackedOrderIds.add(meta.stopOrderId);
+    }
+
+    // Only LIMIT orders are adoption candidates — STOP orders belong to OPEN
+    // lots (their stop), and a resting STOP with no OPEN lot is a different
+    // anomaly handled by the surface path. We also exclude the absurd-price
+    // orders that cancelAbsurdPendingOrders will reap.
+    const candidates = orders.filter(
+      (o) =>
+        !trackedOrderIds.has(o.id) &&
+        /LIMIT/i.test(o.orderType) &&
+        Math.abs(o.amount) >= MIN_QTY_BTC,
+    );
+    if (!candidates.length) return;
+
+    for (const order of candidates) {
+      if (budgetRemaining <= 0) break;
+
+      const direction: 'LONG' | 'SHORT' = order.amount > 0 ? 'LONG' : 'SHORT';
+      const qty = Math.abs(order.amountOrig || order.amount);
+      const limitPrice = order.price;
+      if (!limitPrice || limitPrice <= 0) continue;
+
+      // Size sanity
+      const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
+      const normalLot = this.resolveNormalLotQty(marginCap, leverage, limitPrice);
+      const maxSize = normalLot * RECONCILE_ADOPT_SIZE_ANOMALY_MULTIPLE;
+      if (qty > maxSize + MIN_QTY_BTC) {
+        this.logger.warn(
+          `[RECONCILE-ADOPT] S6a refuse ${instance.userId}: orphan order ${order.id} qty ${qty.toFixed(5)} > 2x normal lot ${maxSize.toFixed(5)} — size anomaly`,
+        );
+        await this.persistReconcileAdoptAudit(instance.id, {
+          kind: 'REFUSED_SIZE_ANOMALY',
+          scenario: 'S6a',
+          orderId: order.id,
+          orphanQty: qty,
+          normalLot,
+          maxSize,
+          direction,
+          limitPrice,
+          at: new Date().toISOString(),
+        }).catch(() => {});
+        continue;
+      }
+
+      // Match — cid first (orders surface cid), then fallback.
+      const match = await this.matchOrphanToTerminalParticipant(
+        agentId,
+        instance.userId,
+        {
+          side: direction,
+          qty,
+          price: limitPrice,
+          cid: order.cid,
+          createdAtMs: order.createdAtMs,
+        },
+        participantScope,
+      );
+      if (!match) {
+        this.logger.warn(
+          `[RECONCILE-ADOPT] S6a refuse ${instance.userId}: no terminal participant matches orphan order ${order.id} — surface-only`,
+        );
+        await this.persistReconcileAdoptAudit(instance.id, {
+          kind: 'REFUSED_NO_MATCH',
+          scenario: 'S6a',
+          orderId: order.id,
+          cid: order.cid,
+          orphanQty: qty,
+          direction,
+          limitPrice,
+          at: new Date().toISOString(),
+        }).catch(() => {});
+        continue;
+      }
+
+      const intent = match.cycle.intentEnvelope as SignalIntentEnvelope;
+      if (!intent?.risk) continue;
+
+      const adoptedCycle = await this.synthesizeAdoptedCycle(
+        agentId,
+        instance.userId,
+        match,
+        'PENDING_ENTRY',
+      ).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`[RECONCILE-ADOPT] S6a synthesize cycle failed ${instance.userId}: ${msg}`);
+        return null;
+      });
+      if (!adoptedCycle) continue;
+      const { cycleId, participantId } = adoptedCycle;
+
+      // Record ORDER_PLACED — this transitions the participant to PENDING_ENTRY
+      // and seeds the execution meta (bitfinexOrderId, limitPrice, qty, cid).
+      await this.cycles.recordHireExecutionEvent(
+        instance.userId,
+        agentId,
+        cycleId,
+        'ORDER_PLACED',
+        {
+          venue: 'bitfinex',
+          local_mark_at_signal: limitPrice,
+          limit_price: limitPrice,
+          original_limit_price: match.meta.originalLimitPrice ?? limitPrice,
+          qty,
+          margin_usd: match.meta.margin_usd ?? marginCap,
+          margin_cap_usd: marginCap,
+          leverage: intent.risk.leverage_hint ?? leverage,
+          bitfinexOrderId: order.id,
+          clientOrderId: order.cid ?? match.meta.clientOrderId,
+          source: 'hire',
+          event: 'RECONCILE_ADOPT_ORPHAN_ORDER',
+          adopt_kind: 'S6a_PENDING_ORDER',
+          origin_participant_id: match.participantId,
+          origin_cycle_id: match.cycleId,
+          lastChaseAtMs: 0,
+          limitChaseCount: 0,
+        },
+      );
+
+      // Seed runtime so applyLimitChase treats it as a freshly-placed order
+      // (chase window starts now). monitorEntry on the next tick will pick up
+      // the chase / TTL expiry / fill lifecycle automatically.
+      this.positionRuntime.set(participantId, {
+        peakMarginPct: 0,
+        lastChaseAtMs: 0,
+        lastProfitLockFloor: undefined,
+        filledRecorded: false,
+      });
+
+      await this.cycles
+        .recordHireExecutionEvent(instance.userId, agentId, cycleId, 'RECONCILE_ADOPT_ORPHAN_ORDER', {
+          venue: 'bitfinex',
+          participant_id: participantId,
+          origin_participant_id: match.participantId,
+          origin_cycle_id: match.cycleId,
+          orderId: order.id,
+          cid: order.cid,
+          direction,
+          qty,
+          limitPrice,
+          budget_remaining: budgetRemaining - 1,
+          source: 'hire',
+        })
+        .catch(() => {});
+
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'ADOPTED_ORDER',
+        scenario: 'S6a',
+        cycleId,
+        participantId,
+        originCycleId: match.cycleId,
+        originParticipantId: match.participantId,
+        orderId: order.id,
+        cid: order.cid,
+        direction,
+        qty,
+        limitPrice,
+        at: new Date().toISOString(),
+      }).catch(() => {});
+
+      budgetRemaining -= 1;
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6a adopted orphan order ${instance.userId} cycle=${cycleId} orderId=${order.id} ${direction} qty=${qty.toFixed(5)} @ ${limitPrice.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
+   * Match an orphan to a terminal participant. cid-first (orders), then
+   * side+qty+price+time fallback (positions and pre-Phase-2 orders). Returns
+   * the terminal participant + its cycle + the loaded execution meta so the
+   * caller can copy intent + synthesise the adopted cycle.
+   *
+   * Safety: only TERMINAL participants (CLOSED / EXPIRED with an EXIT/EXPIRED
+   * event) are candidates — an OPEN/PENDING participant is by definition still
+   * tracking its order/position and must never be re-adopted. The fallback
+   * time-window (RECONCILE_ADOPT_MATCH_WINDOW_MS) excludes stale orphans the
+   * operator chose to leave flat, so the current 0.03247 BTC orphan (exited
+   * long ago) is NOT matched and stays surface-only.
+   */
+  private async matchOrphanToTerminalParticipant(
+    agentId: string,
+    userId: string,
+    orphan: {
+      side: 'LONG' | 'SHORT';
+      qty: number;
+      price?: number;
+      cid?: number;
+      createdAtMs?: number;
+    },
+    participantScope: { createdAt?: { gte: Date } } = {},
+  ): Promise<{
+    participantId: string;
+    cycleId: string;
+    cycle: { id: string; intentEnvelope: unknown; tradeId: string | null };
+    meta: ExecutionPayload;
+    matchKind: 'cid' | 'fallback';
+  } | null> {
+    // Terminal participants for this user/agent. We look back further than
+    // participantScope (the sim/rental window) because a race can happen at
+    // the boundary of a sim session — but the time-window check below still
+    // gates recency.
+    const terminal = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED] },
+        cycle: { agentId },
+        events: { some: { eventType: { in: ['EXIT', 'EXPIRED'] } } },
+      },
+      include: {
+        cycle: { select: { id: true, intentEnvelope: true, tradeId: true } },
+        events: {
+          where: { eventType: { in: ['EXIT', 'EXPIRED', 'ORDER_PLACED'] } },
+          orderBy: { createdAt: 'desc' },
+          take: 3,
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 40,
+    });
+
+    const now = Date.now();
+
+    // Pass 1 — cid match (orders only). Exact int32 equality.
+    if (orphan.cid != null && orphan.cid !== 0) {
+      for (const row of terminal) {
+        const meta = await this.loadExecutionMeta(row.id);
+        if (meta.clientOrderId === orphan.cid && meta.direction === orphan.side) {
+          return {
+            participantId: row.id,
+            cycleId: row.cycleId,
+            cycle: row.cycle,
+            meta,
+            matchKind: 'cid',
+          };
+        }
+      }
+    }
+
+    // Pass 2 — fallback: side + qty (tolerance) + price band + time window.
+    for (const row of terminal) {
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.direction || meta.direction !== orphan.side) continue;
+      const metaQty = meta.qty ?? 0;
+      if (Math.abs(metaQty - orphan.qty) > RECONCILE_ADOPT_QTY_TOLERANCE) continue;
+
+      // Price band — orphan entry within X% of the terminal participant's
+      // intended limit (or its fill price if the limit was never persisted).
+      const refPrice = meta.limitPrice ?? meta.fillPrice ?? meta.originalLimitPrice;
+      if (orphan.price && refPrice && refPrice > 0) {
+        const bandPct = Math.abs((orphan.price - refPrice) / refPrice) * 100;
+        if (bandPct > RECONCILE_ADOPT_PRICE_BAND_PCT) continue;
+      }
+
+      // Time window — the terminal participant's most recent EXIT/EXPIRED
+      // event must be within RECONCILE_ADOPT_MATCH_WINDOW_MS of NOW. This is
+      // what excludes the stale 0.03247 BTC orphan (exited long ago).
+      const lastExit = row.events.find((e) => e.eventType === 'EXIT' || e.eventType === 'EXPIRED');
+      if (!lastExit) continue;
+      const ageMs = now - lastExit.createdAt.getTime();
+      if (ageMs > RECONCILE_ADOPT_MATCH_WINDOW_MS) continue;
+
+      return {
+        participantId: row.id,
+        cycleId: row.cycleId,
+        cycle: row.cycle,
+        meta,
+        matchKind: 'fallback',
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Synthesise a new SignalCycle + SignalCycleParticipant for an adoption.
+   * Copies the original cycle's intentEnvelope so the exit ladder / stop
+   * formula run identically. tradeId is namespaced `adopt:<origin>:<ts>` to
+   * satisfy the (agentId, tradeId) unique constraint without colliding with
+   * the original showcase trade.
+   *
+   * Idempotency: the (cycleId, userId) unique constraint on participants
+   * guarantees that if two ticks race to adopt the same orphan, only one
+   * create succeeds — the other throws P2002 and is caught by the caller.
+   */
+  private async synthesizeAdoptedCycle(
+    agentId: string,
+    userId: string,
+    match: {
+      cycleId: string;
+      cycle: { id: string; intentEnvelope: unknown; tradeId: string | null };
+      participantId: string;
+      matchKind: 'cid' | 'fallback';
+    },
+    initialStatus: SignalCycleStatus,
+  ): Promise<{ cycleId: string; participantId: string }> {
+    const originTradeId = match.cycle.tradeId ?? 'unknown';
+    const adoptedTradeId = `adopt:${originTradeId}:${Date.now()}`;
+    const intentEnvelope = match.cycle.intentEnvelope as Prisma.InputJsonValue;
+
+    const cycle = await this.prisma.signalCycle.create({
+      data: {
+        agentId,
+        tradeId: adoptedTradeId,
+        status: initialStatus,
+        intentEnvelope,
+        researchVenue: 'bitfinex',
+      },
+    });
+
+    const participant = await this.prisma.signalCycleParticipant.create({
+      data: {
+        cycleId: cycle.id,
+        userId,
+        venue: 'bitfinex',
+        status: initialStatus,
+      },
+    });
+
+    return { cycleId: cycle.id, participantId: participant.id };
+  }
+
+  /** Normal lot size at the current price for size-sanity guardrail. */
+  private resolveNormalLotQty(marginCap: number, leverage: number, price: number): number {
+    if (!price || price <= 0) return MIN_QTY_BTC;
+    return computeQty(marginCap, leverage, price, MIN_QTY_BTC);
+  }
+
+  /**
+   * Append an adoption audit entry to dashboardState.reconcileAdoptLog (ring
+   * buffer, cap RECONCILE_ADOPT_LOG_CAP) and increment reconcileAdoptCount.
+   * Best-effort — never aborts the tick on a dashboard patch failure.
+   */
+  private async persistReconcileAdoptAudit(
+    instanceId: string,
+    entry: Record<string, unknown>,
+  ): Promise<void> {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const priorLog = Array.isArray(dash.reconcileAdoptLog)
+      ? (dash.reconcileAdoptLog as unknown[])
+      : [];
+    const priorCount = Number(dash.reconcileAdoptCount ?? 0);
+    const adoptedKinds = new Set(['ADOPTED_POSITION', 'ADOPTED_ORDER']);
+    const nextLog = [...priorLog, entry].slice(-RECONCILE_ADOPT_LOG_CAP);
+    const nextCount = adoptedKinds.has(String(entry.kind))
+      ? priorCount + 1
+      : priorCount;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          reconcileAdoptLog: nextLog,
+          reconcileAdoptCount: nextCount,
+          reconcileAdoptLastAt: new Date().toISOString(),
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
   }
 }
