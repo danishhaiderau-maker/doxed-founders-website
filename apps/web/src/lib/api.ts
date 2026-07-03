@@ -4233,63 +4233,6 @@ export async function fetchBotHealth(slug: string): Promise<BotHealthResponse> {
   }
 }
 
-// --- Spread gate (hard per-spread-bucket limit-order block on the showcase bot) -
-// Direct browser -> bot.doxxedcrypto.digital calls. The bot sets permissive CORS
-// headers on /api/spread-gate (GET + POST + OPTIONS) so the Next.js founder dashboard
-// can read/update cross-origin. The hard gate itself lives in the bot's
-// `_place_simulated_limit_order` (which calls `_spread_gate_blocks_signal` right before
-// building the order dict) — sim AND Bitfinex live submit are skipped when the bucket
-// is disabled. This control is the UI for that gate — NOT a UI-only filter.
-//
-// Shape mirrors the bot's canonical endpoint: `disabled_buckets` is a list of int
-// bucket keys (0..7, where 7 == "7+"); `known_buckets` is the full bucket list the bot
-// reports. `ok:false` means the bot was unreachable — caller shows "bot offline", not a
-// crash.
-export type SpreadGateState = {
-  disabled_buckets: number[];
-  known_buckets: number[];
-};
-
-export type SpreadGateResponse = SpreadGateState & { ok: boolean };
-
-export const SHOWCASE_BOT_BASE_URL = 'https://bot.doxxedcrypto.digital';
-export const SPREAD_GATE_DEFAULT_BUCKETS = [0, 1, 2, 3, 4, 5, 6, 7];
-
-function parseSpreadGateJson(json: unknown): SpreadGateState {
-  const obj = (json ?? {}) as Partial<SpreadGateState>;
-  const disabled = Array.isArray(obj.disabled_buckets)
-    ? obj.disabled_buckets.map((n) => Number(n)).filter((n) => Number.isFinite(n))
-    : [];
-  const known = Array.isArray(obj.known_buckets) && obj.known_buckets.length > 0
-    ? obj.known_buckets.map((n) => Number(n)).filter((n) => Number.isFinite(n))
-    : SPREAD_GATE_DEFAULT_BUCKETS;
-  return { disabled_buckets: disabled, known_buckets: known };
-}
-
-export async function fetchSpreadGate(): Promise<SpreadGateResponse> {
-  try {
-    const res = await fetch(`${SHOWCASE_BOT_BASE_URL}/api/spread-gate`, { method: 'GET' });
-    if (!res.ok) return { ok: false, disabled_buckets: [], known_buckets: SPREAD_GATE_DEFAULT_BUCKETS };
-    return { ok: true, ...parseSpreadGateJson(await res.json().catch(() => ({}))) };
-  } catch {
-    return { ok: false, disabled_buckets: [], known_buckets: SPREAD_GATE_DEFAULT_BUCKETS };
-  }
-}
-
-export async function postSpreadGate(disabledBuckets: number[]): Promise<SpreadGateResponse> {
-  try {
-    const res = await fetch(`${SHOWCASE_BOT_BASE_URL}/api/spread-gate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ disabled_buckets: disabledBuckets }),
-    });
-    if (!res.ok) return { ok: false, disabled_buckets: [], known_buckets: SPREAD_GATE_DEFAULT_BUCKETS };
-    return { ok: true, ...parseSpreadGateJson(await res.json().catch(() => ({}))) };
-  } catch {
-    return { ok: false, disabled_buckets: [], known_buckets: SPREAD_GATE_DEFAULT_BUCKETS };
-  }
-}
-
 export function resetShowcaseSimulation(token: string) {
   return apiFetch<{ ok: boolean; message?: string }>(
     '/admin-control/agent/reset-simulation',
