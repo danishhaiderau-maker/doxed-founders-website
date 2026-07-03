@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-fix(bot): scrub strategy internals from public dashboard endpoints (IP protection)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
