@@ -34,7 +34,7 @@ type ChatMsg = {
 
 type BrainOption = { key: string; label: string; hint: string };
 
-const FOUNDERS_RELEASES_URL = 'https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest';
+const FOUNDERS_RELEASES_URL = 'https://doxxedcrypto.digital/founder-den?onboard=sovereign';
 
 const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
 const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };
@@ -587,7 +587,7 @@ export function MinimalDevWorkspace({
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
         </div>
         <div className='min-h-0 flex-1 overflow-y-auto px-2 pb-3'>
-          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.2+ is running and Cursor is open.</div>}
+          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.3+ is running and Cursor is open.</div>}
           {workspaces.map((w) => (
             <button key={w.id} onClick={() => setSelectedWsId(w.id)} className={'mb-1 block w-full rounded-lg px-3 py-2.5 text-left transition ' + (selectedWsId === w.id ? 'bg-white/10 ring-1 ring-white/15' : 'hover:bg-white/5')}>
               <div className='flex items-center gap-2'>
@@ -739,7 +739,7 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.2+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.3+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               <ol className='mt-4 space-y-2 text-left text-sm text-zinc-300'>
                 <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
                   <span className='font-semibold text-emerald-400'>1.</span>{' '}
@@ -749,7 +749,7 @@ export function MinimalDevWorkspace({
                     rel='noreferrer'
                     className='text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200'
                   >
-                    Download Founder Node v0.7.2 from GitHub Releases
+                    Download Founder Node v0.7.3 — complete setup guide
                   </a>
                 </li>
                 <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>

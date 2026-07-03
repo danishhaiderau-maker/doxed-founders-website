@@ -339,7 +339,7 @@ export class FounderNodeSyncService {
     return {
       ok: false as const,
       error:
-        'Timed out waiting for Founder Node — open the tray app, update to Founder Node v0.7.2+, then retry Rebuild vector index',
+        'Timed out waiting for Founder Node — open the tray app, update to Founder Node v0.7.3+, then retry Rebuild vector index',
     };
   }
 
