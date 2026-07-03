@@ -96,7 +96,20 @@ export type SignalCycleEventType =
   | 'RECONCILE_ADOPT_REHYDRATE'
   | 'RECONCILE_ADOPT_SKIP'
   | 'RECONCILE_STOP_REARM_REFUSED'
-  | 'RECONCILE_STOP_REARM_SKIPPED';
+  | 'RECONCILE_STOP_REARM_SKIPPED'
+  // Phase 4 — autonomous orphan adoption (S6a pending order + S6b filled
+  // position). Additive only; no participant status transition is attached
+  // to the REFUSED/BUDGET/DISABLED variants — they exist for operator
+  // auditability of the adoption decision. The ORPHAN_ORDER / ORPHAN_POSITION
+  // variants are emitted alongside the FILLED / ORDER_PLACED event that
+  // materialises the new adopted participant.
+  | 'RECONCILE_ADOPT_ORPHAN_ORDER'
+  | 'RECONCILE_ADOPT_ORPHAN_POSITION'
+  | 'RECONCILE_ADOPT_REFUSED_NO_MATCH'
+  | 'RECONCILE_ADOPT_REFUSED_SIZE_ANOMALY'
+  | 'RECONCILE_ADOPT_REFUSED_DUPLICATE'
+  | 'RECONCILE_ADOPT_BUDGET_EXHAUSTED'
+  | 'RECONCILE_ADOPT_DISABLED';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
