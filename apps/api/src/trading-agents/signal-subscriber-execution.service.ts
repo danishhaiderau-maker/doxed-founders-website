@@ -125,11 +125,14 @@ function reconcileAdoptEnabled(): boolean {
 }
 
 /**
- * Phase 5 guardrail — max adoptions per API instance session. Counted in
- * dashboardState.reconcileAdoptCount (persisted across ticks, reset only on
- * dashboard state reset). Default 2: tight enough that a runaway match bug
- * cannot adopt a cascade, generous enough to heal a normal fill/expiry race
- * plus one retry. When exceeded, surface-only + RECONCILE_ADOPT_BUDGET_EXHAUSTED.
+ * Phase 5 guardrail — max adoptions per trailing 24h window. Derived from the
+ * Neon SignalCycleEvent stream (adoption event types) + synthesized `adopt:%`
+ * cycle count, NOT from dashboardState.reconcileAdoptCount — the dashboard
+ * counter is wiped by resetAllUserCopySessions on every showcase
+ * fresh-collection (production evidence: 5 adoptions in one day against a
+ * budget of 2). Default 2: tight enough that a runaway match bug cannot adopt
+ * a cascade, generous enough to heal a normal fill/expiry race plus one
+ * retry. When exceeded, surface-only + RECONCILE_ADOPT_BUDGET_EXHAUSTED.
  */
 function reconcileAdoptBudget(): number {
   const raw = Number(process.env.RECONCILE_ADOPT_BUDGET ?? '2');
@@ -146,10 +149,11 @@ function reconcileAdoptBudget(): number {
  *     order per second, and the showcase state fetch is memoised for 1s per
  *     tick so all call sites share a single fresh pull (faster ticks, lower
  *     effective reprice lag).
- *  3. Cancel-race fill check: every entry-order cancel (chase replace,
- *     showcase-close/abandon, TTL expiry) and the RECONCILE_CANCEL_BY_EXCHANGE
- *     classification first verify the order did not (partially) fill; a real
- *     fill is recorded as FILLED at the real price instead of closing at $0.
+ * NOTE (adoption hardening): the cancel-race fill check (every entry-order
+ * cancel and the RECONCILE_CANCEL_BY_EXCHANGE classification verify the order
+ * did not (partially) fill before treating it as cancelled) is ALWAYS ON —
+ * misclassifying a real fill as a cancel is a bug, not a feature. Only the
+ * dedupe + chase-convergence behaviors above remain behind this flag.
  * Read per call so operators can flip it via Railway env without a redeploy.
  */
 function mirrorConvergenceEnabled(): boolean {
@@ -206,6 +210,20 @@ const RECONCILE_ADOPT_PRICE_BAND_PCT = 2.0;
 
 /** Ring buffer cap for dashboardState.reconcileAdoptLog. */
 const RECONCILE_ADOPT_LOG_CAP = 20;
+
+/** Trailing window for the reset-proof adoption budget (RECONCILE_ADOPT_BUDGET
+ *  adoptions per this window, derived from the Neon event stream). */
+const RECONCILE_ADOPT_BUDGET_WINDOW_MS = 24 * 60 * 60_000;
+
+/** Fix 4 — double-adopt guard: a non-terminal `adopt:%` participant for the
+ *  same user+agent+direction created within this window whose qty matches the
+ *  orphan slice blocks a second synthesis (fail-closed, skip + audit). */
+const RECONCILE_ADOPT_DUPLICATE_WINDOW_MS = 10 * 60_000;
+
+/** Fix 3 — synthesized S6a (PENDING_ENTRY) adopted cycles are fill-or-expire:
+ *  hard TTL after which monitorEntry cancels the resting order (fail-loud)
+ *  and marks the participant EXPIRED. Matches the showcase entry TTL. */
+const RECONCILE_ADOPT_ORDER_TTL_MS = 30 * 60_000;
 
 /**
  * Deterministic Bitfinex client order id (`cid`) for a participant's entry
@@ -1535,6 +1553,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const openRows = participants.filter((p) => p.status === SignalCycleStatus.OPEN);
     for (const row of openRows) {
       if (remaining < MIN_QTY_BTC) break;
+      // Fix 5b — EXIT idempotency: recordHireExecutionEvent has no EXIT
+      // dedupe, so a race with another reconcile path (or a second replica)
+      // would double-record the EXIT. Skip rows that already exited.
+      if (await this.hasParticipantExited(row.id)) continue;
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
       const participant = await this.prisma.signalCycleParticipant.findUnique({
@@ -1575,6 +1597,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // order has already executed any quantity, leave it alone so
       // reconcileFilledParticipants can heal it as a fill instead of double-counting.
       const cancelledOids: number[] = [];
+      let cancelStillLive = false;
       for (const oid of [meta.bitfinexOrderId, meta.stopOrderId]) {
         if (oid == null) continue;
         let orderResting: { amount: number; amountOrig: number } | null = null;
@@ -1599,25 +1622,46 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           );
           continue;
         }
-        try {
-          this.logger.log(
-            `[RECONCILE-ADOPT] cancelling orphan oid=${oid} reason=ORPHAN_LEDGER_RECONCILE ${userId} participant=${row.id}`,
-          );
-          await this.activeTrading.cancelOrder(creds, oid);
+        // Fix 5a — fail-loud cancel. The prior bare cancelOrder inside
+        // try/catch swallowed failures and recorded the EXIT anyway, leaving
+        // a live order orphaned on the exchange behind a "closed" ledger row.
+        const cancel = await this.cancelManagedOrderGone(
+          creds,
+          oid,
+          `[RECONCILE-ADOPT] cancel orphan oid=${oid} reason=ORPHAN_LEDGER_RECONCILE ${userId} participant=${row.id}`,
+        );
+        if (cancel.gone) {
           cancelledOids.push(oid);
           this.logger.log(
             `[RECONCILE-ADOPT] cancelled orphan oid=${oid} ${userId} participant=${row.id}`,
           );
-        } catch (err) {
-          // Idempotent: a 404 "already gone" or nonce error must not crash the
-          // reconcile loop. The order may have filled/cancelled between the
-          // findOrder check and the cancel.
-          this.logger.warn(
-            `[RECONCILE-ADOPT] cancel orphan oid=${oid} failed (idempotent, continuing): ${
-              err instanceof Error ? err.message : err
-            } ${userId} participant=${row.id}`,
+        } else {
+          cancelStillLive = true;
+          this.logger.error(
+            `[RECONCILE-ADOPT] cancel orphan oid=${oid} FAILED and order still live (attempts=${cancel.attempts}, reason=${cancel.reason ?? 'unknown'}) — deferring EXIT to next tick ${userId} participant=${row.id}`,
           );
+          await this.cycles
+            .recordHireExecutionEvent(userId, agentId, participant.cycleId, 'RECONCILE_CANCEL_FAILED', {
+              venue,
+              source: 'hire',
+              event: 'ORPHAN_LEDGER_RECONCILE',
+              bitfinex_order_id: oid,
+              participant_id: row.id,
+              cancel_attempts: cancel.attempts,
+              cancel_reason: cancel.reason ?? 'unknown',
+            })
+            .catch(() => {
+              /* audit-best-effort */
+            });
         }
+      }
+
+      if (cancelStillLive) {
+        // Fix 5a — an order for this lot is confirmed still live on the
+        // exchange. Recording the EXIT now would orphan it behind a closed
+        // ledger row. Defer the whole lot to the next tick (idempotent —
+        // this loop re-runs while ledger > exchange).
+        continue;
       }
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
@@ -2174,10 +2218,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Phase 1 cancel-race fill check (MIRROR_CONVERGENCE_ENABLED). Before the
-   * copy cancels its own entry order — or classifies a vanished order as
-   * cancelled-by-exchange — verify the order did not actually (partially)
-   * fill:
+   * Cancel-race fill check (always on — NOT gated by
+   * MIRROR_CONVERGENCE_ENABLED; misclassification is a bug, not a feature).
+   * Before the copy cancels its own entry order — or classifies a vanished
+   * order as cancelled-by-exchange — verify the order did not actually
+   * (partially) fill:
    *  - Order still resting: `|amountOrig| - |amount|` > MIN_QTY_BTC means a
    *    partial execution the cancel would silently discard.
    *  - Order gone entirely: the merged position grew by ~the lot qty vs the
@@ -2413,10 +2458,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // resting limit — otherwise it can chase/fill up to 30m TTL AFTER the showcase exited,
     // creating an orphan position with no showcase to mirror the exit on.
     if (cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED) {
-      // Phase 1 cancel-race fill check: the order may have (partially) filled
-      // before the showcase closure reached us — record the REAL fill instead
-      // of cancelling and closing at $0 (orphan factory).
-      if (mirrorConvergenceEnabled()) {
+      // Cancel-race fill check (always on — misclassifying a real fill as a
+      // cancel is a bug, not a feature flag): the order may have (partially)
+      // filled before the showcase closure reached us — record the REAL fill
+      // instead of cancelling and closing at $0 (orphan factory).
+      {
         const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
         if (fill) {
           const recorded = await this.recordCancelRaceFill(
@@ -2476,8 +2522,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
-        // Phase 1 cancel-race fill check (see SHOWCASE_CYCLE_CLOSED branch).
-        if (mirrorConvergenceEnabled()) {
+        // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
+        {
           const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
           if (fill) {
             const recorded = await this.recordCancelRaceFill(
@@ -2530,8 +2576,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
-      // Phase 1 cancel-race fill check (see SHOWCASE_CYCLE_CLOSED branch).
-      if (mirrorConvergenceEnabled()) {
+      // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
+      {
         const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
         if (fill) {
           const recorded = await this.recordCancelRaceFill(
@@ -2596,13 +2642,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    // Fix 7b — distinguish a transient position-fetch failure from a genuine
+    // no-position state. Classifying on a failed fetch recorded EXPIRED while
+    // the fill was real (orphan factory). Fail-closed: defer to next tick.
+    let positionFetchFailed = false;
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => {
+      positionFetchFailed = true;
+      return null;
+    });
     const expectedLong = meta.direction === 'LONG';
     const hasPosition =
       position &&
       ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
 
     if (!hasPosition) {
+      if (positionFetchFailed) {
+        this.logger.warn(
+          `Order ${orderId} gone and position fetch FAILED for ${userId} — cannot classify fill vs cancel, leaving PENDING_ENTRY for next tick`,
+        );
+        return;
+      }
       this.logger.warn(`Order ${orderId} gone without position for ${userId} — treating as cancelled`);
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
@@ -2617,16 +2676,43 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const lotQty = meta.qty ?? MIN_QTY_BTC;
     const expectedMinQty = exchangeQtyAtOrder + lotQty * 0.85;
     if (currentExchangeQty + MIN_QTY_BTC < expectedMinQty) {
-      this.logger.warn(
-        `Order ${orderId} gone but merged position ${currentExchangeQty.toFixed(5)} BTC did not grow for lot ${lotQty.toFixed(5)} (baseline ${exchangeQtyAtOrder.toFixed(5)}) — expire phantom pending`,
-      );
-      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
-        venue: 'bitfinex',
-        pnl_usd: 0,
-        source: 'hire',
-        event: 'PHANTOM_FILL_REJECTED',
+      // Fix 7c — the exchangeQtyAtOrder baseline is stale: another lot's exit
+      // (showcase-mirror close) between this order's fill and this check
+      // shrinks the merged position, failing the growth check and discarding
+      // a REAL fill. Secondary check against a FRESH baseline: the qty
+      // currently attributed to OTHER open participants. If the merged
+      // position covers other lots + ~this lot, the fill was real.
+      const otherOpenRows = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          status: SignalCycleStatus.OPEN,
+          cycle: { agentId },
+          id: { not: participant.id },
+        },
+        select: { id: true },
       });
-      return;
+      let otherAttributedQty = 0;
+      for (const other of otherOpenRows) {
+        const otherMeta = await this.loadExecutionMeta(other.id);
+        if (otherMeta.direction && otherMeta.direction !== meta.direction) continue;
+        otherAttributedQty += otherMeta.qty ?? 0;
+      }
+      const freshBaselineMinQty = otherAttributedQty + lotQty * 0.85;
+      if (currentExchangeQty + MIN_QTY_BTC < freshBaselineMinQty) {
+        this.logger.warn(
+          `Order ${orderId} gone but merged position ${currentExchangeQty.toFixed(5)} BTC did not grow for lot ${lotQty.toFixed(5)} (baseline ${exchangeQtyAtOrder.toFixed(5)}, fresh attributed ${otherAttributedQty.toFixed(5)}) — expire phantom pending`,
+        );
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+          venue: 'bitfinex',
+          pnl_usd: 0,
+          source: 'hire',
+          event: 'PHANTOM_FILL_REJECTED',
+        });
+        return;
+      }
+      this.logger.warn(
+        `Order ${orderId}: stale at-order baseline ${exchangeQtyAtOrder.toFixed(5)} failed growth check but FRESH attributed baseline ${otherAttributedQty.toFixed(5)} confirms the fill (merged ${currentExchangeQty.toFixed(5)}, lot ${lotQty.toFixed(5)}) — recording real fill for ${userId}`,
+      );
     }
 
     const fillPrice =
@@ -2975,12 +3061,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const stillThere = await this.activeTrading.findOrder(creds, oid).catch(() => null);
       if (stillThere) continue;
 
-      // Phase 1 cancel-race fill check (flag-gated): a vanished order is NOT
-      // necessarily cancelled — it may have FILLED. Check the merged-position
-      // delta before declaring RECONCILE_CANCEL_BY_EXCHANGE; a real fill is
-      // recorded as FILLED at the real price instead of a $0 close that
-      // orphans the position slice (the orphan-adoption loss factory).
-      if (mirrorConvergenceEnabled()) {
+      // Cancel-race fill check (always on — misclassification is a bug, not a
+      // feature flag): a vanished order is NOT necessarily cancelled — it may
+      // have FILLED. Check the merged-position delta before declaring
+      // RECONCILE_CANCEL_BY_EXCHANGE; a real fill is recorded as FILLED at
+      // the real price instead of a $0 close that orphans the position slice
+      // (the orphan-adoption loss factory).
+      {
         const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
         if (fill) {
           const intent = (row.cycle?.intentEnvelope ?? null) as SignalIntentEnvelope | null;
@@ -3475,6 +3562,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ) {
     if (!meta.direction || !meta.limitPrice || !meta.bitfinexOrderId) return;
 
+    // Fix 3 — adopted (adopt:*) resting orders are fill-or-expire ONLY. Their
+    // tradeId matches nothing in showcase state, so a chase would walk the
+    // limit toward market autonomously and can fill a signal the showcase
+    // already abandoned. TTL expiry (cycle.expiresAt) reaps them instead.
+    if (tradeId?.startsWith('adopt:')) return;
+
     const lastChaseAtMs = meta.lastChaseAtMs ?? 0;
     const now = Date.now();
     const mark = await this.activeTrading.getMarkPrice();
@@ -3560,11 +3653,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
 
-    // Phase 1 cancel-race fill check (flag-gated): never cancel+replace an
-    // order that already (partially) executed — record the real fill instead.
-    // If the order is gone entirely, skip the replace and let monitorEntry's
+    // Cancel-race fill check (always on): never cancel+replace an order that
+    // already (partially) executed — record the real fill instead. If the
+    // order is gone entirely, skip the replace and let monitorEntry's
     // fill/cancel classifier handle it next tick.
-    if (mirrorConvergenceEnabled()) {
+    {
       const resting = await this.activeTrading
         .findOrder(creds, meta.bitfinexOrderId)
         .catch(() => null);
@@ -4025,12 +4118,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const fillPrice =
         row.fillPrice != null ? Number(row.fillPrice) : meta.limitPrice ?? mark;
       const exitPrice = mark;
-      const pnlUsd =
-        fillPrice && exitPrice
-          ? meta.direction === 'LONG'
-            ? (exitPrice - fillPrice) * meta.qty
-            : (fillPrice - exitPrice) * meta.qty
-          : 0;
+      // Fix 6 — realized P&L. Fill-vs-current-mark reconstruction misstates
+      // the outcome when the exchange's own stop (or a manual close) fired at
+      // a different price than the current mark. resolveAlreadyFlatPnl walks
+      // the exchange's realized ledger first (single-lot case) and only falls
+      // back to reconstruction — same path closeOrphanLedgerLots uses.
+      const flat = await this.resolveAlreadyFlatPnl(
+        agentId,
+        userId,
+        creds,
+        row.id,
+        meta,
+        fillPrice,
+        exitPrice || fillPrice,
+      );
+      const pnlUsd = flat.pnlUsd;
       const pnlMarginPct =
         fillPrice && fillPrice > 0
           ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
@@ -4092,7 +4194,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
         pnl_usd: Math.round(pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-        pnl_source: 'reconstructed',
+        pnl_source: flat.pnlSource,
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',
         cancelled_order_ids: cancelledOids,
@@ -4753,16 +4855,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    // Read fresh dashboard state for the budget counter (instance param may be
-    // stale by one tick). Idempotent across ticks: count only ever increases.
-    const fresh = await this.prisma.tradingAgentInstance.findUnique({
-      where: { id: instance.id },
-      select: { dashboardState: true },
+    // Fix 2 — reset-proof budget. dashboardState.reconcileAdoptCount is wiped
+    // by resetAllUserCopySessions/buildFreshInstanceDashboardState on every
+    // showcase fresh-collection, so derive the count from the Neon event
+    // stream instead (survives resets): adoption events for this user/agent
+    // in the trailing 24h. Belt-and-braces: also count synthesized `adopt:%`
+    // cycles in the same window (written unconditionally by
+    // synthesizeAdoptedCycle, whereas the audit events are best-effort) and
+    // take the max — fail-closed, never undercounts.
+    const budgetSince = new Date(Date.now() - RECONCILE_ADOPT_BUDGET_WINDOW_MS);
+    const adoptEventCount = await this.prisma.signalCycleEvent.count({
+      where: {
+        eventType: {
+          in: ['RECONCILE_ADOPT_ORPHAN_ORDER', 'RECONCILE_ADOPT_ORPHAN_POSITION'],
+        },
+        createdAt: { gte: budgetSince },
+        cycle: { agentId },
+        participant: { userId: instance.userId },
+      },
     });
-    const dash = (fresh?.dashboardState ?? {}) as Record<string, unknown>;
-    const adoptCount = Number(dash.reconcileAdoptCount ?? 0);
+    const adoptCycleCount = await this.prisma.signalCycle.count({
+      where: {
+        agentId,
+        tradeId: { startsWith: 'adopt:' },
+        createdAt: { gte: budgetSince },
+        participants: { some: { userId: instance.userId } },
+      },
+    });
+    const adoptCount = Math.max(adoptEventCount, adoptCycleCount);
     const budget = reconcileAdoptBudget();
-    const remaining = budget - adoptCount;
+    let remaining = budget - adoptCount;
     if (remaining <= 0) {
       this.logger.warn(
         `[RECONCILE-ADOPT] budget exhausted ${instance.userId} count=${adoptCount} budget=${budget} — surface-only`,
@@ -4781,7 +4903,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // S6b first — a filled orphan position is the dangerous case (no stop, no
     // exit ladder). Heal it before S6a so a fill race doesn't sit unmanaged
     // while we chase a resting order.
-    await this.adoptOrphanFilledPosition(
+    const s6bAdoptions = await this.adoptOrphanFilledPosition(
       agentId,
       instance,
       creds,
@@ -4791,7 +4913,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     ).catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[RECONCILE-ADOPT] S6b error ${instance.userId}: ${msg}`);
+      return 0;
     });
+
+    // Fix 2 — decrement between S6b and S6a: passing the same `remaining` to
+    // both allowed a one-tick overshoot of the budget by one adoption.
+    remaining -= s6bAdoptions;
+    if (remaining <= 0) return;
 
     // S6a — resting orphan order. Lower risk (no position yet) but still worth
     // re-adopting so the chase lifecycle runs and TTL expiry cancels cleanly.
@@ -4812,8 +4940,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * S6b — orphan FILLED position. The exchange has a position but no OPEN
    * participant tracks it (the prior participant was marked terminal in a
    * fill/expiry race). Re-adopt as a fresh OPEN participant seeded from the
-   * real exchange fill, arm a conservative protective stop, and let the next
+   * ORIGIN participant's real fill (Fix 1 — `position.basePrice` is the
+   * exchange's MERGED average across all lots, not this slice's fill), carry
+   * the origin's peak/floor so the profit-lock trail resumes instead of
+   * restarting at 0, arm a conservative protective stop, and let the next
    * tick's monitorOpenPosition run the Scenario C exit ladder.
+   *
+   * Returns the number of adoptions performed (0 or 1) so the caller can
+   * decrement the shared budget before running S6a.
    */
   private async adoptOrphanFilledPosition(
     agentId: string,
@@ -4822,18 +4956,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     participantScope: { createdAt?: { gte: Date } } = {},
     marginCap: number,
     budgetRemaining: number,
-  ): Promise<void> {
+  ): Promise<number> {
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
+    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return 0;
 
     const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
     const exchangeQty = Math.abs(position.amount);
-    const fillPrice = position.basePrice > 0 ? position.basePrice : 0;
-    if (!fillPrice || fillPrice <= 0) {
+    const mergedBasePrice = position.basePrice > 0 ? position.basePrice : 0;
+    if (!mergedBasePrice || mergedBasePrice <= 0) {
       this.logger.warn(
         `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: exchange position has no basePrice — cannot verify fill`,
       );
-      return;
+      return 0;
     }
 
     // Compute currently-attributed OPEN qty for this direction so we only adopt
@@ -4853,25 +4987,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       attributedQty += meta.qty ?? 0;
     }
     const orphanSlice = exchangeQty - attributedQty;
-    if (orphanSlice < MIN_QTY_BTC) return; // nothing unattributed
-
-    // Idempotency: if an adopted participant already tracks this exact slice
-    // (qty within tolerance, same direction, OPEN, no EXIT), skip. This catches
-    // the second-tick re-entry after a successful adoption.
-    const alreadyAdopted = openRows.some((row) => {
-      // Heuristic: any OPEN participant whose qty matches the orphan slice and
-      // whose fillPrice is within 0.5% of the exchange basePrice. The next
-      // tick after adoption, this row exists and attributedQty already covers
-      // the slice — so orphanSlice < MIN_QTY_BTC and we return above. This
-      // check is a belt-and-braces guard for the race between the dashboard
-      // read and the participant create.
-      return false; // primary guard is the orphanSlice check above
-    });
-    void alreadyAdopted;
+    if (orphanSlice < MIN_QTY_BTC) return 0; // nothing unattributed
 
     // Size sanity — refuse giant orphans. Normal lot at this price/lev.
     const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
-    const normalLot = this.resolveNormalLotQty(marginCap, leverage, fillPrice);
+    const normalLot = this.resolveNormalLotQty(marginCap, leverage, mergedBasePrice);
     const maxSize = normalLot * RECONCILE_ADOPT_SIZE_ANOMALY_MULTIPLE;
     if (orphanSlice > maxSize + MIN_QTY_BTC) {
       this.logger.warn(
@@ -4884,10 +5004,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         normalLot,
         maxSize,
         direction,
-        fillPrice,
+        fillPrice: mergedBasePrice,
         at: new Date().toISOString(),
       }).catch(() => {});
-      return;
+      return 0;
     }
 
     // Match the orphan to a terminal participant (cid not available for
@@ -4898,7 +5018,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       {
         side: direction,
         qty: orphanSlice,
-        price: fillPrice,
+        price: mergedBasePrice,
         cid: undefined,
         createdAtMs: Date.now(),
       },
@@ -4906,20 +5026,81 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
     if (!match) {
       this.logger.warn(
-        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: no terminal participant matches orphan slice ${orphanSlice.toFixed(5)} ${direction} @ ${fillPrice.toFixed(2)} — surface-only (could be a manual position)`,
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: no terminal participant matches orphan slice ${orphanSlice.toFixed(5)} ${direction} @ ${mergedBasePrice.toFixed(2)} — surface-only (could be a manual position)`,
       );
       await this.persistReconcileAdoptAudit(instance.id, {
         kind: 'REFUSED_NO_MATCH',
         scenario: 'S6b',
         orphanQty: orphanSlice,
         direction,
-        fillPrice,
+        fillPrice: mergedBasePrice,
         at: new Date().toISOString(),
       }).catch(() => {});
-      return;
+      return 0;
     }
 
-    if (budgetRemaining <= 0) return; // re-check after async match
+    if (budgetRemaining <= 0) return 0; // re-check after async match
+
+    // Fix 1 — adoption economics. Seed the adopted participant from the
+    // ORIGIN participant's own FILLED fill price, not the exchange's merged
+    // basePrice (production evidence: a 0.0324 slice of a 0.0971 BTC merged
+    // position adopted at the merged 61809.74 average — worse than any real
+    // fill — then stopped by noise). Bitfinex client exposes no per-order
+    // trade/order history, so the fallback stays position.basePrice, tagged
+    // in the audit payload.
+    const originFillPrice = await this.resolveOriginFillPrice(match.participantId);
+    const fillPrice = originFillPrice ?? mergedBasePrice;
+    const fillPriceSource: 'origin_filled_event' | 'merged_base_price' =
+      originFillPrice != null ? 'origin_filled_event' : 'merged_base_price';
+
+    // Fix 1 — carry the origin's peak/floor so the profit-lock trail resumes
+    // where the origin left off instead of restarting at 0 (loadExecutionMeta
+    // already folds peak_margin_pct / lock_floor_margin_pct maxima into meta).
+    const carriedPeak = Math.max(0, match.meta.peakMarginPct ?? 0);
+    const carriedFloor = Math.max(0, match.meta.profitLockFloor ?? 0);
+
+    // Fix 4 — orphan-level double-adopt guard. Two replicas (or a tick race)
+    // can each synthesize a DISTINCT adopted cycle for the same orphan (the
+    // tradeId embeds Date.now(), so the cycle-level P2002 unique constraint
+    // does not protect). Fail-closed: skip + audit when a recent non-terminal
+    // adopt:* participant already covers this slice.
+    const duplicate = await this.findRecentAdoptedDuplicate(
+      agentId,
+      instance.userId,
+      direction,
+      orphanSlice,
+    );
+    if (duplicate) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: recent adopted participant ${duplicate.participantId} already covers ${direction} slice ${orphanSlice.toFixed(5)} — double-adopt guard, skipping`,
+      );
+      await this.cycles
+        .recordHireExecutionEvent(
+          instance.userId,
+          agentId,
+          duplicate.cycleId,
+          'RECONCILE_ADOPT_REFUSED_DUPLICATE',
+          {
+            venue: 'bitfinex',
+            source: 'hire',
+            scenario: 'S6b',
+            direction,
+            orphan_qty: orphanSlice,
+            duplicate_participant_id: duplicate.participantId,
+          },
+        )
+        .catch(() => {});
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'REFUSED_DUPLICATE',
+        scenario: 'S6b',
+        direction,
+        orphanQty: orphanSlice,
+        duplicateParticipantId: duplicate.participantId,
+        duplicateCycleId: duplicate.cycleId,
+        at: new Date().toISOString(),
+      }).catch(() => {});
+      return 0;
+    }
 
     // Adopt: synthesise a new cycle + participant seeded from the real fill.
     // The new cycle copies the terminal cycle's intentEnvelope so the exit
@@ -4930,10 +5111,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(
         `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: matched terminal cycle has no intent risk — cannot adopt`,
       );
-      return;
+      return 0;
     }
 
     const adoptQty = Math.min(orphanSlice, match.meta.qty ?? orphanSlice);
+
+    // Fix 1 — stop economics. Use the origin's actual stop-loss margin pct
+    // (its meta stopLossMarginPct, default -18) applied to the REAL fill
+    // price. When the origin was in profit (carried peak/floor), the existing
+    // profit-lock-rung logic recomputes a tighter stop from the carried
+    // values instead of the hardcoded first rung.
+    const mark = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
+    const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, direction, leverage);
+    const stopLossMarginPct =
+      match.meta.stopLossMarginPct ?? intent.risk.stop_loss_margin_pct ?? -18;
+    const standardStop = computeStopPrice(fillPrice, direction, stopLossMarginPct, leverage);
+    let conservativeStop = standardStop;
+    let stopReason: 'STANDARD_SL' | 'PROFIT_LOCK_RUNG' = 'STANDARD_SL';
+    // Feed the carried peak (or the live unrealized margin, whichever is
+    // higher) into the trail ladder; the carried floor wins if it is tighter.
+    const ladderFloor = getProfitLockFloor(Math.max(carriedPeak, unrealMarginPct)) ?? 0;
+    const effectiveFloor = Math.max(carriedFloor, ladderFloor);
+    if (effectiveFloor > 0) {
+      const lockStop = computeProfitLockStopPrice(fillPrice, direction, effectiveFloor, leverage);
+      // Safety: never wider than standard. Lock stop is by definition tighter
+      // for an in-profit position, but guard against a malformed intent.
+      const longStopTooWide = direction === 'LONG' && lockStop < standardStop;
+      const shortStopTooWide = direction === 'SHORT' && lockStop > standardStop;
+      if (!longStopTooWide && !shortStopTooWide && lockStop > 0) {
+        conservativeStop = lockStop;
+        stopReason = 'PROFIT_LOCK_RUNG';
+      }
+    }
+
     const adoptedCycle = await this.synthesizeAdoptedCycle(
       agentId,
       instance.userId,
@@ -4944,17 +5154,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(`[RECONCILE-ADOPT] S6b synthesize cycle failed ${instance.userId}: ${msg}`);
       return null;
     });
-    if (!adoptedCycle) return;
+    if (!adoptedCycle) return 0;
     const { cycleId, participantId } = adoptedCycle;
 
     // Record FILLED so the participant transitions to OPEN with the verified
-    // exchange fill price (recordHireExecutionEvent flips status + fillPrice).
+    // fill price (recordHireExecutionEvent flips status + fillPrice). The
+    // carried peak/floor ride in the payload so loadExecutionMeta re-derives
+    // them for every later tick (peak_margin_pct / lock_floor_margin_pct).
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
+      fill_price_source: fillPriceSource,
       qty: adoptQty,
       stop_loss_placed: false, // armed below
-      stop_loss_margin_pct: intent.risk.stop_loss_margin_pct ?? -18,
+      stop_loss_margin_pct: stopLossMarginPct,
+      peak_margin_pct: carriedPeak,
+      lock_floor_margin_pct: effectiveFloor > 0 ? effectiveFloor : undefined,
       source: 'hire',
       event: 'RECONCILE_ADOPT_ORPHAN_POSITION',
       adopt_kind: 'S6b_FILLED_POSITION',
@@ -4962,32 +5177,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       origin_cycle_id: match.cycleId,
       exchange_qty: exchangeQty,
       orphan_slice: orphanSlice,
+      merged_base_price: mergedBasePrice,
       clientOrderId: match.meta.clientOrderId,
     });
-
-    // Compute the conservative stop price. Standard SL is never wider than
-    // stop_loss_margin_pct; if the position is already in profit by ≥1 ladder
-    // rung (peak unreal ≥ 12%), place the stop at the first profit-lock rung
-    // (8% lock) — tighter than standard.
-    const mark = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
-    const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, direction, leverage);
-    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
-    const standardStop = computeStopPrice(fillPrice, direction, stopLossMarginPct, leverage);
-    let conservativeStop = standardStop;
-    let stopReason: 'STANDARD_SL' | 'PROFIT_LOCK_RUNG' = 'STANDARD_SL';
-    const firstRungTrigger = 12; // SUBSCRIBER_TRAIL_LADDER[0][0]
-    const firstRungLock = 8; // SUBSCRIBER_TRAIL_LADDER[0][1]
-    if (unrealMarginPct >= firstRungTrigger) {
-      const lockStop = computeProfitLockStopPrice(fillPrice, direction, firstRungLock, leverage);
-      // Safety: never wider than standard. Lock stop is by definition tighter
-      // for an in-profit position, but guard against a malformed intent.
-      const longStopTooWide = direction === 'LONG' && lockStop < standardStop;
-      const shortStopTooWide = direction === 'SHORT' && lockStop > standardStop;
-      if (!longStopTooWide && !shortStopTooWide && lockStop > 0) {
-        conservativeStop = lockStop;
-        stopReason = 'PROFIT_LOCK_RUNG';
-      }
-    }
 
     // Arm the protective stop via the existing ensureProtectiveStop, passing
     // the conservative price as an explicit override so it never falls back to
@@ -5003,8 +5195,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       fillPrice,
       margin_usd: match.meta.margin_usd,
       source: 'hire',
-      peakMarginPct: 0,
-      profitLockFloor: stopReason === 'PROFIT_LOCK_RUNG' ? firstRungLock : undefined,
+      peakMarginPct: carriedPeak,
+      profitLockFloor: effectiveFloor > 0 ? effectiveFloor : undefined,
       leverage,
       stopLossMarginPct,
       clientOrderId: match.meta.clientOrderId,
@@ -5028,11 +5220,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     // Hydrate runtime so monitorOpenPosition (next tick) immediately resumes
-    // the Scenario C exit ladder with peak=0 + the degraded profit-lock floor.
+    // the Scenario C exit ladder with the CARRIED peak + profit-lock floor.
     this.positionRuntime.set(participantId, {
-      peakMarginPct: 0,
+      peakMarginPct: carriedPeak,
       lastChaseAtMs: 0,
-      lastProfitLockFloor: stopReason === 'PROFIT_LOCK_RUNG' ? firstRungLock : undefined,
+      lastProfitLockFloor: effectiveFloor > 0 ? effectiveFloor : undefined,
       filledRecorded: true,
     });
 
@@ -5045,8 +5237,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         direction,
         qty: adoptQty,
         fill_price: fillPrice,
+        fill_price_source: fillPriceSource,
+        merged_base_price: mergedBasePrice,
+        carried_peak_margin_pct: carriedPeak,
+        carried_lock_floor_margin_pct: carriedFloor,
+        effective_lock_floor_margin_pct: effectiveFloor,
         stop_price: conservativeStop,
         stop_reason: stopReason,
+        stop_loss_margin_pct: stopLossMarginPct,
         standard_stop: standardStop,
         unreal_margin_pct: Math.round(unrealMarginPct * 100) / 100,
         budget_remaining: budgetRemaining - 1,
@@ -5066,14 +5264,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       direction,
       qty: adoptQty,
       fillPrice,
+      fillPriceSource,
+      mergedBasePrice,
+      carriedPeak,
+      carriedFloor,
       stopPrice: conservativeStop,
       stopReason,
       at: new Date().toISOString(),
     }).catch(() => {});
 
     this.logger.warn(
-      `[RECONCILE-ADOPT] S6b adopted orphan position ${instance.userId} cycle=${cycleId} ${direction} qty=${adoptQty.toFixed(5)} @ ${fillPrice.toFixed(2)} stop=${conservativeStop.toFixed(2)} (${stopReason})`,
+      `[RECONCILE-ADOPT] S6b adopted orphan position ${instance.userId} cycle=${cycleId} ${direction} qty=${adoptQty.toFixed(5)} @ ${fillPrice.toFixed(2)} (${fillPriceSource}) stop=${conservativeStop.toFixed(2)} (${stopReason}) peak=${carriedPeak} floor=${effectiveFloor}`,
     );
+    return 1;
   }
 
   /**
@@ -5185,6 +5388,50 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       const intent = match.cycle.intentEnvelope as SignalIntentEnvelope;
       if (!intent?.risk) continue;
+
+      // Fix 4 — orphan-level double-adopt guard (see adoptOrphanFilledPosition).
+      // Order-id first: a recent non-terminal adopt:* participant already
+      // tracking THIS order id means another replica/tick won the race.
+      const duplicate = await this.findRecentAdoptedDuplicate(
+        agentId,
+        instance.userId,
+        direction,
+        qty,
+        order.id,
+      );
+      if (duplicate) {
+        this.logger.warn(
+          `[RECONCILE-ADOPT] S6a refuse ${instance.userId}: recent adopted participant ${duplicate.participantId} already covers order ${order.id} (${direction} qty=${qty.toFixed(5)}) — double-adopt guard, skipping`,
+        );
+        await this.cycles
+          .recordHireExecutionEvent(
+            instance.userId,
+            agentId,
+            duplicate.cycleId,
+            'RECONCILE_ADOPT_REFUSED_DUPLICATE',
+            {
+              venue: 'bitfinex',
+              source: 'hire',
+              scenario: 'S6a',
+              direction,
+              orphan_qty: qty,
+              order_id: order.id,
+              duplicate_participant_id: duplicate.participantId,
+            },
+          )
+          .catch(() => {});
+        await this.persistReconcileAdoptAudit(instance.id, {
+          kind: 'REFUSED_DUPLICATE',
+          scenario: 'S6a',
+          orderId: order.id,
+          direction,
+          orphanQty: qty,
+          duplicateParticipantId: duplicate.participantId,
+          duplicateCycleId: duplicate.cycleId,
+          at: new Date().toISOString(),
+        }).catch(() => {});
+        continue;
+      }
 
       const adoptedCycle = await this.synthesizeAdoptedCycle(
         agentId,
@@ -5383,6 +5630,80 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
+   * Fix 1 — origin participant's own fill price. Prefer the FILLED event's
+   * `fill_price` payload, falling back to the participant row's persisted
+   * fillPrice column (set by recordHireExecutionEvent's FILLED handler).
+   * Returns null when the origin never recorded a verifiable fill — the
+   * caller then falls back to the exchange's merged basePrice and tags the
+   * audit payload `fill_price_source: 'merged_base_price'`.
+   */
+  private async resolveOriginFillPrice(originParticipantId: string): Promise<number | null> {
+    const filled = await this.prisma.signalCycleEvent.findFirst({
+      where: { participantId: originParticipantId, eventType: 'FILLED' },
+      orderBy: { createdAt: 'desc' },
+      select: { payload: true },
+    });
+    const payload = (filled?.payload ?? null) as { fill_price?: unknown } | null;
+    const fromEvent = Number(payload?.fill_price);
+    if (Number.isFinite(fromEvent) && fromEvent > 0) return fromEvent;
+
+    const row = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: originParticipantId },
+      select: { fillPrice: true },
+    });
+    const fromRow = row?.fillPrice != null ? Number(row.fillPrice) : NaN;
+    if (Number.isFinite(fromRow) && fromRow > 0) return fromRow;
+
+    return null;
+  }
+
+  /**
+   * Fix 4 — orphan-level double-adopt guard. Returns the most recent
+   * non-terminal `adopt:%` participant for this user+agent created within
+   * RECONCILE_ADOPT_DUPLICATE_WINDOW_MS that plausibly covers the same
+   * orphan: same order id (S6a), same direction with qty within tolerance
+   * (S6b), or an in-flight adoption with no execution meta yet (a replica
+   * raced between the cycle create and the FILLED/ORDER_PLACED write —
+   * fail-closed, treat as duplicate).
+   */
+  private async findRecentAdoptedDuplicate(
+    agentId: string,
+    userId: string,
+    direction: 'LONG' | 'SHORT',
+    qty: number,
+    orderId?: number,
+  ): Promise<{ participantId: string; cycleId: string } | null> {
+    const since = new Date(Date.now() - RECONCILE_ADOPT_DUPLICATE_WINDOW_MS);
+    const rows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        createdAt: { gte: since },
+        cycle: { agentId, tradeId: { startsWith: 'adopt:' } },
+      },
+      select: { id: true, cycleId: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    for (const row of rows) {
+      const meta = await this.loadExecutionMeta(row.id);
+      if (orderId != null && meta.bitfinexOrderId === orderId) {
+        return { participantId: row.id, cycleId: row.cycleId };
+      }
+      if (!meta.direction && !meta.qty) {
+        // In-flight adoption (cycle synthesized, execution event not yet
+        // written). Fail-closed — skip this tick rather than double-adopt.
+        return { participantId: row.id, cycleId: row.cycleId };
+      }
+      if (meta.direction !== direction) continue;
+      if (Math.abs((meta.qty ?? 0) - qty) <= RECONCILE_ADOPT_QTY_TOLERANCE) {
+        return { participantId: row.id, cycleId: row.cycleId };
+      }
+    }
+    return null;
+  }
+
+  /**
    * Synthesise a new SignalCycle + SignalCycleParticipant for an adoption.
    * Copies the original cycle's intentEnvelope so the exit ladder / stop
    * formula run identically. tradeId is namespaced `adopt:<origin>:<ts>` to
@@ -5408,6 +5729,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const adoptedTradeId = `adopt:${originTradeId}:${Date.now()}`;
     const intentEnvelope = match.cycle.intentEnvelope as Prisma.InputJsonValue;
 
+    // Fix 3 — adopted PENDING_ENTRY cycles are fill-or-expire: without an
+    // expiresAt, monitorEntry's TTL branch never fires and the adopted
+    // resting order lives forever (adopt:* tradeIds match nothing in showcase
+    // state, so no showcase-closure path expires them either).
+    const expiresAt =
+      initialStatus === SignalCycleStatus.PENDING_ENTRY
+        ? new Date(Date.now() + RECONCILE_ADOPT_ORDER_TTL_MS)
+        : null;
+
     const cycle = await this.prisma.signalCycle.create({
       data: {
         agentId,
@@ -5415,6 +5745,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         status: initialStatus,
         intentEnvelope,
         researchVenue: 'bitfinex',
+        expiresAt,
       },
     });
 
