@@ -58,7 +58,10 @@
         }
       ],
       "icon": "build/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "signingHashAlgorithms": ["sha256"],
+      "rfc3161TimeStampServer": "http://timestamp.digicert.com",
+      "sign": "build/sign.js"
     },
     "mac": {
       "target": [{"target": "dmg", "arch": ["arm64", "x64"]}],
