@@ -3224,6 +3224,56 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
           : 0;
 
+      // Money-path safety: cancel any leftover Bitfinex orders on this lot
+      // before recording the EXIT. Without this, the protective STOP and the
+      // entry limit survive on Bitfinex as orphans after the position is flat —
+      // real incident: a SELL STOP (oid 240154119117) was left ACTIVE and would
+      // have opened an untracked SHORT if price had tagged it. Mirror
+      // closeOrphanLedgerLots (~L1186) pre-fill guard: if the order has already
+      // executed any quantity, leave it alone so reconcileFilledParticipants
+      // heals it as a fill. Use the retry helper, not a bare cancelOrder.
+      const cancelledOids: number[] = [];
+      for (const oid of [meta.bitfinexOrderId, meta.stopOrderId]) {
+        if (oid == null) continue;
+        let orderResting: { amount: number; amountOrig: number } | null = null;
+        try {
+          orderResting = await this.activeTrading.findOrder(creds, oid).catch(() => null);
+        } catch {
+          orderResting = null;
+        }
+        if (!orderResting) {
+          // Already gone (filled, cancelled, or expired) — nothing to cancel.
+          this.logger.log(
+            `[IMMEDIATE-FLAT] oid=${oid} not resting (gone) — skip cancel ${userId} participant=${row.id}`,
+          );
+          continue;
+        }
+        const filledQty =
+          (orderResting.amountOrig ?? 0) - (orderResting.amount ?? 0);
+        if (filledQty > MIN_QTY_BTC) {
+          // Partial/full fill — let reconcileFilledParticipants heal as a fill.
+          this.logger.warn(
+            `[IMMEDIATE-FLAT] oid=${oid} has filled qty=${filledQty.toFixed(5)} — NOT cancelling (defer to fill reconcile) ${userId} participant=${row.id}`,
+          );
+          continue;
+        }
+        this.logger.log(
+          `[IMMEDIATE-FLAT] cancelling oid=${oid} reason=IMMEDIATE_EXCHANGE_FLAT ${userId} participant=${row.id}`,
+        );
+        const result = await this.cancelManagedOrderGone(
+          creds,
+          oid,
+          `IMMEDIATE-FLAT cancel oid=${oid} ${userId} participant=${row.id}`,
+        );
+        if (result.gone) {
+          cancelledOids.push(oid);
+        } else {
+          this.logger.warn(
+            `[IMMEDIATE-FLAT] cancel oid=${oid} FAILED and order still live (reason=${result.reason ?? 'unknown'} attempts=${result.attempts}) — deferring to next tick ${userId} participant=${row.id}`,
+          );
+        }
+      }
+
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
         venue: 'bitfinex',
         exit_price: exitPrice,
@@ -3233,9 +3283,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         pnl_source: 'reconstructed',
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',
+        cancelled_order_ids: cancelledOids,
       });
       this.logger.warn(
-        `Immediate flat reconcile ${userId} cycle=${row.cycleId} — exchange 0, ledger OPEN closed`,
+        `Immediate flat reconcile ${userId} cycle=${row.cycleId} — exchange 0, ledger OPEN closed (cancelled_oids=[${cancelledOids.join(',')}])`,
       );
     }
   }
