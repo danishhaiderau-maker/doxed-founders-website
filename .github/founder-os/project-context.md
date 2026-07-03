@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(web): group Cursor chats by workspace + show full conversation thread
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
