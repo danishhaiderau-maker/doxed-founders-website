@@ -109,7 +109,17 @@ export type SignalCycleEventType =
   | 'RECONCILE_ADOPT_REFUSED_SIZE_ANOMALY'
   | 'RECONCILE_ADOPT_REFUSED_DUPLICATE'
   | 'RECONCILE_ADOPT_BUDGET_EXHAUSTED'
-  | 'RECONCILE_ADOPT_DISABLED';
+  | 'RECONCILE_ADOPT_DISABLED'
+  // Phase 6 — orphan-source fixes. Additive audit events for the fail-loud
+  // cancel-on-expiry path. None of these transition the participant to
+  // EXPIRED — they exist for operator auditability when a cancel failed and
+  // the order was confirmed still live (participant left PENDING_ENTRY for
+  // the next tick to retry), when a cid-matched own-orphan was auto-cancelled
+  // by cleanupOrphanCopyOrders, or when an already-EXPIRED participant's
+  // exchange order was defensively re-ccancelled by reconcileCancelByExchange.
+  | 'RECONCILE_CANCEL_FAILED'
+  | 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN'
+  | 'RECONCILE_RECANCEL_EXPIRED_STILL_LIVE';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;

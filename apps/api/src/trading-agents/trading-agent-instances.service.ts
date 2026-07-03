@@ -12,6 +12,12 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import {
+  cancelOrderWithRetry,
+  confirmOrderGone,
+  type CancelCapableClient,
+} from '../exchanges/bitfinex-cancel.util';
+import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
+import {
   buildFreshInstanceDashboardState,
   readInstanceScope,
   USER_INSTANCE_STARTING_BALANCE,
@@ -357,8 +363,16 @@ export class TradingAgentInstancesService {
     let relayAction: { cancelledOrders?: number } | undefined;
 
     if (paused && instance.exchangeProvider !== 'paper') {
-      relayAction = await this.severShowcaseRelay(userId, instance.exchangeProvider);
-      await this.expirePendingCopyParticipants(userId, agent.id);
+      const stopCreds = await this.exchanges.getUserCredentials(
+        userId,
+        instance.exchangeProvider,
+      );
+      relayAction = await this.severShowcaseRelay(
+        userId,
+        instance.exchangeProvider,
+        stopCreds ?? undefined,
+      );
+      await this.expirePendingCopyParticipants(userId, agent.id, stopCreds ?? undefined);
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -491,7 +505,19 @@ export class TradingAgentInstancesService {
           ? (dash.copyRelaySim as { startedAt?: string }).startedAt
           : undefined;
 
-      await this.expirePendingCopyParticipants(instance.userId, input.agentId);
+      // Phase 6 fix 2 — the session-reset path was a guaranteed orphan generator
+      // (it marked the ledger EXPIRED with NO preceding cancel). Fetch creds and
+      // hand them to expirePendingCopyParticipants so it cancels each pending
+      // participant's resting order first, only marking EXPIRED on confirmed-gone.
+      const resetCreds =
+        instance.exchangeProvider === 'bitfinex'
+          ? await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider)
+          : undefined;
+      await this.expirePendingCopyParticipants(
+        instance.userId,
+        input.agentId,
+        resetCreds ?? undefined,
+      );
       this.relaySim.dropSimClient(instance.userId);
 
       // A showcase session reset refreshes the paper ledger to a $500 baseline, but it must NOT
@@ -534,25 +560,32 @@ export class TradingAgentInstancesService {
   private async severShowcaseRelay(
     userId: string,
     provider: string,
+    creds?: ExchangeCredentials,
   ): Promise<{ cancelledOrders: number }> {
     if (provider !== 'bitfinex') {
       return { cancelledOrders: 0 };
     }
-    const creds = await this.exchanges.getUserCredentials(userId, provider);
-    if (!creds) return { cancelledOrders: 0 };
+    const resolvedCreds = creds ?? (await this.exchanges.getUserCredentials(userId, provider));
+    if (!resolvedCreds) return { cancelledOrders: 0 };
 
     let cancelled = 0;
     try {
-      const orders = await this.bitfinex.listActiveOrders(creds);
+      const orders = await this.bitfinex.listActiveOrders(resolvedCreds);
+      const client = this.bitfinex as CancelCapableClient;
       for (const order of orders) {
-        try {
-          await this.bitfinex.cancelOrder(creds, order.id);
+        // Phase 6 fix 2 — retry + loud-fail semantics (was warn-only swallow).
+        // The kill switch is user-initiated, so cancelling every active order
+        // on the symbol is intentional; the upgrade is just to not silently
+        // drop cancel failures (which would leave orphans behind).
+        const result = await cancelOrderWithRetry(client, resolvedCreds, order.id, {
+          logger: this.logger,
+          label: `Kill switch cancel ${order.id} for ${userId}`,
+        });
+        if (result.ok) {
           cancelled += 1;
-        } catch (err) {
-          this.logger.warn(
-            `Kill switch: failed to cancel order ${order.id} for ${userId}: ${
-              err instanceof Error ? err.message : err
-            }`,
+        } else {
+          this.logger.error(
+            `Kill switch: failed to cancel order ${order.id} for ${userId} after ${result.attempts} attempts: ${result.reason}`,
           );
         }
       }
@@ -566,8 +599,47 @@ export class TradingAgentInstancesService {
     return { cancelledOrders: cancelled };
   }
 
-  /** Stop relay: clear pending ledger rows so resume does not resurrect stale limits. */
-  private async expirePendingCopyParticipants(userId: string, agentId: string) {
+  /**
+   * Resolve the most recent Bitfinex order id recorded for a participant by
+   * scanning its ORDER_PLACED / UPDATE_STOPS event payloads (newest first).
+   * Used by {@link expirePendingCopyParticipants} to know which exchange order
+   * to cancel before marking the ledger row EXPIRED.
+   */
+  private async loadParticipantBitfinexOrderId(participantId: string): Promise<number | null> {
+    const events = await this.prisma.signalCycleEvent.findMany({
+      where: {
+        participantId,
+        eventType: { in: ['ORDER_PLACED', 'UPDATE_STOPS'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 8,
+    });
+    for (const e of events) {
+      const p = (e.payload ?? {}) as Record<string, unknown>;
+      const oid = p.bitfinexOrderId ?? p.bitfinex_order_id;
+      if (typeof oid === 'number' && oid > 0) return oid;
+    }
+    return null;
+  }
+
+  /**
+   * Stop relay: clear pending ledger rows so resume does not resurrect stale limits.
+   *
+   * Phase 6 fix 2 — when `creds` are supplied (live Bitfinex instance), this
+   * now cancels each participant's resting exchange order BEFORE marking it
+   * EXPIRED, using the same retry + confirm-gone semantics as the monitorEntry
+   * path. A participant is only flipped to EXPIRED when the cancel succeeded
+   * OR a follow-up `findOrder` confirms the order is gone; otherwise it is left
+   * PENDING_ENTRY with `instance.lastError = 'CANCEL_FAILED_ORDER_STILL_LIVE'`
+   * and an audit `RECONCILE_CANCEL_FAILED` event so the next tick retries.
+   * Without this, the session-reset path was a guaranteed orphan generator
+   * (it marked the ledger EXPIRED while the Bitfinex order stayed live).
+   */
+  private async expirePendingCopyParticipants(
+    userId: string,
+    agentId: string,
+    creds?: ExchangeCredentials,
+  ): Promise<void> {
     const pending = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
@@ -579,7 +651,62 @@ export class TradingAgentInstancesService {
     if (!pending.length) return;
 
     const now = new Date();
+    let expired = 0;
+    let leftPending = 0;
     for (const row of pending) {
+      const oid = creds ? await this.loadParticipantBitfinexOrderId(row.id) : null;
+
+      if (creds && oid != null) {
+        const client = this.bitfinex as CancelCapableClient;
+        const cancel = await cancelOrderWithRetry(client, creds, oid, {
+          logger: this.logger,
+          label: `Relay stop expire ${userId} cancel pending order ${oid}`,
+        });
+        let gone = cancel.ok;
+        if (!gone) {
+          // Cancel API failed — verify the order is actually still on the book
+          // before refusing to mark EXPIRED (a transient API error may have
+          // left the order cancelled server-side with a lost response).
+          gone = await confirmOrderGone(client, creds, oid);
+        }
+        if (!gone) {
+          this.logger.error(
+            `Relay stop ${userId}: cancel of pending order ${oid} (participant ${row.id}) failed and order still live — leaving PENDING_ENTRY for next tick`,
+          );
+          await this.prisma.tradingAgentInstance
+            .updateMany({
+              where: { userId, agentId },
+              data: { lastError: 'CANCEL_FAILED_ORDER_STILL_LIVE' },
+            })
+            .catch(() => {
+              /* best-effort */
+            });
+          await this.prisma.signalCycleEvent
+            .create({
+              data: {
+                cycleId: row.cycleId,
+                participantId: row.id,
+                eventType: 'RECONCILE_CANCEL_FAILED',
+                payload: {
+                  venue: 'bitfinex',
+                  source: 'hire',
+                  event: 'RELAY_STOP_CANCEL_FAILED',
+                  bitfinex_order_id: oid,
+                  cancel_attempts: cancel.attempts,
+                  cancel_reason: cancel.reason ?? 'unknown',
+                },
+              },
+            })
+            .catch(() => {
+              /* audit-best-effort */
+            });
+          leftPending += 1;
+          continue;
+        }
+      }
+
+      // No creds / no order id (paper or never placed) OR cancel succeeded /
+      // order confirmed gone — safe to mark EXPIRED.
       await this.prisma.signalCycleParticipant.update({
         where: { id: row.id },
         data: { status: SignalCycleStatus.EXPIRED, updatedAt: now },
@@ -594,12 +721,16 @@ export class TradingAgentInstancesService {
             exit_reason: 'USER_RELAY_STOP',
             pnl_usd: 0,
             source: 'hire',
+            ...(oid != null ? { bitfinex_order_id: oid } : {}),
           },
         },
       });
+      expired += 1;
     }
     this.logger.log(
-      `Relay stop ${userId}: expired ${pending.length} pending copy participant(s)`,
+      `Relay stop ${userId}: expired ${expired} pending copy participant(s)${
+        leftPending > 0 ? `, ${leftPending} left PENDING_ENTRY (cancel failed — order still live)` : ''
+      }`,
     );
   }
 
