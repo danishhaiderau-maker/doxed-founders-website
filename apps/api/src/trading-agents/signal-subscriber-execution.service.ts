@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/com
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import {
+  NotificationType,
   SignalCycleStatus,
   TradingAgentInstanceStatus,
   type TradingAgentInstance,
@@ -52,6 +53,7 @@ import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.clie
 import { applyDashboardPatch } from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -190,6 +192,16 @@ const MIRROR_CHASE_MIN_REPLACE_MS = 1_000;
  *  path — all call sites within ~1s share one fresh fetch. */
 const MIRROR_EXEC_STATE_MEMO_MS = 1_000;
 
+/** Fix B — showcase-vanished close rule: an OPEN copy participant whose showcase
+ *  trade_id is absent from the canonical state's positions AND trades/trades_map
+ *  (e.g. after a Fresh Collection wipe) for this many CONSECUTIVE fresh,
+ *  successfully-fetched states is market-closed with exit_reason
+ *  SHOWCASE_VANISHED. Failed/unreachable fetches do not count (fail-closed). */
+const SHOWCASE_VANISHED_CONSECUTIVE_MISSES = 3;
+
+/** Fix E — throttle for surfacing an expired hire (lastError + warn log). */
+const HIRE_EXPIRY_NOTICE_THROTTLE_MS = 60 * 60_000;
+
 /** Phase 5 guardrail — refuse to adopt an orphan whose qty exceeds this multiple
  *  of the normal lot size (marginCap * leverage / price). A giant orphan is a
  *  red flag (manual position or wrong-symbol order), not a heal target. */
@@ -276,6 +288,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly mirrorDivergenceSince = new Map<string, number>();
   /** Phase 0 — instanceId → showcase position trade_ids seen last snapshot (fill capture). */
   private readonly mirrorSeenShowcasePositions = new Map<string, Set<string>>();
+  /** Fix B — participantId → consecutive fresh canonical states missing its showcase trade.
+   *  In-memory by design: resets on process restart (the count simply restarts). */
+  private readonly showcaseVanishedMisses = new Map<string, number>();
+  /** Fix E — instanceId → last time the expired-hire notice was surfaced (ms). */
+  private readonly hireExpiryNoticeAt = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -285,6 +302,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     private readonly relaySim: CopyRelaySimService,
     private readonly cycleAudit: TradeCycleAuditService,
     private readonly config: ConfigService,
+    private readonly notifications: NotificationsService,
   ) {
     this.activeTrading = this.bitfinex;
   }
@@ -293,6 +311,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!executionEnabled()) {
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
       return;
+    }
+    // Fix G — single-replica invariant. The executor's correctness depends on
+    // per-process state: the `this.running` tick mutex, `exitingLots`,
+    // `positionRuntime`, and the Fix B vanished-miss counters. A second replica
+    // would double-place entries and race exits. Do NOT scale this service
+    // horizontally without distributed locking (deliberately not built here).
+    const replicaId = (process.env.RAILWAY_REPLICA_ID ?? '').trim();
+    this.logger.warn(
+      `Subscriber execution assumes a SINGLE replica (in-memory tick mutex / exitingLots / positionRuntime)${replicaId ? ` — RAILWAY_REPLICA_ID=${replicaId}` : ''}`,
+    );
+    const replicaCountRaw = process.env.RAILWAY_REPLICA_COUNT ?? process.env.RAILWAY_REPLICAS;
+    const replicaCount = Number(replicaCountRaw ?? 1);
+    if (Number.isFinite(replicaCount) && replicaCount > 1) {
+      this.logger.error(
+        `MULTIPLE REPLICAS DETECTED (count=${replicaCount}) — live-copy executor is NOT replica-safe; scale back to 1 immediately`,
+      );
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
@@ -345,6 +379,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
         // Live copy requires an active (non-expired) hire. Sim runs without one.
         if (!simActive && instance.expiresAt && instance.expiresAt.getTime() < now) {
+          // Fix E — do not skip silently: the user's live copy is halted and
+          // they should see why. Throttled to once per hour per instance.
+          await this.surfaceExpiredHire(instance).catch(() => {
+            /* surfacing is best-effort — never abort the tick */
+          });
           continue;
         }
 
@@ -391,12 +430,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           });
         }
       }
+    } catch (err) {
+      // Fix F — a throw ABOVE the per-instance loops (agent/instance lookup)
+      // aborts the WHOLE tick for every user. Previously this surfaced only as
+      // an unhandled promise rejection with no context — fail loud instead.
+      this.logger.error(
+        `Subscriber execution FULL TICK FAILED (all instances skipped this cycle): ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
     } finally {
       this.running = false;
       if (this.wakeQueued) {
         this.wakeQueued = false;
         setImmediate(() => void this.tick());
       }
+    }
+  }
+
+  /**
+   * Fix E — surface an expired hire instead of silently skipping the instance.
+   * Sets lastError + warn log once per hour per instance (in-memory throttle),
+   * and sends a one-off user notification (skipped when lastError already
+   * carries the expiry notice, so users are not re-notified every restart).
+   */
+  private async surfaceExpiredHire(instance: TradingAgentInstance) {
+    const now = Date.now();
+    const lastAt = this.hireExpiryNoticeAt.get(instance.id) ?? 0;
+    if (now - lastAt < HIRE_EXPIRY_NOTICE_THROTTLE_MS) return;
+    this.hireExpiryNoticeAt.set(instance.id, now);
+
+    const expiredAtIso = instance.expiresAt?.toISOString() ?? 'unknown';
+    const msg = `Hire expired ${expiredAtIso} — live copy halted; renew to resume.`;
+    this.logger.warn(`Instance ${instance.userId}: ${msg}`);
+
+    const alreadySurfaced =
+      typeof instance.lastError === 'string' && instance.lastError.startsWith('Hire expired');
+    await this.prisma.tradingAgentInstance
+      .update({ where: { id: instance.id }, data: { lastError: msg } })
+      .catch(() => {
+        /* best-effort */
+      });
+
+    if (!alreadySurfaced) {
+      await this.notifications
+        .notifyUser(instance.userId, {
+          type: NotificationType.TRADING_AGENT_UPDATE,
+          title: 'Live copy halted — hire expired',
+          body: `Your rental expired ${expiredAtIso}. Live copy trading is halted until you renew.`,
+          link: `/agent-hub/${AGENT_SLUG}`,
+        })
+        .catch(() => {
+          /* notification is best-effort */
+        });
     }
   }
 
@@ -1321,6 +1407,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       data: {
         dashboardState: applyDashboardPatch(dash, {
           copyRelayCapacity: capacity,
+          // Fix F — tick liveness watchdog. persistCapacityState already runs
+          // once per processInstance (both exit-only and normal paths), so this
+          // piggybacks on an existing per-tick dashboardState write — no extra
+          // DB round-trip. A stale lastTickAt means the executor loop is dead.
+          lastTickAt: new Date().toISOString(),
         }) as unknown as Prisma.InputJsonValue,
       },
     });
@@ -2280,6 +2371,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
+   * Fix D — authoritative fill price from Bitfinex per-order trade history
+   * (POST /v2/auth/r/order/{symbol}:{orderId}/trades). Returns the
+   * volume-weighted real execution price across the order's executions, or
+   * null on error/empty so callers keep their existing approximation
+   * (meta.limitPrice / merged basePrice). Cheap by design: only invoked at
+   * fill-RECORDING time (never per tick) and always best-effort.
+   */
+  private async resolveExchangeTradesFillPrice(
+    creds: ExchangeCredentials,
+    orderId: number | null | undefined,
+  ): Promise<number | null> {
+    if (!orderId) return null;
+    try {
+      const trades = await this.bitfinex.fetchOrderTrades(creds, orderId);
+      let qtySum = 0;
+      let notional = 0;
+      for (const t of trades) {
+        const qty = Math.abs(t.execAmount);
+        if (!(qty > 0) || !(t.execPrice > 0)) continue;
+        qtySum += qty;
+        notional += qty * t.execPrice;
+      }
+      if (qtySum <= 0) return null;
+      return notional / qtySum;
+    } catch (err) {
+      this.logger.warn(
+        `fetchOrderTrades ${orderId} failed (falling back to approximate fill price): ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Phase 1 — record a fill detected by {@link detectEntryFillBeforeCancel}
    * as a REAL fill instead of closing the participant at $0. Cancels any
    * resting remainder first (never leaves a partial order live), arms the
@@ -2335,10 +2459,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
+    // Fix D — the order (partially) executed, so its trade history now holds
+    // the REAL volume-weighted fill price; the heuristic price (limit price /
+    // merged basePrice) stays as fallback.
+    const exchangeFillPrice = await this.resolveExchangeTradesFillPrice(
+      creds,
+      meta.bitfinexOrderId,
+    );
     const fillPrice =
-      fill.fillPrice > 0
+      exchangeFillPrice ??
+      (fill.fillPrice > 0
         ? fill.fillPrice
-        : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
+        : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0));
     if (!fillPrice || fillPrice <= 0) return false;
     const qty = fill.filledQty;
     const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
@@ -2363,6 +2495,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
+      fill_price_source: exchangeFillPrice != null ? 'exchange_trades' : undefined,
       qty,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
@@ -2872,12 +3005,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
 
       const intent = row.cycle.intentEnvelope as SignalIntentEnvelope;
+      // Fix D — prefer the exchange's own per-order trade history (real
+      // volume-weighted fill) over the limit-price/basePrice approximation.
+      const exchangeFillPrice = await this.resolveExchangeTradesFillPrice(
+        creds,
+        meta.bitfinexOrderId,
+      );
       const fillPrice =
-        meta.limitPrice && meta.limitPrice > 0
+        exchangeFillPrice ??
+        (meta.limitPrice && meta.limitPrice > 0
           ? meta.limitPrice
           : position.basePrice > 0
             ? position.basePrice
-            : await this.activeTrading.getMarkPrice();
+            : await this.activeTrading.getMarkPrice());
       const qty = meta.qty ?? MIN_QTY_BTC;
       const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
@@ -2893,6 +3033,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'FILLED', {
         venue: 'bitfinex',
         fill_price: fillPrice,
+        fill_price_source: exchangeFillPrice != null ? 'exchange_trades' : undefined,
         qty,
         stop_loss_placed: stopOrderId != null,
         stop_loss_margin_pct: stopLossMarginPct,
@@ -3749,10 +3890,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /**
    * Scenario C per virtual lot — ladder, thesis -12% / MFE 2%, hard stop; partial close exact qty.
    */
+  /**
+   * Fix B — showcase-vanished tracker. Returns true when the participant's
+   * showcase trade_id has been absent from the canonical showcase state's
+   * open positions AND closed trades (trades / trades_map) AND pending orders
+   * for {@link SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive FRESH,
+   * successfully-fetched canonical states. Fail-closed:
+   *  - unreachable/failed fetch → no verdict, counter unchanged (never counts);
+   *  - trade present anywhere → counter reset (normal mirror machinery owns it);
+   *  - `adopt:*` trades have no showcase counterpart by design → never counted.
+   * Counter is in-memory (Map keyed by participantId) and resets on restart.
+   */
+  private async trackShowcaseVanished(
+    participantId: string,
+    tradeId: string | null,
+  ): Promise<boolean> {
+    if (!tradeId || tradeId.startsWith('adopt:')) {
+      this.showcaseVanishedMisses.delete(participantId);
+      return false;
+    }
+    const bot = await this.fetchExecutionBotState();
+    if (!bot) return false; // canonical unreachable — do not count failed fetches
+
+    const inPositions = (bot.positions ?? []).some((p) => p.trade_id === tradeId);
+    const inTrades = (bot.trades ?? []).some((t) => t.trade_id === tradeId);
+    const inTradesMap =
+      bot.trades_map != null &&
+      Object.prototype.hasOwnProperty.call(bot.trades_map, tradeId);
+    // Defensive: a trade still pending/known as a signal is NOT vanished.
+    const inOrders = (bot.orders ?? []).some((o) => o.trade_id === tradeId);
+    const inSignals = (bot.signal_info?.signals ?? []).some(
+      (s) => String(s.trade_id ?? '') === tradeId,
+    );
+
+    if (inPositions || inTrades || inTradesMap || inOrders || inSignals) {
+      this.showcaseVanishedMisses.delete(participantId);
+      return false;
+    }
+
+    const misses = (this.showcaseVanishedMisses.get(participantId) ?? 0) + 1;
+    this.showcaseVanishedMisses.set(participantId, misses);
+    if (misses < SHOWCASE_VANISHED_CONSECUTIVE_MISSES) {
+      this.logger.warn(
+        `Showcase trade missing ${tradeId} (participant=${participantId}) — miss ${misses}/${SHOWCASE_VANISHED_CONSECUTIVE_MISSES}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
   private async monitorOpenPosition(
     agentId: string,
     userId: string,
-    cycle: { id: string; intentEnvelope: unknown },
+    cycle: { id: string; intentEnvelope: unknown; tradeId?: string | null },
     participant: { id: string; fillPrice: { toNumber?: () => number } | null },
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
@@ -3799,6 +3989,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         mark,
         source: 'hire',
       });
+    }
+
+    // Fix B — showcase-vanished close rule. When the showcase state no longer
+    // contains this trade AT ALL (not an open position, not a closed trade —
+    // e.g. a Fresh Collection wipe) for N consecutive fresh canonical states,
+    // nothing else ever closes the copy position (the mirror-exit path needs
+    // the cycle to transition CLOSED, which never happens for a wiped trade).
+    // Market-close it through the same machinery as the Scenario C exits.
+    if (await this.trackShowcaseVanished(participant.id, cycle.tradeId ?? null)) {
+      this.logger.warn(
+        `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${cycle.tradeId} — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
+      );
+      await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
+        reason: 'SHOWCASE_VANISHED',
+        mark,
+        fillPrice,
+        leverage,
+        peakMarginPct: runtime.peakMarginPct,
+        unrealMarginPct,
+        stopLossMarginPct,
+      });
+      this.positionRuntime.delete(participant.id);
+      return;
     }
 
     const { reason: exitReason, lockFloor } = evaluateSubscriberLotExit({
@@ -3908,7 +4121,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
     opts: {
-      reason: NonNullable<VirtualLotExitReason>;
+      /** Scenario C exits plus Fix B's showcase-vanished close (same machinery). */
+      reason: NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED';
       mark: number;
       fillPrice: number;
       leverage: number;
@@ -3981,10 +4195,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? opts.lockFloor
         : opts.unrealMarginPct;
 
-    const exitReasonMap: Record<NonNullable<VirtualLotExitReason>, string> = {
+    const exitReasonMap: Record<NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED', string> = {
       PROFIT_LOCK: 'PROFIT_LOCK',
       THESIS_FAST_CUT: 'THESIS_FAST_CUT',
       HARD_STOP: 'HARD_STOP',
+      SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
     };
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
@@ -4006,6 +4221,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
     } finally {
       this.exitingLots.delete(participantId);
+      this.showcaseVanishedMisses.delete(participantId);
     }
   }
 
@@ -5045,13 +5261,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // ORIGIN participant's own FILLED fill price, not the exchange's merged
     // basePrice (production evidence: a 0.0324 slice of a 0.0971 BTC merged
     // position adopted at the merged 61809.74 average — worse than any real
-    // fill — then stopped by noise). Bitfinex client exposes no per-order
-    // trade/order history, so the fallback stays position.basePrice, tagged
-    // in the audit payload.
-    const originFillPrice = await this.resolveOriginFillPrice(match.participantId);
-    const fillPrice = originFillPrice ?? mergedBasePrice;
-    const fillPriceSource: 'origin_filled_event' | 'merged_base_price' =
-      originFillPrice != null ? 'origin_filled_event' : 'merged_base_price';
+    // fill — then stopped by noise). Fix D added per-order trade history to
+    // the Bitfinex client, so the origin's REAL executions are consulted
+    // before falling back to position.basePrice (tagged in the audit payload).
+    const originFill = await this.resolveOriginFillPrice(match.participantId, creds);
+    const fillPrice = originFill?.price ?? mergedBasePrice;
+    const fillPriceSource: 'origin_filled_event' | 'exchange_trades' | 'merged_base_price' =
+      originFill?.source ?? 'merged_base_price';
 
     // Fix 1 — carry the origin's peak/floor so the profit-lock trail resumes
     // where the origin left off instead of restarting at 0 (loadExecutionMeta
@@ -5630,14 +5846,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Fix 1 — origin participant's own fill price. Prefer the FILLED event's
-   * `fill_price` payload, falling back to the participant row's persisted
-   * fillPrice column (set by recordHireExecutionEvent's FILLED handler).
-   * Returns null when the origin never recorded a verifiable fill — the
-   * caller then falls back to the exchange's merged basePrice and tags the
-   * audit payload `fill_price_source: 'merged_base_price'`.
+   * Fix 1 — origin participant's own fill price. Source order:
+   *  (a) the FILLED event's `fill_price` payload / the participant row's
+   *      persisted fillPrice column (`origin_filled_event`);
+   *  (b) Fix D — the exchange's per-order trade history for the origin's
+   *      bitfinexOrderId (volume-weighted real fill, `exchange_trades`);
+   *  then null — the caller falls back to the exchange's merged basePrice
+   *  and tags the audit payload `fill_price_source: 'merged_base_price'`.
    */
-  private async resolveOriginFillPrice(originParticipantId: string): Promise<number | null> {
+  private async resolveOriginFillPrice(
+    originParticipantId: string,
+    creds?: ExchangeCredentials,
+  ): Promise<{ price: number; source: 'origin_filled_event' | 'exchange_trades' } | null> {
     const filled = await this.prisma.signalCycleEvent.findFirst({
       where: { participantId: originParticipantId, eventType: 'FILLED' },
       orderBy: { createdAt: 'desc' },
@@ -5645,14 +5865,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
     const payload = (filled?.payload ?? null) as { fill_price?: unknown } | null;
     const fromEvent = Number(payload?.fill_price);
-    if (Number.isFinite(fromEvent) && fromEvent > 0) return fromEvent;
+    if (Number.isFinite(fromEvent) && fromEvent > 0) {
+      return { price: fromEvent, source: 'origin_filled_event' };
+    }
 
     const row = await this.prisma.signalCycleParticipant.findUnique({
       where: { id: originParticipantId },
       select: { fillPrice: true },
     });
     const fromRow = row?.fillPrice != null ? Number(row.fillPrice) : NaN;
-    if (Number.isFinite(fromRow) && fromRow > 0) return fromRow;
+    if (Number.isFinite(fromRow) && fromRow > 0) {
+      return { price: fromRow, source: 'origin_filled_event' };
+    }
+
+    if (creds) {
+      const originMeta = await this.loadExecutionMeta(originParticipantId);
+      const fromExchange = await this.resolveExchangeTradesFillPrice(
+        creds,
+        originMeta.bitfinexOrderId,
+      );
+      if (fromExchange != null && fromExchange > 0) {
+        return { price: fromExchange, source: 'exchange_trades' };
+      }
+    }
 
     return null;
   }

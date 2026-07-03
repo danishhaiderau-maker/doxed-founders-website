@@ -13,7 +13,36 @@ type StoredEpochMeta = {
   showcaseSessionEpoch?: string;
   showcaseSessionResetAt?: string;
   showcaseSessionResetReason?: string;
+  showcaseSessionBotVersion?: string;
+  showcaseSessionFreshResetTs?: number;
 };
+
+/** Sever identity = botVersion + freshResetTs ONLY (bot_start_time excluded).
+ *  A bare bot crash/auto-restart changes bot_start_time but the bot re-adopts its
+ *  own book and resumes the same trades — severing every PENDING copy participant
+ *  on each restart orphaned resting orders and missed trades. Only a fresh
+ *  collection (last_fresh_reset_ts) or a version change is a REAL reset.
+ *  bot_start_time keeps flowing into the full epoch key + dashboard fields
+ *  (uptime/staleness displays are untouched); it just no longer triggers
+ *  resetAllUserCopySessions. */
+function severKeyFromEpoch(epoch: ShowcaseSessionEpoch): string {
+  return `${epoch.botVersion}|${epoch.freshResetTs}`;
+}
+
+/** Recover the previous sever key from the persisted dashboard fields, falling
+ *  back to parsing the stored epoch key (`version|startTime|freshResetTs`). */
+function severKeyFromStored(dash: StoredEpochMeta, prevKey: string): string | null {
+  const version = dash.showcaseSessionBotVersion;
+  const freshResetTs = dash.showcaseSessionFreshResetTs;
+  if (typeof version === 'string' && version.length > 0 && typeof freshResetTs === 'number') {
+    return `${version}|${freshResetTs}`;
+  }
+  const parts = prevKey.split('|');
+  if (parts.length >= 3) {
+    return `${parts.slice(0, parts.length - 2).join('|')}|${parts[parts.length - 1]}`;
+  }
+  return null;
+}
 
 @Injectable()
 export class ShowcaseSessionSyncService implements OnModuleInit {
@@ -70,6 +99,20 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
     }
     if (prevKey === epoch.key) return;
 
+    // Bare restart (bot_start_time changed; version + fresh-reset ts unchanged):
+    // the bot re-adopts its own book and resumes the same trades. Persist the new
+    // epoch key so we stop re-detecting, but do NOT sever user copy sessions.
+    const prevSeverKey = severKeyFromStored(dash, prevKey);
+    if (prevSeverKey != null && prevSeverKey === severKeyFromEpoch(epoch)) {
+      this.logger.warn(
+        `Showcase epoch restart detected (${prevKey} -> ${epoch.key}) — continuity preserved, skipping copy-session sever`,
+      );
+      await this.persistAgentEpoch(agent.id, dash, epoch, 'restart_continuity', {
+        preserveResetStamp: true,
+      });
+      return;
+    }
+
     this.logger.warn(
       `Showcase session epoch changed (${prevKey} -> ${epoch.key}) — resetting copy/relay/paper sessions`,
     );
@@ -85,18 +128,27 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
 
   private async persistAgentEpoch(
     agentId: string,
-    dash: Record<string, unknown>,
+    dash: Record<string, unknown> & StoredEpochMeta,
     epoch: ShowcaseSessionEpoch,
     reason: string,
+    opts?: { preserveResetStamp?: boolean },
   ) {
+    // Restart-continuity persists the new epoch key WITHOUT overwriting the
+    // last real reset timestamp/reason shown on dashboards.
+    const resetAt = opts?.preserveResetStamp
+      ? (dash.showcaseSessionResetAt ?? new Date().toISOString())
+      : new Date().toISOString();
+    const resetReason = opts?.preserveResetStamp
+      ? (dash.showcaseSessionResetReason ?? reason)
+      : reason;
     await this.prisma.tradingAgent.update({
       where: { id: agentId },
       data: {
         dashboardState: {
           ...dash,
           showcaseSessionEpoch: epoch.key,
-          showcaseSessionResetAt: new Date().toISOString(),
-          showcaseSessionResetReason: reason,
+          showcaseSessionResetAt: resetAt,
+          showcaseSessionResetReason: resetReason,
           showcaseSessionBotVersion: epoch.botVersion,
           showcaseSessionBotStartTime: epoch.botStartTime,
           showcaseSessionFreshResetTs: epoch.freshResetTs,
