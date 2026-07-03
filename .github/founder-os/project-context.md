@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bot): sync warmup_mode to is_system_ready() so dashboard warmup flag clears (cosmetic)
 
 ## Last Activity
 
