@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 
 const RULE_BASE = 'Founder Node (Doxxed Crypto)';
-const PROMPT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 let lastFirewallPromptAt = 0;
 
@@ -15,9 +15,20 @@ export function getAppExecutablePath(): string {
   return path.normalize(process.execPath);
 }
 
-/** True when repeated sync failures look like network/firewall, not auth. */
-export function shouldOfferFirewallHelp(consecutiveTransientFailures: number): boolean {
-  return isWindows() && app.isPackaged && consecutiveTransientFailures >= 1;
+/** True when repeated sync failures look like network/firewall, not auth or HTTP errors.
+ *  Only connection-level errors (ECONNREFUSED, ETIMEDOUT, ENOTFOUND, fetch TypeError)
+ *  should trigger the firewall prompt — NOT HTTP 4xx/5xx responses, which mean the
+ *  server IS reachable. */
+export function shouldOfferFirewallHelp(
+  consecutiveTransientFailures: number,
+  lastError?: string | null,
+): boolean {
+  if (!isWindows() || !app.isPackaged || consecutiveTransientFailures < 3) return false;
+  if (!lastError) return true; // unknown error, allow prompt
+  // HTTP responses (4xx/5xx) mean the server is reachable — NOT a firewall issue
+  if (/\b[45]\d\d\b|request entity too large|statusCode|status code/i.test(lastError)) return false;
+  // Connection-level errors — these ARE firewall candidates
+  return /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EHOSTUNREACH|fetch failed|TypeError|network|socket/i.test(lastError);
 }
 
 export function canShowFirewallPrompt(): boolean {
@@ -121,7 +132,7 @@ export async function promptFirewallBlocked(options: {
   onRetrySync?: () => void;
 }): Promise<void> {
   const failures = options.consecutiveFailures ?? 2;
-  if (!shouldOfferFirewallHelp(failures) || !canShowFirewallPrompt()) return;
+  if (!shouldOfferFirewallHelp(failures, options.lastError) || !canShowFirewallPrompt()) return;
 
   markFirewallPromptShown();
 
@@ -147,12 +158,15 @@ export async function promptFirewallBlocked(options: {
 
   if (response === 0) {
     const result = await tryAddWindowsFirewallRules();
-    await dialog.showMessageBox({
-      type: 'info',
-      title: 'Firewall',
-      message: result.detail,
-      buttons: ['OK'],
-    });
+    // Only show the info dialog if we actually had to add a rule (not if it already existed)
+    if (!result.ok || !result.detail.includes('already')) {
+      await dialog.showMessageBox({
+        type: 'info',
+        title: 'Firewall',
+        message: result.detail,
+        buttons: ['OK'],
+      });
+    }
     options.onRetrySync?.();
   } else if (response === 1) {
     await openWindowsFirewallSettings();

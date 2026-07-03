@@ -245,11 +245,14 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
     syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
     checkForUpdatesAfterSyncFailure();
     if (consecutiveTransientFailures >= 1) {
+      const isConnError = lastSyncError
+        ? /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EHOSTUNREACH|fetch failed|TypeError|network|socket/i.test(lastSyncError)
+        : true;
       notifyDesktop(
-        'Founder Node cannot reach Founder OS',
-        isWindows()
+        'Founder Node sync failed',
+        isConnError && isWindows()
           ? 'Open the tray menu → Allow through Windows Firewall, then Sync now.'
-          : 'Check your network, then tray → Sync now.',
+          : `Check your network or try again. ${lastSyncError ? `(${lastSyncError.slice(0, 80)})` : ''}`,
       );
       void promptFirewallBlocked({
         consecutiveFailures: consecutiveTransientFailures,
@@ -264,11 +267,14 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
   syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
   checkForUpdatesAfterSyncFailure();
   if (consecutiveTransientFailures >= 2) {
+    const isConnError = lastSyncError
+      ? /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EHOSTUNREACH|fetch failed|TypeError|network|socket/i.test(lastSyncError)
+      : true;
     notifyDesktop(
-      'Founder Node cannot reach Founder OS',
-      isWindows()
+      'Founder Node sync failed',
+      isConnError && isWindows()
         ? 'Tray → Allow through Windows Firewall, then Sync now.'
-        : 'Check network, then tray → Sync now.',
+        : `Check network or try again. ${lastSyncError ? `(${lastSyncError.slice(0, 80)})` : ''}`,
     );
     void promptFirewallBlocked({
       consecutiveFailures: consecutiveTransientFailures,
