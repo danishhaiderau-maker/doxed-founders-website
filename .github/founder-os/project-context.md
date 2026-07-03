@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-fix(live-copy): cancel protective stop + entry limit when reconcileImmediateExchangeFlat closes a lot
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
