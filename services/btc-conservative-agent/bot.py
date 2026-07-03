@@ -11763,7 +11763,9 @@ def is_system_ready():
             and len(price_buffer) >= WINDOW_SIZE
             and len(delta_buffer) >= WINDOW_SIZE
         )
-        return price_ok and ws_ok and buffer_ready
+        ready = price_ok and ws_ok and buffer_ready
+        state["warmup_mode"] = not ready
+        return ready
 
 def pipeline_guard(stage: str, signal: dict) -> bool:
     if not signal or not signal.get("trade_id"):
