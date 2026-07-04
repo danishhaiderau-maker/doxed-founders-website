@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): bump Founder Node references to v0.7.7
+docs: update platform walkthrough script for Founder OS Cursor + v0.7.7 onboarding
 
 ## Last Activity
 
