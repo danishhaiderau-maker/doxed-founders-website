@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (7 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(founder-node): read tray version from package.json
 
 ## Last Activity
 
