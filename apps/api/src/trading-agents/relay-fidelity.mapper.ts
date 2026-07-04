@@ -527,7 +527,7 @@ export function buildRelayFidelitySnapshot(input: {
     },
     policy: {
       showcaseMirrorOnly: process.env.SUBSCRIBER_SHOWCASE_MIRROR_ONLY !== 'false',
-      copyPolicyVersion: Number(process.env.BITFINEX_COPY_POLICY_VERSION ?? 2),
+      copyPolicyVersion: Number(process.env.BITFINEX_COPY_POLICY_VERSION ?? 4),
       executionPollMs: Number(process.env.SUBSCRIBER_EXECUTION_POLL_MS ?? DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS),
       signalPollMs: Number(process.env.SIGNAL_CYCLE_POLL_MS ?? DEFAULT_SIGNAL_CYCLE_POLL_MS),
     },

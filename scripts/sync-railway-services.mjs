@@ -73,7 +73,7 @@ const relayEnv = {
   SUBSCRIBER_EXECUTION_ENABLED: 'true',
   SUBSCRIBER_EXECUTION_POLL_MS: '250',
   SIGNAL_CYCLE_POLL_MS: '250',
-  BITFINEX_COPY_POLICY_VERSION: '2',
+  BITFINEX_COPY_POLICY_VERSION: '4',
 };
 
 const homeBotUrl = resolveHomeBotPublicUrl(undefined, root);
