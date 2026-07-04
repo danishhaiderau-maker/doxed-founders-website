@@ -2,13 +2,14 @@
 
 import { useState, useId } from "react";
 
-type Accent = "zinc" | "blue" | "violet" | "emerald";
+type Accent = "zinc" | "blue" | "violet" | "emerald" | "cyan";
 
 const ACCENT_BORDER: Record<Accent, string> = {
   zinc: "border-zinc-800",
   blue: "border-blue-900/60",
   violet: "border-violet-900/60",
   emerald: "border-emerald-900/60",
+  cyan: "border-cyan-900/60",
 };
 
 const ACCENT_CHEVRON: Record<Accent, string> = {
@@ -16,6 +17,7 @@ const ACCENT_CHEVRON: Record<Accent, string> = {
   blue: "text-blue-300",
   violet: "text-violet-300",
   emerald: "text-emerald-300",
+  cyan: "text-cyan-300",
 };
 
 /**

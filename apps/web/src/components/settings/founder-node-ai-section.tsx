@@ -8,6 +8,7 @@ import {
   type AiProviderKey,
 } from '@dcf/utils';
 import type { BuilderSettings } from '@/lib/api';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 
 const CATEGORY_STYLES = {
   marketplace: {
@@ -101,36 +102,38 @@ function ApiKeyCard({
       </div>
 
       {guide && (
-        <ol className="mt-3 list-inside list-decimal space-y-1 text-[11px] leading-relaxed text-zinc-400">
-          {guide.steps.map((step) => (
-            <li key={step}>
-              {step.includes('http') ? step : step}
-              {step.includes('http') ? null : (
-                <>
-                  {' '}
-                  {guide.keyUrlLabel && step.toLowerCase().includes('paste') ? (
-                    <a
-                      href={guide.keyUrl}
-                      className={`${style.accent} underline`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Get key →
-                    </a>
-                  ) : null}
-                </>
-              )}
-            </li>
-          ))}
-          {guide.keyUrl && !guide.steps.some((s) => s.includes('http')) && (
-            <li>
-              Get your key at{' '}
-              <a href={guide.keyUrl} className={`${style.accent} underline`} target="_blank" rel="noreferrer">
-                {guide.keyUrlLabel}
-              </a>
-            </li>
-          )}
-        </ol>
+        <CollapsibleInfo title={`${row.label} setup`} hint={`${guide.steps.length} steps`} accent="zinc">
+          <ol className="list-inside list-decimal space-y-1 text-[11px] leading-relaxed text-zinc-400">
+            {guide.steps.map((step) => (
+              <li key={step}>
+                {step.includes('http') ? step : step}
+                {step.includes('http') ? null : (
+                  <>
+                    {' '}
+                    {guide.keyUrlLabel && step.toLowerCase().includes('paste') ? (
+                      <a
+                        href={guide.keyUrl}
+                        className={`${style.accent} underline`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Get key →
+                      </a>
+                    ) : null}
+                  </>
+                )}
+              </li>
+            ))}
+            {guide.keyUrl && !guide.steps.some((s) => s.includes('http')) && (
+              <li>
+                Get your key at{' '}
+                <a href={guide.keyUrl} className={`${style.accent} underline`} target="_blank" rel="noreferrer">
+                  {guide.keyUrlLabel}
+                </a>
+              </li>
+            )}
+          </ol>
+        </CollapsibleInfo>
       )}
 
       <div className="mt-3 flex flex-col gap-2">
@@ -233,10 +236,8 @@ export function FounderNodeAiSection({
 
   return (
     <div className="space-y-6">
-      {/* Quick start */}
-      <div className="rounded-xl border border-zinc-700/80 bg-zinc-950/60 p-4 text-sm text-zinc-300">
-        <p className="font-semibold text-white">How to connect your AI brain (3 steps)</p>
-        <ol className="mt-3 list-inside list-decimal space-y-2 text-xs leading-relaxed text-zinc-400">
+      <CollapsibleInfo title="How to connect your AI brain" hint="3 steps" accent="violet">
+        <ol className="list-inside list-decimal space-y-2 text-xs leading-relaxed text-zinc-400">
           <li>
             <strong className="text-zinc-200">Pick a provider below</strong> — marketplace (Surplus, OpenRouter),
             direct vendor (OpenAI, Anthropic, Gemini), or local Ollama.
@@ -255,7 +256,7 @@ export function FounderNodeAiSection({
           <strong className="text-zinc-400">Brain vs code:</strong> this section powers chat & drafts. Cursor /
           OpenHands below edit your GitHub repo.
         </p>
-      </div>
+      </CollapsibleInfo>
 
       {/* Active brain status */}
       {brainReady && activeBrain ? (
@@ -354,21 +355,23 @@ export function FounderNodeAiSection({
                 <div className={`rounded-xl border p-4 ${localStyle.border} ${localStyle.bg}`}>
                   <p className="font-medium text-white">Ollama (local via Founder Node)</p>
                   <p className="mt-1 text-xs text-zinc-500">
-                    No API key — install Ollama on your PC, pair Founder Node (Step 2), keep tray app running.
+                    No API key — install Ollama on your PC, pair Founder Node, keep tray app running.
                   </p>
-                  <ol className="mt-3 list-inside list-decimal space-y-1 text-[11px] text-zinc-400">
-                    <li>
-                      Install{' '}
-                      <a href="https://ollama.com/download" className="text-cyan-300 underline" target="_blank" rel="noreferrer">
-                        Ollama
-                      </a>{' '}
-                      on the same machine as Founder Node.
-                    </li>
-                    <li>
-                      Run <code className="text-cyan-200/90">ollama pull llama3.2</code> and keep Ollama running.
-                    </li>
-                    <li>Wait for <strong className="text-emerald-300">Ollama ready</strong> in Step 2 pairing.</li>
-                  </ol>
+                  <CollapsibleInfo title="Ollama setup" hint="3 steps" accent="cyan">
+                    <ol className="list-inside list-decimal space-y-1 text-[11px] text-zinc-400">
+                      <li>
+                        Install{' '}
+                        <a href="https://ollama.com/download" className="text-cyan-300 underline" target="_blank" rel="noreferrer">
+                          Ollama
+                        </a>{' '}
+                        on the same machine as Founder Node.
+                      </li>
+                      <li>
+                        Run <code className="text-cyan-200/90">ollama pull llama3.2</code> and keep Ollama running.
+                      </li>
+                      <li>Wait for <strong className="text-emerald-300">Ollama ready</strong> in pairing status.</li>
+                    </ol>
+                  </CollapsibleInfo>
                   {nodeAi?.paired && nodeAi.online && nodeAi.ollamaReady && (
                     <p className="mt-2 text-xs text-emerald-300">
                       Ready{nodeAi.ollamaModel ? ` · ${nodeAi.ollamaModel}` : ''}

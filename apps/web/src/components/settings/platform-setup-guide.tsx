@@ -1,12 +1,12 @@
 'use client';
 
 import Link from 'next/link';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 
-export function PlatformSetupGuide() {
+export function PlatformSetupGuideContent() {
   return (
-    <div className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5 text-sm text-zinc-300">
-      <h3 className="text-base font-semibold text-white">How to use Doxxed Crypto without issues</h3>
-      <p className="mt-1 text-xs text-zinc-500">
+    <div className="text-sm text-zinc-300">
+      <p className="text-xs text-zinc-500">
         Follow this order once — then Development Workspace, agents, and Copilot stay in sync.
       </p>
 
@@ -78,5 +78,17 @@ export function PlatformSetupGuide() {
         </p>
       </div>
     </div>
+  );
+}
+
+export function PlatformSetupGuide() {
+  return (
+    <CollapsibleInfo
+      title="Setup guide"
+      hint="6 steps — GitHub, vault, AI, agents"
+      accent="violet"
+    >
+      <PlatformSetupGuideContent />
+    </CollapsibleInfo>
   );
 }

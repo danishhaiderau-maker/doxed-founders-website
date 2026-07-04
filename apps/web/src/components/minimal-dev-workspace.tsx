@@ -34,7 +34,10 @@ type ChatMsg = {
 
 type BrainOption = { key: string; label: string; hint: string };
 
-const FOUNDERS_RELEASES_URL = 'https://doxxedcrypto.digital/founder-den?onboard=sovereign';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
+import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
+
+const FOUNDER_DEN_ONBOARD_URL = '/founder-den?onboard=sovereign#founder-node-download';
 
 const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
 const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };
@@ -740,25 +743,35 @@ export function MinimalDevWorkspace({
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
               <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.3+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
-              <ol className='mt-4 space-y-2 text-left text-sm text-zinc-300'>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
-                  <span className='font-semibold text-emerald-400'>1.</span>{' '}
-                  <a
-                    href={FOUNDERS_RELEASES_URL}
-                    target='_blank'
-                    rel='noreferrer'
-                    className='text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200'
-                  >
-                    Download Founder Node v0.7.3 — complete setup guide
-                  </a>
-                </li>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
-                  <span className='font-semibold text-emerald-400'>2.</span> Pair it with your account using the pairing code shown in the Founder Node tray menu (no sign-in required).
-                </li>
-                <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
-                  <span className='font-semibold text-emerald-400'>3.</span> Open Cursor — workspaces appear here automatically.
-                </li>
-              </ol>
+              <div className='mt-4 space-y-2'>
+                <a
+                  href={FOUNDER_DEN_ONBOARD_URL}
+                  className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
+                >
+                  Download Founder Node v0.7.3 — setup hub
+                </a>
+                <a
+                  href={FOUNDER_NODE_GITHUB_RELEASES}
+                  target='_blank'
+                  rel='noreferrer'
+                  className='block text-center text-xs text-cyan-400/80 underline hover:text-cyan-300'
+                >
+                  Or download directly from GitHub releases
+                </a>
+              </div>
+              <CollapsibleInfo title='Setup steps' hint='Pair & open Cursor' accent='emerald'>
+                <ol className='space-y-2 text-left text-sm text-zinc-300'>
+                  <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                    <span className='font-semibold text-emerald-400'>1.</span> Download and install Founder Node from the links above.
+                  </li>
+                  <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                    <span className='font-semibold text-emerald-400'>2.</span> Pair it with your account using the pairing code in the Founder Node tray menu (no sign-in required).
+                  </li>
+                  <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
+                    <span className='font-semibold text-emerald-400'>3.</span> Open Cursor — workspaces appear here automatically.
+                  </li>
+                </ol>
+              </CollapsibleInfo>
               <p className='mt-3 text-xs text-zinc-500'>Meanwhile, chat below works with any Brain - no Cursor key needed.</p>
             </div>
           </div>

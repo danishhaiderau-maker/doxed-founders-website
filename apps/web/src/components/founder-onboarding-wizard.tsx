@@ -394,7 +394,7 @@ export function FounderOnboardingWizard({
             </div>
 
             <ol className="mt-4 list-inside list-decimal space-y-1 text-xs text-zinc-400">
-              <li>Install Founder Node</li>
+              <li>Install Founder Node v0.7.3+</li>
               <li>Generate a pairing code below</li>
               <li>Paste it in the Founder Node tray menu on your desktop</li>
               <li>Done — your desktop is paired</li>
@@ -410,10 +410,10 @@ export function FounderOnboardingWizard({
                 {busy ? 'Generating…' : 'Generate pairing code'}
               </button>
               <Link
-                href="/founder-node"
+                href="/founder-den?onboard=sovereign#founder-node-download"
                 className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-300 hover:text-white"
               >
-                Full setup guide →
+                Full setup hub →
               </Link>
             </div>
 

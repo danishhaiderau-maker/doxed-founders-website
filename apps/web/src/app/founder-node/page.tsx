@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 
-/** Legacy URL — everything lives under Builder / Founder Node settings now. */
+/** Legacy URL — download & pairing hub lives on Founder Den onboarding. */
 export default function FounderNodeRedirectPage() {
-  redirect('/settings/builder');
+  redirect('/founder-den?onboard=sovereign#founder-node-download');
 }
