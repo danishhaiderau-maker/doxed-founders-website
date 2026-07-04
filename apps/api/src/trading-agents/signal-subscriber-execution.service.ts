@@ -142,8 +142,9 @@ function reconcileAdoptBudget(): number {
 }
 
 /**
- * Phase 1 — "100% mirror" state-convergence master switch. Default OFF
- * (current behavior). When ON:
+ * Phase 1 — "100% mirror" state-convergence master switch. Default ON
+ * (since 2026-07-04). Set MIRROR_CONVERGENCE_ENABLED=0|false|off|no to
+ * disable in an emergency. When ON:
  *  1. Book-state dedupe: entries mirror the showcase BOOK, not its per-lane
  *     signal spawns — a second participant at an already-resting limit price
  *     is expired ledger-side (DUPLICATE_LIMIT_SKIPPED) without a real order.
@@ -160,7 +161,8 @@ function reconcileAdoptBudget(): number {
  */
 function mirrorConvergenceEnabled(): boolean {
   const v = (process.env.MIRROR_CONVERGENCE_ENABLED ?? '').trim().toLowerCase();
-  return v === '1' || v === 'true';
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
 }
 
 /**
