@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(cursor-bridge): target composer tab and sync real chat threads
+fix(ide-bridge): show only real Cursor Agents chats and live-update threads
 
 ## Last Activity
 
