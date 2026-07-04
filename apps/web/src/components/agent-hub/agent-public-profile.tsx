@@ -42,7 +42,14 @@ function readStoredDesk(slug: string): AgentDeskId | null {
 function sessionSummaryToStats(
   summary: AnalyzerSessionSummary | null,
 ): TradingAgentSessionStats {
-  if (!summary) return {};
+  if (!summary?.ok) return {};
+  // Reject fabricated $500 / 0 trades / $0 PnL envelopes from intermittent analyzer fallbacks.
+  const trades = summary.executed_count ?? summary.trade_count;
+  const hasReal =
+    (typeof trades === 'number' && trades > 0) ||
+    (typeof summary.current_balance === 'number' && summary.current_balance !== 500) ||
+    (typeof summary.total_pnl_usd === 'number' && summary.total_pnl_usd !== 0);
+  if (!hasReal) return {};
   return {
     pnlUsd: summary.total_pnl_usd ?? null,
     pnlPct: summary.total_pnl_pct ?? null,

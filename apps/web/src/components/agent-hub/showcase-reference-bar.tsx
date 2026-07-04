@@ -111,7 +111,17 @@ export function ShowcaseReferenceBar({
   useEffect(() => {
     if (!simActive || !simStartedAt) return;
     if (capturedStartedAtRef.current === simStartedAt) return;
-    if (!summary?.ok || typeof summary.total_pnl_usd !== 'number' || typeof summary.trade_count !== 'number') {
+    if (
+      !summary?.ok ||
+      typeof summary.total_pnl_usd !== 'number' ||
+      typeof summary.trade_count !== 'number' ||
+      // Do not baseline on fabricated $500 / 0 / $0 envelopes.
+      !(
+        summary.trade_count > 0 ||
+        (typeof summary.current_balance === 'number' && summary.current_balance !== runway) ||
+        summary.total_pnl_usd !== 0
+      )
+    ) {
       return;
     }
     const existing = readBaseline(simStartedAt);
@@ -127,22 +137,27 @@ export function ShowcaseReferenceBar({
     capturedStartedAtRef.current = simStartedAt;
   }, [simActive, simStartedAt, summary]);
 
-  // Resolve the analyzer full-session numbers (with graceful fallback to the
-  // short-window showcaseAgent if the analyzer endpoint is unreachable).
+  // Prefer analyzer / full-session numbers only when they carry real data.
+  // Reject fabricated $500 / 0 trades / $0 PnL (intermittent analyzer + slim fallback).
+  const summaryUsable =
+    summary?.ok === true &&
+    ((typeof summary.trade_count === 'number' && summary.trade_count > 0) ||
+      (typeof summary.current_balance === 'number' && summary.current_balance !== runway) ||
+      (typeof summary.total_pnl_usd === 'number' && summary.total_pnl_usd !== 0));
   const fullEquity =
-    summary?.ok && typeof summary.current_balance === 'number'
+    summaryUsable && typeof summary?.current_balance === 'number'
       ? summary.current_balance
       : (showcaseAgent.equityUsd ?? runway);
   const fullPnlUsd =
-    summary?.ok && typeof summary.total_pnl_usd === 'number'
+    summaryUsable && typeof summary?.total_pnl_usd === 'number'
       ? summary.total_pnl_usd
       : (showcaseAgent.sessionPnlUsd ?? fullEquity - runway);
   const fullReturnPct =
-    summary?.ok && typeof summary.total_pnl_pct === 'number'
+    summaryUsable && typeof summary?.total_pnl_pct === 'number'
       ? summary.total_pnl_pct
       : (showcaseAgent.netReturnPct ?? 0);
   const fullTradeCount =
-    summary?.ok && typeof summary.trade_count === 'number'
+    summaryUsable && typeof summary?.trade_count === 'number'
       ? summary.trade_count
       : (showcaseAgent.tradeCount ?? 0);
 
