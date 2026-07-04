@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(web): bump Founder Node references to v0.7.7
 
 ## Last Activity
 
