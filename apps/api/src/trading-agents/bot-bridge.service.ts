@@ -462,13 +462,31 @@ export class BotBridgeService {
   }
 
   /** Cumulative full-session metrics from the canonical showcase bot's full `/api/state`
-   *  (cached 60s). Used when the :9001 analyzer proxy is intermittent/unavailable.
+   *  (fresh cache 60s; last-known-good retained up to 10m on tunnel blips).
+   *  Used when the :9001 analyzer proxy is intermittent/unavailable.
    *
    *  Display-only: always uses `fetchShowcaseCanonicalState` (home tunnel `/api/state`).
    *  Never slim `/api/relay-state` (lacks equity/trade_count/session_pnl) and never Fly
    *  (separate stale instance). Never invents $500 / 0 trades / $0 PnL defaults. */
-  private cumulativeCache: { at: number; data: CumulativeSessionMetrics | null } | null = null;
+  private cumulativeCache: { at: number; data: CumulativeSessionMetrics } | null = null;
   private readonly cumulativeCacheMs = 60_000;
+  /** Serve last successful metrics through brief /api/state tunnel failures. */
+  private readonly cumulativeStaleMs = 10 * 60_000;
+
+  private serveStaleCumulativeMetrics(now: number, reason: string): CumulativeSessionMetrics | null {
+    if (this.cumulativeCache && now - this.cumulativeCache.at < this.cumulativeStaleMs) {
+      this.logger.warn(
+        `Serving last-known-good cumulative metrics (${reason}, age ${Math.round((now - this.cumulativeCache.at) / 1000)}s)`,
+      );
+      return this.cumulativeCache.data;
+    }
+    return null;
+  }
+
+  /** Seed last-known-good display metrics from a successful analyzer summary. */
+  seedCumulativeSessionMetrics(metrics: CumulativeSessionMetrics): void {
+    this.cumulativeCache = { at: Date.now(), data: metrics };
+  }
 
   async fetchCumulativeSessionMetrics(): Promise<CumulativeSessionMetrics | null> {
     const now = Date.now();
@@ -477,8 +495,7 @@ export class BotBridgeService {
     }
     const bot = await this.fetchShowcaseCanonicalState(true);
     if (!bot) {
-      this.cumulativeCache = { at: now, data: null };
-      return null;
+      return this.serveStaleCumulativeMetrics(now, 'canonical /api/state unreachable');
     }
     const STARTING = 500;
     const analytics = bot.analytics ?? {};
@@ -508,8 +525,7 @@ export class BotBridgeService {
       this.logger.warn(
         'Canonical /api/state missing equity/trade_count/session_pnl — refusing fabricated defaults',
       );
-      this.cumulativeCache = { at: now, data: null };
-      return null;
+      return this.serveStaleCumulativeMetrics(now, 'canonical /api/state missing metrics fields');
     }
 
     const totalTrades = tradeCountRaw != null ? Number(tradeCountRaw) : 0;
@@ -521,8 +537,7 @@ export class BotBridgeService {
           ? STARTING + sessionPnlRaw
           : null;
     if (currentBalance == null || !Number.isFinite(currentBalance)) {
-      this.cumulativeCache = { at: now, data: null };
-      return null;
+      return this.serveStaleCumulativeMetrics(now, 'canonical /api/state balance unusable');
     }
 
     const totalPnlUsd =
