@@ -5,7 +5,7 @@
  */
 import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { createDecipheriv, scryptSync } from 'crypto';
+import { createDecipheriv, randomBytes, scryptSync } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { exchangeCredentialsToEnvVars } from '@dcf/utils';
 import { loadVaultEnv } from './load-vault-env.mjs';
@@ -69,6 +69,18 @@ const lines = [
 
 if (vercel.BOT_CONTROL_SECRET?.trim()) {
   lines.push(`BOT_CONTROL_SECRET=${vercel.BOT_CONTROL_SECRET.trim()}`);
+}
+
+// Preserve existing phone/remote operator token (or mint one). Never commit this file.
+{
+  const existingEnvPath = join(getVaultDir(), 'home-bot.env');
+  const existing = existsSync(existingEnvPath) ? readDotEnv(existingEnvPath) : {};
+  let adminTok = (existing.BOT_ADMIN_TOKEN || process.env.BOT_ADMIN_TOKEN || '').trim();
+  if (!adminTok) {
+    adminTok = randomBytes(32).toString('base64url');
+  }
+  lines.push('# Phone/remote operator: https://bot.doxxedcrypto.digital/?admin_token=<token>');
+  lines.push(`BOT_ADMIN_TOKEN=${adminTok}`);
 }
 
 const ex = JSON.parse(decryptSecret(row.showcaseExchangeCredentialEnc, jwtSecret));

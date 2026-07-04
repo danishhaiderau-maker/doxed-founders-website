@@ -112,6 +112,19 @@ try {
   }
 
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
+  function Import-VaultEnv {
+    # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
+    # without requiring a monitor respawn.
+    if (-not (Test-Path $VaultEnv)) { return }
+    Get-Content $VaultEnv | ForEach-Object {
+      if ($_ -match '^\s*([^#=]+)=(.*)$') {
+        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
+      }
+    }
+    $env:PORT = "$Port"
+    $env:DASHBOARD_PORT = "$Port"
+  }
+
   function Start-BotHidden {
     # Clear any stale listener on the port before relaunch (common cause of bind fail).
     try {
@@ -124,6 +137,8 @@ try {
           }
         }
     } catch { }
+
+    Import-VaultEnv
 
     Push-Location $agentDir
     try {
