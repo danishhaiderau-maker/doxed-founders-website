@@ -339,6 +339,17 @@ function checkAlerts(bot, inst, copy, nowMs) {
     }
   }
 
+  // Cross-ID orphan: copy OPEN on a trade_id that is not an open showcase position.
+  // Same-ID miss-exit above never fires when copy filled a different trade than showcase.
+  const mdDivs = Array.isArray(dash?.mirrorDiff?.divergences) ? dash.mirrorDiff.divergences : [];
+  for (const d of mdDivs) {
+    if (d?.type !== 'COPY_POSITION_NO_SHOWCASE' || !d.tradeId) continue;
+    alertOnce(
+      `cross-id-open:${d.tradeId}`,
+      `COPY_POSITION_NO_SHOWCASE trade_id=${d.tradeId} — copy OPEN with no matching showcase position (exit may not fire until cycle CLOSED or SHOWCASE_POSITION_ABSENT deploy)`,
+    );
+  }
+
   for (const e of copy.events) {
     const ek = `${e.eventType}|${e.createdAt}|${e.cycleId}`;
     if (seenEventKeys.has(ek)) continue;
