@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Default A160 V2 research tile OFF for live-safe shadow-only collection.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
