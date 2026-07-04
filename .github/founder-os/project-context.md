@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-node): read tray version from package.json
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
