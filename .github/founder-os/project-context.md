@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-Fail-closed cancel Live Copy PENDING_ENTRY when showcase trade is fully absent.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
