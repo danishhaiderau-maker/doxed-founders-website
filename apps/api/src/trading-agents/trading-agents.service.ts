@@ -585,15 +585,37 @@ export class TradingAgentsService implements OnModuleInit {
           const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
           if (m) sessionHours = Number(m[1]);
         }
+        const currentBalance = Number((STARTING + netPnlUsd).toFixed(2));
+        const totalPnlUsd = Number(netPnlUsd.toFixed(2));
+        const totalPnlPct = Number(((netPnlUsd / STARTING) * 100).toFixed(2));
+        const generatedAt =
+          typeof raw.generated_at === 'string' ? raw.generated_at : new Date().toISOString();
+        // Seed last-known-good so intermittent analyzer/:9001 blips keep real metrics
+        // instead of falling through to fabricated or empty envelopes.
+        this.botBridge.seedCumulativeSessionMetrics({
+          starting_balance: STARTING,
+          current_balance: currentBalance,
+          total_pnl_usd: totalPnlUsd,
+          total_pnl_pct: totalPnlPct,
+          daily_pnl_usd: totalPnlUsd,
+          trade_count: trades,
+          win_rate: Number(winRate.toFixed(1)),
+          session_start: sessionStart,
+          session_hours: sessionHours != null ? Number(sessionHours.toFixed(2)) : undefined,
+          bot_version: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : null,
+          bot_start_time: null,
+          last_fresh_reset_ts: null,
+          generated_at: generatedAt,
+        });
         return {
           ok: true,
           source: 'analyzer :9001 via bot proxy',
           session_start: sessionStart,
           session_hours: sessionHours,
           starting_balance: STARTING,
-          current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
-          total_pnl_usd: Number(netPnlUsd.toFixed(2)),
-          total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
+          current_balance: currentBalance,
+          total_pnl_usd: totalPnlUsd,
+          total_pnl_pct: totalPnlPct,
           trade_count: trades,
           win_rate: Number(winRate.toFixed(1)),
           approve_count: approveAttempts,
@@ -602,7 +624,7 @@ export class TradingAgentsService implements OnModuleInit {
           data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
           executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
           analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
-          generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
+          generated_at: generatedAt,
         };
       }
     }
