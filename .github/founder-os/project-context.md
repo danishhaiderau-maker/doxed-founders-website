@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ide-bridge): show only real Cursor Agents chats and live-update threads
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
