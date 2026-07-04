@@ -272,7 +272,7 @@ export default function FounderDenPageClient() {
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/10 p-5">
             <h2 className="text-lg font-semibold text-white">Founder Node — download & pair</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Install v0.7.3+ on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
+              Install v0.7.7+ on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
             </p>
             <div className="mt-4">
               <FounderNodeDownloads />

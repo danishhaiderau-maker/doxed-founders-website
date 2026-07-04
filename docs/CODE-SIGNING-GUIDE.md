@@ -79,7 +79,7 @@ electron-builder's built-in `CSC_LINK` flow does **not** work with a USB token â
 ### Verifying a signature
 
 ```powershell
-signtool verify /pa /v 'Founder Node Setup 0.7.3.exe'
+signtool verify /pa /v 'Founder Node Setup 0.7.7.exe'
 ```
 
 You should see `Successfully verified` and your name under the publisher.
