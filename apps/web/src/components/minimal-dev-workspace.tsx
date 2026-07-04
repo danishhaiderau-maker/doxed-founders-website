@@ -231,7 +231,42 @@ export function MinimalDevWorkspace({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string>('never');
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
+  const historyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stopHistoryPoll = useCallback(() => {
+    if (historyPollRef.current) {
+      clearInterval(historyPollRef.current);
+      historyPollRef.current = null;
+    }
+  }, []);
+
+  const pollSessionHistory = useCallback(
+    (sessionId: string) => {
+      if (!accessToken) return;
+      stopHistoryPoll();
+      let attempts = 0;
+      historyPollRef.current = setInterval(() => {
+        attempts += 1;
+        if (attempts > 10) {
+          stopHistoryPoll();
+          return;
+        }
+        void fetchIdeBridgeSessionMessages(accessToken, sessionId)
+          .then((msgs) => {
+            if (Array.isArray(msgs) && msgs.length > 0) setHistory(msgs);
+          })
+          .catch(() => undefined);
+        void fetchIdeBridgeSessions(accessToken)
+          .then((ss) => {
+            if (Array.isArray(ss)) setSessions(ss);
+          })
+          .catch(() => undefined);
+      }, 5000);
+    },
+    [accessToken, stopHistoryPoll],
+  );
+
+  useEffect(() => () => stopHistoryPoll(), [stopHistoryPoll]);
   const firedInitial = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -493,8 +528,9 @@ export function MinimalDevWorkspace({
       setDispatchNotice('Queued for local Cursor — Founder Node will type it in shortly.');
       void dispatchToIdeSession(accessToken, sessionForDispatch.id, prompt, 'cursor')
         .then(() => {
-          setDispatchNotice('Sent to Cursor via Founder Node.');
-          setTimeout(() => setDispatchNotice(null), 6000);
+          setDispatchNotice('Sent to Cursor — waiting for agent response…');
+          pollSessionHistory(sessionForDispatch.id);
+          setTimeout(() => setDispatchNotice(null), 12000);
         })
         .catch((e: unknown) => {
           const msg = e instanceof Error ? e.message : 'Failed to queue for Cursor';
@@ -562,7 +598,7 @@ export function MinimalDevWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -590,7 +626,7 @@ export function MinimalDevWorkspace({
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
         </div>
         <div className='min-h-0 flex-1 overflow-y-auto px-2 pb-3'>
-          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.3+ is running and Cursor is open.</div>}
+          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.5+ is running and Cursor is open.</div>}
           {workspaces.map((w) => (
             <button key={w.id} onClick={() => setSelectedWsId(w.id)} className={'mb-1 block w-full rounded-lg px-3 py-2.5 text-left transition ' + (selectedWsId === w.id ? 'bg-white/10 ring-1 ring-white/15' : 'hover:bg-white/5')}>
               <div className='flex items-center gap-2'>
@@ -742,13 +778,13 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.3+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.5+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               <div className='mt-4 space-y-2'>
                 <a
                   href={FOUNDER_DEN_ONBOARD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
-                  Download Founder Node v0.7.3 — setup hub
+                  Download Founder Node v0.7.5 — setup hub
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}

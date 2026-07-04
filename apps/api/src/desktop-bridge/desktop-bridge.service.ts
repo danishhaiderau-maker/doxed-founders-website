@@ -276,9 +276,12 @@ export class DesktopBridgeService {
           : new Date().toISOString();
       out.push({
         id,
+        composerId: this.optString(s.composerId) ?? id,
         title: title.slice(0, MAX_STR_LEN),
         subtitle: this.optString(s.subtitle),
         workspaceId: this.optString(s.workspaceId),
+        workspaceStorageId: this.optString(s.workspaceStorageId),
+        folderPath: this.optString(s.folderPath),
         repository: this.optString(s.repository),
         branch: this.optString(s.branch),
         ideProvider: this.optString(s.ideProvider) ?? 'cursor',

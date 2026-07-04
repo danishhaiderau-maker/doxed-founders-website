@@ -1,6 +1,10 @@
 import { clipboard } from 'electron';
 import { exec } from 'node:child_process';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
+import {
+  focusComposerInWorkspaceState,
+  resolveCursorComposerContext,
+} from './cursor-discovery';
 import { readNodeConfig } from './vault-manager';
 import { throwIfFounderNodeAuthResponse } from './sync-client';
 
@@ -11,19 +15,17 @@ import { throwIfFounderNodeAuthResponse } from './sync-client';
  * sends a message, the API writes a `PendingIdeDispatch` row. Founder Node
  * polls {@link processPendingDispatches} on each sync cycle, and for each
  * pending dispatch it:
- *   1. Opens / focuses the local Cursor IDE.
- *   2. Copies the prompt to the OS clipboard (via Electron's clipboard —
- *      avoids shell-escaping the prompt text).
- *   3. Sends Ctrl+Shift+L (open Cursor chat), Ctrl+V (paste), Enter (send)
- *      via PowerShell SendKeys on Windows.
- *   4. Reports the result back to the API so the row is marked DISPATCHED.
- *
- * The SendKeys approach is a pragmatic Windows-only solution and requires
- * Cursor to be the focused window after step 1.
+ *   1. Resolves the target composer + workspace folder from state.vscdb.
+ *   2. Writes the composer to the front of Cursor's workspace focus list.
+ *   3. Opens / focuses the workspace via `cursor --reuse-window`.
+ *   4. Copies the prompt to the clipboard and pastes into the focused composer
+ *      input (does NOT use Ctrl+Shift+L — that opens a brand-new chat tab).
+ *   5. Reports the result back to the API.
  */
 
 const MAX_DISPATCHES_PER_CYCLE = 3;
-const CURSOR_FOCUS_WAIT_MS = 2000;
+const CURSOR_FOCUS_WAIT_MS = 2500;
+const COMPOSER_TAB_SETTLE_MS = 900;
 
 export type PendingDispatch = {
   id: string;
@@ -89,15 +91,15 @@ function execAsync(cmd: string): Promise<{ ok: boolean; error?: string }> {
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /**
- * Send the prompt into the focused Cursor window via clipboard + SendKeys.
- * Windows-only; on other platforms we just copy to the clipboard and let the
- * user paste manually (returned as a soft error so the dispatch is still
- * marked dispatched and we don't retry forever).
+ * Send the prompt into the focused Cursor composer input via clipboard +
+ * SendKeys. Avoids Ctrl+Shift+L which opens a new chat tab in Cursor 3.x.
  */
-async function sendPromptToCursor(prompt: string): Promise<void> {
-  // Always copy to clipboard first — works cross-platform and gives the user
-  // a manual-paste fallback if SendKeys can't reach Cursor.
+async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
   try {
     clipboard.writeText(prompt);
   } catch (err) {
@@ -105,18 +107,23 @@ async function sendPromptToCursor(prompt: string): Promise<void> {
   }
 
   if (process.platform !== 'win32') {
-    throw new Error('Cursor auto-dispatch is Windows-only; prompt copied to clipboard — press Ctrl+V in Cursor.');
+    throw new Error(
+      'Cursor auto-dispatch is Windows-only; prompt copied to clipboard — paste into the focused composer.',
+    );
   }
 
-  // Ctrl+Shift+L opens the Cursor chat pane, Ctrl+V pastes, Enter sends.
-  // SendKeys: ^ = Ctrl, + = Shift, {ENTER} = Enter key.
+  // Give Cursor time to restore the focused composer tab after workspace activation.
+  await sleep(COMPOSER_TAB_SETTLE_MS);
+
+  // Ctrl+L focuses the chat/composer input in the active tab without spawning
+  // a new agent session (Ctrl+Shift+L does spawn one — that was the bug).
   const sendKeysCmd =
-    "Add-Type -AssemblyName System.Windows.Forms;" +
-    "[System.Windows.Forms.SendKeys]::SendWait('^+l');" +
-    "Start-Sleep -Milliseconds 600;" +
-    "[System.Windows.Forms.SendKeys]::SendWait('^v');" +
-    "Start-Sleep -Milliseconds 250;" +
-    "[System.Windows.Forms.SendKeys]::SendWait('{ENTER}');";
+    'Add-Type -AssemblyName System.Windows.Forms;' +
+    '[System.Windows.Forms.SendKeys]::SendWait(\'^l\');' +
+    'Start-Sleep -Milliseconds 450;' +
+    '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
+    'Start-Sleep -Milliseconds 250;' +
+    '[System.Windows.Forms.SendKeys]::SendWait(\'{ENTER}\');';
 
   const result = await execAsync(`powershell -NoProfile -Command "${sendKeysCmd.replace(/"/g, '\\"')}"`);
   if (!result.ok) {
@@ -125,24 +132,40 @@ async function sendPromptToCursor(prompt: string): Promise<void> {
 }
 
 /**
- * Open or focus Cursor for the given workspace path. When no workspace path is
- * supplied (the common case — the API dispatch payload only carries the
- * session id + prompt), we just launch `cursor` with no args which focuses the
- * most recently used window.
+ * Focus the workspace window and pre-select the target composer tab via
+ * workspace state.vscdb before Cursor reads it on activation.
  */
-async function focusCursor(workspacePath?: string): Promise<void> {
-  const arg = workspacePath ? ` --reuse-window "${workspacePath}"` : '';
-  const result = await execAsync(`cursor${arg}`);
-  if (!result.ok) {
-    // `cursor` CLI not on PATH — non-fatal; the user may still have Cursor
-    // open. We proceed and let SendKeys try to reach the existing window.
-    console.warn('cursor CLI not available, trying existing window:', result.error);
+async function focusCursorComposer(
+  composerId: string,
+  workspaceStorageId?: string,
+  folderPath?: string,
+): Promise<{ focusedTab: boolean; openedWorkspace: boolean }> {
+  let focusedTab = false;
+  if (workspaceStorageId) {
+    focusedTab = focusComposerInWorkspaceState(workspaceStorageId, composerId);
   }
-  await new Promise((r) => setTimeout(r, CURSOR_FOCUS_WAIT_MS));
+
+  let openedWorkspace = false;
+  if (folderPath) {
+    const result = await execAsync(`cursor --reuse-window "${folderPath}"`);
+    openedWorkspace = result.ok;
+    if (!result.ok) {
+      console.warn('cursor CLI workspace focus failed:', result.error);
+    }
+  } else {
+    const result = await execAsync('cursor');
+    openedWorkspace = result.ok;
+    if (!result.ok) {
+      console.warn('cursor CLI focus failed:', result.error);
+    }
+  }
+
+  await sleep(CURSOR_FOCUS_WAIT_MS);
+  return { focusedTab, openedWorkspace };
 }
 
 /**
- * Execute a single dispatch: focus Cursor, push the prompt into the chat pane,
+ * Execute a single dispatch: focus the target composer tab, push the prompt,
  * report the result back to the API.
  */
 export async function executeCursorDispatch(
@@ -152,10 +175,26 @@ export async function executeCursorDispatch(
   dispatch: PendingDispatch,
 ): Promise<void> {
   try {
-    await focusCursor(undefined);
-    await sendPromptToCursor(dispatch.prompt);
+    const composerId = dispatch.sessionId;
+    const ctx = resolveCursorComposerContext(composerId);
+    const workspaceStorageId = ctx?.workspaceStorageId;
+    const folderPath = ctx?.folderPath;
+
+    const { focusedTab, openedWorkspace } = await focusCursorComposer(
+      composerId,
+      workspaceStorageId,
+      folderPath,
+    );
+
+    await sendPromptToFocusedComposer(dispatch.prompt);
+
+    const bits = [
+      `composer=${composerId.slice(0, 8)}`,
+      focusedTab ? 'tab-focused' : 'tab-focus-skipped',
+      openedWorkspace ? 'workspace-opened' : 'workspace-focus-best-effort',
+    ];
     await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, {
-      result: 'dispatched via clipboard + SendKeys',
+      result: `dispatched (${bits.join(', ')})`,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

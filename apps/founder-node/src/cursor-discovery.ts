@@ -357,12 +357,34 @@ const MAX_SESSIONS = 20;
 const SUBTITLE_MAX = 100;
 const MAX_MESSAGES_PER_SESSION = 50;
 const MAX_SESSIONS_WITH_MESSAGES = 12;
-// Wide row scan window: bubble keys aren't strictly time-ordered, so we pull
-// up to this many rows per session and sort by timestamp in memory before
-// trimming to MAX_MESSAGES_PER_SESSION. 500 is generous; Cursor stores far
-// fewer bubbles per composer in practice.
-const BUBBLE_SCAN_LIMIT = 500;
 const MESSAGE_TEXT_MAX = 1000;
+
+function getCursorWorkspaceStorageRoot(): string | null {
+  const appdata =
+    process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  if (!appdata) return null;
+  return path.join(appdata, 'Cursor', 'User', 'workspaceStorage');
+}
+
+/** Map a Cursor workspaceStorage UUID to the local folder path on disk. */
+export function resolveCursorWorkspaceFolder(workspaceStorageId: string): string | null {
+  const root = getCursorWorkspaceStorageRoot();
+  if (!root) return null;
+  const wsJsonPath = path.join(root, workspaceStorageId, 'workspace.json');
+  const wsJson = safeReadJson<WorkspaceJson>(wsJsonPath);
+  if (!wsJson) return null;
+  const folderUri = wsJson.folder ?? wsJson.configuration?.folderPath;
+  if (!folderUri) return null;
+  return fileUriToPath(folderUri);
+}
+
+/** Path to a workspace's state.vscdb (composer tab focus lives here). */
+export function getCursorWorkspaceStateDbPath(workspaceStorageId: string): string | null {
+  const root = getCursorWorkspaceStorageRoot();
+  if (!root) return null;
+  const dbPath = path.join(root, workspaceStorageId, 'state.vscdb');
+  return fs.existsSync(dbPath) ? dbPath : null;
+}
 
 function getCursorGlobalStateDbPath(): string | null {
   const appdata =
@@ -434,7 +456,23 @@ function readAgentProjects(
   }
 }
 
-type BubbleRow = { key?: string; value?: string };
+type ConversationHeader = {
+  bubbleId?: string;
+  type?: number;
+  createdAt?: string;
+  grouping?: {
+    hasText?: boolean;
+    isSimulatedMsg?: boolean;
+    simulatedMsgReason?: number;
+    simulatedMessageMetadataTitle?: string;
+    capabilityType?: number;
+  };
+};
+
+type ComposerDataRow = {
+  composerId?: string;
+  fullConversationHeadersOnly?: ConversationHeader[];
+};
 
 /**
  * Shape of a Cursor chat bubble stored under `cursorDiskKV` key
@@ -508,116 +546,180 @@ function extractBubbleText(b: CursorBubble): string {
   return '';
 }
 
-function bubbleRole(b: CursorBubble): BridgeMessage['role'] | null {
-  if (b.type === 1) return 'user';
-  if (b.type === 2) return 'assistant';
-  // Newer Cursor schemas sometimes omit `type` or use different values.
-  // Infer from other signals: an explicit `model` field ⇒ assistant
-  // response; a `context`/`message` field without `model` ⇒ user input.
-  // Without these signals we can't tell, so skip rather than guess wrong.
-  if (typeof b.model === 'string' && b.model.trim()) return 'assistant';
-  if (typeof b.context !== 'undefined' && !('model' in b)) return 'user';
+function isSystemOrSimulatedBubbleText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (t.startsWith('<timestamp>')) return true;
+  if (t.startsWith('<system_notification>')) return true;
+  if (t.startsWith('<user_query>')) return false;
+  return false;
+}
+
+function headerRole(header: ConversationHeader): BridgeMessage['role'] | null {
+  if (header.type === 1) return 'user';
+  if (header.type === 2) return 'assistant';
   return null;
 }
 
-function bubbleTimestamp(b: CursorBubble): string | undefined {
-  const ms = b.updatedAt ?? b.createdAt ?? b.timestamp ?? b.ts;
-  if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) {
-    return new Date(ms).toISOString();
-  }
-  return undefined;
+function shouldIncludeHeader(header: ConversationHeader): boolean {
+  if (!header.bubbleId) return false;
+  if (header.grouping?.isSimulatedMsg) return false;
+  if (header.grouping?.hasText === false) return false;
+  return true;
 }
 
 /**
- * Best-effort timestamp extraction from a Cursor bubble key suffix when the
- * bubble JSON has no `createdAt`/`updatedAt` field. Cursor uses ULIDs (26-char
- * Crockford Base32, lexically sortable by time) for bubble IDs — the first 10
- * chars encode a 48-bit millisecond timestamp. We parse it back to ms and use
- * it only as a fallback when the JSON lacks an explicit timestamp.
- *
- * ULID epoch reference: 1468051200000 ms (2017-01-01T00:00:00Z).
+ * Read the conversation thread for a composer using Cursor's authoritative
+ * `composerData:<id>.fullConversationHeadersOnly` ordering, then fetch each
+ * bubble by exact key. This avoids the broken `ORDER BY key DESC` scan that
+ * pulled unrelated/stale bubbles when a composer has tens of thousands of
+ * bubble rows (subagent/tool traffic).
  */
-function timestampFromBubbleKey(key: string): number | undefined {
-  // key shape: bubbleId:<composerId>:<bubbleId>
-  const idx = key.lastIndexOf(':');
-  if (idx < 0) return undefined;
-  const id = key.slice(idx + 1);
-  if (id.length < 10) return undefined;
-  const crockford = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-  let ts = 0;
-  for (let i = 0; i < 10; i++) {
-    const c = id[i]!.toUpperCase();
-    const v = crockford.indexOf(c);
-    if (v < 0) return undefined;
-    ts = ts * 32 + v;
-  }
-  return Number.isSafeInteger(ts) && ts > 0 ? ts : undefined;
-}
-
-/**
- * Read up to `MAX_MESSAGES_PER_SESSION` most-recent bubbles for a single
- * composer session from `cursorDiskKV`. Returns [] on any failure so session
- * discovery still works even if the bubble table is missing or locked.
- *
- * Sorted oldest → newest so the UI can render the thread in conversation order.
- *
- * NOTE: We intentionally scan up to `BUBBLE_SCAN_LIMIT` rows (not just
- * MAX_MESSAGES_PER_SESSION) because Cursor's bubble IDs are not strictly
- * time-ordered under a string `ORDER BY key DESC` — scanning more rows then
- * sorting by timestamp in-memory gives us a more reliable chronological
- * sample of the conversation thread.
- */
-function readComposerBubbles(
-  DatabaseSync: typeof import('node:sqlite').DatabaseSync,
-  dbPath: string,
+export function readComposerMessages(
   composerId: string,
+  limit = MAX_MESSAGES_PER_SESSION,
 ): BridgeMessage[] {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return [];
+  const dbPath = getCursorGlobalStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return [];
+
   let db: import('node:sqlite').DatabaseSync | null = null;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
-    // Scan a wide window of rows so we capture the full conversation even
-    // when the bubble key ordering doesn't match chronological order.
-    const stmt = db.prepare(
-      "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' ORDER BY key DESC LIMIT ?",
-    );
-    const prefix = `bubbleId:${composerId}:%`;
-    const rows = stmt.all(prefix, BUBBLE_SCAN_LIMIT) as BubbleRow[];
-    if (!Array.isArray(rows) || rows.length === 0) return [];
+    db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    const headerRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value?: string } | undefined;
+    if (!headerRow || typeof headerRow.value !== 'string') return [];
+    const parsed = JSON.parse(headerRow.value) as ComposerDataRow;
+    const headers = Array.isArray(parsed.fullConversationHeadersOnly)
+      ? parsed.fullConversationHeadersOnly
+      : [];
+    if (headers.length === 0) return [];
 
-    const messages: Array<{ msg: BridgeMessage; ts: number }> = [];
-    for (const row of rows) {
-      if (!row || typeof row.value !== 'string') continue;
-      let parsed: CursorBubble;
+    const tail = headers.filter(shouldIncludeHeader).slice(-limit * 2);
+    const bubbleStmt = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?');
+    const messages: BridgeMessage[] = [];
+
+    for (const header of tail) {
+      const role = headerRole(header);
+      if (!role || !header.bubbleId) continue;
+      const bubbleRow = bubbleStmt.get(
+        `bubbleId:${composerId}:${header.bubbleId}`,
+      ) as { value?: string } | undefined;
+      if (!bubbleRow || typeof bubbleRow.value !== 'string') continue;
+      let bubble: CursorBubble;
       try {
-        parsed = JSON.parse(row.value) as CursorBubble;
+        bubble = JSON.parse(bubbleRow.value) as CursorBubble;
       } catch {
         continue;
       }
-      const role = bubbleRole(parsed);
-      if (!role) continue;
-      const text = extractBubbleText(parsed).slice(0, MESSAGE_TEXT_MAX);
-      if (!text) continue;
-      const isoTs = bubbleTimestamp(parsed);
-      const fallbackTs = isoTs
-        ? new Date(isoTs).getTime()
-        : timestampFromBubbleKey(row.key ?? '');
+      const text = extractBubbleText(bubble);
+      if (!text || isSystemOrSimulatedBubbleText(text)) continue;
       messages.push({
-        msg: {
-          role,
-          content: text,
-          ...(isoTs ? { timestamp: isoTs } : {}),
-          ...(parsed.model ? { model: parsed.model.slice(0, 60) } : {}),
-        },
-        ts: fallbackTs ?? 0,
+        role,
+        content: text.slice(0, MESSAGE_TEXT_MAX),
+        ...(header.createdAt ? { timestamp: header.createdAt } : {}),
+        ...(bubble.model ? { model: bubble.model.slice(0, 60) } : {}),
       });
     }
 
-    // Sort chronologically (oldest first), then trim to the most recent
-    // MAX_MESSAGES_PER_SESSION so the UI shows the tail of the thread.
-    messages.sort((a, b) => a.ts - b.ts);
-    return messages.slice(-MAX_MESSAGES_PER_SESSION).map((m) => m.msg);
+    return messages.slice(-limit);
   } catch {
     return [];
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Resolve dispatch context for a Cursor composer session.
+ */
+export function resolveCursorComposerContext(composerId: string): {
+  composerId: string;
+  workspaceStorageId?: string;
+  folderPath?: string;
+  title?: string;
+} | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+  const dbPath = getCursorGlobalStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+  const headers = readComposerHeaders(sqlite.DatabaseSync, dbPath);
+  if (!headers) return null;
+  const match = headers.allComposers.find((c) => c.composerId === composerId);
+  if (!match) return null;
+
+  const workspaceStorageId = match.workspaceIdentifier?.id;
+  const folderPath = workspaceStorageId
+    ? resolveCursorWorkspaceFolder(workspaceStorageId) ?? undefined
+    : undefined;
+
+  return {
+    composerId,
+    workspaceStorageId,
+    folderPath,
+    title: match.name,
+  };
+}
+
+/**
+ * Move a composer to the front of Cursor's workspace tab focus list so the
+ * next window activation shows that chat tab instead of whatever was last open.
+ */
+export function focusComposerInWorkspaceState(
+  workspaceStorageId: string,
+  composerId: string,
+): boolean {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return false;
+  const dbPath = getCursorWorkspaceStateDbPath(workspaceStorageId);
+  if (!dbPath) return false;
+
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new sqlite.DatabaseSync(dbPath);
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+      .get() as { value?: string } | undefined;
+    if (!row || typeof row.value !== 'string') return false;
+
+    const data = JSON.parse(row.value) as {
+      selectedComposerIds?: string[];
+      lastFocusedComposerIds?: string[];
+    };
+    const selected = Array.isArray(data.selectedComposerIds)
+      ? [...data.selectedComposerIds]
+      : [];
+    const focused = Array.isArray(data.lastFocusedComposerIds)
+      ? [...data.lastFocusedComposerIds]
+      : [];
+
+    if (!selected.includes(composerId)) selected.unshift(composerId);
+    else {
+      const idx = selected.indexOf(composerId);
+      selected.splice(idx, 1);
+      selected.unshift(composerId);
+    }
+
+    data.selectedComposerIds = selected;
+    data.lastFocusedComposerIds = [
+      composerId,
+      ...focused.filter((id) => id !== composerId),
+    ];
+
+    db.prepare(
+      "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('composer.composerData', ?)",
+    ).run(JSON.stringify(data));
+    return true;
+  } catch (err) {
+    console.warn('focusComposerInWorkspaceState failed:', err);
+    return false;
   } finally {
     try {
       db?.close();
@@ -675,11 +777,17 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
       const repo = c.trackedGitRepos?.[0]?.repoPath;
       const branch = c.trackedGitRepos?.[0]?.branches?.[0]?.branchName;
       const repository = repo ? folderNameFromPath(repo) : undefined;
-      const workspaceId = c.workspaceIdentifier?.id;
+      const workspaceStorageId = c.workspaceIdentifier?.id;
+      const folderPath = workspaceStorageId
+        ? resolveCursorWorkspaceFolder(workspaceStorageId) ?? undefined
+        : undefined;
 
       sessions.push({
         id: c.composerId,
-        workspaceId,
+        composerId: c.composerId,
+        workspaceId: workspaceStorageId,
+        workspaceStorageId,
+        folderPath,
         title: c.name,
         subtitle: truncate(c.subtitle, SUBTITLE_MAX),
         repository,
@@ -693,7 +801,7 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
           typeof c.totalLinesRemoved === 'number' ? c.totalLinesRemoved : undefined,
         filesChangedCount:
           typeof c.filesChangedCount === 'number' ? c.filesChangedCount : undefined,
-        isAgentProject: workspaceId ? agentNameById.has(workspaceId) : false,
+        isAgentProject: workspaceStorageId ? agentNameById.has(workspaceStorageId) : false,
       });
     }
 
@@ -709,10 +817,11 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
     // session would balloon the heartbeat payload and the SQLite scan time.
     const withMessages = top.slice(0, MAX_SESSIONS_WITH_MESSAGES);
     for (const s of withMessages) {
-      const msgs = readComposerBubbles(sqlite.DatabaseSync, dbPath, s.id);
+      const composerId = s.composerId ?? s.id;
+      const msgs = readComposerMessages(composerId);
       if (msgs.length > 0) {
         s.messages = msgs;
-        if (typeof s.messageCount !== 'number') s.messageCount = msgs.length;
+        s.messageCount = msgs.length;
       }
       if (Date.now() - started > SESSION_DB_TIMEOUT_MS) break;
     }
