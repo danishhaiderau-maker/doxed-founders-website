@@ -26,8 +26,14 @@ export interface BridgeWorkspace {
 export interface BridgeSession {
   /** Session ID from the IDE */
   id: string;
+  /** Cursor composer UUID when ideProvider is cursor (same as id for SQLite-backed sessions) */
+  composerId?: string;
   /** Workspace this session belongs to */
   workspaceId?: string;
+  /** Cursor workspaceStorage UUID (maps to workspaceStorage/<id>/ on disk) */
+  workspaceStorageId?: string;
+  /** Absolute local folder path for the workspace (used to focus Cursor on dispatch) */
+  folderPath?: string;
   /** Session title (e.g., "Fix mobile layout") */
   title: string;
   /** One-line subtitle summarizing the session (e.g., "Edited 6 files, +115 -15") */
@@ -169,8 +175,8 @@ export const DEFAULT_CAPABILITIES: BridgeCapabilityReport = {
  */
 export const CURSOR_CAPABILITIES: BridgeCapabilityReport = {
   discoverWorkspaces: true, // via desktop bridge taskLabel
-  listRecentSessions: false, // not yet — needs Cursor SDK
-  resumeSession: false, // not yet — needs Cursor SDK
+  listRecentSessions: true, // via Founder Node state.vscdb discovery
+  resumeSession: true, // via workspace composer focus + dispatch
   sendPrompt: true, // via cloud dispatch
   streamEvents: true, // via SSE
   getGitState: true, // via desktop bridge
