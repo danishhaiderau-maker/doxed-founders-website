@@ -634,25 +634,32 @@ function collectSubagentComposerIds(
   return ids;
 }
 
-/** True for composers Cursor shows as top-level chat tabs in the sidebar. */
+/**
+ * True for composers Cursor shows as top-level chats in the Agents sidebar
+ * (Today / Yesterday / …). Subagents, Best-of-N workers, and glass child
+ * agents are never listed there — only independent composer heads.
+ */
 function isTopLevelComposerHeader(c: ComposerHead, subagentIds: Set<string>): boolean {
   if (!c.composerId || !c.name) return false;
   if (c.isArchived || c.isDraft) return false;
-  if (c.subagentInfo?.parentComposerId) return false;
+  // Any subagentInfo means this is a worker/subtopic, not a sidebar chat.
+  if (c.subagentInfo?.parentComposerId || c.subagentInfo?.rootParentConversationId) {
+    return false;
+  }
+  if (c.subagentInfo?.subagentTypeName || typeof c.subagentInfo?.subagentType === 'number') {
+    return false;
+  }
   if (c.isBestOfNSubcomposer) return false;
   if (c.glassMetaParentAgent) return false;
   if (subagentIds.has(c.composerId)) return false;
+  // hasBeenInSidebar is authoritative when present; older Cursor builds omit it.
+  if (c.hasBeenInSidebar === false) return false;
   return true;
-}
-
-function parentComposerIdFromHeader(c: ComposerHead): string | undefined {
-  return c.subagentInfo?.parentComposerId?.trim() || undefined;
 }
 
 function buildSessionFromHeader(
   c: ComposerHead,
   agentNameById: Map<string, string>,
-  parentComposerId?: string,
 ): BridgeSession | null {
   if (!c.composerId || !c.name) return null;
   const lastActiveAt = isoFromEpochMs(c.lastUpdatedAt) ?? isoFromEpochMs(c.createdAt);
@@ -683,7 +690,6 @@ function buildSessionFromHeader(
     totalLinesRemoved: typeof c.totalLinesRemoved === 'number' ? c.totalLinesRemoved : undefined,
     filesChangedCount: typeof c.filesChangedCount === 'number' ? c.filesChangedCount : undefined,
     isAgentProject: workspaceStorageId ? agentNameById.has(workspaceStorageId) : false,
-    ...(parentComposerId ? { parentComposerId } : {}),
   };
 }
 
@@ -952,46 +958,12 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
       headers.allComposers,
     );
 
+    // Only top-level Agents-sidebar chats — never subagents/workers/transcripts.
     const topLevel: BridgeSession[] = [];
-    const subagentsByParent = new Map<string, BridgeSession[]>();
-
     for (const c of headers.allComposers) {
-      const parentId = parentComposerIdFromHeader(c);
-      if (parentId && c.composerId) {
-        const sub = buildSessionFromHeader(c, agentNameById, parentId);
-        if (sub) {
-          const list = subagentsByParent.get(parentId) ?? [];
-          list.push(sub);
-          subagentsByParent.set(parentId, list);
-        }
-        continue;
-      }
       if (!isTopLevelComposerHeader(c, subagentIds)) continue;
       const session = buildSessionFromHeader(c, agentNameById);
       if (session) topLevel.push(session);
-    }
-
-    for (const s of topLevel) {
-      const children = subagentsByParent.get(s.id);
-      if (children && children.length > 0) {
-        children.sort(
-          (a, b) =>
-            new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
-        );
-        for (const sub of children.slice(0, 3)) {
-          if (Date.now() - started > SESSION_DB_TIMEOUT_MS) break;
-          const { messages: subMsgs, agentTyping: subTyping } = readComposerMessagesWithMeta(
-            sub.id,
-            20,
-          );
-          if (subMsgs.length > 0) {
-            sub.messages = subMsgs;
-            sub.messageCount = subMsgs.length;
-          }
-          if (subTyping) sub.agentTyping = true;
-        }
-        s.subagents = children.slice(0, 8);
-      }
     }
 
     topLevel.sort(
@@ -1000,10 +972,9 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
     );
     const top = topLevel.slice(0, MAX_SESSIONS);
 
-    // Attach the recent message thread to the most recent sessions so the
-    // dashboard can show what was actually said without an extra round trip.
-    // Only the top N sessions get messages — reading bubbles for every
-    // session would balloon the heartbeat payload and the SQLite scan time.
+    // Attach recent message threads so the dashboard can render live text.
+    // Prefer sessions that are actively generating so "Agent is typing…" and
+    // partial bubbles update on the fast session-sync loop.
     const withMessages = top.slice(0, MAX_SESSIONS_WITH_MESSAGES);
     for (const s of withMessages) {
       const composerId = s.composerId ?? s.id;
