@@ -45,7 +45,7 @@ type BrainOption = { key: string; label: string; hint: string };
 
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
-import { useVoiceInput } from '@/hooks/use-voice-input';
+import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
 const FOUNDER_DEN_ONBOARD_URL = '/founder-den?onboard=sovereign#founder-node-download';
@@ -274,13 +274,11 @@ export function MinimalDevWorkspace({
     }
   }, []);
 
-  const onVoiceTranscript = useCallback((text: string, isFinal: boolean) => {
-    if (!text.trim()) return;
-    setInput((prev) => {
-      const base = prev.trim();
-      if (isFinal) return base ? `${base} ${text.trim()}` : text.trim();
-      return base ? `${base} ${text.trim()}` : text.trim();
-    });
+  // Hook owns interim vs final segments — replace the textarea, never append.
+  const onVoiceTranscript = useCallback((text: string) => {
+    const cleaned = cleanTranscriptText(text);
+    if (!cleaned) return;
+    setInput(cleaned);
   }, []);
 
   const {
@@ -637,7 +635,7 @@ export function MinimalDevWorkspace({
   );
 
   const handleSend = useCallback(async () => {
-    const prompt = input.trim();
+    const prompt = cleanTranscriptText(input.trim());
     if ((!prompt && pendingAttachments.length === 0) || busy) return;
     if (phase !== 'idle') stopVoice();
     const attachNote =
@@ -665,38 +663,63 @@ export function MinimalDevWorkspace({
           }))
         : undefined,
     };
-    const assistantId = 'a-' + Date.now();
-    const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
-    setMessages((m) => [...m, userMsg, assistantMsg]);
     setInput('');
     setPendingAttachments([]);
     setBusy(true);
     setError(null);
 
-    // If a Cursor chat session is selected in the sidebar, also queue the
-    // prompt for relay to the local Cursor IDE via Founder Node. Fire and
-    // forget — the AI brain response below is the primary feedback; the
-    // dispatch just makes Cursor start working on it locally.
     const sessionForDispatch = selectedSessionId
       ? sessions.find((s) => s.id === selectedSessionId)
       : null;
-    const isCursorSession =
-      selectedSessionId &&
-      (sessionForDispatch?.ideProvider === 'cursor' || sessionForDispatch?.ideProvider == null);
-    if (accessToken && isCursorSession && sessionForDispatch) {
-      setDispatchNotice('Queued for local Cursor — Founder Node will type it in shortly.');
-      void dispatchToIdeSession(accessToken, sessionForDispatch.id, fullPrompt, 'cursor')
-        .then(() => {
-          setDispatchNotice('Sent to Cursor — waiting for agent response…');
-          pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
-          setTimeout(() => setDispatchNotice(null), 12000);
-        })
-        .catch((e: unknown) => {
-          const msg = e instanceof Error ? e.message : 'Failed to queue for Cursor';
-          setDispatchNotice(`Cursor relay failed: ${msg}`);
-          setTimeout(() => setDispatchNotice(null), 8000);
-        });
+    const dispatchToSelectedSession = Boolean(accessToken && sessionForDispatch);
+
+    // Cursor session selected → remote control only; no platform Brain / RULE_BASED fallback.
+    if (dispatchToSelectedSession && sessionForDispatch) {
+      setMessages((m) => [...m, userMsg]);
+      setDispatchNotice('Dispatching to Cursor…');
+      const ideProvider = sessionForDispatch.ideProvider || 'cursor';
+      try {
+        await dispatchToIdeSession(
+          accessToken,
+          sessionForDispatch.id,
+          fullPrompt,
+          ideProvider,
+        );
+        setDispatchNotice('Sent to Cursor — agent working…');
+        setMessages((m) => [
+          ...m,
+          {
+            id: 'a-' + Date.now(),
+            role: 'assistant',
+            text: `Sent to Cursor (${sessionForDispatch.title}). Watch the conversation above for the agent reply — no platform Brain required.`,
+            provider: 'cursor-dispatch',
+          },
+        ]);
+        pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
+        setTimeout(() => setDispatchNotice(null), 12_000);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
+        setDispatchNotice(`Cursor dispatch failed: ${msg}`);
+        setMessages((m) => [
+          ...m,
+          {
+            id: 'a-' + Date.now(),
+            role: 'assistant',
+            text: `Could not send to Cursor: ${msg}. Check Founder Node is online and try again.`,
+            provider: 'cursor-dispatch',
+          },
+        ]);
+        setError(msg);
+        setTimeout(() => setDispatchNotice(null), 8000);
+      } finally {
+        setBusy(false);
+      }
+      return;
     }
+
+    const assistantId = 'a-' + Date.now();
+    const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
+    setMessages((m) => [...m, userMsg, assistantMsg]);
 
     let firstTokenSeen = false;
     let providerLabel = selectedBrain;

@@ -270,7 +270,7 @@ export function FounderCopilotChat({
   );
 
   const onTranscript = useCallback((text: string) => {
-    setPrompt(text);
+    setPrompt(text.trim());
   }, []);
   const {
     listening,
