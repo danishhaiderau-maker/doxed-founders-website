@@ -377,9 +377,14 @@ export class IdeBridgeService {
         }): Promise<PendingIdeDispatchRow[]>;
         findFirst(args: {
           where: Record<string, unknown>;
+          orderBy?: Record<string, unknown>;
           select: Record<string, true>;
         }): Promise<PendingIdeDispatchRow | null>;
         update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<unknown>;
+        updateMany(args: {
+          where: Record<string, unknown>;
+          data: Record<string, unknown>;
+        }): Promise<{ count: number }>;
       };
     }).pendingIdeDispatch;
   }
@@ -392,6 +397,22 @@ export class IdeBridgeService {
   ) {
     const trimmed = prompt?.trim();
     if (!trimmed) throw new Error('Prompt required');
+
+    // One row per user action — ignore duplicate POSTs within 15s even after claim.
+    const duplicate = (await this.dispatchModel.findFirst({
+      where: {
+        userId,
+        sessionId,
+        prompt: trimmed,
+        createdAt: { gte: new Date(Date.now() - 15_000) },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, status: true },
+    })) as { id: string; status: string } | null;
+    if (duplicate) {
+      return { id: duplicate.id, status: duplicate.status };
+    }
+
     return this.dispatchModel.create({
       data: {
         userId,
@@ -417,9 +438,8 @@ export class IdeBridgeService {
   }
 
   /**
-   * Mark a dispatch as claimed by a Founder Node. Atomically flips PENDING →
-   * DISPATCHED only if the row still belongs to this user and is PENDING,
-   * returning the claimed row (or null if another node already claimed it).
+   * Atomically claim a dispatch for execution. Flips PENDING → DISPATCHING
+   * only when the row is still pending for this user (compare-and-swap).
    */
   async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
     const existing = await this.dispatchModel.findFirst({
@@ -427,16 +447,17 @@ export class IdeBridgeService {
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
     });
     if (!existing) return null;
-    await this.dispatchModel.update({
-      where: { id: dispatchId },
-      data: { status: 'DISPATCHED', dispatchedAt: new Date() },
+    const claimed = await this.dispatchModel.updateMany({
+      where: { id: dispatchId, userId, status: 'PENDING' },
+      data: { status: 'DISPATCHING' },
     });
+    if (claimed.count === 0) return null;
     return existing;
   }
 
   async markDispatched(id: string, result?: string): Promise<void> {
-    await this.dispatchModel.update({
-      where: { id },
+    await this.dispatchModel.updateMany({
+      where: { id, status: { in: ['PENDING', 'DISPATCHING'] } },
       data: {
         status: 'DISPATCHED',
         dispatchedAt: new Date(),

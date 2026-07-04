@@ -26,9 +26,13 @@ import { throwIfFounderNodeAuthResponse } from './sync-client';
  *   5. Reports the result back to the API.
  */
 
-const MAX_DISPATCHES_PER_CYCLE = 3;
+const MAX_DISPATCHES_PER_CYCLE = 1;
 const CURSOR_FOCUS_WAIT_MS = 2500;
 const COMPOSER_TAB_SETTLE_MS = 900;
+const SESSION_DISPATCH_COOLDOWN_MS = 8_000;
+
+let dispatchCycleInFlight = false;
+const lastDispatchBySession = new Map<string, number>();
 
 export type PendingDispatch = {
   id: string;
@@ -58,6 +62,29 @@ export async function fetchPendingDispatches(
   }
   const body = (await res.json().catch(() => null)) as PendingDispatch[] | null;
   if (!Array.isArray(body)) return [];
+  return body;
+}
+
+/** Atomically claim a dispatch row before executing — returns null if already claimed. */
+export async function claimPendingDispatch(
+  apiBaseUrl: string,
+  nodeId: string,
+  nodeToken: string,
+  dispatchId: string,
+): Promise<PendingDispatch | null> {
+  const res = await fetch(apiBase(apiBaseUrl, `/api/founder-node/dispatch/${dispatchId}/claim`), {
+    method: 'POST',
+    headers: { Authorization: founderNodeAuthHeader(nodeId, nodeToken) },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throwIfFounderNodeAuthResponse(res.status, text);
+    console.warn(`Dispatch claim failed (${res.status}): ${text.slice(0, 200)}`);
+    return null;
+  }
+  const body = (await res.json().catch(() => null)) as PendingDispatch | null;
+  if (!body?.id) return null;
   return body;
 }
 
@@ -300,22 +327,43 @@ export async function executeCursorDispatch(
 }
 
 /**
- * Pull all pending dispatches for this node and execute them serially.
- * Called from the main sync loop.
+ * Pull pending dispatches, claim each atomically, and execute at most one per
+ * cycle so overlapping sync loops cannot paste the same prompt multiple times.
  */
 export async function processPendingDispatches(vaultRoot: string): Promise<void> {
+  if (dispatchCycleInFlight) return;
   const config = readNodeConfig(vaultRoot);
   if (!config) return;
 
-  let dispatches: PendingDispatch[];
+  dispatchCycleInFlight = true;
   try {
-    dispatches = await fetchPendingDispatches(config.apiBaseUrl, config.nodeId, config.nodeToken);
-  } catch (err) {
-    console.warn('Pending dispatch fetch failed:', err);
-    return;
-  }
+    let dispatches: PendingDispatch[];
+    try {
+      dispatches = await fetchPendingDispatches(config.apiBaseUrl, config.nodeId, config.nodeToken);
+    } catch (err) {
+      console.warn('Pending dispatch fetch failed:', err);
+      return;
+    }
 
-  for (let i = 0; i < Math.min(dispatches.length, MAX_DISPATCHES_PER_CYCLE); i += 1) {
-    await executeCursorDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, dispatches[i]);
+    for (let i = 0; i < Math.min(dispatches.length, MAX_DISPATCHES_PER_CYCLE); i += 1) {
+      const candidate = dispatches[i]!;
+      const lastAt = lastDispatchBySession.get(candidate.sessionId) ?? 0;
+      if (Date.now() - lastAt < SESSION_DISPATCH_COOLDOWN_MS) {
+        continue;
+      }
+
+      const claimed = await claimPendingDispatch(
+        config.apiBaseUrl,
+        config.nodeId,
+        config.nodeToken,
+        candidate.id,
+      );
+      if (!claimed) continue;
+
+      lastDispatchBySession.set(claimed.sessionId, Date.now());
+      await executeCursorDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, claimed);
+    }
+  } finally {
+    dispatchCycleInFlight = false;
   }
 }
