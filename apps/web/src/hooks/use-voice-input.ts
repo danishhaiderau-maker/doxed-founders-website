@@ -33,6 +33,45 @@ const MAX_RECOGNITION_RESTARTS = 24;
 const RESTART_DELAY_MS = 350;
 const NETWORK_RETRY_BASE_MS = 1200;
 const MAX_NETWORK_RETRIES = 12;
+/** Guard against runaway interim/final duplication in the textarea. */
+export const MAX_VOICE_TRANSCRIPT_LENGTH = 12_000;
+
+/** Collapse cumulative STT duplication (same phrase repeated with growing prefixes). */
+export function cleanTranscriptText(text: string): string {
+  let t = text.trim().replace(/\s+/g, ' ');
+  if (!t) return t;
+  if (t.length > MAX_VOICE_TRANSCRIPT_LENGTH) {
+    t = t.slice(0, MAX_VOICE_TRANSCRIPT_LENGTH).trim();
+  }
+  const words = t.split(' ');
+  if (words.length < 8) return t;
+
+  // Drop consecutive duplicate word runs (e.g. "uh uh uh" → "uh").
+  const dedupedWords: string[] = [];
+  for (const w of words) {
+    if (dedupedWords.length === 0 || dedupedWords[dedupedWords.length - 1] !== w) {
+      dedupedWords.push(w);
+    }
+  }
+  t = dedupedWords.join(' ');
+
+  // If the string is prefix + space + prefix + … keep the longest trailing segment.
+  for (let len = Math.min(Math.floor(t.length / 2), 240); len >= 12; len--) {
+    const prefix = t.slice(0, len).trimEnd();
+    if (!prefix) continue;
+    const rest = t.slice(len).trimStart();
+    if (rest.startsWith(prefix)) {
+      let candidate = t;
+      while (candidate.length > prefix.length) {
+        const tail = candidate.slice(prefix.length).trimStart();
+        if (tail.startsWith(prefix)) candidate = tail;
+        else break;
+      }
+      return candidate.trim() || t;
+    }
+  }
+  return t;
+}
 
 function getSpeechRecognition(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
@@ -216,10 +255,13 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
         else interim += part;
       }
       if (finalChunk) {
-        transcriptBaseRef.current = `${transcriptBaseRef.current} ${finalChunk}`.trim();
+        transcriptBaseRef.current = cleanTranscriptText(
+          `${transcriptBaseRef.current} ${finalChunk}`.trim(),
+        );
         onTranscriptRef.current(transcriptBaseRef.current, true);
       } else if (interim) {
-        onTranscriptRef.current(`${transcriptBaseRef.current} ${interim}`.trim(), false);
+        const preview = cleanTranscriptText(`${transcriptBaseRef.current} ${interim}`.trim());
+        onTranscriptRef.current(preview, false);
       }
     };
 
@@ -271,7 +313,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const start = useCallback(
     (existingText = '') => {
       setVoiceError(null);
-      transcriptBaseRef.current = existingText.trim();
+      transcriptBaseRef.current = cleanTranscriptText(existingText);
       wantListeningRef.current = true;
       restartCountRef.current = 0;
       networkRetryRef.current = 0;
