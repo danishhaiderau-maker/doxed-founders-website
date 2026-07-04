@@ -10,6 +10,7 @@ from combo_pathway_config import (
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
@@ -27,8 +28,17 @@ RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
 RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
+# Default analyzer/dashboard views — live research stack only (historical CSV preserved).
+DASHBOARD_PRIMARY_LANES = (
+    COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+    RESEARCH_LANE_AI_SCAN,
+)
+
 LIVE_PATHWAY_TILE_ORDER = (
     RESEARCH_CANDIDATE_LANE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     COMPARISON_BENCHMARK_LANE,
 )
 
@@ -53,13 +63,15 @@ PATHWAY_SHADOW_COLLECTING_ENABLED = True
 
 ROSTER_PHASE = "genome-architecture-v1-2026-06-23"
 ROSTER_NOTES = (
-    "Live: COMBO_604 research candidate + CONTINUOUS benchmark. "
+    "Live: AI60_SP3 Virtual Chase + A160 V2 independent paper + CONTINUOUS benchmark. "
+    "V2 uses own prompt/AI clock/trade IDs — CONTINUOUS unaffected. "
     "Retired from live orders: COMBO_65, experimental tiles, direct combos. "
     "Shadow collecting ON for legacy lanes (virtual sim, no orders)."
 )
 
 ANALYZER_COMPARE_LANES = (
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
@@ -73,3 +85,17 @@ ANALYZER_COMPARE_LANES = (
     RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_AI_SCAN,
 ) + tuple(SHADOW_COLLECTING_LANES)
+
+
+def is_ai_focused_lane(lane: str) -> bool:
+    """Primary dashboard filter: CONTINUOUS + AI60 + A160 V2 (+ AI_SCAN).
+
+    Legacy COMBO/EDGE/CHASE/shadow-collecting lanes stay in CSV and full reports;
+    default UI hides them (?all=1 to expand).
+    """
+    u = str(lane or "").upper().strip()
+    return u in DASHBOARD_PRIMARY_LANES
+
+
+# Back-compat alias used by older dashboard imports.
+DASHBOARD_PRIMARY_LANES_FILTERED = DASHBOARD_PRIMARY_LANES

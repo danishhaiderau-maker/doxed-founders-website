@@ -25,6 +25,7 @@ from combo_pathway_config import (
     combo_lane_matches,
     is_ai_scan_lane,
     is_combo_execution_lane,
+    is_independent_ai_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -221,7 +222,20 @@ def _sim_lane_orders_allowed(
         return False
     if is_ai_scan_lane(lane):
         return False
+    try:
+        from combo_pathway_config import is_shadow_only_lane
+        if is_shadow_only_lane(lane):
+            return False
+    except ImportError:
+        pass
     if lane in COMBO_LANE_SPECS:
+        spec = COMBO_LANE_SPECS.get(lane) or {}
+        if spec.get("is_shadow_only"):
+            return False
+        # Only order-capable combo execution lanes may return True.
+        from combo_pathway_config import COMBO_EXECUTION_LANES
+        if lane not in COMBO_EXECUTION_LANES:
+            return False
         return bool(enabled_map.get(lane, True))
     if is_experimental_execution_lane(lane):
         return bool(enabled_map.get(lane, True))
@@ -239,9 +253,14 @@ def _sim_should_invoke_ai(enabled_map: dict, continuous_enabled: bool) -> bool:
 
 
 def _sim_spawn_targets(enabled_map: dict, ai: dict, direction: str, spread: int) -> list:
-    """Which combo lanes would receive spawn_combo_lanes_from_ai_scan."""
+    """Which combo lanes would receive spawn_combo_lanes_from_ai_scan.
+
+    Independent-AI lanes (A160 V2) are excluded — they never inherit AI_SCAN decisions.
+    """
     out = []
     for lane in COMBO_EXECUTION_LANES:
+        if is_independent_ai_lane(lane):
+            continue
         if not enabled_map.get(lane, True):
             continue
         if combo_lane_matches(lane, ai, direction, spread):
@@ -290,11 +309,18 @@ def run_ai_scan_independence_self_test(retired_status: dict = None) -> dict:
             tile_orders,
             f"orders={tile_orders}",
         )
-        add(
-            f"only {tile} ON → APPROVE fans out to enabled matching tile",
-            tile in spawn and len(spawn) == 1,
-            f"spawn_targets={spawn}",
-        )
+        if is_independent_ai_lane(tile):
+            add(
+                f"only {tile} ON → independent AI (no AI_SCAN fan-out)",
+                tile not in spawn and len(spawn) == 0,
+                f"spawn_targets={spawn} (own prompt/timer)",
+            )
+        else:
+            add(
+                f"only {tile} ON → APPROVE fans out to enabled matching tile",
+                tile in spawn and len(spawn) == 1,
+                f"spawn_targets={spawn}",
+            )
         add(
             f"invariant: {tile} ON ⇒ AI pipeline ON (cannot have AI_SCAN OFF)",
             not (only[tile] and not ai_scan_on),
@@ -400,6 +426,12 @@ def run_ai_scan_role_validation() -> dict:
         "check": "AI_SCAN never appears in simulated spawn targets",
         "passed": RESEARCH_LANE_AI_SCAN not in sim_spawn,
         "detail": f"spawn_targets={sim_spawn}",
+    })
+    independent_in_spawn = [ln for ln in sim_spawn if is_independent_ai_lane(ln)]
+    checks.append({
+        "check": "independent-AI lanes never inherit AI_SCAN spawn",
+        "passed": len(independent_in_spawn) == 0,
+        "detail": f"independent_in_spawn={independent_in_spawn}",
     })
 
     passed = all(c["passed"] for c in checks)

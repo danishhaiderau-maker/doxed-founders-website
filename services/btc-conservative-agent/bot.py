@@ -57,6 +57,7 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
@@ -70,9 +71,29 @@ from combo_pathway_config import (
     is_chase_3plus_entry_lane,
     is_combo_execution_lane,
     is_immediate_entry_lane,
+    is_independent_ai_lane,
     is_research_candidate_lane,
+    is_shadow_only_lane,
     get_lane_ladder_override,
     is_virtual_chase_entry_lane,
+)
+from a160_v2_research import (
+    V2_AI_DECISION_LOG_FILE,
+    V2_AI_INPUT_LOG_FILE,
+    V2_AI_OFFSET_FROM_MAIN_SEC,
+    V2_CHECKER_LOG_FILE,
+    V2_LANE,
+    V2_MIN_SIGNAL_AGE_SEC,
+    V2_PROMPT_ID,
+    V2_RESEARCH_AI_COOLDOWN_SEC,
+    V2_SHADOW_OUTCOME_FILE,
+    build_v2_prompt,
+    checked_to_v2_ai,
+    evaluate_a160_context_chase_v2_checker,
+    load_v2_shadow_metrics,
+    parse_v2_structured_audit,
+    v2_research_ai_enabled_env,
+    v2_wipe_files,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -185,6 +206,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -249,6 +271,7 @@ _lane_locks = {
     RESEARCH_LANE_COMBO_604_SP4_CHASE: threading.Lock(),
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: threading.Lock(),
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: threading.Lock(),
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: threading.Lock(),
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
     RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
@@ -2164,6 +2187,8 @@ def lane_orders_allowed(lane: str = None) -> bool:
     lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
     if is_ai_scan_lane(lane):
         return False
+    if is_shadow_only_lane(lane):
+        return False
     if lane_blocks_live_orders(lane):
         return False
     return is_research_lane_enabled(lane)
@@ -2246,6 +2271,8 @@ def lane_blocks_live_orders(lane: str) -> bool:
     lane = str(lane or "").upper()
     if lane == RESEARCH_LANE_CONTINUOUS:
         return False
+    if is_shadow_only_lane(lane):
+        return True
     status = get_pathway_lane_status(lane)
     if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
         return True
@@ -5844,6 +5871,8 @@ state = {
     "last_event_ts": 0.0,
     "ws_retry": 1,
     "last_ai_call_ts": 0.0,
+    "v2_last_ai_call_ts": 0.0,
+    "v2_ai_call_ts_hour": [],
     "bootstrap_done": False,
     "prev_ai_ctx": {},
     "ai_history_updated": 0.0,
@@ -10313,7 +10342,11 @@ def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str):
 
 
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
-    """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders)."""
+    """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
+
+    Independent-AI lanes (A160 V2) are excluded — they never inherit AI_SCAN / CONTINUOUS
+    decisions; they run their own prompt on a phase-shifted timer.
+    """
     if not is_ai_scan_lane(source_lane) or ai.get("decision") != "APPROVE":
         return
     if not is_research_data_collection():
@@ -10327,6 +10360,9 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             final_direction = "LONG"
     spread = int(compute_directional_spread(final_direction, ai))
     for lane in COMBO_EXECUTION_LANES:
+        # Guard: V2 must not spawn from AI_SCAN (own prompt + own decision only).
+        if is_independent_ai_lane(lane):
+            continue
         if not combo_lane_matches(lane, ai, final_direction, spread):
             continue
         _spawn_combo_lane(
@@ -10615,6 +10651,472 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         "pre_ai": copy.deepcopy(ai),
         "pre_ctx": spawn_ctx,
     })
+
+
+def _v2_benchmark_safety_ok(context: str, trade_id: str = None) -> bool:
+    """Prove V2 cannot alter CONTINUOUS decisions / shared AI cooldown / live exchange.
+
+    Returns True when safe to continue V2 path. Aborts only on invariant violations.
+    V2 IS order-capable for independent paper limits (same pattern as AI60 tile).
+    """
+    # CONTINUOUS prompt / AI_SCAN result must never be written by V2 (enforced by not
+    # calling evaluate_signal_with_ai / reserve_ai_cooldown_slot for V2).
+    if not is_independent_ai_lane(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2):
+        logger.critical(
+            f"[V2_GUARD] CRITICAL V2 not marked independent_ai context={context} "
+            f"trade_id={trade_id} — aborting [PIPELINE ENFORCEMENT]"
+        )
+        return False
+    # Never allow V2 to ride Bitfinex live / live_armed exchange path.
+    if state.get("live_armed") and state.get("bitfinex_live_enabled"):
+        logger.warning(
+            f"[V2_GUARD] live_armed+bitfinex_live — V2 paper path still allowed but "
+            f"must not submit exchange orders context={context} [PIPELINE ENFORCEMENT]"
+        )
+    return True
+
+
+def _v2_research_collection_active() -> bool:
+    """V2 AI + checker + shadow sim — runs regardless of tile ON/OFF (tile gates orders only)."""
+    if not v2_research_ai_enabled_env():
+        return False
+    if not is_research_data_collection():
+        return False
+    return True
+
+
+def _v2_tile_orders_enabled() -> bool:
+    """Tile ON → independent paper limits on a160v2-* (Live Copy may mirror). Tile OFF → shadow sim only."""
+    return is_research_lane_enabled(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
+
+
+def _v2_reserve_ai_slot() -> tuple:
+    """Phase-shifted V2 AI — never touches last_ai_call_ts / CONTINUOUS cadence.
+
+    Rules (only anti-spam):
+    - ≥ V2_AI_OFFSET_FROM_MAIN_SEC (90s) after last main AI call (last_ai_call_ts)
+    - ≥ V2_RESEARCH_AI_COOLDOWN_SEC (~180s) since v2_last_ai_call_ts
+    - No hourly budget / max-calls-per-hour
+    - Never concurrent with AI_SCAN (main last_ai_call_ts is set before AI_SCAN API call)
+    """
+    now = time.time()
+    with state_lock:
+        # Refuse if AI_SCAN pipeline is actively running (concurrent protection).
+        stages = state.get("lane_pipeline_stage") or {}
+        if stages.get(RESEARCH_LANE_AI_SCAN) == "RUNNING":
+            return False, "V2_AI_SCAN_RUNNING"
+        main_last = float(state.get("last_ai_call_ts") or 0)
+        if main_last <= 0:
+            return False, "V2_WAIT_MAIN_AI"
+        since_main = now - main_last
+        if since_main < V2_AI_OFFSET_FROM_MAIN_SEC:
+            remain = int(V2_AI_OFFSET_FROM_MAIN_SEC - since_main)
+            return False, f"V2_PHASE_OFFSET_{remain}s"
+        v2_last = float(state.get("v2_last_ai_call_ts") or 0)
+        if v2_last and (now - v2_last) < V2_RESEARCH_AI_COOLDOWN_SEC:
+            remain = int(V2_RESEARCH_AI_COOLDOWN_SEC - (now - v2_last))
+            return False, f"V2_COOLDOWN_{remain}s"
+        # Only update V2 clock — NEVER last_ai_call_ts (CONTINUOUS / AI_SCAN unchanged).
+        state["v2_last_ai_call_ts"] = now
+    return True, "OK"
+
+
+def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, source_ai=None):
+    """Independent V2 DeepSeek call — never updates CONTINUOUS / last_ai_call_ts.
+
+    Uses V2 prompt only (tmp_ai_prompt_balanced_direction_v1.md). Does not call
+    evaluate_signal_with_ai or touch AI_PROMPT_TEMPLATE / RESEARCH_AI_PROMPT_ADDENDUM.
+    Tile OFF still runs AI + checker + shadow sim; only paper limits are gated by the tile toggle.
+    """
+    if not _v2_research_collection_active():
+        return None
+    orders_on = _v2_tile_orders_enabled()
+    if not _v2_benchmark_safety_ok("evaluate_signal_with_v2_research_ai", (raw_context or {}).get("trade_id")):
+        return None
+    try:
+        ctx = copy.deepcopy(raw_context or {})
+        if not ctx.get("ai_input_upgrade"):
+            ctx = enrich_ai_context_upgrade(ctx)
+        ctx = sanitize_ai_inputs(ctx)
+        ok, reason = validate_ai_features(ctx)
+        if not ok:
+            logger.info(f"[V2_AI] feature validation failed: {reason} [PIPELINE ENFORCEMENT]")
+            return None
+        prompt = build_v2_prompt(ctx)
+        temperature = research_ai_temperature()
+        text, latency_ms = call_deepseek_api(
+            [{"role": "user", "content": prompt}], temperature=temperature,
+        )
+        # Legacy parser for Direction/Win/Decision lines — do not modify parse_ai_response_fields.
+        parsed = parse_ai_response_fields(text)
+        audit = parse_v2_structured_audit(text)
+        factors = parsed.get("factors") or {}
+        v2_ai = {
+            "win_prob": parsed.get("win_prob"),
+            "direction": parsed.get("direction"),
+            "decision": parsed.get("decision"),
+            "override": parsed.get("override"),
+            "comment": text,
+            "ai_error": False,
+            "factors": factors,
+            "bull_score": factors.get("bull_score", 0),
+            "bear_score": factors.get("bear_score", 0),
+            "long_score": factors.get("long_score", 0),
+            "short_score": factors.get("short_score", 0),
+            "preferred_direction": factors.get("preferred_direction"),
+            "source": "V2_FRESH",
+            "approved": False,
+            "trade_id": ctx.get("trade_id"),
+            "latency_ms": latency_ms,
+            "research_lane": RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+            "shadow_only": not orders_on,
+            "independent_paper_orders": orders_on,
+            "prompt_id": V2_PROMPT_ID,
+            "structured_audit": audit,
+            "v2_parse_ok": bool(audit.get("parse_ok")),
+            "json_blob": parsed.get("json_blob"),
+        }
+        checked = evaluate_a160_context_chase_v2_checker(
+            ctx, v2_ai, audit, edge_score=edge_score, features=features, source_ai=source_ai,
+            orders_enabled=orders_on,
+        )
+        checked["latency_ms"] = latency_ms
+        checked["raw_decision"] = v2_ai.get("decision")
+        checked["shadow_only"] = not orders_on
+        checked["orders_allowed"] = bool(checked.get("accepted") and orders_on)
+        _log_v2_ai_input(ctx, source_ai, edge_score, shadow_only=not orders_on)
+        _log_v2_ai_decision(ctx, v2_ai, checked, latency_ms, shadow_only=not orders_on)
+        _log_v2_checker(ctx, checked, shadow_only=not orders_on)
+        logger.info(
+            f"[V2_AI] dir={checked.get('direction')} prob={checked.get('win_prob')} "
+            f"spread={checked.get('spread')} accepted={checked.get('accepted')} "
+            f"fails={checked.get('fail_reasons')} latency={latency_ms}ms "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return checked
+    except Exception as e:
+        logger.error(f"[V2_AI] crash: {e} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def _log_v2_ai_input(ctx, source_ai, edge_score, shadow_only: bool = False):
+    try:
+        row = {
+            "schema": "v2_ai_input_v1",
+            "ts": utc_iso(),
+            "prompt_id": V2_PROMPT_ID,
+            "lane": V2_LANE,
+            "source_trade_id": (ctx or {}).get("trade_id"),
+            "edge_score": round(float(edge_score or 0), 1),
+            "source_ai": {
+                "decision": (source_ai or {}).get("decision"),
+                "direction": (source_ai or {}).get("direction"),
+                "win_prob": (source_ai or {}).get("win_prob"),
+            },
+            "context_keys": sorted(list((ctx or {}).keys()))[:80],
+            "shadow_only": bool(shadow_only),
+            "independent_paper_orders": not bool(shadow_only),
+        }
+        _safe_append_jsonl(V2_AI_INPUT_LOG_FILE, row, label="V2_AI_INPUT")
+    except Exception as e:
+        logger.debug(f"[V2_AI_INPUT] log failed: {e}")
+
+
+def _log_v2_ai_decision(ctx, v2_ai, checked, latency_ms, shadow_only: bool = False):
+    try:
+        row = {
+            "schema": "v2_ai_decision_v1",
+            "ts": utc_iso(),
+            "prompt_id": V2_PROMPT_ID,
+            "lane": V2_LANE,
+            "source_trade_id": (ctx or {}).get("trade_id"),
+            "latency_ms": latency_ms,
+            "direction": (v2_ai or {}).get("direction"),
+            "win_prob": (v2_ai or {}).get("win_prob"),
+            "decision": (v2_ai or {}).get("decision"),
+            "v2_parse_ok": (v2_ai or {}).get("v2_parse_ok"),
+            "structured_audit": (v2_ai or {}).get("structured_audit"),
+            "checker_accepted": (checked or {}).get("accepted"),
+            "shadow_only": bool(shadow_only),
+            "independent_paper_orders": not bool(shadow_only),
+        }
+        _safe_append_jsonl(V2_AI_DECISION_LOG_FILE, row, label="V2_AI_DECISION")
+    except Exception as e:
+        logger.debug(f"[V2_AI_DECISION] log failed: {e}")
+
+
+def _log_v2_checker(ctx, checked, shadow_only: bool = False):
+    try:
+        row = {
+            "schema": "v2_checker_v1",
+            "ts": utc_iso(),
+            "prompt_id": V2_PROMPT_ID,
+            "lane": V2_LANE,
+            "source_trade_id": (ctx or {}).get("trade_id"),
+            "accepted": bool((checked or {}).get("accepted")),
+            "fail_reasons": (checked or {}).get("fail_reasons") or [],
+            "direction": (checked or {}).get("direction"),
+            "win_prob": (checked or {}).get("win_prob"),
+            "spread": (checked or {}).get("spread"),
+            "regime_read": (checked or {}).get("regime_read"),
+            "sr_bias_read": (checked or {}).get("sr_bias_read"),
+            "context_alignment": (checked or {}).get("context_alignment"),
+            "chase_target_min": (checked or {}).get("chase_target_min"),
+            "chase_target_max": (checked or {}).get("chase_target_max"),
+            "min_signal_age_sec": (checked or {}).get("min_signal_age_sec"),
+            "shadow_only": bool(shadow_only),
+            "orders_allowed": bool((checked or {}).get("orders_allowed")),
+            "independent_paper_orders": not bool(shadow_only),
+        }
+        _safe_append_jsonl(V2_CHECKER_LOG_FILE, row, label="V2_CHECKER")
+    except Exception as e:
+        logger.debug(f"[V2_CHECKER] log failed: {e}")
+
+
+def spawn_a160_v2_paper_order(ctx, checked, edge_score, features):
+    """Independent paper limits on V2 lane — same virtual-chase path as AI60_SP3.
+
+    Tile OFF → no process_signal / no a160v2-* on shared book (use start_a160_v2_shadow_replay).
+    """
+    if not checked or not checked.get("accepted"):
+        return
+    if not _v2_benchmark_safety_ok("spawn_a160_v2_paper_order", (ctx or {}).get("trade_id")):
+        return
+    target_lane = RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2
+    if not is_research_data_collection():
+        return
+    if not _v2_tile_orders_enabled():
+        logger.info(f"[V2] tile OFF — skip paper spawn (shadow sim only) [PIPELINE ENFORCEMENT]")
+        return
+    if not lane_orders_allowed(target_lane):
+        logger.info(f"[V2] orders not allowed — skip spawn [PIPELINE ENFORCEMENT]")
+        return
+    v2_ai = checked_to_v2_ai(checked, latency_ms=int(checked.get("latency_ms") or 0))
+    spawn_ctx = copy.deepcopy(ctx or {})
+    spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
+    spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
+    spawn_ctx["v2_min_signal_age_sec"] = int(
+        checked.get("min_signal_age_sec") or V2_MIN_SIGNAL_AGE_SEC
+    )
+    spawn_ctx["prompt_id"] = V2_PROMPT_ID
+    v2_ai["trade_id"] = spawn_ctx["trade_id"]
+    logger.info(
+        f"[V2] independent paper spawn trade_id={spawn_ctx['trade_id']} "
+        f"dir={v2_ai.get('direction')} prob={v2_ai.get('win_prob')} "
+        f"spread={checked.get('spread')} min_age={spawn_ctx['v2_min_signal_age_sec']}s "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    process_signal({
+        "event_trigger": True,
+        "research_lane": target_lane,
+        "edge_trigger_reason": "V2_INDEPENDENT_AI",
+        "edge_score": round(float(edge_score or checked.get("edge_score") or 0), 1),
+        "price": nz(state.get("price")),
+        "timestamp": utc_iso(),
+        "features": features or {},
+        "skip_ai": True,
+        "pre_ai": v2_ai,
+        "pre_ctx": spawn_ctx,
+    })
+
+
+def start_a160_v2_shadow_replay(ctx, checked, edge_score, features, *, checker_reject: bool = False):
+    """Scenario C shadow replay — tile OFF accepts, or checker rejects (counterfactual metrics).
+
+    checker_reject=True: simulate would-have-been PnL when checker fails (e.g. WIN_PROB_LT_60).
+    Never places paper limits — orders remain gated by tile ON + checker accept.
+    """
+    if not checked:
+        return
+    if checker_reject:
+        if checked.get("accepted"):
+            return
+        fail_set = set(checked.get("fail_reasons") or [])
+        if fail_set & {"V2_PARSE_FAIL", "NO_DIRECTION"}:
+            return
+    elif not checked.get("accepted"):
+        return
+    if not _v2_benchmark_safety_ok("start_a160_v2_shadow_replay", (ctx or {}).get("trade_id")):
+        return
+    if not is_research_data_collection():
+        return
+    if not checker_reject:
+        if _v2_tile_orders_enabled():
+            logger.error(
+                "[V2_GUARD] start_a160_v2_shadow_replay while tile ON — abort [PIPELINE ENFORCEMENT]"
+            )
+            return
+        if lane_orders_allowed(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2):
+            logger.error(
+                "[V2_GUARD] orders allowed during shadow replay spawn — abort [PIPELINE ENFORCEMENT]"
+            )
+            return
+    direction = str(checked.get("direction") or "LONG").upper()
+    if state.get("invert_signal", False):
+        if direction == "LONG":
+            direction = "SHORT"
+        elif direction == "SHORT":
+            direction = "LONG"
+    price = float(nz(state.get("price")) or 0)
+    if price <= 0:
+        return
+    study_id = f"v2shadow-{uuid.uuid4().hex[:12]}"
+    min_age = int(checked.get("min_signal_age_sec") or V2_MIN_SIGNAL_AGE_SEC)
+    exit_cfg = get_exit_config_for_lane(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
+    collection_mode = "V2_CHECKER_REJECT" if checker_reject else "V2_SHADOW"
+    start_replay_buffer(
+        study_id,
+        price,
+        lane=f"shadow_v2_{RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2.lower()}",
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(FIXED_MARGIN_USDT),
+        pullback_pct=0.0,
+        early_fail_enabled=bool(state.get("early_fail_enabled", True)),
+        exit_config=exit_cfg,
+        ai_win_prob=checked.get("win_prob"),
+        edge_score=round(float(edge_score or checked.get("edge_score") or 0), 1),
+        research_lane=RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+        source_trade_id=(ctx or {}).get("trade_id"),
+        collection_mode=collection_mode,
+        v2_min_fill_age_sec=min_age,
+        v2_chase_target_min=checked.get("chase_target_min"),
+        v2_chase_target_max=checked.get("chase_target_max"),
+        prompt_id=V2_PROMPT_ID,
+        v2_checker_accepted=not checker_reject,
+        v2_fail_reasons=list(checked.get("fail_reasons") or []) if checker_reject else [],
+    )
+    append_replay_tick(study_id, price, None)
+    tag = "checker reject counterfactual" if checker_reject else "sim fill + Scenario C"
+    logger.info(
+        f"[V2_SHADOW] study_id={study_id} dir={direction} min_age={min_age}s "
+        f"prob={checked.get('win_prob')} spread={checked.get('spread')} "
+        f"mode={collection_mode} fails={checked.get('fail_reasons')} "
+        f"— {tag}, no paper limits [PIPELINE ENFORCEMENT]"
+    )
+
+
+def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
+    """Legacy shadow-replay finalizer (pre-orders era / LAB OFF-tile). Safe no-order path."""
+    if not _v2_benchmark_safety_ok("finalize_a160_v2_shadow_outcome", study_id):
+        close_replay_buffer(study_id)
+        return
+    min_age = float(buf.get("v2_min_fill_age_sec") or V2_MIN_SIGNAL_AGE_SEC)
+    ticks = sorted(buf.get("ticks") or [], key=lambda x: x.get("seq", 0))
+    fill_tick = None
+    for tick in ticks:
+        t = _buf_float(tick.get("t"), 0)
+        price = _buf_float(tick.get("price"), 0)
+        if t >= min_age and price > 0:
+            fill_tick = tick
+            break
+    buf_copy = {**buf, "ticks": list(ticks)}
+    if fill_tick is None:
+        outcome = {
+            "filled": False,
+            "exit_reason": "NO_FILL_AGE_GATE",
+            "net_pnl_usd": 0.0,
+            "fill_delay_sec": None,
+        }
+    else:
+        buf_copy["virtual_entry"] = _buf_float(fill_tick.get("price"), 0)
+        buf_copy["virtual_fill_t"] = _buf_float(fill_tick.get("t"), 0)
+        outcome = simulate_replay_outcome(buf_copy)
+    row = {
+        "schema": "v2_shadow_outcome_v1",
+        "ts": utc_iso(),
+        "study_id": study_id,
+        "trade_id": study_id,
+        "research_lane": RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+        "source_trade_id": buf.get("source_trade_id"),
+        "prompt_id": buf.get("prompt_id") or V2_PROMPT_ID,
+        "collection_mode": buf.get("collection_mode") or "V2_LAB",
+        "checker_accepted": bool(buf.get("v2_checker_accepted", True)),
+        "fail_reasons": buf.get("v2_fail_reasons") or [],
+        "executed": False,
+        "shadow_only": True,
+        "orders_allowed": False,
+        "direction": buf.get("direction"),
+        "ai_win_prob": buf.get("ai_win_prob"),
+        "edge_score": buf.get("edge_score"),
+        "min_fill_age_sec": min_age,
+        "chase_target_min": buf.get("v2_chase_target_min"),
+        "chase_target_max": buf.get("v2_chase_target_max"),
+        "exit_config": buf.get("exit_config"),
+        "bot_version": EXECUTION_FIX_VERSION,
+        **outcome,
+    }
+    _safe_append_jsonl(V2_SHADOW_OUTCOME_FILE, row, label="V2_SHADOW_OUTCOME")
+    logger.info(
+        f"[V2_LAB] finalize study_id={study_id} filled={outcome.get('filled')} "
+        f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    close_replay_buffer(study_id)
+
+
+def maybe_tick_a160_v2_research():
+    """Phase-shifted V2 AI tick — independent of AI_SCAN / CONTINUOUS order path.
+
+    Schedule: last_ai_call_ts + 90s, then every ~180s on v2_last_ai_call_ts.
+    Never concurrent with AI_SCAN. Never updates last_ai_call_ts.
+    On accept: paper orders when tile ON; shadow Scenario C replay when tile OFF.
+    """
+    if not _v2_research_collection_active():
+        return
+    if not _v2_benchmark_safety_ok("maybe_tick_a160_v2"):
+        return
+    if _lane_pipeline_running(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2):
+        return
+    if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
+        return
+    reserved, reason = _v2_reserve_ai_slot()
+    if not reserved:
+        return
+    try:
+        if not is_buffer_ready():
+            return
+        features = build_full_feature_snapshot()
+        if features is None:
+            return
+        edge_score = compute_edge_score(features)
+        buffers = {
+            "ret_1m": ret_1m_buffer,
+            "ret_5m": ret_5m_buffer,
+            "velocity": velocity_buffer,
+            "volume": volume_buffer,
+            "avg_volume": get_aggregated(volume_buffer),
+            "delta": delta_buffer,
+            "delta_change": delta_change_buffer,
+            "imbalance": imbalance_buffer,
+            "range": candle_range_buffer,
+            "wick_ratio": wick_ratio_buffer,
+            "body_ratio": body_ratio_buffer,
+        }
+        ctx = build_pure_ai_context(state, buffers)
+        if not ctx:
+            logger.info("[V2_AI] CTX_FAIL — skip tick [PIPELINE ENFORCEMENT]")
+            return
+        ctx["trade_id"] = f"v2scan-{uuid.uuid4().hex[:12]}"
+        logger.info(
+            f"[V2_AI] phase-shifted tick offset≥{V2_AI_OFFSET_FROM_MAIN_SEC}s "
+            f"cooldown={V2_RESEARCH_AI_COOLDOWN_SEC}s edge={edge_score:.1f} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        checked = evaluate_signal_with_v2_research_ai(
+            ctx, edge_score, features, source_ai=None,
+        )
+        if checked and checked.get("accepted"):
+            if _v2_tile_orders_enabled():
+                spawn_a160_v2_paper_order(ctx, checked, edge_score, features)
+            else:
+                start_a160_v2_shadow_replay(ctx, checked, edge_score, features)
+        elif checked:
+            start_a160_v2_shadow_replay(
+                ctx, checked, edge_score, features, checker_reject=True,
+            )
+    except Exception as e:
+        logger.error(f"[V2_AI] tick crash: {e} [PIPELINE ENFORCEMENT]")
 
 
 def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, features, source_lane: str):
@@ -11188,6 +11690,20 @@ def evaluate_dashboard_execution_gate(
 
     if not lane_orders_allowed(lane):
         return False, "LANE_DISABLED", False
+
+    # V2 entry gate: age ≥180s before limit submit (chase 3–5 via virtual chase).
+    # Does not affect CONTINUOUS or AI60_SP3.
+    if str(lane or "").upper() == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
+        min_age = float(
+            signal.get("v2_min_signal_age_sec")
+            or (signal.get("context") or {}).get("v2_min_signal_age_sec")
+            or V2_MIN_SIGNAL_AGE_SEC
+        )
+        age = _signal_age_sec(signal)
+        if age < min_age:
+            if stage == "promote":
+                return False, "V2_MIN_AGE_DEFER", True
+            return False, "V2_MIN_AGE_WAIT", False
 
     sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
     if sg_blocked:
@@ -13535,7 +14051,9 @@ def process_signal(event: dict):
                 ai["research_lane"] = research_lane
                 ai["research_model"] = research_lane_label(research_lane)
                 ai["source"] = "SPAWN"
-                if is_combo_execution_lane(research_lane):
+                if is_combo_execution_lane(research_lane) and not is_independent_ai_lane(research_lane):
+                    # AI_SCAN-inherited tiles only. Independent-AI lanes (V2) already
+                    # passed their own checker — never re-filter against AI_SCAN fingerprint.
                     spawn_dir = ai.get("direction")
                     if state.get("invert_signal", False):
                         if spawn_dir == "LONG":
@@ -13666,6 +14184,8 @@ def process_signal(event: dict):
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
+                    # V2 runs on its own phase-shifted timer (maybe_tick_a160_v2_research).
+                    # Never called here — must not share AI_SCAN timestamp or inherit decisions.
 
             if not ai:
                 enforce_log({"trade_id": ctx["trade_id"]}, "BLOCKED", "AI_FAIL")
@@ -13742,6 +14262,12 @@ def process_signal(event: dict):
             atomic_freeze_signal(signal, edge_score, pipeline_eff_thr)
             signal["ai_decision"] = ai.get("decision")
             signal["ai_win_prob"] = ai.get("win_prob")
+            # V2 age gate (≥180s) — carried from independent spawn pre_ctx.
+            if is_independent_ai_lane(research_lane):
+                signal["v2_min_signal_age_sec"] = int(
+                    (ctx or {}).get("v2_min_signal_age_sec") or V2_MIN_SIGNAL_AGE_SEC
+                )
+                signal["prompt_id"] = (ctx or {}).get("prompt_id") or V2_PROMPT_ID
             enforce_immutable(signal)
             ensure_signal_registered(signal)
             log_setup(signal)
@@ -14785,6 +15311,11 @@ def state_monitor_loop():
                     finalize_reversal_study(tid, buf_copy)
                 elif lane == "golden_stack_reject":
                     finalize_golden_stack_reject_study(tid, buf_copy)
+                elif (
+                    buf.get("research_lane") == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2
+                    or str(lane or "").startswith("shadow_v2_")
+                ):
+                    finalize_a160_v2_shadow_outcome(tid, buf_copy)
                 elif buf.get("research_lane") in SHADOW_COLLECTING_LANES or str(lane or "").startswith("shadow_collect_"):
                     finalize_shadow_lane_collecting(tid, buf_copy)
                 elif lane not in ("executed", "shadow_blocked"):
@@ -14829,6 +15360,9 @@ def state_monitor_loop():
                             })
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
+            # V2 phase-shifted AI (last_ai_call_ts + 90s, own ~180s cooldown).
+            # Never shares AI_SCAN call or CONTINUOUS last_ai_call_ts.
+            maybe_tick_a160_v2_research()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -15813,34 +16347,22 @@ _AI_RATE_LOG = _dd(deque)           # ip -> deque[timestamps] for AI-influencing
 _API_RATE_WINDOW_S = 60             # 1 minute
 _API_RATE_MAX_PER_IP = 60           # 60 general /api/ calls per minute per IP
 _AI_RATE_WINDOW_S = 3600            # 1 hour
-_AI_RATE_MAX_PER_IP = 10            # 10 AI-influencing POSTs per hour per IP
+_AI_RATE_MAX_PER_IP = 60            # remote/untrusted cap on AI-drain POSTs per hour per IP
 _AI_RATE_LOCK = threading.Lock()
 
-# Endpoints whose mutation causes the trading loop to call DeepSeek more often
-# (enabling continuous AI research, lowering thresholds, arming live, etc.).
-_AI_INFLUENCING_POST_PATHS = {
+# Endpoints whose mutation can increase DeepSeek call frequency (thresholds, continuous
+# AI toggles, live arm). Execution-only dashboard saves (pullback, max concurrent,
+# chase buckets, AI bands) are NOT capped here — they do not drain the AI key.
+_AI_DRAIN_POST_PATHS = {
     "/api/toggle_continuous_ai_research",
     "/api/toggle_continuous_ai_direct",
     "/api/toggle_research_lane",
-    "/api/toggle_profit_gates",
-    "/api/toggle_fresh_collection",
-    "/api/toggle_early_fail",
-    "/api/toggle_invert_signal",
-    "/api/toggle_duplicate_limit_block",
     "/api/set_threshold",
-    "/api/set_ai_bands",
     "/api/set_edge_threshold",
     "/api/set_edge_range",
-    "/api/set_pullback_threshold",
-    "/api/set_max_active_signals",
-    "/api/set_chase_buckets",
-    "/api/set_spread_gate",
-    "/api/spread-gate",
     "/api/live_arm",
     "/api/bitfinex_live",
     "/api/reset",
-    "/api/pause",
-    "/api/resume",
 }
 
 # Read-only GET endpoints that never mutate state and never trigger AI — safe to
@@ -15858,6 +16380,26 @@ def _client_ip() -> str:
     if xff:
         return xff.split(",")[0].strip()[:64]
     return (request.remote_addr or "unknown")[:64]
+
+
+def _is_local_operator(ip: str) -> bool:
+    """Home dashboard on :7002 — operator at the keyboard, not a remote attacker."""
+    if not ip or ip == "unknown":
+        return False
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return True
+    if ip.startswith("127.") or ip.startswith("::ffff:127."):
+        return True
+    return False
+
+
+def _trusted_dashboard_operator(ip: str) -> bool:
+    """Local operator or request carrying a valid BOT_ADMIN_TOKEN cookie/header."""
+    if _is_local_operator(ip):
+        return True
+    if _BOT_ADMIN_TOKEN and _admin_authed():
+        return True
+    return False
 
 
 def _rate_check(log: dict, key: str, window_s: int, limit: int) -> bool:
@@ -15891,7 +16433,13 @@ def _admin_authed_strict() -> bool:
     configured — strategy internals are scrubbed unless a valid token is
     presented. Used by /api/state and /debug_state to decide whether to
     return the full state or the sanitized public view.
+
+    Local operator on :7002 (127.0.0.1 / ::1) is always trusted — the home
+    showcase dashboard must render Pathway Lab tiles and controls without
+    requiring a token cookie on every refresh.
     """
+    if _is_local_operator(_client_ip()):
+        return True
     if not _BOT_ADMIN_TOKEN:
         return False
     if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
@@ -15934,12 +16482,13 @@ def _emergency_api_guard():
         resp.status_code = 401
         return resp
 
-    # Tighter cap on AI-influencing POSTs (10/hour/IP) even when authed.
-    if method == "POST" and path in _AI_INFLUENCING_POST_PATHS:
+    # Tighter cap on AI-drain POSTs for untrusted remote callers only.
+    if method == "POST" and path in _AI_DRAIN_POST_PATHS and not _trusted_dashboard_operator(ip):
         if not _rate_check(_AI_RATE_LOG, ip, _AI_RATE_WINDOW_S, _AI_RATE_MAX_PER_IP):
             resp = jsonify({
                 "error": "AI-influencing endpoint rate limit exceeded",
                 "limit": f"{_AI_RATE_MAX_PER_IP} per hour per IP",
+                "retry_after_s": _AI_RATE_WINDOW_S,
             })
             resp.status_code = 429
             resp.headers["Retry-After"] = str(_AI_RATE_WINDOW_S)
@@ -16127,6 +16676,7 @@ def research_wipe_file_paths():
         LANE_PNL_LEDGER_FILE, "research_session_index.json", CSV_FALLBACK_JSONL,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
+    paths.extend(v2_wipe_files())
     return paths
 
 
@@ -16140,6 +16690,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         GOLDEN_STACK_REJECTIONS_FILE, REVERSAL_STUDY_FILE, AI_REASON_RESEARCH_FILE,
         AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE, AI_INPUT_LOG_FILE, EDGE_CENSUS_FILE,
         LANE_OPPORTUNITY_CAPTURE_FILE, AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl",
+        V2_AI_INPUT_LOG_FILE, V2_AI_DECISION_LOG_FILE, V2_CHECKER_LOG_FILE, V2_SHADOW_OUTCOME_FILE,
     ]
     found = []
     for base in bases:
@@ -16387,7 +16938,7 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
         f"Thesis pause above: +{exit.get('thesis_pause_above_margin_pct')}% unreal",
         f"Time cap: {exit.get('fixed_time_exit')}",
         f"Margin: ${entry.get('margin_usd', shared['margin_usd']):.0f} · signal TTL {shared['signal_ttl_min']}m",
-        f"Post-AI: {shared['post_ai_gates']}",
+        f"Post-AI: {entry.get('post_ai_gates') or shared['post_ai_gates']}",
     ]
     if extra:
         lines.extend(extra)
@@ -16418,29 +16969,122 @@ def build_static_pathway_lane_specs() -> dict:
     lanes = []
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
         spec = COMBO_LANE_SPECS[lane_id]
+        shadow_only = bool(spec.get("is_shadow_only")) or is_shadow_only_lane(lane_id)
+        independent_ai = is_independent_ai_lane(lane_id)
         chase = spec.get("entry_mode") == "CHASE_3PLUS"
         virtual_chase = spec.get("entry_mode") == "VIRTUAL_CHASE"
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
-        ai_label = "60+" if virtual_chase else ("65+" if ai_lo >= 65 else "60-65")
+        ai_label = "60+" if (virtual_chase or ai_lo >= 60) else ("65+" if ai_lo >= 65 else "60-65")
         entry_mode_label = "Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")
-        trigger = f"AI {ai_label} + spread {spread_label} + {entry_mode_label}"
-        execution = (
-            "Chase 0 live · hide 1–2 · relive 3 · chase 6 +60s market + Scenario C"
-            if virtual_chase
-            else (
-                "AWAITING_CHASE_3PLUS then 25% chase + Scenario C"
-                if chase
-                else "Immediate AI limit + 25% chase + Scenario C"
+        if independent_ai:
+            trigger = (
+                "AI 60+ · Spread ≥3 · Context veto BULL+SHORT+LONG_PREF · "
+                "Chase 3–5 · Age ≥180s · V2 prompt"
             )
-        )
+            execution = (
+                "Independent paper limits · hide 1–2 · relive at chase 3 · age≥180s gate · "
+                "chase 6 +60s market · Scenario C (same path as AI60 tile)"
+            )
+        else:
+            trigger = f"AI {ai_label} + spread {spread_label} + {entry_mode_label}"
+            execution = (
+                "Chase 0 live · hide 1–2 · relive 3 · chase 6 +60s market + Scenario C"
+                if virtual_chase
+                else (
+                    "AWAITING_CHASE_3PLUS then 25% chase + Scenario C"
+                    if chase
+                    else "Immediate AI limit + 25% chase + Scenario C"
+                )
+            )
         is_candidate = bool(spec.get("is_research_candidate"))
         lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
         lane_promote = spec.get("promotion_criteria") or promote
         lane_kill = spec.get("kill_criteria") or kill
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
+        if independent_ai:
+            filter_chips = [
+                "AI 60+",
+                "Spread ≥3",
+                "Context veto",
+                "Chase 3–5",
+                "Age ≥180s",
+                "V2 prompt",
+                f"Ladder {lane_ladder_label}",
+            ]
+            hypothesis = spec.get("hypothesis") or (
+                "Independent V2 prompt + context veto improves EV vs AI60_SP3 and CONTINUOUS."
+            )
+            research_q = spec.get("research_question") or (
+                "Does A160 V2 beat CONTINUOUS and AI60_SP3 on EV/appr (same window)?"
+            )
+            strategy_extra = [
+                "Tile ON: ORDERS ENABLED — independent paper limits (a160v2-*; Live Copy may mirror)",
+                "Tile OFF: SHADOW SIM ONLY — AI + checker + simulated PnL; no limit orders (safe for live money)",
+                "CONTINUOUS benchmark unaffected — own prompt, own trade IDs (a160v2-*), own AI clock",
+                f"AI cadence: phase-shifted +{V2_AI_OFFSET_FROM_MAIN_SEC}s from main AI · "
+                f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap",
+                "Logs: v2_ai_input / v2_ai_decision / v2_checker / v2_shadow_outcome · trades_3factor when ON",
+                f"Independence: {shared['independence']}",
+            ]
+            entry_filters = {
+                "ai_probability_bucket": "60+",
+                "directional_spread_bucket": "≥3",
+                "entry_mode": "VIRTUAL_CHASE",
+                "context_veto": True,
+                "chase_target": "3-5",
+                "min_signal_age_sec": 180,
+                "prompt_id": V2_PROMPT_ID,
+            }
+            v2_ai_cadence = (
+                f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s from last_ai_call_ts · "
+                f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
+            )
+            v2_entry = {
+                "trigger": trigger,
+                "entry_path": "AI_DIRECT",
+                "fill_path": "AI_DIRECT_CHASE",
+                "ai_path": "Independent V2 DeepSeek (own prompt, phase-shifted from AI_SCAN)",
+                "ai_cadence": v2_ai_cadence,
+                "chase_detail": (
+                    "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
+                ),
+                "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                "margin_usd": ai_direct["margin_usd"],
+                "execution": execution,
+                "orders": "Independent paper limits on V2 lane (never Bitfinex live)",
+                "filters": entry_filters,
+            }
+        else:
+            filter_chips = [
+                f"AI {ai_label}",
+                f"Spread {spread_label}",
+                entry_mode_label,
+                "25% chase",
+                f"Ladder {lane_ladder_label}",
+            ] + (["Hide 1–2", "Market @6+60s"] if virtual_chase else [])
+            hypothesis = (
+                "Tradable at entry: AI band + directional spread only. "
+                "TYPE_B is classified after the trade from peak MFE."
+            )
+            research_q = f"Does {spec['label']} beat legacy lanes on EV/appr?"
+            strategy_extra = [f"Independence: {shared['independence']}"]
+            entry_filters = {
+                "ai_probability_bucket": ai_label,
+                "directional_spread_bucket": spread_label,
+                "entry_mode": spec["entry_mode"],
+            }
+            v2_entry = None
+        badge = RESEARCH_CANDIDATE_ROLE if is_candidate else ""
+        entry_block = v2_entry if independent_ai else {
+            "trigger": trigger,
+            **ai_direct,
+            "execution": execution,
+            "orders": None,
+            "filters": entry_filters,
+        }
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
@@ -16450,49 +17094,76 @@ def build_static_pathway_lane_specs() -> dict:
             "is_benchmark": False,
             "is_primary_production": False,
             "is_research_candidate": is_candidate,
-            "badge": RESEARCH_CANDIDATE_ROLE if is_candidate else "",
+            "is_shadow_only": shadow_only,
+            "is_independent_ai": independent_ai,
+            "badge": badge,
             "tile_number": tile_idx,
             "entry_mode_label": entry_mode_label,
-            "filter_chips": [
-                f"AI {ai_label}",
-                f"Spread {spread_label}",
-                entry_mode_label,
-                "25% chase",
-                f"Ladder {lane_ladder_label}",
-            ] + (["Hide 1–2", "Market @6+60s"] if virtual_chase else []),
+            "filter_chips": filter_chips,
             "toggle_key": "research_lane_enabled",
-            "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
-            "research_question": f"Does {spec['label']} beat legacy lanes on EV/appr?",
-            "entry": {
-                "trigger": trigger,
-                **ai_direct,
-                "execution": execution,
-                "filters": {
-                    "ai_probability_bucket": ai_label,
-                    "directional_spread_bucket": spread_label,
-                    "entry_mode": spec["entry_mode"],
-                },
-            },
+            "hypothesis": hypothesis,
+            "research_question": research_q,
+            "entry": entry_block,
             "exit": scenario_c,
             "exit_path": "Scenario C frozen — exit combo optimization next",
             "promotion_criteria": lane_promote,
             "kill_criteria": lane_kill,
-            "expected_advantage": "Historical winners: strong AI + spread ≥4 at entry",
-            "expected_risk": "TYPE_A drag if filters too loose — monitor exit leakage",
-            "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
-            "diff_vs_benchmark": [
-                f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
-                f"Filters: AI {ai_label} spread {spread_label}",
-                "Beat benchmark on EV/appr to promote",
-            ],
+            "expected_advantage": (
+                "Context-veto + chase timing + independent V2 prompt vs known weak pockets"
+                if independent_ai
+                else "Historical winners: strong AI + spread ≥4 at entry"
+            ),
+            "expected_risk": (
+                "Overfit to in-sample BULL/SHORT cells · parse drift"
+                if independent_ai
+                else "TYPE_A drag if filters too loose — monitor exit leakage"
+            ),
+            "benchmark_comparison": (
+                f"vs {COMPARISON_BENCHMARK_LANE} and AI60_SP3_VIRTUAL_CHASE (same window) · "
+                f"CONTINUOUS benchmark unaffected"
+                if independent_ai
+                else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
+            ),
+            "diff_vs_benchmark": (
+                [
+                    "Independent V2 prompt (not AI_SCAN inheritance)",
+                    "Context veto BULL+SHORT+LONG_PREFERRED (symmetric BEAR)",
+                    "Paper fill after age≥180s + virtual chase ≥3",
+                    "Own trade IDs / ledger — CONTINUOUS prompt & orders unchanged",
+                ]
+                if independent_ai
+                else [
+                    f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
+                    f"Filters: AI {ai_label} spread {spread_label}",
+                    "Beat benchmark on EV/appr to promote",
+                ]
+            ),
             "strategy_detail": _strategy_detail_lines(
                 {
-                    "spawn": f"Spawn on AI_SCAN APPROVE · filters {trigger}",
+                    "spawn": (
+                        "Phase-shifted independent V2 DeepSeek · never shares CONTINUOUS AI clock"
+                        if independent_ai
+                        else f"Spawn on AI_SCAN APPROVE · filters {trigger}"
+                    ),
                     "execution": execution,
-                    **ai_direct,
+                    **(
+                        {
+                            "chase_detail": (
+                                "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
+                            ),
+                            "ai_cadence": (
+                                f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s · "
+                                f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
+                            ),
+                            "margin_usd": ai_direct["margin_usd"],
+                            "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                        }
+                        if independent_ai
+                        else ai_direct
+                    ),
                 },
                 scenario_c,
-                [f"Independence: {shared['independence']}"],
+                strategy_extra,
             ),
         })
     scenario_c_continuous = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
@@ -16618,7 +17289,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + AI60_SP3 Virtual Chase research candidate",
+        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + AI60_SP3 Virtual Chase + A160 V2 independent paper orders",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -16728,6 +17399,8 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_wins = int(m.get("lab_wins") or 0)
     lab_win_rate = float(m.get("lab_win_rate") or 0.0)
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
+    win_rate = float(m.get("win_rate_pct") or 0.0)
+    shadow_sim = bool(m.get("shadow_sim_mode"))
     lab_line = (
         f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
         if lab_closes else "LAB sim · collecting…"
@@ -16741,9 +17414,18 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "per_approve_ev": ev,
         "verdict": m.get("verdict"),
         "summary_line": (
-            f"n={approves} approves · {fills} trades · "
-            f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
+            (
+                f"shadow sim · n={approves} approves · {fills} sim trades · "
+                f"{win_rate:.0f}% win · ${pnl:.2f} sim · EV ${ev:.2f}/approve"
+            )
+            if shadow_sim and fills
+            else (
+                f"n={approves} approves · {fills} trades · "
+                f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
+            )
         ),
+        "shadow_sim_mode": shadow_sim,
+        "win_rate_pct": win_rate,
         # LAB (OFF-combo) simulated metrics — surfaced on the tile when OFF; never mixed into real.
         "lab_mode": bool(m.get("lab_mode")),
         "lab_closes": lab_closes,
@@ -16785,18 +17467,67 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     }
     disk_metrics = _load_lane_metrics_from_disk()
     live_ledger = get_lane_pnl_ledger()
+    # V2 checker approves + shadow outcomes (paper fills/PnL from lane_pnl_ledger when tile ON).
+    try:
+        v2_metrics = load_v2_shadow_metrics()
+        prev_v2 = disk_metrics.get(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2) or {}
+        live_v2 = live_ledger.get(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2) or {}
+        live_v2_closes = int(live_v2.get("closes") or 0)
+        if v2_metrics:
+            use_shadow_primary = live_v2_closes <= 0 and int(v2_metrics.get("real_fills") or 0) > 0
+            disk_metrics[RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2] = {
+                **prev_v2,
+                "approves": max(
+                    int(prev_v2.get("approves") or 0),
+                    int(v2_metrics.get("approves") or 0),
+                ),
+                "real_fills": int(live_v2_closes)
+                or int(prev_v2.get("real_fills") or 0)
+                or int(v2_metrics.get("real_fills") or 0),
+                "net_pnl_real": float(live_v2.get("net_pnl_usd") or 0)
+                or float(prev_v2.get("net_pnl_real") or 0)
+                or float(v2_metrics.get("net_pnl_real") or 0),
+                "per_approve_ev": float(prev_v2.get("per_approve_ev") or 0)
+                or float(v2_metrics.get("per_approve_ev") or 0),
+                "win_rate_pct": float(v2_metrics.get("win_rate_pct") or prev_v2.get("win_rate_pct") or 0),
+                "shadow_sim_mode": use_shadow_primary,
+                "verdict": (
+                    "shadow sim (tile OFF)"
+                    if use_shadow_primary
+                    else (prev_v2.get("verdict") or v2_metrics.get("verdict") or "independent paper orders")
+                ),
+            }
+        elif RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 not in disk_metrics:
+            disk_metrics[RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2] = {
+                "approves": 0,
+                "real_fills": 0,
+                "approve_to_fill_pct": 0.0,
+                "shadow_fill_pct": 0.0,
+                "net_pnl_real": 0.0,
+                "per_approve_ev": 0.0,
+                "win_rate_pct": 0.0,
+                "shadow_sim_mode": False,
+                "verdict": "independent paper orders",
+            }
+    except Exception as e:
+        logger.debug(f"[V2_METRICS] load failed: {e}")
     for lane, lb in live_ledger.items():
         closes = int(lb.get("closes") or 0)
         pnl = float(lb.get("net_pnl_usd") or 0)
         if closes or pnl:
             prev = disk_metrics.get(lane) or {}
+            approves = int(prev.get("approves") or 0)
+            # EV/appr updates as paper trades complete (prefer live ledger closes).
+            per_ev = round(pnl / approves, 2) if approves else float(prev.get("per_approve_ev") or 0)
+            if not approves and closes:
+                per_ev = round(pnl / closes, 2)
             disk_metrics[lane] = {
-                "approves": int(prev.get("approves") or 0),
+                "approves": approves or closes,
                 "real_fills": closes or int(prev.get("real_fills") or 0),
                 "approve_to_fill_pct": prev.get("approve_to_fill_pct"),
                 "shadow_fill_pct": float(prev.get("shadow_fill_pct") or 0),
                 "net_pnl_real": round(pnl, 2),
-                "per_approve_ev": float(prev.get("per_approve_ev") or 0),
+                "per_approve_ev": per_ev,
                 "verdict": prev.get("verdict"),
             }
     # Fold live LAB (OFF-combo) simulated ledger into the per-lane metrics so the dashboard
@@ -16845,21 +17576,31 @@ def get_pathway_lane_specs_cached() -> dict:
     file_payload = {}
     mtime = None
     ledger_mtime = None
+    v2_mtime = None
     if os.path.isfile(LANE_PNL_LEDGER_FILE):
         try:
             ledger_mtime = os.path.getmtime(LANE_PNL_LEDGER_FILE)
         except Exception:
             pass
+    for v2_path in (V2_SHADOW_OUTCOME_FILE, V2_CHECKER_LOG_FILE):
+        if os.path.isfile(v2_path):
+            try:
+                mt = os.path.getmtime(v2_path)
+                v2_mtime = mt if v2_mtime is None else max(v2_mtime, mt)
+            except Exception:
+                pass
     if os.path.isfile(path):
         try:
             mtime = os.path.getmtime(path)
             cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
             cached_ver = (_cached_pathway_lane_specs or {}).get("_cached_static_version")
             cached_ledger = (_cached_pathway_lane_specs or {}).get("_cached_ledger_mtime")
+            cached_v2 = (_cached_pathway_lane_specs or {}).get("_cached_v2_mtime")
             if (
                 cached_at == mtime
                 and cached_ver == EXECUTION_FIX_VERSION
                 and cached_ledger == ledger_mtime
+                and cached_v2 == v2_mtime
                 and _cached_pathway_lane_specs.get("lanes")
             ):
                 return _cached_pathway_lane_specs
@@ -16872,6 +17613,7 @@ def get_pathway_lane_specs_cached() -> dict:
     if mtime is not None:
         merged["_cached_mtime"] = mtime
     merged["_cached_ledger_mtime"] = ledger_mtime
+    merged["_cached_v2_mtime"] = v2_mtime
     _cached_pathway_lane_specs = merged
     return merged
 
@@ -17224,7 +17966,7 @@ HTML = """<!DOCTYPE html>
   <option value="0.5">0.5%</option>
   <option value="0.6">0.6%</option>
 </select><br>
-<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
+<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
 <h3>Ultimate execution control</h3>
@@ -18011,6 +18753,7 @@ DASHBOARD_JS = """(function () {
       if (spec.status === 'BENCHMARK') return '#d4a72c';
       if (spec.status === 'RETIRED' || spec.status === 'DATA_RETIRED') return '#484f58';
       if (spec.is_benchmark || spec.status === 'PRIMARY_PRODUCTION') return '#d4a72c';
+      if (spec.is_shadow_only) return '#a371f7';
       if ((spec.lane || '').indexOf('604') >= 0) return '#58a6ff';
       if ((spec.lane || '').indexOf('65') >= 0) return '#3fb950';
       if (spec.status === 'PROBATION') return '#f97316';
@@ -18065,14 +18808,17 @@ DASHBOARD_JS = """(function () {
           // LAB (OFF-combo) simulated metrics — shown alongside real stats so the user can
           // pre-flight a strategy/ladder without real orders. Sim PnL is colour-coded the
           // same as real PnL but prefixed "LAB" so it is never confused with live money.
-          const labOn = !on && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned && stats.lab_mode;
+          const labOn = !on && !spec.is_independent_ai && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned && stats.lab_mode;
+          const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
           const labPnl = stats.lab_net_pnl != null ? stats.lab_net_pnl : 0;
           const labPnlCol = labPnl >= 0 ? '#3fb950' : '#f85149';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
             + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-            + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
+            + statRow(v2Shadow && stats.win_rate_pct ? 'Win%' : 'EV/appr', v2Shadow && stats.win_rate_pct
+              ? Number(stats.win_rate_pct || 0).toFixed(0) + '%'
+              : '$' + Number(stats.per_approve_ev || 0).toFixed(2))
             + '</div>'
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow('LAB sim', '🧪 ' + (stats.lab_closes != null ? stats.lab_closes : 0), '#58a6ff')
@@ -18090,6 +18836,18 @@ DASHBOARD_JS = """(function () {
           let orderBanner = '';
           if (spec.planned) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#6e7681;font-size:0.82em;font-weight:600;">PLANNED — no orders</div>';
+          } else if (spec.is_shadow_only) {
+            if (on) {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">SHADOW ONLY — NO ORDERS · collecting V2 research data</div>';
+            } else {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">SHADOW ONLY — NO ORDERS · still collecting decisions &amp; simulated PnL</div>';
+            }
+          } else if (spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') {
+            if (on) {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — independent tile (paper limits; Live Copy may mirror)</div>';
+            } else {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">SHADOW SIM ONLY — no limit orders (safe for live money) · still collecting decisions &amp; simulated PnL</div>';
+            }
           } else if (spec.lane === 'CONTINUOUS') {
             if (on) {
               orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — benchmark lane places limits</div>';
@@ -18124,6 +18882,9 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
             + (spec.research_question ? ('<div style="margin-top:4px;font-size:0.76em;color:#6e7681;"><strong style="color:#8b949e;">Question:</strong> ' + spec.research_question + '</div>') : '')
             + (function () {
+              if ((spec.is_shadow_only || spec.is_independent_ai) && entry.trigger) {
+                return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + entry.trigger + '</div>';
+              }
               const ef = entry.filters || {};
               const parts = [];
               if (ef.ai_probability_bucket) parts.push('AI ' + ef.ai_probability_bucket);
@@ -18133,6 +18894,9 @@ DASHBOARD_JS = """(function () {
               if (!parts.length) return '';
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
+            + (spec.is_independent_ai
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — V2 uses own prompt, trade IDs, and AI clock</div>'
+              : '')
             + (function () {
               const prom = spec.promotion_criteria;
               const kill = spec.kill_criteria;
@@ -18756,7 +19520,7 @@ DASHBOARD_JS = """(function () {
         }
         const capWarn = document.getElementById('capacityWarningBanner');
         if (capWarn) {
-          const maxAct = d.max_active_signals != null ? d.max_active_signals : 3;
+          const maxAct = d.max_active_signals != null ? d.max_active_signals : 20;
           const maxLongs = d.max_longs != null ? d.max_longs : 3;
           const msgs = [];
           if (maxAct <= 3) {
@@ -19023,7 +19787,10 @@ DASHBOARD_JS = """(function () {
         const el = document.getElementById(id);
         if (el) {
           const save = debounce(function() {
-            post(dropdowns[id], {value: this.value});
+            const v = this.value;
+            // Skip mid-edit empty/partial number fields (avoids 400 spam / prior 500s).
+            if (v === '' || v == null || Number.isNaN(Number(v))) return;
+            post(dropdowns[id], {value: v});
             refresh();
           }, 400);
           el.addEventListener('change', function() {
@@ -19135,11 +19902,17 @@ def dashboard():
     resp = make_response(render_template_string(page))
     # If the owner visits /?admin_token=XXX, mint an http-only cookie so the
     # dashboard's own fetch() calls pass the _emergency_api_guard admin gate.
+    # Phone operators use https://bot.doxxedcrypto.digital/?admin_token=TOKEN once;
+    # subsequent polls/saves ride the cookie (full /api/state + write access).
     tok = request.args.get("admin_token", "")
     if _BOT_ADMIN_TOKEN and tok == _BOT_ADMIN_TOKEN:
+        # Cloudflare tunnel terminates TLS; Flask often sees http on :7002.
+        forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        secure = bool(request.is_secure or forwarded_proto == "https")
         resp.set_cookie(
             "bot_admin_token", _BOT_ADMIN_TOKEN,
             httponly=True, samesite="Lax", path="/", max_age=60 * 60 * 24 * 30,
+            secure=secure,
         )
     return resp
 
@@ -20931,12 +21704,16 @@ def api_bitfinex_live():
 @app.route('/api/set_leverage', methods=['POST'])
 def set_leverage():
     data = request.get_json() or {}
-    val = int(data.get("value", DEFAULT_RESEARCH_LEVERAGE))
-    val = max(1, min(val, MAX_RESEARCH_LEVERAGE))
+    raw = data.get("value", DEFAULT_RESEARCH_LEVERAGE)
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "msg": "invalid leverage"}), 400
+    val = max(1, min(requested, MAX_RESEARCH_LEVERAGE))
     with state_lock:
         state["leverage"] = val
         save_persistent_config()
-    if int(data.get("value", val)) > MAX_RESEARCH_LEVERAGE:
+    if requested > MAX_RESEARCH_LEVERAGE:
         logger.warning(f"[LEVERAGE] Capped request to {MAX_RESEARCH_LEVERAGE}x (max allowed) [PIPELINE ENFORCEMENT]")
     return jsonify({"leverage": val})
 
@@ -20953,7 +21730,13 @@ def set_pullback_threshold():
 @app.route('/api/set_max_active_signals', methods=['POST'])
 def set_max_active_signals():
     data = request.get_json() or {}
-    val = max(1, min(RESEARCH_MAX_CONCURRENT_CAP, int(data.get("value", MAX_CONCURRENT_POSITIONS_DEFAULT))))
+    raw = data.get("value", MAX_CONCURRENT_POSITIONS_DEFAULT)
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        # Number inputs fire `input` while the field is empty mid-edit; never 500.
+        return jsonify({"status": "error", "msg": "invalid max_active_signals"}), 400
+    val = max(1, min(RESEARCH_MAX_CONCURRENT_CAP, requested))
     with state_lock:
         state["max_active_signals"] = val
         save_persistent_config()
@@ -22336,6 +23119,10 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "research_lane": meta.get("research_lane"),
             "source_trade_id": meta.get("source_trade_id"),
             "collection_mode": meta.get("collection_mode"),
+            "v2_min_fill_age_sec": meta.get("v2_min_fill_age_sec"),
+            "v2_chase_target_min": meta.get("v2_chase_target_min"),
+            "v2_chase_target_max": meta.get("v2_chase_target_max"),
+            "prompt_id": meta.get("prompt_id"),
         }
 
 
