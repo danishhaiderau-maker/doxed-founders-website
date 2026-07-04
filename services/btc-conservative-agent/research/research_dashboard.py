@@ -52,7 +52,12 @@ try:
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_DASHBOARD_VERSION,
     )
-    from pathway_lane_roster import ANALYZER_COMPARE_LANES, DASHBOARD_PATHWAY_LANES
+    from pathway_lane_roster import (
+        ANALYZER_COMPARE_LANES,
+        DASHBOARD_PATHWAY_LANES,
+        DASHBOARD_PRIMARY_LANES,
+        is_ai_focused_lane,
+    )
     ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
 except ImportError:
     BENCHMARK_LANE = "CONTINUOUS"
@@ -84,6 +89,21 @@ except ImportError:
         "URGENT_CHASE_ALPHA",
         "CHASE_3PLUS_ALPHA",
     )
+    DASHBOARD_PATHWAY_LANES = ("CONTINUOUS", "AI_SCAN")
+    DASHBOARD_PRIMARY_LANES = tuple(
+        lane for lane in ALL_PATHWAY_LANES
+        if str(lane).upper() == "CONTINUOUS"
+        or str(lane).upper().startswith(("AI", "A160"))
+        or "AI" in str(lane).upper()
+    )
+
+    def is_ai_focused_lane(lane: str) -> bool:
+        u = str(lane or "").upper().strip()
+        if not u:
+            return False
+        if u == "CONTINUOUS":
+            return True
+        return u.startswith("A160") or u.startswith("AI") or "AI" in u
 
 # ---------------------------------------------------------------------------
 # Config
@@ -120,33 +140,44 @@ HISTORY_ROOT = Path(os.getenv(
     str(ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT)),
 ))
 
-REPORT_NAV = (
-    ("summary", "Overview", None),
-    ("findings", "Findings", None),
-    ("lanes", "Lanes", "benchmark_vs_lanes_report.json"),
-    ("lanes-retire", "Lane Retirement", "lane_retirement_report.json"),
-    ("lanes-def", "Lane Definitions", "lane_definition_report.json"),
-    ("regime", "Regime", "regime_leaderboard.json"),
-    ("regime-conf", "Regime × Conf", "regime_confidence_matrix.json"),
-    ("chase", "Chase", "chase_attribution_report.json"),
-    ("chase-threshold", "Chase Threshold", "chase_threshold_report.json"),
-    ("chase-delay", "Chase Delay", "chase_delay_report.json"),
-    ("chase-iso", "Chase Isolation", "lane_chase_isolation_report.json"),
-    ("combos", "Top Combos", "top_combinations_report.json"),
-    ("spread-perf", "Spread Performance", "top_combinations_report.json"),
-    ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
-    ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
-    ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
-    ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
-    ("exits", "Exit Leakage", "top_leakage_report.json"),
-    ("horizon", "Recovery", "horizon_profitability_report.json"),
-    ("ai", "AI Lab", "ai_calibration_report.json"),
-    ("genome", "Genome", "research/genome/genome_analysis_report.json"),
-    ("edge", "Edge & Features", "feature_importance_report.json"),
-    ("explorer", "Report Explorer", None),
-    ("archives", "Archives", None),
-    ("download", "Downloads", None),
+REPORT_NAV_GROUPS = (
+    ("overview", "Overview", (
+        ("summary", "Overview", None),
+        ("findings", "Findings", None),
+        ("regime", "Regime", "regime_leaderboard.json"),
+        ("regime-conf", "Regime x Conf", "regime_confidence_matrix.json"),
+    )),
+    ("lanes-group", "Lanes & AI", (
+        ("lanes", "Laboratory", "benchmark_vs_lanes_report.json"),
+        ("lanes-retire", "Retirement", "lane_retirement_report.json"),
+        ("lanes-def", "Definitions", "lane_definition_report.json"),
+        ("ai", "AI Lab", "ai_calibration_report.json"),
+    )),
+    ("trading-group", "Chase & Exits", (
+        ("chase", "Attribution", "chase_attribution_report.json"),
+        ("chase-threshold", "Threshold", "chase_threshold_report.json"),
+        ("chase-delay", "Delay", "chase_delay_report.json"),
+        ("chase-iso", "Isolation", "lane_chase_isolation_report.json"),
+        ("combos", "Top Combos", "top_combinations_report.json"),
+        ("spread-perf", "Spread Performance", "top_combinations_report.json"),
+        ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
+        ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
+        ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
+        ("exits", "Exit Leakage", "top_leakage_report.json"),
+    )),
+    ("deep-group", "Genome & Reports", (
+        ("genome", "Genome", "research/genome/genome_analysis_report.json"),
+        ("edge", "Edge & Features", "feature_importance_report.json"),
+        ("explorer", "Report Explorer", None),
+        ("archives", "Archives", None),
+        ("download", "Downloads", None),
+        ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
+        ("horizon", "Recovery", "horizon_profitability_report.json"),
+    )),
 )
+
+# Flat list for any code that still iterates sections (id, label, report_file).
+REPORT_NAV = tuple(item for _gid, _glabel, items in REPORT_NAV_GROUPS for item in items)
 
 BUNDLE_FILES = (
     EXECUTIVE_SUMMARY_FILE,
@@ -990,10 +1021,48 @@ def api_findings():
     return jsonify(_findings_payload())
 
 
+
+def _wants_all_lanes() -> bool:
+    """Power-user override: ?all=1 or ?show_all=1 shows non-AI historical lanes."""
+    try:
+        flag = (request.args.get("all") or request.args.get("show_all") or "").strip().lower()
+    except Exception:
+        flag = ""
+    return flag in ("1", "true", "yes", "all")
+
+
+def _filter_lane_rows(rows, *, all_lanes: bool = False):
+    """Default: AI-focused lanes + CONTINUOUS. Historical CSV data is never deleted."""
+    if all_lanes:
+        return list(rows or [])
+    out = []
+    for row in rows or []:
+        lane = ""
+        if isinstance(row, dict):
+            lane = row.get("lane") or row.get("research_lane") or ""
+        else:
+            lane = str(row)
+        if is_ai_focused_lane(lane):
+            out.append(row)
+    return out
+
+
 @app.route("/api/lanes")
 def api_lanes():
     rows, bench_pnl = _lane_rows()
-    return jsonify({"lanes": rows, "benchmark_pnl": bench_pnl})
+    all_lanes = _wants_all_lanes()
+    filtered = _filter_lane_rows(rows, all_lanes=all_lanes)
+    return jsonify({
+        "lanes": filtered,
+        "benchmark_pnl": bench_pnl,
+        "lane_filter": "all" if all_lanes else "ai_continuous",
+        "lane_filter_note": (
+            "Showing all historical lanes"
+            if all_lanes
+            else "Default: AI lanes + CONTINUOUS benchmark (toggle Show all lanes for legacy COMBO/EDGE/CHASE)"
+        ),
+        "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
+    })
 
 
 @app.route("/api/chase")
@@ -1033,7 +1102,18 @@ def api_chase_iso():
 
 @app.route("/api/lanes-def")
 def api_lanes_def():
-    return jsonify(_lanes_def_payload())
+    payload = _lanes_def_payload()
+    all_lanes = _wants_all_lanes()
+    payload["lanes"] = _filter_lane_rows(payload.get("lanes") or [], all_lanes=all_lanes)
+    if not all_lanes:
+        payload["active_roster"] = [
+            lane for lane in (payload.get("active_roster") or []) if is_ai_focused_lane(lane)
+        ]
+        payload["retired_lanes"] = [
+            lane for lane in (payload.get("retired_lanes") or []) if is_ai_focused_lane(lane)
+        ]
+    payload["lane_filter"] = "all" if all_lanes else "ai_continuous"
+    return jsonify(payload)
 
 
 @app.route("/api/exit-combos")
@@ -1068,7 +1148,14 @@ def api_leakage():
 
 @app.route("/api/lane-retirement")
 def api_lane_retirement():
-    return jsonify(_lane_retirement_payload())
+    payload = _lane_retirement_payload()
+    all_lanes = _wants_all_lanes()
+    payload["lanes"] = _filter_lane_rows(payload.get("lanes") or [], all_lanes=all_lanes)
+    payload["retire_candidates"] = _filter_lane_rows(
+        payload.get("retire_candidates") or [], all_lanes=all_lanes
+    )
+    payload["lane_filter"] = "all" if all_lanes else "ai_continuous"
+    return jsonify(payload)
 
 
 def _genome_payload():
@@ -1569,6 +1656,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: #0e1319; }
   nav button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
   nav button.active { border-color: var(--accent); color: var(--accent); }
+  nav.subnav { padding-top: 0; border-bottom-color: #1a2430; background: #0b1016; }
+  nav.subnav button { font-size: 0.8rem; padding: 6px 12px; opacity: 0.9; }
+  nav.subnav button.active { opacity: 1; }
+  .lane-toggle { display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 4px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
+  .lane-toggle input { accent-color: var(--accent); }
   main { padding: 20px 24px; max-width: 1200px; }
   section { display: none; }
   section.active { display: block; }
@@ -1611,6 +1703,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </header>
 <nav id="nav"></nav>
+<nav id="subnav" class="subnav" style="display:none"></nav>
 <main>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
@@ -1623,14 +1716,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="hl-kpis"></div>
     <ol class="findings" id="findings-list"></ol>
   </section>
-  <section id="sec-lanes">
+    <section id="sec-lanes">
     <h2>Lane Laboratory</h2>
-    <p class="note">All lanes in code — real fills from live tiles; shadow cols = virtual sim (blocked counterfactual + shadow-collecting lanes). Green = beats benchmark on comparable PnL/EV.</p>
+    <p class="note" id="lanes-filter-note">Default: AI lanes + CONTINUOUS benchmark. Historical non-AI lanes stay in CSV; use Show all lanes for legacy COMBO/EDGE/CHASE.</p>
+    <label class="lane-toggle"><input type="checkbox" id="show-all-lanes"/> Show all lanes</label>
     <table><thead><tr><th>Lane</th><th>Appr</th><th>Sess Fills</th><th>Shadow</th><th>Sess PnL</th><th>Shadow PnL</th><th>EV/appr</th><th>All Fills</th><th>All PnL</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
-  <section id="sec-lanes-retire">
+    <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
-    <p class="note">Automatic KEEP / RETIRE / COLLECT MORE — removes guesswork on pathway lanes.</p>
+    <p class="note" id="retire-filter-note">AI lanes + CONTINUOUS only by default. Toggle Show all lanes on Laboratory to include legacy pathways.</p>
     <table><thead><tr><th>Lane</th><th>Sess Trades</th><th>All Trades</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
   </section>
   <section id="sec-lanes-def">
@@ -1808,25 +1902,84 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
 </main>
 <script>
-const NAV = {{ nav_json|safe }};
+const NAV_GROUPS = {{ nav_groups_json|safe }};
 const navEl = document.getElementById('nav');
-NAV.forEach(([id, label]) => {
-  const b = document.createElement('button');
-  b.textContent = label;
-  b.onclick = () => show(id);
-  b.dataset.sec = id;
-  navEl.appendChild(b);
-});
-function show(id) {
-  document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.sec === id));
-  const sec = document.getElementById('sec-' + id);
-  if (sec) sec.classList.add('active');
-  try { localStorage.setItem('research_dashboard_prefs_v1', JSON.stringify({activeSection: id})); } catch (e) {}
-}
+const subnavEl = document.getElementById('subnav');
 let _rdPrefs = {};
 try { _rdPrefs = JSON.parse(localStorage.getItem('research_dashboard_prefs_v1') || '{}'); } catch (e) {}
-show(_rdPrefs.activeSection || 'summary');
+let showAllLanes = !!_rdPrefs.showAllLanes;
+let activeGroup = _rdPrefs.activeGroup || 'overview';
+let activeSection = _rdPrefs.activeSection || 'summary';
+
+function sectionGroup(secId) {
+  for (const g of NAV_GROUPS) {
+    if ((g.items || []).some(it => it[0] === secId)) return g.id;
+  }
+  return NAV_GROUPS[0] ? NAV_GROUPS[0].id : 'overview';
+}
+function savePrefs() {
+  try {
+    localStorage.setItem('research_dashboard_prefs_v1', JSON.stringify({
+      activeSection, activeGroup, showAllLanes
+    }));
+  } catch (e) {}
+}
+function laneQuery() { return showAllLanes ? '?all=1' : ''; }
+function renderNav() {
+  navEl.innerHTML = '';
+  NAV_GROUPS.forEach(g => {
+    const b = document.createElement('button');
+    b.textContent = g.label;
+    b.dataset.group = g.id;
+    b.classList.toggle('active', g.id === activeGroup);
+    b.onclick = () => showGroup(g.id);
+    navEl.appendChild(b);
+  });
+  const g = NAV_GROUPS.find(x => x.id === activeGroup);
+  const items = (g && g.items) || [];
+  if (!g || items.length <= 1) {
+    subnavEl.style.display = 'none';
+    subnavEl.innerHTML = '';
+    return;
+  }
+  subnavEl.style.display = 'flex';
+  subnavEl.innerHTML = '';
+  items.forEach(([id, label]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.dataset.sec = id;
+    b.classList.toggle('active', id === activeSection);
+    b.onclick = () => show(id);
+    subnavEl.appendChild(b);
+  });
+}
+function showGroup(gid) {
+  activeGroup = gid;
+  const g = NAV_GROUPS.find(x => x.id === gid);
+  const first = g && g.items && g.items[0] ? g.items[0][0] : 'summary';
+  show(first);
+}
+function show(id) {
+  activeSection = id;
+  activeGroup = sectionGroup(id);
+  document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
+  const sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+  renderNav();
+  savePrefs();
+}
+const showAllEl = document.getElementById('show-all-lanes');
+if (showAllEl) {
+  showAllEl.checked = showAllLanes;
+  showAllEl.addEventListener('change', () => {
+    showAllLanes = !!showAllEl.checked;
+    savePrefs();
+    loadLanes();
+    loadRetirement();
+    loadLaneDefs();
+  });
+}
+show(activeSection);
 
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
 function fmtMelb(iso) {
@@ -1900,8 +2053,10 @@ async function loadFindings() {
 }
 
 async function loadLanes() {
-  const r = await fetch('/api/lanes');
+  const r = await fetch('/api/lanes' + laneQuery());
   const d = await r.json();
+  const note = document.getElementById('lanes-filter-note');
+  if (note) note.textContent = d.lane_filter_note || note.textContent;
   document.getElementById('lane-body').innerHTML = (d.lanes||[]).map(row => {
     let cls = '';
     if (row.pathway_status === 'SHADOW_COLLECTING') cls = 'amber';
@@ -2031,7 +2186,7 @@ async function loadChaseIso() {
 }
 
 async function loadLaneDefs() {
-  const r = await fetch('/api/lanes-def');
+  const r = await fetch('/api/lanes-def' + laneQuery());
   const d = await r.json();
   const roster = (d.active_roster||[]).join(', ') || 'n/a';
   const retired = (d.retired_lanes||[]).join(', ') || 'none';
@@ -2170,7 +2325,7 @@ async function loadLeakage() {
 }
 
 async function loadRetirement() {
-  const r = await fetch('/api/lane-retirement');
+  const r = await fetch('/api/lane-retirement' + laneQuery());
   const d = await r.json();
   document.getElementById('retire-body').innerHTML = (d.lanes||[]).map(row => {
     const cls = row.recommendation === 'RETIRE' ? 'red' : (row.recommendation.startsWith('KEEP') ? 'green' : 'amber');
@@ -2399,10 +2554,13 @@ setInterval(refreshAll, 60000);
 
 @app.route("/")
 def index():
-    nav_json = json.dumps([[a, b] for a, b, _ in REPORT_NAV])
+    nav_groups_json = json.dumps([
+        {"id": gid, "label": glabel, "items": [[a, b] for a, b, _ in items]}
+        for gid, glabel, items in REPORT_NAV_GROUPS
+    ])
     return render_template_string(
         DASHBOARD_HTML,
-        nav_json=nav_json,
+        nav_groups_json=nav_groups_json,
         benchmark_lane=BENCHMARK_LANE,
         dashboard_version=RESEARCH_DASHBOARD_VERSION,
     )

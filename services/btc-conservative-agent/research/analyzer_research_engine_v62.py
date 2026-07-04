@@ -54,13 +54,6 @@ import sys
 import traceback
 import re
 
-# Agent root must be on sys.path before combo_pathway_config import (script lives in research/).
-_ANALYZER_DIR = os.path.dirname(os.path.abspath(__file__))
-_AGENT_ROOT = os.path.dirname(_ANALYZER_DIR)
-for _boot_path in (_AGENT_ROOT, _ANALYZER_DIR):
-    if _boot_path and _boot_path not in sys.path:
-        sys.path.insert(0, _boot_path)
-
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -100,16 +93,12 @@ EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
-REGIME_CONFIDENCE_MATRIX_REPORT_FILE = "regime_confidence_matrix.json"
-FILL_DELAY_REPORT_FILE = "fill_delay_report.json"
-TOP_CONDITIONAL_EDGES_REPORT_FILE = "top_conditional_edges.json"
-REGIME_STABILITY_REPORT_FILE = "regime_stability_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 REPORTS_HISTORY_DIR = os.path.join("reports", "history")
 HORIZON_MIN_COVERAGE_PCT = 80
-CONFIDENCE_BANDS_STANDARD = ("50-55", "55-60", "60-65", "65-69", "70-74", "75+")
+CONFIDENCE_BANDS_STANDARD = ("50-55", "55-60", "60-65", "65+")
 MIN_LANE_FILLS_FOR_RETIREMENT = 15
 MIN_LANE_APPROVES_FOR_RETIREMENT = 10
 _CONSOLE_STDOUT = sys.stdout
@@ -176,16 +165,15 @@ ANALYZER_LOOP_INTERVAL_MINUTES = max(1, int(os.getenv("ANALYZER_INTERVAL_MINUTES
 
 
 def resolve_analyzer_session_scope() -> tuple:
-    """Session-only when fresh_collection wipe is active; else full CSV (ALL-TIME)."""
+    """Always analyze the current session — from last fresh collection wipe onward."""
     session = load_research_session()
     if session.get("fresh_collection_mode") or session.get("fresh_collection_start_time"):
         iso = session.get("fresh_collection_start_iso") or "n/a"
         return True, f"SESSION (fresh collection from {iso})"
-    forced = os.getenv("ANALYZER_SESSION_ONLY", "").strip().lower()
-    if forced in ("1", "true", "yes"):
+    if session.get("bot_start_time"):
         iso = session.get("bot_start_iso") or "n/a"
-        return True, f"SESSION (ANALYZER_SESSION_ONLY from {iso})"
-    return False, "ALL-TIME (full trades_3factor.csv — fresh_collection_mode off)"
+        return True, f"SESSION (bot session from {iso})"
+    return True, "SESSION (no research_session.json — analyzing all loaded rows)"
 
 
 def start_research_dashboard_server() -> threading.Thread | None:
@@ -324,6 +312,7 @@ try:
         EXPECTED_EXCHANGE,
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_STACK_VERSION,
+        RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     )
     from scenario_c_config import SCENARIO_C_LADDER_LABEL, TRAIL_LADDER_SCENARIO_C
     from legacy_pathway_config import (
@@ -342,13 +331,13 @@ try:
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
 except ImportError:
-    EXPECTED_BOT_VERSION = "v10.6-melbourne-unified-2026-06-24"
+    EXPECTED_BOT_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
     EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.6-melbourne-unified-2026-06-24"
+    ANALYZER_SYNC_ID = "v10.2-ai-chase-bands-desk-2026-06-23"
     RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
-    SCENARIO_C_LADDER_LABEL = "10→6, 20→10, 30→20, 40→28, 60→45, 80→60, 100→75, 150→120"
+    SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
     TRAIL_LADDER_SCENARIO_C = [
-        (10, 6), (20, 10), (30, 20), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120),
+        (12, 8), (15, 10), (25, 18), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120),
     ]
     PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
     SHADOW_COLLECTING_LANES = ()
@@ -638,12 +627,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
-    ("Regime Leaderboard", REGIME_LEADERBOARD_REPORT_FILE, "Best lane per market regime cell"),
-    ("Regime × Confidence", REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "EV/WR by regime and AI confidence band"),
-    ("Fill Delay", FILL_DELAY_REPORT_FILE, "Signal age and chase count vs outcome"),
-    ("Top Conditional Edges", TOP_CONDITIONAL_EDGES_REPORT_FILE, "Multi-factor combos ranked by EV"),
-    ("Regime Stability", REGIME_STABILITY_REPORT_FILE, "Sample size + stability score per regime cell"),
-    ("Trading Genome", "research/genome/genome_analysis_report.json", "DNA-first discoveries, cluster match, decision/lifecycle DNA"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -720,6 +703,9 @@ SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
+V2_SHADOW_OUTCOME_FILE = "v2_shadow_outcome.jsonl"
+V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
+
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
@@ -1974,6 +1960,77 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
     return df
+
+
+def _load_v2_shadow_outcome_df(session: dict = None):
+    """A160 V2 tile-OFF simulated fills/exits (v2_shadow_outcome.jsonl)."""
+    rows = _load_jsonl_rows(V2_SHADOW_OUTCOME_FILE)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if session and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
+    return df
+
+
+def _load_v2_checker_approves_df(session: dict = None):
+    """V2 checker accepts — independent of AI_SCAN signal_snapshot approves."""
+    rows = _load_jsonl_rows(V2_CHECKER_LOG_FILE)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if "accepted" in df.columns:
+        df = df[df["accepted"].apply(_truthy)]
+    if session and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
+    return df
+
+
+def _v2_lane_metrics_from_logs(session: dict = None) -> dict:
+    """Aggregate V2 checker approves + shadow outcomes for benchmark_vs_lanes."""
+    checker = _load_v2_checker_approves_df(session)
+    outcomes = _load_v2_shadow_outcome_df(session)
+    approves = len(checker) if checker is not None and not checker.empty else 0
+    sim_fills = 0
+    sim_pnl = 0.0
+    wins = 0
+    reject_sim_fills = 0
+    reject_sim_pnl = 0.0
+    if outcomes is not None and not outcomes.empty:
+        work = outcomes.copy()
+        if "filled" in work.columns:
+            work["filled"] = work["filled"].apply(_truthy)
+        else:
+            work["filled"] = True
+        if "checker_accepted" in work.columns:
+            accepted_mask = work["checker_accepted"].apply(_truthy)
+            reject_work = work[~accepted_mask]
+            work = work[accepted_mask]
+        else:
+            reject_work = work.iloc[0:0]
+        filled = work[work["filled"]]
+        sim_fills = len(filled)
+        sim_pnl = round(
+            float(pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
+        )
+        pnl_series = pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0)
+        wins = int((pnl_series >= 0).sum())
+        reject_filled = reject_work[reject_work["filled"]] if not reject_work.empty else reject_work
+        reject_sim_fills = len(reject_filled)
+        reject_sim_pnl = round(
+            float(pd.to_numeric(reject_filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
+        ) if reject_sim_fills else 0.0
+    per_ev = round(sim_pnl / approves, 2) if approves else 0.0
+    win_rate = round(100.0 * wins / sim_fills, 1) if sim_fills else 0.0
+    return {
+        "approves": approves,
+        "sim_fills": sim_fills,
+        "sim_pnl": sim_pnl,
+        "per_approve_ev": per_ev,
+        "win_rate_pct": win_rate,
+        "reject_sim_fills": reject_sim_fills,
+        "reject_sim_pnl": reject_sim_pnl,
+    }
 
 
 def _load_shadow_lane_outcome_df(session: dict = None):
@@ -6954,27 +7011,6 @@ def _refresh_pathway_scorecard_safe(session: dict):
         print(f"  ⚠️ pathway_scorecard refresh failed: {pe} {PIPELINE_ENFORCEMENT_TAG}")
 
 
-def run_genome_analyzer_pipeline():
-    """Trading Genome v11 — DNA-first analyzer (research.db + JSONL mirrors)."""
-    try:
-        from research.genome.run_analyzer import run_genome_analyzer
-
-        report = run_genome_analyzer()
-        layers = report.get("layer_counts") or {}
-        disc = len(report.get("discoveries") or [])
-        lib = report.get("genome_library_size") or len(report.get("genome_library") or [])
-        dq = (report.get("dna_quality") or {}).get("overall") or {}
-        print(
-            f"  ✅ Trading Genome analyzer: layers={sum(layers.values())} "
-            f"discoveries={disc} clusters={lib} dna_quality={dq.get('dna_quality')} "
-            f"confidence={dq.get('research_confidence')} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-        return report
-    except Exception as exc:
-        print(f"  ⚠️ Trading Genome analyzer failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-        return None
-
-
 def _write_analyzer_crash_log(iteration: int, tb: str):
     crash_path = os.path.join(os.getcwd(), "analyzer_crash.log")
     try:
@@ -7076,7 +7112,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             shadow_vs_live_entry_report()
             ai_calibration_report(trades, session=session)
             _refresh_pathway_scorecard_safe(session)
-            run_genome_analyzer_pipeline()
             finalize_analyzer_outputs(
                 session=session,
                 trades=trades,
@@ -7187,7 +7222,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
         shadow_vs_live_fill_audit(blocked)
         shadow_vs_live_entry_report()
         _refresh_pathway_scorecard_safe(session)
-        run_genome_analyzer_pipeline()
 
         print(f"\n🔥 STRATEGY ADVICE 🔥 {PIPELINE_ENFORCEMENT_TAG}")
         print(f"Review EXECUTIVE SUMMARY first. Rules need ≥{MIN_TRADES_FOR_RULES} trades. Fix zero-variance features in bot before trusting edge buckets. {PIPELINE_ENFORCEMENT_TAG}")
@@ -7716,9 +7750,15 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         shadow_by_lane = shadow_report["by_lane"]
 
     shadow_lane_df = _load_shadow_lane_outcome_df(session)
+    v2_log_metrics = _v2_lane_metrics_from_logs(session)
+    if v2_log_metrics.get("approves"):
+        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+        lanes_with_approves_seed.add(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
+    else:
+        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
 
     lane_metrics = {}
-    lanes_with_approves = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+    lanes_with_approves = lanes_with_approves_seed
     all_trade_df = all_trades if all_trades is not None else trade_df
     lanes_ordered = _ordered_lane_catalog(lanes_with_approves, all_trade_df)
 
@@ -7737,6 +7777,16 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             lane_trades = pd.DataFrame()
         real_fills = len(lane_trades)
         net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
+
+        if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
+            v2_approves = int(v2_log_metrics.get("approves") or 0)
+            if v2_approves:
+                approves_n = max(approves_n, v2_approves)
+            if real_fills == 0 and int(v2_log_metrics.get("sim_fills") or 0) > 0:
+                real_fills = int(v2_log_metrics.get("sim_fills") or 0)
+                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
+            elif real_fills == 0 and v2_approves and approves_n == v2_approves:
+                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
 
         if _pathway_lane_status(lane) == PATHWAY_STATUS_SHADOW_COLLECTING:
             if shadow_lane_df is not None and not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
@@ -8831,11 +8881,7 @@ def _confidence_band_label(conf) -> str:
         return "55-60"
     if c < 65:
         return "60-65"
-    if c < 69:
-        return "65-69"
-    if c < 74:
-        return "70-74"
-    return "75+"
+    return "65+"
 
 
 def _direction_cohort_stats(sub):
@@ -9143,7 +9189,8 @@ def _build_confidence_edge_matrix(with_outcome):
 
 def _print_confidence_edge_matrix(matrix_payload):
     print("\n--- 8. AI Confidence × Edge Matrix ---")
-    header = f"{'edge \\\\ ai':<10}" + "".join(f"{cb:>16}" for cb in AI_MATRIX_CONF_BUCKETS)
+    edge_label = 'edge \\\\ ai'
+    header = f"{edge_label:<10}" + "".join(f"{cb:>16}" for cb in AI_MATRIX_CONF_BUCKETS)
     print(header)
     for edge_b in AI_MATRIX_EDGE_BUCKETS:
         row = f"{edge_b:<10}"
@@ -12835,50 +12882,8 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
     return payload
 
 
-_COMBO_EXCLUDED_TOKENS = frozenset({"UNKNOWN", "UNK", "NAN", "NONE", "NULL", "OTHER", "MIXED"})
-_COMBO_EXCLUDED_LANE_PREFIXES = ("TYPE_B",)
-
-
-def _normalize_combo_token(val) -> str:
-    return str(val or "").strip().upper()
-
-
-def _is_known_combo_dimension(val) -> bool:
-    tok = _normalize_combo_token(val)
-    if not tok or tok in _COMBO_EXCLUDED_TOKENS:
-        return False
-    if "TYPE_B" in tok or tok == "TYPE B":
-        return False
-    return True
-
-
-def _is_known_combo_row(*, ai_bucket, spread_bucket, entry_mode, lane) -> bool:
-    if not all(
-        _is_known_combo_dimension(x)
-        for x in (ai_bucket, spread_bucket, entry_mode, lane)
-    ):
-        return False
-    lane_u = _normalize_combo_token(lane)
-    return not any(lane_u.startswith(p) for p in _COMBO_EXCLUDED_LANE_PREFIXES)
-
-
-def _is_known_regime_key(regime) -> bool:
-    r = _normalize_combo_token(regime)
-    if not r or r in _COMBO_EXCLUDED_TOKENS:
-        return False
-    parts = [p.strip() for p in r.split("|") if p.strip()]
-    if not parts:
-        return False
-    for part in parts:
-        if part in _COMBO_EXCLUDED_TOKENS or part.startswith("UNK"):
-            return False
-        if "UNKNOWN" in part:
-            return False
-    return True
-
-
 def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
-    """Rank AI × spread × entry × lane cohorts — known dimensions only, sorted by EV."""
+    """Rank AI × spread × type × lane cohorts — top and bottom performers."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
@@ -12895,13 +12900,6 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     dims = ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"]
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
         ai_b, spread_b, entry_b, lane = keys
-        if not _is_known_combo_row(
-            ai_bucket=ai_b,
-            spread_bucket=spread_b,
-            entry_mode=entry_b,
-            lane=lane,
-        ):
-            continue
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
@@ -12930,7 +12928,6 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "min_trades_per_combo": min_trades,
         "dimensions": ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"],
-        "filter_note": "Excludes UNKNOWN/OTHER/MIXED/TYPE_B dimensions — actionable combos only",
         "total_combos": len(combos),
         "top": top,
         "bottom": bottom,
@@ -12938,7 +12935,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     try:
         with open(analyzer_report_path(TOP_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {TOP_COMBINATIONS_REPORT_FILE} ({len(combos)} known combos) {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  ✅ Wrote {TOP_COMBINATIONS_REPORT_FILE} ({len(combos)} combos) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {TOP_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
@@ -13180,12 +13177,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
     if replays:
         for tid, replay in replays.items():
             tid = str(tid)
-            # NOTE: do NOT filter replays by executed_ids. Replays accumulate
-            # all-time while `trades` is the fresh-collection session, so their
-            # trade_ids almost never overlap — filtering here zeros the whole
-            # table (the bug that made the Ladder Simulator show 589 replays but
-            # 0 results per profile). Simulate every replay that has tick data;
-            # the entry/ticks guard below skips invalid/non-executed scans.
+            if executed_ids and tid not in executed_ids:
+                continue
             entry = _replay_entry_price(replay)
             ticks = replay.get("ticks") or []
             if not entry or not ticks:
@@ -13751,271 +13744,6 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
         print(f"  ✅ Wrote {REGIME_LEADERBOARD_REPORT_FILE} ({len(regimes)} regimes) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {REGIME_LEADERBOARD_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
-    """Regime × AI confidence band — where conditional edge hides (recommend-only)."""
-    if session is None:
-        session = load_research_session()
-    trades = _trades_for_regime_analysis(trades=trades, session=session)
-    scope = _shadow_scope_label(session)
-    print(
-        f"\n=== REGIME × CONFIDENCE MATRIX — {scope.lower()} {ANALYZER_SYNC_ID} "
-        f"{PIPELINE_ENFORCEMENT_TAG} ==="
-    )
-    if trades is None or trades.empty:
-        payload = {
-            "schema": "regime_confidence_matrix_v1",
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "session_scope": scope,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "bands": list(CONFIDENCE_BANDS_STANDARD),
-            "cells": [],
-            "regime_summaries": [],
-            "note": "No trades — collect data with live tiles",
-        }
-        with open(REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
-    tag_rows = work.apply(_regime_tags_from_row, axis=1)
-    work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
-    conf = pd.to_numeric(work.get("ai_win_prob", work.get("conf")), errors="coerce")
-    work["confidence_band"] = conf.apply(_confidence_band_label)
-
-    cells = []
-    regime_summaries = []
-    for regime, reg_df in work.groupby("regime_key"):
-        if not _is_known_regime_key(regime):
-            continue
-        band_rows = []
-        for bucket in CONFIDENCE_BANDS_STANDARD:
-            if not _is_known_combo_dimension(bucket):
-                continue
-            sub = reg_df[reg_df["confidence_band"] == bucket]
-            stats = _direction_cohort_stats(sub)
-            cell = {
-                "regime": regime,
-                "confidence_band": bucket,
-                **stats,
-                "sample_ok": stats["trades"] >= min_trades,
-            }
-            cells.append(cell)
-            band_rows.append(cell)
-            if stats["trades"]:
-                print(
-                    f"  {regime} · {bucket}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
-                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-                )
-        eligible = [b for b in band_rows if b.get("sample_ok") and b.get("trades")]
-        ranked = sorted(eligible or band_rows, key=lambda x: (x.get("ev_usd", 0), x.get("sum_pnl_usd", 0)), reverse=True)
-        best = ranked[0] if ranked else None
-        regime_summaries.append({
-            "regime": regime,
-            "total_trades": int(len(reg_df)),
-            "best_band": best.get("confidence_band") if best else None,
-            "best_ev_usd": best.get("ev_usd") if best else None,
-            "best_wr_pct": best.get("win_rate_pct") if best else None,
-            "conclusion_allowed": bool(best and best.get("sample_ok")),
-        })
-
-    cells.sort(key=lambda x: (x.get("ev_usd", 0), x.get("sum_pnl_usd", 0)), reverse=True)
-    regime_summaries.sort(
-        key=lambda x: (x.get("best_ev_usd") or 0, x.get("total_trades") or 0),
-        reverse=True,
-    )
-
-    payload = {
-        "schema": "regime_confidence_matrix_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "min_trades_per_cell": min_trades,
-        "bands": list(CONFIDENCE_BANDS_STANDARD),
-        "total_trades": len(work),
-        "cells": cells,
-        "regime_summaries": regime_summaries,
-        "usage_note": "Known regimes only (no UNKNOWN/unk) — sorted by EV; need ≥2 trades/cell before acting",
-    }
-    try:
-        with open(REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(
-            f"  ✅ Wrote {REGIME_CONFIDENCE_MATRIX_REPORT_FILE} "
-            f"({len(cells)} cells) {PIPELINE_ENFORCEMENT_TAG}"
-        )
-    except Exception as e:
-        print(f"  ⚠️ Could not write {REGIME_CONFIDENCE_MATRIX_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def _stability_score(trades: int, wr_pct: float, ev_usd: float) -> dict:
-    """Recommend-only stability — penalize tiny samples."""
-    if trades < 2:
-        return {"score": 0.0, "tier": "INSUFFICIENT", "recommend_ok": False}
-    sample_factor = min(1.0, trades / 100.0)
-    ev_factor = max(0.0, min(1.0, (ev_usd + 2.0) / 4.0))
-    wr_factor = max(0.0, min(1.0, wr_pct / 100.0))
-    score = round(100.0 * sample_factor * (0.55 * ev_factor + 0.45 * wr_factor), 1)
-    tier = "HIGH" if trades >= 100 and ev_usd > 0 and wr_pct >= 55 else (
-        "MEDIUM" if trades >= 20 and ev_usd > 0 else "LOW"
-    )
-    return {
-        "score": score,
-        "tier": tier,
-        "recommend_ok": trades >= 100 and ev_usd > 0 and wr_pct >= 50,
-    }
-
-
-def fill_delay_report(trades=None, session=None):
-    """Time-to-fill: signal age, chase count, fill delay vs outcome."""
-    if session is None:
-        session = load_research_session()
-    trades = _trades_for_regime_analysis(trades=trades, session=session)
-    scope = _shadow_scope_label(session)
-    print(f"\n=== FILL DELAY REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    buckets = []
-    chase_buckets = []
-    if trades is not None and not trades.empty:
-        work = trades.drop_duplicates(subset=["trade_id"], keep="last").copy()
-        delay = pd.to_numeric(
-            work.get("execution_fill_delay_sec", work.get("signal_age_sec", work.get("entry_delay_sec"))),
-            errors="coerce",
-        )
-        chase = pd.to_numeric(work.get("limit_chase_count", work.get("chase_count")), errors="coerce").fillna(0).astype(int)
-        pnl = pd.to_numeric(work.get("net_pnl_usd"), errors="coerce")
-        work["_delay"] = delay
-        work["_chase"] = chase
-        work["_pnl"] = pnl
-        for label, lo, hi in (
-            ("0-30s", 0, 30),
-            ("30-60s", 30, 60),
-            ("1-3m", 60, 180),
-            ("3-10m", 180, 600),
-            ("10m+", 600, 999999),
-        ):
-            sub = work[(work["_delay"] >= lo) & (work["_delay"] < hi)]
-            stats = _direction_cohort_stats(sub)
-            buckets.append({"delay_bucket": label, **stats})
-            if stats["trades"]:
-                print(
-                    f"  delay {label}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
-                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-                )
-        for ch in range(0, 7):
-            sub = work[work["_chase"] == ch] if ch < 6 else work[work["_chase"] >= 6]
-            label = f"{ch}" if ch < 6 else "6+"
-            stats = _direction_cohort_stats(sub)
-            chase_buckets.append({"chase_count": label, **stats})
-            if stats["trades"]:
-                print(
-                    f"  chase {label}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
-                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-                )
-    payload = {
-        "schema": "fill_delay_report_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "delay_buckets": buckets,
-        "chase_buckets": chase_buckets,
-        "usage_note": "Compare immediate vs chased fills — execution quality vs signal quality",
-    }
-    try:
-        with open(FILL_DELAY_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {FILL_DELAY_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {FILL_DELAY_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def top_conditional_edges_report(trades=None, session=None, min_trades=3):
-    """Multi-factor interaction discovery — confidence × spread × ADX × session × lane."""
-    if session is None:
-        session = load_research_session()
-    trades = _trades_for_regime_analysis(trades=trades, session=session)
-    scope = _shadow_scope_label(session)
-    print(f"\n=== TOP CONDITIONAL EDGES — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    edges = []
-    if trades is not None and not trades.empty:
-        work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
-        tag_rows = work.apply(_regime_tags_from_row, axis=1)
-        work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
-        work["session"] = tag_rows.apply(lambda t: t.get("session"))
-        work["adx_bucket"] = tag_rows.apply(lambda t: t.get("adx"))
-        conf = pd.to_numeric(work.get("ai_win_prob", work.get("conf")), errors="coerce")
-        work["confidence_band"] = conf.apply(_confidence_band_label)
-        if "research_lane" not in work.columns:
-            work["research_lane"] = "UNKNOWN"
-        spread = work.get("directional_spread_bucket", work.get("spread_bucket"))
-        if spread is not None:
-            work["spread_bucket"] = spread.astype(str)
-        else:
-            work["spread_bucket"] = "unknown"
-        group_cols = ["confidence_band", "spread_bucket", "adx_bucket", "session", "research_lane"]
-        for keys, sub in work.groupby([work[c].astype(str) for c in group_cols]):
-            stats = _combo_stats_from_df(sub)
-            if stats["trades"] < 1:
-                continue
-            stab = _stability_score(stats["trades"], stats["wr_pct"], stats["ev_usd"])
-            combo = dict(zip(group_cols, keys if isinstance(keys, tuple) else (keys,)))
-            edges.append({"combo": combo, **stats, **stab})
-        edges.sort(key=lambda x: (x.get("recommend_ok", False), x.get("score", 0), x.get("ev_usd", 0)), reverse=True)
-        for row in edges[:8]:
-            if row["trades"]:
-                c = row["combo"]
-                print(
-                    f"  {c.get('confidence_band')} sp={c.get('spread_bucket')} adx={c.get('adx_bucket')} "
-                    f"sess={c.get('session')} lane={c.get('research_lane')}: "
-                    f"n={row['trades']} WR={row['wr_pct']:.1f}% EV=${row['ev_usd']:+.2f} "
-                    f"stab={row['tier']} {PIPELINE_ENFORCEMENT_TAG}"
-                )
-    payload = {
-        "schema": "top_conditional_edges_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "min_trades_per_combo": min_trades,
-        "edges": edges[:50],
-        "top_recommendable": [e for e in edges if e.get("recommend_ok")][:10],
-        "usage_note": "Require ≥100 trades + positive EV before auto roster changes",
-    }
-    try:
-        with open(TOP_CONDITIONAL_EDGES_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {TOP_CONDITIONAL_EDGES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {TOP_CONDITIONAL_EDGES_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def regime_stability_report(trades=None, session=None, regime_payload=None):
-    """Stability scores for regime × lane cells — filters noise from tiny samples."""
-    if regime_payload is None:
-        regime_payload = _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {}
-    cells = regime_payload.get("cells") or []
-    scoped = []
-    for cell in cells:
-        stab = _stability_score(cell.get("trades", 0), cell.get("wr_pct", 0), cell.get("ev_usd", 0))
-        scoped.append({**cell, **stab})
-    scoped.sort(key=lambda x: (-x.get("score", 0), -x.get("ev_usd", 0)))
-    payload = {
-        "schema": "regime_stability_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "cells": scoped,
-        "recommendable": [c for c in scoped if c.get("recommend_ok")],
-        "usage_note": "recommend_ok requires ≥100 trades, EV>0, WR≥50%",
-    }
-    try:
-        with open(REGIME_STABILITY_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except Exception:
-        pass
     return payload
 
 
@@ -14756,10 +14484,6 @@ def pre_test_analytics_reports(
     lane_definition_report(trades=trades, session=session, benchmark_report=benchmark_report)
     lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
     regime_payload = regime_leaderboard_report(trades=trades, session=session)
-    regime_confidence_matrix_report(trades=trades, session=session)
-    fill_delay_report(trades=trades, session=session)
-    top_conditional_edges_report(trades=trades, session=session)
-    regime_stability_report(trades=trades, session=session, regime_payload=regime_payload)
     roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
     confidence_band_cross_report(trades=trades, session=session, benchmark_report=benchmark_report)
@@ -15273,38 +14997,7 @@ def _generate_research_findings(payload):
             "⚠ Statistical confidence MODERATE — use for direction, confirm over ≥200 trades."
         )
 
-    cond = payload.get("conditional_edges") or {}
-    top_edge = (cond.get("top_recommendable") or cond.get("edges") or [])[:1]
-    if top_edge:
-        e = top_edge[0]
-        c = e.get("combo") or {}
-        findings.append(
-            f"Top conditional edge: {c.get('confidence_band')} + spread {c.get('spread_bucket')} + "
-            f"ADX {c.get('adx_bucket')} + {c.get('session')} → {c.get('research_lane')} "
-            f"({e.get('trades', 0)} trades, EV ${float(e.get('ev_usd', 0)):+.2f}, "
-            f"stability={e.get('tier', '?')})."
-        )
-
-    stab = payload.get("regime_stability") or {}
-    rec_cells = (stab.get("recommendable") or [])[:2]
-    if rec_cells:
-        labels = [
-            f"{c.get('regime_key', '?')}/{c.get('best_lane', c.get('lane', '?'))} "
-            f"(n={c.get('trades', 0)}, EV ${float(c.get('ev_usd', 0)):+.2f})"
-            for c in rec_cells
-        ]
-        findings.append(f"Regime-stable cells (≥100 trades): {'; '.join(labels)}.")
-
-    fd = payload.get("fill_delay") or {}
-    fd_buckets = fd.get("buckets") or []
-    if fd_buckets:
-        best_fd = max(fd_buckets, key=lambda x: float(x.get("ev_usd") or -999))
-        findings.append(
-            f"Fill delay: best bucket {best_fd.get('bucket')} "
-            f"({best_fd.get('trades', 0)} trades, EV ${float(best_fd.get('ev_usd', 0)):+.2f})."
-        )
-
-    return findings[:15]
+    return findings[:12]
 
 
 def _mirror_reports_to_dir():
@@ -15356,7 +15049,7 @@ def write_report_manifest(payload=None):
             RESEARCH_COMPACT_SUMMARY_FILE,
         ],
         "research_dashboard_url": os.getenv(
-            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9500/"
+            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/"
         ),
     }
     try:
@@ -15476,10 +15169,6 @@ def build_executive_summary_payload(
     top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
     lane_ret = _load_json_report(LANE_RETIREMENT_REPORT_FILE)
     feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
-    fill_delay = _load_json_report(FILL_DELAY_REPORT_FILE)
-    conditional_edges = _load_json_report(TOP_CONDITIONAL_EDGES_REPORT_FILE)
-    regime_stability = _load_json_report(REGIME_STABILITY_REPORT_FILE)
-    exit_leak_cohort = _load_json_report(EXIT_LEAKAGE_BY_REASON_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -15644,10 +15333,6 @@ def build_executive_summary_payload(
         "top_leakage": top_leak,
         "lane_retirement": lane_ret,
         "feature_importance": feat_imp,
-        "fill_delay": fill_delay,
-        "conditional_edges": conditional_edges,
-        "regime_stability": regime_stability,
-        "exit_leakage_by_reason": exit_leak_cohort,
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
@@ -16283,22 +15968,21 @@ def finalize_analyzer_outputs(
 
 if __name__ == "__main__":
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _agent_root = os.path.dirname(_script_dir)
+    # Home-stack runs from agent/research/; pathway_lab_validation lives in agent root.
     if os.path.isfile(os.path.join(_script_dir, "pathway_lab_validation.py")):
         if _script_dir not in sys.path:
             sys.path.insert(0, _script_dir)
     else:
+        _agent_root = os.path.dirname(_script_dir)
         if _agent_root and _agent_root not in sys.path:
             sys.path.insert(0, _agent_root)
-    # CSV/JSONL live in agent root; research/ subfolder hosts the script.
-    _data_dir = _agent_root if os.path.isfile(os.path.join(_agent_root, "trades_3factor.csv")) else _script_dir
-    if os.path.abspath(os.getcwd()) != _data_dir:
-        print(f"  ℹ️ Switching cwd → {_data_dir}")
-        os.chdir(_data_dir)
+    if os.path.abspath(os.getcwd()) != _script_dir:
+        print(f"  ℹ️ Switching cwd → {_script_dir}")
+        os.chdir(_script_dir)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()
-    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9500/")
+    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/")
 
     _once_mode = len(sys.argv) > 1 and str(sys.argv[1]).startswith("--once")
 
