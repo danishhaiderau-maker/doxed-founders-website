@@ -337,6 +337,11 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
 
   const clearVoiceError = useCallback(() => setVoiceError(null), []);
 
+  /** Clear accumulated transcript so a send cannot be overwritten by stale STT. */
+  const resetTranscript = useCallback(() => {
+    transcriptBaseRef.current = '';
+  }, []);
+
   return {
     listening,
     starting,
@@ -346,6 +351,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     audioLevel,
     voiceError,
     clearVoiceError,
+    resetTranscript,
     start,
     stop,
     toggle,

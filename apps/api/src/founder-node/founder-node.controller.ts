@@ -266,6 +266,16 @@ export class FounderNodeController {
     return this.ideBridge.getPendingDispatches(req.founderNode.userId);
   }
 
+  /** Claim one pending dispatch before executing — prevents double paste races. */
+  @UseGuards(FounderNodeGuard)
+  @Post('dispatch/:id/claim')
+  claimDispatch(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('id') id: string,
+  ) {
+    return this.ideBridge.claimDispatch(req.founderNode.userId, id);
+  }
+
   /**
    * Founder Node calls this after it has typed the prompt into Cursor (or
    * given up). Atomically flips the dispatch row PENDING → DISPATCHED and

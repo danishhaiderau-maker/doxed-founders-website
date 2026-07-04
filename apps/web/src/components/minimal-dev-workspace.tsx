@@ -267,6 +267,9 @@ export function MinimalDevWorkspace({
   const agentTypingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Synchronous guard — React `busy` state updates too late for double-clicks. */
+  const sendingRef = useRef(false);
+  const lastSendRef = useRef<{ text: string; at: number } | null>(null);
   const stopHistoryPoll = useCallback(() => {
     if (historyPollRef.current) {
       clearTimeout(historyPollRef.current);
@@ -290,6 +293,7 @@ export function MinimalDevWorkspace({
     waitingNetwork,
     voiceError,
     clearVoiceError,
+    resetTranscript,
     toggle: toggleVoice,
     stop: stopVoice,
   } = useVoiceInput(onVoiceTranscript);
@@ -637,7 +641,19 @@ export function MinimalDevWorkspace({
   const handleSend = useCallback(async () => {
     const prompt = cleanTranscriptText(input.trim());
     if ((!prompt && pendingAttachments.length === 0) || busy) return;
+    // Sync guard — `busy` flips too late for double-clicks / Enter + Send.
+    if (sendingRef.current) return;
+    const now = Date.now();
+    const last = lastSendRef.current;
+    if (last && last.text === prompt && now - last.at < 2000) return;
+    sendingRef.current = true;
+    lastSendRef.current = { text: prompt, at: now };
+
     if (phase !== 'idle') stopVoice();
+    resetTranscript();
+    setInput('');
+    setPendingAttachments([]);
+
     const attachNote =
       pendingAttachments.length > 0
         ? '\n\n[Attachments: ' + pendingAttachments.map((a) => a.name).join(', ') + ']'
@@ -663,8 +679,6 @@ export function MinimalDevWorkspace({
           }))
         : undefined,
     };
-    setInput('');
-    setPendingAttachments([]);
     setBusy(true);
     setError(null);
 
@@ -675,7 +689,6 @@ export function MinimalDevWorkspace({
 
     // Cursor session selected → remote control only; no platform Brain / RULE_BASED fallback.
     if (dispatchToSelectedSession && sessionForDispatch) {
-      setMessages((m) => [...m, userMsg]);
       setDispatchNotice('Dispatching to Cursor…');
       const ideProvider = sessionForDispatch.ideProvider || 'cursor';
       try {
@@ -686,33 +699,16 @@ export function MinimalDevWorkspace({
           ideProvider,
         );
         setDispatchNotice('Sent to Cursor — agent working…');
-        setMessages((m) => [
-          ...m,
-          {
-            id: 'a-' + Date.now(),
-            role: 'assistant',
-            text: `Sent to Cursor (${sessionForDispatch.title}). Watch the conversation above for the agent reply — no platform Brain required.`,
-            provider: 'cursor-dispatch',
-          },
-        ]);
         pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
         setTimeout(() => setDispatchNotice(null), 12_000);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
         setDispatchNotice(`Cursor dispatch failed: ${msg}`);
-        setMessages((m) => [
-          ...m,
-          {
-            id: 'a-' + Date.now(),
-            role: 'assistant',
-            text: `Could not send to Cursor: ${msg}. Check Founder Node is online and try again.`,
-            provider: 'cursor-dispatch',
-          },
-        ]);
         setError(msg);
         setTimeout(() => setDispatchNotice(null), 8000);
       } finally {
         setBusy(false);
+        sendingRef.current = false;
       }
       return;
     }
@@ -779,8 +775,9 @@ export function MinimalDevWorkspace({
       setError(msg);
     } finally {
       setBusy(false);
+      sendingRef.current = false;
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice, resetTranscript]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
