@@ -1,5 +1,7 @@
 # DoxxedCrypto Platform — Video Walkthrough Plan
 
+> **Superseded for onboarding:** see `video-walkthrough-plan-v2.md` (Founder OS Cursor chat, sovereign Founder Node URL, Verified Builder vs Trial tokens).
+
 > **Target runtime:** 90–120 seconds (DemoMaker sweet spot)
 > **Public URL:** https://doxxedcrypto.digital
 > **Bot showcase:** https://bot.doxxedcrypto.digital
