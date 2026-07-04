@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-Market-close Live Copy lots when showcase has no open position for the trade_id.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
