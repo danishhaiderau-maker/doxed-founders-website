@@ -312,6 +312,7 @@ try:
         EXPECTED_EXCHANGE,
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_STACK_VERSION,
+        RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     )
     from scenario_c_config import SCENARIO_C_LADDER_LABEL, TRAIL_LADDER_SCENARIO_C
     from legacy_pathway_config import (
@@ -702,6 +703,9 @@ SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
+V2_SHADOW_OUTCOME_FILE = "v2_shadow_outcome.jsonl"
+V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
+
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
@@ -1956,6 +1960,77 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
     return df
+
+
+def _load_v2_shadow_outcome_df(session: dict = None):
+    """A160 V2 tile-OFF simulated fills/exits (v2_shadow_outcome.jsonl)."""
+    rows = _load_jsonl_rows(V2_SHADOW_OUTCOME_FILE)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if session and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
+    return df
+
+
+def _load_v2_checker_approves_df(session: dict = None):
+    """V2 checker accepts — independent of AI_SCAN signal_snapshot approves."""
+    rows = _load_jsonl_rows(V2_CHECKER_LOG_FILE)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if "accepted" in df.columns:
+        df = df[df["accepted"].apply(_truthy)]
+    if session and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
+    return df
+
+
+def _v2_lane_metrics_from_logs(session: dict = None) -> dict:
+    """Aggregate V2 checker approves + shadow outcomes for benchmark_vs_lanes."""
+    checker = _load_v2_checker_approves_df(session)
+    outcomes = _load_v2_shadow_outcome_df(session)
+    approves = len(checker) if checker is not None and not checker.empty else 0
+    sim_fills = 0
+    sim_pnl = 0.0
+    wins = 0
+    reject_sim_fills = 0
+    reject_sim_pnl = 0.0
+    if outcomes is not None and not outcomes.empty:
+        work = outcomes.copy()
+        if "filled" in work.columns:
+            work["filled"] = work["filled"].apply(_truthy)
+        else:
+            work["filled"] = True
+        if "checker_accepted" in work.columns:
+            accepted_mask = work["checker_accepted"].apply(_truthy)
+            reject_work = work[~accepted_mask]
+            work = work[accepted_mask]
+        else:
+            reject_work = work.iloc[0:0]
+        filled = work[work["filled"]]
+        sim_fills = len(filled)
+        sim_pnl = round(
+            float(pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
+        )
+        pnl_series = pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0)
+        wins = int((pnl_series >= 0).sum())
+        reject_filled = reject_work[reject_work["filled"]] if not reject_work.empty else reject_work
+        reject_sim_fills = len(reject_filled)
+        reject_sim_pnl = round(
+            float(pd.to_numeric(reject_filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
+        ) if reject_sim_fills else 0.0
+    per_ev = round(sim_pnl / approves, 2) if approves else 0.0
+    win_rate = round(100.0 * wins / sim_fills, 1) if sim_fills else 0.0
+    return {
+        "approves": approves,
+        "sim_fills": sim_fills,
+        "sim_pnl": sim_pnl,
+        "per_approve_ev": per_ev,
+        "win_rate_pct": win_rate,
+        "reject_sim_fills": reject_sim_fills,
+        "reject_sim_pnl": reject_sim_pnl,
+    }
 
 
 def _load_shadow_lane_outcome_df(session: dict = None):
@@ -7675,9 +7750,15 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         shadow_by_lane = shadow_report["by_lane"]
 
     shadow_lane_df = _load_shadow_lane_outcome_df(session)
+    v2_log_metrics = _v2_lane_metrics_from_logs(session)
+    if v2_log_metrics.get("approves"):
+        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+        lanes_with_approves_seed.add(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
+    else:
+        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
 
     lane_metrics = {}
-    lanes_with_approves = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+    lanes_with_approves = lanes_with_approves_seed
     all_trade_df = all_trades if all_trades is not None else trade_df
     lanes_ordered = _ordered_lane_catalog(lanes_with_approves, all_trade_df)
 
@@ -7696,6 +7777,16 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             lane_trades = pd.DataFrame()
         real_fills = len(lane_trades)
         net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
+
+        if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
+            v2_approves = int(v2_log_metrics.get("approves") or 0)
+            if v2_approves:
+                approves_n = max(approves_n, v2_approves)
+            if real_fills == 0 and int(v2_log_metrics.get("sim_fills") or 0) > 0:
+                real_fills = int(v2_log_metrics.get("sim_fills") or 0)
+                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
+            elif real_fills == 0 and v2_approves and approves_n == v2_approves:
+                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
 
         if _pathway_lane_status(lane) == PATHWAY_STATUS_SHADOW_COLLECTING:
             if shadow_lane_df is not None and not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
