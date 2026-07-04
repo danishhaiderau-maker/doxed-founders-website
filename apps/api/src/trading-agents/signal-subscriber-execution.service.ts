@@ -1130,13 +1130,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const pending = this.showcasePendingOrder(bot, tradeId);
     if (pending?.limit_price && pending.limit_price > 0) return { abandoned: false };
 
+    // Showcase already filled this trade — keep the copy limit alive so it can
+    // still fill and mirror; do not treat a missing pending as abandon.
+    const showcasePos = (bot.positions ?? []).find(
+      (p) => String(p.trade_id ?? '') === tradeId,
+    );
+    if (showcasePos) return { abandoned: false };
+
     const expired = (bot.expired_orders ?? []).find((e) => e.trade_id === tradeId);
     if (expired) {
       return { abandoned: true, reason: expired.reason ?? 'SHOWCASE_EXPIRED' };
     }
 
     const sig = this.showcaseSignalForTrade(bot, tradeId);
-    if (!sig) return { abandoned: false };
+    // No pending, no position, no active signal, and no expired_orders hit.
+    // Showcase fully dropped this trade — common when the expiry row rotated
+    // out of the bot's MAX_EXPIRED_ORDERS ring (20). Fail-closed so the copy
+    // does not rest until cycle TTL and risk an orphan fill (COPY_ORDER_NO_SHOWCASE).
+    if (!sig) {
+      return { abandoned: true, reason: 'SHOWCASE_ABSENT' };
+    }
 
     const st = String(sig.status ?? '').toUpperCase();
     if (
