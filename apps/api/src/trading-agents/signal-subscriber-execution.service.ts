@@ -254,6 +254,13 @@ const MIRROR_EXEC_STATE_MEMO_MS = 1_000;
  *  SHOWCASE_VANISHED. Failed/unreachable fetches do not count (fail-closed). */
 const SHOWCASE_VANISHED_CONSECUTIVE_MISSES = 3;
 
+/** Cross-ID / ghost-fill exit: OPEN copy lot whose trade_id is not in showcase
+ *  open positions for this many consecutive fresh bot states is market-closed
+ *  (SHOWCASE_POSITION_ABSENT). Unlike SHOWCASE_VANISHED, this only checks
+ *  positions — trades_map may still list PENDING/VIRTUAL_CHASE for a trade the
+ *  copy filled but showcase never opened. Fail-closed on unreachable fetch. */
+const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
+
 /** Fix E — throttle for surfacing an expired hire (lastError + warn log). */
 const HIRE_EXPIRY_NOTICE_THROTTLE_MS = 60 * 60_000;
 
@@ -346,6 +353,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** Fix B — participantId → consecutive fresh canonical states missing its showcase trade.
    *  In-memory by design: resets on process restart (the count simply restarts). */
   private readonly showcaseVanishedMisses = new Map<string, number>();
+  /** participantId → consecutive fresh states where showcase has no OPEN position
+   *  for this lot's trade_id (cross-ID / ghost-fill exit). In-memory; resets on restart. */
+  private readonly showcasePositionAbsentMisses = new Map<string, number>();
   /** Fix E — instanceId → last time the expired-hire notice was surfaced (ms). */
   private readonly hireExpiryNoticeAt = new Map<string, number>();
 
@@ -2917,16 +2927,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const freshBaselineMinQty = otherAttributedQty + lotQty * 0.85;
       if (currentExchangeQty + MIN_QTY_BTC < freshBaselineMinQty) {
-        this.logger.warn(
+      this.logger.warn(
           `Order ${orderId} gone but merged position ${currentExchangeQty.toFixed(5)} BTC did not grow for lot ${lotQty.toFixed(5)} (baseline ${exchangeQtyAtOrder.toFixed(5)}, fresh attributed ${otherAttributedQty.toFixed(5)}) — expire phantom pending`,
-        );
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
-          venue: 'bitfinex',
-          pnl_usd: 0,
-          source: 'hire',
-          event: 'PHANTOM_FILL_REJECTED',
-        });
-        return;
+      );
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+        venue: 'bitfinex',
+        pnl_usd: 0,
+        source: 'hire',
+        event: 'PHANTOM_FILL_REJECTED',
+      });
+      return;
       }
       this.logger.warn(
         `Order ${orderId}: stale at-order baseline ${exchangeQtyAtOrder.toFixed(5)} failed growth check but FRESH attributed baseline ${otherAttributedQty.toFixed(5)} confirms the fill (merged ${currentExchangeQty.toFixed(5)}, lot ${lotQty.toFixed(5)}) — recording real fill for ${userId}`,
@@ -4084,6 +4094,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED;
     let showcaseExitPrice: number | undefined;
     let showcaseExitReason: string | undefined;
+    let mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
 
     if (!closed && showcaseTradeId) {
       const bot = await this.fetchExecutionBotState();
@@ -4092,6 +4103,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         closed = true;
         showcaseExitPrice = det.exitPrice;
         showcaseExitReason = det.exitReason;
+        mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
+      } else if (
+        bot &&
+        this.trackShowcasePositionAbsent(participant.id, showcaseTradeId, bot)
+      ) {
+        // Copy OPEN but this trade_id is not in showcase open positions.
+        // Covers cross-ID ghost fills (showcase trade still PENDING in trades_map)
+        // where SHOWCASE_VANISHED never fires because the trade is still "known".
+        closed = true;
+        showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
+        mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
+        this.logger.warn(
+          `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId} — market-closing copy lot after ${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh states without an open showcase position`,
+        );
       }
     }
 
@@ -4105,6 +4130,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         originCycle?.status === SignalCycleStatus.EXPIRED
       ) {
         closed = true;
+        mirrorTrigger = 'ORIGIN_SHOWCASE_CLOSED';
       }
     }
 
@@ -4128,7 +4154,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         showcaseExitPrice,
         showcaseExitReason,
         mirrorRelinked,
-        trigger: mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED',
+        trigger: mirrorTrigger,
       },
     );
   }
@@ -4213,6 +4239,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           pnl_source: pnlSource,
           source: 'hire',
         });
+        this.showcaseVanishedMisses.delete(participant.id);
+        this.showcasePositionAbsentMisses.delete(participant.id);
         this.logger.log(
           `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
         );
@@ -4286,6 +4314,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         `Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
       );
       this.showcaseVanishedMisses.delete(participant.id);
+      this.showcasePositionAbsentMisses.delete(participant.id);
       return true;
     } finally {
       this.exitingLots.delete(participant.id);
@@ -4594,6 +4623,42 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
+   * Cross-ID / ghost-fill tracker. Returns true when the participant's
+   * showcase trade_id is absent from open positions for
+   * {@link SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh bot
+   * states. Unlike {@link trackShowcaseVanished}, this does NOT require the
+   * trade to be wiped from trades_map — a PENDING/VIRTUAL_CHASE entry that
+   * never became an open showcase position still counts as absent.
+   * Fail-closed: caller must pass a successfully-fetched bot state.
+   */
+  private trackShowcasePositionAbsent(
+    participantId: string,
+    tradeId: string,
+    bot: BotApiState,
+  ): boolean {
+    if (!tradeId || tradeId.startsWith('adopt:')) {
+      this.showcasePositionAbsentMisses.delete(participantId);
+      return false;
+    }
+    const inPositions = (bot.positions ?? []).some(
+      (p) => p.trade_id && tradeIdsMatch(p.trade_id, tradeId),
+    );
+    if (inPositions) {
+      this.showcasePositionAbsentMisses.delete(participantId);
+      return false;
+    }
+    const misses = (this.showcasePositionAbsentMisses.get(participantId) ?? 0) + 1;
+    this.showcasePositionAbsentMisses.set(participantId, misses);
+    if (misses < SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES) {
+      this.logger.warn(
+        `Showcase position absent ${tradeId} (participant=${participantId}) — miss ${misses}/${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Fix B — showcase-vanished tracker. Returns true when the participant's
    * showcase trade_id has been absent from the canonical showcase state's
    * open positions AND closed trades (trades / trades_map) AND pending orders
@@ -4893,9 +4958,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       pnlSource = flat.pnlSource;
     } else {
       pnlUsd =
-        direction === 'LONG'
-          ? (opts.mark - opts.fillPrice) * closeQty
-          : (opts.fillPrice - opts.mark) * closeQty;
+      direction === 'LONG'
+        ? (opts.mark - opts.fillPrice) * closeQty
+        : (opts.fillPrice - opts.mark) * closeQty;
       pnlSource = 'open_position';
     }
     const pnlMarginPct =
@@ -4930,6 +4995,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     } finally {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
+      this.showcasePositionAbsentMisses.delete(participantId);
     }
   }
 
@@ -5342,10 +5408,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             );
           }
         } else {
-          // Log only; do NOT cancel — could be a user's own manual order.
-          this.logger.debug(
+        // Log only; do NOT cancel — could be a user's own manual order.
+        this.logger.debug(
             `Unmanaged order ${order.id} (cid=${order.cid ?? 'none'}, ${order.orderType}) present for ${userId}; leaving untouched (no cid match, aggressive cleanup off)`,
-          );
+        );
         }
         continue;
       }
