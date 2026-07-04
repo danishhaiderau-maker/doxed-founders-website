@@ -461,10 +461,12 @@ export class BotBridgeService {
     return this.fetchAnalyzerProxy<Record<string, unknown>>('/api/analyzer/genome', 12_000);
   }
 
-  /** Cumulative full-session metrics derived from the bot's /api/state (cached 60s).
-   *  Used as the reliable fallback when the :9001 analyzer proxy (/api/analyzer/summary)
-   *  is not exposed by the bot. Reads analytics.total_trades / win_rate (cumulative since the
-   *  last fresh-collection wipeout) and the live account balance + daily P&L. */
+  /** Cumulative full-session metrics from the canonical showcase bot's full `/api/state`
+   *  (cached 60s). Used when the :9001 analyzer proxy is intermittent/unavailable.
+   *
+   *  Display-only: always uses `fetchShowcaseCanonicalState` (home tunnel `/api/state`).
+   *  Never slim `/api/relay-state` (lacks equity/trade_count/session_pnl) and never Fly
+   *  (separate stale instance). Never invents $500 / 0 trades / $0 PnL defaults. */
   private cumulativeCache: { at: number; data: CumulativeSessionMetrics | null } | null = null;
   private readonly cumulativeCacheMs = 60_000;
 
@@ -473,20 +475,60 @@ export class BotBridgeService {
     if (this.cumulativeCache && now - this.cumulativeCache.at < this.cumulativeCacheMs) {
       return this.cumulativeCache.data;
     }
-    const bot = await this.fetchState(true, 'relay');
+    const bot = await this.fetchShowcaseCanonicalState(true);
     if (!bot) {
       this.cumulativeCache = { at: now, data: null };
       return null;
     }
     const STARTING = 500;
     const analytics = bot.analytics ?? {};
-    const totalTrades =
-      Number(analytics.total_trades ?? bot.trade_count_session ?? 0) || 0;
+    const balanceRaw =
+      typeof bot.account_balance === 'number' && Number.isFinite(bot.account_balance)
+        ? bot.account_balance
+        : typeof bot.equity === 'number' && Number.isFinite(bot.equity)
+          ? bot.equity
+          : null;
+    const tradeCountRaw =
+      typeof analytics.total_trades === 'number' && Number.isFinite(analytics.total_trades)
+        ? analytics.total_trades
+        : typeof bot.trade_count === 'number' && Number.isFinite(bot.trade_count)
+          ? bot.trade_count
+          : typeof bot.trade_count_session === 'number' && Number.isFinite(bot.trade_count_session)
+            ? bot.trade_count_session
+            : null;
+    const sessionPnlRaw =
+      typeof bot.session_pnl_usd === 'number' && Number.isFinite(bot.session_pnl_usd)
+        ? bot.session_pnl_usd
+        : null;
+
+    // Full /api/state must carry at least one real metric field. Slim/partial payloads
+    // used to fall through to equity ?? 500 and trade_count ?? 0 with ok:true, which
+    // overwrote the landing card with fabricated zeros whenever the analyzer was down.
+    if (balanceRaw == null && tradeCountRaw == null && sessionPnlRaw == null) {
+      this.logger.warn(
+        'Canonical /api/state missing equity/trade_count/session_pnl — refusing fabricated defaults',
+      );
+      this.cumulativeCache = { at: now, data: null };
+      return null;
+    }
+
+    const totalTrades = tradeCountRaw != null ? Number(tradeCountRaw) : 0;
     const winRate = Number(analytics.win_rate ?? 0) || 0;
-    const currentBalance = Number(
-      bot.account_balance ?? bot.equity ?? STARTING,
-    );
-    const totalPnlUsd = Number((currentBalance - STARTING).toFixed(2));
+    const currentBalance =
+      balanceRaw != null
+        ? Number(balanceRaw)
+        : sessionPnlRaw != null
+          ? STARTING + sessionPnlRaw
+          : null;
+    if (currentBalance == null || !Number.isFinite(currentBalance)) {
+      this.cumulativeCache = { at: now, data: null };
+      return null;
+    }
+
+    const totalPnlUsd =
+      sessionPnlRaw != null
+        ? Number(sessionPnlRaw.toFixed(2))
+        : Number((currentBalance - STARTING).toFixed(2));
     const totalPnlPct = Number(((totalPnlUsd / STARTING) * 100).toFixed(2));
     const dailyPnlUsd =
       typeof bot.daily_pnl_usd === 'number' && Number.isFinite(bot.daily_pnl_usd)

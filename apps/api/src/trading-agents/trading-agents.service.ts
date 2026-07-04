@@ -567,47 +567,53 @@ export class TradingAgentsService implements OnModuleInit {
       const winRate = Number(perf.win_rate_pct ?? 0);
       const trades = Number(perf.trades ?? 0);
       const approveAttempts = Number(realEdge.approve_attempts ?? 0);
-      const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
-      const freshStartIso =
-        typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
-      const sessionStart = freshStartIso ?? botStartIso ?? null;
-      let sessionHours: number | undefined;
-      if (sessionStart) {
-        const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
-        if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
-      } else if (typeof raw.executive_text === 'string') {
-        const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
-        if (m) sessionHours = Number(m[1]);
+      // Empty/zeroed analyzer envelopes (intermittent :9001) must not publish fabricated
+      // $500 / 0 trades / $0 PnL — fall through to canonical full /api/state metrics.
+      const hasRealAnalyzerData =
+        (Number.isFinite(trades) && trades > 0) ||
+        (Number.isFinite(netPnlUsd) && netPnlUsd !== 0);
+      if (hasRealAnalyzerData) {
+        const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
+        const freshStartIso =
+          typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
+        const sessionStart = freshStartIso ?? botStartIso ?? null;
+        let sessionHours: number | undefined;
+        if (sessionStart) {
+          const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
+          if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
+        } else if (typeof raw.executive_text === 'string') {
+          const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
+          if (m) sessionHours = Number(m[1]);
+        }
+        return {
+          ok: true,
+          source: 'analyzer :9001 via bot proxy',
+          session_start: sessionStart,
+          session_hours: sessionHours,
+          starting_balance: STARTING,
+          current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
+          total_pnl_usd: Number(netPnlUsd.toFixed(2)),
+          total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
+          trade_count: trades,
+          win_rate: Number(winRate.toFixed(1)),
+          approve_count: approveAttempts,
+          executed_count: trades,
+          coverage_status: String(raw.coverage_status ?? '—'),
+          data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
+          executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
+          analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
+          generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
+        };
       }
-      return {
-        ok: true,
-        source: 'analyzer :9001 via bot proxy',
-        session_start: sessionStart,
-        session_hours: sessionHours,
-        starting_balance: STARTING,
-        current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
-        total_pnl_usd: Number(netPnlUsd.toFixed(2)),
-        total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
-        trade_count: trades,
-        win_rate: Number(winRate.toFixed(1)),
-        approve_count: approveAttempts,
-        executed_count: trades,
-        coverage_status: String(raw.coverage_status ?? '—'),
-        data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
-        executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
-        analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
-        generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
-      };
     }
 
-    // Fallback: the bot does not expose /api/analyzer/summary on the public tunnel.
-    // Derive cumulative full-session metrics from /api/state (cached 60s in BotBridgeService).
+    // Fallback: analyzer missing/empty — derive metrics from canonical showcase /api/state only.
     const metrics = await this.botBridge.fetchCumulativeSessionMetrics();
     if (!metrics) {
       return {
         ok: false,
         source: 'bot /api/state cumulative',
-        error: 'showcase bot unreachable — cannot read cumulative session metrics (Fly + Cloudflare both down)',
+        error: 'showcase bot unreachable — cannot read cumulative session metrics from canonical /api/state',
       };
     }
     return {
