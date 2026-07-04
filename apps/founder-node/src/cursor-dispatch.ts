@@ -1,5 +1,8 @@
 import { clipboard } from 'electron';
 import { exec } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
   focusComposerInWorkspaceState,
@@ -95,18 +98,77 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const ATTACH_IMAGE_RE =
+  /<!--founder-attach:image:([^\n]+)\n(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\n-->/g;
+
+type ParsedDispatchPrompt = {
+  text: string;
+  images: Array<{ name: string; dataUrl: string }>;
+};
+
+function parseDispatchPrompt(raw: string): ParsedDispatchPrompt {
+  const images: Array<{ name: string; dataUrl: string }> = [];
+  const text = raw
+    .replace(ATTACH_IMAGE_RE, (_full, name: string, dataUrl: string) => {
+      images.push({ name: String(name).trim(), dataUrl: String(dataUrl).replace(/\s+/g, '') });
+      return '';
+    })
+    .trim();
+  return { text, images };
+}
+
+/**
+ * Best-effort: write a data-URL image to the Windows clipboard as a PNG so
+ * Cursor can receive it via Ctrl+V. Falls back silently on failure.
+ */
+async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!m) return false;
+  const b64 = m[2]!.replace(/\s+/g, '');
+  let tmpPng: string | null = null;
+  try {
+    const bytes = Buffer.from(b64, 'base64');
+    if (bytes.length < 32 || bytes.length > 8 * 1024 * 1024) return false;
+    tmpPng = path.join(os.tmpdir(), `fn-attach-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+    fs.writeFileSync(tmpPng, bytes);
+    const ps =
+      `Add-Type -AssemblyName System.Windows.Forms;` +
+      `Add-Type -AssemblyName System.Drawing;` +
+      `$img=[System.Drawing.Image]::FromFile('${tmpPng.replace(/'/g, "''")}');` +
+      `[System.Windows.Forms.Clipboard]::SetImage($img);` +
+      `$img.Dispose();`;
+    const result = await execAsync(
+      `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`,
+    );
+    return result.ok;
+  } catch {
+    return false;
+  } finally {
+    if (tmpPng) {
+      try {
+        fs.unlinkSync(tmpPng);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 /**
  * Send the prompt into the focused Cursor composer input via clipboard +
  * SendKeys. Avoids Ctrl+Shift+L which opens a new chat tab in Cursor 3.x.
+ * Image attachments (embedded by Founder OS) are pasted first when possible.
  */
 async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
-  try {
-    clipboard.writeText(prompt);
-  } catch (err) {
-    throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const { text, images } = parseDispatchPrompt(prompt);
 
   if (process.platform !== 'win32') {
+    try {
+      clipboard.writeText(text || prompt);
+    } catch (err) {
+      throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     throw new Error(
       'Cursor auto-dispatch is Windows-only; prompt copied to clipboard — paste into the focused composer.',
     );
@@ -117,15 +179,47 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
 
   // Ctrl+L focuses the chat/composer input in the active tab without spawning
   // a new agent session (Ctrl+Shift+L does spawn one — that was the bug).
-  const sendKeysCmd =
+  const focusCmd =
     'Add-Type -AssemblyName System.Windows.Forms;' +
     '[System.Windows.Forms.SendKeys]::SendWait(\'^l\');' +
-    'Start-Sleep -Milliseconds 450;' +
+    'Start-Sleep -Milliseconds 450;';
+  const focusResult = await execAsync(
+    `powershell -NoProfile -Command "${focusCmd.replace(/"/g, '\\"')}"`,
+  );
+  if (!focusResult.ok) {
+    throw new Error(`SendKeys focus failed: ${focusResult.error ?? 'unknown error'}`);
+  }
+
+  // Paste images (if any), then the text prompt.
+  for (const img of images.slice(0, 3)) {
+    const ok = await pasteImageDataUrl(img.dataUrl);
+    if (!ok) continue;
+    const pasteImg =
+      'Add-Type -AssemblyName System.Windows.Forms;' +
+      '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
+      'Start-Sleep -Milliseconds 400;';
+    await execAsync(`powershell -NoProfile -Command "${pasteImg.replace(/"/g, '\\"')}"`);
+  }
+
+  const finalText =
+    text ||
+    (images.length > 0
+      ? `[Attachments: ${images.map((i) => i.name).join(', ')}]`
+      : prompt);
+  try {
+    clipboard.writeText(finalText);
+  } catch (err) {
+    throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const pasteText =
+    'Add-Type -AssemblyName System.Windows.Forms;' +
     '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
     'Start-Sleep -Milliseconds 250;' +
     '[System.Windows.Forms.SendKeys]::SendWait(\'{ENTER}\');';
-
-  const result = await execAsync(`powershell -NoProfile -Command "${sendKeysCmd.replace(/"/g, '\\"')}"`);
+  const result = await execAsync(
+    `powershell -NoProfile -Command "${pasteText.replace(/"/g, '\\"')}"`,
+  );
   if (!result.ok) {
     throw new Error(`SendKeys failed: ${result.error ?? 'unknown error'}`);
   }

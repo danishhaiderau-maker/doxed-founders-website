@@ -22,6 +22,14 @@ import {
   type RecentAgent,
 } from '@/lib/api';
 
+type PendingAttachment = {
+  name: string;
+  previewUrl?: string;
+  category?: string;
+  /** data: URL for images — Founder Node can paste into Cursor clipboard */
+  dataUrl?: string;
+};
+
 type ChatMsg = {
   id: string;
   role: 'user' | 'assistant';
@@ -30,7 +38,7 @@ type ChatMsg = {
   pending?: boolean;
   thinking?: boolean;
   missingConnections?: CopilotMissingConnection[];
-  attachments?: Array<{ name: string; previewUrl?: string; category?: string }>;
+  attachments?: PendingAttachment[];
 };
 
 type BrainOption = { key: string; label: string; hint: string };
@@ -253,15 +261,15 @@ export function MinimalDevWorkspace({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string>('never');
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
-  const [pendingAttachments, setPendingAttachments] = useState<
-    Array<{ name: string; previewUrl?: string; category?: string }>
-  >([]);
-  const historyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const historyPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const postDispatchUntilRef = useRef(0);
+  const agentTypingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stopHistoryPoll = useCallback(() => {
     if (historyPollRef.current) {
-      clearInterval(historyPollRef.current);
+      clearTimeout(historyPollRef.current);
       historyPollRef.current = null;
     }
   }, []);
@@ -293,9 +301,12 @@ export function MinimalDevWorkspace({
   }, [voiceError]);
 
   const pollSessionHistory = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, opts?: { aggressiveMs?: number }) => {
       if (!accessToken) return;
       stopHistoryPoll();
+      if (opts?.aggressiveMs && opts.aggressiveMs > 0) {
+        postDispatchUntilRef.current = Date.now() + opts.aggressiveMs;
+      }
       const tick = () => {
         void fetchIdeBridgeSessionMessages(accessToken, sessionId)
           .then((msgs) => {
@@ -309,7 +320,18 @@ export function MinimalDevWorkspace({
           .catch(() => undefined);
       };
       tick();
-      historyPollRef.current = setInterval(tick, 3000);
+      // 2s while agent is typing / post-dispatch; otherwise 3s.
+      const intervalMs = () =>
+        agentTypingRef.current || Date.now() < postDispatchUntilRef.current
+          ? 2000
+          : 3000;
+      const schedule = () => {
+        historyPollRef.current = setTimeout(() => {
+          tick();
+          schedule();
+        }, intervalMs());
+      };
+      schedule();
     },
     [accessToken, stopHistoryPoll],
   );
@@ -511,50 +533,57 @@ export function MinimalDevWorkspace({
     });
   }, []);
 
-  const [collapsedSubagents, setCollapsedSubagents] = useState<Set<string>>(new Set());
-  const toggleSubagents = useCallback((sessionId: string) => {
-    setCollapsedSubagents((prev) => {
-      const next = new Set(prev);
-      if (next.has(sessionId)) next.delete(sessionId);
-      else next.add(sessionId);
-      return next;
-    });
-  }, []);
-
   const selectedSession = useMemo(() => {
     if (!selectedSessionId) return null;
-    for (const s of sessions) {
-      if (s.id === selectedSessionId) return s;
-      const sub = s.subagents?.find((x) => x.id === selectedSessionId);
-      if (sub) return sub;
-    }
-    return null;
+    return sessions.find((s) => s.id === selectedSessionId) ?? null;
   }, [sessions, selectedSessionId]);
-  const selectedAgentTyping = selectedSession?.agentTyping ?? false;
+  const selectedAgentTyping =
+    selectedSession?.agentTyping === true ||
+    Boolean(history?.some((m) => m.streaming || m.partial));
+
+  useEffect(() => {
+    agentTypingRef.current = selectedAgentTyping;
+  }, [selectedAgentTyping]);
 
   const handleAttachFiles = useCallback(async (files: FileList | null) => {
     if (!files?.length) return;
-    const next: Array<{ name: string; previewUrl?: string; category?: string }> = [];
+    const next: PendingAttachment[] = [];
     for (const file of Array.from(files)) {
+      let dataUrl: string | undefined;
+      let previewUrl: string | undefined;
+      if (file.type.startsWith('image/')) {
+        try {
+          dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('read failed'));
+            reader.readAsDataURL(file);
+          });
+          previewUrl = dataUrl;
+        } catch {
+          previewUrl = URL.createObjectURL(file);
+        }
+      }
       try {
         const form = new FormData();
         form.append('file', file);
         const res = await fetch('/api/founder-vault/upload', { method: 'POST', body: form });
-        if (!res.ok) continue;
+        if (!res.ok) {
+          next.push({ name: file.name, previewUrl, dataUrl, category: file.type.startsWith('image/') ? 'screenshot' : 'document' });
+          continue;
+        }
         const body = (await res.json()) as {
           items?: Array<{ name: string; category: string }>;
         };
         const saved = body.items?.[0];
-        const previewUrl = file.type.startsWith('image/')
-          ? URL.createObjectURL(file)
-          : undefined;
         next.push({
           name: saved?.name ?? file.name,
           category: saved?.category,
           previewUrl,
+          dataUrl,
         });
       } catch {
-        next.push({ name: file.name });
+        next.push({ name: file.name, previewUrl, dataUrl });
       }
     }
     if (next.length) setPendingAttachments((prev) => [...prev, ...next]);
@@ -615,12 +644,26 @@ export function MinimalDevWorkspace({
       pendingAttachments.length > 0
         ? '\n\n[Attachments: ' + pendingAttachments.map((a) => a.name).join(', ') + ']'
         : '';
-    const fullPrompt = (prompt + attachNote).trim();
+    // Embed image data URLs for Founder Node clipboard paste (stripped before Cursor sees text).
+    const imageBlocks = pendingAttachments
+      .filter((a) => a.dataUrl && a.dataUrl.startsWith('data:image/'))
+      .map(
+        (a) =>
+          `\n<!--founder-attach:image:${a.name}\n${a.dataUrl}\n-->`,
+      )
+      .join('');
+    const fullPrompt = (prompt + attachNote + imageBlocks).trim();
     const userMsg: ChatMsg = {
       id: 'u-' + Date.now(),
       role: 'user',
       text: prompt || '(attachment)',
-      attachments: pendingAttachments.length ? [...pendingAttachments] : undefined,
+      attachments: pendingAttachments.length
+        ? pendingAttachments.map(({ name, previewUrl, category }) => ({
+            name,
+            previewUrl,
+            category,
+          }))
+        : undefined,
     };
     const assistantId = 'a-' + Date.now();
     const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
@@ -645,7 +688,7 @@ export function MinimalDevWorkspace({
       void dispatchToIdeSession(accessToken, sessionForDispatch.id, fullPrompt, 'cursor')
         .then(() => {
           setDispatchNotice('Sent to Cursor — waiting for agent response…');
-          pollSessionHistory(sessionForDispatch.id);
+          pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
           setTimeout(() => setDispatchNotice(null), 12000);
         })
         .catch((e: unknown) => {
@@ -742,7 +785,7 @@ export function MinimalDevWorkspace({
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
         </div>
         <div className='min-h-0 flex-1 overflow-y-auto px-2 pb-3'>
-          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.6+ is running and Cursor is open.</div>}
+          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.7+ is running and Cursor is open.</div>}
           {workspaces.map((w) => (
             <button key={w.id} onClick={() => setSelectedWsId(w.id)} className={'mb-1 block w-full rounded-lg px-3 py-2.5 text-left transition ' + (selectedWsId === w.id ? 'bg-white/10 ring-1 ring-white/15' : 'hover:bg-white/5')}>
               <div className='flex items-center gap-2'>
@@ -783,47 +826,19 @@ export function MinimalDevWorkspace({
                     </button>
                     {!collapsed && (
                       <div className='ml-1'>
-                        {g.sessions.map((s) => {
-                          const subagents = s.subagents ?? [];
-                          const subCollapsed = collapsedSubagents.has(s.id);
-                          return (
-                            <div key={g.key + ':' + s.id}>
-                              <SessionRow
-                                session={s}
-                                selected={selectedSessionId === s.id}
-                                onSelect={handleSelectSession}
-                                dotClass={
-                                  Date.now() - new Date(s.lastActiveAt).getTime() < 86400000
-                                    ? 'bg-emerald-400'
-                                    : 'bg-violet-400'
-                                }
-                              />
-                              {subagents.length > 0 && (
-                                <>
-                                  <button
-                                    type='button'
-                                    onClick={() => toggleSubagents(s.id)}
-                                    className='ml-6 flex w-[calc(100%-1.5rem)] items-center gap-1 rounded-md px-2 py-1 text-left text-[0.6rem] text-zinc-500 hover:bg-white/5'
-                                  >
-                                    <span className={'transition-transform ' + (subCollapsed ? '' : 'rotate-90')}>▶</span>
-                                    <span>{subagents.length} subtask{subagents.length === 1 ? '' : 's'}</span>
-                                  </button>
-                                  {!subCollapsed &&
-                                    subagents.map((sub) => (
-                                      <div key={sub.id} className='ml-4 opacity-80'>
-                                        <SessionRow
-                                          session={sub}
-                                          selected={selectedSessionId === sub.id}
-                                          onSelect={handleSelectSession}
-                                          dotClass='bg-zinc-500'
-                                        />
-                                      </div>
-                                    ))}
-                                </>
-                              )}
-                            </div>
-                          );
-                        })}
+                        {g.sessions.map((s) => (
+                          <SessionRow
+                            key={g.key + ':' + s.id}
+                            session={s}
+                            selected={selectedSessionId === s.id}
+                            onSelect={handleSelectSession}
+                            dotClass={
+                              Date.now() - new Date(s.lastActiveAt).getTime() < 86400000
+                                ? 'bg-emerald-400'
+                                : 'bg-violet-400'
+                            }
+                          />
+                        ))}
                       </div>
                     )}
                   </div>

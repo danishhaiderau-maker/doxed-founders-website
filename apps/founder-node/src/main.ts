@@ -93,7 +93,8 @@ import {
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
 const SYNC_INTERVAL_MS = 30_000;
-const SESSION_MESSAGE_SYNC_MS = 8_000;
+/** Fast loop: refresh Cursor chat messages + claim pending dispatches. */
+const SESSION_MESSAGE_SYNC_MS = 3_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
@@ -372,6 +373,12 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
       sessions,
     });
     lastCachedHeartbeat = { ...lastCachedHeartbeat, sessions };
+
+    // Claim IDE dispatches on the fast loop so a Send from Founder OS reaches
+    // Cursor within a few seconds, not only on the 30s full sync.
+    void processPendingDispatches(vaultRoot).catch((err) =>
+      console.warn('Pending dispatch cycle failed:', err),
+    );
   } catch (err) {
     console.warn('Session message sync failed:', err);
   } finally {

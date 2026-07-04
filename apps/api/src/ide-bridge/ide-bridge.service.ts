@@ -350,11 +350,6 @@ export class IdeBridgeService {
   async getSessionMessages(userId: string, sessionId: string): Promise<BridgeMessage[]> {
     const sessions = await this.desktopBridge.listSessions(userId);
     const direct = sessions.find((x) => x.id === sessionId);
-    if (direct?.messages?.length) return direct.messages;
-    for (const s of sessions) {
-      const sub = s.subagents?.find((x) => x.id === sessionId);
-      if (sub?.messages?.length) return sub.messages;
-    }
     return direct?.messages ?? [];
   }
 
