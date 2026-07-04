@@ -1,5 +1,7 @@
 # DoxxedCrypto Platform Walkthrough — Narration Script
 
+> **Superseded for onboarding:** see `video-walkthrough-narration-v2.md`.
+
 Voice: calm, confident product-launch narrator. Pace: unhurried, breath-friendly.
 Ready to feed to ElevenLabs/TTS or read aloud. Scene numbers match `video-walkthrough-plan.md`.
 
