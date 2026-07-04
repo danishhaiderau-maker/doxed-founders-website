@@ -191,8 +191,8 @@ _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_CHASE: False,
-    # V2 default ON in research — independent paper orders until user turns tile OFF.
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: True,
+    # V2 default OFF - shadow sim only; enable tile for independent paper orders.
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: False,
 })
 
 
