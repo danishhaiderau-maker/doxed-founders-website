@@ -7,6 +7,7 @@ import {
   revokeFounderNode,
   type FounderNodeStatusRow,
 } from '@/lib/api';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 
 type Props = {
   accessToken: string;
@@ -109,7 +110,6 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     }
   }
 
-  /** When cloud is paired but desktop is offline, always surface the pairing code flow. */
   const desktopNeedsRePair = isPaired && !anyOnline;
   const showPairingFlow = !isPaired || showNewPairing || desktopNeedsRePair;
 
@@ -117,144 +117,80 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-4">
       <h4 className="text-sm font-semibold text-cyan-100">Founder Node pairing</h4>
       <p className="mt-1 text-xs text-cyan-100/70">
-        Install Founder Node on your PC, Mac, or Linux. Your vault stays local — Founder OS only receives tiny
-        metadata snapshots (goal, progress, tasks count), not your private vault files.
+        Install Founder Node v0.7.3+ on your PC. Your vault stays local — Founder OS only receives tiny metadata
+        snapshots.
       </p>
-
-      <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-950/15 p-3 text-[11px] text-emerald-100/90">
-        <p className="font-semibold text-emerald-200">What stays private</p>
-        <p className="mt-1">
-          Full company memory (private notes, raw task bodies, vault markdown) stays on your machine and in
-          encrypted blobs we cannot read. The website sees progress metadata and what you publish to GitHub or
-          the public feed.
-        </p>
-      </div>
 
       {isPaired && !showNewPairing && anyOnline && (
         <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
-          ✓ Desktop vault connected — desktop pairing code hidden. Tray app must keep running (icon near the clock).
-        </div>
-      )}
-
-      {isPaired && !showNewPairing && (
-        <div className="mt-3 rounded-lg border border-violet-500/35 bg-violet-950/25 p-3">
-          <p className="text-xs font-semibold text-violet-100">Pair Android phone</p>
-          <p className="mt-1 text-[11px] leading-relaxed text-violet-100/80">
-            Install the APK from{' '}
-            <a href="/mobile" className="text-violet-200 underline">
-              doxxedcrypto.digital/mobile
-            </a>
-            , open <strong className="text-white">Founder Node</strong> in the app (or{' '}
-            <a href="/settings/builder" className="text-violet-200 underline">
-              /settings/builder
-            </a>
-            ), paste the code below under <strong className="text-white">Android vault</strong>.
-          </p>
-          <button
-            type="button"
-            disabled={busy === 'mobile'}
-            onClick={() => void generateCode('mobile')}
-            className="mt-3 rounded-lg border border-violet-400/50 bg-violet-800/40 px-3 py-1.5 text-xs font-medium text-violet-50 disabled:opacity-50"
-          >
-            {busy === 'mobile' ? 'Generating…' : 'Code for Android'}
-          </button>
-          {pairingCode && pairingTarget === 'mobile' && (
-            <div className="mt-3 rounded-lg border border-violet-400/40 bg-black/30 p-3 text-center">
-              <p className="text-xs text-zinc-400">Enter in Android app → Founder Node → Android vault</p>
-              <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-violet-200">{pairingCode}</p>
-              {expiresAt && (
-                <p className="mt-1 text-[10px] text-zinc-500">
-                  Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
-                </p>
-              )}
-            </div>
-          )}
+          ✓ Desktop vault connected — tray app must keep running (icon near the clock).
         </div>
       )}
 
       {isPaired && !showNewPairing && !anyOnline && (
-        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-3 text-xs text-amber-100">
-          <p className="font-semibold text-amber-200">Paired on the website, but your desktop is not syncing</p>
-          <p className="mt-2 leading-relaxed text-zinc-300">
-            The cloud only knows your machine was linked before. Step 4 stays offline until the{' '}
-            <strong className="text-white">Founder Node tray app</strong> is open and heartbeating (~every 60s).
-          </p>
-          <ol className="mt-2 list-decimal space-y-1 pl-4 text-zinc-300">
-            <li>
-              Open <strong className="text-white">Founder Node</strong> from the Start Menu — quit extra tray copies if
-              you see more than one icon.
-            </li>
-            <li>
-              If the pairing window appears, click <strong className="text-white">Pair another desktop device</strong>{' '}
-              below, generate a <strong className="text-white">new</strong> code, and paste it there (upgrading or
-              re-pairing on the site invalidates the old desktop token).
-            </li>
-            <li>
-              Right-click the tray icon → <strong className="text-white">Sync now</strong>, then wait for{' '}
-              <strong className="text-emerald-300">● online</strong> in Step 4.
-            </li>
-          </ol>
+        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
+          Paired in cloud, but desktop offline — generate a new code below or open the tray app.
         </div>
       )}
 
+      {/* Primary pairing actions — always visible */}
       {showPairingFlow && (
-        <>
-          <ol className="mt-3 list-inside list-decimal space-y-1 text-xs text-zinc-300">
-            <li>Download and open Founder Node (tray app).</li>
-            <li>
-              Generate a pairing code below and paste it once into the <strong>Founder Node tray popup</strong>{' '}
-              (Pair this machine — not a browser tab).
-            </li>
-            <li>When connected, this code disappears — you will not re-enter it every 15 minutes.</li>
-          </ol>
-
-          <div className="mt-4 flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={busy === 'desktop'}
+            onClick={() => void generateCode('desktop')}
+            className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {busy === 'desktop' ? 'Generating…' : 'Code for desktop'}
+          </button>
+          <button
+            type="button"
+            disabled={busy === 'mobile'}
+            onClick={() => void generateCode('mobile')}
+            className="rounded-lg border border-violet-500/50 bg-violet-950/40 px-4 py-2 text-sm font-medium text-violet-100 disabled:opacity-50"
+          >
+            {busy === 'mobile' ? 'Generating…' : 'Code for Android'}
+          </button>
+          {isPaired && (
             <button
               type="button"
-              disabled={busy === 'desktop'}
-              onClick={() => void generateCode('desktop')}
-              className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+              onClick={() => {
+                setShowNewPairing(false);
+                setPairingCode(null);
+                setPairingTarget(null);
+                setExpiresAt(null);
+              }}
+              className="rounded-lg border border-zinc-600 px-3 py-2 text-xs text-zinc-400"
             >
-              {busy === 'desktop' ? 'Generating…' : 'Code for desktop'}
+              Cancel
             </button>
-            <button
-              type="button"
-              disabled={busy === 'mobile'}
-              onClick={() => void generateCode('mobile')}
-              className="rounded-lg border border-violet-500/50 bg-violet-950/40 px-3 py-1.5 text-xs font-medium text-violet-100 disabled:opacity-50"
-            >
-              {busy === 'mobile' ? 'Generating…' : 'Code for Android'}
-            </button>
-            {isPaired && (
-              <button
-                type="button"
-                onClick={() => {
-                  setShowNewPairing(false);
-                  setPairingCode(null);
-                  setPairingTarget(null);
-                  setExpiresAt(null);
-                }}
-                className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-
-          {pairingCode && pairingTarget === 'desktop' && (
-            <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
-              <p className="text-xs text-zinc-400">Paste in Founder Node tray app (desktop)</p>
-              <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">
-                {pairingCode}
-              </p>
-              {expiresAt && (
-                <p className="mt-1 text-[10px] text-zinc-500">
-                  Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
-                </p>
-              )}
-            </div>
           )}
-        </>
+        </div>
+      )}
+
+      {pairingCode && pairingTarget === 'desktop' && (
+        <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
+          <p className="text-xs text-zinc-400">Paste in Founder Node tray app (desktop)</p>
+          <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">{pairingCode}</p>
+          {expiresAt && (
+            <p className="mt-1 text-[10px] text-zinc-500">
+              Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
+            </p>
+          )}
+        </div>
+      )}
+
+      {pairingCode && pairingTarget === 'mobile' && (
+        <div className="mt-3 rounded-lg border border-violet-400/40 bg-black/30 p-3 text-center">
+          <p className="text-xs text-zinc-400">Enter in Android app → Founder Node → Android vault</p>
+          <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-violet-200">{pairingCode}</p>
+          {expiresAt && (
+            <p className="mt-1 text-[10px] text-zinc-500">
+              Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
+            </p>
+          )}
+        </div>
       )}
 
       {isPaired && !showNewPairing && (
@@ -267,6 +203,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         </button>
       )}
 
+      {/* Connected nodes — always visible */}
       {nodes.length > 0 && (
         <div className="mt-4 space-y-2">
           <p className="text-xs font-medium text-zinc-300">Connected nodes</p>
@@ -294,9 +231,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                       : ' · start Founder Node tray app'}
                   </span>
                 )}
-                {node.ramGb != null && (
-                  <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>
-                )}
+                {node.ramGb != null && <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>}
                 <span
                   className={`ml-2 ${
                     node.status === 'online' && node.vaultHealthy
@@ -334,6 +269,67 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         </p>
       )}
       {err && <p className="mt-3 text-xs text-red-300">{err}</p>}
+
+      {/* Instructional sections — collapsed by default */}
+      <div className="mt-4 space-y-2">
+        <CollapsibleInfo title="What stays private" hint="Vault vs cloud" accent="emerald">
+          <p className="text-[11px] leading-relaxed text-emerald-100/90">
+            Full company memory (private notes, raw task bodies, vault markdown) stays on your machine and in
+            encrypted blobs we cannot read. The website sees progress metadata and what you publish to GitHub or
+            the public feed.
+          </p>
+        </CollapsibleInfo>
+
+        <CollapsibleInfo title="How to pair" hint="3 steps">
+          <ol className="list-inside list-decimal space-y-1 text-xs text-zinc-300">
+            <li>Download and open Founder Node (tray app).</li>
+            <li>
+              Generate a pairing code above and paste it once into the <strong>Founder Node tray popup</strong>{' '}
+              (Pair this machine — not a browser tab).
+            </li>
+            <li>When connected, this code disappears — you will not re-enter it every 15 minutes.</li>
+          </ol>
+        </CollapsibleInfo>
+
+        {isPaired && !showNewPairing && (
+          <CollapsibleInfo title="Pair Android phone" hint="Mobile vault" accent="violet">
+            <p className="text-[11px] leading-relaxed text-violet-100/80">
+              Install the APK from{' '}
+              <a href="/mobile" className="text-violet-200 underline">
+                doxxedcrypto.digital/mobile
+              </a>
+              , open <strong className="text-white">Founder Node</strong> in the app (or{' '}
+              <a href="/settings/builder" className="text-violet-200 underline">
+                /settings/builder
+              </a>
+              ), paste the code under <strong className="text-white">Android vault</strong>.
+            </p>
+          </CollapsibleInfo>
+        )}
+
+        {isPaired && !showNewPairing && !anyOnline && (
+          <CollapsibleInfo title="Paired on website but desktop not syncing" hint="Troubleshooting" accent="emerald">
+            <p className="text-xs leading-relaxed text-zinc-300">
+              The cloud only knows your machine was linked before. Sync stays offline until the{' '}
+              <strong className="text-white">Founder Node tray app</strong> is open and heartbeating (~every 60s).
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-zinc-300">
+              <li>
+                Open <strong className="text-white">Founder Node</strong> from the Start Menu — quit extra tray copies
+                if you see more than one icon.
+              </li>
+              <li>
+                Click <strong className="text-white">Pair another desktop device</strong> above, generate a{' '}
+                <strong className="text-white">new</strong> code, and paste it in the tray app.
+              </li>
+              <li>
+                Right-click the tray icon → <strong className="text-white">Sync now</strong>, then wait for{' '}
+                <strong className="text-emerald-300">● online</strong> in status.
+              </li>
+            </ol>
+          </CollapsibleInfo>
+        )}
+      </div>
     </div>
   );
 }

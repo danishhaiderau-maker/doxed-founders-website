@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 
-/** Founder Node v0.5.5+ — single instance, one pairing dialog, hourly updates */
+/** Founder Node v0.7.3+ — single instance, one pairing dialog, hourly updates */
 function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   if (!version?.trim()) return true;
   const parts = version
@@ -14,8 +14,8 @@ function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   if (parts.some((n) => Number.isNaN(n))) return true;
   const [major = 0, minor = 0, patch = 0] = parts;
   if (major !== 0) return major < 0;
-  if (minor < 5) return true;
-  if (minor === 5 && patch < 3) return true;
+  if (minor < 7) return true;
+  if (minor === 7 && patch < 3) return true;
   return false;
 }
 

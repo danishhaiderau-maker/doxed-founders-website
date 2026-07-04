@@ -10,6 +10,7 @@ import {
   clearFounderOnboardingDismiss,
   FounderOnboardingWizard,
 } from '@/components/founder-onboarding-wizard';
+import { FounderNodeDownloads } from '@/components/founder-node-downloads';
 import { FounderSetupRail } from '@/components/founder-setup-rail';
 import {
   createBuildPost,
@@ -86,6 +87,17 @@ export default function FounderDenPageClient() {
   useEffect(() => {
     setTab(parseTab(searchParams.get('tab')));
     setCopilotPrompt(searchParams.get('prompt'));
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.location.hash !== '#founder-node-download') return;
+    const scroll = () => {
+      document.getElementById('founder-node-download')?.scrollIntoView({ behavior: 'smooth' });
+    };
+    window.requestAnimationFrame(scroll);
+    const t = window.setTimeout(scroll, 600);
+    return () => window.clearTimeout(t);
   }, [searchParams]);
 
   function clearCopilotUrlParams() {
@@ -254,6 +266,25 @@ export default function FounderDenPageClient() {
           <p className="rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-2 text-sm text-red-300">
             {error}
           </p>
+        )}
+
+        {session?.accessToken && initialPath === 'SOVEREIGN' && (
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/10 p-5">
+            <h2 className="text-lg font-semibold text-white">Founder Node — download & pair</h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              Install v0.7.3+ on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
+            </p>
+            <div className="mt-4">
+              <FounderNodeDownloads />
+            </div>
+            <p className="mt-3 text-xs text-zinc-500">
+              Full pairing, AI brain, and vault settings are in{' '}
+              <a href="/settings/builder" className="text-emerald-400 underline">
+                Settings → Founder Node
+              </a>
+              .
+            </p>
+          </div>
         )}
 
         {session?.accessToken && hasFounder && setupIncomplete && onboardingStatus && wizardDismissed && (
