@@ -12,7 +12,7 @@ Product & platform (7 recent commits)
 
 ## Last Commit
 
-Mirror Phase 2 exit convergence + Phase 3 adoption re-link and catch-up.
+chore(monitoring): track live-copy lifecycle watcher for 3h soak sessions
 
 ## Last Activity
 
