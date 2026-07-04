@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: update platform walkthrough script for Founder OS Cursor + v0.7.7 onboarding
+Default A160 V2 research tile OFF for live-safe shadow-only collection.
 
 ## Last Activity
 
