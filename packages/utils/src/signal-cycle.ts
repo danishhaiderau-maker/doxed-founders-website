@@ -131,8 +131,11 @@ export type SignalCycleEventType =
   // separate EXPIRED event for the status transition).
   | 'MIRROR_DIFF'
   | 'DUPLICATE_LIMIT_SKIPPED'
-  // Phase 3 — slippage-capped catch-up market entry when showcase is OPEN but copy missed fill.
-  | 'MIRROR_CATCHUP_ENTRY';
+  // Phase 3 — catch-up market entry when showcase is OPEN but copy missed fill.
+  | 'MIRROR_CATCHUP_ENTRY'
+  // Action-match audit: catch-up could not place an entry (structural skip).
+  | 'MIRROR_CATCHUP_SKIPPED'
+  | 'ACTION_MISS_ENTRY';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;

@@ -203,15 +203,36 @@ function mirrorCatchupEnabled(): boolean {
   return true;
 }
 
-function mirrorCatchupMaxSlipUsd(): number {
-  const raw = Number(process.env.MIRROR_CATCHUP_MAX_SLIP_USD ?? '50');
-  return Number.isFinite(raw) && raw > 0 ? raw : 50;
+/**
+ * Action-match priority (policy v4): no slip cap by default — fill price may differ.
+ * Set MIRROR_CATCHUP_MAX_SLIP_USD to a positive number to re-enable a cap.
+ * Unset / 0 / invalid → unlimited (null).
+ */
+function mirrorCatchupMaxSlipUsd(): number | null {
+  const env = process.env.MIRROR_CATCHUP_MAX_SLIP_USD;
+  if (env == null || env.trim() === '') return null;
+  const raw = Number(env);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return raw;
 }
 
-function mirrorCatchupBudgetPerDay(): number {
-  const raw = Number(process.env.MIRROR_CATCHUP_BUDGET_PER_DAY ?? '3');
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
+/**
+ * Action-match priority (policy v4): no daily catch-up budget by default.
+ * Set MIRROR_CATCHUP_BUDGET_PER_DAY to a positive integer to re-enable a cap.
+ * Unset / 0 / invalid → unlimited (null).
+ */
+function mirrorCatchupBudgetPerDay(): number | null {
+  const env = process.env.MIRROR_CATCHUP_BUDGET_PER_DAY;
+  if (env == null || env.trim() === '') return null;
+  const raw = Number(env);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.floor(raw);
 }
+
+const TERMINAL_PARTICIPANT_STATUSES = new Set<SignalCycleStatus>([
+  SignalCycleStatus.CLOSED,
+  SignalCycleStatus.EXPIRED,
+]);
 
 /** Effective stop-loss margin % — wide disaster stop in mirror+convergence mode. */
 function resolveEffectiveStopLossMarginPct(
@@ -358,6 +379,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly showcasePositionAbsentMisses = new Map<string, number>();
   /** Fix E — instanceId → last time the expired-hire notice was surfaced (ms). */
   private readonly hireExpiryNoticeAt = new Map<string, number>();
+  /** Action-miss audit throttle: userId:tradeId:reason → last event ms. */
+  private readonly actionMissEntryThrottle = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -4333,8 +4356,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Phase 3b — slippage-capped catch-up market entry when showcase is OPEN but copy missed fill.
-   * Fail-closed: skips when uncertain (no intent cycle, slip over cap, budget exhausted, orphan freeze).
+   * Phase 3b — action-match catch-up market entry when showcase is OPEN but copy
+   * has no OPEN lot and no working order for that trade_id.
+   * Policy v4: no daily budget / slip cap by default (fill price may differ).
+   * Still fail-closed on: no intent cycle, direction mismatch, capacity/orphans,
+   * insufficient margin, exchange errors.
    */
   private async attemptMirrorCatchupEntries(
     agentId: string,
@@ -4359,13 +4385,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!this.botBridge.isEnabled() || !botState) return;
 
     const budget = mirrorCatchupBudgetPerDay();
-    const used = await this.countMirrorCatchupEntriesLast24h(instance.userId, agentId);
-    if (used >= budget) return;
-
-    const copyTradeIds = new Set<string>();
-    for (const p of openParticipants) {
-      const tid = p.cycle?.tradeId;
-      if (tid && !tid.startsWith('adopt:')) copyTradeIds.add(tid);
+    const used =
+      budget != null ? await this.countMirrorCatchupEntriesLast24h(instance.userId, agentId) : 0;
+    if (budget != null && used >= budget) {
+      this.logger.warn(
+        `[ACTION-MISS] ENTRY catch-up budget exhausted ${instance.userId}: ${used}/${budget} in 24h`,
+      );
+      return;
     }
 
     const showcasePositions = (botState.positions ?? []).filter(
@@ -4378,13 +4404,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const maxSlip = mirrorCatchupMaxSlipUsd();
     let catchupsThisTick = 0;
-    const budgetRemaining = budget - used;
+    const budgetRemaining = budget != null ? budget - used : Number.POSITIVE_INFINITY;
 
     for (const pos of showcasePositions) {
-      if (catchupsThisTick >= budgetRemaining) break;
+      if (catchupsThisTick >= budgetRemaining) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY catch-up budget hit mid-tick ${instance.userId}: placed=${catchupsThisTick} remaining was ${budgetRemaining}`,
+        );
+        break;
+      }
       const tradeId = pos.trade_id!;
-      if (copyTradeIds.has(tradeId)) continue;
 
+      // Entry action already in flight or filled for this trade_id.
       const hasCopy = openParticipants.some(
         (p) => p.cycle?.tradeId && tradeIdsMatch(p.cycle.tradeId, tradeId),
       );
@@ -4392,14 +4423,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       const showcaseEntry = typeof pos.entry === 'number' && pos.entry > 0 ? pos.entry : mark;
       const slipUsd = Math.abs(mark - showcaseEntry);
-      if (slipUsd > maxSlip) {
-        this.logger.debug(
-          `[MIRROR-CATCHUP] skip ${instance.userId} trade=${tradeId}: slip $${slipUsd.toFixed(2)} > cap $${maxSlip}`,
+      if (maxSlip != null && slipUsd > maxSlip) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY catch-up slip cap ${instance.userId} trade=${tradeId}: slip $${slipUsd.toFixed(2)} > cap $${maxSlip}`,
         );
+        await this.recordActionMissEntry(agentId, instance.userId, null, tradeId, 'SLIP_CAP', {
+          slip_usd: Math.round(slipUsd * 100) / 100,
+          max_slip_usd: maxSlip,
+          showcase_entry: showcaseEntry,
+          mark,
+        });
         continue;
       }
 
-      const cycles = await this.prisma.signalCycle.findMany({
+      // Direct tradeId lookup — do not rely on a recent-50 scan (action miss risk).
+      const liveCycles = await this.prisma.signalCycle.findMany({
         where: {
           agentId,
           status: {
@@ -4411,14 +4449,58 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           },
         },
         orderBy: { createdAt: 'desc' },
-        take: 50,
+        take: 100,
       });
-      const matchedCycle = cycles.find((c) => tradeIdsMatch(c.tradeId, tradeId));
+      let matchedCycle = liveCycles.find((c) => tradeIdsMatch(c.tradeId, tradeId)) ?? null;
+      if (!matchedCycle) {
+        // Fallback: exact tradeId match even if status drifted (rare desync).
+        matchedCycle = await this.prisma.signalCycle.findFirst({
+          where: { agentId, tradeId },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (
+          matchedCycle &&
+          matchedCycle.status !== SignalCycleStatus.INTENT &&
+          matchedCycle.status !== SignalCycleStatus.PENDING_ENTRY &&
+          matchedCycle.status !== SignalCycleStatus.OPEN
+        ) {
+          // Cycle terminal but showcase still OPEN — reopen cycle for catch-up.
+          matchedCycle = await this.prisma.signalCycle.update({
+            where: { id: matchedCycle.id },
+            data: { status: SignalCycleStatus.OPEN, closedAt: null },
+          });
+          this.logger.warn(
+            `[MIRROR-CATCHUP] reopened terminal cycle ${matchedCycle.id} trade=${tradeId} for action-match entry`,
+          );
+        }
+      }
 
-      if (!matchedCycle) continue;
+      if (!matchedCycle) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY no Neon cycle for showcase OPEN trade=${tradeId} user=${instance.userId}`,
+        );
+        await this.recordActionMissEntry(agentId, instance.userId, null, tradeId, 'NO_CYCLE', {
+          showcase_entry: showcaseEntry,
+          mark,
+        });
+        continue;
+      }
 
       const intent = matchedCycle.intentEnvelope as SignalIntentEnvelope;
-      if (!intent?.direction || !intent?.risk) continue;
+      if (!intent?.direction || !intent?.risk) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY cycle ${matchedCycle.id} trade=${tradeId} missing intent envelope`,
+        );
+        await this.recordActionMissEntry(
+          agentId,
+          instance.userId,
+          matchedCycle.id,
+          tradeId,
+          'NO_INTENT',
+          { showcase_entry: showcaseEntry, mark },
+        );
+        continue;
+      }
 
       const posDir = String(pos.dir ?? pos.side ?? '').toUpperCase();
       const showcaseDir =
@@ -4427,7 +4509,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           : posDir.includes('SHORT') || posDir === 'SELL'
             ? 'SHORT'
             : intent.direction;
-      if (showcaseDir !== intent.direction) continue;
+      if (showcaseDir !== intent.direction) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY direction mismatch trade=${tradeId} showcase=${showcaseDir} intent=${intent.direction}`,
+        );
+        await this.recordActionMissEntry(
+          agentId,
+          instance.userId,
+          matchedCycle.id,
+          tradeId,
+          'DIRECTION_MISMATCH',
+          { showcase_dir: showcaseDir, intent_dir: intent.direction },
+        );
+        continue;
+      }
 
       const existingParticipant = await this.prisma.signalCycleParticipant.findUnique({
         where: {
@@ -4455,7 +4550,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         intent.direction,
         instance,
       );
-      if (!eligibility.canEnter) continue;
+      if (!eligibility.canEnter) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY eligibility blocked trade=${tradeId}: ${eligibility.reason}`,
+        );
+        await this.recordActionMissEntry(
+          agentId,
+          instance.userId,
+          matchedCycle.id,
+          tradeId,
+          'ELIGIBILITY',
+          { reason: eligibility.reason },
+        );
+        continue;
+      }
 
       const placed = await this.placeMirrorCatchupEntry(
         agentId,
@@ -4470,6 +4578,61 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         slipUsd,
       );
       if (placed) catchupsThisTick += 1;
+    }
+  }
+
+  /** Throttled ACTION_MISS_ENTRY audit (max 1 per trade_id per 60s). */
+  private async recordActionMissEntry(
+    _agentId: string,
+    userId: string,
+    cycleId: string | null,
+    tradeId: string,
+    reason: string,
+    extra?: Record<string, unknown>,
+  ): Promise<void> {
+    const key = `${userId}:${tradeId}:${reason}`;
+    const now = Date.now();
+    const prev = this.actionMissEntryThrottle.get(key) ?? 0;
+    if (now - prev < 60_000) return;
+    this.actionMissEntryThrottle.set(key, now);
+
+    this.logger.warn(`[ACTION-MISS] ENTRY ${reason} trade=${tradeId} user=${userId}`);
+    if (!cycleId) return;
+
+    // Write audit events directly — do NOT use recordHireExecutionEvent, which
+    // auto-creates a PENDING_ENTRY participant and would block real catch-up.
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { cycleId_userId: { cycleId, userId } },
+      select: { id: true },
+    });
+    const payload = {
+      venue: 'bitfinex',
+      source: 'hire',
+      trade_id: tradeId,
+      reason,
+      ...extra,
+    };
+    try {
+      await this.prisma.signalCycleEvent.create({
+        data: {
+          cycleId,
+          participantId: participant?.id ?? null,
+          eventType: 'ACTION_MISS_ENTRY',
+          payload,
+        },
+      });
+      await this.prisma.signalCycleEvent.create({
+        data: {
+          cycleId,
+          participantId: participant?.id ?? null,
+          eventType: 'MIRROR_CATCHUP_SKIPPED',
+          payload,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[ACTION-MISS] failed to persist entry miss trade=${tradeId}: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 
@@ -4488,23 +4651,83 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const existingClaim = await this.prisma.signalCycleParticipant.findUnique({
       where: { cycleId_userId: { cycleId, userId: instance.userId } },
     });
-    if (existingClaim) return false;
 
     let claimParticipantId: string | null = null;
-    try {
-      const claimed = await this.prisma.signalCycleParticipant.create({
-        data: {
-          cycleId,
-          userId: instance.userId,
-          venue: 'bitfinex',
-          status: SignalCycleStatus.INTENT,
-        },
-      });
-      claimParticipantId = claimed.id;
-    } catch (err) {
-      if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') return false;
-      throw err;
+    let revivedTerminal = false;
+
+    if (existingClaim) {
+      // Active claim — another path owns this trade (or a concurrent replica).
+      if (
+        existingClaim.status === SignalCycleStatus.OPEN ||
+        existingClaim.status === SignalCycleStatus.PENDING_ENTRY
+      ) {
+        return false;
+      }
+      // Fresh INTENT claim (<120s) — another replica is placing; do not steal.
+      if (
+        existingClaim.status === SignalCycleStatus.INTENT &&
+        existingClaim.createdAt.getTime() >= Date.now() - 120_000
+      ) {
+        return false;
+      }
+      // Terminal (CLOSED/EXPIRED) or stale INTENT — revive for action-match entry.
+      // Unique(cycleId, userId) blocks create; reset the row instead.
+      if (
+        TERMINAL_PARTICIPANT_STATUSES.has(existingClaim.status) ||
+        existingClaim.status === SignalCycleStatus.INTENT
+      ) {
+        await this.prisma.signalCycleParticipant.update({
+          where: { id: existingClaim.id },
+          data: {
+            status: SignalCycleStatus.INTENT,
+            fillPrice: null,
+            exitPrice: null,
+            pnlUsd: null,
+            pnlMarginPct: null,
+            stopLossConfirmedAt: null,
+          },
+        });
+        claimParticipantId = existingClaim.id;
+        revivedTerminal = true;
+        this.logger.warn(
+          `[MIRROR-CATCHUP] revived ${existingClaim.status} participant ${existingClaim.id} cycle=${cycleId} trade=${tradeId}`,
+        );
+      } else {
+        return false;
+      }
+    } else {
+      try {
+        const claimed = await this.prisma.signalCycleParticipant.create({
+          data: {
+            cycleId,
+            userId: instance.userId,
+            venue: 'bitfinex',
+            status: SignalCycleStatus.INTENT,
+          },
+        });
+        claimParticipantId = claimed.id;
+      } catch (err) {
+        if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') return false;
+        throw err;
+      }
     }
+
+    const releaseClaim = async () => {
+      if (!claimParticipantId) return;
+      if (revivedTerminal) {
+        // Preserve the row (history / unique key) — mark EXPIRED so next tick can revive again.
+        await this.prisma.signalCycleParticipant
+          .update({
+            where: { id: claimParticipantId },
+            data: { status: SignalCycleStatus.EXPIRED },
+          })
+          .catch(() => {});
+      } else {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {});
+      }
+    };
 
     const intentCap = intent.risk?.max_margin_usd;
     const effectiveCap =
@@ -4515,20 +4738,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     try {
       available = await this.activeTrading.getDerivativesAvailableUsd(creds);
     } catch {
-      if (claimParticipantId) {
-        await this.prisma.signalCycleParticipant
-          .delete({ where: { id: claimParticipantId } })
-          .catch(() => {});
-      }
+      await releaseClaim();
       return false;
     }
     const marginUsd = Math.min(effectiveCap, available * 0.95);
     if (marginUsd < effectiveCap * 0.9) {
-      if (claimParticipantId) {
-        await this.prisma.signalCycleParticipant
-          .delete({ where: { id: claimParticipantId } })
-          .catch(() => {});
-      }
+      await releaseClaim();
       return false;
     }
 
@@ -4544,11 +4759,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         clientOrderId,
       });
     } catch (err) {
-      if (claimParticipantId) {
-        await this.prisma.signalCycleParticipant
-          .delete({ where: { id: claimParticipantId } })
-          .catch(() => {});
-      }
+      await releaseClaim();
       this.logger.warn(
         `[MIRROR-CATCHUP] market entry failed ${instance.userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
       );
@@ -4583,6 +4794,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         slip_usd: Math.round(slipUsd * 100) / 100,
         qty,
         fill_price: fillPrice,
+        action_match: true,
+        revived_terminal: revivedTerminal,
       },
     );
 

@@ -2,7 +2,7 @@
  * Frozen Bitfinex live-copy policy (NestJS relay).
  * NOT overwritten by bybit_bot.py / sync-btc-research-bot — real money execution lives here.
  */
-export const BITFINEX_COPY_POLICY_VERSION = 3;
+export const BITFINEX_COPY_POLICY_VERSION = 4;
 
 /** Wide disaster stop (margin %) in showcase-mirror mode — crash/disconnect insurance only. */
 export const BITFINEX_COPY_MIRROR_DISASTER_STOP_MARGIN_PCT_DEFAULT = -40;

@@ -2,6 +2,10 @@
  * Live Copy + showcase lifecycle watcher (~3h sessions).
  * Read-only: bot /api/state + Neon Prisma. No Bitfinex API calls.
  *
+ * Scores ACTION fidelity (not fill quality):
+ *   ACTION_MISS_ENTRY — showcase OPEN, copy has no OPEN/PENDING/INTENT for trade_id
+ *   ACTION_MISS_EXIT  — showcase flat, copy still OPEN (same-id or cross-id orphan)
+ *
  * Poll every POLL_MS. Append -> logs/live-copy-lifecycle-watch.log
  * Console: CHANGE or ALERT only.
  * Stop: kill process or touch logs/.live-copy-lifecycle-watch.stop
@@ -31,6 +35,8 @@ const EVENT_TYPES = [
   'EXIT',
   'SHOWCASE_MIRROR',
   'MIRROR_CATCHUP_ENTRY',
+  'MIRROR_CATCHUP_SKIPPED',
+  'ACTION_MISS_ENTRY',
   'MIRROR_DIFF',
 ];
 const OPEN_PART_STATUSES = new Set(['INTENT', 'PENDING_ENTRY', 'OPEN']);
@@ -319,8 +325,12 @@ function checkAlerts(bot, inst, copy, nowMs) {
 
   for (const tid of showcaseOpenIds) {
     if (!showcaseOpenSince.has(tid)) showcaseOpenSince.set(tid, nowMs);
+    // PENDING_ENTRY / INTENT count as entry action taken (not an action miss).
     if (!copyOpenIds.has(tid) && nowMs - showcaseOpenSince.get(tid) > MISSED_ENTRY_SEC * 1000) {
-      alertOnce(`miss-entry:${tid}`, `showcase OPEN trade_id=${tid} but copy flat >${MISSED_ENTRY_SEC}s`);
+      alertOnce(
+        `action-miss-entry:${tid}`,
+        `ACTION_MISS_ENTRY showcase OPEN trade_id=${tid} but copy has no position and no working order >${MISSED_ENTRY_SEC}s`,
+      );
     }
   }
   for (const tid of [...showcaseOpenSince.keys()]) {
@@ -332,7 +342,10 @@ function checkAlerts(bot, inst, copy, nowMs) {
 
   for (const [tid, closedMs] of showcaseClosedAt) {
     if (copyOpenIds.has(tid) && nowMs - closedMs > MISSED_EXIT_SEC * 1000) {
-      alertOnce(`miss-exit:${tid}`, `showcase CLOSED trade_id=${tid} but copy still OPEN >${MISSED_EXIT_SEC}s`);
+      alertOnce(
+        `action-miss-exit:${tid}`,
+        `ACTION_MISS_EXIT showcase CLOSED trade_id=${tid} but copy still OPEN >${MISSED_EXIT_SEC}s`,
+      );
     }
     if (!copyOpenIds.has(tid) && nowMs - closedMs > MISSED_EXIT_SEC * 1000) {
       showcaseClosedAt.delete(tid);
@@ -341,12 +354,13 @@ function checkAlerts(bot, inst, copy, nowMs) {
 
   // Cross-ID orphan: copy OPEN on a trade_id that is not an open showcase position.
   // Same-ID miss-exit above never fires when copy filled a different trade than showcase.
+  // SHOWCASE_POSITION_ABSENT (policy v3+) market-closes after 2 consecutive ticks.
   const mdDivs = Array.isArray(dash?.mirrorDiff?.divergences) ? dash.mirrorDiff.divergences : [];
   for (const d of mdDivs) {
     if (d?.type !== 'COPY_POSITION_NO_SHOWCASE' || !d.tradeId) continue;
     alertOnce(
-      `cross-id-open:${d.tradeId}`,
-      `COPY_POSITION_NO_SHOWCASE trade_id=${d.tradeId} — copy OPEN with no matching showcase position (exit may not fire until cycle CLOSED or SHOWCASE_POSITION_ABSENT deploy)`,
+      `action-miss-exit-crossid:${d.tradeId}`,
+      `ACTION_MISS_EXIT COPY_POSITION_NO_SHOWCASE trade_id=${d.tradeId} — copy OPEN with no matching showcase position (SHOWCASE_POSITION_ABSENT should fire within ~2 ticks)`,
     );
   }
 
@@ -364,6 +378,14 @@ function checkAlerts(bot, inst, copy, nowMs) {
           `new EXIT exit_reason=${exitReason} (expected SHOWCASE_MIRROR/VANISHED/EXCHANGE_STOP) cycle=${e.cycleId?.slice(0, 10)}`,
         );
       }
+    }
+    if (e.eventType === 'ACTION_MISS_ENTRY' || e.eventType === 'MIRROR_CATCHUP_SKIPPED') {
+      const tid = e.payload?.trade_id ?? '?';
+      const reason = e.payload?.reason ?? e.eventType;
+      alertOnce(
+        `neon-action-miss-entry:${e.cycleId}:${reason}`,
+        `ACTION_MISS_ENTRY neon event reason=${reason} tid=${String(tid).slice(0, 12)} cycle=${e.cycleId?.slice(0, 10)}`,
+      );
     }
   }
 
