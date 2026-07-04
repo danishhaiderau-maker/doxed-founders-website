@@ -305,6 +305,9 @@ export class DesktopBridgeService {
             ? Math.max(0, Math.floor(s.filesChangedCount))
             : undefined,
         isAgentProject: Boolean(s.isAgentProject) || undefined,
+        parentComposerId: this.optString(s.parentComposerId),
+        agentTyping: Boolean(s.agentTyping) || undefined,
+        subagents: this.sanitizeSubagents(s.subagents),
       });
       if (out.length >= MAX_SESSIONS) break;
     }
@@ -320,7 +323,8 @@ export class DesktopBridgeService {
       const role = m.role;
       const content = typeof m.content === 'string' ? m.content : '';
       if (role !== 'user' && role !== 'assistant' && role !== 'system') continue;
-      if (!content.trim()) continue;
+      const isStreaming = m.streaming === true || m.partial === true;
+      if (!content.trim() && !isStreaming) continue;
       const ts =
         typeof m.timestamp === 'string' && !Number.isNaN(Date.parse(m.timestamp))
           ? m.timestamp
@@ -332,8 +336,44 @@ export class DesktopBridgeService {
         ...(typeof m.model === 'string' && m.model.trim()
           ? { model: m.model.trim().slice(0, 60) }
           : {}),
+        ...(m.streaming === true ? { streaming: true } : {}),
+        ...(m.partial === true ? { partial: true } : {}),
       });
       if (out.length >= MAX_MESSAGES_PER_SESSION) break;
+    }
+    return out.length > 0 ? out : undefined;
+  }
+
+  private sanitizeSubagents(input: unknown): BridgeSession[] | undefined {
+    if (!Array.isArray(input)) return undefined;
+    const out: BridgeSession[] = [];
+    for (const raw of input) {
+      if (!raw || typeof raw !== 'object') continue;
+      const s = raw as Record<string, unknown>;
+      const id = typeof s.id === 'string' ? s.id.trim() : '';
+      const title = typeof s.title === 'string' ? s.title.trim() : '';
+      if (!id || !title) continue;
+      const lastActiveAt =
+        typeof s.lastActiveAt === 'string' && !Number.isNaN(Date.parse(s.lastActiveAt))
+          ? s.lastActiveAt
+          : new Date().toISOString();
+      out.push({
+        id,
+        composerId: this.optString(s.composerId) ?? id,
+        title: title.slice(0, MAX_STR_LEN),
+        subtitle: this.optString(s.subtitle),
+        parentComposerId: this.optString(s.parentComposerId),
+        ideProvider: this.optString(s.ideProvider) ?? 'cursor',
+        restorable: Boolean(s.restorable),
+        lastActiveAt,
+        messages: this.sanitizeMessages(s.messages),
+        messageCount:
+          typeof s.messageCount === 'number' && Number.isFinite(s.messageCount)
+            ? Math.max(0, Math.floor(s.messageCount))
+            : undefined,
+        agentTyping: Boolean(s.agentTyping) || undefined,
+      });
+      if (out.length >= 8) break;
     }
     return out.length > 0 ? out : undefined;
   }

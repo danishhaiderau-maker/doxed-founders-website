@@ -30,12 +30,15 @@ type ChatMsg = {
   pending?: boolean;
   thinking?: boolean;
   missingConnections?: CopilotMissingConnection[];
+  attachments?: Array<{ name: string; previewUrl?: string; category?: string }>;
 };
 
 type BrainOption = { key: string; label: string; hint: string };
 
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
+import { useVoiceInput } from '@/hooks/use-voice-input';
+import { VoiceWaveform } from '@/components/voice-waveform';
 
 const FOUNDER_DEN_ONBOARD_URL = '/founder-den?onboard=sovereign#founder-node-download';
 
@@ -132,8 +135,13 @@ function HistoryMessage({ msg }: { msg: BridgeMessage }) {
   const [expanded, setExpanded] = useState(false);
   const isUser = msg.role === 'user';
   const text = msg.content || '';
+  const isTyping = msg.partial && !text.trim();
   const overLimit = text.length > HISTORY_MSG_COLLAPSED_LEN;
-  const shown = expanded || !overLimit ? text : text.slice(0, HISTORY_MSG_COLLAPSED_LEN) + '…';
+  const shown = isTyping
+    ? 'Agent is typing…'
+    : expanded || !overLimit
+      ? text
+      : text.slice(0, HISTORY_MSG_COLLAPSED_LEN) + '…';
   const timeLabel = msg.timestamp ? timeAgo(msg.timestamp) : null;
   return (
     <div className={'flex ' + (isUser ? 'justify-end' : 'justify-start')}>
@@ -142,9 +150,13 @@ function HistoryMessage({ msg }: { msg: BridgeMessage }) {
           <span>{isUser ? 'You' : msg.role === 'system' ? 'System' : 'Assistant'}</span>
           {msg.model && <span className='text-zinc-600'>· {msg.model}</span>}
           {timeLabel && <span className='text-zinc-600'>· {timeLabel}</span>}
+          {msg.streaming && <span className='text-emerald-400/80'>· live</span>}
         </div>
-        <p className='whitespace-pre-wrap break-words'>{shown}</p>
-        {overLimit && (
+        <p className={'whitespace-pre-wrap break-words ' + (isTyping ? 'italic text-zinc-400' : '')}>
+          {shown}
+          {msg.streaming && !isTyping && <span className='ml-0.5 inline-block animate-pulse text-zinc-500'>▋</span>}
+        </p>
+        {overLimit && !isTyping && (
           <button
             type='button'
             onClick={() => setExpanded((v) => !v)}
@@ -162,10 +174,12 @@ function HistoryThread({
   messages,
   loading,
   error,
+  agentTyping,
 }: {
   messages: BridgeMessage[] | null;
   loading: boolean;
   error: string | null;
+  agentTyping?: boolean;
 }) {
   if (loading && (!messages || messages.length === 0)) {
     return (
@@ -196,6 +210,14 @@ function HistoryThread({
       {messages.map((m, i) => (
         <HistoryMessage key={i} msg={m} />
       ))}
+      {agentTyping && !messages.some((m) => m.streaming || m.partial) && (
+        <div className='flex justify-start'>
+          <div className='rounded-2xl bg-white/5 px-4 py-2.5 text-sm italic text-zinc-400'>
+            Agent is typing…
+            <span className='ml-1 inline-block animate-pulse'>▋</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -231,8 +253,12 @@ export function MinimalDevWorkspace({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string>('never');
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<
+    Array<{ name: string; previewUrl?: string; category?: string }>
+  >([]);
   const historyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const stopHistoryPoll = useCallback(() => {
     if (historyPollRef.current) {
       clearInterval(historyPollRef.current);
@@ -240,20 +266,40 @@ export function MinimalDevWorkspace({
     }
   }, []);
 
+  const onVoiceTranscript = useCallback((text: string, isFinal: boolean) => {
+    if (!text.trim()) return;
+    setInput((prev) => {
+      const base = prev.trim();
+      if (isFinal) return base ? `${base} ${text.trim()}` : text.trim();
+      return base ? `${base} ${text.trim()}` : text.trim();
+    });
+  }, []);
+
+  const {
+    phase,
+    audioLevel,
+    supported: voiceSupported,
+    listening,
+    starting,
+    waitingNetwork,
+    voiceError,
+    clearVoiceError,
+    toggle: toggleVoice,
+    stop: stopVoice,
+  } = useVoiceInput(onVoiceTranscript);
+
+  useEffect(() => {
+    if (voiceError) setError(voiceError);
+  }, [voiceError]);
+
   const pollSessionHistory = useCallback(
     (sessionId: string) => {
       if (!accessToken) return;
       stopHistoryPoll();
-      let attempts = 0;
-      historyPollRef.current = setInterval(() => {
-        attempts += 1;
-        if (attempts > 10) {
-          stopHistoryPoll();
-          return;
-        }
+      const tick = () => {
         void fetchIdeBridgeSessionMessages(accessToken, sessionId)
           .then((msgs) => {
-            if (Array.isArray(msgs) && msgs.length > 0) setHistory(msgs);
+            if (Array.isArray(msgs)) setHistory(msgs);
           })
           .catch(() => undefined);
         void fetchIdeBridgeSessions(accessToken)
@@ -261,7 +307,9 @@ export function MinimalDevWorkspace({
             if (Array.isArray(ss)) setSessions(ss);
           })
           .catch(() => undefined);
-      }, 5000);
+      };
+      tick();
+      historyPollRef.current = setInterval(tick, 3000);
     },
     [accessToken, stopHistoryPoll],
   );
@@ -338,7 +386,16 @@ export function MinimalDevWorkspace({
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages]);
+  }, [messages, history]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !accessToken) {
+      stopHistoryPoll();
+      return;
+    }
+    pollSessionHistory(selectedSessionId);
+    return () => stopHistoryPoll();
+  }, [selectedSessionId, accessToken, pollSessionHistory, stopHistoryPoll]);
 
   useEffect(() => {
     if (firedInitial.current) return;
@@ -454,7 +511,54 @@ export function MinimalDevWorkspace({
     });
   }, []);
 
-  const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+  const [collapsedSubagents, setCollapsedSubagents] = useState<Set<string>>(new Set());
+  const toggleSubagents = useCallback((sessionId: string) => {
+    setCollapsedSubagents((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }, []);
+
+  const selectedSession = useMemo(() => {
+    if (!selectedSessionId) return null;
+    for (const s of sessions) {
+      if (s.id === selectedSessionId) return s;
+      const sub = s.subagents?.find((x) => x.id === selectedSessionId);
+      if (sub) return sub;
+    }
+    return null;
+  }, [sessions, selectedSessionId]);
+  const selectedAgentTyping = selectedSession?.agentTyping ?? false;
+
+  const handleAttachFiles = useCallback(async (files: FileList | null) => {
+    if (!files?.length) return;
+    const next: Array<{ name: string; previewUrl?: string; category?: string }> = [];
+    for (const file of Array.from(files)) {
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch('/api/founder-vault/upload', { method: 'POST', body: form });
+        if (!res.ok) continue;
+        const body = (await res.json()) as {
+          items?: Array<{ name: string; category: string }>;
+        };
+        const saved = body.items?.[0];
+        const previewUrl = file.type.startsWith('image/')
+          ? URL.createObjectURL(file)
+          : undefined;
+        next.push({
+          name: saved?.name ?? file.name,
+          category: saved?.category,
+          previewUrl,
+        });
+      } catch {
+        next.push({ name: file.name });
+      }
+    }
+    if (next.length) setPendingAttachments((prev) => [...prev, ...next]);
+  }, []);
 
   // Load the conversation thread whenever the user picks a session. We show
   // whatever was already embedded in the session list immediately (no network
@@ -505,12 +609,24 @@ export function MinimalDevWorkspace({
 
   const handleSend = useCallback(async () => {
     const prompt = input.trim();
-    if (!prompt || busy) return;
-    const userMsg: ChatMsg = { id: 'u-' + Date.now(), role: 'user', text: prompt };
+    if ((!prompt && pendingAttachments.length === 0) || busy) return;
+    if (phase !== 'idle') stopVoice();
+    const attachNote =
+      pendingAttachments.length > 0
+        ? '\n\n[Attachments: ' + pendingAttachments.map((a) => a.name).join(', ') + ']'
+        : '';
+    const fullPrompt = (prompt + attachNote).trim();
+    const userMsg: ChatMsg = {
+      id: 'u-' + Date.now(),
+      role: 'user',
+      text: prompt || '(attachment)',
+      attachments: pendingAttachments.length ? [...pendingAttachments] : undefined,
+    };
     const assistantId = 'a-' + Date.now();
     const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
     setMessages((m) => [...m, userMsg, assistantMsg]);
     setInput('');
+    setPendingAttachments([]);
     setBusy(true);
     setError(null);
 
@@ -526,7 +642,7 @@ export function MinimalDevWorkspace({
       (sessionForDispatch?.ideProvider === 'cursor' || sessionForDispatch?.ideProvider == null);
     if (accessToken && isCursorSession && sessionForDispatch) {
       setDispatchNotice('Queued for local Cursor — Founder Node will type it in shortly.');
-      void dispatchToIdeSession(accessToken, sessionForDispatch.id, prompt, 'cursor')
+      void dispatchToIdeSession(accessToken, sessionForDispatch.id, fullPrompt, 'cursor')
         .then(() => {
           setDispatchNotice('Sent to Cursor — waiting for agent response…');
           pollSessionHistory(sessionForDispatch.id);
@@ -548,7 +664,7 @@ export function MinimalDevWorkspace({
     try {
       const effectiveProvider = selectedBrain === 'BYOK' ? 'BYOK' : selectedBrain;
       await copilotAskStream(
-        prompt,
+        fullPrompt,
         accessToken,
         {
           provider: effectiveProvider,
@@ -598,7 +714,7 @@ export function MinimalDevWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -626,7 +742,7 @@ export function MinimalDevWorkspace({
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
         </div>
         <div className='min-h-0 flex-1 overflow-y-auto px-2 pb-3'>
-          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.5+ is running and Cursor is open.</div>}
+          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.6+ is running and Cursor is open.</div>}
           {workspaces.map((w) => (
             <button key={w.id} onClick={() => setSelectedWsId(w.id)} className={'mb-1 block w-full rounded-lg px-3 py-2.5 text-left transition ' + (selectedWsId === w.id ? 'bg-white/10 ring-1 ring-white/15' : 'hover:bg-white/5')}>
               <div className='flex items-center gap-2'>
@@ -667,19 +783,47 @@ export function MinimalDevWorkspace({
                     </button>
                     {!collapsed && (
                       <div className='ml-1'>
-                        {g.sessions.map((s) => (
-                          <SessionRow
-                            key={g.key + ':' + s.id}
-                            session={s}
-                            selected={selectedSessionId === s.id}
-                            onSelect={handleSelectSession}
-                            dotClass={
-                              Date.now() - new Date(s.lastActiveAt).getTime() < 86400000
-                                ? 'bg-emerald-400'
-                                : 'bg-violet-400'
-                            }
-                          />
-                        ))}
+                        {g.sessions.map((s) => {
+                          const subagents = s.subagents ?? [];
+                          const subCollapsed = collapsedSubagents.has(s.id);
+                          return (
+                            <div key={g.key + ':' + s.id}>
+                              <SessionRow
+                                session={s}
+                                selected={selectedSessionId === s.id}
+                                onSelect={handleSelectSession}
+                                dotClass={
+                                  Date.now() - new Date(s.lastActiveAt).getTime() < 86400000
+                                    ? 'bg-emerald-400'
+                                    : 'bg-violet-400'
+                                }
+                              />
+                              {subagents.length > 0 && (
+                                <>
+                                  <button
+                                    type='button'
+                                    onClick={() => toggleSubagents(s.id)}
+                                    className='ml-6 flex w-[calc(100%-1.5rem)] items-center gap-1 rounded-md px-2 py-1 text-left text-[0.6rem] text-zinc-500 hover:bg-white/5'
+                                  >
+                                    <span className={'transition-transform ' + (subCollapsed ? '' : 'rotate-90')}>▶</span>
+                                    <span>{subagents.length} subtask{subagents.length === 1 ? '' : 's'}</span>
+                                  </button>
+                                  {!subCollapsed &&
+                                    subagents.map((sub) => (
+                                      <div key={sub.id} className='ml-4 opacity-80'>
+                                        <SessionRow
+                                          session={sub}
+                                          selected={selectedSessionId === sub.id}
+                                          onSelect={handleSelectSession}
+                                          dotClass='bg-zinc-500'
+                                        />
+                                      </div>
+                                    ))}
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -778,13 +922,13 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.5+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.6+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               <div className='mt-4 space-y-2'>
                 <a
                   href={FOUNDER_DEN_ONBOARD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
-                  Download Founder Node v0.7.5 — setup hub
+                  Download Founder Node v0.7.6 — setup hub
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}
@@ -838,7 +982,12 @@ export function MinimalDevWorkspace({
             </div>
           )}
           {selectedSession && (
-            <HistoryThread messages={history} loading={historyLoading} error={historyError} />
+            <HistoryThread
+              messages={history}
+              loading={historyLoading}
+              error={historyError}
+              agentTyping={selectedAgentTyping}
+            />
           )}
           {messages.length === 0 && !showConnectWizard && <div className='flex h-full items-center justify-center text-sm text-zinc-600'>Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.</div>}
           <div className='mx-auto max-w-3xl space-y-3'>
@@ -849,6 +998,27 @@ export function MinimalDevWorkspace({
                     {m.text || (m.thinking ? 'Thinking…' : m.pending ? '…' : '')}
                     {m.thinking && <span className='ml-1 inline-block animate-pulse text-zinc-500'>▋</span>}
                   </p>
+                  {m.attachments && m.attachments.length > 0 && (
+                    <div className='mt-2 flex flex-wrap gap-2'>
+                      {m.attachments.map((a) =>
+                        a.previewUrl ? (
+                          <img
+                            key={a.name}
+                            src={a.previewUrl}
+                            alt={a.name}
+                            className='max-h-32 rounded-lg border border-white/10'
+                          />
+                        ) : (
+                          <span
+                            key={a.name}
+                            className='rounded-md bg-white/5 px-2 py-1 text-[0.65rem] text-zinc-400'
+                          >
+                            📎 {a.name}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  )}
                   {m.provider && !m.pending && m.role === 'assistant' && <p className='mt-1 text-xs text-zinc-500'>via {m.provider}</p>}
                   {m.role === 'assistant' && !m.pending && m.missingConnections && m.missingConnections.length > 0 && (
                     <InlineOnboarding
@@ -875,9 +1045,114 @@ export function MinimalDevWorkspace({
           {dispatchNotice && (
             <div className='mb-2 text-xs text-emerald-400/90'>→ {dispatchNotice}</div>
           )}
-          <div className='mx-auto flex max-w-3xl items-end gap-2'>
-            <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} rows={1} placeholder='Message Founder OS - shift+enter for newline' className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40' />
-            <button onClick={handleSend} disabled={busy || !input.trim()} className='rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40'>{busy ? '...' : 'Send'}</button>
+          {pendingAttachments.length > 0 && (
+            <div className='mx-auto mb-2 flex max-w-3xl flex-wrap gap-2'>
+              {pendingAttachments.map((a) => (
+                <span
+                  key={a.name}
+                  className='inline-flex items-center gap-1 rounded-md bg-white/5 px-2 py-1 text-[0.65rem] text-zinc-300'
+                >
+                  📎 {a.name}
+                  <button
+                    type='button'
+                    onClick={() =>
+                      setPendingAttachments((prev) => prev.filter((x) => x.name !== a.name))
+                    }
+                    className='text-zinc-500 hover:text-zinc-200'
+                    aria-label={'Remove ' + a.name}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className='mx-auto max-w-3xl'>
+            <div className='flex items-end gap-2'>
+              <input
+                ref={fileInputRef}
+                type='file'
+                accept='image/*,.pdf,.txt,.log,.csv,.zip,.md,.json'
+                multiple
+                className='hidden'
+                onChange={(e) => {
+                  void handleAttachFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              <div className='flex shrink-0 flex-col gap-1'>
+                <button
+                  type='button'
+                  onClick={() => {
+                    clearVoiceError();
+                    setError(null);
+                    if (!voiceSupported) {
+                      setError(
+                        'Voice needs Chrome or Edge on desktop with microphone permission (HTTPS).',
+                      );
+                      return;
+                    }
+                    toggleVoice(input);
+                  }}
+                  className={
+                    'flex h-11 w-11 items-center justify-center rounded-xl text-sm transition ' +
+                    (listening
+                      ? 'bg-red-600 text-white'
+                      : waitingNetwork
+                        ? 'bg-sky-700/90 text-white'
+                        : starting
+                          ? 'bg-amber-600/90 text-white'
+                          : 'border border-white/10 bg-[#12121a] text-zinc-400 hover:text-zinc-100')
+                  }
+                  title={listening ? 'Stop recording' : 'Voice input (speech to text)'}
+                >
+                  {listening ? '⏹' : '🎤'}
+                </button>
+                <button
+                  type='button'
+                  onClick={() => fileInputRef.current?.click()}
+                  className='flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#12121a] text-zinc-400 transition hover:text-zinc-100'
+                  title='Attach image or file'
+                >
+                  📎
+                </button>
+              </div>
+              <textarea
+                value={input}
+                onChange={(e) => {
+                  if (phase !== 'idle') stopVoice();
+                  setInput(e.target.value);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                rows={1}
+                placeholder='Message Founder OS — shift+enter for newline'
+                className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'
+              />
+              <button
+                onClick={handleSend}
+                disabled={busy || (!input.trim() && pendingAttachments.length === 0)}
+                className='rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40'
+              >
+                {busy ? '...' : 'Send'}
+              </button>
+            </div>
+            {(listening || starting || waitingNetwork) && (
+              <div className='mt-1.5 flex items-center gap-2 text-[0.65rem] text-zinc-500'>
+                <VoiceWaveform phase={phase} level={audioLevel} />
+                <span>
+                  {listening
+                    ? 'Listening — speak now'
+                    : waitingNetwork
+                      ? 'Waiting for network…'
+                      : 'Starting microphone…'}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </main>

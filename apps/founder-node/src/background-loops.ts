@@ -2,6 +2,7 @@ import type { FounderNodeConfig } from '@dcf/founder-vault';
 
 export type BackgroundLoopHandles = {
   syncTimer: ReturnType<typeof setInterval> | null;
+  sessionSyncTimer: ReturnType<typeof setInterval> | null;
   inferenceTimer: ReturnType<typeof setInterval> | null;
   syncJobTimer: ReturnType<typeof setInterval> | null;
   startupTimers: ReturnType<typeof setTimeout>[];
@@ -10,6 +11,7 @@ export type BackgroundLoopHandles = {
 export function createLoopHandles(): BackgroundLoopHandles {
   return {
     syncTimer: null,
+    sessionSyncTimer: null,
     inferenceTimer: null,
     syncJobTimer: null,
     startupTimers: [],
@@ -20,6 +22,10 @@ export function stopBackgroundLoops(handles: BackgroundLoopHandles): void {
   if (handles.syncTimer) {
     clearInterval(handles.syncTimer);
     handles.syncTimer = null;
+  }
+  if (handles.sessionSyncTimer) {
+    clearInterval(handles.sessionSyncTimer);
+    handles.sessionSyncTimer = null;
   }
   if (handles.inferenceTimer) {
     clearInterval(handles.inferenceTimer);

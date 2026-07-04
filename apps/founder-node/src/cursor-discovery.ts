@@ -329,6 +329,12 @@ function discoverCursorSessionsFromWorkspaces(): BridgeSession[] {
 type ComposerBranch = { branchName?: string; lastInteractionAt?: number };
 type ComposerTrackedRepo = { repoPath?: string; branches?: ComposerBranch[] };
 type ComposerWorkspaceId = { id?: string };
+type ComposerSubagentInfo = {
+  subagentType?: number;
+  parentComposerId?: string;
+  subagentTypeName?: string;
+  rootParentConversationId?: string;
+};
 type ComposerHead = {
   composerId?: string;
   name?: string;
@@ -340,6 +346,11 @@ type ComposerHead = {
   filesChangedCount?: number;
   isArchived?: boolean;
   isDraft?: boolean;
+  isBestOfNSubcomposer?: boolean;
+  glassMetaParentAgent?: unknown;
+  hasBeenInSidebar?: boolean;
+  type?: string;
+  subagentInfo?: ComposerSubagentInfo;
   trackedGitRepos?: ComposerTrackedRepo[];
   workspaceIdentifier?: ComposerWorkspaceId;
 };
@@ -472,6 +483,12 @@ type ConversationHeader = {
 type ComposerDataRow = {
   composerId?: string;
   fullConversationHeadersOnly?: ConversationHeader[];
+  generatingBubbleIds?: string[];
+  isContinuationInProgress?: boolean;
+  status?: string;
+  subagentComposerIds?: string[];
+  subagentInfo?: ComposerSubagentInfo;
+  isBestOfNSubcomposer?: boolean;
 };
 
 /**
@@ -561,6 +578,115 @@ function headerRole(header: ConversationHeader): BridgeMessage['role'] | null {
   return null;
 }
 
+function readComposerDataRow(
+  db: import('node:sqlite').DatabaseSync,
+  composerId: string,
+): ComposerDataRow | null {
+  try {
+    const headerRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value?: string } | undefined;
+    if (!headerRow || typeof headerRow.value !== 'string') return null;
+    return JSON.parse(headerRow.value) as ComposerDataRow;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collect every composer UUID Cursor marks as a subagent/subtopic — from
+ * composer headers (`subagentInfo`) and parent `subagentComposerIds` lists.
+ */
+function collectSubagentComposerIds(
+  DatabaseSync: typeof import('node:sqlite').DatabaseSync,
+  dbPath: string,
+  headers: ComposerHead[],
+): Set<string> {
+  const ids = new Set<string>();
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    for (const c of headers) {
+      const parentId = c.subagentInfo?.parentComposerId;
+      if (parentId && c.composerId) ids.add(c.composerId);
+      if (c.isBestOfNSubcomposer && c.composerId) ids.add(c.composerId);
+      if (c.glassMetaParentAgent && c.composerId) ids.add(c.composerId);
+    }
+    for (const c of headers) {
+      if (!c.composerId || ids.has(c.composerId)) continue;
+      const data = readComposerDataRow(db, c.composerId);
+      if (!data) continue;
+      if (data.subagentInfo?.parentComposerId) ids.add(c.composerId);
+      if (data.isBestOfNSubcomposer) ids.add(c.composerId);
+      for (const sid of data.subagentComposerIds ?? []) {
+        if (typeof sid === 'string' && sid.trim()) ids.add(sid.trim());
+      }
+    }
+  } catch {
+    /* ignore */
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  return ids;
+}
+
+/** True for composers Cursor shows as top-level chat tabs in the sidebar. */
+function isTopLevelComposerHeader(c: ComposerHead, subagentIds: Set<string>): boolean {
+  if (!c.composerId || !c.name) return false;
+  if (c.isArchived || c.isDraft) return false;
+  if (c.subagentInfo?.parentComposerId) return false;
+  if (c.isBestOfNSubcomposer) return false;
+  if (c.glassMetaParentAgent) return false;
+  if (subagentIds.has(c.composerId)) return false;
+  return true;
+}
+
+function parentComposerIdFromHeader(c: ComposerHead): string | undefined {
+  return c.subagentInfo?.parentComposerId?.trim() || undefined;
+}
+
+function buildSessionFromHeader(
+  c: ComposerHead,
+  agentNameById: Map<string, string>,
+  parentComposerId?: string,
+): BridgeSession | null {
+  if (!c.composerId || !c.name) return null;
+  const lastActiveAt = isoFromEpochMs(c.lastUpdatedAt) ?? isoFromEpochMs(c.createdAt);
+  if (!lastActiveAt) return null;
+
+  const repo = c.trackedGitRepos?.[0]?.repoPath;
+  const branch = c.trackedGitRepos?.[0]?.branches?.[0]?.branchName;
+  const repository = repo ? folderNameFromPath(repo) : undefined;
+  const workspaceStorageId = c.workspaceIdentifier?.id;
+  const folderPath = workspaceStorageId
+    ? resolveCursorWorkspaceFolder(workspaceStorageId) ?? undefined
+    : undefined;
+
+  return {
+    id: c.composerId,
+    composerId: c.composerId,
+    workspaceId: workspaceStorageId,
+    workspaceStorageId,
+    folderPath,
+    title: c.name,
+    subtitle: truncate(c.subtitle, SUBTITLE_MAX),
+    repository,
+    branch,
+    ideProvider: 'cursor',
+    restorable: true,
+    lastActiveAt,
+    totalLinesAdded: typeof c.totalLinesAdded === 'number' ? c.totalLinesAdded : undefined,
+    totalLinesRemoved: typeof c.totalLinesRemoved === 'number' ? c.totalLinesRemoved : undefined,
+    filesChangedCount: typeof c.filesChangedCount === 'number' ? c.filesChangedCount : undefined,
+    isAgentProject: workspaceStorageId ? agentNameById.has(workspaceStorageId) : false,
+    ...(parentComposerId ? { parentComposerId } : {}),
+  };
+}
+
 function shouldIncludeHeader(header: ConversationHeader): boolean {
   if (!header.bubbleId) return false;
   if (header.grouping?.isSimulatedMsg) return false;
@@ -579,35 +705,64 @@ export function readComposerMessages(
   composerId: string,
   limit = MAX_MESSAGES_PER_SESSION,
 ): BridgeMessage[] {
+  const result = readComposerMessagesWithMeta(composerId, limit);
+  return result.messages;
+}
+
+/** Read messages plus agent-typing state from Cursor bubble DB. */
+export function readComposerMessagesWithMeta(
+  composerId: string,
+  limit = MAX_MESSAGES_PER_SESSION,
+): { messages: BridgeMessage[]; agentTyping: boolean } {
   const sqlite = loadNodeSqlite();
-  if (!sqlite) return [];
+  if (!sqlite) return { messages: [], agentTyping: false };
   const dbPath = getCursorGlobalStateDbPath();
-  if (!dbPath || !fs.existsSync(dbPath)) return [];
+  if (!dbPath || !fs.existsSync(dbPath)) return { messages: [], agentTyping: false };
 
   let db: import('node:sqlite').DatabaseSync | null = null;
   try {
     db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
-    const headerRow = db
-      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-      .get(`composerData:${composerId}`) as { value?: string } | undefined;
-    if (!headerRow || typeof headerRow.value !== 'string') return [];
-    const parsed = JSON.parse(headerRow.value) as ComposerDataRow;
+    const parsed = readComposerDataRow(db, composerId);
+    if (!parsed) return { messages: [], agentTyping: false };
     const headers = Array.isArray(parsed.fullConversationHeadersOnly)
       ? parsed.fullConversationHeadersOnly
       : [];
-    if (headers.length === 0) return [];
+    if (headers.length === 0) return { messages: [], agentTyping: false };
+
+    const generating = new Set(
+      (Array.isArray(parsed.generatingBubbleIds) ? parsed.generatingBubbleIds : [])
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    );
+    const agentTyping =
+      generating.size > 0 ||
+      parsed.isContinuationInProgress === true ||
+      parsed.status === 'generating';
 
     const tail = headers.filter(shouldIncludeHeader).slice(-limit * 2);
     const bubbleStmt = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?');
     const messages: BridgeMessage[] = [];
+    const seenBubbleIds = new Set<string>();
 
     for (const header of tail) {
       const role = headerRole(header);
       if (!role || !header.bubbleId) continue;
+      seenBubbleIds.add(header.bubbleId);
+      const isStreaming = generating.has(header.bubbleId);
       const bubbleRow = bubbleStmt.get(
         `bubbleId:${composerId}:${header.bubbleId}`,
       ) as { value?: string } | undefined;
-      if (!bubbleRow || typeof bubbleRow.value !== 'string') continue;
+      if (!bubbleRow || typeof bubbleRow.value !== 'string') {
+        if (isStreaming && role === 'assistant') {
+          messages.push({
+            role,
+            content: '',
+            streaming: true,
+            partial: true,
+            ...(header.createdAt ? { timestamp: header.createdAt } : {}),
+          });
+        }
+        continue;
+      }
       let bubble: CursorBubble;
       try {
         bubble = JSON.parse(bubbleRow.value) as CursorBubble;
@@ -615,18 +770,42 @@ export function readComposerMessages(
         continue;
       }
       const text = extractBubbleText(bubble);
-      if (!text || isSystemOrSimulatedBubbleText(text)) continue;
+      if (!text && !isStreaming) continue;
+      if (text && isSystemOrSimulatedBubbleText(text) && !isStreaming) continue;
       messages.push({
         role,
-        content: text.slice(0, MESSAGE_TEXT_MAX),
+        content: (text || '').slice(0, MESSAGE_TEXT_MAX),
         ...(header.createdAt ? { timestamp: header.createdAt } : {}),
         ...(bubble.model ? { model: bubble.model.slice(0, 60) } : {}),
+        ...(isStreaming ? { streaming: true, partial: true } : {}),
       });
     }
 
-    return messages.slice(-limit);
+    // In-progress bubbles not yet listed in conversation headers.
+    for (const bubbleId of generating) {
+      if (seenBubbleIds.has(bubbleId)) continue;
+      const bubbleRow = bubbleStmt.get(
+        `bubbleId:${composerId}:${bubbleId}`,
+      ) as { value?: string } | undefined;
+      let text = '';
+      if (bubbleRow && typeof bubbleRow.value === 'string') {
+        try {
+          text = extractBubbleText(JSON.parse(bubbleRow.value) as CursorBubble);
+        } catch {
+          /* ignore */
+        }
+      }
+      messages.push({
+        role: 'assistant',
+        content: text.slice(0, MESSAGE_TEXT_MAX),
+        streaming: true,
+        partial: true,
+      });
+    }
+
+    return { messages: messages.slice(-limit), agentTyping };
   } catch {
-    return [];
+    return { messages: [], agentTyping: false };
   } finally {
     try {
       db?.close();
@@ -767,49 +946,59 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
       if (ap.id && ap.name && !ap.isArchived) agentNameById.set(ap.id, ap.name);
     }
 
-    const sessions: BridgeSession[] = [];
+    const subagentIds = collectSubagentComposerIds(
+      sqlite.DatabaseSync,
+      dbPath,
+      headers.allComposers,
+    );
+
+    const topLevel: BridgeSession[] = [];
+    const subagentsByParent = new Map<string, BridgeSession[]>();
+
     for (const c of headers.allComposers) {
-      if (c.isArchived || c.isDraft) continue;
-      if (!c.composerId || !c.name) continue;
-      const lastActiveAt = isoFromEpochMs(c.lastUpdatedAt) ?? isoFromEpochMs(c.createdAt);
-      if (!lastActiveAt) continue;
-
-      const repo = c.trackedGitRepos?.[0]?.repoPath;
-      const branch = c.trackedGitRepos?.[0]?.branches?.[0]?.branchName;
-      const repository = repo ? folderNameFromPath(repo) : undefined;
-      const workspaceStorageId = c.workspaceIdentifier?.id;
-      const folderPath = workspaceStorageId
-        ? resolveCursorWorkspaceFolder(workspaceStorageId) ?? undefined
-        : undefined;
-
-      sessions.push({
-        id: c.composerId,
-        composerId: c.composerId,
-        workspaceId: workspaceStorageId,
-        workspaceStorageId,
-        folderPath,
-        title: c.name,
-        subtitle: truncate(c.subtitle, SUBTITLE_MAX),
-        repository,
-        branch,
-        ideProvider: 'cursor',
-        restorable: true,
-        lastActiveAt,
-        totalLinesAdded:
-          typeof c.totalLinesAdded === 'number' ? c.totalLinesAdded : undefined,
-        totalLinesRemoved:
-          typeof c.totalLinesRemoved === 'number' ? c.totalLinesRemoved : undefined,
-        filesChangedCount:
-          typeof c.filesChangedCount === 'number' ? c.filesChangedCount : undefined,
-        isAgentProject: workspaceStorageId ? agentNameById.has(workspaceStorageId) : false,
-      });
+      const parentId = parentComposerIdFromHeader(c);
+      if (parentId && c.composerId) {
+        const sub = buildSessionFromHeader(c, agentNameById, parentId);
+        if (sub) {
+          const list = subagentsByParent.get(parentId) ?? [];
+          list.push(sub);
+          subagentsByParent.set(parentId, list);
+        }
+        continue;
+      }
+      if (!isTopLevelComposerHeader(c, subagentIds)) continue;
+      const session = buildSessionFromHeader(c, agentNameById);
+      if (session) topLevel.push(session);
     }
 
-    sessions.sort(
+    for (const s of topLevel) {
+      const children = subagentsByParent.get(s.id);
+      if (children && children.length > 0) {
+        children.sort(
+          (a, b) =>
+            new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+        );
+        for (const sub of children.slice(0, 3)) {
+          if (Date.now() - started > SESSION_DB_TIMEOUT_MS) break;
+          const { messages: subMsgs, agentTyping: subTyping } = readComposerMessagesWithMeta(
+            sub.id,
+            20,
+          );
+          if (subMsgs.length > 0) {
+            sub.messages = subMsgs;
+            sub.messageCount = subMsgs.length;
+          }
+          if (subTyping) sub.agentTyping = true;
+        }
+        s.subagents = children.slice(0, 8);
+      }
+    }
+
+    topLevel.sort(
       (a, b) =>
         new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
     );
-    const top = sessions.slice(0, MAX_SESSIONS);
+    const top = topLevel.slice(0, MAX_SESSIONS);
 
     // Attach the recent message thread to the most recent sessions so the
     // dashboard can show what was actually said without an extra round trip.
@@ -818,11 +1007,12 @@ function readCursorComposerSessionsFromSqlite(): BridgeSession[] | null {
     const withMessages = top.slice(0, MAX_SESSIONS_WITH_MESSAGES);
     for (const s of withMessages) {
       const composerId = s.composerId ?? s.id;
-      const msgs = readComposerMessages(composerId);
+      const { messages: msgs, agentTyping } = readComposerMessagesWithMeta(composerId);
       if (msgs.length > 0) {
         s.messages = msgs;
         s.messageCount = msgs.length;
       }
+      if (agentTyping) s.agentTyping = true;
       if (Date.now() - started > SESSION_DB_TIMEOUT_MS) break;
     }
 
