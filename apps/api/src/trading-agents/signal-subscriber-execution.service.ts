@@ -15,6 +15,7 @@ import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   BITFINEX_COPY_POLICY_VERSION,
   resolveMaxConcurrentCopySignals,
+  resolveMirrorDisasterStopMarginPct,
   isCopyRelaySimActive,
   readCopyRelaySimState,
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
@@ -52,7 +53,8 @@ import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { applyDashboardPatch } from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
-import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
+import { mapBotStateToAgentStats, normalizeBotSessionTrades, type BotApiState } from './bot-state.mapper';
+import { resolveShowcaseTradeDetails, tradeIdsMatch } from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const AGENT_SLUG = 'conservative-btc';
@@ -91,6 +93,10 @@ type ExecutionPayload = {
    * forward-looking infrastructure.
    */
   clientOrderId?: number;
+  /** Phase 3 — S6b/S6a adoption re-link to origin showcase trade. */
+  originParticipantId?: string;
+  originCycleId?: string;
+  originTradeId?: string;
 };
 
 type PositionRuntime = {
@@ -175,6 +181,53 @@ function mirrorConvergenceEnabled(): boolean {
  */
 function mirrorDiffEnabled(): boolean {
   return process.env.MIRROR_DIFF_ENABLED !== '0';
+}
+
+/**
+ * Phase 2 — exit convergence master switch. Default ON (same pattern as
+ * MIRROR_CONVERGENCE_ENABLED). When ON in showcase-mirror mode: wide disaster
+ * stop only, no profit-lock trail, no local HARD_STOP — exits follow showcase
+ * closure (+ SHOWCASE_VANISHED fallback). Set MIRROR_EXIT_CONVERGENCE_ENABLED=0
+ * to roll back to legacy independent Scenario C exits on the copy.
+ */
+function mirrorExitConvergenceEnabled(): boolean {
+  const v = (process.env.MIRROR_EXIT_CONVERGENCE_ENABLED ?? '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
+}
+
+/** Phase 3 — catch-up market entry when showcase is OPEN but copy missed fill. Default ON. */
+function mirrorCatchupEnabled(): boolean {
+  const v = (process.env.MIRROR_CATCHUP_ENABLED ?? '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
+}
+
+function mirrorCatchupMaxSlipUsd(): number {
+  const raw = Number(process.env.MIRROR_CATCHUP_MAX_SLIP_USD ?? '50');
+  return Number.isFinite(raw) && raw > 0 ? raw : 50;
+}
+
+function mirrorCatchupBudgetPerDay(): number {
+  const raw = Number(process.env.MIRROR_CATCHUP_BUDGET_PER_DAY ?? '3');
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
+}
+
+/** Effective stop-loss margin % — wide disaster stop in mirror+convergence mode. */
+function resolveEffectiveStopLossMarginPct(
+  intentStopLoss?: number,
+  opts?: { mirrorMode?: boolean; simActive?: boolean },
+): number {
+  if (
+    opts?.mirrorMode !== false &&
+    !opts?.simActive &&
+    isShowcaseMirrorOnlyMode() &&
+    mirrorExitConvergenceEnabled()
+  ) {
+    // Crash/disconnect insurance only — must never front-run showcase thesis exits.
+    return resolveMirrorDisasterStopMarginPct();
+  }
+  return intentStopLoss ?? -18;
 }
 
 /** Two copy/showcase limits within this many USD are "the same book entry"
@@ -665,6 +718,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       if (participant.status === SignalCycleStatus.OPEN) {
         managedOpenTrade = true;
+        const mirrorExited = await this.tryImmediateShowcaseMirrorExit(
+          agentId,
+          instance.userId,
+          cycle,
+          participant,
+          meta,
+          creds,
+          simActive,
+        );
+        if (mirrorExited) continue;
         const attributed = await this.reconcileAttributedLotClose(
           agentId,
           instance.userId,
@@ -788,6 +851,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
+
+    await this.attemptMirrorCatchupEntries(
+      agentId,
+      instance,
+      creds,
+      botStateForCap,
+      openParticipantAfter,
+      lotSummary,
+      managedOrderIds,
+      marginCap,
+      maxConcurrent,
+      exitOnly,
+      simActive,
+    ).catch((err) => {
+      this.logger.warn(
+        `[MIRROR-CATCHUP] ${instance.userId}: ${err instanceof Error ? err.message : err}`,
+      );
+    });
 
     const botState = botStateForCap;
     if (botState?.execution_paused) {
@@ -2476,7 +2557,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!fillPrice || fillPrice <= 0) return false;
     const qty = fill.filledQty;
     const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
-    const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent?.risk?.stop_loss_margin_pct, {
+      mirrorMode: isShowcaseMirrorOnlyMode(),
+    });
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
     const stopOrderId = await this.activeTrading
@@ -3662,7 +3745,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!entry || entry <= 0) return;
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
-    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+      intent.risk.stop_loss_margin_pct,
+      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
+    );
     const stopPrice =
       stopPriceOverride != null && stopPriceOverride > 0
         ? stopPriceOverride
@@ -3686,6 +3772,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         stop_price: stopPrice,
         stopOrderId,
         qty,
+        stop_loss_margin_pct: stopLossMarginPct,
         source: 'hire',
       });
       this.logger.log(`Hire stop retry ${userId} cycle=${cycleId} @ ${stopPrice.toFixed(2)}`);
@@ -3890,8 +3977,622 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Scenario C per virtual lot — ladder, thesis -12% / MFE 2%, hard stop; partial close exact qty.
+   * Phase 2/3 — resolve the showcase trade_id to mirror for exit convergence.
+   * Adopted participants (`adopt:*`) re-link to the origin showcase trade.
    */
+  private resolveShowcaseMirrorTradeId(
+    cycle: { tradeId?: string | null },
+    meta: ExecutionPayload,
+  ): string | null {
+    const tid = cycle.tradeId ?? null;
+    if (tid?.startsWith('adopt:')) {
+      if (meta.originTradeId) return meta.originTradeId;
+      const parts = tid.split(':');
+      if (parts.length >= 2 && parts[1] && parts[1] !== 'unknown') return parts[1];
+      return null;
+    }
+    return tid;
+  }
+
+  /** Detect showcase trade closure from bot state (trades / trades_map / positions). */
+  private detectShowcaseTradeClosed(
+    bot: BotApiState | null,
+    tradeId: string | null,
+  ): { closed: boolean; exitPrice?: number; exitReason?: string } {
+    if (!bot || !tradeId) return { closed: false };
+
+    const inPositions = (bot.positions ?? []).some(
+      (p) => p.trade_id && tradeIdsMatch(p.trade_id, tradeId),
+    );
+    if (inPositions) return { closed: false };
+
+    const inOrders = (bot.orders ?? []).some(
+      (o) =>
+        o.trade_id &&
+        tradeIdsMatch(o.trade_id, tradeId) &&
+        (o.status === 'PENDING' || o.status === 'ORDERED'),
+    );
+    if (inOrders) return { closed: false };
+
+    const details = resolveShowcaseTradeDetails(bot, tradeId);
+    if (details?.exit != null && Number.isFinite(details.exit) && details.exit > 0) {
+      return {
+        closed: true,
+        exitPrice: details.exit,
+        exitReason: details.exitReason,
+      };
+    }
+
+    for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
+      const sig = entry?.signal_ref as Record<string, unknown> | undefined;
+      if (!sig) continue;
+      const refId = String(sig.trade_id ?? mapKey);
+      if (!tradeIdsMatch(refId, tradeId) && !tradeIdsMatch(mapKey, tradeId)) continue;
+      if (
+        String(sig.status ?? '') === 'CLOSED' &&
+        (sig.exit_price != null || sig.closed_ts != null)
+      ) {
+        const exitCtx = sig.exit_context as Record<string, unknown> | undefined;
+        const exitPrice = Number(exitCtx?.exit_price ?? sig.exit_price ?? 0);
+        return {
+          closed: true,
+          exitPrice: exitPrice > 0 ? exitPrice : undefined,
+          exitReason: String(sig.exit_reason ?? ''),
+        };
+      }
+    }
+
+    const trades = normalizeBotSessionTrades(bot);
+    const trade = trades.find((t) => t.trade_id && tradeIdsMatch(t.trade_id, tradeId));
+    if (trade?.exit != null && trade.pnl != null) {
+      return {
+        closed: true,
+        exitPrice: trade.exit ?? undefined,
+        exitReason: trade.exit_reason ?? undefined,
+      };
+    }
+
+    return { closed: false };
+  }
+
+  /**
+   * Phase 2c/3a — immediate showcase mirror exit before independent exit ladder.
+   * Returns true when the lot was closed or exit is in progress.
+   */
+  private async tryImmediateShowcaseMirrorExit(
+    agentId: string,
+    userId: string,
+    cycle: {
+      id: string;
+      status: SignalCycleStatus;
+      tradeId?: string | null;
+      intentEnvelope?: unknown;
+      showcasePnlUsd?: { toNumber?: () => number } | null;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    simActive = false,
+  ): Promise<boolean> {
+    if (simActive) return false;
+    if (!mirrorExitConvergenceEnabled() || !isShowcaseMirrorOnlyMode()) return false;
+
+    const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
+    const mirrorRelinked = (cycle.tradeId ?? '').startsWith('adopt:');
+
+    let closed =
+      cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED;
+    let showcaseExitPrice: number | undefined;
+    let showcaseExitReason: string | undefined;
+
+    if (!closed && showcaseTradeId) {
+      const bot = await this.fetchExecutionBotState();
+      const det = this.detectShowcaseTradeClosed(bot, showcaseTradeId);
+      if (det.closed) {
+        closed = true;
+        showcaseExitPrice = det.exitPrice;
+        showcaseExitReason = det.exitReason;
+      }
+    }
+
+    if (!closed && mirrorRelinked && meta.originCycleId) {
+      const originCycle = await this.prisma.signalCycle.findUnique({
+        where: { id: meta.originCycleId },
+        select: { status: true },
+      });
+      if (
+        originCycle?.status === SignalCycleStatus.CLOSED ||
+        originCycle?.status === SignalCycleStatus.EXPIRED
+      ) {
+        closed = true;
+      }
+    }
+
+    if (!closed) return false;
+
+    if (showcaseExitPrice == null && showcaseTradeId) {
+      const bot = await this.fetchExecutionBotState();
+      const det = this.detectShowcaseTradeClosed(bot, showcaseTradeId);
+      showcaseExitPrice = det.exitPrice;
+      showcaseExitReason = det.exitReason ?? showcaseExitReason;
+    }
+
+    return this.executeShowcaseMirrorClose(
+      agentId,
+      userId,
+      cycle,
+      participant,
+      meta,
+      creds,
+      {
+        showcaseExitPrice,
+        showcaseExitReason,
+        mirrorRelinked,
+        trigger: mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED',
+      },
+    );
+  }
+
+  /**
+   * Phase 2c — market-close copy lot on showcase closure with observability fields.
+   * Idempotent via exitingLots + hasParticipantExited.
+   */
+  private async executeShowcaseMirrorClose(
+    agentId: string,
+    userId: string,
+    cycle: {
+      id: string;
+      showcasePnlUsd?: { toNumber?: () => number } | null;
+      intentEnvelope?: unknown;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    opts?: {
+      showcaseExitPrice?: number;
+      showcaseExitReason?: string;
+      mirrorRelinked?: boolean;
+      trigger?: string;
+    },
+  ): Promise<boolean> {
+    if (await this.hasParticipantExited(participant.id)) return true;
+    if (this.exitingLots.has(participant.id)) return true;
+
+    this.exitingLots.add(participant.id);
+    try {
+      await this.cancelLinkedPendingLimits(creds, meta, new Set());
+
+      const fillPrice =
+        participant.fillPrice != null
+          ? Number(participant.fillPrice)
+          : meta.limitPrice ?? meta.fillPrice ?? 0;
+
+      const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+      if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
+        const exitPrice =
+          opts?.showcaseExitPrice ??
+          (await this.activeTrading.getMarkPrice().catch(() => fillPrice || 0));
+        let pnlUsd = 0;
+        let pnlMarginPct = 0;
+        let pnlSource: 'exchange_realised' | 'reconstructed' = 'reconstructed';
+        if (meta.qty && meta.direction) {
+          const flat = await this.resolveAlreadyFlatPnl(
+            agentId,
+            userId,
+            creds,
+            participant.id,
+            meta,
+            fillPrice,
+            exitPrice || fillPrice,
+          );
+          pnlUsd = flat.pnlUsd;
+          pnlSource = flat.pnlSource;
+          pnlMarginPct =
+            fillPrice && fillPrice > 0
+              ? (pnlUsd / (fillPrice * meta.qty)) *
+                100 *
+                ((cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
+                  DEFAULT_SUBSCRIBER_LEVERAGE)
+              : 0;
+        }
+        const exitSlippageUsd =
+          opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
+            ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
+            : undefined;
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+          venue: 'bitfinex',
+          exit_price: exitPrice || fillPrice,
+          exit_reason: 'SHOWCASE_MIRROR_ALREADY_FLAT',
+          showcase_exit_price: opts?.showcaseExitPrice,
+          exit_slippage_usd: exitSlippageUsd,
+          showcase_exit_reason: opts?.showcaseExitReason,
+          mirror_relinked: opts?.mirrorRelinked ?? false,
+          mirror_trigger: opts?.trigger,
+          pnl_usd: Math.round(pnlUsd * 100) / 100,
+          pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+          pnl_source: pnlSource,
+          source: 'hire',
+        });
+        this.logger.log(
+          `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
+        );
+        return true;
+      }
+
+      if (!meta.qty || !meta.direction) return false;
+
+      let exitPrice = fillPrice ?? 0;
+      const leverage =
+        (cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
+        DEFAULT_SUBSCRIBER_LEVERAGE;
+      try {
+        if (meta.stopOrderId) {
+          try {
+            await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
+          } catch {
+            /* may have fired */
+          }
+        }
+        exitPrice = await this.activeTrading.getMarkPrice();
+        const closeQty = position
+          ? Math.min(meta.qty, Math.abs(position.amount))
+          : meta.qty;
+        if (closeQty >= MIN_QTY_BTC) {
+          await this.activeTrading.submitMarketClose(creds, {
+            positionDirection: meta.direction,
+            qty: closeQty,
+            leverage,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${msg}`);
+      }
+
+      const direction = meta.direction;
+      const pnlUsd =
+        fillPrice && exitPrice
+          ? direction === 'LONG'
+            ? (exitPrice - fillPrice) * meta.qty
+            : (fillPrice - exitPrice) * meta.qty
+          : cycle.showcasePnlUsd != null
+            ? Number(cycle.showcasePnlUsd)
+            : 0;
+
+      const pnlMarginPct =
+        fillPrice && fillPrice > 0 ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage : 0;
+
+      const exitSlippageUsd =
+        opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
+          ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
+          : undefined;
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        venue: 'bitfinex',
+        exit_price: exitPrice,
+        exit_reason: 'SHOWCASE_MIRROR',
+        showcase_exit_price: opts?.showcaseExitPrice,
+        exit_slippage_usd: exitSlippageUsd,
+        showcase_exit_reason: opts?.showcaseExitReason,
+        mirror_relinked: opts?.mirrorRelinked ?? false,
+        mirror_trigger: opts?.trigger,
+        pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+        pnl_source: 'open_position',
+        source: 'hire',
+      });
+
+      this.logger.log(
+        `Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
+      );
+      this.showcaseVanishedMisses.delete(participant.id);
+      return true;
+    } finally {
+      this.exitingLots.delete(participant.id);
+    }
+  }
+
+  private async countMirrorCatchupEntriesLast24h(userId: string, agentId: string): Promise<number> {
+    const since = new Date(Date.now() - 24 * 60 * 60_000);
+    return this.prisma.signalCycleEvent.count({
+      where: {
+        eventType: 'MIRROR_CATCHUP_ENTRY',
+        createdAt: { gte: since },
+        participant: { userId, cycle: { agentId } },
+      },
+    });
+  }
+
+  /**
+   * Phase 3b — slippage-capped catch-up market entry when showcase is OPEN but copy missed fill.
+   * Fail-closed: skips when uncertain (no intent cycle, slip over cap, budget exhausted, orphan freeze).
+   */
+  private async attemptMirrorCatchupEntries(
+    agentId: string,
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    botState: BotApiState | null,
+    openParticipants: Array<{
+      id: string;
+      status: SignalCycleStatus;
+      cycleId: string;
+      cycle?: { tradeId: string | null } | null;
+    }>,
+    lotSummary: VirtualLotSummary,
+    managedOrderIds: Set<number>,
+    marginCap: number,
+    maxConcurrent: number,
+    exitOnly: boolean,
+    simActive: boolean,
+  ): Promise<void> {
+    if (exitOnly || simActive) return;
+    if (!mirrorCatchupEnabled() || !isShowcaseMirrorOnlyMode()) return;
+    if (!this.botBridge.isEnabled() || !botState) return;
+
+    const budget = mirrorCatchupBudgetPerDay();
+    const used = await this.countMirrorCatchupEntriesLast24h(instance.userId, agentId);
+    if (used >= budget) return;
+
+    const copyTradeIds = new Set<string>();
+    for (const p of openParticipants) {
+      const tid = p.cycle?.tradeId;
+      if (tid && !tid.startsWith('adopt:')) copyTradeIds.add(tid);
+    }
+
+    const showcasePositions = (botState.positions ?? []).filter(
+      (pos) => typeof pos.trade_id === 'string' && pos.trade_id.length > 0,
+    );
+    if (!showcasePositions.length) return;
+
+    const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+    if (!mark || mark <= 0) return;
+
+    const maxSlip = mirrorCatchupMaxSlipUsd();
+    let catchupsThisTick = 0;
+    const budgetRemaining = budget - used;
+
+    for (const pos of showcasePositions) {
+      if (catchupsThisTick >= budgetRemaining) break;
+      const tradeId = pos.trade_id!;
+      if (copyTradeIds.has(tradeId)) continue;
+
+      const hasCopy = openParticipants.some(
+        (p) => p.cycle?.tradeId && tradeIdsMatch(p.cycle.tradeId, tradeId),
+      );
+      if (hasCopy) continue;
+
+      const showcaseEntry = typeof pos.entry === 'number' && pos.entry > 0 ? pos.entry : mark;
+      const slipUsd = Math.abs(mark - showcaseEntry);
+      if (slipUsd > maxSlip) {
+        this.logger.debug(
+          `[MIRROR-CATCHUP] skip ${instance.userId} trade=${tradeId}: slip $${slipUsd.toFixed(2)} > cap $${maxSlip}`,
+        );
+        continue;
+      }
+
+      const cycles = await this.prisma.signalCycle.findMany({
+        where: {
+          agentId,
+          status: {
+            in: [
+              SignalCycleStatus.INTENT,
+              SignalCycleStatus.PENDING_ENTRY,
+              SignalCycleStatus.OPEN,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      const matchedCycle = cycles.find((c) => tradeIdsMatch(c.tradeId, tradeId));
+
+      if (!matchedCycle) continue;
+
+      const intent = matchedCycle.intentEnvelope as SignalIntentEnvelope;
+      if (!intent?.direction || !intent?.risk) continue;
+
+      const posDir = String(pos.dir ?? pos.side ?? '').toUpperCase();
+      const showcaseDir =
+        posDir.includes('LONG') || posDir === 'BUY'
+          ? 'LONG'
+          : posDir.includes('SHORT') || posDir === 'SELL'
+            ? 'SHORT'
+            : intent.direction;
+      if (showcaseDir !== intent.direction) continue;
+
+      const existingParticipant = await this.prisma.signalCycleParticipant.findUnique({
+        where: {
+          cycleId_userId: { cycleId: matchedCycle.id, userId: instance.userId },
+        },
+      });
+      if (
+        existingParticipant &&
+        (existingParticipant.status === SignalCycleStatus.OPEN ||
+          existingParticipant.status === SignalCycleStatus.PENDING_ENTRY)
+      ) {
+        continue;
+      }
+
+      const eligibility = await this.evaluateEntryEligibility(
+        creds,
+        {
+          open: lotSummary.open + catchupsThisTick,
+          pending: lotSummary.pending,
+          direction: lotSummary.direction,
+        },
+        managedOrderIds,
+        marginCap,
+        maxConcurrent,
+        intent.direction,
+        instance,
+      );
+      if (!eligibility.canEnter) continue;
+
+      const placed = await this.placeMirrorCatchupEntry(
+        agentId,
+        instance,
+        matchedCycle.id,
+        intent,
+        creds,
+        marginCap,
+        tradeId,
+        showcaseEntry,
+        mark,
+        slipUsd,
+      );
+      if (placed) catchupsThisTick += 1;
+    }
+  }
+
+  private async placeMirrorCatchupEntry(
+    agentId: string,
+    instance: TradingAgentInstance,
+    cycleId: string,
+    intent: SignalIntentEnvelope,
+    creds: ExchangeCredentials,
+    marginCap: number,
+    tradeId: string,
+    showcaseEntry: number,
+    mark: number,
+    slipUsd: number,
+  ): Promise<boolean> {
+    const existingClaim = await this.prisma.signalCycleParticipant.findUnique({
+      where: { cycleId_userId: { cycleId, userId: instance.userId } },
+    });
+    if (existingClaim) return false;
+
+    let claimParticipantId: string | null = null;
+    try {
+      const claimed = await this.prisma.signalCycleParticipant.create({
+        data: {
+          cycleId,
+          userId: instance.userId,
+          venue: 'bitfinex',
+          status: SignalCycleStatus.INTENT,
+        },
+      });
+      claimParticipantId = claimed.id;
+    } catch (err) {
+      if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') return false;
+      throw err;
+    }
+
+    const intentCap = intent.risk?.max_margin_usd;
+    const effectiveCap =
+      intentCap != null && Number.isFinite(intentCap) && intentCap > 0
+        ? Math.min(marginCap, intentCap)
+        : marginCap;
+    let available = 0;
+    try {
+      available = await this.activeTrading.getDerivativesAvailableUsd(creds);
+    } catch {
+      if (claimParticipantId) {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {});
+      }
+      return false;
+    }
+    const marginUsd = Math.min(effectiveCap, available * 0.95);
+    if (marginUsd < effectiveCap * 0.9) {
+      if (claimParticipantId) {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {});
+      }
+      return false;
+    }
+
+    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const qty = computeQty(marginUsd, leverage, mark, MIN_QTY_BTC);
+    const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
+
+    try {
+      await this.activeTrading.submitMarketEntry(creds, {
+        direction: intent.direction,
+        qty,
+        leverage,
+        clientOrderId,
+      });
+    } catch (err) {
+      if (claimParticipantId) {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {});
+      }
+      this.logger.warn(
+        `[MIRROR-CATCHUP] market entry failed ${instance.userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return false;
+    }
+
+    const fillPrice = mark;
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent.risk.stop_loss_margin_pct, {
+      mirrorMode: true,
+    });
+    const stopPrice = computeStopPrice(fillPrice, intent.direction, stopLossMarginPct, leverage);
+    const stopOrderId = await this.activeTrading
+      .submitStopOrder(creds, {
+        positionDirection: intent.direction,
+        qty,
+        stopPrice,
+        leverage,
+      })
+      .catch(() => null);
+
+    await this.cycles.recordHireExecutionEvent(
+      instance.userId,
+      agentId,
+      cycleId,
+      'MIRROR_CATCHUP_ENTRY',
+      {
+        venue: 'bitfinex',
+        source: 'hire',
+        trade_id: tradeId,
+        showcase_entry: showcaseEntry,
+        mark_at_entry: mark,
+        slip_usd: Math.round(slipUsd * 100) / 100,
+        qty,
+        fill_price: fillPrice,
+      },
+    );
+
+    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'FILLED', {
+      venue: 'bitfinex',
+      fill_price: fillPrice,
+      qty,
+      stop_loss_placed: stopOrderId != null,
+      stop_loss_margin_pct: stopLossMarginPct,
+      stopOrderId: stopOrderId ?? undefined,
+      source: 'hire',
+      event: 'MIRROR_CATCHUP_ENTRY',
+      clientOrderId,
+    });
+
+    if (stopOrderId != null) {
+      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'STOP_LOSS_ARMED', {
+        venue: 'bitfinex',
+        stop_price: stopPrice,
+        stopOrderId,
+        qty,
+        stop_loss_margin_pct: stopLossMarginPct,
+        source: 'hire',
+      });
+    }
+
+    await this.healStuckPendingFill(claimParticipantId!, cycleId, fillPrice);
+    this.positionRuntime.set(claimParticipantId!, {
+      peakMarginPct: 0,
+      lastChaseAtMs: 0,
+      filledRecorded: true,
+    });
+
+    this.logger.warn(
+      `[MIRROR-CATCHUP] ${instance.userId} cycle=${cycleId} trade=${tradeId} ${intent.direction} qty=${qty.toFixed(5)} @ ${fillPrice.toFixed(2)} slip=$${slipUsd.toFixed(2)} vs showcase ${showcaseEntry.toFixed(2)}`,
+    );
+    return true;
+  }
+
   /**
    * Fix B — showcase-vanished tracker. Returns true when the participant's
    * showcase trade_id has been absent from the canonical showcase state's
@@ -3970,7 +4671,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!fillPrice || fillPrice <= 0) return;
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
-    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+      intent.risk.stop_loss_margin_pct,
+      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
+    );
     const mark = await this.activeTrading.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
 
@@ -4078,7 +4782,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const lockFloorTrail = getProfitLockFloor(runtime.peakMarginPct);
-    if (lockFloorTrail != null && fillPrice > 0 && meta.stopOrderId) {
+    const skipProfitLockTrail =
+      !simActive && isShowcaseMirrorOnlyMode() && mirrorExitConvergenceEnabled();
+    if (lockFloorTrail != null && fillPrice > 0 && meta.stopOrderId && !skipProfitLockTrail) {
       const trailStop = computeProfitLockStopPrice(fillPrice, meta.direction, lockFloorTrail, leverage);
       const priorFloor = runtime.lastProfitLockFloor ?? 0;
       if (lockFloorTrail > priorFloor + 0.5) {
@@ -4528,6 +5234,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     cycle: {
       id: string;
       status: SignalCycleStatus;
+      tradeId?: string | null;
       showcasePnlUsd: { toNumber?: () => number } | null;
       closedAt: Date | null;
       intentEnvelope?: unknown;
@@ -4540,107 +5247,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    if (await this.hasParticipantExited(participant.id)) {
-      return;
-    }
+    const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
+    const bot = await this.fetchExecutionBotState();
+    const det = showcaseTradeId ? this.detectShowcaseTradeClosed(bot, showcaseTradeId) : { closed: false };
+    const mirrorRelinked = (cycle.tradeId ?? '').startsWith('adopt:');
 
-    await this.cancelLinkedPendingLimits(creds, meta, new Set());
-
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
-      // Already-flat path: showcase position exited (or exchange stop fired) before the
-      // relay could close this lot. The exchange realized a real result — attribute it
-      // instead of recording $0 (which under-accounts P&L vs the user's real wallet).
-      const fillPrice = participant.fillPrice != null ? Number(participant.fillPrice) : meta.limitPrice ?? 0;
-      const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice || 0);
-      let pnlUsd = 0;
-      let pnlMarginPct = 0;
-      let pnlSource: 'exchange_realised' | 'reconstructed' = 'reconstructed';
-      if (meta.qty && meta.direction) {
-        const flat = await this.resolveAlreadyFlatPnl(
-          agentId,
-          userId,
-          creds,
-          participant.id,
-          meta,
-          fillPrice,
-          exitPrice || fillPrice,
-        );
-        pnlUsd = flat.pnlUsd;
-        pnlSource = flat.pnlSource;
-        pnlMarginPct =
-          fillPrice && fillPrice > 0
-            ? (pnlUsd / (fillPrice * meta.qty)) * 100 *
-              ((cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
-                DEFAULT_SUBSCRIBER_LEVERAGE)
-            : 0;
-      }
-      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
-        venue: 'bitfinex',
-        exit_price: exitPrice || fillPrice,
-        exit_reason: 'SHOWCASE_MIRROR_ALREADY_FLAT',
-        pnl_usd: Math.round(pnlUsd * 100) / 100,
-        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-        pnl_source: pnlSource,
-        source: 'hire',
-      });
-      this.logger.log(
-        `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
-      );
-      return;
-    }
-
-    if (!meta.qty || !meta.direction) return;
-
-    const fillPrice = participant.fillPrice != null ? Number(participant.fillPrice) : meta.limitPrice;
-    let exitPrice = fillPrice ?? 0;
-    const leverage =
-      (cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
-    try {
-      exitPrice = await this.activeTrading.getMarkPrice();
-      const position = await this.activeTrading.getOpenPositionDetail(creds);
-      const closeQty = position
-        ? Math.min(meta.qty, Math.abs(position.amount))
-        : meta.qty;
-      if (closeQty >= MIN_QTY_BTC) {
-      await this.activeTrading.submitMarketClose(creds, {
-        positionDirection: meta.direction,
-          qty: closeQty,
-          leverage,
-      });
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${msg}`);
-      // Still record EXIT so billing/state advances; position may close on exchange stop.
-    }
-
-    const direction = meta.direction;
-    const pnlUsd =
-      fillPrice && exitPrice
-        ? direction === 'LONG'
-          ? (exitPrice - fillPrice) * meta.qty
-          : (fillPrice - exitPrice) * meta.qty
-        : cycle.showcasePnlUsd != null
-          ? Number(cycle.showcasePnlUsd)
-          : 0;
-
-    const pnlMarginPct =
-      fillPrice && fillPrice > 0
-        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage
-        : 0;
-
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
-      venue: 'bitfinex',
-      exit_price: exitPrice,
-      exit_reason: 'SHOWCASE_MIRROR',
-      pnl_usd: Math.round(pnlUsd * 100) / 100,
-      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-      pnl_source: 'open_position',
-      source: 'hire',
+    await this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
+      showcaseExitPrice: det.exitPrice,
+      showcaseExitReason: det.exitReason,
+      mirrorRelinked,
+      trigger: 'CYCLE_CLOSED',
     });
-
-    this.logger.log(`Hire exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`);
   }
 
   private async cleanupOrphanCopyOrders(
@@ -4965,8 +5582,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         const p = e.payload as ExecutionPayload & {
           peak_margin_pct?: number;
           lock_floor_margin_pct?: number;
+          origin_participant_id?: string;
+          origin_cycle_id?: string;
+          origin_trade_id?: string;
         };
         Object.assign(meta, p);
+        if (p.origin_participant_id) meta.originParticipantId = p.origin_participant_id;
+        if (p.origin_cycle_id) meta.originCycleId = p.origin_cycle_id;
+        if (p.origin_trade_id) meta.originTradeId = p.origin_trade_id;
         const peak = Number(p.peak_margin_pct ?? p.peakMarginPct);
         if (Number.isFinite(peak)) peakFromEvents = Math.max(peakFromEvents, peak);
         const floor = Number(p.lock_floor_margin_pct ?? p.profitLockFloor);
@@ -5343,17 +5966,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, direction, leverage);
     const stopLossMarginPct =
       match.meta.stopLossMarginPct ?? intent.risk.stop_loss_margin_pct ?? -18;
-    const standardStop = computeStopPrice(fillPrice, direction, stopLossMarginPct, leverage);
+    const effectiveStopMargin = resolveEffectiveStopLossMarginPct(stopLossMarginPct, {
+      mirrorMode: isShowcaseMirrorOnlyMode(),
+    });
+    const standardStop = computeStopPrice(fillPrice, direction, effectiveStopMargin, leverage);
     let conservativeStop = standardStop;
-    let stopReason: 'STANDARD_SL' | 'PROFIT_LOCK_RUNG' = 'STANDARD_SL';
-    // Feed the carried peak (or the live unrealized margin, whichever is
-    // higher) into the trail ladder; the carried floor wins if it is tighter.
+    let stopReason: 'STANDARD_SL' | 'PROFIT_LOCK_RUNG' | 'MIRROR_DISASTER_STOP' = 'STANDARD_SL';
     const ladderFloor = getProfitLockFloor(Math.max(carriedPeak, unrealMarginPct)) ?? 0;
     const effectiveFloor = Math.max(carriedFloor, ladderFloor);
-    if (effectiveFloor > 0) {
+    const mirrorDisasterOnly =
+      isShowcaseMirrorOnlyMode() && mirrorExitConvergenceEnabled();
+    if (mirrorDisasterOnly) {
+      stopReason = 'MIRROR_DISASTER_STOP';
+    } else if (effectiveFloor > 0) {
       const lockStop = computeProfitLockStopPrice(fillPrice, direction, effectiveFloor, leverage);
-      // Safety: never wider than standard. Lock stop is by definition tighter
-      // for an in-profit position, but guard against a malformed intent.
       const longStopTooWide = direction === 'LONG' && lockStop < standardStop;
       const shortStopTooWide = direction === 'SHORT' && lockStop > standardStop;
       if (!longStopTooWide && !shortStopTooWide && lockStop > 0) {
@@ -5393,6 +6019,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       adopt_kind: 'S6b_FILLED_POSITION',
       origin_participant_id: match.participantId,
       origin_cycle_id: match.cycleId,
+      origin_trade_id: match.cycle.tradeId ?? undefined,
       exchange_qty: exchangeQty,
       orphan_slice: orphanSlice,
       merged_base_price: mergedBasePrice,
@@ -5418,6 +6045,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       leverage,
       stopLossMarginPct,
       clientOrderId: match.meta.clientOrderId,
+      originParticipantId: match.participantId,
+      originCycleId: match.cycleId,
+      originTradeId: match.cycle.tradeId ?? undefined,
     };
     if (reconcileWriteWindowEnabled()) {
       await this.ensureProtectiveStop(
@@ -5452,6 +6082,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         participant_id: participantId,
         origin_participant_id: match.participantId,
         origin_cycle_id: match.cycleId,
+        origin_trade_id: match.cycle.tradeId ?? undefined,
         direction,
         qty: adoptQty,
         fill_price: fillPrice,
@@ -5687,6 +6318,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           adopt_kind: 'S6a_PENDING_ORDER',
           origin_participant_id: match.participantId,
           origin_cycle_id: match.cycleId,
+          origin_trade_id: match.cycle.tradeId ?? undefined,
           lastChaseAtMs: 0,
           limitChaseCount: 0,
         },
@@ -5708,6 +6340,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           participant_id: participantId,
           origin_participant_id: match.participantId,
           origin_cycle_id: match.cycleId,
+          origin_trade_id: match.cycle.tradeId ?? undefined,
           orderId: order.id,
           cid: order.cid,
           direction,
