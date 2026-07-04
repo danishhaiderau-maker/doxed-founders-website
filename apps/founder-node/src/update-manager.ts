@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { FOUNDER_NODE_APP_VERSION } from '@dcf/founder-vault';
 import { semverGt } from './semver';
 
 const GITHUB_RELEASES =
@@ -192,14 +191,14 @@ export async function checkForUpdates(options: { silent?: boolean } = {}): Promi
       return null;
     }
 
-    if (!semverGt(latest.version, FOUNDER_NODE_APP_VERSION)) {
+    if (!semverGt(latest.version, app.getVersion())) {
       pendingUpdate = null;
       notifyMenuRefresh();
       if (!options.silent) {
         await dialog.showMessageBox({
           type: 'info',
           title: 'Founder Node',
-          message: `You're on the latest version (v${FOUNDER_NODE_APP_VERSION}).`,
+          message: `You're on the latest version (v${app.getVersion()}).`,
         });
       }
       return null;
@@ -216,7 +215,7 @@ export async function checkForUpdates(options: { silent?: boolean } = {}): Promi
       const { response } = await dialog.showMessageBox({
         type: 'info',
         title: 'Update available',
-        message: `Founder Node v${latest.version} is available (you have v${FOUNDER_NODE_APP_VERSION}).`,
+        message: `Founder Node v${latest.version} is available (you have v${app.getVersion()}).`,
         detail: 'Install now? Your vault in ~/FounderVault stays untouched.',
         buttons: ['Install update', 'Later', 'View release'],
         defaultId: 0,

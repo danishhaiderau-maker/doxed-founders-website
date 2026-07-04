@@ -17,6 +17,7 @@ import type {
   DesktopBridgeInput,
   DeviceMemoryMetadataPayload,
 } from '@dcf/utils';
+import { FOUNDER_NODE_LOCAL_VERSION } from './app-version';
 
 /**
  * Phase A — Desktop Runtime.
@@ -41,9 +42,6 @@ export type FounderNodeHeartbeatExt = FounderNodeHeartbeat & {
   /** Real Cursor chat/agent sessions read from state.vscdb (v0.6.1+). */
   sessions?: BridgeSession[];
 };
-
-/** Local app version — kept in sync with apps/founder-node/package.json. */
-export const FOUNDER_NODE_LOCAL_VERSION = '0.6.0';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
