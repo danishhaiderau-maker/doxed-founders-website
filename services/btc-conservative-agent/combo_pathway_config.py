@@ -2,7 +2,9 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-AI60_SP3_VIRTUAL_CHASE: research candidate (NOT production).
+AI60_SP3_VIRTUAL_CHASE: research candidate (inherits AI_SCAN decision).
+A160_CONTEXT_CHASE_EXIT_V2: research candidate with independent V2 prompt + paper limits
+  (same virtual-chase order path as AI60; never alters CONTINUOUS prompt/orders).
 
 Retired: COMBO_604_SP4_CHASE_3PLUS — historical data preserved, no new orders.
 """
@@ -15,11 +17,20 @@ RESEARCH_LANE_COMBO_65_SP5_DIRECT = "COMBO_65_SP5_DIRECT"
 RESEARCH_LANE_COMBO_604_SP4_CHASE = "COMBO_604_SP4_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_604_SP4_DIRECT = "COMBO_604_SP4_DIRECT"
 RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE = "AI60_SP3_VIRTUAL_CHASE"
+RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 = "A160_CONTEXT_CHASE_EXIT_V2"
 
-# Live order generation — research candidate only (+ CONTINUOUS benchmark toggle)
-COMBO_EXECUTION_LANES = (RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,)
+# Live order generation — research candidates (+ CONTINUOUS benchmark toggle)
+# V2 is order-capable for independent paper limits; it is excluded from AI_SCAN spawn
+# (is_independent_ai_lane) so it never inherits CONTINUOUS/AI_SCAN decisions.
+COMBO_EXECUTION_LANES = (
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+)
 
-COMBO_TILE_DISPLAY_ORDER = (RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,)
+COMBO_TILE_DISPLAY_ORDER = (
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+)
 
 COMBO_LANE_SPECS = {
     RESEARCH_LANE_COMBO_65_SP5_CHASE: {
@@ -105,6 +116,43 @@ COMBO_LANE_SPECS = {
             "failure to outperform CONTINUOUS"
         ),
     },
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: {
+        "label": "A160 · Context Chase Exit V2",
+        "subtitle": (
+            "RESEARCH_CANDIDATE · toggle ON = paper limits (a160v2-*) · toggle OFF = shadow sim only · "
+            "AI + checker always run · CONTINUOUS unaffected"
+        ),
+        "combo_key": "A160++CONTEXT_CHASE_EXIT_V2",
+        "ai_min": 60,
+        "ai_max": 100,
+        "spread_min": 3,
+        "spread_max": 99,
+        "entry_mode": "VIRTUAL_CHASE",
+        "is_benchmark": False,
+        "is_primary_production": False,
+        "is_research_candidate": True,
+        "is_independent_ai": True,
+        "id_prefix": "a160v2",
+        "ladder": [(30, 20), (40, 30), (50, 40), (60, 50)],
+        "ladder_label": "30→20, 40→30, 50→40, 60→50",
+        "ladder_profile_id": "SCENARIO_C_PROFILE_30_v1",
+        "promotion_criteria": (
+            "ALL required: ≥100 completed trades · positive EV/appr · beats CONTINUOUS "
+            "and AI60_SP3_VIRTUAL_CHASE over same window · context-veto loss reduction · "
+            "stable across regimes"
+        ),
+        "kill_criteria": (
+            "ANY after ≥50 trades: negative EV · fails to beat CONTINUOUS "
+            "or AI60_SP3 on EV/appr · parse failure rate elevated · context veto ineffective"
+        ),
+        "research_question": (
+            "Does A160 V2 beat CONTINUOUS and AI60_SP3 on EV/appr (same window)?"
+        ),
+        "hypothesis": (
+            "Independent V2 prompt + context veto + chase 3–5 / age≥180s + Scenario C "
+            "improves EV vs AI60_SP3 and CONTINUOUS on independent paper fills."
+        ),
+    },
 }
 
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
@@ -117,9 +165,9 @@ PRIMARY_PRODUCTION_ROLE = "RESEARCH_CANDIDATE"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v11.1-virtual-chase-known-combos-v1"
+RESEARCH_STACK_VERSION = "v11.2-a160-v2-independent-paper-v1"
 RESEARCH_STACK_FEATURES = (
-    "AI60_SP3 Virtual Chase · known-combo dashboard filters · "
+    "AI60_SP3 Virtual Chase · A160 V2 independent paper · known-combo dashboard filters · "
     "Trading Genome v1 · Event bus + research.db · Relay snapshot push"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
@@ -143,12 +191,28 @@ _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_CHASE: False,
+    # V2 default ON in research — independent paper orders until user turns tile OFF.
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: True,
 })
 
 
+def is_independent_ai_lane(lane: str) -> bool:
+    """Lanes with their own DeepSeek prompt — never inherit AI_SCAN / CONTINUOUS decisions."""
+    lane_u = str(lane or "").upper()
+    if lane_u == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
+        return True
+    spec = COMBO_LANE_SPECS.get(lane_u) or {}
+    return bool(spec.get("is_independent_ai"))
+
+
 def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = None) -> bool:
-    spec = COMBO_LANE_SPECS.get(str(lane or "").upper())
-    if not spec or not ai or spec.get("is_legacy"):
+    """Match AI_SCAN-inherited combo tiles. Independent-AI lanes always return False here."""
+    lane_u = str(lane or "").upper()
+    if is_independent_ai_lane(lane_u):
+        # V2 must not spawn from AI_SCAN APPROVE — own prompt + own decision only.
+        return False
+    spec = COMBO_LANE_SPECS.get(lane_u)
+    if not spec or not ai or spec.get("is_legacy") or spec.get("is_shadow_only"):
         return False
     try:
         prob = int(ai.get("win_prob") or 0)
@@ -165,9 +229,21 @@ def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = 
     return spec["spread_min"] <= spread <= spec["spread_max"]
 
 
+def is_shadow_only_lane(lane: str) -> bool:
+    """Shadow/research telemetry lanes — never order-capable by construction."""
+    lane_u = str(lane or "").upper()
+    # V2 is no longer shadow-only — independent paper orders on its own lane ledger.
+    if lane_u == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
+        return False
+    spec = COMBO_LANE_SPECS.get(lane_u) or {}
+    return bool(spec.get("is_shadow_only"))
+
+
 def is_combo_execution_lane(lane: str) -> bool:
     lane_u = str(lane or "").upper()
     if lane_u not in COMBO_LANE_SPECS:
+        return False
+    if is_shadow_only_lane(lane_u):
         return False
     return lane_u in COMBO_EXECUTION_LANES
 
