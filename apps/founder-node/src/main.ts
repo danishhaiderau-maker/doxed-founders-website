@@ -92,7 +92,8 @@ import {
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
-const SYNC_INTERVAL_MS = 45_000;
+const SYNC_INTERVAL_MS = 30_000;
+const SESSION_MESSAGE_SYNC_MS = 8_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
@@ -116,6 +117,8 @@ let pairWindow: BrowserWindow | null = null;
 const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
 let syncCycleInFlight = false;
+let sessionSyncInFlight = false;
+let lastCachedHeartbeat: FounderNodeHeartbeatExt | null = null;
 let lastSyncOkAt: Date | null = null;
 let lastSyncError: string | null = null;
 let consecutiveTransientFailures = 0;
@@ -180,6 +183,10 @@ function startSyncLoop(vaultRoot: string) {
   consecutiveTransientFailures = 0;
   scheduleStartupSyncBursts(vaultRoot);
   loops.syncTimer = setInterval(() => runSyncCycle(vaultRoot).catch(console.error), SYNC_INTERVAL_MS);
+  loops.sessionSyncTimer = setInterval(
+    () => runSessionMessageSync(vaultRoot).catch(console.error),
+    SESSION_MESSAGE_SYNC_MS,
+  );
   if (!loops.inferenceTimer) {
     loops.inferenceTimer = setInterval(
       () => runInferenceCycle(vaultRoot).catch(console.error),
@@ -349,6 +356,29 @@ async function runSyncJobCycle(vaultRoot: string): Promise<void> {
   }
 }
 
+async function runSessionMessageSync(vaultRoot: string): Promise<void> {
+  if (sessionSyncInFlight || syncCycleInFlight || Date.now() < syncPausedUntil) return;
+  const config = readNodeConfig(vaultRoot);
+  if (!config || !lastCachedHeartbeat) return;
+
+  sessionSyncInFlight = true;
+  try {
+    const cursorSessions = discoverCursorSessions();
+    const claudeSessions = discoverClaudeCodeSessions();
+    const sessions = [...cursorSessions, ...claudeSessions];
+
+    await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
+      ...lastCachedHeartbeat,
+      sessions,
+    });
+    lastCachedHeartbeat = { ...lastCachedHeartbeat, sessions };
+  } catch (err) {
+    console.warn('Session message sync failed:', err);
+  } finally {
+    sessionSyncInFlight = false;
+  }
+}
+
 async function runSyncCycle(vaultRoot: string): Promise<void> {
   if (syncCycleInFlight || Date.now() < syncPausedUntil) return;
   const config = readNodeConfig(vaultRoot);
@@ -431,6 +461,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     };
 
     await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, heartbeat);
+    lastCachedHeartbeat = heartbeat;
 
     await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
 

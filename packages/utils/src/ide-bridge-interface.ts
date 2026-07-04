@@ -60,6 +60,12 @@ export interface BridgeSession {
   filesChangedCount?: number;
   /** Whether the session is an agent project (vs. a regular chat) */
   isAgentProject?: boolean;
+  /** Parent composer UUID when this session is a Cursor subagent/subtopic */
+  parentComposerId?: string;
+  /** Nested subagent sessions spawned inside this composer (sidebar display only) */
+  subagents?: BridgeSession[];
+  /** True when Cursor reports the agent is actively generating a response */
+  agentTyping?: boolean;
 }
 
 export interface BridgeMessage {
@@ -67,6 +73,10 @@ export interface BridgeMessage {
   content: string;
   timestamp?: string;
   model?: string;
+  /** True when Cursor is still streaming this bubble (generatingBubbleIds) */
+  streaming?: boolean;
+  /** True for in-progress partial assistant text not yet finalized */
+  partial?: boolean;
 }
 
 export interface BridgeGitState {
