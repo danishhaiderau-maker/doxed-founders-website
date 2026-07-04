@@ -58,7 +58,8 @@ import {
   discoverClaudeCodeWorkspaces,
 } from './claude-code-discovery';
 import { CLAUDE_CODE_CAPABILITIES, CURSOR_CAPABILITIES } from '@dcf/utils';
-import { FOUNDER_NODE_LOCAL_VERSION, type FounderNodeHeartbeatExt } from './sync-client';
+import { FOUNDER_NODE_LOCAL_VERSION } from './app-version';
+import type { FounderNodeHeartbeatExt } from './sync-client';
 import {
   bindUpdateTray,
   checkForUpdates,
