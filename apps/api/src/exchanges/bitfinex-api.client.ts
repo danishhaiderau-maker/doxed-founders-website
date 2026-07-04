@@ -527,6 +527,37 @@ export class BitfinexTradingClient {
     return id;
   }
 
+  /** Market entry — mirror catch-up and other immediate fills (opposite sign of submitMarketClose). */
+  async submitMarketEntry(
+    creds: ExchangeCredentials,
+    input: {
+      symbol?: string;
+      direction: 'LONG' | 'SHORT';
+      qty: number;
+      leverage?: number;
+      clientOrderId?: number;
+    },
+  ): Promise<number> {
+    const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const amount =
+      input.direction === 'LONG' ? Math.abs(input.qty) : -Math.abs(input.qty);
+    const body: Record<string, unknown> = {
+      type: 'MARKET',
+      symbol,
+      amount: amount.toFixed(5),
+      lev,
+      meta: { aff_code: 'doxxedcrypto' },
+    };
+    if (input.clientOrderId != null && Number.isFinite(input.clientOrderId)) {
+      body.cid = Math.trunc(input.clientOrderId) & 0x7fffffff;
+    }
+    const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', body);
+    const id = parseBitfinexOrderId(res);
+    if (!id) throw new Error('Bitfinex market entry submitted but no order id returned');
+    return id;
+  }
+
   async cancelOrder(creds: ExchangeCredentials, orderId: number): Promise<void> {
     await bitfinexAuthPost(creds, 'v2/auth/w/order/cancel', { id: orderId });
   }

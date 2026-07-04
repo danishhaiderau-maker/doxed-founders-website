@@ -2,7 +2,18 @@
  * Frozen Bitfinex live-copy policy (NestJS relay).
  * NOT overwritten by bybit_bot.py / sync-btc-research-bot — real money execution lives here.
  */
-export const BITFINEX_COPY_POLICY_VERSION = 2;
+export const BITFINEX_COPY_POLICY_VERSION = 3;
+
+/** Wide disaster stop (margin %) in showcase-mirror mode — crash/disconnect insurance only. */
+export const BITFINEX_COPY_MIRROR_DISASTER_STOP_MARGIN_PCT_DEFAULT = -40;
+
+/** Resolve MIRROR_DISASTER_STOP_MARGIN_PCT (default -40 margin at leverage). */
+export function resolveMirrorDisasterStopMarginPct(envOverride?: string | number | null): number {
+  const raw = Number(
+    envOverride ?? process.env.MIRROR_DISASTER_STOP_MARGIN_PCT ?? BITFINEX_COPY_MIRROR_DISASTER_STOP_MARGIN_PCT_DEFAULT,
+  );
+  return Number.isFinite(raw) && raw < 0 ? raw : BITFINEX_COPY_MIRROR_DISASTER_STOP_MARGIN_PCT_DEFAULT;
+}
 
 /** When true (default), subscribers exit only on showcase close + exchange hard stop — no independent Scenario C. */
 export function isShowcaseMirrorOnlyMode(): boolean {

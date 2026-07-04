@@ -240,6 +240,24 @@ export class BitfinexSimTradingClient {
     return this.ledger.nextOrderId++;
   }
 
+  async submitMarketEntry(
+    _creds: ExchangeCredentials,
+    input: {
+      symbol?: string;
+      direction: 'LONG' | 'SHORT';
+      qty: number;
+      leverage?: number;
+      clientOrderId?: number;
+    },
+  ): Promise<number> {
+    void input.clientOrderId;
+    const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const mark = await this.getMarkPrice(symbol);
+    const delta = orderAmount(input.direction, input.qty);
+    this.applyFill(delta, input.qty, mark);
+    return this.ledger.nextOrderId++;
+  }
+
   async cancelOrder(_creds: ExchangeCredentials, orderId: number): Promise<void> {
     this.ledger.orders = this.ledger.orders.filter((o) => o.id !== orderId);
   }

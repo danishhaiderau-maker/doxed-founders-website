@@ -130,7 +130,9 @@ export type SignalCycleEventType =
   // Neither transitions the participant on its own (the dedupe path emits a
   // separate EXPIRED event for the status transition).
   | 'MIRROR_DIFF'
-  | 'DUPLICATE_LIMIT_SKIPPED';
+  | 'DUPLICATE_LIMIT_SKIPPED'
+  // Phase 3 — slippage-capped catch-up market entry when showcase is OPEN but copy missed fill.
+  | 'MIRROR_CATCHUP_ENTRY';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;

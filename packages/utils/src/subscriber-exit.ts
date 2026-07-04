@@ -216,10 +216,9 @@ export function evaluateSubscriberLotExit(opts: {
   stopLossMarginPct?: number;
   showcaseMirrorOnly?: boolean;
 }): { reason: VirtualLotExitReason; lockFloor?: number } {
-  const result = evaluateScenarioCLotExit(opts);
   const mirrorOnly = opts.showcaseMirrorOnly ?? true;
-  if (!mirrorOnly) return result;
-  if (result.reason === 'HARD_STOP') return result;
+  if (!mirrorOnly) return evaluateScenarioCLotExit(opts);
+  // Mirror mode: showcase closure + exchange disaster stop only — no local thesis/profit-lock/hard-stop.
   return { reason: null };
 }
 
