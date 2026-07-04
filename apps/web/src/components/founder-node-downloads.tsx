@@ -172,7 +172,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
         {loading
           ? 'Checking latest release…'
           : winUrl || macUrl || linuxUrl
-            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows v0.7.3+ recommended.`
+            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows v0.7.7+ recommended.`
             : `Installers on GitHub — ${FOUNDER_NODE_GITHUB_RELEASES}`}
       </p>
 

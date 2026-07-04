@@ -15,7 +15,7 @@ Ninety-nine point six percent of Pump.fun traders have never realized over ten t
 Founder OS gives you three ways to run. Go Sovereign and keep everything on your laptop. Run Hybrid and blend local compute with cloud brains. Or choose Founder Cloud and let us host the runtime for you.
 
 **Scene 4 — Founder Node**
-Founder Node is the runtime that lives on your laptop. It pairs with one code, beats a heartbeat every forty-five seconds, and runs Ollama locally — so your private context never leaves your machine. No remote desktop. No VPN. No open ports. Just your laptop as the compute.
+Founder Node v0.7.7 is the runtime that lives on your laptop. It pairs with one code, beats a heartbeat every forty-five seconds, and runs Ollama locally — so your private context never leaves your machine. No remote desktop. No VPN. No open ports. Just your laptop as the compute.
 
 **Scene 5 — BTC Trading Agent**
 This is the BTC conservative agent — live on Bitfinex with real paper trading. Watch the PnL update in real time, copy a trade in one click, or hire the agent with DDollar. Every fill is logged. Every decision is auditable.

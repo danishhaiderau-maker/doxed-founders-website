@@ -394,7 +394,7 @@ export function FounderOnboardingWizard({
             </div>
 
             <ol className="mt-4 list-inside list-decimal space-y-1 text-xs text-zinc-400">
-              <li>Install Founder Node v0.7.3+</li>
+              <li>Install Founder Node v0.7.7+</li>
               <li>Generate a pairing code below</li>
               <li>Paste it in the Founder Node tray menu on your desktop</li>
               <li>Done — your desktop is paired</li>

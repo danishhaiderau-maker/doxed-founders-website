@@ -960,13 +960,13 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.6+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.7+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               <div className='mt-4 space-y-2'>
                 <a
                   href={FOUNDER_DEN_ONBOARD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
-                  Download Founder Node v0.7.6 — setup hub
+                  Download Founder Node v0.7.7 — setup hub
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}

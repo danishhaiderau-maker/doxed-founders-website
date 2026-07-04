@@ -65,7 +65,7 @@ export function FounderNodeHubPanel({
   const v2 = settings.founderNodeV2;
   const paired = v2?.paired ?? false;
   const online = v2?.online ?? false;
-  const versionLabel = v2?.appVersion ? `v${v2.appVersion}` : 'v0.7.3+';
+  const versionLabel = v2?.appVersion ? `v${v2.appVersion}` : 'v0.7.7+';
 
   return (
     <section className="rounded-2xl border border-cyan-500/40 bg-gradient-to-b from-cyan-950/20 to-[#0a0a0f] p-6 shadow-lg shadow-cyan-950/20">
@@ -95,7 +95,7 @@ export function FounderNodeHubPanel({
       {/* Primary CTAs — download */}
       <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
         <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
-        <p className="mt-0.5 text-xs text-zinc-500">Windows installer with auto-update — v0.7.3+ recommended.</p>
+        <p className="mt-0.5 text-xs text-zinc-500">Windows installer with auto-update — v0.7.7+ recommended.</p>
         <div className="mt-4">
           <FounderNodeDownloads />
         </div>

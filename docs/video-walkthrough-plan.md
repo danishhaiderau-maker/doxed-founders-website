@@ -36,9 +36,9 @@ All claims are grounded in `docs/FOUNDER_OS_PRODUCT_SPECIFICATION.md`, `apps/api
 
 ## Scene 4 — Founder Node Explainer
 - **URL:** https://doxxedcrypto.digital/#founder-node (or [LOCAL DEV] `/founder-node` route if not yet on public site)
-- **On-screen actions:** Diagram animates: laptop → outbound WebSocket → cloud control plane. Caption chips appear: "Ollama local", "BYO keys", "Pair with one code", "45s heartbeat". Vault sync line draws in with a lock icon.
+- **On-screen actions:** Diagram animates: laptop → outbound WebSocket → cloud control plane. Caption chips appear: "v0.7.7", "Ollama local", "BYO keys", "Pair with one code", "45s heartbeat". Vault sync line draws in with a lock icon.
 - **Camera direction:** Top-down diagram view. Lines draw in with a 200ms ease. Lock icon pulses once. End on a wide hold.
-- **Narration:** Founder Node is the runtime that lives on your laptop. It pairs with one code, beats a heartbeat every forty-five seconds, and runs Ollama locally — so your private context never leaves your machine. No remote desktop. No VPN. No open ports. Just your laptop as the compute.
+- **Narration:** Founder Node v0.7.7 is the runtime that lives on your laptop. It pairs with one code, beats a heartbeat every forty-five seconds, and runs Ollama locally — so your private context never leaves your machine. No remote desktop. No VPN. No open ports. Just your laptop as the compute.
 - **Duration:** 9s
 - **Transition:** Browser tab switch to the bot showcase domain.
 
