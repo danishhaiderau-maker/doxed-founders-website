@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+release(founder-node): v0.7.8 download hub, iOS section, unified mobile docs
 
 ## Last Activity
 
