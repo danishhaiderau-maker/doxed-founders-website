@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import {
   COPY_RELAY_SIM_DEFAULT_BALANCE_USD,
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
+  effectiveExchangeQtyBtc,
   emptyCopyRelaySimState,
   formatMelbourneDateTime,
   readCopyRelaySimState,
@@ -378,9 +379,10 @@ export class CopyRelaySimService {
     pendingLots: number;
     markPrice: number | null;
   }): CopyRelayReconcileSnapshot {
-    const deltaBtc = input.exchangePositionQty - input.ledgerOpenQty;
+    const exchangePositionQty = effectiveExchangeQtyBtc(input.exchangePositionQty);
+    const deltaBtc = exchangePositionQty - input.ledgerOpenQty;
     return {
-      exchangePositionQty: input.exchangePositionQty,
+      exchangePositionQty,
       ledgerOpenQty: input.ledgerOpenQty,
       deltaBtc,
       alert: Math.abs(deltaBtc) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC,

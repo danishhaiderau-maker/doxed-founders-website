@@ -3,6 +3,13 @@
 export const COPY_RELAY_SIM_DEFAULT_BALANCE_USD = 500;
 export const COPY_RELAY_SIM_RECONCILE_ALERT_BTC = 0.001;
 
+/** Exchange qty below Bitfinex min lot is treated as flat for reconcile/alerts. */
+export const COPY_RELAY_MIN_QTY_BTC = 0.00004;
+export function effectiveExchangeQtyBtc(qty: number): number {
+  const a = Math.abs(qty);
+  return a < COPY_RELAY_MIN_QTY_BTC ? 0 : a;
+}
+
 export type CopyRelaySimOrder = {
   id: number;
   symbol: string;

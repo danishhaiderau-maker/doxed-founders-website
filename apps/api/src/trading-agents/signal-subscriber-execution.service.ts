@@ -19,6 +19,7 @@ import {
   isCopyRelaySimActive,
   readCopyRelaySimState,
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
+  effectiveExchangeQtyBtc,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
   SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS,
@@ -1674,7 +1675,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
     const summary = await this.buildVirtualLotSummary(participants);
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-    const exchangeQty = position ? Math.abs(position.amount) : 0;
+    const exchangeQty = position ? effectiveExchangeQtyBtc(position.amount) : 0;
     const ledgerOpenQty = summary.openQty;
     const delta = exchangeQty - ledgerOpenQty;
     const mark = await this.activeTrading.getMarkPrice().catch(() => null);
