@@ -92,6 +92,7 @@ CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
+ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
@@ -1086,7 +1087,24 @@ def safe_float(x):
     except:
         return np.nan
 
+def _agent_data_path(filename: str) -> str:
+    """Resolve CSV/JSONL under agent root when cwd is research/."""
+    if os.path.isfile(filename):
+        return filename
+    parent = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    alt = os.path.normpath(os.path.join(parent, filename))
+    if os.path.isfile(alt):
+        return alt
+    env_root = os.getenv("BTC_AGENT_DATA_DIR")
+    if env_root:
+        env_alt = os.path.join(env_root, filename)
+        if os.path.isfile(env_alt):
+            return env_alt
+    return filename
+
+
 def robust_read_csv(filepath, name="file"):
+    filepath = _agent_data_path(filepath)
     if not os.path.exists(filepath):
         print(f"⚠️ {name} not found - pipeline stage incomplete {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()
@@ -1986,50 +2004,66 @@ def _load_v2_checker_approves_df(session: dict = None):
     return df
 
 
+def _v2_outcome_is_reject_counterfactual(row) -> bool:
+    """Reject-path counterfactual sims must not count as checker-pass paper fills."""
+    if hasattr(row, "get"):
+        mode = str(row.get("collection_mode") or "").upper()
+        checker_accepted = row.get("checker_accepted", True)
+    else:
+        mode = str((row or {}).get("collection_mode") or "").upper()
+        checker_accepted = (row or {}).get("checker_accepted", True)
+    if mode == "V2_CHECKER_REJECT":
+        return True
+    if mode == "V2_SHADOW":
+        return False
+    return not _truthy(checker_accepted)
+
+
 def _v2_lane_metrics_from_logs(session: dict = None) -> dict:
     """Aggregate V2 checker approves + shadow outcomes for benchmark_vs_lanes."""
     checker = _load_v2_checker_approves_df(session)
     outcomes = _load_v2_shadow_outcome_df(session)
     approves = len(checker) if checker is not None and not checker.empty else 0
-    sim_fills = 0
-    sim_pnl = 0.0
+    checker_pass_sims = 0
+    checker_pass_pnl = 0.0
     wins = 0
-    reject_sim_fills = 0
-    reject_sim_pnl = 0.0
+    reject_counterfactual_sims = 0
+    reject_counterfactual_pnl = 0.0
     if outcomes is not None and not outcomes.empty:
         work = outcomes.copy()
         if "filled" in work.columns:
             work["filled"] = work["filled"].apply(_truthy)
         else:
             work["filled"] = True
-        if "checker_accepted" in work.columns:
-            accepted_mask = work["checker_accepted"].apply(_truthy)
-            reject_work = work[~accepted_mask]
-            work = work[accepted_mask]
-        else:
-            reject_work = work.iloc[0:0]
+        reject_mask = work.apply(_v2_outcome_is_reject_counterfactual, axis=1)
+        reject_work = work[reject_mask]
+        work = work[~reject_mask]
         filled = work[work["filled"]]
-        sim_fills = len(filled)
-        sim_pnl = round(
+        checker_pass_sims = len(filled)
+        checker_pass_pnl = round(
             float(pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
         )
         pnl_series = pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0)
         wins = int((pnl_series >= 0).sum())
         reject_filled = reject_work[reject_work["filled"]] if not reject_work.empty else reject_work
-        reject_sim_fills = len(reject_filled)
-        reject_sim_pnl = round(
+        reject_counterfactual_sims = len(reject_filled)
+        reject_counterfactual_pnl = round(
             float(pd.to_numeric(reject_filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
-        ) if reject_sim_fills else 0.0
-    per_ev = round(sim_pnl / approves, 2) if approves else 0.0
-    win_rate = round(100.0 * wins / sim_fills, 1) if sim_fills else 0.0
+        ) if reject_counterfactual_sims else 0.0
+    per_ev = round(checker_pass_pnl / approves, 2) if approves else 0.0
+    win_rate = round(100.0 * wins / checker_pass_sims, 1) if checker_pass_sims else 0.0
     return {
         "approves": approves,
-        "sim_fills": sim_fills,
-        "sim_pnl": sim_pnl,
+        "checker_pass_sims": checker_pass_sims,
+        "checker_pass_pnl": checker_pass_pnl,
+        "sim_fills": checker_pass_sims,
+        "sim_pnl": checker_pass_pnl,
         "per_approve_ev": per_ev,
         "win_rate_pct": win_rate,
-        "reject_sim_fills": reject_sim_fills,
-        "reject_sim_pnl": reject_sim_pnl,
+        "reject_counterfactual_sims": reject_counterfactual_sims,
+        "reject_counterfactual_pnl": reject_counterfactual_pnl,
+        "reject_sim_fills": reject_counterfactual_sims,
+        "reject_sim_pnl": reject_counterfactual_pnl,
     }
 
 
@@ -2346,7 +2380,11 @@ def _simulate_ticks_fast_cut_ladder(
         t_rel = float(tick.get("t", 0))
         if fill_t is not None and t_rel < fill_t:
             continue
-        unreal = ((price - entry) / entry) * dir_factor * leverage * 100
+        unreal = tick.get("unreal_pct")
+        if unreal is None:
+            unreal = ((price - entry) / entry) * dir_factor * leverage * 100
+        else:
+            unreal = float(unreal)
         peak = max(peak, unreal)
         if peak >= ladder[0][0]:
             _, lock = _ladder_lock_for_peak_custom(peak, ladder)
@@ -7092,7 +7130,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             shadow_report = shadow_fill_outcome_matrix(trades, session=session, blocked=blocked)
             benchmark_report = benchmark_vs_lanes_report(
                 trades, session=session, blocked=blocked, shadow_report=shadow_report,
-                all_trades=all_trades_unfiltered,
+                all_trades=all_trades_unfiltered, decisions=decisions, ai_log=ai_log,
             )
             lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
             ai_funnel_report(trades=trades, session=session)
@@ -7680,7 +7718,7 @@ def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
     return "mixed vs benchmark"
 
 
-def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_report=None, all_trades=None):
+def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_report=None, all_trades=None, decisions=None, ai_log=None):
     """Compare research lanes vs CONTINUOUS benchmark within the same session."""
     if session is None:
         session = load_research_session()
@@ -7778,15 +7816,37 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         real_fills = len(lane_trades)
         net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
 
+        v2_lane_extra = {}
         if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
             v2_approves = int(v2_log_metrics.get("approves") or 0)
             if v2_approves:
                 approves_n = max(approves_n, v2_approves)
-            if real_fills == 0 and int(v2_log_metrics.get("sim_fills") or 0) > 0:
-                real_fills = int(v2_log_metrics.get("sim_fills") or 0)
-                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
-            elif real_fills == 0 and v2_approves and approves_n == v2_approves:
-                net_pnl_real = float(v2_log_metrics.get("sim_pnl") or 0.0)
+            v2_lane_extra = {
+                "v2_checker_approves": v2_approves,
+                "v2_checker_pass_sims": int(v2_log_metrics.get("checker_pass_sims") or v2_log_metrics.get("sim_fills") or 0),
+                "v2_reject_counterfactual_sims": int(
+                    v2_log_metrics.get("reject_counterfactual_sims") or v2_log_metrics.get("reject_sim_fills") or 0
+                ),
+                "v2_checker_pass_pnl": float(v2_log_metrics.get("checker_pass_pnl") or v2_log_metrics.get("sim_pnl") or 0.0),
+                "v2_reject_counterfactual_pnl": float(
+                    v2_log_metrics.get("reject_counterfactual_pnl") or v2_log_metrics.get("reject_sim_pnl") or 0.0
+                ),
+                "v2_metrics_note": (
+                    "Tile-OFF lane: Approves=checker pass; Checker-pass sims=paper shadow fills; "
+                    "Reject sims=checker-reject counterfactuals (not session fills)."
+                ),
+            }
+            if real_fills == 0 and v2_lane_extra["v2_checker_pass_sims"] > 0:
+                net_pnl_real = float(v2_lane_extra["v2_checker_pass_pnl"])
+        elif lane == "AI_SCAN":
+            coord = _ai_scan_coordinator_stats(decisions, ai_log)
+            v2_lane_extra = {
+                "coordinator_note": "Coordinator — 0 fills by design",
+                "ai_scan_coordinator": coord,
+                "coordinator_rejects": coord.get("rejects", 0),
+                "coordinator_skipped": coord.get("skipped", 0),
+                "coordinator_timeouts": coord.get("timeouts", 0),
+            }
 
         if _pathway_lane_status(lane) == PATHWAY_STATUS_SHADOW_COLLECTING:
             if shadow_lane_df is not None and not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
@@ -7842,6 +7902,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "per_approve_ev": per_approve_ev,
             "costly_blocks_usd": costly_blocks_usd,
             "good_blocks_saved_usd": good_blocks_saved_usd,
+            **v2_lane_extra,
         }
         if all_trade_df is not None:
             lane_metrics[lane]["all_time"] = _all_time_lane_metrics(all_trade_df, lane)
@@ -10218,6 +10279,241 @@ def _funnel_row_epoch(row: dict):
         return None
 
 
+
+def _normalize_lane_label(lane) -> str:
+    """Fix pandas NaN / empty funnel lane values."""
+    if lane is None:
+        return "UNKNOWN"
+    s = str(lane).strip().upper()
+    if not s or s in {"NAN", "NONE", "NULL", "UNKNOWN", "<NA>"}:
+        return "UNKNOWN"
+    return s
+
+
+def _resolve_chase_count(tid: str, funnel_count, trade_chase: dict) -> tuple[int, str]:
+    """Prefer trades_3factor.limit_chase_count when funnel under-reports chases."""
+    csv_count = trade_chase.get(tid)
+    try:
+        funnel_n = int(funnel_count or 0)
+    except (TypeError, ValueError):
+        funnel_n = 0
+    if csv_count is not None:
+        try:
+            csv_n = int(csv_count or 0)
+        except (TypeError, ValueError):
+            csv_n = 0
+        if csv_n > funnel_n:
+            return csv_n, "trades_3factor.limit_chase_count"
+        return max(funnel_n, csv_n), (
+            "execution_funnel.limit_chase_count" if funnel_n else "trades_3factor.limit_chase_count"
+        )
+    return funnel_n, "execution_funnel.limit_chase_count"
+
+
+def _ai_scan_coordinator_stats(decisions=None, ai_log=None) -> dict:
+    """AI_SCAN funnel — approvals/rejects/skipped/timeout from decisions + ai log."""
+    out = {"approvals": 0, "rejects": 0, "skipped": 0, "timeouts": 0, "total": 0}
+    if decisions is not None and not decisions.empty:
+        work = decisions.copy()
+        if "ai_decision_text" in work.columns:
+            txt = work["ai_decision_text"].fillna("").astype(str).str.upper()
+            out["approvals"] = int((txt == "APPROVE").sum())
+            out["rejects"] = int((txt == "REJECT").sum())
+            out["timeouts"] = int(txt.str.contains("ERROR|TIMEOUT", regex=True).sum())
+        if "skip_stage" in work.columns:
+            out["skipped"] = int(work["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN").sum())
+        elif "reason" in work.columns:
+            out["skipped"] = int(work["reason"].fillna("").astype(str).str.contains("AI_COOLDOWN", regex=False).sum())
+        out["total"] = int(len(work))
+    funnel = out["approvals"] + out["rejects"] + out["skipped"] + out["timeouts"]
+    out["funnel_sum"] = funnel
+    return out
+
+
+
+def run_integrity_checks(
+    trades=None,
+    decisions=None,
+    session=None,
+    chase_payload=None,
+    benchmark_report=None,
+):
+    """
+    Validate → reconcile → display. Reports are INVALID when checks fail.
+    Writes analyzer_integrity_report.json (dashboard reads before render).
+    """
+    checks = []
+    valid = True
+
+    def _add(name, passed, expected, found, detail=""):
+        nonlocal valid
+        if not passed:
+            valid = False
+        checks.append({
+            "check": name,
+            "passed": passed,
+            "expected": expected,
+            "found": found,
+            "detail": detail,
+        })
+
+    # Trade W/L reconciliation
+    if trades is not None and not trades.empty and "trade_id" in trades.columns:
+        work = trades.drop_duplicates(subset=["trade_id"], keep="last")
+        pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
+        pnl = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0)
+        wins = int((pnl > 0).sum())
+        losses = int((pnl < 0).sum())
+        breakeven = int((pnl == 0).sum())
+        total = int(len(work))
+        _add(
+            "trades_wins_losses",
+            total == wins + losses + breakeven,
+            f"wins+losses+be={wins}+{losses}+{breakeven}={wins + losses + breakeven}",
+            f"total_trades={total}",
+        )
+
+    # AI funnel: approvals + rejects + skipped + timeout reconcile on AI-involved rows
+    if decisions is not None and not decisions.empty:
+        d = decisions.copy()
+        ai_txt = d["ai_decision_text"].fillna("").astype(str).str.upper() if "ai_decision_text" in d.columns else pd.Series([""] * len(d))
+        dec = d["decision"].fillna("").astype(str).str.upper() if "decision" in d.columns else pd.Series([""] * len(d))
+        skip_st = d["skip_stage"].fillna("").astype(str).str.upper() if "skip_stage" in d.columns else pd.Series([""] * len(d))
+        ai_involved = d[dec.isin(["AI", "BLOCKED"]) | ai_txt.isin(["APPROVE", "REJECT"]) | skip_st.eq("COOLDOWN")]
+        sub_txt = ai_involved["ai_decision_text"].fillna("").astype(str).str.upper()
+        appr = int((sub_txt == "APPROVE").sum())
+        rej = int((sub_txt == "REJECT").sum())
+        timeout = int(sub_txt.str.contains("ERROR|TIMEOUT", regex=True).sum())
+        skipped = int(ai_involved["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN").sum()) if "skip_stage" in ai_involved.columns else 0
+        funnel = appr + rej + skipped + timeout
+        n_ai = int(len(ai_involved))
+        _add(
+            "ai_decision_funnel",
+            abs(funnel - n_ai) <= max(10, int(0.05 * n_ai)),
+            f"approvals+rejects+skipped+timeout={appr}+{rej}+{skipped}+{timeout}={funnel}",
+            f"ai_involved_rows={n_ai} (total decisions={len(d)})",
+            "decisions_3factor: AI/BLOCKED + ai_decision_text APPROVE/REJECT + COOLDOWN skip_stage",
+        )
+
+    # Chase buckets: CSV limit_chase_count vs chase_effectiveness report
+    csv_buckets = {}
+    if trades is not None and not trades.empty and "limit_chase_count" in trades.columns:
+        work = trades.drop_duplicates(subset=["trade_id"], keep="last")
+        cc = pd.to_numeric(work["limit_chase_count"], errors="coerce").fillna(0).astype(int)
+        for n in cc:
+            key = _chase_count_bucket(n)
+            csv_buckets[key] = csv_buckets.get(key, 0) + 1
+        eff = {}
+        if chase_payload:
+            attr = (chase_payload.get("trades") or [])
+            for row in attr:
+                key = _chase_count_bucket(row.get("chase_count"))
+                if row.get("net_pnl_usd") is not None or row.get("win") is not None:
+                    eff[key] = eff.get(key, 0) + 1
+        else:
+            eff_path = analyzer_report_path("chase_effectiveness_report.json")
+            if os.path.isfile(eff_path):
+                try:
+                    with open(eff_path, encoding="utf-8") as f:
+                        rep = json.load(f)
+                    for k, b in (rep.get("buckets") or {}).items():
+                        eff[k] = int((b or {}).get("trades") or 0)
+                except Exception:
+                    eff = {}
+        mismatch = []
+        for k in set(list(csv_buckets.keys()) + list(eff.keys())):
+            if csv_buckets.get(k, 0) != eff.get(k, 0):
+                mismatch.append(f"{k}: csv={csv_buckets.get(k, 0)} report={eff.get(k, 0)}")
+        _add(
+            "chase_count_buckets",
+            not mismatch,
+            str(csv_buckets),
+            str(eff),
+            "; ".join(mismatch[:6]) if mismatch else "trades_3factor.limit_chase_count matches report buckets",
+        )
+
+    # Lane totals vs CONTINUOUS
+    if benchmark_report and trades is not None and not trades.empty and "research_lane" in trades.columns:
+        lanes = (benchmark_report or {}).get("lanes") or {}
+        cont = int((lanes.get("CONTINUOUS") or {}).get("real_fills") or (lanes.get("CONTINUOUS") or {}).get("fills") or 0)
+        lane_sum = 0
+        for ln, m in lanes.items():
+            if ln in ("AI_SCAN", "EXEC_5M"):
+                continue
+            lane_sum += int(m.get("real_fills") or m.get("fills") or 0)
+        work = trades.drop_duplicates(subset=["trade_id"])
+        csv_total = int(len(work))
+        _add(
+            "lane_fill_reconcile",
+            lane_sum >= cont and csv_total >= cont,
+            f"lane_fills_sum≥CONTINUOUS({cont}), csv_trades={csv_total}",
+            f"lane_fills_sum={lane_sum}",
+        )
+
+    # Genome vs completed trades (best-effort)
+    genome_path = _agent_data_path(os.path.join("research", "genome", "genome_events.jsonl"))
+    if not os.path.isfile(genome_path):
+        genome_path = _agent_data_path("genome_events.jsonl")
+    trade_ids = set()
+    if trades is not None and not trades.empty and "trade_id" in trades.columns:
+        trade_ids = set(trades["trade_id"].dropna().astype(str))
+    genome_trade_events = 0
+    if os.path.isfile(genome_path) and trade_ids:
+        try:
+            for row in _load_jsonl_rows(genome_path):
+                if row.get("event_name") in ("TRADE_COMPLETE", "TRADE_CLOSED") and str(row.get("trade_id") or "") in trade_ids:
+                    genome_trade_events += 1
+        except Exception:
+            pass
+        if genome_trade_events:
+            _add(
+                "genome_vs_trades",
+                genome_trade_events <= len(trade_ids) * 1.5,
+                f"genome_trade_events≤{len(trade_ids) * 1.5}",
+                f"genome_events={genome_trade_events}, csv_trades={len(trade_ids)}",
+            )
+
+    # signal_id linkage spot check
+    if trades is not None and not trades.empty and decisions is not None and not decisions.empty:
+        if "signal_id" in trades.columns and "signal_id" in decisions.columns:
+            sample = trades.drop_duplicates(subset=["trade_id"]).head(20)
+            linked = 0
+            dec_ids = set(decisions["signal_id"].dropna().astype(str))
+            for _, row in sample.iterrows():
+                sid = str(row.get("signal_id") or "")
+                tid = str(row.get("trade_id") or "")
+                if sid and sid in dec_ids:
+                    linked += 1
+                elif tid and tid in set(decisions.get("trade_id", pd.Series()).dropna().astype(str)):
+                    linked += 1
+            _add(
+                "signal_id_linkage_spot",
+                linked >= min(5, len(sample) // 2),
+                f"≥{min(5, len(sample) // 2)} of {len(sample)} sample trades linked",
+                f"linked={linked}",
+            )
+
+    scope = _shadow_scope_label(session) if session else "SESSION"
+    payload = {
+        "schema": "analyzer_integrity_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_scope": scope,
+        "valid": valid,
+        "report_status": "VALID" if valid else "INVALID",
+        "banner": None if valid else "⚠ REPORT INVALID — reconcile before trusting chase/exit tables",
+        "checks": checks,
+        "failed_checks": [c for c in checks if not c.get("passed")],
+    }
+    try:
+        with open(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        status = payload["report_status"]
+        print(f"  Integrity: {status} ({len(checks)} checks, {len(payload['failed_checks'])} failed) {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as exc:
+        print(f"  ⚠️ Could not write {ANALYZER_INTEGRITY_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
 def chase_attribution_report(trades=None, session=None):
     """
     Per-trade chase attribution from execution_funnel.jsonl.
@@ -10232,6 +10528,7 @@ def chase_attribution_report(trades=None, session=None):
     rows = _filter_jsonl_rows_by_session(_load_jsonl_rows(EXECUTION_FUNNEL_FILE), session)
     trade_pnl = {}
     trade_wr = {}
+    trade_chase = {}
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         work = trades.copy()
         if "trade_id" in work.columns:
@@ -10247,6 +10544,18 @@ def chase_attribution_report(trades=None, session=None):
                 if pd.notna(pnl):
                     trade_pnl[tid] = float(pnl)
                     trade_wr[tid] = float(pnl) > 0
+        trade_lane = {}
+        trade_hold = {}
+        if "limit_chase_count" in work.columns:
+            for _, t in work.iterrows():
+                tid = str(t.get("trade_id") or "")
+                if tid:
+                    trade_chase[tid] = int(pd.to_numeric(t.get("limit_chase_count"), errors="coerce") or 0)
+                    if "research_lane" in work.columns:
+                        trade_lane[tid] = _normalize_lane_label(t.get("research_lane"))
+                    hold = t.get("dur_min") if "dur_min" in work.columns else t.get("duration_min")
+                    if hold is not None and pd.notna(hold):
+                        trade_hold[tid] = round(float(hold), 2)
 
     by_tid = {}
     for row in rows:
@@ -10277,19 +10586,21 @@ def chase_attribution_report(trades=None, session=None):
             if last_ts is not None:
                 last_chase_sec = round(last_ts - order_epoch, 1)
 
-        chase_count = 0
+        funnel_cc = 0
         if fill_row and fill_row.get("limit_chase_count") is not None:
-            chase_count = int(fill_row.get("limit_chase_count") or 0)
+            funnel_cc = int(fill_row.get("limit_chase_count") or 0)
         elif chase_rows:
-            chase_count = int(chase_rows[-1].get("limit_chase_count") or len(chase_rows))
+            funnel_cc = int(chase_rows[-1].get("limit_chase_count") or len(chase_rows))
         elif expire_row and expire_row.get("limit_chase_count") is not None:
-            chase_count = int(expire_row.get("limit_chase_count") or 0)
+            funnel_cc = int(expire_row.get("limit_chase_count") or 0)
+        chase_count, chase_count_source = _resolve_chase_count(tid, funnel_cc, trade_chase)
 
-        lane = (
+        lane = _normalize_lane_label(
             (order_row or {}).get("research_lane")
             or (fill_row or {}).get("research_lane")
             or (chase_rows[0].get("research_lane") if chase_rows else None)
             or (expire_row or {}).get("research_lane")
+            or trade_lane.get(tid)
             or "UNKNOWN"
         )
         original_limit = (
@@ -10339,6 +10650,8 @@ def chase_attribution_report(trades=None, session=None):
             "lane": str(lane).upper(),
             "label": RESEARCH_LANE_LABELS.get(str(lane).upper(), lane),
             "chase_count": chase_count,
+            "chase_count_source": chase_count_source,
+            "avg_hold_min": trade_hold.get(tid),
             "chase_events_logged": len(chase_rows),
             "first_chase_sec": first_chase_sec,
             "last_chase_sec": last_chase_sec,
@@ -10359,6 +10672,31 @@ def chase_attribution_report(trades=None, session=None):
                 f"first={first_chase_sec}s filled={filled} saved={saved_fill} "
                 f"reason={fill_reason} {PIPELINE_ENFORCEMENT_TAG}"
             )
+
+    seen_tids = {a.get("trade_id") for a in attributions}
+    for tid, pnl in trade_pnl.items():
+        if tid in seen_tids:
+            continue
+        chase_count = int(trade_chase.get(tid) or 0)
+        attributions.append({
+            "trade_id": tid,
+            "lane": "UNKNOWN",
+            "label": "UNKNOWN",
+            "chase_count": chase_count,
+            "chase_events_logged": 0,
+            "first_chase_sec": None,
+            "last_chase_sec": None,
+            "filled_after_chase": chase_count > 0,
+            "fill_reason": "STATIC_LIMIT" if chase_count <= 0 else "LIMIT_CHASE",
+            "saved_fill": False,
+            "original_limit_price": None,
+            "final_limit_price": None,
+            "fill_price": None,
+            "net_pnl_usd": pnl,
+            "win": trade_wr.get(tid),
+            "ttl_expired": False,
+            "chase_count_source": "trades_3factor.limit_chase_count",
+        })
 
     approve_count = sum(1 for r in rows if r.get("stage") == "APPROVE")
     orders_created = sum(1 for r in rows if r.get("stage") == "ORDER_SUBMITTED")
@@ -10442,22 +10780,22 @@ def _chase_count_bucket(chase_count) -> str:
         n = int(chase_count or 0)
     except (TypeError, ValueError):
         n = 0
-    if n <= 0:
-        return "0_chases"
-    if n == 1:
-        return "1_chase"
-    if n == 2:
-        return "2_chases"
-    if n <= 5:
-        return "3-5_chases"
-    return "6+_chases"
+    if n >= 5:
+        return "5+"
+    return str(n)
 
 
 def _chase_bucket_stats(attributions):
-    order = ["0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases"]
-    buckets = {k: {"trades": 0, "wins": 0, "sum_pnl_usd": 0.0, "win_rate_pct": 0.0, "ev_usd": 0.0} for k in order}
+    order = ["0", "1", "2", "3", "4", "5+"]
+    buckets = {
+        k: {
+            "trades": 0, "wins": 0, "sum_pnl_usd": 0.0, "win_rate_pct": 0.0, "ev_usd": 0.0,
+            "avg_hold_min": 0.0, "_hold_n": 0,
+        }
+        for k in order
+    }
     for row in attributions or []:
-        if not row.get("net_pnl_usd") and row.get("win") is None:
+        if row.get("net_pnl_usd") is None and row.get("win") is None:
             continue
         key = _chase_count_bucket(row.get("chase_count"))
         b = buckets[key]
@@ -10466,8 +10804,20 @@ def _chase_bucket_stats(attributions):
         b["sum_pnl_usd"] = round(b["sum_pnl_usd"] + pnl, 2)
         if row.get("win") or pnl > 0:
             b["wins"] += 1
+        hold = row.get("avg_hold_min")
+        if hold is not None:
+            try:
+                b["avg_hold_min"] = round(b["avg_hold_min"] + float(hold), 2)
+                b["_hold_n"] += 1
+            except (TypeError, ValueError):
+                pass
     for key, b in buckets.items():
         n = b["trades"]
+        hold_n = b.pop("_hold_n", 0)
+        if hold_n:
+            b["avg_hold_min"] = round(b["avg_hold_min"] / hold_n, 2)
+        else:
+            b["avg_hold_min"] = None
         if n:
             b["win_rate_pct"] = round(100.0 * b["wins"] / n, 1)
             b["ev_usd"] = round(b["sum_pnl_usd"] / n, 2)
@@ -10540,8 +10890,13 @@ def _cumulative_chase_threshold_stats(attributions, min_chase: int) -> dict:
     }
 
 
+def _exact_chase_bucket_stats(attributions):
+    """Exact limit_chase_count buckets: 0, 1, 2, 3, 4, 5+."""
+    return _chase_bucket_stats(attributions)
+
+
 def chase_threshold_report(trades=None, session=None, chase_payload=None):
-    """Cumulative chase thresholds — where does profitability begin (0+, 1+, … 5+)?"""
+    """Exact chase-count buckets — EV/WR/PnL at each limit_chase_count (0, 1, 2, 3, 4, 5+)."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
@@ -10555,23 +10910,21 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
     if chase_payload is None:
         chase_payload = chase_attribution_report(trades=trades, session=session)
     attributions = (chase_payload or {}).get("trades") or []
-    thresholds = {}
-    for n in range(0, 6):
-        key = f"{n}_plus"
-        block = _cumulative_chase_threshold_stats(attributions, n)
-        thresholds[key] = block
+    thresholds = _exact_chase_bucket_stats(attributions)
+    for key, block in thresholds.items():
         if block["trades"]:
             print(
-                f"  {key}: n={block['trades']} WR={block['wr']:.1f}% "
-                f"PnL=${block['pnl']:.2f} EV=${block['ev']:.2f} {PIPELINE_ENFORCEMENT_TAG}"
+                f"  chase={key}: n={block['trades']} WR={block['win_rate_pct']:.1f}% "
+                f"PnL=${block['sum_pnl_usd']:.2f} EV=${block['ev_usd']:.2f} {PIPELINE_ENFORCEMENT_TAG}"
             )
     payload = {
-        "schema": "chase_threshold_v1",
+        "schema": "chase_threshold_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "question": "At which cumulative chase_count threshold does EV turn positive?",
+        "question": "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+) — EV/WR/PnL.",
+        "chase_count_source": "trades_3factor.limit_chase_count when execution_funnel lacks LIMIT_CHASE rows",
         "thresholds": thresholds,
     }
     try:
@@ -12982,6 +13335,8 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
     combos = []
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
         ex, ai_b, sp_b, mfe_b, time_b, ttype, lane = keys
+        if str(ttype).upper() == "TYPE_B":
+            continue
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
@@ -13020,6 +13375,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "dimensions": dims,
         "total_combos": len(combos),
         "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
+        "filter_note": "TYPE_B excluded — not predictable enough for exit combo optimization.",
         "top": top,
         "worst_leakage": worst_leak,
     }
@@ -13030,6 +13386,76 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
+
+
+EXIT_LEAK_ACTION_MAP = {
+    "PROFIT_LOCK_LADDER": {
+        "action": "Tighten ladder rungs — raise lock floors on early rungs (12→8 → 12→10) to capture more peak.",
+        "script_hint": "Review cfg_trail_ladder_json / TRAIL_LADDER in combo_pathway_config.py",
+        "priority": "high",
+    },
+    "STOP_LOSS": {
+        "action": "Block or widen hard stop path on chase-assisted entries — largest leak bucket after ladder.",
+        "script_hint": "Audit STOP_LOSS triggers in bot exit ladder; consider thesis_mfe_protect before hard SL.",
+        "priority": "high",
+    },
+    "THESIS_FAST_CUT": {
+        "action": "Raise thesis fast-cut threshold or enable MFE-protect on runners showing >10% peak.",
+        "script_hint": "Tune cfg_thesis_fast_exit_unreal_pct / cfg_thesis_mfe_protect_pct per lane.",
+        "priority": "medium",
+    },
+    "EARLY_FAIL": {
+        "action": "Tighten early-fail gate — trades dying before ladder engagement.",
+        "script_hint": "Review cfg_early_fail_pct_threshold and cfg_type_a_early_fail_enabled.",
+        "priority": "medium",
+    },
+    "THESIS_INVALIDATED": {
+        "action": "Review thesis-invalidation score flip margin — may be cutting recoverable runners.",
+        "script_hint": "Tune cfg_thesis_score_flip_margin / cfg_thesis_min_age_sec.",
+        "priority": "medium",
+    },
+    "TIME_EXIT": {
+        "action": "Extend TTL or add late-stage ladder rung before TIME_EXIT fires.",
+        "script_hint": "Review pending order TTL and time-based exit config.",
+        "priority": "low",
+    },
+}
+
+
+def _exit_leak_recommendations(reasons: list) -> list:
+    """Finding → Recommendation → Expected gain per exit leak source."""
+    recs = []
+    for row in reasons or []:
+        reason = str(row.get("exit_reason") or "")
+        template = EXIT_LEAK_ACTION_MAP.get(reason)
+        if not template:
+            continue
+        left = float(row.get("left_on_table_usd") or 0)
+        n = int(row.get("trades") or 0)
+        avg_left = float(row.get("avg_left_usd") or 0)
+        capture = float(row.get("capture_ratio_pct") or 0)
+        finding = (
+            f"{reason} on {n} trades left ${left:.0f} on table "
+            f"(avg ${avg_left:.2f}/trade, {capture:.0f}% capture)."
+        )
+        expected_gain = (
+            f"Recover ~10–25% of leaked value (${left * 0.1:.0f}–${left * 0.25:.0f}) "
+            f"if {reason} exits tighten by one ladder rung or delayed trigger."
+        )
+        recs.append({
+            "exit_reason": reason,
+            "trades": n,
+            "left_on_table_usd": left,
+            "priority": template["priority"],
+            "finding": finding,
+            "recommendation": template["action"],
+            "expected_gain": expected_gain,
+            "action": template["action"],
+            "script_hint": template["script_hint"],
+        })
+    order = {"high": 0, "medium": 1, "low": 2}
+    recs.sort(key=lambda r: (order.get(r.get("priority"), 9), -(r.get("left_on_table_usd") or 0)))
+    return recs
 
 
 def exit_leakage_by_reason_report(trades=None, session=None):
@@ -13100,7 +13526,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         )
 
     payload = {
-        "schema": "exit_leakage_by_reason_v1",
+        "schema": "exit_leakage_by_reason_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -13109,6 +13535,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         "overall_booked_usd": round(float(booked_usd.sum()), 2),
         "overall_peak_usd": round(float(peak_usd.sum()), 2),
         "reasons": reasons,
+        "recommendations": _exit_leak_recommendations(reasons),
     }
     try:
         with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
@@ -13173,12 +13600,16 @@ def exit_ladder_simulator_report(trades=None, session=None):
         pid: {"sum_pnl_usd": 0.0, "n": 0, "wins": 0, "ladder_exits": 0, "thesis_cuts": 0, "replay_end": 0}
         for pid in LADDER_SIM_PROFILES
     }
+    replays_considered = 0
+    replays_matched = 0
 
     if replays:
         for tid, replay in replays.items():
             tid = str(tid)
+            replays_considered += 1
             if executed_ids and tid not in executed_ids:
                 continue
+            replays_matched += 1
             entry = _replay_entry_price(replay)
             ticks = replay.get("ticks") or []
             if not entry or not ticks:
@@ -13220,6 +13651,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
         cell = profile_stats[pid]
         n = cell["n"]
         sum_pnl = round(cell["sum_pnl_usd"], 2)
+        delta = round(sum_pnl - actual_sum, 2) if actual_n and n else None
+        unrealistic = bool(actual_sum > 0 and sum_pnl > actual_sum * 2)
         profiles_out.append({
             "profile_id": pid,
             "label": prof["label"],
@@ -13230,20 +13663,32 @@ def exit_ladder_simulator_report(trades=None, session=None):
             "wr_pct": round(100.0 * cell["wins"] / n, 1) if n else 0.0,
             "ladder_exit_pct": round(100.0 * cell["ladder_exits"] / n, 1) if n else 0.0,
             "thesis_cut_pct": round(100.0 * cell["thesis_cuts"] / n, 1) if n else 0.0,
-            "delta_vs_actual_usd": round(sum_pnl - actual_sum, 2) if actual_n and n else None,
+            "delta_vs_actual_usd": delta,
+            "unrealistic_vs_actual": unrealistic,
         })
     profiles_out.sort(key=lambda x: (-x["sum_pnl_usd"], -x["trades_simulated"]))
     best = profiles_out[0] if profiles_out else None
+    disclaimer = (
+        "HINDSIGHT COUNTERFACTUAL: tick replay on executed trade paths only (not perfect live fills). "
+        "perfect ladder fills at historical tick marks — optimistic vs live slippage/fees. "
+        "Δ vs actual compares simulated cohort to session booked PnL; not a live deployment forecast."
+    )
+    if executed_ids and replays_matched < actual_n:
+        disclaimer += (
+            f" Warning: only {replays_matched}/{actual_n} executed trades have tick replays "
+            f"({replays_considered} total replays on disk)."
+        )
     if best and best.get("trades_simulated"):
+        flag = " UNREALISTIC (>2× actual)" if best.get("unrealistic_vs_actual") else ""
         print(
             f"  Best profile: {best['profile_id']} sum=${best['sum_pnl_usd']:.2f} "
-            f"(actual=${actual_sum:.2f}, Δ=${best.get('delta_vs_actual_usd')}) {PIPELINE_ENFORCEMENT_TAG}"
+            f"(actual=${actual_sum:.2f}, Δ=${best.get('delta_vs_actual_usd')}){flag} {PIPELINE_ENFORCEMENT_TAG}"
         )
     elif not replays:
         print(f"  No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays. {PIPELINE_ENFORCEMENT_TAG}")
 
     payload = {
-        "schema": "exit_ladder_simulator_v1",
+        "schema": "exit_ladder_simulator_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -13253,8 +13698,11 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "actual_realized_usd": actual_sum,
         "actual_trades": actual_n,
         "replays_available": len(replays),
+        "replays_considered": replays_considered,
+        "replays_matched_executed": replays_matched,
+        "disclaimer": disclaimer,
         "profiles": profiles_out,
-        "best_profile_id": best["profile_id"] if best else None,
+        "best_profile_id": best["profile_id"] if best and best.get("trades_simulated") else None,
     }
     try:
         with open(EXIT_LADDER_SIMULATOR_REPORT_FILE, "w", encoding="utf-8") as f:
@@ -13319,7 +13767,7 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
         cell["ev_usd"] = round(cell["sum_pnl_usd"] / n, 2) if n else 0.0
 
     overall = {k: v for k, v in matrix.items() if "|" not in k}
-    by_lane = {k: v for k, v in matrix.items() if k.startswith(("0_chases|", "1_chase|", "2_chases|", "3-5_chases|", "6+_chases|")) and "|lane=" in k and "|ai=" not in k}
+    by_lane = {k: v for k, v in matrix.items() if k.split("|")[0] in ("0", "1", "2", "3", "4", "5+") and "|lane=" in k and "|ai=" not in k}
     golden = sorted(
         [v for k, v in matrix.items() if "|ai=60-65|spread=4|lane=" in k],
         key=lambda x: x.get("ev_usd", 0),
@@ -13337,7 +13785,7 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
         "golden_ai60_spread4": golden,
         "full_matrix": dict(matrix),
     }
-    for key in ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases"):
+    for key in ("0", "1", "2", "3", "4", "5+"):
         cell = overall.get(key)
         if cell and cell["trades"]:
             print(
@@ -13351,6 +13799,89 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
     except Exception as e:
         print(f"  ⚠️ Could not write {CHASE_EFFICIENCY_MATRIX_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
+
+
+def _type_b_bucket(val, kind: str) -> str:
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "unknown"
+    if kind == "adx":
+        if v < 20:
+            return "adx<20"
+        if v < 30:
+            return "adx20-30"
+        return "adx30+"
+    if kind == "spread":
+        if v <= 2:
+            return "spread0-2"
+        if v <= 4:
+            return "spread3-4"
+        return "spread5+"
+    if kind == "conf":
+        if v < 55:
+            return "conf<55"
+        if v < 65:
+            return "conf55-65"
+        return "conf65+"
+    if kind == "vol":
+        if v < 80:
+            return "vol_low"
+        if v < 150:
+            return "vol_mid"
+        return "vol_high"
+    return "unknown"
+
+
+def _type_b_probability_table(work: pd.DataFrame) -> list:
+    """Historical P(TYPE_B | feature bucket) — discovery only, not an entry gate."""
+    if work is None or work.empty:
+        return []
+    df = work.copy()
+    df["trade_mfe_type"] = _trade_mfe_type_series(df)
+    df["is_type_b"] = df["trade_mfe_type"].eq("TYPE_B")
+    if "adx_at_entry" in df.columns:
+        df["_adx_b"] = df["adx_at_entry"].map(lambda x: _type_b_bucket(x, "adx"))
+    if "conviction_spread" in df.columns:
+        df["_spread_b"] = df["conviction_spread"].map(lambda x: _type_b_bucket(x, "spread"))
+    elif "directional_spread" in df.columns:
+        df["_spread_b"] = df["directional_spread"].map(lambda x: _type_b_bucket(x, "spread"))
+    if "ai_win_prob" in df.columns:
+        df["_conf_b"] = df["ai_win_prob"].map(lambda x: _type_b_bucket(x, "conf"))
+    if "volatility" in df.columns:
+        df["_vol_b"] = df["volatility"].map(lambda x: _type_b_bucket(x, "vol"))
+    if "context_ema_slope" in df.columns:
+        df["_ema_b"] = pd.to_numeric(df["context_ema_slope"], errors="coerce").map(
+            lambda x: "ema_up" if (x or 0) > 0 else ("ema_down" if (x or 0) < 0 else "ema_flat")
+        )
+    if "research_lane" in df.columns:
+        df["_lane_b"] = df["research_lane"].fillna("").astype(str).str.upper()
+    dim_cols = {
+        "adx": "_adx_b", "spread": "_spread_b", "confidence": "_conf_b",
+        "volatility": "_vol_b", "ema_slope": "_ema_b", "lane": "_lane_b",
+    }
+    rows = []
+    for dim, col in dim_cols.items():
+        if col not in df.columns:
+            continue
+        for bucket, sub in df.groupby(col, observed=True):
+            if str(bucket) in ("unknown", "nan", ""):
+                continue
+            n = int(len(sub))
+            if n < 3:
+                continue
+            b_n = int(sub["is_type_b"].sum())
+            wr = round(100.0 * (sub["net_pnl_usd"].astype(float) > 0).mean(), 1) if "net_pnl_usd" in sub.columns else None
+            rows.append({
+                "dimension": dim,
+                "bucket": str(bucket),
+                "trades": n,
+                "type_b_count": b_n,
+                "type_b_probability_pct": round(100.0 * b_n / n, 1),
+                "wr_pct": wr,
+            })
+    rows.sort(key=lambda r: (-r["type_b_probability_pct"], -r["trades"]))
+    return rows[:40]
 
 
 def type_b_predictor_report(trades=None, session=None):
@@ -13412,8 +13943,9 @@ def type_b_predictor_report(trades=None, session=None):
                 })
         separators.sort(key=lambda x: x["delta_abs"], reverse=True)
 
+    prob_table = _type_b_probability_table(work)
     payload = {
-        "schema": "type_b_predictor_v1",
+        "schema": "type_b_predictor_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -13422,6 +13954,7 @@ def type_b_predictor_report(trades=None, session=None):
         "cohorts": cohort_stats,
         "separators_ranked": separators,
         "top_separators": separators[:10],
+        "probability_table": prob_table,
         "hypothesis": "Moderate AI (60-65) + spread 4 + high participation → Type B sweet spot",
     }
     if separators:
@@ -14491,6 +15024,16 @@ def pre_test_analytics_reports(
     benchmark_contribution_report(trades=trades, session=session, benchmark_report=benchmark_report)
     lane_overlap_report(trades=trades, session=session, benchmark_report=benchmark_report)
     fast_cut_sweep_report(trades=trades, session=session)
+    chase_payload_final = chase_payload
+    if chase_payload_final is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
+        chase_payload_final = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
+    run_integrity_checks(
+        trades=trades,
+        decisions=decisions,
+        session=session,
+        chase_payload=chase_payload_final,
+        benchmark_report=benchmark_report,
+    )
 
 
 def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, shadow_report=None):

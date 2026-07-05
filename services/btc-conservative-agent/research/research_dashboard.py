@@ -117,6 +117,7 @@ PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
+ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
 HIGHLIGHTS_FILE = "research_highlights.txt"
 FINDINGS_FILE = "research_findings.txt"
@@ -152,6 +153,7 @@ REPORT_NAV_GROUPS = (
         ("lanes-retire", "Retirement", "lane_retirement_report.json"),
         ("lanes-def", "Definitions", "lane_definition_report.json"),
         ("ai", "AI Lab", "ai_calibration_report.json"),
+        ("typeb", "Type B Discovery", "type_b_predictor_report.json"),
     )),
     ("trading-group", "Chase & Exits", (
         ("chase", "Attribution", "chase_attribution_report.json"),
@@ -203,6 +205,13 @@ def _load_bot_session():
             except Exception:
                 pass
     return _read_json("research_session.json")
+
+
+def _integrity_payload() -> dict:
+    rep = _read_report(ANALYZER_INTEGRITY_FILE)
+    if not rep:
+        return {"valid": True, "report_status": "UNKNOWN", "checks": [], "banner": None}
+    return rep
 
 
 def _summary_stale_meta(compact: dict) -> dict:
@@ -550,6 +559,13 @@ def _lane_rows():
         rows.append({
             "lane": lane,
             "trades": fills,
+            "v2_checker_pass_sims": int(m.get("v2_checker_pass_sims") or 0),
+            "v2_reject_counterfactual_sims": int(m.get("v2_reject_counterfactual_sims") or 0),
+            "v2_metrics_note": m.get("v2_metrics_note") or "",
+            "coordinator_note": m.get("coordinator_note") or "",
+            "coordinator_rejects": int(m.get("coordinator_rejects") or (m.get("ai_scan_coordinator") or {}).get("rejects") or 0),
+            "coordinator_skipped": int(m.get("coordinator_skipped") or (m.get("ai_scan_coordinator") or {}).get("skipped") or 0),
+            "coordinator_timeouts": int(m.get("coordinator_timeouts") or (m.get("ai_scan_coordinator") or {}).get("timeouts") or 0),
             "approves": approves,
             "shadow_filled": shadow_filled,
             "shadow_fill_pct": round(shadow_fill_pct, 1),
@@ -571,13 +587,44 @@ def _lane_rows():
     return rows, benchmark_pnl
 
 
-def _chase_payload():
+CHASE_LANE_ALIASES = {
+    "AI60": "AI60_SP3_VIRTUAL_CHASE",
+    "A160": "A160_CONTEXT_CHASE_EXIT_V2",
+    "A160 V2": "A160_CONTEXT_CHASE_EXIT_V2",
+}
+
+
+def _normalize_chase_lane(lane: str) -> str:
+    u = str(lane or "").strip().upper()
+    return CHASE_LANE_ALIASES.get(u, u)
+
+
+def _filter_chase_attributions(rows, lane: str):
+    lane = _normalize_chase_lane(lane)
+    if not lane:
+        return list(rows or [])
+    out = []
+    for row in rows or []:
+        rl = _normalize_chase_lane((row or {}).get("lane") or (row or {}).get("research_lane"))
+        if rl == lane:
+            out.append(row)
+    return out
+
+
+def _chase_payload(lane: str = ""):
+    integrity = _integrity_payload()
     attr = _read_report("chase_attribution_report.json")
     eff = _read_report("chase_effectiveness_report.json")
     threshold = _read_report("chase_threshold_report.json")
     delay = _read_report("chase_delay_report.json")
     totals = attr.get("overnight_watch") or attr.get("totals") or {}
     buckets = eff.get("buckets") or {}
+    trades_attr = _filter_chase_attributions(attr.get("trades") or [], lane)
+    if lane and trades_attr:
+        buckets = {}
+        eff_rep = {"buckets": {}}
+        for key, b in (_chase_bucket_stats_from_trades(trades_attr) or {}).items():
+            buckets[key] = b
     bucket_rows = []
     if isinstance(buckets, dict):
         for key, b in buckets.items():
@@ -596,6 +643,8 @@ def _chase_payload():
         "delay_verdict": delay.get("verdict"),
         "delay_delta": delay.get("delta_chase_3plus_vs_continuous"),
         "question": eff.get("question"),
+        "lane_filter": lane or "combined",
+        "integrity": integrity,
     }
 
 
@@ -698,19 +747,55 @@ def _typeb_payload():
         "cohorts": cohort_rows,
         "separators": (rep.get("top_separators") or rep.get("separators_ranked") or [])[:12],
         "rules": rep.get("predictor_rules") or rep.get("rules") or [],
+        "probability_table": rep.get("probability_table") or [],
     }
 
 
-def _chase_threshold_payload():
+def _chase_bucket_stats_from_trades(rows):
+    order = ["0", "1", "2", "3", "4", "5+"]
+    buckets = {k: {"trades": 0, "wins": 0, "sum_pnl_usd": 0.0, "win_rate_pct": 0.0, "ev_usd": 0.0, "avg_hold_min": None} for k in order}
+    for row in rows or []:
+        if row.get("net_pnl_usd") is None and row.get("win") is None:
+            continue
+        try:
+            cc = int(row.get("chase_count") or 0)
+        except (TypeError, ValueError):
+            cc = 0
+        key = "5+" if cc >= 5 else str(cc)
+        b = buckets[key]
+        b["trades"] += 1
+        pnl = float(row.get("net_pnl_usd") or 0)
+        b["sum_pnl_usd"] = round(b["sum_pnl_usd"] + pnl, 2)
+        if row.get("win") or pnl > 0:
+            b["wins"] += 1
+    for key, b in buckets.items():
+        n = b["trades"]
+        if n:
+            b["win_rate_pct"] = round(100.0 * b["wins"] / n, 1)
+            b["ev_usd"] = round(b["sum_pnl_usd"] / n, 2)
+    return buckets
+
+
+def _chase_threshold_payload(lane: str = ""):
     rep = _read_report("chase_threshold_report.json")
+    attr = _read_report("chase_attribution_report.json")
     rows = []
-    for key, block in (rep.get("thresholds") or {}).items():
-        if int((block or {}).get("trades") or 0):
-            rows.append({"threshold": key, **(block or {})})
+    if lane:
+        trades_attr = _filter_chase_attributions(attr.get("trades") or [], lane)
+        buckets = _chase_bucket_stats_from_trades(trades_attr)
+        for key, block in buckets.items():
+            if int((block or {}).get("trades") or 0):
+                rows.append({"threshold": key, **(block or {})})
+    else:
+        for key, block in (rep.get("thresholds") or {}).items():
+            if int((block or {}).get("trades") or 0):
+                rows.append({"threshold": key, **(block or {})})
     return {
         "generated_at": rep.get("generated_at"),
-        "question": rep.get("question"),
+        "question": rep.get("question") or "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+)",
         "thresholds": rows,
+        "lane_filter": lane or "combined",
+        "integrity": _integrity_payload(),
     }
 
 
@@ -772,13 +857,20 @@ def _lanes_def_payload():
 
 def _exit_combos_payload():
     rep = _read_report("exit_combinations_report.json")
+
+    def _ok(row):
+        return "TYPE_B" not in str((row or {}).get("type") or "").upper()
+
+    top = [r for r in (rep.get("top") or []) if _ok(r)]
+    worst = [r for r in (rep.get("worst_leakage") or []) if _ok(r)]
     return {
         "generated_at": rep.get("generated_at"),
         "benchmark_lane": rep.get("benchmark_lane"),
         "overall_left_on_table_usd": rep.get("overall_left_on_table_usd"),
-        "total_combos": rep.get("total_combos", 0),
-        "top": (rep.get("top") or [])[:50],
-        "worst_leakage": (rep.get("worst_leakage") or [])[:30],
+        "total_combos": len(top),
+        "filter_note": rep.get("filter_note") or "TYPE_B excluded from exit combos.",
+        "top": top[:50],
+        "worst_leakage": worst[:30],
     }
 
 
@@ -790,6 +882,7 @@ def _exit_reason_leak_payload():
         "overall_booked_usd": rep.get("overall_booked_usd"),
         "overall_peak_usd": rep.get("overall_peak_usd"),
         "reasons": rep.get("reasons") or [],
+        "recommendations": rep.get("recommendations") or [],
     }
 
 
@@ -800,8 +893,11 @@ def _ladder_sim_payload():
         "actual_realized_usd": rep.get("actual_realized_usd"),
         "actual_trades": rep.get("actual_trades"),
         "replays_available": rep.get("replays_available"),
+        "replays_matched_executed": rep.get("replays_matched_executed"),
+        "disclaimer": rep.get("disclaimer"),
         "best_profile_id": rep.get("best_profile_id"),
         "profiles": rep.get("profiles") or [],
+        "integrity": _integrity_payload(),
     }
 
 
@@ -1012,6 +1108,7 @@ def api_summary():
         "executive_text": _read_text(EXECUTIVE_SUMMARY_FILE),
         "coverage_status": (compact.get("coverage") or {}).get("confidence_status"),
         "stale": stale_meta,
+        "integrity": _integrity_payload(),
         "all_data_fallback_active": all_data_active,
     })
 
@@ -1067,7 +1164,8 @@ def api_lanes():
 
 @app.route("/api/chase")
 def api_chase():
-    return jsonify(_chase_payload())
+    lane = request.args.get("lane") or ""
+    return jsonify(_chase_payload(lane=lane))
 
 
 @app.route("/api/combos")
@@ -1087,7 +1185,8 @@ def api_typeb():
 
 @app.route("/api/chase-threshold")
 def api_chase_threshold():
-    return jsonify(_chase_threshold_payload())
+    lane = request.args.get("lane") or ""
+    return jsonify(_chase_threshold_payload(lane=lane))
 
 
 @app.route("/api/chase-delay")
@@ -1689,6 +1788,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .note { color: var(--muted); font-size: 0.8rem; }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
 </style></head><body>
+<div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
 <div id="stale-banner" class="stale-banner" style="display:none;"></div>
 <header>
   <div>
@@ -1720,12 +1820,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Lane Laboratory</h2>
     <p class="note" id="lanes-filter-note">Default: AI lanes + CONTINUOUS benchmark. Historical non-AI lanes stay in CSV; use Show all lanes for legacy COMBO/EDGE/CHASE.</p>
     <label class="lane-toggle"><input type="checkbox" id="show-all-lanes"/> Show all lanes</label>
-    <table><thead><tr><th>Lane</th><th>Appr</th><th>Sess Fills</th><th>Shadow</th><th>Sess PnL</th><th>Shadow PnL</th><th>EV/appr</th><th>All Fills</th><th>All PnL</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <p class="note" id="lanes-metrics-note">Sess Fills = live/paper closes only. V2 lanes show checker-pass sims and reject counterfactuals separately.</p>
+    <table><thead><tr><th>Lane</th><th>Appr</th><th>Paper Fills</th><th>Checker Pass</th><th>Shadow Sims</th><th>Rejects</th><th>Shadow</th><th>Sess PnL</th><th>Shadow PnL</th><th>EV/appr</th><th>All Fills</th><th>All PnL</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
     <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
     <p class="note" id="retire-filter-note">AI lanes + CONTINUOUS only by default. Toggle Show all lanes on Laboratory to include legacy pathways.</p>
     <table><thead><tr><th>Lane</th><th>Sess Trades</th><th>All Trades</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
+  </section>
+  <section id="sec-typeb">
+    <h2>Type B Discovery</h2>
+    <p class="note" id="typeb-note">Pre-entry feature separators for TYPE_B runners (MFE≥15%). TYPE_B is post-trade classification — not an entry gate.</p>
+    <div class="kpis" id="typeb-kpis"></div>
+    <table><thead><tr><th>Cohort</th><th>Trades</th><th>WR%</th><th>Avg MFE%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="typeb-cohort-body"></tbody></table>
+    <h3>Type B probability table (historical — not an entry gate)</h3>
+    <table><thead><tr><th>Dimension</th><th>Bucket</th><th>N</th><th>TYPE_B</th><th>P(TYPE_B)%</th><th>WR%</th></tr></thead><tbody id="typeb-prob-body"></tbody></table>
+    <h3>Top separators (TYPE_B vs TYPE_A)</h3>
+    <table><thead><tr><th>Feature</th><th>TYPE_A mean</th><th>TYPE_B mean</th><th>|Δ|</th></tr></thead><tbody id="typeb-sep-body"></tbody></table>
   </section>
   <section id="sec-lanes-def">
     <h2>Lane Definitions</h2>
@@ -1749,21 +1860,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
+    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <div class="kpis" id="chase-kpis"></div>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
   <section id="sec-chase-iso">
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <h2>Chase Isolation</h2>
     <p class="note" id="chase-iso-note">COMBO Direct vs Chase 3+ — fill_model and chase policy per tile pair.</p>
     <div class="kpis" id="chase-iso-kpis"></div>
@@ -1797,7 +1912,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-exit-combos">
     <h2>Exit Combinations</h2>
-    <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × TYPE × lane.</p>
+    <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane (TYPE_B excluded — not predictable).</p>
     <div class="kpis" id="exit-combos-kpis"></div>
     <h3>Best exit combos (by EV)</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
@@ -1805,14 +1920,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Left on table</th><th>Avg left</th><th>EV</th></tr></thead><tbody id="exit-leak-body"></tbody></table>
   </section>
   <section id="sec-exit-reason-leak">
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <h2>Leakage by Exit Reason</h2>
     <p class="note" id="exit-reason-note">Which exit path destroys the most value — sorted by total left on table.</p>
     <div class="kpis" id="exit-reason-kpis"></div>
     <table><thead><tr><th>Exit reason</th><th>N</th><th>Left $</th><th>Avg left $</th><th>Avg MFE%</th><th>Realized%</th><th>Leak%</th><th>Capture%</th></tr></thead><tbody id="exit-reason-body"></tbody></table>
+    <h3>Recommended actions</h3>
+    <ul id="exit-reason-recs"></ul>
   </section>
   <section id="sec-ladder-sim">
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
     <h2>Optimal Ladder Simulator</h2>
-    <p class="note" id="ladder-sim-note">Tick replay of executed trades — compare alternate ladder rungs vs current live vs actual booked PnL.</p>
+    <p class="note" id="ladder-sim-note">Counterfactual tick replay on executed trades — compare alternate ladder rungs vs current live vs actual booked PnL.</p>
+    <p class="note amber" id="ladder-sim-disclaimer"></p>
     <div class="kpis" id="ladder-sim-kpis"></div>
     <table><thead><tr><th>Profile</th><th>Ladder rungs</th><th>N sim</th><th>Sum PnL</th><th>Avg PnL</th><th>WR%</th><th>Ladder exit%</th><th>Δ vs actual</th></tr></thead><tbody id="ladder-sim-body"></tbody></table>
   </section>
@@ -1925,6 +2045,11 @@ function savePrefs() {
   } catch (e) {}
 }
 function laneQuery() { return showAllLanes ? '?all=1' : ''; }
+function chaseLaneQuery() {
+  const sel = document.getElementById('chase-lane-filter');
+  const lane = sel ? sel.value : '';
+  return lane ? '?lane=' + encodeURIComponent(lane) : '';
+}
 function renderNav() {
   navEl.innerHTML = '';
   NAV_GROUPS.forEach(g => {
@@ -1995,6 +2120,17 @@ async function loadSummary() {
   const d = await r.json();
   const p = d.performance || {};
   const re = d.real_edge || {};
+  const integrity = d.integrity || {};
+  const iBanner = document.getElementById('integrity-banner');
+  if (iBanner) {
+    if (integrity.valid === false || integrity.report_status === 'INVALID') {
+      iBanner.style.display = 'block';
+      const fails = (integrity.failed_checks || []).map(c => `${c.check}: expected ${c.expected}, found ${c.found}`).join(' · ');
+      iBanner.innerHTML = '<strong>' + (integrity.banner || '⚠ REPORT INVALID') + '</strong> ' + fails;
+    } else {
+      iBanner.style.display = 'none';
+    }
+  }
   const stale = d.stale || {};
   const banner = document.getElementById('stale-banner');
   if (banner) {
@@ -2063,17 +2199,24 @@ async function loadLanes() {
     else if (row.retired || (row.pathway_status || '').includes('RETIRED')) cls = 'amber';
     else if (row.status === 'UNDERPERFORMING') cls = 'red';
     else if (row.status === 'BEATS BENCHMARK' || row.status === 'PRIMARY_PRODUCTION') cls = 'green';
-    const role = row.pathway_status || (row.retired ? 'RETIRED' : row.status);
+    let role = row.pathway_status || (row.retired ? 'RETIRED' : row.status);
+    if (row.lane === 'AI_SCAN' && row.coordinator_note) role = row.coordinator_note;
+    if (row.v2_metrics_note && row.lane && row.lane.includes('A160')) role = row.v2_metrics_note;
     const atF = row.all_time_fills || 0;
     const atP = row.all_time_pnl || 0;
     const sh = row.shadow_filled || 0;
     const shPnl = row.shadow_pnl || 0;
-    return `<tr class="${cls}"><td>${row.lane}</td><td>${row.approves ?? 0}</td><td>${row.trades}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '—'}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>${role}</td></tr>`;
-  }).join('') || '<tr><td colspan="10">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
-}
+    const chk = row.v2_checker_pass_sims || 0;
+    const rej = row.v2_reject_counterfactual_sims || 0;
+    const isScan = row.lane === 'AI_SCAN';
+    const paper = isScan ? 0 : row.trades;
+    const apprCell = isScan ? `${row.approves ?? 0} appr` : (row.approves ?? 0);
+    const rejCell = isScan ? `R:${row.coordinator_rejects||0} S:${row.coordinator_skipped||0} T:${row.coordinator_timeouts||0}` : (rej || '\u2014');
+    return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
+  }).join('') || '<tr><td colspan="12">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
 
 async function loadChase() {
-  const r = await fetch('/api/chase');
+  const r = await fetch('/api/chase' + chaseLaneQuery());
   const d = await r.json();
   const t = d.totals || {};
   const ck = [
@@ -2084,7 +2227,7 @@ async function loadChase() {
   document.getElementById('chase-kpis').innerHTML = ck.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('chase-body').innerHTML = (d.buckets||[]).map(b =>
-    `<tr><td>${b.bucket}</td><td>${b.trades}</td><td>${b.win_rate_pct}%</td><td>$${fmtUsd(b.sum_pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`).join('');
+    `<tr><td>${b.bucket||b.threshold||''}</td><td>${b.trades||0}</td><td>${b.win_rate_pct??'n/a'}%</td><td>$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}</td><td>$${fmtUsd(b.ev_usd??b.ev??0)}</td><td>${b.avg_hold_min??'—'}</td></tr>`).join('') || '<tr><td colspan="6">No chase bucket data</td></tr>';
 }
 
 async function loadCombos() {
@@ -2121,7 +2264,7 @@ async function loadSpreadPerf() {
 }
 
 async function loadChaseThreshold() {
-  const r = await fetch('/api/chase-threshold');
+  const r = await fetch('/api/chase-threshold' + chaseLaneQuery());
   const d = await r.json();
   const note = document.getElementById('chase-threshold-note');
   if (note) note.textContent = d.question || 'Cumulative limit_chase_count thresholds.';
@@ -2130,7 +2273,7 @@ async function loadChaseThreshold() {
     const ev = t.ev_usd ?? t.ev ?? 'n/a';
     const pnl = t.pnl_usd ?? t.pnl ?? 0;
     const cls = (Number(ev) >= 0.8) ? 'green' : '';
-    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${wr}%</td><td>$${fmtUsd(pnl)}</td><td>$${fmtUsd(ev)}</td></tr>`;
+    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${wr}%</td><td>$${fmtUsd(pnl)}</td><td>$${fmtUsd(ev)}</td><td>${t.avg_hold_min??'—'}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No threshold data.</td></tr>';
 }
 
@@ -2227,26 +2370,37 @@ async function loadExitReasonLeak() {
     ['Booked', '$' + fmtUsd(d.overall_booked_usd)],
     ['Peak', '$' + fmtUsd(d.overall_peak_usd)],
     ['Exit reasons', (d.reasons||[]).length],
+    ['Actions', (d.recommendations||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('exit-reason-body').innerHTML = (d.reasons||[]).map(r =>
     `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.avg_left_usd)}</td><td>${r.avg_mfe_margin_pct??'n/a'}%</td><td>${r.avg_realized_margin_pct??'n/a'}%</td><td class="red">${r.avg_leakage_margin_pct??'n/a'}%</td><td>${r.capture_ratio_pct??'n/a'}%</td></tr>`
   ).join('') || '<tr><td colspan="8">Run analyzer for exit reason leakage.</td></tr>';
+  const recEl = document.getElementById('exit-reason-recs');
+  if (recEl) {
+    recEl.innerHTML = (d.recommendations||[]).map(rec =>
+      `<li><b>${rec.exit_reason}</b> (${rec.priority})<br/><em>Finding:</em> ${rec.finding||rec.action}<br/><em>Recommendation:</em> ${rec.recommendation||rec.action}<br/><em>Expected gain:</em> ${rec.expected_gain||'TBD'} <code>${rec.script_hint||''}</code></li>`
+    ).join('') || '<li>Run analyzer to generate action items.</li>';
+  }
 }
 
 async function loadLadderSim() {
   const r = await fetch('/api/ladder-sim');
   const d = await r.json();
+  const disc = document.getElementById('ladder-sim-disclaimer');
+  if (disc) disc.textContent = d.disclaimer || '';
   document.getElementById('ladder-sim-kpis').innerHTML = [
     ['Actual PnL', '$' + fmtUsd(d.actual_realized_usd)],
-    ['Actual trades', d.actual_trades ?? 0],
-    ['Replays', d.replays_available ?? 0],
+    ['Executed trades', d.actual_trades ?? 0],
+    ['Matched replays', d.replays_matched_executed ?? 0],
+    ['Replays on disk', d.replays_available ?? 0],
     ['Best profile', d.best_profile_id || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('ladder-sim-body').innerHTML = (d.profiles||[]).map(p => {
-    const rungs = (p.ladder||[]).map(x => x[0] + '→' + x[1]).join(' · ');
-    const best = p.profile_id === d.best_profile_id ? ' class="green"' : '';
-    return `<tr${best}><td><strong>${p.profile_id||''}</strong><br><span style="font-size:0.85em;color:var(--muted)">${p.label||''}</span></td><td style="font-size:0.85em">${rungs}</td><td>${p.trades_simulated||0}</td><td>$${fmtUsd(p.sum_pnl_usd)}</td><td>$${fmtUsd(p.avg_pnl_usd)}</td><td>${p.wr_pct??'n/a'}%</td><td>${p.ladder_exit_pct??'n/a'}%</td><td>$${fmtUsd(p.delta_vs_actual_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="8">Run analyzer — needs signal_replay.jsonl tick data.</td></tr>';
+    const delta = p.delta_vs_actual_usd;
+    const cls = p.unrealistic_vs_actual ? 'red' : (delta != null && delta > 50 ? 'amber' : '');
+    const unreal = p.unrealistic_vs_actual ? ' UNREALISTIC' : '';
+    return `<tr class="${cls}"><td>${p.profile_id||''}${unreal}</td><td>${(p.ladder||[]).map(r=>r.join('\u2192')).join(' · ')||p.label||''}</td><td>${p.trades_simulated||0}</td><td>$${fmtUsd(p.sum_pnl_usd)}</td><td>$${fmtUsd(p.avg_pnl_usd)}</td><td>${p.wr_pct??'n/a'}%</td><td>${p.ladder_exit_pct??'n/a'}%</td><td>${delta!=null?'$'+fmtUsd(delta):'n/a'}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">No ladder sim data — need executed-trade tick replays.</td></tr>';
 }
 
 async function loadPathwayAudit() {
@@ -2396,6 +2550,27 @@ async function loadFeatures() {
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
 
+async function loadTypeB() {
+  const r = await fetch('/api/typeb');
+  const d = await r.json();
+  const note = document.getElementById('typeb-note');
+  if (note && d.classification) note.textContent = d.classification + ' — advisory research only.';
+  document.getElementById('typeb-kpis').innerHTML = [
+    ['Cohorts', (d.cohorts||[]).length],
+    ['Separators', (d.separators||[]).length],
+    ['Rules', (d.rules||[]).length],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('typeb-cohort-body').innerHTML = (d.cohorts||[]).map(c =>
+    `<tr><td>${c.cohort}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>${c.avg_mfe_pct ?? 'n/a'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`
+  ).join('') || '<tr><td colspan="6">Run analyzer — type_b_predictor_report.json</td></tr>';
+  document.getElementById('typeb-prob-body').innerHTML = (d.probability_table||[]).map(p =>
+    `<tr><td>${p.dimension||''}</td><td>${p.bucket||''}</td><td>${p.trades||0}</td><td>${p.type_b_count||0}</td><td>${p.type_b_probability_pct??'n/a'}%</td><td>${p.wr_pct??'n/a'}%</td></tr>`
+  ).join('') || '<tr><td colspan="6">Run analyzer for Type B discovery table.</td></tr>';
+  document.getElementById('typeb-sep-body').innerHTML = (d.separators||[]).map(s =>
+    `<tr><td>${s.feature||s.name||''}</td><td>${s.type_a_mean ?? 'n/a'}</td><td>${s.type_b_mean ?? 'n/a'}</td><td>${s.abs_delta ?? s.delta ?? 'n/a'}</td></tr>`
+  ).join('') || '<tr><td colspan="4">No separators yet.</td></tr>';
+}
+
 async function loadGenome() {
   const r = await fetch('/api/genome');
   const d = await r.json();
@@ -2542,6 +2717,7 @@ async function refreshAll() {
   await loadHorizon();
   await loadFeatures();
   await loadAI();
+  await loadTypeB();
   await loadGenome();
   await loadGptAuditNote();
   await loadExplorer();
