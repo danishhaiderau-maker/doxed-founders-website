@@ -142,7 +142,6 @@ export class ExchangesService {
     }
   }
 
-  /** Open orders + position on Bitfinex derivatives for subscriber live dashboard. */
   async getUserBitfinexExchangeSnapshot(userId: string) {
     const creds = await this.getUserCredentials(userId, 'bitfinex');
     if (!creds) return null;
@@ -159,6 +158,17 @@ export class ExchangesService {
       position = null;
     }
     return { orders, position };
+  }
+
+  /** Exchange-truth position closes for live-copy Trades table backfill when Neon ledger lags. */
+  async getUserBitfinexPositionCloseLedger(userId: string, sessionStartedAt: Date) {
+    const creds = await this.getUserCredentials(userId, 'bitfinex');
+    if (!creds) return [];
+    try {
+      return await this.bitfinex.getPositionCloseLedgerEntries(creds, sessionStartedAt.getTime());
+    } catch {
+      return [];
+    }
   }
 
   async ensureUserBitfinexDerivativesMargin(userId: string, minUsd: number) {

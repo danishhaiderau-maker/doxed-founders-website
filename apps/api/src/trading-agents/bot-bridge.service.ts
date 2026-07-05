@@ -124,6 +124,45 @@ export class BotBridgeService {
     this.lastFetchAt = 0;
   }
 
+  /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
+   *  Never the Fly.io stale instance. Falls back to the Railway-pushed relay snapshot
+   *  (up to 10m stale) when the tunnel blips. */
+  async fetchPublicShowcaseState(force = true): Promise<BotApiState | null> {
+    const now = Date.now();
+    if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
+      return this.cached;
+    }
+    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    for (const path of ['/api/relay-state', '/api/state'] as const) {
+      const timeoutMs = path === '/api/relay-state' ? 20_000 : 30_000;
+      try {
+        const res = await fetch(`${cf}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-showcase/1.0' },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Public showcase ${cf}${path} HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as BotApiState;
+        if (!data || typeof data !== 'object') continue;
+        this.cached = data;
+        this.lastFetchAt = now;
+        return data;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Public showcase ${cf}${path} fetch failed: ${msg}`);
+      }
+    }
+    const cached = await this.fetchCachedRelaySnapshot(this.cumulativeStaleMs);
+    if (cached) {
+      this.cached = cached;
+      this.lastFetchAt = now;
+      return cached;
+    }
+    return null;
+  }
+
   /** Cache-first relay snapshot pushed from home bot every ~2s (admin display only). */
   private async fetchCachedRelaySnapshot(maxAgeMs = 15_000): Promise<BotApiState | null> {
     try {
@@ -436,21 +475,26 @@ export class BotBridgeService {
   /** Read-only proxy to the research analyzer (:9001) via the bot's public tunnel.
    *  The analyzer runs only on the LOCAL showcase bot (Cloudflare tunnel) — Fly does NOT run it.
    *  Try the Cloudflare tunnel for analyzer paths; fall back to Fly for non-analyzer state. */
-  private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 8_000): Promise<T | null> {
-    // Analyzer proxy is only on the Cloudflare showcase bot (Fly is trading-only).
+  private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 20_000): Promise<T | null> {
+    // Analyzer proxy is only on the home showcase bot (Cloudflare tunnel :7002) — Fly does NOT run :9001.
     const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
-    try {
-      const res = await fetch(`${cf}${path}`, {
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-analyzer/1.0' },
-      });
-      if (!res.ok) return null;
-      return (await res.json()) as T;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`Analyzer proxy ${path} failed: ${msg}`);
-      return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`${cf}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-analyzer/1.0' },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Analyzer proxy ${cf}${path} HTTP ${res.status} (attempt ${attempt + 1})`);
+          continue;
+        }
+        return (await res.json()) as T;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Analyzer proxy ${cf}${path} failed (attempt ${attempt + 1}): ${msg}`);
+      }
     }
+    return null;
   }
 
   async fetchAnalyzerSummary(): Promise<Record<string, unknown> | null> {
@@ -493,7 +537,10 @@ export class BotBridgeService {
     if (this.cumulativeCache && now - this.cumulativeCache.at < this.cumulativeCacheMs) {
       return this.cumulativeCache.data;
     }
-    const bot = await this.fetchShowcaseCanonicalState(true);
+    let bot = await this.fetchShowcaseCanonicalState(true);
+    if (!bot) {
+      bot = await this.fetchCachedRelaySnapshot(this.cumulativeStaleMs);
+    }
     if (!bot) {
       return this.serveStaleCumulativeMetrics(now, 'canonical /api/state unreachable');
     }

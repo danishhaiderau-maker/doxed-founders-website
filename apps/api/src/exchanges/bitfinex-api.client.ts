@@ -32,6 +32,13 @@ export type BitfinexPositionDetail = {
   direction: 'LONG' | 'SHORT';
 };
 
+export type BitfinexPositionCloseLedgerRow = {
+  ledgerId: string;
+  closedAt: Date;
+  pnlUsd: number;
+  description: string;
+};
+
 export type BitfinexLiveAccountMetrics = {
   derivativesAvailableUsd: number;
   derivativesTotalUsd: number;
@@ -695,6 +702,24 @@ export class BitfinexTradingClient {
     creds: ExchangeCredentials,
     sinceMs: number,
   ): Promise<number> {
+    const rows = await this.fetchPositionCloseLedgerRows(creds, sinceMs);
+    return Number(
+      rows.reduce((sum, row) => sum + row.pnlUsd, 0).toFixed(4),
+    );
+  }
+
+  /** Individual derivatives position-close ledger rows since session start. */
+  async getPositionCloseLedgerEntries(
+    creds: ExchangeCredentials,
+    sinceMs: number,
+  ): Promise<BitfinexPositionCloseLedgerRow[]> {
+    return this.fetchPositionCloseLedgerRows(creds, sinceMs);
+  }
+
+  private async fetchPositionCloseLedgerRows(
+    creds: ExchangeCredentials,
+    sinceMs: number,
+  ): Promise<BitfinexPositionCloseLedgerRow[]> {
     try {
       const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/ledgers/hist', {
         wallet: 'margin',
@@ -702,21 +727,28 @@ export class BitfinexTradingClient {
         end: Date.now(),
         limit: 250,
       });
-      if (!Array.isArray(rows)) return 0;
-      let realised = 0;
+      if (!Array.isArray(rows)) return [];
+      const out: BitfinexPositionCloseLedgerRow[] = [];
       for (const row of rows) {
         if (!Array.isArray(row) || row.length < 8) continue;
         const amount = Number(row[4] ?? 0);
         if (!Number.isFinite(amount) || amount === 0) continue;
-        const description = String(row[7] ?? '').toLowerCase();
-        if (!/position/i.test(description)) continue;
-        // Exclude fee / funding / transfer ledger rows that may also mention "position".
-        if (/fee|funding|transfer|commission|margin funding/i.test(description)) continue;
-        realised += amount;
+        const description = String(row[7] ?? '');
+        const lower = description.toLowerCase();
+        if (!/position/i.test(lower)) continue;
+        if (/fee|funding|transfer|commission|margin funding/i.test(lower)) continue;
+        const closedAtMs = Number(row[3] ?? 0);
+        const closedAt = Number.isFinite(closedAtMs) && closedAtMs > 0 ? new Date(closedAtMs) : new Date();
+        out.push({
+          ledgerId: String(row[0] ?? `${closedAtMs}-${amount}`),
+          closedAt,
+          pnlUsd: Number(amount.toFixed(4)),
+          description,
+        });
       }
-      return Number(realised.toFixed(4));
+      return out.sort((a, b) => b.closedAt.getTime() - a.closedAt.getTime());
     } catch {
-      return 0;
+      return [];
     }
   }
 
