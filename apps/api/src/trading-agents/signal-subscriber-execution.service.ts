@@ -4331,12 +4331,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       showcaseExitReason: showcaseExitReason ?? 'SHOWCASE_FLAT_FAILSAFE',
       mirrorRelinked: (cycle.tradeId ?? '').startsWith('adopt:'),
       trigger: 'SHOWCASE_FLAT_FAILSAFE',
+      forceMirrorExit: true,
     });
   }
 
   /**
    * Phase 2c — market-close copy lot on showcase closure with observability fields.
-   * Idempotent via exitingLots + hasParticipantExited.
+   * Idempotent via exitingLots + hasParticipantExited (unless forceMirrorExit).
    */
   private async executeShowcaseMirrorClose(
     agentId: string,
@@ -4354,9 +4355,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       showcaseExitReason?: string;
       mirrorRelinked?: boolean;
       trigger?: string;
+      /** Bypass hasParticipantExited (stale RECONCILE_CANCEL EXIT events). */
+      forceMirrorExit?: boolean;
     },
   ): Promise<boolean> {
-    if (await this.hasParticipantExited(participant.id)) return true;
+    if (!opts?.forceMirrorExit && (await this.hasParticipantExited(participant.id))) return true;
     if (this.exitingLots.has(participant.id)) return true;
 
     this.exitingLots.add(participant.id);

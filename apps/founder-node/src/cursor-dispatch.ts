@@ -35,6 +35,8 @@ const CURSOR_FOCUS_ATTEMPTS = 8;
 const CURSOR_FOCUS_ATTEMPT_MS = 400;
 const SENDKEYS_STEP_DELAY_MS = 350;
 const ENTER_SUBMIT_DELAY_MS = 500;
+const CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS = 3;
+const CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS = 500;
 
 let dispatchCycleInFlight = false;
 const lastDispatchBySession = new Map<string, number>();
@@ -182,7 +184,10 @@ const WIN32_CURSOR_FOCUS_TYPE = [
   '    return sb.ToString();',
   '  }',
   '  public static bool IsCursorForeground() {',
-  '    return string.Equals(ForegroundProcessName(), "Cursor", StringComparison.OrdinalIgnoreCase);',
+  '    if (!string.Equals(ForegroundProcessName(), "Cursor", StringComparison.OrdinalIgnoreCase)) return false;',
+  '    var title = ForegroundTitle();',
+  '    if (string.IsNullOrEmpty(title)) return false;',
+  '    return title.IndexOf("Cursor", StringComparison.OrdinalIgnoreCase) >= 0;',
   '  }',
   '  public static bool ActivateCursor() {',
   '    var h = FindCursorMainWindow();',
@@ -230,8 +235,13 @@ async function runVerifiedCursorSendKeys(
   const ps =
     WIN32_CURSOR_FOCUS_TYPE +
     'Add-Type -AssemblyName System.Windows.Forms;' +
-    `$ok=[FnCursorFocus]::EnsureCursorForeground(${CURSOR_FOCUS_ATTEMPTS},${CURSOR_FOCUS_ATTEMPT_MS});` +
-    'if (-not $ok) { Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1 }' +
+    '`$strictOk=$true;' +
+    `for ($v=0; $v -lt ${CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS}; $v++) {` +
+    `  $ok=[FnCursorFocus]::EnsureCursorForeground(${CURSOR_FOCUS_ATTEMPTS},${CURSOR_FOCUS_ATTEMPT_MS});` +
+    '  if (-not $ok -or -not [FnCursorFocus]::IsCursorForeground()) { $strictOk=$false; break }' +
+    `  Start-Sleep -Milliseconds ${CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS};` +
+    '}' +
+    'if (-not $strictOk) { Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1 }' +
     stepScripts +
     'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())';
 

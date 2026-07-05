@@ -17416,10 +17416,30 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
     win_rate = float(m.get("win_rate_pct") or 0.0)
     shadow_sim = bool(m.get("shadow_sim_mode"))
+    checker_pass_sims = int(m.get("checker_pass_sims") or 0)
+    checker_pass_pnl = float(m.get("checker_pass_pnl") or 0)
+    reject_sims = int(m.get("reject_counterfactual_sims") or 0)
+    reject_pnl = float(m.get("reject_counterfactual_pnl") or 0)
+    paper_fills = int(m.get("paper_fills") if m.get("paper_fills") is not None else (fills if not shadow_sim else 0))
     lab_line = (
         f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
         if lab_closes else "LAB sim · collecting…"
     )
+    if shadow_sim and (checker_pass_sims or reject_sims):
+        summary_line = (
+            f"shadow sim · n={approves} approves · {checker_pass_sims} chk pass · ${checker_pass_pnl:.2f} · "
+            f"{reject_sims} reject sim · ${reject_pnl:.2f} · {paper_fills} paper fills"
+        )
+    elif shadow_sim and fills:
+        summary_line = (
+            f"shadow sim · n={approves} approves · {fills} sim trades · "
+            f"{win_rate:.0f}% win · ${pnl:.2f} sim · EV ${ev:.2f}/approve"
+        )
+    else:
+        summary_line = (
+            f"n={approves} approves · {fills} trades · "
+            f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
+        )
     return {
         "approves": approves,
         "real_fills": fills,
@@ -17428,19 +17448,14 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "net_pnl_real": pnl,
         "per_approve_ev": ev,
         "verdict": m.get("verdict"),
-        "summary_line": (
-            (
-                f"shadow sim · n={approves} approves · {fills} sim trades · "
-                f"{win_rate:.0f}% win · ${pnl:.2f} sim · EV ${ev:.2f}/approve"
-            )
-            if shadow_sim and fills
-            else (
-                f"n={approves} approves · {fills} trades · "
-                f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
-            )
-        ),
+        "summary_line": summary_line,
         "shadow_sim_mode": shadow_sim,
         "win_rate_pct": win_rate,
+        "checker_pass_sims": checker_pass_sims,
+        "checker_pass_pnl": round(checker_pass_pnl, 2),
+        "reject_counterfactual_sims": reject_sims,
+        "reject_counterfactual_pnl": round(reject_pnl, 2),
+        "paper_fills": paper_fills,
         # LAB (OFF-combo) simulated metrics — surfaced on the tile when OFF; never mixed into real.
         "lab_mode": bool(m.get("lab_mode")),
         "lab_closes": lab_closes,
@@ -17489,7 +17504,11 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         live_v2 = live_ledger.get(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2) or {}
         live_v2_closes = int(live_v2.get("closes") or 0)
         if v2_metrics:
-            use_shadow_primary = live_v2_closes <= 0 and int(v2_metrics.get("real_fills") or 0) > 0
+            chk_pass = int(v2_metrics.get("checker_pass_sims") or v2_metrics.get("real_fills") or 0)
+            chk_pnl = float(v2_metrics.get("checker_pass_pnl") or v2_metrics.get("net_pnl_real") or 0)
+            reject_sims = int(v2_metrics.get("reject_counterfactual_sims") or 0)
+            reject_pnl = float(v2_metrics.get("reject_counterfactual_pnl") or 0)
+            use_shadow_primary = live_v2_closes <= 0 and (chk_pass > 0 or reject_sims > 0)
             disk_metrics[RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2] = {
                 **prev_v2,
                 "approves": max(
@@ -17498,13 +17517,18 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
                 ),
                 "real_fills": int(live_v2_closes)
                 or int(prev_v2.get("real_fills") or 0)
-                or int(v2_metrics.get("real_fills") or 0),
+                or chk_pass,
                 "net_pnl_real": float(live_v2.get("net_pnl_usd") or 0)
                 or float(prev_v2.get("net_pnl_real") or 0)
-                or float(v2_metrics.get("net_pnl_real") or 0),
+                or chk_pnl,
                 "per_approve_ev": float(prev_v2.get("per_approve_ev") or 0)
                 or float(v2_metrics.get("per_approve_ev") or 0),
                 "win_rate_pct": float(v2_metrics.get("win_rate_pct") or prev_v2.get("win_rate_pct") or 0),
+                "checker_pass_sims": chk_pass,
+                "checker_pass_pnl": round(chk_pnl, 2),
+                "reject_counterfactual_sims": reject_sims,
+                "reject_counterfactual_pnl": round(reject_pnl, 2),
+                "paper_fills": live_v2_closes,
                 "shadow_sim_mode": use_shadow_primary,
                 "verdict": (
                     "shadow sim (tile OFF)"
@@ -18825,16 +18849,34 @@ DASHBOARD_JS = """(function () {
           // same as real PnL but prefixed "LAB" so it is never confused with live money.
           const labOn = !on && !spec.is_independent_ai && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned && stats.lab_mode;
           const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
+          const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
+          const v2ChkPnl = stats.checker_pass_pnl != null ? stats.checker_pass_pnl : (stats.net_pnl_real != null ? stats.net_pnl_real : 0);
+          const v2ChkPnlCol = v2ChkPnl >= 0 ? '#3fb950' : '#f85149';
+          const v2RejectSims = stats.reject_counterfactual_sims != null ? stats.reject_counterfactual_sims : 0;
+          const v2RejectPnl = stats.reject_counterfactual_pnl != null ? stats.reject_counterfactual_pnl : 0;
+          const v2RejectPnlCol = v2RejectPnl >= 0 ? '#3fb950' : '#f85149';
+          const v2PaperFills = stats.paper_fills != null ? stats.paper_fills : 0;
           const labPnl = stats.lab_net_pnl != null ? stats.lab_net_pnl : 0;
           const labPnlCol = labPnl >= 0 ? '#3fb950' : '#f85149';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
-            + statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
-            + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-            + statRow(v2Shadow && stats.win_rate_pct ? 'Win%' : 'EV/appr', v2Shadow && stats.win_rate_pct
-              ? Number(stats.win_rate_pct || 0).toFixed(0) + '%'
-              : '$' + Number(stats.per_approve_ev || 0).toFixed(2))
+            + (v2Shadow
+              ? statRow('Chk pass', v2ChkPass)
+                + statRow('Chk PnL', '$' + Number(v2ChkPnl).toFixed(2), v2ChkPnlCol)
+                + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%')
+                + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
+              : statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
+                + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
+                + statRow(v2Shadow && stats.win_rate_pct ? 'Win%' : 'EV/appr', v2Shadow && stats.win_rate_pct
+                  ? Number(stats.win_rate_pct || 0).toFixed(0) + '%'
+                  : '$' + Number(stats.per_approve_ev || 0).toFixed(2)))
             + '</div>'
+            + (v2Shadow ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
+              + statRow('Paper fills', v2PaperFills, '#58a6ff')
+              + statRow('Reject sim', v2RejectSims, '#58a6ff')
+              + statRow('Rej PnL', '$' + Number(v2RejectPnl).toFixed(2), v2RejectPnlCol)
+              + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
+              + '</div>') : '')
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow('LAB sim', '🧪 ' + (stats.lab_closes != null ? stats.lab_closes : 0), '#58a6ff')
               + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
