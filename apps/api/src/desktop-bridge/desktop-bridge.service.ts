@@ -23,14 +23,33 @@ const MESSAGE_TEXT_MAX = 1000;
 export class DesktopBridgeService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async saveFromHeartbeat(
+  /**
+   * Atomically persist desktop bridge + workspaces + sessions from one heartbeat.
+   * Separate read-modify-write calls raced and overwrote each other in memoryGraph.
+   */
+  async saveBridgePayload(
     userId: string,
     nodeId: string,
     label: string,
-    bridge: DesktopBridgeInput | null | undefined,
+    input: {
+      bridge?: DesktopBridgeInput | null;
+      workspaces?: BridgeWorkspace[];
+      sessions?: BridgeSession[];
+    },
   ): Promise<DesktopBridgeSnapshot | null> {
-    const snapshot = sanitizeDesktopBridge(nodeId, label, bridge);
-    if (!snapshot) return null;
+    const snapshot = input.bridge
+      ? sanitizeDesktopBridge(nodeId, label, input.bridge)
+      : null;
+    const cleanedWorkspaces = input.workspaces?.length
+      ? this.sanitizeWorkspaces(input.workspaces)
+      : [];
+    const cleanedSessions = input.sessions?.length
+      ? this.sanitizeSessions(input.sessions)
+      : [];
+
+    if (!snapshot && cleanedWorkspaces.length === 0 && cleanedSessions.length === 0) {
+      return null;
+    }
 
     const settings = await this.prisma.founderBuilderSettings.findUnique({
       where: { userId },
@@ -41,12 +60,32 @@ export class DesktopBridgeService {
         ? { ...(settings.memoryGraph as Record<string, unknown>) }
         : {};
 
-    const byNode =
-      base[BRIDGE_KEY] && typeof base[BRIDGE_KEY] === 'object' && !Array.isArray(base[BRIDGE_KEY])
-        ? { ...(base[BRIDGE_KEY] as Record<string, DesktopBridgeSnapshot>) }
-        : {};
-    byNode[nodeId] = snapshot;
-    base[BRIDGE_KEY] = byNode;
+    if (snapshot) {
+      const byNode =
+        base[BRIDGE_KEY] && typeof base[BRIDGE_KEY] === 'object' && !Array.isArray(base[BRIDGE_KEY])
+          ? { ...(base[BRIDGE_KEY] as Record<string, DesktopBridgeSnapshot>) }
+          : {};
+      byNode[nodeId] = snapshot;
+      base[BRIDGE_KEY] = byNode;
+    }
+
+    if (cleanedWorkspaces.length > 0) {
+      const byNode =
+        base[WORKSPACES_KEY] && typeof base[WORKSPACES_KEY] === 'object' && !Array.isArray(base[WORKSPACES_KEY])
+          ? { ...(base[WORKSPACES_KEY] as Record<string, BridgeWorkspace[]>) }
+          : {};
+      byNode[nodeId] = cleanedWorkspaces;
+      base[WORKSPACES_KEY] = byNode;
+    }
+
+    if (cleanedSessions.length > 0) {
+      const byNode =
+        base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
+          ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
+          : {};
+      byNode[nodeId] = cleanedSessions;
+      base[SESSIONS_KEY] = byNode;
+    }
 
     await this.prisma.founderBuilderSettings.upsert({
       where: { userId },
@@ -55,6 +94,15 @@ export class DesktopBridgeService {
     });
 
     return snapshot;
+  }
+
+  async saveFromHeartbeat(
+    userId: string,
+    nodeId: string,
+    label: string,
+    bridge: DesktopBridgeInput | null | undefined,
+  ): Promise<DesktopBridgeSnapshot | null> {
+    return this.saveBridgePayload(userId, nodeId, label, { bridge });
   }
 
   async getLatest(userId: string): Promise<DesktopBridgeSnapshot | null> {
@@ -104,29 +152,7 @@ export class DesktopBridgeService {
   ): Promise<BridgeWorkspace[]> {
     const cleaned = this.sanitizeWorkspaces(workspaces);
     if (cleaned.length === 0) return [];
-
-    const settings = await this.prisma.founderBuilderSettings.findUnique({
-      where: { userId },
-      select: { memoryGraph: true },
-    });
-    const base =
-      settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
-        ? { ...(settings.memoryGraph as Record<string, unknown>) }
-        : {};
-
-    const byNode =
-      base[WORKSPACES_KEY] && typeof base[WORKSPACES_KEY] === 'object' && !Array.isArray(base[WORKSPACES_KEY])
-        ? { ...(base[WORKSPACES_KEY] as Record<string, BridgeWorkspace[]>) }
-        : {};
-    byNode[nodeId] = cleaned;
-    base[WORKSPACES_KEY] = byNode;
-
-    await this.prisma.founderBuilderSettings.upsert({
-      where: { userId },
-      create: { userId, memoryGraph: base as Prisma.InputJsonValue },
-      update: { memoryGraph: base as Prisma.InputJsonValue },
-    });
-
+    await this.saveBridgePayload(userId, nodeId, '', { workspaces: cleaned });
     return cleaned;
   }
 
@@ -208,29 +234,7 @@ export class DesktopBridgeService {
   ): Promise<BridgeSession[]> {
     const cleaned = this.sanitizeSessions(sessions);
     if (cleaned.length === 0) return [];
-
-    const settings = await this.prisma.founderBuilderSettings.findUnique({
-      where: { userId },
-      select: { memoryGraph: true },
-    });
-    const base =
-      settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
-        ? { ...(settings.memoryGraph as Record<string, unknown>) }
-        : {};
-
-    const byNode =
-      base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
-        ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
-        : {};
-    byNode[nodeId] = cleaned;
-    base[SESSIONS_KEY] = byNode;
-
-    await this.prisma.founderBuilderSettings.upsert({
-      where: { userId },
-      create: { userId, memoryGraph: base as Prisma.InputJsonValue },
-      update: { memoryGraph: base as Prisma.InputJsonValue },
-    });
-
+    await this.saveBridgePayload(userId, nodeId, '', { sessions: cleaned });
     return cleaned;
   }
 
