@@ -249,30 +249,46 @@ async function runVerifiedCursorSendKeys(
 }
 
 async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
-  return new Promise((resolve) => {
-    exec(`powershell -NoProfile -Command "${psBody.replace(/"/g, '\\"')}"`, (err, stdout) => {
-      const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
-      if (line.startsWith('OK:')) {
-        resolve({ ok: true, foregroundTitle: line.slice(3) });
-        return;
-      }
-      if (line.startsWith('FAIL:')) {
-        const detail = line.slice(5);
-        const [processName, title] = detail.split('|');
-        resolve({
-          ok: false,
-          foregroundTitle: title || processName || undefined,
-          error: `Cursor.exe not foreground (process="${processName ?? 'unknown'}", title="${title ?? ''}")`,
-        });
-        return;
-      }
-      resolve({
-        ok: false,
-        foregroundTitle: line || undefined,
-        error: err?.message || line || 'Cursor focus verification failed',
-      });
+  const tmpScript = path.join(
+    os.tmpdir(),
+    `fn-cursor-sendkeys-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`,
+  );
+  try {
+    fs.writeFileSync(tmpScript, psBody, 'utf8');
+    return await new Promise((resolve) => {
+      exec(
+        `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScript.replace(/"/g, '""')}"`,
+        (err, stdout) => {
+          const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
+          if (line.startsWith('OK:')) {
+            resolve({ ok: true, foregroundTitle: line.slice(3) });
+            return;
+          }
+          if (line.startsWith('FAIL:')) {
+            const detail = line.slice(5);
+            const [processName, title] = detail.split('|');
+            resolve({
+              ok: false,
+              foregroundTitle: title || processName || undefined,
+              error: `Cursor.exe not foreground (process="${processName ?? 'unknown'}", title="${title ?? ''}")`,
+            });
+            return;
+          }
+          resolve({
+            ok: false,
+            foregroundTitle: line || undefined,
+            error: err?.message || line || 'Cursor focus verification failed',
+          });
+        },
+      );
     });
-  });
+  } finally {
+    try {
+      fs.unlinkSync(tmpScript);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /** Pre-flight activation check — abort dispatch before touching clipboard/SendKeys. */
@@ -343,9 +359,19 @@ async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
       `$img=[System.Drawing.Image]::FromFile('${tmpPng.replace(/'/g, "''")}');` +
       `[System.Windows.Forms.Clipboard]::SetImage($img);` +
       `$img.Dispose();`;
-    const result = await execAsync(
-      `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`,
+    const tmpScript = path.join(
+      os.tmpdir(),
+      `fn-attach-clip-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`,
     );
+    fs.writeFileSync(tmpScript, ps, 'utf8');
+    const result = await execAsync(
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScript.replace(/"/g, '""')}"`,
+    );
+    try {
+      fs.unlinkSync(tmpScript);
+    } catch {
+      /* ignore */
+    }
     return result.ok;
   } catch {
     return false;

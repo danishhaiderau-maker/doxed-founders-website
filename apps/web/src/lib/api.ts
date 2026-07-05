@@ -5656,6 +5656,25 @@ export function dispatchToIdeSession(
     token,
   );
 }
+
+export type IdeDispatchStatus = {
+  id: string;
+  status: 'PENDING' | 'DISPATCHING' | 'DISPATCHED' | string;
+  result: string | null;
+  dispatchedAt: string | null;
+  createdAt: string;
+  sessionId: string;
+  delivered: boolean;
+  failed: boolean;
+};
+
+export function fetchIdeDispatchStatus(token: string, dispatchId: string) {
+  return apiFetch<IdeDispatchStatus>(
+    `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}`,
+    undefined,
+    token,
+  );
+}
 export type PlatformBrainStatus = { configured: boolean; updatedAt: string | null };
 
 export function fetchPlatformBrainStatus(token: string) {
