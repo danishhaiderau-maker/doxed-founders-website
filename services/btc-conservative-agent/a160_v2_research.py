@@ -446,20 +446,31 @@ def checked_to_v2_ai(checked: dict, latency_ms: int = 0) -> dict:
     }
 
 
+def _v2_outcome_is_reject_counterfactual(row: dict) -> bool:
+    """Reject-path counterfactual sims must not count as checker-pass shadow fills."""
+    mode = str((row or {}).get("collection_mode") or "").upper()
+    if mode == "V2_CHECKER_REJECT":
+        return True
+    if mode == "V2_SHADOW":
+        return False
+    return not bool((row or {}).get("checker_accepted", True))
+
+
 def load_v2_shadow_metrics(cwd: str = None) -> dict:
-    """Aggregate V2 checker approves + legacy shadow outcomes for Pathway Lab tile fallback.
+    """Aggregate V2 checker approves + shadow outcomes for Pathway Lab tile fallback.
 
     Live paper fills/PnL come from lane_pnl_ledger / trades_3factor.csv (same as AI60).
-    This loader supplies approve counts from v2_checker_log when analyzer disk metrics lag.
+    Checker-pass sims and reject counterfactuals are split — matches analyzer Lane Laboratory.
     """
     base = cwd or os.getcwd()
     outcome_path = os.path.join(base, V2_SHADOW_OUTCOME_FILE)
     checker_path = os.path.join(base, V2_CHECKER_LOG_FILE)
     approves = 0
-    fills = 0
-    pnl = 0.0
-    wins = 0
-    losses = 0
+    checker_pass_sims = 0
+    checker_pass_pnl = 0.0
+    checker_pass_wins = 0
+    reject_sims = 0
+    reject_pnl = 0.0
     try:
         if os.path.isfile(checker_path):
             with open(checker_path, encoding="utf-8") as f:
@@ -488,35 +499,42 @@ def load_v2_shadow_metrics(cwd: str = None) -> dict:
                         continue
                     if not row.get("filled"):
                         continue
-                    fills += 1
                     net = float(row.get("net_pnl_usd") or 0)
-                    pnl += net
-                    if net >= 0:
-                        wins += 1
+                    if _v2_outcome_is_reject_counterfactual(row):
+                        reject_sims += 1
+                        reject_pnl += net
                     else:
-                        losses += 1
+                        checker_pass_sims += 1
+                        checker_pass_pnl += net
+                        if net >= 0:
+                            checker_pass_wins += 1
     except Exception:
         pass
-    if approves <= 0 and fills > 0:
-        approves = fills
-    ev = round(pnl / approves, 2) if approves else 0.0
-    win_rate = round(100.0 * wins / fills, 1) if fills else 0.0
+    if approves <= 0 and checker_pass_sims > 0:
+        approves = checker_pass_sims
+    ev = round(checker_pass_pnl / approves, 2) if approves else 0.0
+    win_rate = round(100.0 * checker_pass_wins / checker_pass_sims, 1) if checker_pass_sims else 0.0
+    has_shadow = checker_pass_sims > 0 or reject_sims > 0
     return {
         "approves": approves,
-        "real_fills": fills,
-        "approve_to_fill_pct": round(100.0 * fills / approves, 1) if approves else 0.0,
-        "shadow_fill_pct": round(100.0 * fills / approves, 1) if approves else 0.0,
-        "net_pnl_real": round(pnl, 2),
+        "real_fills": checker_pass_sims,
+        "checker_pass_sims": checker_pass_sims,
+        "checker_pass_pnl": round(checker_pass_pnl, 2),
+        "reject_counterfactual_sims": reject_sims,
+        "reject_counterfactual_pnl": round(reject_pnl, 2),
+        "approve_to_fill_pct": round(100.0 * checker_pass_sims / approves, 1) if approves else 0.0,
+        "shadow_fill_pct": round(100.0 * checker_pass_sims / approves, 1) if approves else 0.0,
+        "net_pnl_real": round(checker_pass_pnl, 2),
         "per_approve_ev": ev,
         "win_rate_pct": win_rate,
-        "verdict": "shadow sim (tile OFF)" if fills else "independent paper orders",
+        "verdict": "shadow sim (tile OFF)" if has_shadow else "independent paper orders",
         "lab_mode": False,
         "lab_closes": 0,
         "lab_net_pnl": 0.0,
-        "lab_wins": wins,
-        "lab_losses": losses,
-        "lab_win_rate": round(100.0 * wins / fills, 1) if fills else 0.0,
-        "lab_per_close_ev": round(pnl / fills, 2) if fills else 0.0,
+        "lab_wins": checker_pass_wins,
+        "lab_losses": checker_pass_sims - checker_pass_wins,
+        "lab_win_rate": win_rate,
+        "lab_per_close_ev": round(checker_pass_pnl / checker_pass_sims, 2) if checker_pass_sims else 0.0,
     }
 
 
