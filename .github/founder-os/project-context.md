@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-node): refuse Cursor dispatch when composer tab focus cannot be verified
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
