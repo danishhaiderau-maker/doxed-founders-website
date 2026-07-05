@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(agent-hub): canonical showcase fetches, analyzer 500, Bitfinex trade backfill
 
 ## Last Activity
 
