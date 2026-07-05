@@ -1,6 +1,5 @@
 import { apiUrl, describeApiTarget } from './api-base';
 import type { AgentShowcaseFlash, GamifiedRole, NotificationPreferenceGroups, SecurityScoreResult } from '@dcf/utils';
-import { withFounderOsDispatchAttribution } from '@dcf/utils';
 
 export interface DexScreenerPreview {
   dexscreenerUrl: string;
@@ -5650,7 +5649,7 @@ export function dispatchToIdeSession(
     {
       method: 'POST',
       body: JSON.stringify({
-        prompt: withFounderOsDispatchAttribution(prompt),
+        prompt,
         ideProvider,
       }),
     },

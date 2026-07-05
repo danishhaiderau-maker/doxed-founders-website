@@ -22,27 +22,35 @@ import { throwIfFounderNodeAuthResponse } from './sync-client';
  *   2. Writes the composer to the front of Cursor's workspace focus list.
  *   3. Opens / focuses the workspace via `cursor --reuse-window`.
  *   4. Copies the prompt to the clipboard and pastes into the focused composer
- *      input (does NOT use Ctrl+Shift+L — that opens a brand-new chat tab).
+ *      input — no Ctrl+L (browser omnibox) or Ctrl+Shift+L (new chat tab).
  *   5. Reports the result back to the API.
  */
 
 const MAX_DISPATCHES_PER_CYCLE = 1;
-const CURSOR_FOCUS_WAIT_MS = 2500;
-const COMPOSER_TAB_SETTLE_MS = 900;
-const SESSION_DISPATCH_COOLDOWN_MS = 8_000;
-const DISPATCH_FINGERPRINT_COOLDOWN_MS = 30_000;
-const CURSOR_FOCUS_ATTEMPTS = 5;
-const CURSOR_FOCUS_ATTEMPT_MS = 450;
+const CURSOR_FOCUS_WAIT_MS = 3000;
+const COMPOSER_TAB_SETTLE_MS = 1400;
+const SESSION_DISPATCH_COOLDOWN_MS = 12_000;
+const DISPATCH_FINGERPRINT_COOLDOWN_MS = 60_000;
+const CURSOR_FOCUS_ATTEMPTS = 8;
+const CURSOR_FOCUS_ATTEMPT_MS = 400;
+const SENDKEYS_STEP_DELAY_MS = 350;
+const ENTER_SUBMIT_DELAY_MS = 500;
 
 let dispatchCycleInFlight = false;
 const lastDispatchBySession = new Map<string, number>();
 const recentDispatchFingerprints = new Map<string, number>();
+const executingDispatchIds = new Set<string>();
 
 export type PendingDispatch = {
   id: string;
   sessionId: string;
   prompt: string;
   ideProvider: string;
+};
+
+type SendKeysStep = {
+  keys: string;
+  delayMs: number;
 };
 
 function apiBase(apiBaseUrl: string, path: string): string {
@@ -113,13 +121,17 @@ export async function completeDispatch(
   }
 }
 
-function execAsync(cmd: string): Promise<{ ok: boolean; error?: string }> {
+function execAsync(cmd: string): Promise<{ ok: boolean; error?: string; stdout?: string }> {
   return new Promise((resolve) => {
-    exec(cmd, (err) => {
+    exec(cmd, (err, stdout, stderr) => {
       if (err) {
-        resolve({ ok: false, error: err.message });
+        resolve({
+          ok: false,
+          error: err.message,
+          stdout: `${stdout || ''}${stderr || ''}`.trim() || undefined,
+        });
       } else {
-        resolve({ ok: true });
+        resolve({ ok: true, stdout: (stdout || '').trim() || undefined });
       }
     });
   });
@@ -135,57 +147,98 @@ function dispatchFingerprint(sessionId: string, prompt: string): string {
 }
 
 /**
- * Win32: activate Cursor.exe main window and verify it owns the foreground.
- * Prevents SendKeys (^l, ^v, {ENTER}) from hitting the browser address bar
- * (Ctrl+L in Edge/Chrome focuses omnibox → paste + Enter opens Bing search).
+ * Win32 helpers embedded once per script. Foreground is verified by **process
+ * name** (Cursor.exe), not window title — browser tabs mentioning "Cursor"
+ * must never pass the guard.
  */
-async function ensureCursorWindowFocused(): Promise<{ ok: boolean; foregroundTitle?: string }> {
-  if (process.platform !== 'win32') return { ok: false, foregroundTitle: undefined };
+const WIN32_CURSOR_FOCUS_TYPE = [
+  'Add-Type @"',
+  'using System;',
+  'using System.Diagnostics;',
+  'using System.Runtime.InteropServices;',
+  'using System.Text;',
+  'public class FnCursorFocus {',
+  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);',
+  '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);',
+  '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+  '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);',
+  '  public static IntPtr FindCursorMainWindow() {',
+  '    foreach (var p in Process.GetProcessesByName("Cursor")) {',
+  '      if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;',
+  '    }',
+  '    return IntPtr.Zero;',
+  '  }',
+  '  public static string ForegroundProcessName() {',
+  '    var fg = GetForegroundWindow();',
+  '    if (fg == IntPtr.Zero) return "";',
+  '    uint pid;',
+  '    GetWindowThreadProcessId(fg, out pid);',
+  '    try { return Process.GetProcessById((int)pid).ProcessName; } catch { return ""; }',
+  '  }',
+  '  public static string ForegroundTitle() {',
+  '    var sb = new StringBuilder(512);',
+  '    GetWindowText(GetForegroundWindow(), sb, 512);',
+  '    return sb.ToString();',
+  '  }',
+  '  public static bool IsCursorForeground() {',
+  '    return string.Equals(ForegroundProcessName(), "Cursor", StringComparison.OrdinalIgnoreCase);',
+  '  }',
+  '  public static bool ActivateCursor() {',
+  '    var h = FindCursorMainWindow();',
+  '    if (h == IntPtr.Zero) return false;',
+  '    ShowWindow(h, 9);',
+  '    return SetForegroundWindow(h);',
+  '  }',
+  '  public static bool EnsureCursorForeground(int attempts, int delayMs) {',
+  '    for (int i = 0; i < attempts; i++) {',
+  '      ActivateCursor();',
+  '      System.Threading.Thread.Sleep(delayMs);',
+  '      if (IsCursorForeground()) return true;',
+  '    }',
+  '    return IsCursorForeground();',
+  '  }',
+  '}',
+  '"@;',
+].join('');
+
+function escapePsSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+/**
+ * Run SendKeys only inside a single PowerShell process that verifies
+ * Cursor.exe owns the foreground immediately before every keystroke.
+ * Never split focus-check and SendKeys across separate exec() calls.
+ */
+async function runVerifiedCursorSendKeys(
+  steps: SendKeysStep[],
+): Promise<{ ok: boolean; error?: string; foregroundTitle?: string }> {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'Windows-only SendKeys' };
+  }
+
+  const stepScripts = steps
+    .map(
+      (step) =>
+        `if (-not [FnCursorFocus]::IsCursorForeground()) { Write-Output ('FAIL:' + [FnCursorFocus]::ForegroundProcessName() + '|' + [FnCursorFocus]::ForegroundTitle()); exit 1 }` +
+        `[System.Windows.Forms.SendKeys]::SendWait('${escapePsSingleQuoted(step.keys)}');` +
+        `Start-Sleep -Milliseconds ${step.delayMs};`,
+    )
+    .join('');
 
   const ps =
-    'Add-Type @\"' +
-    'using System;' +
-    'using System.Diagnostics;' +
-    'using System.Runtime.InteropServices;' +
-    'using System.Text;' +
-    'public class FnCursorFocus {' +
-    '  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' +
-    '  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' +
-    '  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();' +
-    '  [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);' +
-    '  public static IntPtr FindCursorMainWindow() {' +
-    '    foreach (var p in Process.GetProcessesByName(\"Cursor\")) {' +
-    '      if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;' +
-    '    }' +
-    '    return IntPtr.Zero;' +
-    '  }' +
-    '  public static string ForegroundTitle() {' +
-    '    var sb = new StringBuilder(512);' +
-    '    GetWindowText(GetForegroundWindow(), sb, 512);' +
-    '    return sb.ToString();' +
-    '  }' +
-    '  public static bool ActivateCursor() {' +
-    '    var h = FindCursorMainWindow();' +
-    '    if (h == IntPtr.Zero) return false;' +
-    '    ShowWindow(h, 9);' +
-    '    return SetForegroundWindow(h);' +
-    '  }' +
-    '}' +
-    '\"@;' +
-    `$ok=$false;` +
-    `$title='';` +
-    `for ($i=0; $i -lt ${CURSOR_FOCUS_ATTEMPTS}; $i++) {` +
-    '  [void][FnCursorFocus]::ActivateCursor();' +
-    `  Start-Sleep -Milliseconds ${CURSOR_FOCUS_ATTEMPT_MS};` +
-    '  $title=[FnCursorFocus]::ForegroundTitle();' +
-    "  if ($title -match 'Cursor') { $ok=$true; break }" +
-    '}' +
-    'if ($ok) { Write-Output ("OK:" + $title) } else { Write-Output ("FAIL:" + $title) }';
+    WIN32_CURSOR_FOCUS_TYPE +
+    'Add-Type -AssemblyName System.Windows.Forms;' +
+    `$ok=[FnCursorFocus]::EnsureCursorForeground(${CURSOR_FOCUS_ATTEMPTS},${CURSOR_FOCUS_ATTEMPT_MS});` +
+    'if (-not $ok) { Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1 }' +
+    stepScripts +
+    'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())';
 
   return readCursorFocusResult(ps);
 }
 
-async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; foregroundTitle?: string }> {
+async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
   return new Promise((resolve) => {
     exec(`powershell -NoProfile -Command "${psBody.replace(/"/g, '\\"')}"`, (err, stdout) => {
       const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
@@ -194,23 +247,28 @@ async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; for
         return;
       }
       if (line.startsWith('FAIL:')) {
-        resolve({ ok: false, foregroundTitle: line.slice(5) || undefined });
+        const detail = line.slice(5);
+        const [processName, title] = detail.split('|');
+        resolve({
+          ok: false,
+          foregroundTitle: title || processName || undefined,
+          error: `Cursor.exe not foreground (process="${processName ?? 'unknown'}", title="${title ?? ''}")`,
+        });
         return;
       }
-      resolve({ ok: false, foregroundTitle: line || err?.message });
+      resolve({
+        ok: false,
+        foregroundTitle: line || undefined,
+        error: err?.message || line || 'Cursor focus verification failed',
+      });
     });
   });
 }
 
-async function runSendKeys(script: string): Promise<{ ok: boolean; error?: string }> {
-  const focus = await ensureCursorWindowFocused();
-  if (!focus.ok) {
-    return {
-      ok: false,
-      error: `Cursor window not focused (foreground="${focus.foregroundTitle ?? 'unknown'}") — refusing SendKeys`,
-    };
-  }
-  return execAsync(`powershell -NoProfile -Command "${script.replace(/"/g, '\\"')}"`);
+/** Pre-flight activation check — abort dispatch before touching clipboard/SendKeys. */
+async function ensureCursorWindowFocused(): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows-only' };
+  return runVerifiedCursorSendKeys([]);
 }
 
 const ATTACH_IMAGE_RE =
@@ -293,11 +351,13 @@ async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
 }
 
 /**
- * Send the prompt into the focused Cursor composer input via clipboard +
- * SendKeys. Avoids Ctrl+Shift+L which opens a new chat tab in Cursor 3.x.
- * Image attachments (embedded by Founder OS) are pasted first when possible.
+ * Paste into the composer that focusComposerInWorkspaceState + cursor CLI
+ * already selected. No Ctrl+L — that hijacks browser address bars during demos.
  */
-async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
+async function sendPromptToFocusedComposer(
+  prompt: string,
+  composerFocusedInState: boolean,
+): Promise<void> {
   const { text, images } = parseDispatchPrompt(prompt);
 
   if (process.platform !== 'win32') {
@@ -311,36 +371,22 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
     );
   }
 
-  // Give Cursor time to restore the focused composer tab after workspace activation.
-  await sleep(COMPOSER_TAB_SETTLE_MS);
+  await sleep(composerFocusedInState ? COMPOSER_TAB_SETTLE_MS : COMPOSER_TAB_SETTLE_MS + 600);
 
-  const focusBeforeKeys = await ensureCursorWindowFocused();
-  if (!focusBeforeKeys.ok) {
+  const focusBeforePaste = await ensureCursorWindowFocused();
+  if (!focusBeforePaste.ok) {
     throw new Error(
-      `Cursor is not the foreground window (got "${focusBeforeKeys.foregroundTitle ?? 'unknown'}") — aborting paste to avoid browser/search hijack`,
+      focusBeforePaste.error ??
+        `Cursor.exe is not the foreground process — aborting paste to avoid browser/search hijack`,
     );
   }
 
-  // Ctrl+L focuses the chat/composer input in the active tab without spawning
-  // a new agent session (Ctrl+Shift+L does spawn one — that was the bug).
-  const focusCmd =
-    'Add-Type -AssemblyName System.Windows.Forms;' +
-    '[System.Windows.Forms.SendKeys]::SendWait(\'^l\');' +
-    'Start-Sleep -Milliseconds 450;';
-  const focusResult = await runSendKeys(focusCmd);
-  if (!focusResult.ok) {
-    throw new Error(`SendKeys focus failed: ${focusResult.error ?? 'unknown error'}`);
-  }
-
-  // Paste images (if any), then the text prompt.
   for (const img of images.slice(0, 3)) {
     const ok = await pasteImageDataUrl(img.dataUrl);
     if (!ok) continue;
-    const pasteImg =
-      'Add-Type -AssemblyName System.Windows.Forms;' +
-      '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
-      'Start-Sleep -Milliseconds 400;';
-    const imgResult = await runSendKeys(pasteImg);
+    const imgResult = await runVerifiedCursorSendKeys([
+      { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
+    ]);
     if (!imgResult.ok) {
       throw new Error(`SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`);
     }
@@ -358,14 +404,24 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
     throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const pasteText =
-    'Add-Type -AssemblyName System.Windows.Forms;' +
-    '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
-    'Start-Sleep -Milliseconds 250;' +
-    '[System.Windows.Forms.SendKeys]::SendWait(\'{ENTER}\');';
-  const result = await runSendKeys(pasteText);
-  if (!result.ok) {
-    throw new Error(`SendKeys failed: ${result.error ?? 'unknown error'}`);
+  await sleep(120);
+
+  const pasteResult = await runVerifiedCursorSendKeys([
+    { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
+  ]);
+  if (!pasteResult.ok) {
+    throw new Error(`SendKeys paste failed: ${pasteResult.error ?? 'unknown error'}`);
+  }
+
+  await sleep(ENTER_SUBMIT_DELAY_MS);
+
+  const submitResult = await runVerifiedCursorSendKeys([
+    { keys: '{ENTER}', delayMs: SENDKEYS_STEP_DELAY_MS },
+  ]);
+  if (!submitResult.ok) {
+    throw new Error(
+      `SendKeys submit refused — Cursor lost focus before Enter (${submitResult.error ?? 'unknown'})`,
+    );
   }
 }
 
@@ -412,6 +468,13 @@ export async function executeCursorDispatch(
   nodeToken: string,
   dispatch: PendingDispatch,
 ): Promise<void> {
+  if (executingDispatchIds.has(dispatch.id)) {
+    await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, {
+      result: 'deduplicated (dispatch already executing)',
+    });
+    return;
+  }
+
   const fingerprint = dispatchFingerprint(dispatch.sessionId, dispatch.prompt);
   const lastFingerprintAt = recentDispatchFingerprints.get(fingerprint) ?? 0;
   if (Date.now() - lastFingerprintAt < DISPATCH_FINGERPRINT_COOLDOWN_MS) {
@@ -420,6 +483,9 @@ export async function executeCursorDispatch(
     });
     return;
   }
+
+  executingDispatchIds.add(dispatch.id);
+  recentDispatchFingerprints.set(fingerprint, Date.now());
 
   try {
     const composerId = dispatch.sessionId;
@@ -433,8 +499,13 @@ export async function executeCursorDispatch(
       folderPath,
     );
 
-    await sendPromptToFocusedComposer(dispatch.prompt);
-    recentDispatchFingerprints.set(fingerprint, Date.now());
+    if (!focusedTab && !openedWorkspace) {
+      throw new Error(
+        'Could not focus Cursor workspace or composer tab — refusing SendKeys',
+      );
+    }
+
+    await sendPromptToFocusedComposer(dispatch.prompt, focusedTab);
 
     const bits = [
       `composer=${composerId.slice(0, 8)}`,
@@ -445,11 +516,14 @@ export async function executeCursorDispatch(
       result: `dispatched (${bits.join(', ')})`,
     });
   } catch (err) {
+    recentDispatchFingerprints.delete(fingerprint);
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Cursor dispatch ${dispatch.id} failed:`, message);
     await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, { error: message }).catch(
       (e) => console.error('Failed to report dispatch error:', e),
     );
+  } finally {
+    executingDispatchIds.delete(dispatch.id);
   }
 }
 
@@ -476,6 +550,15 @@ export async function processPendingDispatches(vaultRoot: string): Promise<void>
       const candidate = dispatches[i]!;
       const lastAt = lastDispatchBySession.get(candidate.sessionId) ?? 0;
       if (Date.now() - lastAt < SESSION_DISPATCH_COOLDOWN_MS) {
+        continue;
+      }
+
+      const fingerprint = dispatchFingerprint(candidate.sessionId, candidate.prompt);
+      const lastFingerprintAt = recentDispatchFingerprints.get(fingerprint) ?? 0;
+      if (Date.now() - lastFingerprintAt < DISPATCH_FINGERPRINT_COOLDOWN_MS) {
+        await completeDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, candidate.id, {
+          result: 'deduplicated (identical prompt recently dispatched)',
+        }).catch(() => undefined);
         continue;
       }
 

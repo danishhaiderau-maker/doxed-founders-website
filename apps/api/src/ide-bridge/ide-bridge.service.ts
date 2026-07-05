@@ -24,7 +24,7 @@ export type PendingIdeDispatchRow = {
   ideProvider: string;
 };
 
-const DISPATCH_DEDUPE_MS = 30_000;
+const DISPATCH_DEDUPE_MS = 60_000;
 const DISPATCH_ATTACH_RE =
   /<!--founder-attach:image:[\s\S]*?-->/g;
 
@@ -421,16 +421,24 @@ export class IdeBridgeService {
     const attributed = withFounderOsDispatchAttribution(trimmed);
     const dedupeKey = normalizeDispatchPromptForDedupe(attributed);
 
-    // One row per user action — ignore duplicate POSTs within 30s (normalized text).
+    // One row per user action — ignore duplicate POSTs within 60s (normalized text).
     const recent = (await this.dispatchModel.findMany({
       where: {
         userId,
         sessionId,
-        createdAt: { gte: new Date(Date.now() - DISPATCH_DEDUPE_MS) },
-        status: { in: ['PENDING', 'DISPATCHING'] },
+        OR: [
+          {
+            createdAt: { gte: new Date(Date.now() - DISPATCH_DEDUPE_MS) },
+            status: { in: ['PENDING', 'DISPATCHING'] },
+          },
+          {
+            dispatchedAt: { gte: new Date(Date.now() - DISPATCH_DEDUPE_MS) },
+            status: 'DISPATCHED',
+          },
+        ],
       },
       orderBy: { createdAt: 'desc' },
-      take: 8,
+      take: 12,
       select: { id: true, status: true, prompt: true },
     })) as Array<{ id: string; status: string; prompt: string }>;
     const duplicate = recent.find(
