@@ -297,13 +297,13 @@ function HistoryThread({
   }
   if (!messages || messages.length === 0) {
     return (
-      <div className='mb-4 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-4 text-center text-xs text-zinc-500'>
+      <div className='rounded-lg border border-white/5 bg-white/[0.03] px-3 py-3 text-center text-xs text-zinc-500 sm:py-4'>
         No messages stored for this session yet.
       </div>
     );
   }
   return (
-    <div className='mx-auto mb-4 max-w-3xl space-y-2.5'>
+    <div className='mx-auto max-w-3xl space-y-2 sm:space-y-2.5'>
       <div className='px-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>
         Conversation history
       </div>
@@ -1130,9 +1130,14 @@ export function MinimalDevWorkspace({
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
+  const showEmptyChatPlaceholder =
+    !showConnectWizard &&
+    !selectedSession &&
+    messages.length === 0 &&
+    !(history?.length);
 
   return (
-    <div className='flex h-[calc(100vh-3.5rem)] w-full bg-[#08080c] text-zinc-100'>
+    <div className='flex h-[calc(100vh-3.5rem)] min-h-0 w-full bg-[#08080c] text-zinc-100'>
       {/* Mobile sidebar toggle */}
       <button
         onClick={() => setSidebarOpen((v) => !v)}
@@ -1227,9 +1232,9 @@ export function MinimalDevWorkspace({
         </div>
       </aside>
 
-      <main className='flex min-w-0 flex-1 flex-col'>
+      <main className='flex min-h-0 min-w-0 flex-1 flex-col'>
         {/* Today card */}
-        <div className='border-b border-white/5 bg-[#0a0a0f] px-4 py-3'>
+        <div className='shrink-0 border-b border-white/5 bg-[#0a0a0f] px-3 py-2 sm:px-4 sm:py-3'>
           <div className='mx-auto max-w-3xl'>
             <div className='mb-2 flex items-center gap-3'>
               <span className='text-xs font-semibold uppercase tracking-wider text-zinc-400'>Today</span>
@@ -1366,12 +1371,12 @@ export function MinimalDevWorkspace({
         <div
           ref={scrollRef}
           onScroll={handleScrollAreaScroll}
-          className='min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 py-4 [overflow-anchor:auto] [-webkit-overflow-scrolling:touch]'
+          className='flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain px-3 py-2 sm:px-4 sm:py-3 [overflow-anchor:auto] [-webkit-overflow-scrolling:touch]'
           style={{ touchAction: 'pan-y', overflowAnchor: 'auto' }}
         >
-          {selectedWs && !selectedSession && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
+          {selectedWs && !selectedSession && <div className='mb-2 shrink-0 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400 sm:mb-3'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
           {selectedSession && (
-            <div className='mx-auto mb-3 max-w-3xl rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300'>
+            <div className='mx-auto mb-2 max-w-3xl shrink-0 rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300 sm:mb-3'>
               <div className='flex items-center gap-2'>
                 <span
                   className={
@@ -1393,15 +1398,22 @@ export function MinimalDevWorkspace({
             </div>
           )}
           {selectedSession && (
-            <HistoryThread
-              messages={history}
-              loading={historyLoading}
-              error={historyError}
-              agentTyping={selectedAgentTyping}
-            />
+            <div className='min-h-0 flex-1'>
+              <HistoryThread
+                messages={history}
+                loading={historyLoading}
+                error={historyError}
+                agentTyping={selectedAgentTyping}
+              />
+            </div>
           )}
-          {messages.length === 0 && !showConnectWizard && <div className='flex h-full items-center justify-center text-sm text-zinc-600'>Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.</div>}
-          <div className='mx-auto max-w-3xl space-y-3'>
+          {showEmptyChatPlaceholder && (
+            <div className='py-6 text-center text-sm text-zinc-600 sm:py-10'>
+              Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.
+            </div>
+          )}
+          {!selectedSession && (
+          <div className='mx-auto max-w-3xl shrink-0 space-y-2 sm:space-y-3'>
             {messages.map((m) => (
               <div key={m.id} className={'flex ' + (m.role === 'user' ? 'justify-end' : 'justify-start')}>
                 <div className={'max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ' + (m.role === 'user' ? 'bg-emerald-500/15 text-emerald-50' : 'bg-white/5 text-zinc-100')}>
@@ -1449,9 +1461,10 @@ export function MinimalDevWorkspace({
               </div>
             ))}
           </div>
+          )}
         </div>
 
-        <div className='border-t border-white/5 bg-[#0a0a0f] px-4 py-3'>
+        <div className='sticky bottom-0 z-10 shrink-0 border-t border-white/5 bg-[#0a0a0f] px-3 py-2 sm:px-4 sm:py-3'>
           {error && <div className='mb-2 text-xs text-rose-400'>{error}</div>}
           {dispatchNotice && (
             <div
@@ -1532,7 +1545,7 @@ export function MinimalDevWorkspace({
                     toggleVoice(input);
                   }}
                   className={
-                    'flex h-11 w-11 items-center justify-center rounded-xl text-sm transition ' +
+                    'flex h-9 w-9 items-center justify-center rounded-xl text-sm transition sm:h-11 sm:w-11 ' +
                     (listening
                       ? 'bg-red-600 text-white'
                       : waitingNetwork
@@ -1548,7 +1561,7 @@ export function MinimalDevWorkspace({
                 <button
                   type='button'
                   onClick={() => fileInputRef.current?.click()}
-                  className='flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#12121a] text-zinc-400 transition hover:text-zinc-100'
+                  className='flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-[#12121a] text-zinc-400 transition hover:text-zinc-100 sm:h-11 sm:w-11'
                   title='Attach image or file'
                 >
                   📎
@@ -1574,13 +1587,13 @@ export function MinimalDevWorkspace({
                       ? 'Select a Cursor chat in the sidebar to dispatch to your IDE'
                       : 'Message Founder OS — shift+enter for newline'
                 }
-                className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40 sm:text-sm'
+                className='min-h-[40px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-3 py-2 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40 sm:min-h-[44px] sm:px-4 sm:py-3 sm:text-sm'
               />
               <button
                 type='button'
                 onClick={handleSend}
                 disabled={busy || (!input.trim() && pendingAttachments.length === 0)}
-                className='min-h-[48px] min-w-[48px] touch-manipulation rounded-xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40 sm:min-h-0 sm:min-w-0'
+                className='min-h-[40px] min-w-[40px] touch-manipulation rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40 sm:min-h-0 sm:min-w-0 sm:px-5 sm:py-3'
               >
                 {busy ? '...' : 'Send'}
               </button>
