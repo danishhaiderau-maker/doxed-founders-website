@@ -836,6 +836,8 @@ def _chase_iso_payload():
         "continuous": direct,
         "urgent": chase,
         "primary_pair": primary,
+        "primary_inactive": rep.get("primary_inactive"),
+        "active_lanes": rep.get("active_lanes") or [],
         "pairs": rep.get("pairs") or [],
         "direct_lane": primary.get("direct_lane"),
         "chase_lane": primary.get("chase_lane"),
@@ -895,6 +897,8 @@ def _ladder_sim_payload():
         "replays_available": rep.get("replays_available"),
         "replays_matched_executed": rep.get("replays_matched_executed"),
         "disclaimer": rep.get("disclaimer"),
+        "data_status": rep.get("data_status"),
+        "empty_reason": rep.get("empty_reason"),
         "best_profile_id": rep.get("best_profile_id"),
         "profiles": rep.get("profiles") or [],
         "integrity": _integrity_payload(),
@@ -959,6 +963,7 @@ def _horizon_payload():
         "max_horizon_coverage_pct": rep.get("max_horizon_coverage_pct"),
         "min_coverage_pct_for_conclusions": rep.get("min_coverage_pct_for_conclusions", 80),
         "note": rep.get("note"),
+        "coverage_reason": rep.get("coverage_reason"),
     }
 
 
@@ -2301,9 +2306,15 @@ async function loadChaseIso() {
   const r = await fetch('/api/chase-iso');
   const d = await r.json();
   const note = document.getElementById('chase-iso-note');
-  if (note) note.textContent = `Verdict: ${d.verdict || 'n/a'} — COMBO Direct vs Chase 3+ per tile pair.`;
   const cont = d.continuous || {};
   const urg = d.urgent || {};
+  const inactive = d.primary_inactive || ((cont.trades||0) === 0 && (urg.trades||0) === 0);
+  if (note) {
+    note.textContent = inactive
+      ? `COMBO tiles inactive this session — primary: ${d.direct_label || 'CONTINUOUS'} vs ${d.chase_label || 'AI60 SP3'}. Global fill_model counts all lanes.`
+      : `Verdict: ${d.verdict || 'n/a'} — ${d.direct_label || 'Direct'} vs ${d.chase_label || 'Chase 3+'}.`;
+    note.style.color = inactive ? 'var(--amber)' : '';
+  }
   const directH = document.getElementById('chase-iso-direct-h');
   const chaseH = document.getElementById('chase-iso-chase-h');
   if (directH) directH.textContent = d.direct_label || d.direct_lane || 'Direct';
@@ -2312,6 +2323,8 @@ async function loadChaseIso() {
     ['Verdict', d.verdict || 'n/a'],
     ['Direct EV', '$' + fmtUsd(cont.ev_usd)],
     ['Chase EV', '$' + fmtUsd(urg.ev_usd)],
+    ['Direct trades', cont.trades ?? 0],
+    ['Chase trades', urg.trades ?? 0],
     ['Global fill model', JSON.stringify(d.global_fill_model || {})],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('chase-iso-notes').innerHTML = (d.notes||[]).map(n => `<li>${n}</li>`).join('') || '<li>No isolation notes.</li>';
@@ -2387,7 +2400,12 @@ async function loadLadderSim() {
   const r = await fetch('/api/ladder-sim');
   const d = await r.json();
   const disc = document.getElementById('ladder-sim-disclaimer');
-  if (disc) disc.textContent = d.disclaimer || '';
+  const noSim = !((d.profiles||[]).some(p => (p.trades_simulated||0) > 0));
+  const overlapZero = d.data_status === 'NO_EXECUTED_REPLAY_OVERLAP' || ((d.replays_matched_executed ?? 0) === 0 && (d.actual_trades ?? 0) > 0);
+  if (disc) {
+    disc.textContent = d.empty_reason || d.disclaimer || '';
+    disc.style.display = (overlapZero || d.disclaimer) ? '' : 'none';
+  }
   document.getElementById('ladder-sim-kpis').innerHTML = [
     ['Actual PnL', '$' + fmtUsd(d.actual_realized_usd)],
     ['Executed trades', d.actual_trades ?? 0],
@@ -2395,6 +2413,11 @@ async function loadLadderSim() {
     ['Replays on disk', d.replays_available ?? 0],
     ['Best profile', d.best_profile_id || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  if (noSim && overlapZero) {
+    document.getElementById('ladder-sim-body').innerHTML =
+      `<tr class="amber"><td colspan="8">No executed-trade replay overlap — ladder sim requires bot v1.1.41+ post-exit tick collection on session cont-*/vc603-* fills. ${d.replays_available ?? 0} replays on disk are mostly prior-session shadow/scan paths.</td></tr>`;
+    return;
+  }
   document.getElementById('ladder-sim-body').innerHTML = (d.profiles||[]).map(p => {
     const delta = p.delta_vs_actual_usd;
     const cls = p.unrealistic_vs_actual ? 'red' : (delta != null && delta > 50 ? 'amber' : '');
@@ -2449,9 +2472,10 @@ async function loadHorizon() {
   const d = await r.json();
   const note = document.getElementById('horizon-note');
   if (note) {
+    const reason = d.coverage_reason ? ` ${d.coverage_reason}` : '';
     note.textContent = d.conclusions_allowed
       ? (d.note || 'Coverage sufficient for recovery conclusions.')
-      : `⚠ Coverage ${d.max_horizon_coverage_pct ?? 0}% — recovery rates hidden until ≥${d.min_coverage_pct_for_conclusions ?? 80}%. ${d.note || ''}`;
+      : `⚠ Coverage ${d.max_horizon_coverage_pct ?? 0}% — recovery rates hidden until ≥${d.min_coverage_pct_for_conclusions ?? 80}%. ${d.note || ''}${reason}`;
     note.style.color = d.conclusions_allowed ? '' : 'var(--amber)';
   }
   const row = h => {

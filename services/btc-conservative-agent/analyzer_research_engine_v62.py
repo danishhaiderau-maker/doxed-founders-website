@@ -306,7 +306,10 @@ try:
         CONTINUOUS_PROXY_LANES,
         COMBO_CHASE_DELAY_LANES,
         COMBO_CHASE_DIRECT_REFERENCE,
+        ACTIVE_CHASE_ISOLATION_LANES,
+        ACTIVE_CHASE_ISOLATION_PAIRS,
         COMBO_CHASE_ISOLATION_PAIRS,
+        COMBO_LANE_SPECS,
         COMBO_EXECUTION_LANES,
         COMBO_LANE_LABELS as _COMBO_LANE_LABELS,
         EXPECTED_BOT_VERSION,
@@ -357,6 +360,15 @@ except ImportError:
         ("COMBO_604_SP4_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"),
         ("COMBO_65_SP5_DIRECT", "COMBO_65_SP5_CHASE_3PLUS"),
     )
+    ACTIVE_CHASE_ISOLATION_PAIRS = (
+        ("CONTINUOUS", "AI60_SP3_VIRTUAL_CHASE"),
+    )
+    ACTIVE_CHASE_ISOLATION_LANES = (
+        "CONTINUOUS",
+        "AI60_SP3_VIRTUAL_CHASE",
+        "A160_CONTEXT_CHASE_EXIT_V2",
+    )
+    COMBO_LANE_SPECS = {}
     COMBO_CHASE_DIRECT_REFERENCE = "COMBO_604_SP4_DIRECT"
     ACTIVE_PATHWAY_LANES = (
         "COMBO_65_SP5_CHASE_3PLUS",
@@ -1790,9 +1802,9 @@ def _ladder_lock_for_peak_custom(peak_pct, ladder):
 
 
 def _signal_replay_paths():
-    paths = [SIGNAL_REPLAY_FILE]
+    paths = [_agent_data_path(SIGNAL_REPLAY_FILE)]
     for i in range(1, 6):
-        alt = f"{SIGNAL_REPLAY_FILE}.{i}"
+        alt = _agent_data_path(f"{SIGNAL_REPLAY_FILE}.{i}")
         if os.path.isfile(alt):
             paths.append(alt)
     return paths
@@ -1802,6 +1814,8 @@ def _load_jsonl_replays():
     replays = {}
     try:
         for path in _signal_replay_paths():
+            if not os.path.isfile(path):
+                continue
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -12143,6 +12157,21 @@ def _fast_cut_trade_replay(trade_row, replays):
     return None
 
 
+def _replay_keys_for_trade_id(trade_id: str) -> tuple:
+    """Candidate replay keys for an executed trade_id (direct + rev- alias)."""
+    tid = str(trade_id or "").strip()
+    if not tid:
+        return ()
+    keys = [tid]
+    if not tid.startswith("rev-"):
+        keys.append(f"rev-{tid}")
+    return tuple(keys)
+
+
+def _trade_has_replay(trade_id: str, replays: dict) -> bool:
+    return any(k in replays for k in _replay_keys_for_trade_id(trade_id))
+
+
 def _resolve_trade_exit_t(replay, trade_row, exit_reason=None):
     """Best-effort exit timestamp (seconds from replay start) for horizon checks."""
     if replay and replay.get("exit_t_rel") is not None:
@@ -12335,9 +12364,16 @@ def horizon_profitability_report(trades=None, session=None):
         "trades": trade_rows[:100],
         "note": (
             "Recovery rates hidden until coverage >= 80%. "
-            "Bot v1.1.41+ collects 120m post-exit replay ticks — re-run after fresh data."
+            "Bot v1.1.41+ collects 120m post-exit replay ticks on executed trade_ids — "
+            "re-run after fresh session fills accumulate post-exit data."
             if max_coverage < HORIZON_MIN_COVERAGE_PCT
             else "Coverage sufficient for recovery conclusions."
+        ),
+        "coverage_reason": (
+            f"0/{n_losers} losing trades have post-exit replay ticks linked to session trade_ids. "
+            "Prior-session replays (scan-*, rev-*) do not overlap fresh cont-*/vc603-* fills."
+            if max_coverage < HORIZON_MIN_COVERAGE_PCT and n_losers
+            else None
         ),
     }
     try:
@@ -13159,22 +13195,32 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
 
     global_fill = work["fill_model"].value_counts().to_dict() if not work.empty and "fill_model" in work.columns else {}
     pairs_out = []
-    for direct_lane, chase_lane in COMBO_CHASE_ISOLATION_PAIRS:
+    isolation_pairs = list(ACTIVE_CHASE_ISOLATION_PAIRS) + list(COMBO_CHASE_ISOLATION_PAIRS)
+
+    for direct_lane, chase_lane in isolation_pairs:
         direct_a = _lane_audit(direct_lane)
         chase_a = _lane_audit(chase_lane)
+        combo_retired = bool(COMBO_LANE_SPECS.get(direct_lane, {}).get("is_legacy"))
+        session_inactive = (direct_a.get("trades") or 0) == 0 and (chase_a.get("trades") or 0) == 0
         pairs_out.append({
             "direct_lane": direct_lane,
             "chase_lane": chase_lane,
             "direct_label": RESEARCH_LANE_LABELS.get(direct_lane, direct_lane),
             "chase_label": RESEARCH_LANE_LABELS.get(chase_lane, chase_lane),
+            "combo_retired": combo_retired,
+            "session_inactive": session_inactive,
             "direct": {
                 **direct_a,
-                "chase_policy": "immediate limit (COMBO Direct)",
+                "chase_policy": "immediate limit (COMBO Direct)" if combo_retired else "CONTINUOUS immediate limit",
                 "virtual_chase_gate": False,
             },
             "chase": {
                 **chase_a,
-                "chase_policy": "virtual chase 3+ gate before fill",
+                "chase_policy": (
+                    "virtual chase 3+ gate before fill"
+                    if combo_retired
+                    else "virtual chase 3+ (AI60 SP3 tile)"
+                ),
                 "virtual_chase_gate": True,
             },
             "delta": {
@@ -13190,18 +13236,29 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
         })
         print(
             f"  {direct_lane} vs {chase_lane}: direct_n={direct_a.get('trades')} chase_n={chase_a.get('trades')} "
-            f"ΔEV=${pairs_out[-1]['delta']['ev_usd']} {PIPELINE_ENFORCEMENT_TAG}"
+            f"inactive={session_inactive} {PIPELINE_ENFORCEMENT_TAG}"
         )
 
-    primary = pairs_out[0] if pairs_out else {}
+    active_pairs = [p for p in pairs_out if not p.get("session_inactive")]
+    primary = active_pairs[0] if active_pairs else (pairs_out[0] if pairs_out else {})
     direct_primary = primary.get("direct") or {}
     chase_primary = primary.get("chase") or {}
     isolated = True
-    notes = [
+    notes = []
+    if primary.get("session_inactive"):
+        notes.append(
+            "COMBO tiles inactive this session (retired 2026-06-26) — compare CONTINUOUS vs AI60_SP3 instead."
+        )
+    else:
+        notes.append(
+            f"Primary pair: {primary.get('direct_label')} vs {primary.get('chase_label')} "
+            f"(direct n={direct_primary.get('trades', 0)}, chase n={chase_primary.get('trades', 0)})."
+        )
+    notes.extend([
         "COMBO Direct lanes use immediate limit entry; COMBO Chase lanes require virtual chase 3+ (or age/dist) before fill.",
         "fill_model=AI_DIRECT_CHASE tags limit_chase_count>0 on AI_DIRECT path — expected on both when chase steps fire.",
-        "Compare Direct vs Chase within the same AI/spread tier — not legacy CONTINUOUS / URGENT lanes.",
-    ]
+        "Global fill_model counts all session fills — not limited to the primary isolation pair.",
+    ])
     if direct_primary.get("fill_model") and chase_primary.get("fill_model"):
         if direct_primary["fill_model"].keys() == chase_primary["fill_model"].keys():
             notes.append("Primary pair fill_model keys match — parallel tagging, not cross-lane contamination.")
@@ -13215,8 +13272,10 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
         "verdict": "ISOLATED" if isolated else "CONTAMINATED",
         "isolation_notes": notes,
         "global_fill_model": global_fill,
+        "active_lanes": list(ACTIVE_CHASE_ISOLATION_LANES),
         "pairs": pairs_out,
         "primary_pair": primary,
+        "primary_inactive": bool(primary.get("session_inactive")),
         "benchmark_lane": BENCHMARK_LANE,
         "continuous_benchmark": direct_primary,
         "urgent_chase_alpha": chase_primary,
@@ -13600,16 +13659,24 @@ def exit_ladder_simulator_report(trades=None, session=None):
         pid: {"sum_pnl_usd": 0.0, "n": 0, "wins": 0, "ladder_exits": 0, "thesis_cuts": 0, "replay_end": 0}
         for pid in LADDER_SIM_PROFILES
     }
-    replays_considered = 0
-    replays_matched = 0
+    replays_considered = len(replays)
+    replays_matched = (
+        sum(1 for tid in executed_ids if _trade_has_replay(tid, replays))
+        if executed_ids
+        else 0
+    )
+    matched_replay_keys = set()
+    if executed_ids:
+        for tid in executed_ids:
+            for key in _replay_keys_for_trade_id(tid):
+                if key in replays:
+                    matched_replay_keys.add(key)
 
-    if replays:
-        for tid, replay in replays.items():
-            tid = str(tid)
-            replays_considered += 1
-            if executed_ids and tid not in executed_ids:
+    if replays and matched_replay_keys:
+        for tid in matched_replay_keys:
+            replay = replays.get(tid)
+            if not replay:
                 continue
-            replays_matched += 1
             entry = _replay_entry_price(replay)
             ticks = replay.get("ticks") or []
             if not entry or not ticks:
@@ -13670,14 +13737,35 @@ def exit_ladder_simulator_report(trades=None, session=None):
     best = profiles_out[0] if profiles_out else None
     disclaimer = (
         "HINDSIGHT COUNTERFACTUAL: tick replay on executed trade paths only (not perfect live fills). "
-        "perfect ladder fills at historical tick marks — optimistic vs live slippage/fees. "
+        "Perfect ladder fills at historical tick marks — optimistic vs live slippage/fees. "
         "Δ vs actual compares simulated cohort to session booked PnL; not a live deployment forecast."
     )
-    if executed_ids and replays_matched < actual_n:
-        disclaimer += (
-            f" Warning: only {replays_matched}/{actual_n} executed trades have tick replays "
+    if actual_n and replays_matched == 0:
+        data_status = "NO_EXECUTED_REPLAY_OVERLAP"
+        empty_reason = (
+            f"No executed-trade replay overlap — {replays_considered} replays on disk are mostly "
+            f"shadow/scan paths (scan-*, rev-*) from prior sessions, not linked to this session's "
+            f"{actual_n} cont-*/vc603-* fills. Ladder sim requires bot v1.1.41+ post-exit tick "
+            "collection on executed trade_ids after fresh start."
+        )
+        disclaimer += f" {empty_reason}"
+    elif executed_ids and replays_matched < actual_n:
+        data_status = "PARTIAL_OVERLAP"
+        empty_reason = (
+            f"Only {replays_matched}/{actual_n} executed trades have tick replays "
             f"({replays_considered} total replays on disk)."
         )
+        disclaimer += f" Warning: {empty_reason}"
+    elif replays_matched:
+        data_status = "OK"
+        empty_reason = None
+    elif not replays:
+        data_status = "NO_REPLAYS"
+        empty_reason = f"No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays."
+        disclaimer += f" {empty_reason}"
+    else:
+        data_status = "OK"
+        empty_reason = None
     if best and best.get("trades_simulated"):
         flag = " UNREALISTIC (>2× actual)" if best.get("unrealistic_vs_actual") else ""
         print(
@@ -13697,15 +13785,17 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "thesis_exit_above_pct": THESIS_EXIT_ABOVE_DEFAULT,
         "actual_realized_usd": actual_sum,
         "actual_trades": actual_n,
-        "replays_available": len(replays),
+        "replays_available": replays_considered,
         "replays_considered": replays_considered,
         "replays_matched_executed": replays_matched,
+        "data_status": data_status,
+        "empty_reason": empty_reason,
         "disclaimer": disclaimer,
         "profiles": profiles_out,
         "best_profile_id": best["profile_id"] if best and best.get("trades_simulated") else None,
     }
     try:
-        with open(EXIT_LADDER_SIMULATOR_REPORT_FILE, "w", encoding="utf-8") as f:
+        with open(analyzer_report_path(EXIT_LADDER_SIMULATOR_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         print(f"  ✅ Wrote {EXIT_LADDER_SIMULATOR_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
