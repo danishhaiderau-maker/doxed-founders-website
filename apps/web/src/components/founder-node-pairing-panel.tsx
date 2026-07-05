@@ -8,6 +8,7 @@ import {
   type FounderNodeStatusRow,
 } from '@/lib/api';
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 type Props = {
   accessToken: string;
@@ -117,7 +118,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-4">
       <h4 className="text-sm font-semibold text-cyan-100">Founder Node pairing</h4>
       <p className="mt-1 text-xs text-cyan-100/70">
-        Install Founder Node v0.7.7+ on your PC. Your vault stays local — Founder OS only receives tiny metadata
+        Install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL} on your PC. Your vault stays local — Founder OS only receives tiny metadata
         snapshots.
       </p>
 

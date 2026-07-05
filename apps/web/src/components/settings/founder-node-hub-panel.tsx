@@ -16,6 +16,7 @@ import { SealedSecretsPanel } from '@/components/settings/sealed-secrets-panel';
 import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
 import { PlatformSetupGuide } from '@/components/settings/platform-setup-guide';
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 function StatusCard({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
   return (
@@ -65,7 +66,7 @@ export function FounderNodeHubPanel({
   const v2 = settings.founderNodeV2;
   const paired = v2?.paired ?? false;
   const online = v2?.online ?? false;
-  const versionLabel = v2?.appVersion ? `v${v2.appVersion}` : 'v0.7.7+';
+  const versionLabel = v2?.appVersion ? `v${v2.appVersion}` : FOUNDER_NODE_MIN_VERSION_LABEL;
 
   return (
     <section className="rounded-2xl border border-cyan-500/40 bg-gradient-to-b from-cyan-950/20 to-[#0a0a0f] p-6 shadow-lg shadow-cyan-950/20">
@@ -95,7 +96,7 @@ export function FounderNodeHubPanel({
       {/* Primary CTAs — download */}
       <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
         <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
-        <p className="mt-0.5 text-xs text-zinc-500">Windows installer with auto-update — v0.7.7+ recommended.</p>
+        <p className="mt-0.5 text-xs text-zinc-500">Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.</p>
         <div className="mt-4">
           <FounderNodeDownloads />
         </div>

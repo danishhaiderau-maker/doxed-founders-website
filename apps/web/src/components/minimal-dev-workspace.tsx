@@ -49,6 +49,7 @@ type BrainOption = { key: string; label: string; hint: string };
 
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
+import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
@@ -895,7 +896,7 @@ export function MinimalDevWorkspace({
           {workspaces.length === 0 && (
             <div className='px-3 py-6 text-center text-xs text-zinc-600'>
               {pairingMismatchHint ??
-                'No workspaces detected. Make sure Founder Node v0.7.7+ is running, Cursor is open, and tray shows Last sync: just now.'}
+                `No workspaces detected. Make sure Founder Node ${FOUNDER_NODE_MIN_VERSION_LABEL} is running, Cursor is open, and tray shows Last sync: just now.`}
             </div>
           )}
           {workspaces.map((w) => (
@@ -1054,7 +1055,7 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.7+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL} on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
               {pairingMismatchHint && (
                 <p className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
                   {pairingMismatchHint}
@@ -1065,7 +1066,7 @@ export function MinimalDevWorkspace({
                   href={FOUNDER_DEN_ONBOARD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
-                  Download Founder Node v0.7.7 — setup hub
+                  Download Founder Node v{FOUNDER_NODE_MIN_VERSION} — setup hub
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}

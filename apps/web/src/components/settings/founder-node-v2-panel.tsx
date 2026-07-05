@@ -2,23 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
+import { founderNodeNeedsUpdate } from '@/lib/founder-node-requirements';
 
-/** Founder Node v0.7.7+ — single instance, one pairing dialog, hourly updates */
-function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
-  if (!version?.trim()) return true;
-  const parts = version
-    .trim()
-    .replace(/^v/i, '')
-    .split('.')
-    .map((n) => Number(n));
-  if (parts.some((n) => Number.isNaN(n))) return true;
-  const [major = 0, minor = 0, patch = 0] = parts;
-  if (major !== 0) return major < 0;
-  if (minor < 7) return true;
-  if (minor === 7 && patch < 7) return true;
-  return false;
-}
-
+/** Founder Node v0.7.8+ — single instance, one pairing dialog, hourly updates */
 function formatLastSeen(iso: string | null | undefined): string {
   if (!iso) return 'never (no heartbeat yet)';
   const ms = Date.now() - new Date(iso).getTime();

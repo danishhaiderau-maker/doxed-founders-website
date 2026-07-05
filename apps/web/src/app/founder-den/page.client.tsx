@@ -11,6 +11,7 @@ import {
   FounderOnboardingWizard,
 } from '@/components/founder-onboarding-wizard';
 import { FounderNodeDownloads } from '@/components/founder-node-downloads';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { FounderSetupRail } from '@/components/founder-setup-rail';
 import {
   createBuildPost,
@@ -283,7 +284,7 @@ export default function FounderDenPageClient() {
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/10 p-5">
             <h2 className="text-lg font-semibold text-white">Founder Node — download & pair</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Install v0.7.7+ on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
+              Install {FOUNDER_NODE_MIN_VERSION_LABEL} on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
             </p>
             <div className="mt-4">
               <FounderNodeDownloads />
@@ -292,6 +293,15 @@ export default function FounderDenPageClient() {
               Full pairing, AI brain, and vault settings are in{' '}
               <a href="/settings/builder" className="text-emerald-400 underline">
                 Settings → Founder Node
+              </a>
+              . Release notes:{' '}
+              <a
+                href="https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_NODE_v0.7.8_RELEASE.md"
+                className="text-emerald-400 underline"
+                target="_blank"
+                rel="noreferrer"
+              >
+                v0.7.8
               </a>
               .
             </p>
