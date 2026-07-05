@@ -13,6 +13,7 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   resolveSubscriberExecutionPollMs,
   DEFAULT_SUBSCRIBER_LEVERAGE,
+  resolveSubscriberLeverage,
   BITFINEX_COPY_POLICY_VERSION,
   resolveMaxConcurrentCopySignals,
   resolveMirrorDisasterStopMarginPct,
@@ -1508,7 +1509,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (qty <= MIN_QTY_BTC && meta.margin_usd && meta.limitPrice) {
         qty = computeQty(
           meta.margin_usd,
-          DEFAULT_SUBSCRIBER_LEVERAGE,
+          resolveSubscriberLeverage(),
           meta.limitPrice,
           MIN_QTY_BTC,
         );
@@ -2325,7 +2326,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
       }
 
-      const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+      const leverage = resolveSubscriberLeverage(intent);
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
     const prePosition = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
@@ -2626,7 +2627,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0));
     if (!fillPrice || fillPrice <= 0) return false;
     const qty = fill.filledQty;
-    const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent?.risk?.stop_loss_margin_pct, {
       mirrorMode: isShowcaseMirrorOnlyMode(),
     });
@@ -3049,7 +3050,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const runtime = this.positionRuntime.get(participant.id);
     if (runtime?.filledRecorded) return;
 
-    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
@@ -3193,7 +3194,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             ? position.basePrice
             : await this.activeTrading.getMarkPrice());
       const qty = meta.qty ?? MIN_QTY_BTC;
-      const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+      const leverage = resolveSubscriberLeverage(intent);
       const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
@@ -3833,7 +3834,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const entry = fillPrice ?? meta.limitPrice;
     if (!entry || entry <= 0) return;
 
-    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
       intent.risk.stop_loss_margin_pct,
       { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
@@ -3968,7 +3969,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ) {
     if (!meta.direction || !meta.bitfinexOrderId || !meta.limitPrice) return;
 
-    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
 
@@ -4395,8 +4396,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             fillPrice && fillPrice > 0
               ? (pnlUsd / (fillPrice * meta.qty)) *
                 100 *
-                ((cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
-                  DEFAULT_SUBSCRIBER_LEVERAGE)
+                resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope)
               : 0;
         }
         const exitSlippageUsd =
@@ -4430,8 +4430,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       let exitPrice = fillPrice ?? 0;
       const leverage =
-        (cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
-        DEFAULT_SUBSCRIBER_LEVERAGE;
+        resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
       try {
         if (meta.stopOrderId) {
           try {
@@ -4904,7 +4903,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return false;
     }
 
-    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const qty = computeQty(marginUsd, leverage, mark, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
 
@@ -5105,7 +5104,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           : 0;
     if (!fillPrice || fillPrice <= 0) return;
 
-    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
       intent.risk.stop_loss_margin_pct,
       { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
@@ -5988,7 +5987,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         limitPrice = sanitizeLimitPrice(mark, raw, direction) ?? limitPrice;
       }
     }
-    const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const leverage = resolveSubscriberLeverage(intent);
     const marginUsd =
       meta.margin_usd ??
       (intent?.risk?.max_margin_usd && intent.risk.max_margin_usd > 0
@@ -6088,7 +6087,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         reason: 'HARD_STOP',
         mark: mark || fillPrice,
         fillPrice,
-        leverage: meta.leverage ?? DEFAULT_SUBSCRIBER_LEVERAGE,
+        leverage: meta.leverage ?? resolveSubscriberLeverage(),
         peakMarginPct: meta.peakMarginPct ?? 0,
         unrealMarginPct: 0,
         stopLossMarginPct: meta.stopLossMarginPct ?? 0,
@@ -6761,7 +6760,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           qty,
           margin_usd: match.meta.margin_usd ?? marginCap,
           margin_cap_usd: marginCap,
-          leverage: intent.risk.leverage_hint ?? leverage,
+          leverage: resolveSubscriberLeverage(intent),
           bitfinexOrderId: order.id,
           clientOrderId: order.cid ?? match.meta.clientOrderId,
           source: 'hire',
