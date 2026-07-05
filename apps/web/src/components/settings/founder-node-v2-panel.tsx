@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 import { founderNodeNeedsUpdate } from '@/lib/founder-node-requirements';
 
-/** Founder Node v0.7.9+ — single instance, one pairing dialog, hourly updates */
+/** Founder Node v0.7.11+ — single instance, one pairing dialog, hourly updates */
 function formatLastSeen(iso: string | null | undefined): string {
   if (!iso) return 'never (no heartbeat yet)';
   const ms = Date.now() - new Date(iso).getTime();

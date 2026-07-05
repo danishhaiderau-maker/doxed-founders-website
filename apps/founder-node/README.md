@@ -4,7 +4,7 @@ Self-custody desktop vault for Founder OS project memory — your machine, your 
 
 Founder Node stores roadmaps, AI context, and build memory in `~/FounderVault/` on your laptop. Founder OS stays the control plane; the node syncs **metadata only** (never your full vault contents).
 
-**Current release:** v0.7.9 — tag `founder-node-v0.7.9` · [release notes](../docs/FOUNDER_NODE_v0.7.9_RELEASE.md)
+**Current release:** v0.7.11 — tag `founder-node-v0.7.11` · [release notes](../docs/FOUNDER_NODE_v0.7.11_RELEASE.md)
 
 ## Quick start (recommended)
 
@@ -12,9 +12,9 @@ Founder Node stores roadmaps, AI context, and build memory in `~/FounderVault/` 
 
 | Platform | Download |
 |----------|----------|
-| **Windows** | [Founder-Node-0.7.9-win-x64.exe](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
-| **macOS** | [Founder-Node-0.7.9-mac-x64.dmg](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
-| **Linux** | [Founder-Node-0.7.9-linux-x64.AppImage](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **Windows** | [Founder-Node-0.7.11-win-x64.exe](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **macOS** | [Founder-Node-0.7.11-mac-x64.dmg](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **Linux** | [Founder-Node-0.7.11-linux-x64.AppImage](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
 
 Or open **[doxxedcrypto.digital/founder-den](https://doxxedcrypto.digital/founder-den?onboard=sovereign#founder-node-download)** for one-click download buttons.
 
@@ -100,8 +100,8 @@ npm run pack:founder-node:linux # Linux AppImage
 Release tag (CI builds all platforms):
 
 ```bash
-git tag founder-node-v0.7.9
-git push origin founder-node-v0.7.9
+git tag founder-node-v0.7.11
+git push origin founder-node-v0.7.11
 ```
 
 ---
