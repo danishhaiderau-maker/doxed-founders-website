@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-release(founder-node): v0.7.8 download hub, iOS section, unified mobile docs
+fix dispatch Bing hijack v0.7.9
 
 ## Last Activity
 
