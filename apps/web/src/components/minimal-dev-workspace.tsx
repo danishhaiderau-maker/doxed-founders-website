@@ -143,6 +143,59 @@ function SessionRow({
 }
 
 const HISTORY_MSG_COLLAPSED_LEN = 280;
+const SCROLL_BOTTOM_THRESHOLD_PX = 96;
+const DISPATCH_PAYLOAD_MAX_CHARS = 9_000_000;
+
+function isNearScrollBottom(el: HTMLElement, threshold = SCROLL_BOTTOM_THRESHOLD_PX): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+/** Downscale phone camera photos so dispatch JSON stays under the API 10mb limit. */
+async function compressImageForDispatch(
+  file: File,
+  maxDim = 1600,
+  quality = 0.82,
+): Promise<string> {
+  if (!file.type.startsWith('image/')) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('read failed'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('decode failed'));
+      el.src = objectUrl;
+    });
+
+    let { width, height } = img;
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas unavailable');
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const mime = 'image/jpeg';
+    const dataUrl = canvas.toDataURL(mime, quality);
+    if (dataUrl.length > 4_000_000 && quality > 0.55) {
+      return compressImageForDispatch(file, maxDim, quality - 0.12);
+    }
+    return dataUrl;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 
 /** Never replace a populated thread with an empty API/poll payload. */
 function mergeBridgeHistory(
@@ -285,6 +338,10 @@ export function MinimalDevWorkspace({
   const postDispatchUntilRef = useRef(0);
   const agentTypingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
+  const forceScrollRef = useRef(false);
+  const prevHistoryLenRef = useRef(0);
+  const prevMessagesLenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Synchronous guard — React `busy` state updates too late for double-clicks. */
   const sendingRef = useRef(false);
@@ -368,6 +425,42 @@ export function MinimalDevWorkspace({
   );
 
   useEffect(() => () => stopHistoryPoll(), [stopHistoryPoll]);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+  }, []);
+
+  const handleScrollAreaScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    userScrolledUpRef.current = !isNearScrollBottom(el);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const histLen = history?.length ?? 0;
+    const msgLen = messages.length;
+    const historyGrew = histLen > prevHistoryLenRef.current;
+    const messagesGrew = msgLen > prevMessagesLenRef.current;
+    prevHistoryLenRef.current = histLen;
+    prevMessagesLenRef.current = msgLen;
+
+    if (forceScrollRef.current) {
+      forceScrollRef.current = false;
+      userScrolledUpRef.current = false;
+      scrollToBottom('smooth');
+      return;
+    }
+
+    if ((historyGrew || messagesGrew) && !userScrolledUpRef.current) {
+      scrollToBottom('auto');
+    }
+  }, [messages, history, scrollToBottom]);
+
   const firedInitial = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -452,10 +545,6 @@ export function MinimalDevWorkspace({
   }, [accessToken]);
 
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, history]);
-
-  useEffect(() => {
     if (!selectedSessionId || !accessToken) {
       stopHistoryPoll();
       return;
@@ -500,10 +589,10 @@ export function MinimalDevWorkspace({
 
   const accountHasPairedNode = pairedNodes.length > 0;
   const accountNodeOnline = pairedNodes.some((n) => n.status === 'online');
+  const founderNodeHeartbeating =
+    nodeStatus.founderNodeOnline || nodeStatus.desktopOnline || accountNodeOnline;
   const isNodeLive =
-    nodeStatus.founderNodeOnline ||
-    nodeStatus.desktopOnline ||
-    accountNodeOnline ||
+    founderNodeHeartbeating ||
     !!bridge?.latest ||
     !!bridge?.nodes?.length ||
     ideWorkspaces.length > 0 ||
@@ -619,15 +708,20 @@ export function MinimalDevWorkspace({
       let previewUrl: string | undefined;
       if (file.type.startsWith('image/')) {
         try {
-          dataUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result || ''));
-            reader.onerror = () => reject(new Error('read failed'));
-            reader.readAsDataURL(file);
-          });
+          dataUrl = await compressImageForDispatch(file);
           previewUrl = dataUrl;
         } catch {
-          previewUrl = URL.createObjectURL(file);
+          try {
+            dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ''));
+              reader.onerror = () => reject(new Error('read failed'));
+              reader.readAsDataURL(file);
+            });
+            previewUrl = dataUrl;
+          } catch {
+            previewUrl = URL.createObjectURL(file);
+          }
         }
       }
       try {
@@ -700,6 +794,8 @@ export function MinimalDevWorkspace({
     setSelectedSessionId(session.id);
     setPinnedSession(session);
     setSidebarOpen(false);
+    forceScrollRef.current = true;
+    userScrolledUpRef.current = false;
     if (session.messages?.length) {
       setHistory(session.messages);
       setHistoryLoading(false);
@@ -724,22 +820,38 @@ export function MinimalDevWorkspace({
       last.sessionId === selectedSessionId &&
       now - last.at < 60_000
     ) {
+      setDispatchNotice('Duplicate blocked — wait a minute or edit your message.');
+      setTimeout(() => setDispatchNotice(null), 5000);
       return;
     }
+
+    const sessionForDispatch = selectedSessionId
+      ? sessions.find((s) => s.id === selectedSessionId)
+      : null;
+    const dispatchToSelectedSession = Boolean(accessToken && sessionForDispatch);
+
+    if (dispatchToSelectedSession && authStale) {
+      setError(SESSION_EXPIRED_MESSAGE);
+      setDispatchNotice('Sign in again to dispatch to Cursor.');
+      setTimeout(() => setDispatchNotice(null), 8000);
+      return;
+    }
+
     sendingRef.current = true;
     lastSendRef.current = { text: prompt, sessionId: selectedSessionId, at: now };
 
     if (phase !== 'idle') stopVoice();
     resetTranscript();
     setInput('');
+    const attachmentsForSend = pendingAttachments;
     setPendingAttachments([]);
 
     const attachNote =
-      pendingAttachments.length > 0
-        ? '\n\n[Attachments: ' + pendingAttachments.map((a) => a.name).join(', ') + ']'
+      attachmentsForSend.length > 0
+        ? '\n\n[Attachments: ' + attachmentsForSend.map((a) => a.name).join(', ') + ']'
         : '';
     // Embed image data URLs for Founder Node clipboard paste (stripped before Cursor sees text).
-    const imageBlocks = pendingAttachments
+    const imageBlocks = attachmentsForSend
       .filter((a) => a.dataUrl && a.dataUrl.startsWith('data:image/'))
       .map(
         (a) =>
@@ -751,8 +863,8 @@ export function MinimalDevWorkspace({
       id: 'u-' + Date.now(),
       role: 'user',
       text: prompt || '(attachment)',
-      attachments: pendingAttachments.length
-        ? pendingAttachments.map(({ name, previewUrl, category }) => ({
+      attachments: attachmentsForSend.length
+        ? attachmentsForSend.map(({ name, previewUrl, category }) => ({
             name,
             previewUrl,
             category,
@@ -762,14 +874,27 @@ export function MinimalDevWorkspace({
     setBusy(true);
     setError(null);
 
-    const sessionForDispatch = selectedSessionId
-      ? sessions.find((s) => s.id === selectedSessionId)
-      : null;
-    const dispatchToSelectedSession = Boolean(accessToken && sessionForDispatch);
-
     // Cursor session selected → remote control only; no platform Brain / RULE_BASED fallback.
     if (dispatchToSelectedSession && sessionForDispatch) {
-      setDispatchNotice('Dispatching to Cursor…');
+      if (fullPrompt.length > DISPATCH_PAYLOAD_MAX_CHARS) {
+        const msg =
+          'Message too large (usually a photo). Try a smaller image or fewer attachments.';
+        setDispatchNotice(`Cursor dispatch failed: ${msg}`);
+        setError(msg);
+        setBusy(false);
+        sendingRef.current = false;
+        setTimeout(() => setDispatchNotice(null), 8000);
+        return;
+      }
+
+      forceScrollRef.current = true;
+      setDispatchNotice(
+        founderNodeHeartbeating
+          ? 'Dispatching to Cursor…'
+          : accountHasPairedNode
+            ? 'Queuing — Founder Node offline on your PC…'
+            : 'Queuing — pair Founder Node on your PC to deliver…',
+      );
       setHistory((prev) => [
         ...(prev ?? []),
         {
@@ -786,9 +911,19 @@ export function MinimalDevWorkspace({
           fullPrompt,
           ideProvider,
         );
-        setDispatchNotice('Sent to Cursor — agent working…');
+        if (founderNodeHeartbeating) {
+          setDispatchNotice('Sent to Cursor — agent working…');
+        } else if (accountHasPairedNode) {
+          setDispatchNotice(
+            'Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to Cursor.',
+          );
+        } else {
+          setDispatchNotice(
+            'Queued on server — install and pair Founder Node on your PC to deliver to Cursor.',
+          );
+        }
         pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
-        setTimeout(() => setDispatchNotice(null), 12_000);
+        setTimeout(() => setDispatchNotice(null), founderNodeHeartbeating ? 12_000 : 20_000);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
         setDispatchNotice(`Cursor dispatch failed: ${msg}`);
@@ -801,6 +936,7 @@ export function MinimalDevWorkspace({
       return;
     }
 
+    forceScrollRef.current = true;
     const assistantId = 'a-' + Date.now();
     const assistantMsg: ChatMsg = { id: assistantId, role: 'assistant', text: '', pending: true, thinking: true };
     setMessages((m) => [...m, userMsg, assistantMsg]);
@@ -865,7 +1001,7 @@ export function MinimalDevWorkspace({
       setBusy(false);
       sendingRef.current = false;
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice, resetTranscript]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice, resetTranscript, authStale, founderNodeHeartbeating, accountHasPairedNode]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -982,7 +1118,7 @@ export function MinimalDevWorkspace({
               </div>
             </div>
             <div className='grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-3'>
-              <div className='flex items-center gap-2'><span className={'h-2 w-2 rounded-full ' + (isNodeLive ? 'bg-emerald-400' : 'bg-zinc-600')} /><span className='text-zinc-500'>Founder Node</span><span className='ml-auto text-zinc-200'>{isNodeLive ? 'Online' : 'Offline'}</span></div>
+              <div className='flex items-center gap-2'><span className={'h-2 w-2 rounded-full ' + (founderNodeHeartbeating ? 'bg-emerald-400' : 'bg-zinc-600')} /><span className='text-zinc-500'>Founder Node</span><span className='ml-auto text-zinc-200'>{founderNodeHeartbeating ? 'Online' : accountHasPairedNode ? 'Offline' : 'Not paired'}</span></div>
               <div className='flex items-center gap-2'><span className={'h-2 w-2 rounded-full ' + (cursorConnected ? 'bg-emerald-400' : 'bg-zinc-600')} /><span className='text-zinc-500'>Cursor</span><span className='ml-auto text-zinc-200'>{cursorConnected ? 'Connected' : 'Not connected'}</span></div>
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Repository</span><span className='ml-auto truncate text-zinc-200'>{repoName}</span></div>
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Branch</span><span className='ml-auto text-zinc-200'>{branchName}</span></div>
@@ -993,6 +1129,13 @@ export function MinimalDevWorkspace({
             {authStale && (
               <div className='mt-3 rounded-lg border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-xs text-rose-200/90'>
                 {SESSION_EXPIRED_MESSAGE} Founder Node may still show connected in the tray — that uses a separate device token.
+              </div>
+            )}
+            {selectedSession && !founderNodeHeartbeating && (
+              <div className='mt-3 rounded-lg border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-xs text-amber-200/90'>
+                {accountHasPairedNode
+                  ? 'Founder Node is offline on your PC. Messages queue on the server — open Founder Node on your desktop to deliver them to Cursor.'
+                  : 'Pair Founder Node on your PC to relay phone messages into Cursor. Until then, dispatches stay queued on the server.'}
               </div>
             )}
             {!realBrainsAvailable && (
@@ -1095,7 +1238,12 @@ export function MinimalDevWorkspace({
           </div>
         )}
 
-        <div ref={scrollRef} className='min-h-0 flex-1 overflow-y-auto px-4 py-4'>
+        <div
+          ref={scrollRef}
+          onScroll={handleScrollAreaScroll}
+          className='min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 py-4 [-webkit-overflow-scrolling:touch]'
+          style={{ touchAction: 'pan-y' }}
+        >
           {selectedWs && !selectedSession && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
           {selectedSession && (
             <div className='mx-auto mb-3 max-w-3xl rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300'>
@@ -1181,7 +1329,18 @@ export function MinimalDevWorkspace({
         <div className='border-t border-white/5 bg-[#0a0a0f] px-4 py-3'>
           {error && <div className='mb-2 text-xs text-rose-400'>{error}</div>}
           {dispatchNotice && (
-            <div className='mb-2 text-xs text-emerald-400/90'>→ {dispatchNotice}</div>
+            <div
+              className={
+                'mb-2 text-xs ' +
+                (dispatchNotice.includes('failed') || dispatchNotice.includes('blocked')
+                  ? 'text-rose-400'
+                  : dispatchNotice.includes('Queued') || dispatchNotice.includes('offline') || dispatchNotice.includes('pair')
+                    ? 'text-amber-300/95'
+                    : 'text-emerald-400/90')
+              }
+            >
+              → {dispatchNotice}
+            </div>
           )}
           {pendingAttachments.length > 0 && (
             <div className='mx-auto mb-2 flex max-w-3xl flex-wrap gap-2'>
@@ -1268,13 +1427,20 @@ export function MinimalDevWorkspace({
                   }
                 }}
                 rows={1}
-                placeholder='Message Founder OS — shift+enter for newline'
-                className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'
+                placeholder={
+                  selectedSession
+                    ? 'Reply to this Cursor chat — delivered via Founder Node on your PC'
+                    : sessions.length > 0
+                      ? 'Select a Cursor chat in the sidebar to dispatch to your IDE'
+                      : 'Message Founder OS — shift+enter for newline'
+                }
+                className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40 sm:text-sm'
               />
               <button
+                type='button'
                 onClick={handleSend}
                 disabled={busy || (!input.trim() && pendingAttachments.length === 0)}
-                className='rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40'
+                className='min-h-[48px] min-w-[48px] touch-manipulation rounded-xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40 sm:min-h-0 sm:min-w-0'
               >
                 {busy ? '...' : 'Send'}
               </button>
