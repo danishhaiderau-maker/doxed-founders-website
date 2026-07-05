@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): mobile chat scroll and typing strip
+fix(founder-node): refuse Cursor dispatch when composer tab focus cannot be verified
 
 ## Last Activity
 
