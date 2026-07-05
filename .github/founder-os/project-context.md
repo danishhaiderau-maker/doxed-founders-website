@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(copy): add 120s showcase-flat fail-safe for stuck OPEN lots
+fix(btc-v2): tighten checker and paper entry zone
 
 ## Last Activity
 
