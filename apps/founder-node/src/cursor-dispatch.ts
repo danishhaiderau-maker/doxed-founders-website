@@ -204,8 +204,8 @@ const WIN32_CURSOR_FOCUS_TYPE = [
   '    return IsCursorForeground();',
   '  }',
   '}',
-  '"@;',
-].join('');
+  '"@',
+].join('\n');
 
 function escapePsSingleQuoted(value: string): string {
   return value.replace(/'/g, "''");
@@ -226,69 +226,90 @@ async function runVerifiedCursorSendKeys(
   const stepScripts = steps
     .map(
       (step) =>
-        `if (-not [FnCursorFocus]::IsCursorForeground()) { Write-Output ('FAIL:' + [FnCursorFocus]::ForegroundProcessName() + '|' + [FnCursorFocus]::ForegroundTitle()); exit 1 }` +
-        `[System.Windows.Forms.SendKeys]::SendWait('${escapePsSingleQuoted(step.keys)}');` +
-        `Start-Sleep -Milliseconds ${step.delayMs};`,
+        [
+          `if (-not [FnCursorFocus]::IsCursorForeground()) { Write-Output ('FAIL:' + [FnCursorFocus]::ForegroundProcessName() + '|' + [FnCursorFocus]::ForegroundTitle()); exit 1 }`,
+          `[System.Windows.Forms.SendKeys]::SendWait('${escapePsSingleQuoted(step.keys)}');`,
+          `Start-Sleep -Milliseconds ${step.delayMs};`,
+        ].join('\n'),
     )
-    .join('');
+    .join('\n');
 
-  const ps =
-    WIN32_CURSOR_FOCUS_TYPE +
-    'Add-Type -AssemblyName System.Windows.Forms;' +
-    '`$strictOk=$true;' +
-    `for ($v=0; $v -lt ${CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS}; $v++) {` +
-    `  $ok=[FnCursorFocus]::EnsureCursorForeground(${CURSOR_FOCUS_ATTEMPTS},${CURSOR_FOCUS_ATTEMPT_MS});` +
-    '  if (-not $ok -or -not [FnCursorFocus]::IsCursorForeground()) { $strictOk=$false; break }' +
-    `  Start-Sleep -Milliseconds ${CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS};` +
-    '}' +
-    'if (-not $strictOk) { Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1 }' +
-    stepScripts +
-    'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())';
+  const ps = [
+    WIN32_CURSOR_FOCUS_TYPE,
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$strictOk=$true;',
+    `for ($v=0; $v -lt ${CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS}; $v++) {`,
+    `  $ok=[FnCursorFocus]::EnsureCursorForeground(${CURSOR_FOCUS_ATTEMPTS},${CURSOR_FOCUS_ATTEMPT_MS});`,
+    '  if (-not $ok -or -not [FnCursorFocus]::IsCursorForeground()) { $strictOk=$false; break }',
+    `  Start-Sleep -Milliseconds ${CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS};`,
+    '}',
+    'if (-not $strictOk) { Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1 }',
+    stepScripts,
+    'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())',
+  ].join('\n');
 
   return readCursorFocusResult(ps);
 }
 
-async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
+function runPowerShellScriptFile(
+  psBody: string,
+  tmpPrefix: string,
+): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
   const tmpScript = path.join(
     os.tmpdir(),
-    `fn-cursor-sendkeys-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`,
+    `${tmpPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`,
   );
-  try {
-    fs.writeFileSync(tmpScript, psBody, 'utf8');
-    return await new Promise((resolve) => {
-      exec(
-        `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScript.replace(/"/g, '""')}"`,
-        (err, stdout) => {
-          const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
-          if (line.startsWith('OK:')) {
-            resolve({ ok: true, foregroundTitle: line.slice(3) });
-            return;
-          }
-          if (line.startsWith('FAIL:')) {
-            const detail = line.slice(5);
-            const [processName, title] = detail.split('|');
-            resolve({
-              ok: false,
-              foregroundTitle: title || processName || undefined,
-              error: `Cursor.exe not foreground (process="${processName ?? 'unknown'}", title="${title ?? ''}")`,
-            });
-            return;
-          }
+  return new Promise((resolve) => {
+    try {
+      fs.writeFileSync(tmpScript, psBody, 'utf8');
+    } catch (err) {
+      resolve({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    exec(
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScript.replace(/"/g, '""')}"`,
+      (err, stdout, stderr) => {
+        try {
+          fs.unlinkSync(tmpScript);
+        } catch {
+          /* ignore */
+        }
+
+        const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
+        if (line.startsWith('OK:')) {
+          resolve({ ok: true, foregroundTitle: line.slice(3) });
+          return;
+        }
+        if (line.startsWith('FAIL:')) {
+          const detail = line.slice(5);
+          const [processName, title] = detail.split('|');
           resolve({
             ok: false,
-            foregroundTitle: line || undefined,
-            error: err?.message || line || 'Cursor focus verification failed',
+            foregroundTitle: title || processName || undefined,
+            error: `Cursor.exe not foreground (process="${processName ?? 'unknown'}", title="${title ?? ''}")`,
           });
-        },
-      );
-    });
-  } finally {
-    try {
-      fs.unlinkSync(tmpScript);
-    } catch {
-      /* ignore */
-    }
-  }
+          return;
+        }
+
+        const stderrLine = (stderr || '').trim().split(/\r?\n/).pop();
+        resolve({
+          ok: false,
+          foregroundTitle: line || undefined,
+          error: err?.message || stderrLine || line || 'Cursor focus verification failed',
+        });
+      },
+    );
+  });
+}
+
+async function readCursorFocusResult(
+  psBody: string,
+): Promise<{ ok: boolean; foregroundTitle?: string; error?: string }> {
+  return runPowerShellScriptFile(psBody, 'fn-cursor-sendkeys');
 }
 
 /** Pre-flight activation check — abort dispatch before touching clipboard/SendKeys. */
@@ -353,25 +374,14 @@ async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
     if (bytes.length < 32 || bytes.length > 8 * 1024 * 1024) return false;
     tmpPng = path.join(os.tmpdir(), `fn-attach-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
     fs.writeFileSync(tmpPng, bytes);
-    const ps =
-      `Add-Type -AssemblyName System.Windows.Forms;` +
-      `Add-Type -AssemblyName System.Drawing;` +
-      `$img=[System.Drawing.Image]::FromFile('${tmpPng.replace(/'/g, "''")}');` +
-      `[System.Windows.Forms.Clipboard]::SetImage($img);` +
-      `$img.Dispose();`;
-    const tmpScript = path.join(
-      os.tmpdir(),
-      `fn-attach-clip-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`,
-    );
-    fs.writeFileSync(tmpScript, ps, 'utf8');
-    const result = await execAsync(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScript.replace(/"/g, '""')}"`,
-    );
-    try {
-      fs.unlinkSync(tmpScript);
-    } catch {
-      /* ignore */
-    }
+    const ps = [
+      'Add-Type -AssemblyName System.Windows.Forms;',
+      'Add-Type -AssemblyName System.Drawing;',
+      `$img=[System.Drawing.Image]::FromFile('${tmpPng.replace(/'/g, "''")}');`,
+      '[System.Windows.Forms.Clipboard]::SetImage($img);',
+      '$img.Dispose();',
+    ].join('\n');
+    const result = await runPowerShellScriptFile(ps, 'fn-attach-clip');
     return result.ok;
   } catch {
     return false;
@@ -386,6 +396,13 @@ async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
   }
 }
 
+type SendPromptResult = {
+  pasted: boolean;
+  submitted: boolean;
+  clipboardReady: boolean;
+  warning?: string;
+};
+
 /**
  * Paste into the composer that focusComposerInWorkspaceState + cursor CLI
  * already selected. No Ctrl+L — that hijacks browser address bars during demos.
@@ -393,7 +410,7 @@ async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
 async function sendPromptToFocusedComposer(
   prompt: string,
   composerFocusedInState: boolean,
-): Promise<void> {
+): Promise<SendPromptResult> {
   const { text, images } = parseDispatchPrompt(prompt);
 
   if (process.platform !== 'win32') {
@@ -409,25 +426,6 @@ async function sendPromptToFocusedComposer(
 
   await sleep(composerFocusedInState ? COMPOSER_TAB_SETTLE_MS : COMPOSER_TAB_SETTLE_MS + 600);
 
-  const focusBeforePaste = await ensureCursorWindowFocused();
-  if (!focusBeforePaste.ok) {
-    throw new Error(
-      focusBeforePaste.error ??
-        `Cursor.exe is not the foreground process — aborting paste to avoid browser/search hijack`,
-    );
-  }
-
-  for (const img of images.slice(0, 3)) {
-    const ok = await pasteImageDataUrl(img.dataUrl);
-    if (!ok) continue;
-    const imgResult = await runVerifiedCursorSendKeys([
-      { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
-    ]);
-    if (!imgResult.ok) {
-      throw new Error(`SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`);
-    }
-  }
-
   const bodyText = withFounderOsDispatchAttribution(
     text ||
       (images.length > 0
@@ -440,13 +438,46 @@ async function sendPromptToFocusedComposer(
     throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  const focusBeforePaste = await ensureCursorWindowFocused();
+  if (!focusBeforePaste.ok) {
+    return {
+      pasted: false,
+      submitted: false,
+      clipboardReady: true,
+      warning:
+        focusBeforePaste.error ??
+        'Cursor.exe is not the foreground process — prompt copied to clipboard; paste with Ctrl+V',
+    };
+  }
+
+  for (const img of images.slice(0, 3)) {
+    const ok = await pasteImageDataUrl(img.dataUrl);
+    if (!ok) continue;
+    const imgResult = await runVerifiedCursorSendKeys([
+      { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
+    ]);
+    if (!imgResult.ok) {
+      return {
+        pasted: false,
+        submitted: false,
+        clipboardReady: true,
+        warning: `SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`,
+      };
+    }
+  }
+
   await sleep(120);
 
   const pasteResult = await runVerifiedCursorSendKeys([
     { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
   ]);
   if (!pasteResult.ok) {
-    throw new Error(`SendKeys paste failed: ${pasteResult.error ?? 'unknown error'}`);
+    return {
+      pasted: false,
+      submitted: false,
+      clipboardReady: true,
+      warning: `SendKeys paste failed: ${pasteResult.error ?? 'unknown error'}`,
+    };
   }
 
   await sleep(ENTER_SUBMIT_DELAY_MS);
@@ -455,10 +486,15 @@ async function sendPromptToFocusedComposer(
     { keys: '{ENTER}', delayMs: SENDKEYS_STEP_DELAY_MS },
   ]);
   if (!submitResult.ok) {
-    throw new Error(
-      `SendKeys submit refused — Cursor lost focus before Enter (${submitResult.error ?? 'unknown'})`,
-    );
+    return {
+      pasted: true,
+      submitted: false,
+      clipboardReady: true,
+      warning: `SendKeys submit refused — Cursor lost focus before Enter (${submitResult.error ?? 'unknown'})`,
+    };
   }
+
+  return { pasted: true, submitted: true, clipboardReady: true };
 }
 
 /**
@@ -541,13 +577,21 @@ export async function executeCursorDispatch(
       );
     }
 
-    await sendPromptToFocusedComposer(dispatch.prompt, focusedTab);
+    const sendResult = await sendPromptToFocusedComposer(dispatch.prompt, focusedTab);
 
     const bits = [
       `composer=${composerId.slice(0, 8)}`,
       focusedTab ? 'tab-focused' : 'tab-focus-skipped',
       openedWorkspace ? 'workspace-opened' : 'workspace-focus-best-effort',
     ];
+
+    if (!sendResult.submitted) {
+      const fallback = sendResult.clipboardReady
+        ? ' — prompt copied to clipboard; focus Cursor composer and press Ctrl+V'
+        : '';
+      throw new Error((sendResult.warning ?? 'Cursor paste did not complete') + fallback);
+    }
+
     await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, {
       result: `dispatched (${bits.join(', ')})`,
     });
