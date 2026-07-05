@@ -306,7 +306,7 @@ export interface BustedTraderEntry {
 
 function parseApiError(body: unknown, status: number): string {
   if (status === 401) {
-    return 'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
+    return SESSION_EXPIRED_MESSAGE;
   }
   if (status === 502 || status === 503 || status === 504) {
     return 'Production API is temporarily unavailable — Railway may be restarting or overloaded. Wait 1–2 minutes and refresh. If login or relay start keeps failing, redeploy Railway from Home Command Center (npm run redeploy:railway) and confirm Founder Node tray is running.';
@@ -318,12 +318,20 @@ function parseApiError(body: unknown, status: number): string {
     }
     if (typeof message === 'string') {
       if (status === 401 && message.toLowerCase() === 'unauthorized') {
-        return 'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
+        return SESSION_EXPIRED_MESSAGE;
       }
       return message;
     }
   }
   return `Request failed (${status})`;
+}
+
+/** Shown when the Nest API JWT expired while the NextAuth cookie session is still valid. */
+export const SESSION_EXPIRED_MESSAGE =
+  'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
+
+export function isSessionExpiredError(err: unknown): boolean {
+  return err instanceof Error && err.message === SESSION_EXPIRED_MESSAGE;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Promise<T> {

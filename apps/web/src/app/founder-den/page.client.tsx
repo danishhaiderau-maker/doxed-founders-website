@@ -20,7 +20,9 @@ import {
   fetchProjectRoom,
   FounderDashboard,
   FounderOnboardingStatus,
+  isSessionExpiredError,
   ProjectRoom,
+  SESSION_EXPIRED_MESSAGE,
   submitFounderApplication,
 } from '@/lib/api';
 
@@ -146,9 +148,12 @@ export default function FounderDenPageClient() {
       } else {
         setRoom(null);
       }
-    } catch {
+    } catch (err) {
       setDashboard(null);
       setOnboardingStatus(null);
+      if (isSessionExpiredError(err)) {
+        setError(SESSION_EXPIRED_MESSAGE);
+      }
     } finally {
       setDashboardLoaded(true);
     }
@@ -268,6 +273,12 @@ export default function FounderDenPageClient() {
           </p>
         )}
 
+        {session?.accessToken && !error && !hasFounder && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
+            Activate your founder profile in Settings to unlock the workspace.
+          </div>
+        )}
+
         {session?.accessToken && initialPath === 'SOVEREIGN' && (
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/10 p-5">
             <h2 className="text-lg font-semibold text-white">Founder Node — download & pair</h2>
@@ -358,6 +369,7 @@ export default function FounderDenPageClient() {
           onLaunchRaise={launchRaise}
           initialCopilotPrompt={copilotPrompt}
           onInitialCopilotPromptConsumed={clearCopilotUrlParams}
+          sessionError={error}
         />
       </div>
       )}

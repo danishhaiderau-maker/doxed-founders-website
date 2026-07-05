@@ -74,6 +74,7 @@ export type FounderWorkspaceProps = {
   onLaunchRaise: () => void;
   initialCopilotPrompt?: string | null;
   onInitialCopilotPromptConsumed?: () => void;
+  sessionError?: string | null;
 };
 
 function OsSection({
@@ -117,6 +118,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     onSubmitApplication,
     initialCopilotPrompt,
     onInitialCopilotPromptConsumed,
+    sessionError,
   } = props;
 
   const useDashboardShell = Boolean(session && hasFounder);
@@ -293,7 +295,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
         </div>
       )}
 
-      {session && !hasFounder && (
+      {session && !hasFounder && !sessionError && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
           Activate your founder profile in Settings to unlock the workspace.
         </div>

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   ForbiddenException,
@@ -121,5 +122,23 @@ export class AuthController {
   @Get('me')
   me(@CurrentUser() user: AuthUser) {
     return this.authService.getProfile(user.id);
+  }
+
+  /**
+   * Mint a fresh API JWT for an existing NextAuth session. Called server-side
+   * from the NextAuth jwt callback when the stored accessToken is expired — the
+   * web session can outlive the 24h API token, which otherwise makes Founder OS
+   * look offline (all authenticated fetches return 401).
+   */
+  @Public()
+  @Post('session-refresh')
+  sessionRefresh(
+    @Body() body: { userId?: string },
+    @Headers('x-internal-auth-secret') internalSecret: string | undefined,
+  ) {
+    this.assertInternalAuthSecret(internalSecret);
+    const userId = body.userId?.trim();
+    if (!userId) throw new BadRequestException('userId required');
+    return this.authService.buildAuthResponseForUserId(userId);
   }
 }
