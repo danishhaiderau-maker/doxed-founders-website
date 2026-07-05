@@ -92,6 +92,7 @@ from a160_v2_research import (
     evaluate_a160_context_chase_v2_checker,
     load_v2_shadow_metrics,
     parse_v2_structured_audit,
+    synthesize_v2_trade_planner,
     v2_research_ai_enabled_env,
     v2_wipe_files,
 )
@@ -10750,6 +10751,16 @@ def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, sourc
         # Legacy parser for Direction/Win/Decision lines — do not modify parse_ai_response_fields.
         parsed = parse_ai_response_fields(text)
         audit = parse_v2_structured_audit(text)
+        trade_plan = parse_ai_trade_planner(text, json_blob=parsed.get("json_blob"))
+        if not trade_plan.get("entry_zone_low") or not trade_plan.get("entry_zone_high"):
+            trade_plan = {
+                **trade_plan,
+                **synthesize_v2_trade_planner(
+                    parsed.get("direction") or audit.get("direction"),
+                    float(nz(state.get("price")) or ctx.get("price") or 0),
+                    float(state.get("pullback_threshold", 0.001)),
+                ),
+            }
         factors = parsed.get("factors") or {}
         v2_ai = {
             "win_prob": parsed.get("win_prob"),
@@ -10780,6 +10791,7 @@ def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, sourc
             ctx, v2_ai, audit, edge_score=edge_score, features=features, source_ai=source_ai,
             orders_enabled=orders_on,
         )
+        checked["trade_planner"] = trade_plan
         checked["latency_ms"] = latency_ms
         checked["raw_decision"] = v2_ai.get("decision")
         checked["shadow_only"] = not orders_on
@@ -10934,6 +10946,9 @@ def start_a160_v2_shadow_replay(ctx, checked, edge_score, features, *, checker_r
         fail_set = set(checked.get("fail_reasons") or [])
         if fail_set & {"V2_PARSE_FAIL", "NO_DIRECTION"}:
             return
+        # Low win-prob rejects are noise for counterfactual shadow — checker already logged.
+        if any(str(f).startswith("WIN_PROB_LT_") for f in fail_set):
+            return
     elif not checked.get("accepted"):
         return
     if not _v2_benchmark_safety_ok("start_a160_v2_shadow_replay", (ctx or {}).get("trade_id")):
@@ -11031,7 +11046,7 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
         "source_trade_id": buf.get("source_trade_id"),
         "prompt_id": buf.get("prompt_id") or V2_PROMPT_ID,
         "collection_mode": buf.get("collection_mode") or "V2_LAB",
-        "checker_accepted": bool(buf.get("v2_checker_accepted", True)),
+        "checker_accepted": bool(buf.get("v2_checker_accepted", not (buf.get("collection_mode") == "V2_CHECKER_REJECT"))),
         "fail_reasons": buf.get("v2_fail_reasons") or [],
         "executed": False,
         "shadow_only": True,
@@ -23123,6 +23138,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "v2_chase_target_min": meta.get("v2_chase_target_min"),
             "v2_chase_target_max": meta.get("v2_chase_target_max"),
             "prompt_id": meta.get("prompt_id"),
+            "v2_checker_accepted": meta.get("v2_checker_accepted"),
+            "v2_fail_reasons": meta.get("v2_fail_reasons"),
         }
 
 

@@ -12,6 +12,7 @@ Benchmark safety (enforced by callers in bot.py):
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -30,8 +31,9 @@ V2_AI_DECISION_LOG_FILE = "v2_ai_decision_log.jsonl"
 V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
 V2_SHADOW_OUTCOME_FILE = "v2_shadow_outcome.jsonl"  # legacy shadow outcomes (pre-orders)
 
-V2_MIN_WIN_PROB = 60
+V2_MIN_WIN_PROB = 62
 V2_MIN_SPREAD = 3
+V2_REQUIRE_ALIGNED_CONTEXT = True
 V2_CHASE_TARGET_MIN = 3
 V2_CHASE_TARGET_MAX = 5
 V2_MIN_SIGNAL_AGE_SEC = 180
@@ -222,6 +224,40 @@ def parse_v2_structured_audit(text: str) -> dict:
     return audit
 
 
+def resolve_v2_win_prob(parsed: dict, audit: dict) -> int:
+    """Prefer structured-audit win_probability when legacy parser returns 0/missing."""
+    try:
+        wp = int(parsed.get("win_prob") or 0)
+    except (TypeError, ValueError):
+        wp = 0
+    try:
+        audit_wp = int(audit.get("win_probability") or 0)
+    except (TypeError, ValueError):
+        audit_wp = 0
+    return max(wp, audit_wp)
+
+
+def synthesize_v2_trade_planner(direction: str, price: float, pullback_pct: float = 0.001) -> dict:
+    """Fallback entry zone when V2 prompt JSON omits planner fields (paper path only)."""
+    direction = str(direction or "").upper()
+    price = float(price or 0)
+    pb = max(float(pullback_pct or 0.001), 0.0005)
+    if price <= 0 or direction not in ("LONG", "SHORT"):
+        return {}
+    if direction == "LONG":
+        zhi = price
+        zlo = price * (1.0 - pb * 2.0)
+    else:
+        zlo = price
+        zhi = price * (1.0 + pb * 2.0)
+    limit = zlo + (zhi - zlo) * 0.5
+    return {
+        "entry_zone_low": round(zlo, 2),
+        "entry_zone_high": round(zhi, 2),
+        "limit_price": round(limit, 2),
+    }
+
+
 def compute_v2_direction_spread(direction: str, parsed: dict, audit: dict) -> int:
     """Directional spread from long/short scores, falling back to bull/bear."""
     direction = str(direction or "").upper()
@@ -295,10 +331,7 @@ def evaluate_a160_context_chase_v2_checker(
         or audit.get("direction")
         or "NO_TRADE"
     ).upper()
-    try:
-        win_prob = int(parsed.get("win_prob") or audit.get("win_probability") or 0)
-    except (TypeError, ValueError):
-        win_prob = 0
+    win_prob = resolve_v2_win_prob(parsed, audit)
     spread = compute_v2_direction_spread(direction, parsed, audit)
     score_spread = audit.get("score_spread")
     try:
@@ -335,6 +368,8 @@ def evaluate_a160_context_chase_v2_checker(
 
     if counter_veto and not _strong_counter_context_proof(audit):
         fail_reasons.append("CONTEXT_VETO")
+    if V2_REQUIRE_ALIGNED_CONTEXT and alignment not in ("ALIGNED",):
+        fail_reasons.append("CONTEXT_NOT_ALIGNED")
 
     accepted = len(fail_reasons) == 0
     result = {
@@ -407,6 +442,7 @@ def checked_to_v2_ai(checked: dict, latency_ms: int = 0) -> dict:
         "v2_parse_ok": bool(checked.get("v2_parse_ok")),
         "independent_paper_orders": True,
         "shadow_only": False,
+        "trade_planner": copy.deepcopy((checked or {}).get("trade_planner") or {}),
     }
 
 
