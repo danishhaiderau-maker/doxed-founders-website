@@ -83,7 +83,21 @@ export class DesktopBridgeService {
         base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
           ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
           : {};
-      byNode[nodeId] = cleanedSessions;
+      const prior = Array.isArray(byNode[nodeId]) ? byNode[nodeId]! : [];
+      const priorById = new Map(prior.map((s) => [s.id, s]));
+      const mergedSessions = cleanedSessions.map((s) => {
+        if (s.messages?.length) return s;
+        const old = priorById.get(s.id);
+        if (old?.messages?.length) {
+          return {
+            ...s,
+            messages: old.messages,
+            messageCount: s.messageCount ?? old.messageCount ?? old.messages.length,
+          };
+        }
+        return s;
+      });
+      byNode[nodeId] = mergedSessions;
       base[SESSIONS_KEY] = byNode;
     }
 
@@ -263,6 +277,54 @@ export class DesktopBridgeService {
         new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
     );
     return all.slice(0, MAX_SESSIONS * 2);
+  }
+
+  /**
+   * Resolve a session by id/composerId across all nodes, preferring the copy
+   * with the richest message thread (fast session sync can omit messages).
+   */
+  async findSessionById(userId: string, sessionId: string): Promise<BridgeSession | undefined> {
+    const normalized = decodeURIComponent(sessionId).trim();
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const graph = settings?.memoryGraph;
+    if (graph && typeof graph === 'object' && !Array.isArray(graph)) {
+      const byNode = (graph as Record<string, unknown>)[SESSIONS_KEY];
+      if (byNode && typeof byNode === 'object' && !Array.isArray(byNode)) {
+        let best: BridgeSession | undefined;
+        for (const nodeSessions of Object.values(byNode as Record<string, BridgeSession[]>)) {
+          if (!Array.isArray(nodeSessions)) continue;
+          for (const s of nodeSessions) {
+            if (
+              s.id !== normalized &&
+              s.composerId !== normalized &&
+              s.id !== sessionId &&
+              s.composerId !== sessionId
+            ) {
+              continue;
+            }
+            const score = s.messages?.length ?? 0;
+            if (!best || score > (best.messages?.length ?? 0)) best = s;
+          }
+        }
+        if (best) return best;
+      }
+    }
+
+    const sessions = await this.listSessions(userId);
+    const matches = sessions.filter(
+      (x) =>
+        x.id === normalized ||
+        x.composerId === normalized ||
+        x.id === sessionId ||
+        x.composerId === sessionId,
+    );
+    if (matches.length === 0) return undefined;
+    return matches.sort(
+      (a, b) => (b.messages?.length ?? 0) - (a.messages?.length ?? 0),
+    )[0];
   }
 
   private sanitizeSessions(input: unknown): BridgeSession[] {

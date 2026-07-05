@@ -9,6 +9,7 @@ import {
   type BridgeMessage,
   type BridgeSession,
   type BridgeWorkspace,
+  withFounderOsDispatchAttribution,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
@@ -22,6 +23,15 @@ export type PendingIdeDispatchRow = {
   prompt: string;
   ideProvider: string;
 };
+
+const DISPATCH_DEDUPE_MS = 30_000;
+const DISPATCH_ATTACH_RE =
+  /<!--founder-attach:image:[\s\S]*?-->/g;
+
+/** Strip attachment blocks for duplicate detection — user-visible text only. */
+function normalizeDispatchPromptForDedupe(prompt: string): string {
+  return prompt.replace(DISPATCH_ATTACH_RE, '').replace(/\s+/g, ' ').trim();
+}
 
 export type RecentAgentMessage = {
   role: 'user' | 'assistant';
@@ -360,9 +370,8 @@ export class IdeBridgeService {
    * without an extra round trip back to the desktop.
    */
   async getSessionMessages(userId: string, sessionId: string): Promise<BridgeMessage[]> {
-    const sessions = await this.desktopBridge.listSessions(userId);
-    const direct = sessions.find((x) => x.id === sessionId);
-    return direct?.messages ?? [];
+    const session = await this.desktopBridge.findSessionById(userId, sessionId);
+    return session?.messages ?? [];
   }
 
   /**
@@ -383,10 +392,10 @@ export class IdeBridgeService {
         }>;
         findMany(args: {
           where: Record<string, unknown>;
-          orderBy: Record<string, unknown>;
-          take: number;
+          orderBy?: Record<string, unknown>;
+          take?: number;
           select: Record<string, true>;
-        }): Promise<PendingIdeDispatchRow[]>;
+        }): Promise<Array<PendingIdeDispatchRow & { status?: string; prompt?: string }>>;
         findFirst(args: {
           where: Record<string, unknown>;
           orderBy?: Record<string, unknown>;
@@ -409,18 +418,24 @@ export class IdeBridgeService {
   ) {
     const trimmed = prompt?.trim();
     if (!trimmed) throw new Error('Prompt required');
+    const attributed = withFounderOsDispatchAttribution(trimmed);
+    const dedupeKey = normalizeDispatchPromptForDedupe(attributed);
 
-    // One row per user action — ignore duplicate POSTs within 15s even after claim.
-    const duplicate = (await this.dispatchModel.findFirst({
+    // One row per user action — ignore duplicate POSTs within 30s (normalized text).
+    const recent = (await this.dispatchModel.findMany({
       where: {
         userId,
         sessionId,
-        prompt: trimmed,
-        createdAt: { gte: new Date(Date.now() - 15_000) },
+        createdAt: { gte: new Date(Date.now() - DISPATCH_DEDUPE_MS) },
+        status: { in: ['PENDING', 'DISPATCHING'] },
       },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, status: true },
-    })) as { id: string; status: string } | null;
+      take: 8,
+      select: { id: true, status: true, prompt: true },
+    })) as Array<{ id: string; status: string; prompt: string }>;
+    const duplicate = recent.find(
+      (row) => normalizeDispatchPromptForDedupe(row.prompt) === dedupeKey,
+    );
     if (duplicate) {
       return { id: duplicate.id, status: duplicate.status };
     }
@@ -429,7 +444,7 @@ export class IdeBridgeService {
       data: {
         userId,
         sessionId,
-        prompt: trimmed,
+        prompt: attributed,
         ideProvider: ideProvider || 'cursor',
         status: 'PENDING',
       },
@@ -464,6 +479,35 @@ export class IdeBridgeService {
       data: { status: 'DISPATCHING' },
     });
     if (claimed.count === 0) return null;
+
+    // Collapse duplicate PENDING rows queued for the same session + text.
+    const claimedNorm = normalizeDispatchPromptForDedupe(existing.prompt);
+    const siblings = (await this.dispatchModel.findMany({
+      where: {
+        userId,
+        sessionId: existing.sessionId,
+        status: 'PENDING',
+      },
+      select: { id: true, prompt: true },
+    })) as Array<{ id: string; prompt: string }>;
+    const supersededIds = siblings
+      .filter(
+        (row) =>
+          row.id !== dispatchId &&
+          normalizeDispatchPromptForDedupe(row.prompt) === claimedNorm,
+      )
+      .map((row) => row.id);
+    if (supersededIds.length > 0) {
+      await this.dispatchModel.updateMany({
+        where: { id: { in: supersededIds }, userId, status: 'PENDING' },
+        data: {
+          status: 'DISPATCHED',
+          dispatchedAt: new Date(),
+          result: 'superseded (duplicate dispatch)',
+        },
+      });
+    }
+
     return existing;
   }
 
