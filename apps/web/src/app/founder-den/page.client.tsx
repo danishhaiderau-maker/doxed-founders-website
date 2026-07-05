@@ -296,12 +296,12 @@ export default function FounderDenPageClient() {
               </a>
               . Release notes:{' '}
               <a
-                href="https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_NODE_v0.7.9_RELEASE.md"
+                href="https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_NODE_v0.7.11_RELEASE.md"
                 className="text-emerald-400 underline"
                 target="_blank"
                 rel="noreferrer"
               >
-                v0.7.9
+                v0.7.11
               </a>
               .
             </p>
