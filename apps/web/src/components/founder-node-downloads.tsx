@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
@@ -172,7 +173,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
         {loading
           ? 'Checking latest release…'
           : winUrl || macUrl || linuxUrl
-            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows v0.7.7+ recommended.`
+            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows ${FOUNDER_NODE_MIN_VERSION_LABEL} recommended.`
             : `Installers on GitHub — ${FOUNDER_NODE_GITHUB_RELEASES}`}
       </p>
 

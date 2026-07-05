@@ -4,16 +4,19 @@ Self-custody desktop vault for Founder OS project memory — your machine, your 
 
 Founder Node stores roadmaps, AI context, and build memory in `~/FounderVault/` on your laptop. Founder OS stays the control plane; the node syncs **metadata only** (never your full vault contents).
 
+**Current release:** v0.7.8 — tag `founder-node-v0.7.8` · [release notes](../docs/FOUNDER_NODE_v0.7.8_RELEASE.md)
+
 ## Quick start (recommended)
 
 ### 1. Download & install
 
 | Platform | Download |
 |----------|----------|
-| **Windows** | [Founder-Node-0.2.0-win-x64.exe](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
-| **macOS** | [Founder-Node-0.2.0-mac-x64.dmg](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **Windows** | [Founder-Node-0.7.8-win-x64.exe](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **macOS** | [Founder-Node-0.7.8-mac-x64.dmg](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
+| **Linux** | [Founder-Node-0.7.8-linux-x64.AppImage](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) |
 
-Or open **[doxxedcrypto.digital/founder-node](https://doxxedcrypto.digital/founder-node)** for one-click download buttons.
+Or open **[doxxedcrypto.digital/founder-den](https://doxxedcrypto.digital/founder-den?onboard=sovereign#founder-node-download)** for one-click download buttons.
 
 > **Windows:** SmartScreen may warn because the app is not code-signed yet — choose **More info → Run anyway**.  
 > **macOS:** First launch may require **right-click → Open** (unsigned app).
@@ -91,13 +94,14 @@ Build installers locally:
 ```bash
 npm run pack:founder-node:win   # Windows .exe
 npm run pack:founder-node:mac   # macOS .dmg (on Mac)
+npm run pack:founder-node:linux # Linux AppImage
 ```
 
-Release tag (CI builds both platforms):
+Release tag (CI builds all platforms):
 
 ```bash
-git tag founder-node-v0.2.0
-git push origin founder-node-v0.2.0
+git tag founder-node-v0.7.8
+git push origin founder-node-v0.7.8
 ```
 
 ---

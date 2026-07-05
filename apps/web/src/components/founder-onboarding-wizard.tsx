@@ -12,6 +12,7 @@ import {
   type OnboardingPathId,
 } from '@dcf/utils';
 import { FounderNodeDownloads } from '@/components/founder-node-downloads';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { FounderOnboardingAiStack } from '@/components/founder-onboarding-ai-stack';
 import { FounderOnboardingComplete } from '@/components/founder-onboarding-complete';
 import { trackOnboardingStep } from '@/lib/onboarding-track';
@@ -394,7 +395,7 @@ export function FounderOnboardingWizard({
             </div>
 
             <ol className="mt-4 list-inside list-decimal space-y-1 text-xs text-zinc-400">
-              <li>Install Founder Node v0.7.7+</li>
+              <li>Install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL}</li>
               <li>Generate a pairing code below</li>
               <li>Paste it in the Founder Node tray menu on your desktop</li>
               <li>Done — your desktop is paired</li>

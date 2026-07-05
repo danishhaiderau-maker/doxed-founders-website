@@ -2,6 +2,8 @@ import Link from 'next/link';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AndroidAppDownloads } from '@/components/android-app-downloads';
 import { FounderNodeDownloads } from '@/components/founder-node-downloads';
+import { IosAppDownloads } from '@/components/ios-app-downloads';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 export const metadata = {
   title: 'Download — Doxxed Crypto Mobile & Founder Node',
@@ -21,19 +23,18 @@ export default function MobileDownloadPage() {
 
       <div className="mx-auto w-full max-w-3xl space-y-10 px-4 py-10 sm:px-6">
         <section>
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Phase 3 — Android vault</p>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight">Doxxed Crypto for Android</h1>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Unified mobile app</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight">Doxxed Crypto for Android &amp; iOS</h1>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            Official app for Discover, rankings, Trust Center, agents, paper trading, feed, and Founder OS — same
-            account as{' '}
+            One app for Discover, trading, agents, and Founder OS — same account as{' '}
             <a href="https://doxxedcrypto.digital" className="text-cyan-300 underline">
               doxxedcrypto.digital
             </a>
             .
           </p>
           <p className="mt-2 text-sm text-zinc-500">
-            Vault encrypted on our servers; readable only on your devices. Choose Phala or local Ollama on desktop when
-            you want confidential AI — not just encrypted storage.
+            Founder OS + mobile vault live inside this app — not a separate Founder Node mobile app. Desktop{' '}
+            {FOUNDER_NODE_MIN_VERSION_LABEL} still powers Ollama, IDE bridge, and full vault files.
           </p>
           <div className="mt-6">
             <AndroidAppDownloads variant="hero" showInstallGuide />
@@ -44,6 +45,17 @@ export default function MobileDownloadPage() {
           >
             Start Founder OS on phone →
           </Link>
+        </section>
+
+        <section className="rounded-2xl border border-sky-500/25 bg-sky-950/15 p-6">
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-400">iPhone &amp; iPad</p>
+          <h2 className="mt-2 text-xl font-bold">Founder OS on iOS</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Safari and Add to Home Screen work today. TestFlight native app uses the same unified shell as Android.
+          </p>
+          <div className="mt-5">
+            <IosAppDownloads />
+          </div>
         </section>
 
         <section className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-6">
