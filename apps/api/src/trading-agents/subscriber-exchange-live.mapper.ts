@@ -271,6 +271,26 @@ export function mapSubscriberExchangeLiveBook(input: {
     return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
   });
 
+  // Exchange-truth pending limits when Neon participant rows lag or omit qty/price.
+  if (activeSignals.length === 0 && exchangePending.length > 0) {
+    for (const o of exchangePending) {
+      activeSignals.push({
+        time: fmtTime(new Date()),
+        direction: o.side,
+        confidence: 0,
+        regime: '—',
+        strategy: 'EXCHANGE',
+        trigger: 'BITFINEX',
+        pullRequiredPct: 0,
+        signalPrice: o.limitPrice,
+        maxPullPct: 0,
+        outcome: o.status,
+        fillPrice: null,
+        exitReason: null,
+      });
+    }
+  }
+
   return {
     activeSignals: activeSignals.slice(0, 10),
     positions,
