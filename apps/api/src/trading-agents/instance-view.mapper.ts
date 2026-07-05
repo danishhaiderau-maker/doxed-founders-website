@@ -21,6 +21,18 @@ export type UserInstanceStats = {
   sessionPnlUsd?: number;
 };
 
+/** Participants visible in the current live-copy / relay-sim session window. */
+export function participantTouchesSession(
+  p: { createdAt: Date; updatedAt: Date; events: Array<{ createdAt: Date }> },
+  sessionStart: Date,
+): boolean {
+  return (
+    p.createdAt >= sessionStart ||
+    p.updatedAt >= sessionStart ||
+    p.events.some((e) => e.createdAt >= sessionStart)
+  );
+}
+
 export function readInstanceScope(instance: {
   id: string;
   activatedAt: Date | null;

@@ -54,7 +54,7 @@ export function assessParticipantLifecycle(p: ParticipantLike): string[] {
   }
 
   // Resting limit on book — in flight until fill or expire; not a lifecycle gap yet.
-  if (p.status === 'PENDING_ENTRY') {
+  if (p.status === 'PENDING_ENTRY' || p.status === 'INTENT') {
     return ['ORDER_PLACED'].filter((stage) => !types.has(stage));
   }
 

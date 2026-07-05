@@ -138,7 +138,11 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       const statusR = results[1];
 
       if (dashR.status === 'fulfilled') {
-        setAgent(dashR.value.agent);
+        setAgent((prev) => ({
+          ...dashR.value.agent,
+          hired: dashR.value.agent.hired ?? prev?.hired ?? false,
+          following: dashR.value.agent.following ?? prev?.following ?? false,
+        }));
         setDashboard(dashR.value.dashboard);
         setBotConnected(Boolean(dashR.value.botConnected));
         setExecutionPaused(Boolean(dashR.value.executionPaused));

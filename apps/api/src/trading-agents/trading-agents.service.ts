@@ -47,6 +47,7 @@ import {
   buildShowcaseFlashFromBot,
 } from './showcase-flash.util';
 import {
+  participantTouchesSession,
   readInstanceScope,
   scopeActivityToUserSession,
   statsFromScopedActivity,
@@ -1049,8 +1050,12 @@ export class TradingAgentsService implements OnModuleInit {
     const rows = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
-        createdAt: { gte: sessionStartedAt },
         cycle: { agentId },
+        OR: [
+          { createdAt: { gte: sessionStartedAt } },
+          { updatedAt: { gte: sessionStartedAt } },
+          { events: { some: { createdAt: { gte: sessionStartedAt } } } },
+        ],
       },
       include: {
         cycle: {
@@ -1160,11 +1165,43 @@ export class TradingAgentsService implements OnModuleInit {
     let exchangeLiveBook: TradingAgentDashboardState['liveBook'] | null = null;
     let overlayMeta: Awaited<ReturnType<typeof this.resolveUserInstanceOverlay>> | null = null;
     let agentRowId: string | null = null;
+    let userHired = false;
+    let userFollowing = false;
+    let userExchangeConnected = false;
+    let userExchangeProvider: string | null = null;
+    let userExchangeLabel: string | null = null;
+    let userInstanceRow: Awaited<
+      ReturnType<PrismaService['tradingAgentInstance']['findUnique']>
+    > = null;
 
     if (userId) {
       const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
       agentRowId = agentRow?.id ?? null;
       if (agentRow) {
+        const [followRow, instanceRow] = await Promise.all([
+          this.prisma.tradingAgentFollow.findUnique({
+            where: { agentId_userId: { agentId: agentRow.id, userId } },
+          }),
+          this.prisma.tradingAgentInstance.findUnique({
+            where: { agentId_userId: { agentId: agentRow.id, userId } },
+          }),
+        ]);
+        userInstanceRow = instanceRow;
+        userFollowing = Boolean(followRow);
+        userHired =
+          instanceRow?.status === 'ACTIVE' || instanceRow?.status === 'PAUSED';
+        if (instanceRow && instanceRow.exchangeProvider !== 'paper') {
+          userExchangeProvider = instanceRow.exchangeProvider;
+          userExchangeLabel =
+            EXCHANGE_PROVIDER_LABELS[instanceRow.exchangeProvider as ExchangeProvider] ??
+            instanceRow.exchangeProvider;
+          const exStatus = await this.exchanges.getUserExchangeStatus(
+            userId,
+            instanceRow.exchangeProvider,
+          );
+          userExchangeConnected = Boolean(exStatus.connected);
+        }
+
         const overlay = await this.resolveUserInstanceOverlay(agentRow.id, userId);
         overlayMeta = overlay;
         if (overlay?.liveStats) {
@@ -1195,6 +1232,7 @@ export class TradingAgentsService implements OnModuleInit {
             viewScope: 'user',
             userSessionStartedAt: overlay.userSessionStartedAt,
             instanceMode: overlay.instanceMode,
+            instanceStatus: overlay.instanceStatus,
             rentalExpiresAt: overlay.rentalExpiresAt ?? null,
             exchangeBalanceUsd: overlay.exchangeBalanceUsd ?? null,
             exchangeUsd: overlay.exchangeUsd ?? null,
@@ -1206,6 +1244,22 @@ export class TradingAgentsService implements OnModuleInit {
             walletStatusHint: overlay.walletStatusHint ?? null,
             hireFeeDdollar: overlay.hireFeeDdollar ?? null,
             paperDdRefunded: overlay.paperDdRefunded ?? null,
+            hired: userHired,
+            following: userFollowing,
+            exchangeProvider: userExchangeProvider,
+            exchangeLabel: userExchangeLabel,
+            exchangeConnected: userExchangeConnected,
+          };
+        } else if (userHired && instanceRow) {
+          agent = {
+            ...agent,
+            hired: userHired,
+            following: userFollowing,
+            instanceStatus: instanceRow.status,
+            instanceMode: readInstanceScope(instanceRow).instanceMode,
+            exchangeProvider: userExchangeProvider,
+            exchangeLabel: userExchangeLabel,
+            exchangeConnected: userExchangeConnected,
           };
         }
       }
@@ -1233,13 +1287,20 @@ export class TradingAgentsService implements OnModuleInit {
 
     let userActivity = showcaseActivity;
     if (userId && viewScope === 'user') {
-      if (agentRowId && overlayMeta?.userSessionStartedAt) {
-        exchangeLiveBook = await this.buildSubscriberExchangeLiveBook(
-          userId,
-          agentRowId,
-          new Date(overlayMeta.userSessionStartedAt),
-          rest.dashboard.currentPrice,
-        );
+      if (agentRowId) {
+        const sessionStart = overlayMeta?.userSessionStartedAt
+          ? new Date(overlayMeta.userSessionStartedAt)
+          : userInstanceRow
+            ? readInstanceScope(userInstanceRow).sessionStartedAt
+            : null;
+        if (sessionStart) {
+          exchangeLiveBook = await this.buildSubscriberExchangeLiveBook(
+            userId,
+            agentRowId,
+            sessionStart,
+            rest.dashboard.currentPrice,
+          );
+        }
       }
       if (overlayMeta?.instanceMode === 'live') {
         userActivity = mapLiveBookToActivity(
@@ -1310,12 +1371,7 @@ export class TradingAgentsService implements OnModuleInit {
               ? new Date(overlayMeta.userSessionStartedAt)
               : null;
         const lifecycleParticipants = simSessionStart
-          ? recentParticipants.filter(
-              (p) =>
-                p.createdAt >= simSessionStart ||
-                p.updatedAt >= simSessionStart ||
-                p.events.some((e) => e.createdAt >= simSessionStart),
-            )
+          ? recentParticipants.filter((p) => participantTouchesSession(p, simSessionStart))
           : [];
         tradeLifecycleIntegrity =
           lifecycleParticipants.length > 0
