@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(btc-v2): tighten checker and paper entry zone
+fix(founder-os): refresh expired API JWT and surface auth errors in workspace
 
 ## Last Activity
 
