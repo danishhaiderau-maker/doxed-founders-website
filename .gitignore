@@ -228,4 +228,8 @@ services/btc-conservative-agent/tmp_*.md
 services/btc-conservative-agent/tmp_research_*.json
 
 # One-off local research scripts (not production tooling)
+scripts/tmp-*.mjs
 scripts/tmp-*.py
+tmp-*.mjs
+tmp-*.json
+tmp-*.py

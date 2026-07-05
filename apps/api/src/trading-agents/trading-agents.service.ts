@@ -721,13 +721,14 @@ export class TradingAgentsService implements OnModuleInit {
       }
     };
     const [fly, cloudflare] = await Promise.all([probe(flyUrl), probe(cfUrl)]);
-    const ok = fly || cloudflare;
+    // Canonical showcase is the home tunnel — Fly is legacy and must not gate botConnected.
+    const ok = cloudflare;
     return {
       ok,
       fly,
       cloudflare,
-      botConnected: ok,
-      source: ok ? (fly ? 'fly' : 'cloudflare') : 'unreachable',
+      botConnected: cloudflare,
+      source: cloudflare ? 'cloudflare' : fly ? 'fly-legacy-only' : 'unreachable',
     };
   }
 
