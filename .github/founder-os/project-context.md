@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-os): refresh expired API JWT and surface auth errors in workspace
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
