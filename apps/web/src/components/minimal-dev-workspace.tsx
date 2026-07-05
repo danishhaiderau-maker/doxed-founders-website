@@ -722,7 +722,7 @@ export function MinimalDevWorkspace({
       last &&
       last.text === prompt &&
       last.sessionId === selectedSessionId &&
-      now - last.at < 5000
+      now - last.at < 12_000
     ) {
       return;
     }

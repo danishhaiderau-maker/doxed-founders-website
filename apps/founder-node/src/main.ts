@@ -376,9 +376,7 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
 
     // Claim IDE dispatches on the fast loop so a Send from Founder OS reaches
     // Cursor within a few seconds, not only on the 30s full sync.
-    void processPendingDispatches(vaultRoot).catch((err) =>
-      console.warn('Pending dispatch cycle failed:', err),
-    );
+    await processPendingDispatches(vaultRoot);
   } catch (err) {
     console.warn('Session message sync failed:', err);
   } finally {

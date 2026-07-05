@@ -62,7 +62,7 @@ export function IosAppDownloads() {
             vault — not a separate Founder Node listing).
           </li>
           <li>
-            Desktop vault + Ollama still requires <strong className="text-zinc-200">Founder Node v0.7.8+</strong> on your
+            Desktop vault + Ollama still requires <strong className="text-zinc-200">Founder Node v0.7.9+</strong> on your
             laptop.
           </li>
         </ul>
