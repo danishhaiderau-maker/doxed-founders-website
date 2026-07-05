@@ -28,7 +28,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
-import { BotBridgeService } from './bot-bridge.service';
+import { BotBridgeService, type CumulativeSessionMetrics } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { ShowcaseSessionSyncService } from './showcase-session-sync.service';
 import {
@@ -554,6 +554,54 @@ export class TradingAgentsService implements OnModuleInit {
     generated_at?: string;
     error?: string;
   }> {
+    try {
+      return await this.buildAnalyzerSummary(slug);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`getAnalyzerSummary failed: ${msg}`);
+      const metrics = await this.botBridge.fetchCumulativeSessionMetrics().catch(() => null);
+      if (metrics) {
+        return this.analyzerSummaryFromMetrics(metrics);
+      }
+      return {
+        ok: false,
+        source: 'bot /api/state cumulative',
+        error: 'analyzer summary unavailable — showcase metrics fetch failed',
+      };
+    }
+  }
+
+  private analyzerSummaryFromMetrics(metrics: CumulativeSessionMetrics) {
+    return {
+      ok: true,
+      source: 'bot /api/state cumulative',
+      session_start: metrics.session_start,
+      session_hours: metrics.session_hours,
+      starting_balance: metrics.starting_balance,
+      current_balance: metrics.current_balance,
+      total_pnl_usd: metrics.total_pnl_usd,
+      total_pnl_pct: metrics.total_pnl_pct,
+      trade_count: metrics.trade_count,
+      win_rate: metrics.win_rate,
+      approve_count: metrics.trade_count,
+      executed_count: metrics.trade_count,
+      coverage_status:
+        metrics.last_fresh_reset_ts && metrics.last_fresh_reset_ts > 0
+          ? 'since fresh wipeout'
+          : 'since bot start',
+      data_scope: 'cumulative session',
+      executive_text:
+        `Cumulative since ${formatAnalyzerSessionStartLabel(metrics.session_start)}.\n` +
+        `Balance ${metrics.current_balance.toFixed(2)} USDT (start ${metrics.starting_balance}) · ` +
+        `P&L ${metrics.total_pnl_usd >= 0 ? '+' : ''}${metrics.total_pnl_usd.toFixed(2)} USD (${metrics.total_pnl_pct.toFixed(2)}%).\n` +
+        `${metrics.trade_count} trades · win rate ${metrics.win_rate.toFixed(1)}% · ` +
+        `today ${metrics.daily_pnl_usd >= 0 ? '+' : ''}${metrics.daily_pnl_usd.toFixed(2)} USD.`,
+      analyzer_sync_id: metrics.bot_version ?? undefined,
+      generated_at: metrics.generated_at,
+    };
+  }
+
+  private async buildAnalyzerSummary(slug: string) {
     if (slug !== 'conservative-btc') {
       return { ok: false, error: 'analyzer summary only available for conservative-btc' };
     }
@@ -600,7 +648,7 @@ export class TradingAgentsService implements OnModuleInit {
           daily_pnl_usd: totalPnlUsd,
           trade_count: trades,
           win_rate: Number(winRate.toFixed(1)),
-          session_start: sessionStart,
+          session_start: normalizeAnalyzerSessionStartIso(sessionStart) ?? sessionStart,
           session_hours: sessionHours != null ? Number(sessionHours.toFixed(2)) : undefined,
           bot_version: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : null,
           bot_start_time: null,
@@ -635,33 +683,11 @@ export class TradingAgentsService implements OnModuleInit {
       return {
         ok: false,
         source: 'bot /api/state cumulative',
-        error: 'showcase bot unreachable — cannot read cumulative session metrics from canonical /api/state',
+        error:
+          'showcase bot unreachable — cannot read cumulative session metrics from bot.doxxedcrypto.digital /api/state',
       };
     }
-    return {
-      ok: true,
-      source: 'bot /api/state cumulative',
-      session_start: metrics.session_start,
-      session_hours: metrics.session_hours,
-      starting_balance: metrics.starting_balance,
-      current_balance: metrics.current_balance,
-      total_pnl_usd: metrics.total_pnl_usd,
-      total_pnl_pct: metrics.total_pnl_pct,
-      trade_count: metrics.trade_count,
-      win_rate: metrics.win_rate,
-      approve_count: metrics.trade_count,
-      executed_count: metrics.trade_count,
-      coverage_status: metrics.last_fresh_reset_ts && metrics.last_fresh_reset_ts > 0 ? 'since fresh wipeout' : 'since bot start',
-      data_scope: 'cumulative session',
-      executive_text:
-        `Cumulative since ${metrics.session_start ? new Date(metrics.session_start).toISOString() : 'bot start'}.\n` +
-        `Balance ${metrics.current_balance.toFixed(2)} USDT (start ${metrics.starting_balance}) · ` +
-        `P&L ${metrics.total_pnl_usd >= 0 ? '+' : ''}${metrics.total_pnl_usd.toFixed(2)} USD (${metrics.total_pnl_pct.toFixed(2)}%).\n` +
-        `${metrics.trade_count} trades · win rate ${metrics.win_rate.toFixed(1)}% · ` +
-        `today ${metrics.daily_pnl_usd >= 0 ? '+' : ''}${metrics.daily_pnl_usd.toFixed(2)} USD.`,
-      analyzer_sync_id: metrics.bot_version ?? undefined,
-      generated_at: metrics.generated_at,
-    };
+    return this.analyzerSummaryFromMetrics(metrics);
   }
 
   /** Server-side Fly.io + Cloudflare tunnel reachability for the conservative-btc showcase.
@@ -1071,11 +1097,17 @@ export class TradingAgentsService implements OnModuleInit {
 
     const exchangePosition = snapshot?.position ?? metrics?.openPosition ?? null;
 
+    const ledgerCloses =
+      instance.exchangeProvider === 'bitfinex'
+        ? await this.exchanges.getUserBitfinexPositionCloseLedger(userId, sessionStartedAt)
+        : [];
+
     return mapSubscriberExchangeLiveBook({
       orders: snapshot?.orders ?? [],
       position: exchangePosition,
       markPrice,
       participants,
+      ledgerCloses: ledgerCloses ?? [],
     });
   }
 
@@ -1100,7 +1132,7 @@ export class TradingAgentsService implements OnModuleInit {
 
     let sharedBot: BotApiState | null = null;
     if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
-      sharedBot = await this.botBridge.fetchState(true, 'relay');
+      sharedBot = await this.botBridge.fetchPublicShowcaseState(true);
     }
 
     const rest =
@@ -1788,6 +1820,29 @@ export class TradingAgentsService implements OnModuleInit {
  * TAKE_PROFIT, STOP_LOSS, MANUAL, SIGNAL, EXPIRED, etc. Unknown / signal-driven outcomes
  * fall back to "Signal".
  */
+function formatAnalyzerSessionStartLabel(raw: string | null | undefined): string {
+  if (!raw) return 'bot start';
+  const direct = new Date(raw);
+  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
+  if (m) {
+    const [, y, mo, d, h, mi] = m;
+    return `${y}-${mo}-${d} ${h}:${mi} AEST`;
+  }
+  return raw;
+}
+
+function normalizeAnalyzerSessionStartIso(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const direct = new Date(raw);
+  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  const dt = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}+10:00`);
+  return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+}
+
 function mapShowcaseExitReasonToTrigger(
   exitReason: string | null,
 ): 'Take Profit' | 'Stop Loss' | 'Manual' | 'Signal' {

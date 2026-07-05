@@ -3,6 +3,7 @@ import type { TradingAgentDashboardState } from '@dcf/utils';
 import { formatMelbourneDateTime } from '@dcf/utils';
 import type {
   BitfinexActiveOrder,
+  BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
 
@@ -75,6 +76,7 @@ export function mapSubscriberExchangeLiveBook(input: {
   position: BitfinexPositionDetail | null;
   markPrice?: number;
   participants: SubscriberCycleRow[];
+  ledgerCloses?: BitfinexPositionCloseLedgerRow[];
 }): TradingAgentDashboardState['liveBook'] {
   const mark = input.markPrice ?? 0;
   const positions: TradingAgentDashboardState['liveBook']['positions'] = [];
@@ -239,6 +241,35 @@ export function mapSubscriberExchangeLiveBook(input: {
       });
     }
   }
+
+  const participantCloseMs = trades.map((t) => Date.parse(String(t.time).replace(' AEST', '+10:00'))).filter(Number.isFinite);
+  for (const row of input.ledgerCloses ?? []) {
+    const closedMs = row.closedAt.getTime();
+    const alreadyCovered = participantCloseMs.some(
+      (ms) => Number.isFinite(ms) && Math.abs(ms - closedMs) <= 120_000,
+    );
+    if (alreadyCovered) continue;
+    trades.push({
+      time: fmtTime(row.closedAt),
+      tradeId: `bfx-${row.ledgerId}`,
+      direction: row.pnlUsd >= 0 ? 'LONG' : 'SHORT',
+      entry: 0,
+      exit: 0,
+      durationMin: 1,
+      pnlPct: 0,
+      netUsd: row.pnlUsd,
+      grossUsd: row.pnlUsd,
+      tradeFeesUsd: 0,
+      fundingUsd: 0,
+      aiBand: 'EXCHANGE',
+    });
+  }
+
+  trades.sort((a, b) => {
+    const ta = Date.parse(String(a.time).replace(' AEST', '+10:00'));
+    const tb = Date.parse(String(b.time).replace(' AEST', '+10:00'));
+    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+  });
 
   return {
     activeSignals: activeSignals.slice(0, 10),

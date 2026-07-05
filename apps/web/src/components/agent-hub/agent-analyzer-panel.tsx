@@ -133,8 +133,10 @@ export function AgentAnalyzerPanel({
             Analyzer session unavailable
             {summary?.error ? ` — ${summary.error}` : ''}
             <p className="mt-1 text-amber-200/70">
-              The showcase bot (Fly + Cloudflare) is unreachable. Cumulative session metrics will reappear
-              once either endpoint responds 200.
+              Full-session metrics come from the home showcase bot on{' '}
+              <span className="font-mono">bot.doxxedcrypto.digital</span> (:7002 analyzer :9001). When the
+              Cloudflare tunnel or analyzer proxy blips, cached /api/state metrics will repopulate this block
+              automatically — the separate Fly.io bot is not the canonical showcase.
             </p>
           </div>
         )}
