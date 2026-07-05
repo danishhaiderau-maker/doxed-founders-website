@@ -135,7 +135,10 @@ export type SignalCycleEventType =
   | 'MIRROR_CATCHUP_ENTRY'
   // Action-match audit: catch-up could not place an entry (structural skip).
   | 'MIRROR_CATCHUP_SKIPPED'
-  | 'ACTION_MISS_ENTRY';
+  | 'ACTION_MISS_ENTRY'
+  // Cancel-race / exit fail-safe observability (no status transition on their own).
+  | 'STALE_EXIT_SUPERSEDED'
+  | 'MIRROR_EXIT_FAILSAFE_ALERT';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
