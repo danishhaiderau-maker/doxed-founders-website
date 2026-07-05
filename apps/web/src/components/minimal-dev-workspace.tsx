@@ -311,7 +311,9 @@ function HistoryThread({
         <HistoryMessage key={i} msg={m} />
       ))}
       {agentTyping && !messages.some((m) => m.streaming || m.partial) && (
-        <AgentTypingBubble prominent />
+        <div className='hidden md:block'>
+          <AgentTypingBubble prominent />
+        </div>
       )}
     </div>
   );
@@ -867,6 +869,13 @@ export function MinimalDevWorkspace({
           if (status.failed) {
             const detail = status.result?.replace(/^error:\s*/i, '') ?? 'Delivery failed on your PC';
             onDone('failed', detail);
+            return;
+          }
+          if (status.status === 'DISPATCHED' && !status.delivered) {
+            onDone(
+              'failed',
+              status.result?.replace(/^error:\s*/i, '') ?? 'Cursor delivery did not complete on your PC',
+            );
             return;
           }
           if (status.status === 'DISPATCHING') {

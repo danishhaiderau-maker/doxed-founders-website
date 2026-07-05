@@ -551,6 +551,15 @@ export class IdeBridgeService {
       sessionId: string;
     } | null;
     if (!row) throw new NotFoundException('Dispatch not found');
+    const resultText = row.result ?? '';
+    const delivered = row.status === 'DISPATCHED' && /^dispatched\s*\(/i.test(resultText);
+    const failed =
+      row.status === 'DISPATCHED' &&
+      !delivered &&
+      (/^error:/i.test(resultText) ||
+        /Command failed|SendKeys.*failed|paste failed|refusing SendKeys|Could not focus/i.test(
+          resultText,
+        ));
     return {
       id: row.id,
       status: row.status,
@@ -558,8 +567,8 @@ export class IdeBridgeService {
       dispatchedAt: row.dispatchedAt?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString(),
       sessionId: row.sessionId,
-      delivered: row.status === 'DISPATCHED' && !row.result?.startsWith('error:'),
-      failed: row.status === 'DISPATCHED' && Boolean(row.result?.startsWith('error:')),
+      delivered,
+      failed,
     };
   }
 }
