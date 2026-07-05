@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(copy): add 120s showcase-flat fail-safe for stuck OPEN lots
 
 ## Last Activity
 
