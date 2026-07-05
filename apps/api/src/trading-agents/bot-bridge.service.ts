@@ -90,16 +90,20 @@ export class BotBridgeService {
     return envUrl;
   }
 
-  /** Ordered candidate bot URLs for resilient health/state pulls.
-   *  Fly.io is PRIMARY (stable HTTP 200), Cloudflare tunnel is FALLBACK (covers analyzer proxy
-   *  and the local showcase bot when Fly is unreachable). Online if EITHER responds. */
+  /** Canonical showcase URL — home bot :7002 via Cloudflare tunnel ONLY. */
+  async resolveShowcaseUrl(): Promise<string> {
+    return (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+  }
+
+  /** Ordered candidate bot URLs for legacy health probes.
+   *  Canonical showcase is Cloudflare first; Fly is a separate legacy instance and must
+   *  never win showcase state races (split-brain). */
   async resolveBotUrls(): Promise<string[]> {
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    const cf = await this.resolveShowcaseUrl();
     const fly = this.getFlyUrl();
-    // De-dup while preserving order (Fly first).
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const u of [fly, cf]) {
+    for (const u of [cf, fly]) {
       if (!u) continue;
       if (seen.has(u)) continue;
       seen.add(u);
@@ -258,7 +262,7 @@ export class BotBridgeService {
     }
   }
 
-  /** Admin panels — fast relay snapshot; do not block on full /api/state (large trades_map). */
+  /** Admin panels — canonical showcase only (never Fly). Cache-first, then live tunnel. */
   async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
@@ -272,7 +276,7 @@ export class BotBridgeService {
       return cached;
     }
 
-    const data = await this.fetchStateFromCandidates(['/api/relay-state', '/api/state'], {
+    const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
       relayTimeout: 8_000,
       stateTimeout: 8_000,
       userAgent: 'doxxedcrypto-admin/1.0',
@@ -299,7 +303,7 @@ export class BotBridgeService {
       }
     }
 
-    const data = await this.fetchStateFromCandidates(['/api/relay-state', '/api/state'], {
+    const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
       relayTimeout: 20_000,
       stateTimeout: 30_000,
       userAgent: 'doxxedcrypto-relay/1.0',
@@ -311,6 +315,34 @@ export class BotBridgeService {
     }
 
     this.invalidateCache();
+    return null;
+  }
+
+  /** Fetch state from the canonical showcase tunnel only — never Fly (split-brain guard). */
+  private async fetchShowcaseState(
+    paths: string[],
+    opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
+  ): Promise<BotApiState | null> {
+    const base = await this.resolveShowcaseUrl();
+    for (const path of paths) {
+      const timeoutMs = path.includes('relay-state') ? opts.relayTimeout : opts.stateTimeout;
+      try {
+        const res = await fetch(`${base}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json', 'User-Agent': opts.userAgent },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Showcase bot ${base}${path} HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as BotApiState;
+        if (!data || typeof data !== 'object') continue;
+        return data;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Showcase bot ${base}${path} fetch failed: ${msg}`);
+      }
+    }
     return null;
   }
 
@@ -369,17 +401,26 @@ export class BotBridgeService {
     return null;
   }
 
-  /** True when EITHER the Fly bot or the Cloudflare showcase tunnel responds. */
+  /** True when the canonical Cloudflare showcase tunnel responds. */
   async isReachable(force = false): Promise<boolean> {
-    const health = await this.fetchHealth();
-    if (health) return true;
-    const state = await this.fetchState(force, 'relay');
+    const cf = await this.resolveShowcaseUrl();
+    try {
+      const res = await fetch(`${cf}/api/ping`, {
+        signal: AbortSignal.timeout(6_000),
+        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+      });
+      if (res.ok) return true;
+    } catch {
+      // fall through
+    }
+    if (!force) return false;
+    const state = await this.fetchPublicShowcaseState(true);
     return Boolean(state);
   }
 
   async getLiveDashboard(agentName: string, force = false) {
-    const botUrl = await this.resolveBotUrl();
-    const bot = await this.fetchState(force, 'relay');
+    const botUrl = await this.resolveShowcaseUrl();
+    const bot = await this.fetchPublicShowcaseState(force);
     if (!bot) {
       // Health-only is not enough for showcase tables — avoid "connected" with empty liveBook.
       return null;
@@ -404,8 +445,8 @@ export class BotBridgeService {
   }
 
   async proxyBotPost(path: string, body: Record<string, unknown> = {}) {
-    const bases = await this.resolveBotUrls();
-    if (bases.length === 0) {
+    const bases = [await this.resolveShowcaseUrl()];
+    if (bases.length === 0 || !bases[0]) {
       return { ok: false, error: 'Bot bridge not configured' };
     }
     const secret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
