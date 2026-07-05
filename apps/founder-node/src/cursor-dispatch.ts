@@ -30,9 +30,13 @@ const MAX_DISPATCHES_PER_CYCLE = 1;
 const CURSOR_FOCUS_WAIT_MS = 2500;
 const COMPOSER_TAB_SETTLE_MS = 900;
 const SESSION_DISPATCH_COOLDOWN_MS = 8_000;
+const DISPATCH_FINGERPRINT_COOLDOWN_MS = 30_000;
+const CURSOR_FOCUS_ATTEMPTS = 5;
+const CURSOR_FOCUS_ATTEMPT_MS = 450;
 
 let dispatchCycleInFlight = false;
 const lastDispatchBySession = new Map<string, number>();
+const recentDispatchFingerprints = new Map<string, number>();
 
 export type PendingDispatch = {
   id: string;
@@ -125,6 +129,90 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function dispatchFingerprint(sessionId: string, prompt: string): string {
+  const { text } = parseDispatchPrompt(prompt);
+  return `${sessionId}:${(text || prompt).trim()}`;
+}
+
+/**
+ * Win32: activate Cursor.exe main window and verify it owns the foreground.
+ * Prevents SendKeys (^l, ^v, {ENTER}) from hitting the browser address bar
+ * (Ctrl+L in Edge/Chrome focuses omnibox → paste + Enter opens Bing search).
+ */
+async function ensureCursorWindowFocused(): Promise<{ ok: boolean; foregroundTitle?: string }> {
+  if (process.platform !== 'win32') return { ok: false, foregroundTitle: undefined };
+
+  const ps =
+    'Add-Type @\"' +
+    'using System;' +
+    'using System.Diagnostics;' +
+    'using System.Runtime.InteropServices;' +
+    'using System.Text;' +
+    'public class FnCursorFocus {' +
+    '  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);' +
+    '  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' +
+    '  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();' +
+    '  [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);' +
+    '  public static IntPtr FindCursorMainWindow() {' +
+    '    foreach (var p in Process.GetProcessesByName(\"Cursor\")) {' +
+    '      if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;' +
+    '    }' +
+    '    return IntPtr.Zero;' +
+    '  }' +
+    '  public static string ForegroundTitle() {' +
+    '    var sb = new StringBuilder(512);' +
+    '    GetWindowText(GetForegroundWindow(), sb, 512);' +
+    '    return sb.ToString();' +
+    '  }' +
+    '  public static bool ActivateCursor() {' +
+    '    var h = FindCursorMainWindow();' +
+    '    if (h == IntPtr.Zero) return false;' +
+    '    ShowWindow(h, 9);' +
+    '    return SetForegroundWindow(h);' +
+    '  }' +
+    '}' +
+    '\"@;' +
+    `$ok=$false;` +
+    `$title='';` +
+    `for ($i=0; $i -lt ${CURSOR_FOCUS_ATTEMPTS}; $i++) {` +
+    '  [void][FnCursorFocus]::ActivateCursor();' +
+    `  Start-Sleep -Milliseconds ${CURSOR_FOCUS_ATTEMPT_MS};` +
+    '  $title=[FnCursorFocus]::ForegroundTitle();' +
+    "  if ($title -match 'Cursor') { $ok=$true; break }" +
+    '}' +
+    'if ($ok) { Write-Output ("OK:" + $title) } else { Write-Output ("FAIL:" + $title) }';
+
+  return readCursorFocusResult(ps);
+}
+
+async function readCursorFocusResult(psBody: string): Promise<{ ok: boolean; foregroundTitle?: string }> {
+  return new Promise((resolve) => {
+    exec(`powershell -NoProfile -Command "${psBody.replace(/"/g, '\\"')}"`, (err, stdout) => {
+      const line = (stdout || '').trim().split(/\r?\n/).pop() || '';
+      if (line.startsWith('OK:')) {
+        resolve({ ok: true, foregroundTitle: line.slice(3) });
+        return;
+      }
+      if (line.startsWith('FAIL:')) {
+        resolve({ ok: false, foregroundTitle: line.slice(5) || undefined });
+        return;
+      }
+      resolve({ ok: false, foregroundTitle: line || err?.message });
+    });
+  });
+}
+
+async function runSendKeys(script: string): Promise<{ ok: boolean; error?: string }> {
+  const focus = await ensureCursorWindowFocused();
+  if (!focus.ok) {
+    return {
+      ok: false,
+      error: `Cursor window not focused (foreground="${focus.foregroundTitle ?? 'unknown'}") — refusing SendKeys`,
+    };
+  }
+  return execAsync(`powershell -NoProfile -Command "${script.replace(/"/g, '\\"')}"`);
+}
+
 const ATTACH_IMAGE_RE =
   /<!--founder-attach:image:([^\n]+)\n(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\n-->/g;
 
@@ -204,15 +292,20 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
   // Give Cursor time to restore the focused composer tab after workspace activation.
   await sleep(COMPOSER_TAB_SETTLE_MS);
 
+  const focusBeforeKeys = await ensureCursorWindowFocused();
+  if (!focusBeforeKeys.ok) {
+    throw new Error(
+      `Cursor is not the foreground window (got "${focusBeforeKeys.foregroundTitle ?? 'unknown'}") — aborting paste to avoid browser/search hijack`,
+    );
+  }
+
   // Ctrl+L focuses the chat/composer input in the active tab without spawning
   // a new agent session (Ctrl+Shift+L does spawn one — that was the bug).
   const focusCmd =
     'Add-Type -AssemblyName System.Windows.Forms;' +
     '[System.Windows.Forms.SendKeys]::SendWait(\'^l\');' +
     'Start-Sleep -Milliseconds 450;';
-  const focusResult = await execAsync(
-    `powershell -NoProfile -Command "${focusCmd.replace(/"/g, '\\"')}"`,
-  );
+  const focusResult = await runSendKeys(focusCmd);
   if (!focusResult.ok) {
     throw new Error(`SendKeys focus failed: ${focusResult.error ?? 'unknown error'}`);
   }
@@ -225,16 +318,20 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
       'Add-Type -AssemblyName System.Windows.Forms;' +
       '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
       'Start-Sleep -Milliseconds 400;';
-    await execAsync(`powershell -NoProfile -Command "${pasteImg.replace(/"/g, '\\"')}"`);
+    const imgResult = await runSendKeys(pasteImg);
+    if (!imgResult.ok) {
+      throw new Error(`SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`);
+    }
   }
 
-  const finalText =
+  const bodyText = withFounderOsDispatchAttribution(
     text ||
-    (images.length > 0
-      ? `[Attachments: ${images.map((i) => i.name).join(', ')}]`
-      : prompt);
+      (images.length > 0
+        ? `[Attachments: ${images.map((i) => i.name).join(', ')}]`
+        : prompt),
+  );
   try {
-    clipboard.writeText(finalText);
+    clipboard.writeText(bodyText);
   } catch (err) {
     throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -244,9 +341,7 @@ async function sendPromptToFocusedComposer(prompt: string): Promise<void> {
     '[System.Windows.Forms.SendKeys]::SendWait(\'^v\');' +
     'Start-Sleep -Milliseconds 250;' +
     '[System.Windows.Forms.SendKeys]::SendWait(\'{ENTER}\');';
-  const result = await execAsync(
-    `powershell -NoProfile -Command "${pasteText.replace(/"/g, '\\"')}"`,
-  );
+  const result = await runSendKeys(pasteText);
   if (!result.ok) {
     throw new Error(`SendKeys failed: ${result.error ?? 'unknown error'}`);
   }
@@ -295,6 +390,15 @@ export async function executeCursorDispatch(
   nodeToken: string,
   dispatch: PendingDispatch,
 ): Promise<void> {
+  const fingerprint = dispatchFingerprint(dispatch.sessionId, dispatch.prompt);
+  const lastFingerprintAt = recentDispatchFingerprints.get(fingerprint) ?? 0;
+  if (Date.now() - lastFingerprintAt < DISPATCH_FINGERPRINT_COOLDOWN_MS) {
+    await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, {
+      result: 'deduplicated (identical prompt recently dispatched)',
+    });
+    return;
+  }
+
   try {
     const composerId = dispatch.sessionId;
     const ctx = resolveCursorComposerContext(composerId);
@@ -308,6 +412,7 @@ export async function executeCursorDispatch(
     );
 
     await sendPromptToFocusedComposer(dispatch.prompt);
+    recentDispatchFingerprints.set(fingerprint, Date.now());
 
     const bits = [
       `composer=${composerId.slice(0, 8)}`,

@@ -226,3 +226,34 @@ export const OPENHANDS_CAPABILITIES: BridgeCapabilityReport = {
   getDeployments: false,
   getAgents: true, // via run snapshots
 };
+
+/** Visible prefix pasted into Cursor so agents know the prompt was relayed from Founder OS. */
+export const FOUNDER_OS_DISPATCH_PREFIX = '[Founder OS → Cursor]';
+
+const FOUNDER_OS_ATTACH_IMAGE_RE =
+  /<!--founder-attach:image:([^\n]+)\n(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\n-->/g;
+
+/**
+ * Prefix a relay prompt without disturbing trailing `<!--founder-attach:image:...-->`
+ * blocks (those must stay at the end for Founder Node clipboard paste).
+ */
+export function withFounderOsDispatchAttribution(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.includes(FOUNDER_OS_DISPATCH_PREFIX)) return trimmed;
+
+  const attachmentBlocks: string[] = [];
+  const text = trimmed
+    .replace(FOUNDER_OS_ATTACH_IMAGE_RE, (block) => {
+      attachmentBlocks.push(block);
+      return '';
+    })
+    .trim();
+
+  const prefixedText = text
+    ? `${FOUNDER_OS_DISPATCH_PREFIX}\n\n${text}`
+    : FOUNDER_OS_DISPATCH_PREFIX;
+  return attachmentBlocks.length > 0
+    ? `${prefixedText}${attachmentBlocks.join('')}`
+    : prefixedText;
+}

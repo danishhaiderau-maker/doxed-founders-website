@@ -367,7 +367,7 @@ const SESSION_DB_TIMEOUT_MS = 5_000;
 const MAX_SESSIONS = 20;
 const SUBTITLE_MAX = 100;
 const MAX_MESSAGES_PER_SESSION = 50;
-const MAX_SESSIONS_WITH_MESSAGES = 12;
+const MAX_SESSIONS_WITH_MESSAGES = 20;
 const MESSAGE_TEXT_MAX = 1000;
 
 function getCursorWorkspaceStorageRoot(): string | null {

@@ -143,6 +143,17 @@ function SessionRow({
 
 const HISTORY_MSG_COLLAPSED_LEN = 280;
 
+/** Never replace a populated thread with an empty API/poll payload. */
+function mergeBridgeHistory(
+  prev: BridgeMessage[] | null,
+  incoming: BridgeMessage[] | null | undefined,
+): BridgeMessage[] | null {
+  if (!incoming || incoming.length === 0) {
+    return prev && prev.length > 0 ? prev : incoming ?? null;
+  }
+  return incoming;
+}
+
 function HistoryMessage({ msg }: { msg: BridgeMessage }) {
   const [expanded, setExpanded] = useState(false);
   const isUser = msg.role === 'user';
@@ -247,6 +258,7 @@ export function MinimalDevWorkspace({
   const [agents, setAgents] = useState<RecentAgent[]>([]);
   const [sessions, setSessions] = useState<BridgeSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [pinnedSession, setPinnedSession] = useState<BridgeSession | null>(null);
   const [history, setHistory] = useState<BridgeMessage[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -275,7 +287,7 @@ export function MinimalDevWorkspace({
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Synchronous guard — React `busy` state updates too late for double-clicks. */
   const sendingRef = useRef(false);
-  const lastSendRef = useRef<{ text: string; at: number } | null>(null);
+  const lastSendRef = useRef<{ text: string; sessionId: string | null; at: number } | null>(null);
   const stopHistoryPoll = useCallback(() => {
     if (historyPollRef.current) {
       clearTimeout(historyPollRef.current);
@@ -318,12 +330,22 @@ export function MinimalDevWorkspace({
       const tick = () => {
         void fetchIdeBridgeSessionMessages(accessToken, sessionId)
           .then((msgs) => {
-            if (Array.isArray(msgs)) setHistory(msgs);
+            if (Array.isArray(msgs)) {
+              setHistory((prev) => mergeBridgeHistory(prev, msgs));
+            }
           })
           .catch(() => undefined);
         void fetchIdeBridgeSessions(accessToken)
           .then((ss) => {
-            if (Array.isArray(ss)) setSessions(ss);
+            if (!Array.isArray(ss)) return;
+            setSessions(ss);
+            const match = ss.find((s) => s.id === sessionId);
+            if (match?.messages?.length) {
+              setHistory((prev) => mergeBridgeHistory(prev, match.messages));
+              setPinnedSession((pin) =>
+                pin?.id === sessionId ? { ...pin, ...match, messages: match.messages } : pin,
+              );
+            }
           })
           .catch(() => undefined);
       };
@@ -578,8 +600,8 @@ export function MinimalDevWorkspace({
 
   const selectedSession = useMemo(() => {
     if (!selectedSessionId) return null;
-    return sessions.find((s) => s.id === selectedSessionId) ?? null;
-  }, [sessions, selectedSessionId]);
+    return sessions.find((s) => s.id === selectedSessionId) ?? pinnedSession;
+  }, [sessions, selectedSessionId, pinnedSession]);
   const selectedAgentTyping =
     selectedSession?.agentTyping === true ||
     Boolean(history?.some((m) => m.streaming || m.partial));
@@ -640,19 +662,25 @@ export function MinimalDevWorkspace({
     if (!selectedSessionId || !accessToken) {
       setHistory(null);
       setHistoryError(null);
+      setPinnedSession(null);
       return;
     }
     let cancelled = false;
-    const embedded = selectedSession?.messages ?? null;
+    const embedded =
+      selectedSession?.messages ??
+      pinnedSession?.messages ??
+      null;
 
-    setHistory(embedded);
+    setHistory((prev) => mergeBridgeHistory(prev, embedded));
     setHistoryError(null);
-    setHistoryLoading(true);
+    setHistoryLoading(!embedded?.length);
 
     fetchIdeBridgeSessionMessages(accessToken, selectedSessionId)
       .then((msgs) => {
         if (cancelled) return;
-        if (Array.isArray(msgs)) setHistory(msgs);
+        if (Array.isArray(msgs)) {
+          setHistory((prev) => mergeBridgeHistory(prev, msgs));
+        }
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -665,19 +693,22 @@ export function MinimalDevWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [selectedSessionId, accessToken, selectedSession?.messages]);
+  }, [selectedSessionId, accessToken, pinnedSession?.id]);
 
-  const handleSelectSession = useCallback(
-    (session: BridgeSession) => {
-      setSelectedSessionId(session.id);
-      setSidebarOpen(false);
-      // Don't prefill the input with a technical summary — the conversation
-      // thread above shows the full history; the user just continues typing
-      // as if replying in a chat app.
-      setInput('');
-    },
-    [],
-  );
+  const handleSelectSession = useCallback((session: BridgeSession) => {
+    setSelectedSessionId(session.id);
+    setPinnedSession(session);
+    setSidebarOpen(false);
+    if (session.messages?.length) {
+      setHistory(session.messages);
+      setHistoryLoading(false);
+      setHistoryError(null);
+    }
+    // Don't prefill the input with a technical summary — the conversation
+    // thread above shows the full history; the user just continues typing
+    // as if replying in a chat app.
+    setInput('');
+  }, []);
 
   const handleSend = useCallback(async () => {
     const prompt = cleanTranscriptText(input.trim());
@@ -686,9 +717,16 @@ export function MinimalDevWorkspace({
     if (sendingRef.current) return;
     const now = Date.now();
     const last = lastSendRef.current;
-    if (last && last.text === prompt && now - last.at < 2000) return;
+    if (
+      last &&
+      last.text === prompt &&
+      last.sessionId === selectedSessionId &&
+      now - last.at < 5000
+    ) {
+      return;
+    }
     sendingRef.current = true;
-    lastSendRef.current = { text: prompt, at: now };
+    lastSendRef.current = { text: prompt, sessionId: selectedSessionId, at: now };
 
     if (phase !== 'idle') stopVoice();
     resetTranscript();
@@ -731,6 +769,14 @@ export function MinimalDevWorkspace({
     // Cursor session selected → remote control only; no platform Brain / RULE_BASED fallback.
     if (dispatchToSelectedSession && sessionForDispatch) {
       setDispatchNotice('Dispatching to Cursor…');
+      setHistory((prev) => [
+        ...(prev ?? []),
+        {
+          role: 'user',
+          content: prompt || '(attachment)',
+          timestamp: new Date().toISOString(),
+        },
+      ]);
       const ideProvider = sessionForDispatch.ideProvider || 'cursor';
       try {
         await dispatchToIdeSession(

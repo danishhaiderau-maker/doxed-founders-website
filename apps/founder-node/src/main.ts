@@ -477,13 +477,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       notifyDesktop('Founder Vault synced', `Applied ${merged} update(s) from your other device.`);
     }
 
-    // Relay any pending IDE dispatches (Founder OS sidebar → local Cursor).
-    // Fire-and-forget so a slow SendKeys sequence doesn't block the next
-    // heartbeat; errors are logged inside the helper.
-    void processPendingDispatches(vaultRoot).catch((err) =>
-      console.warn('Pending dispatch cycle failed:', err),
-    );
-
+    // Session sync (every 3s) claims pending IDE dispatches — no duplicate poll here.
     lastSyncOkAt = new Date();
     lastSyncError = null;
     consecutiveTransientFailures = 0;
