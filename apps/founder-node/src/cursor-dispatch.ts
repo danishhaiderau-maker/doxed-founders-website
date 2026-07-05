@@ -3,7 +3,6 @@ import { exec } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { withFounderOsDispatchAttribution } from '@dcf/utils';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
   focusComposerInWorkspaceState,
@@ -216,6 +215,28 @@ async function runSendKeys(script: string): Promise<{ ok: boolean; error?: strin
 
 const ATTACH_IMAGE_RE =
   /<!--founder-attach:image:([^\n]+)\n(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\n-->/g;
+
+const FOUNDER_OS_DISPATCH_PREFIX = '[Founder OS → Cursor]';
+
+/** Keep paste attribution aligned with @dcf/utils — local copy avoids Electron tsc resolution quirks. */
+function withFounderOsDispatchAttribution(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.includes(FOUNDER_OS_DISPATCH_PREFIX)) return trimmed;
+  const attachmentBlocks: string[] = [];
+  const text = trimmed
+    .replace(ATTACH_IMAGE_RE, (block) => {
+      attachmentBlocks.push(block);
+      return '';
+    })
+    .trim();
+  const prefixedText = text
+    ? `${FOUNDER_OS_DISPATCH_PREFIX}\n\n${text}`
+    : FOUNDER_OS_DISPATCH_PREFIX;
+  return attachmentBlocks.length > 0
+    ? `${prefixedText}${attachmentBlocks.join('')}`
+    : prefixedText;
+}
 
 type ParsedDispatchPrompt = {
   text: string;
