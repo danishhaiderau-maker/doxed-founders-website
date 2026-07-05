@@ -17,6 +17,8 @@ import {
   fetchRecentAgents,
   fetchFounderNodeStatus,
   type FounderNodeStatusRow,
+  isSessionExpiredError,
+  SESSION_EXPIRED_MESSAGE,
   dispatchToIdeSession,
   type BridgeSession,
   type ConnectedWorkspace,
@@ -263,6 +265,7 @@ export function MinimalDevWorkspace({
   const [fullScreenPanel, setFullScreenPanel] = useState<'none' | 'social' | 'settings'>('none');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string>('never');
+  const [authStale, setAuthStale] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const historyPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -347,13 +350,17 @@ export function MinimalDevWorkspace({
   const refresh = useCallback(async () => {
     if (!accessToken) return;
     try {
+      const catchAuth = <T,>(fallback: T) => (err: unknown): T => {
+        if (isSessionExpiredError(err)) setAuthStale(true);
+        return fallback;
+      };
       const [b, iw, c, a, ss, nodeStatusResp] = await Promise.all([
-        fetchDesktopBridge(accessToken).catch(() => null),
-        fetchIdeBridgeWorkspaces(accessToken).catch(() => [] as IdeWorkspace[]),
-        fetchConnectedWorkspaces(accessToken).catch(() => [] as ConnectedWorkspace[]),
-        fetchRecentAgents(accessToken).catch(() => null),
-        fetchIdeBridgeSessions(accessToken).catch(() => [] as BridgeSession[]),
-        fetchFounderNodeStatus(accessToken).catch(() => ({ nodes: [] as FounderNodeStatusRow[] })),
+        fetchDesktopBridge(accessToken).catch(catchAuth(null)),
+        fetchIdeBridgeWorkspaces(accessToken).catch(catchAuth([] as IdeWorkspace[])),
+        fetchConnectedWorkspaces(accessToken).catch(catchAuth([] as ConnectedWorkspace[])),
+        fetchRecentAgents(accessToken).catch(catchAuth(null)),
+        fetchIdeBridgeSessions(accessToken).catch(catchAuth([] as BridgeSession[])),
+        fetchFounderNodeStatus(accessToken).catch(catchAuth({ nodes: [] as FounderNodeStatusRow[] })),
       ]);
       if (b) { setBridge(b); setLastSync(b.latest?.updatedAt || 'never'); }
       if (iw) setIdeWorkspaces(iw);
@@ -361,10 +368,18 @@ export function MinimalDevWorkspace({
       if (a) { setAgents(a.agents); setNodeStatus({ desktopOnline: a.desktopOnline, cursorConnected: a.cursorConnected, founderNodeOnline: a.founderNodeOnline }); }
       if (ss) setSessions(ss);
       setPairedNodes(nodeStatusResp?.nodes ?? []);
-      setError(null);
+      if (nodeStatusResp?.nodes?.length || b || iw.length || ss.length || a) {
+        setAuthStale(false);
+        setError(null);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load workspace state';
-      setError(msg);
+      if (isSessionExpiredError(e)) {
+        setAuthStale(true);
+        setError(SESSION_EXPIRED_MESSAGE);
+      } else {
+        setError(msg);
+      }
     }
   }, [accessToken]);
 
@@ -476,7 +491,9 @@ export function MinimalDevWorkspace({
     ideWorkspaces.some((w) => w.ideProvider === 'cursor') ||
     Boolean(bridge?.latest || bridge?.nodes?.length);
   const pairingMismatchHint =
-    !isNodeLive && !accountHasPairedNode
+    authStale
+      ? SESSION_EXPIRED_MESSAGE
+      : !isNodeLive && !accountHasPairedNode
       ? 'No Founder Node is paired to this account. In Founder Node tray → Repair connection, generate a code in Settings → Builder, and paste it in the tray app (not the browser).'
       : !isNodeLive && accountHasPairedNode && !accountNodeOnline
         ? 'Your account has a paired node but it is not heartbeating. Open Founder Node from the tray, click Sync now, or re-pair with a fresh code from Settings → Builder.'
@@ -926,6 +943,11 @@ export function MinimalDevWorkspace({
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Active Agents</span><span className='ml-auto text-zinc-200'>{agentCount}</span></div>
               <div className='flex items-center gap-2'><span className='text-zinc-500'>Last Sync</span><span className='ml-auto text-zinc-400'>{timeAgo(lastSync)}</span></div>
             </div>
+            {authStale && (
+              <div className='mt-3 rounded-lg border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-xs text-rose-200/90'>
+                {SESSION_EXPIRED_MESSAGE} Founder Node may still show connected in the tray — that uses a separate device token.
+              </div>
+            )}
             {!realBrainsAvailable && (
               <div className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
                 No AI key configured — using free fallback. Pick <span className='font-semibold'>Bring Your Own Key</span> below to paste a Z.ai/OpenAI key, or ask an admin to enable the promo pool.

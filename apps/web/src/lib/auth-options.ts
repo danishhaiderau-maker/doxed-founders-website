@@ -5,6 +5,52 @@ import TwitterProvider from 'next-auth/providers/twitter';
 import { cookies } from 'next/headers';
 import { apiUrl } from './api-base';
 
+/** Decode JWT exp (seconds) without verifying — used only to decide when to refresh. */
+function decodeJwtExp(token: string | undefined | null): number | null {
+  if (!token || typeof token !== 'string') return null;
+  const part = token.split('.')[1];
+  if (!part) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refresh when missing, expired, or within `skewSec` of expiry (default 1h). */
+function apiTokenNeedsRefresh(exp: number | null, skewSec = 3600): boolean {
+  if (!exp) return true;
+  return Date.now() / 1000 >= exp - skewSec;
+}
+
+async function refreshApiAccessToken(userId: string): Promise<string | null> {
+  try {
+    const res = await fetch(apiUrl('/auth/session-refresh', true), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(process.env.INTERNAL_AUTH_SECRET
+          ? { 'x-internal-auth-secret': process.env.INTERNAL_AUTH_SECRET }
+          : {}),
+      },
+      body: JSON.stringify({ userId }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`[auth] session-refresh failed: ${res.status} ${body.slice(0, 200)}`);
+      return null;
+    }
+    const data = (await res.json()) as { accessToken?: string };
+    return data.accessToken?.trim() || null;
+  } catch (err) {
+    console.error('[auth] session-refresh error', err);
+    return null;
+  }
+}
+
 async function syncOAuthWithApi(input: {
   email: string;
   name?: string | null;
@@ -292,6 +338,14 @@ export const authOptions: NextAuthOptions = {
         token.role = user.role;
         token.id = user.id;
       }
+
+      const userId = typeof token.id === 'string' ? token.id : null;
+      const currentToken = typeof token.accessToken === 'string' ? token.accessToken : null;
+      if (userId && apiTokenNeedsRefresh(decodeJwtExp(currentToken))) {
+        const fresh = await refreshApiAccessToken(userId);
+        if (fresh) token.accessToken = fresh;
+      }
+
       return token;
     },
     async session({ session, token }) {
