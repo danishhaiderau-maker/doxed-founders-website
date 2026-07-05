@@ -361,9 +361,9 @@ export function MinimalDevWorkspace({
   const agentTypingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
+  const wasAtBottomRef = useRef(true);
   const forceScrollRef = useRef(false);
-  const prevHistoryLenRef = useRef(0);
-  const prevMessagesLenRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Synchronous guard — React `busy` state updates too late for double-clicks. */
   const sendingRef = useRef(false);
@@ -458,40 +458,44 @@ export function MinimalDevWorkspace({
     stopDispatchPoll();
   }, [stopHistoryPoll, stopDispatchPoll]);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior });
-  }, []);
-
   const handleScrollAreaScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    userScrolledUpRef.current = !isNearScrollBottom(el);
+    const atBottom = isNearScrollBottom(el);
+    wasAtBottomRef.current = atBottom;
+    userScrolledUpRef.current = !atBottom;
+    prevScrollHeightRef.current = el.scrollHeight;
   }, []);
 
+  /** Auto-scroll only when user was at bottom or explicitly sent / switched session. */
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (!el) return;
 
-    const histLen = history?.length ?? 0;
-    const msgLen = messages.length;
-    const historyGrew = histLen > prevHistoryLenRef.current;
-    const messagesGrew = msgLen > prevMessagesLenRef.current;
-    prevHistoryLenRef.current = histLen;
-    prevMessagesLenRef.current = msgLen;
+      const newHeight = el.scrollHeight;
+      const prevHeight = prevScrollHeightRef.current;
+      const heightDelta = newHeight - prevHeight;
 
-    if (forceScrollRef.current) {
-      forceScrollRef.current = false;
-      userScrolledUpRef.current = false;
-      scrollToBottom('smooth');
-      return;
-    }
+      if (forceScrollRef.current) {
+        forceScrollRef.current = false;
+        wasAtBottomRef.current = true;
+        userScrolledUpRef.current = false;
+        el.scrollTo({ top: newHeight, behavior: 'smooth' });
+        prevScrollHeightRef.current = newHeight;
+        return;
+      }
 
-    if ((historyGrew || messagesGrew) && !userScrolledUpRef.current) {
-      scrollToBottom('auto');
-    }
-  }, [messages, history, scrollToBottom]);
+      if (wasAtBottomRef.current && (heightDelta !== 0 || isNearScrollBottom(el))) {
+        el.scrollTop = newHeight;
+        wasAtBottomRef.current = true;
+        userScrolledUpRef.current = false;
+      }
+
+      prevScrollHeightRef.current = newHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages, history]);
 
   const firedInitial = useRef(false);
 
@@ -731,9 +735,6 @@ export function MinimalDevWorkspace({
 
   useEffect(() => {
     agentTypingRef.current = selectedAgentTyping;
-    if (selectedAgentTyping) {
-      forceScrollRef.current = true;
-    }
   }, [selectedAgentTyping]);
 
   useEffect(() => {
@@ -1365,8 +1366,8 @@ export function MinimalDevWorkspace({
         <div
           ref={scrollRef}
           onScroll={handleScrollAreaScroll}
-          className='min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 py-4 [-webkit-overflow-scrolling:touch]'
-          style={{ touchAction: 'pan-y' }}
+          className='min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 py-4 [overflow-anchor:auto] [-webkit-overflow-scrolling:touch]'
+          style={{ touchAction: 'pan-y', overflowAnchor: 'auto' }}
         >
           {selectedWs && !selectedSession && <div className='mb-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400'>Working in: <span className='text-zinc-200'>{selectedWs.label}</span>{selectedWs.branch && <span className='text-zinc-500'> - {selectedWs.branch}</span>}</div>}
           {selectedSession && (
@@ -1474,7 +1475,9 @@ export function MinimalDevWorkspace({
               → {dispatchNotice}
             </div>
           )}
-          {selectedSession && selectedAgentTyping && (
+          {selectedSession &&
+            selectedAgentTyping &&
+            !history?.some((m) => m.streaming || m.partial) && (
             <div className='mx-auto mb-2 max-w-3xl md:hidden'>
               <AgentTypingBubble prominent />
             </div>
