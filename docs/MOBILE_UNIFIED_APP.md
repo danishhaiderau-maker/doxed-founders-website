@@ -1,6 +1,6 @@
 # Unified mobile app — Founder OS + Founder Node
 
-**Status:** Android v0.4.2 ships today as one Capacitor app. Desktop Founder Node v0.7.8 remains the primary vault + Ollama runtime. iOS is Safari-first until TestFlight.
+**Status:** Android v0.4.2 ships today as one Capacitor app. Desktop Founder Node v0.7.9 remains the primary vault + Ollama runtime. iOS is Safari-first until TestFlight.
 
 ## Product direction
 
@@ -31,7 +31,7 @@ The browser was the laptop→phone bridge during rollout. The APK already *is* t
                            │ sync API
                            ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Founder Node (Electron, desktop) v0.7.8                │
+│  Founder Node (Electron, desktop) v0.7.9                │
 │  ~/FounderVault/ · Ollama · Cursor IDE bridge           │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -49,13 +49,13 @@ The browser was the laptop→phone bridge during rollout. The APK already *is* t
 |----------|---------|--------------|
 | Android | Direct APK + future Play internal testing | `/mobile`, `/downloads/doxxedcrypto-android.apk` |
 | iOS | Safari + Add to Home Screen now; TestFlight Q3 | `/mobile#ios` |
-| Desktop | Founder Node v0.7.8 | `/founder-den#founder-node-download`, GitHub `founder-node-v0.7.8` |
+| Desktop | Founder Node v0.7.9 | `/founder-den#founder-node-download`, GitHub `founder-node-v0.7.9` |
 
 ## Build commands
 
 ```bash
 npm run pack:android          # APK → apps/web/public/downloads/
 npm run pack:founder-node:win # Windows installer
-git tag founder-node-v0.7.8 && git push origin founder-node-v0.7.8
+git tag founder-node-v0.7.9 && git push origin founder-node-v0.7.9
 git tag android-app-v0.4.2 && git push origin android-app-v0.4.2
 ```
