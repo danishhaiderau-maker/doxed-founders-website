@@ -15,6 +15,8 @@ import {
   fetchIdeBridgeSessions,
   fetchIdeBridgeWorkspaces,
   fetchRecentAgents,
+  fetchFounderNodeStatus,
+  type FounderNodeStatusRow,
   dispatchToIdeSession,
   type BridgeSession,
   type ConnectedWorkspace,
@@ -247,6 +249,7 @@ export function MinimalDevWorkspace({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
+  const [pairedNodes, setPairedNodes] = useState<FounderNodeStatusRow[]>([]);
   const [brains, setBrains] = useState<BrainOption[] | null>(null);
   const [byokKey, setByokKey] = useState<string>('');
   const [byokDraft, setByokDraft] = useState<string>('');
@@ -344,18 +347,20 @@ export function MinimalDevWorkspace({
   const refresh = useCallback(async () => {
     if (!accessToken) return;
     try {
-      const [b, iw, c, a, ss] = await Promise.all([
+      const [b, iw, c, a, ss, nodeStatusResp] = await Promise.all([
         fetchDesktopBridge(accessToken).catch(() => null),
         fetchIdeBridgeWorkspaces(accessToken).catch(() => [] as IdeWorkspace[]),
         fetchConnectedWorkspaces(accessToken).catch(() => [] as ConnectedWorkspace[]),
         fetchRecentAgents(accessToken).catch(() => null),
         fetchIdeBridgeSessions(accessToken).catch(() => [] as BridgeSession[]),
+        fetchFounderNodeStatus(accessToken).catch(() => ({ nodes: [] as FounderNodeStatusRow[] })),
       ]);
       if (b) { setBridge(b); setLastSync(b.latest?.updatedAt || 'never'); }
       if (iw) setIdeWorkspaces(iw);
       if (c) setConnected(c);
       if (a) { setAgents(a.agents); setNodeStatus({ desktopOnline: a.desktopOnline, cursorConnected: a.cursorConnected, founderNodeOnline: a.founderNodeOnline }); }
       if (ss) setSessions(ss);
+      setPairedNodes(nodeStatusResp?.nodes ?? []);
       setError(null);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load workspace state';
@@ -455,8 +460,27 @@ export function MinimalDevWorkspace({
     return items;
   }, [ideWorkspaces, bridge, connected]);
 
-  const isNodeLive = nodeStatus.founderNodeOnline || !!bridge?.latest || !!bridge?.nodes?.length;
-  const cursorConnected = nodeStatus.cursorConnected;
+  const accountHasPairedNode = pairedNodes.length > 0;
+  const accountNodeOnline = pairedNodes.some((n) => n.status === 'online');
+  const isNodeLive =
+    nodeStatus.founderNodeOnline ||
+    nodeStatus.desktopOnline ||
+    accountNodeOnline ||
+    !!bridge?.latest ||
+    !!bridge?.nodes?.length ||
+    ideWorkspaces.length > 0 ||
+    sessions.length > 0;
+  const cursorConnected =
+    nodeStatus.cursorConnected ||
+    sessions.length > 0 ||
+    ideWorkspaces.some((w) => w.ideProvider === 'cursor') ||
+    Boolean(bridge?.latest || bridge?.nodes?.length);
+  const pairingMismatchHint =
+    !isNodeLive && !accountHasPairedNode
+      ? 'No Founder Node is paired to this account. In Founder Node tray → Repair connection, generate a code in Settings → Builder, and paste it in the tray app (not the browser).'
+      : !isNodeLive && accountHasPairedNode && !accountNodeOnline
+        ? 'Your account has a paired node but it is not heartbeating. Open Founder Node from the tray, click Sync now, or re-pair with a fresh code from Settings → Builder.'
+        : null;
   const agentCount = agents.length;
   const resolvedBrains = brains ?? [RULE_BASED_BRAIN];
   const brainLabel = resolvedBrains.find((b) => b.key === selectedBrain)?.label || selectedBrain;
@@ -805,7 +829,12 @@ export function MinimalDevWorkspace({
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
         </div>
         <div className='min-h-0 flex-1 overflow-y-auto px-2 pb-3'>
-          {workspaces.length === 0 && <div className='px-3 py-6 text-center text-xs text-zinc-600'>No workspaces detected. Make sure Founder Node v0.7.7+ is running and Cursor is open.</div>}
+          {workspaces.length === 0 && (
+            <div className='px-3 py-6 text-center text-xs text-zinc-600'>
+              {pairingMismatchHint ??
+                'No workspaces detected. Make sure Founder Node v0.7.7+ is running, Cursor is open, and tray shows Last sync: just now.'}
+            </div>
+          )}
           {workspaces.map((w) => (
             <button key={w.id} onClick={() => setSelectedWsId(w.id)} className={'mb-1 block w-full rounded-lg px-3 py-2.5 text-left transition ' + (selectedWsId === w.id ? 'bg-white/10 ring-1 ring-white/15' : 'hover:bg-white/5')}>
               <div className='flex items-center gap-2'>
@@ -958,6 +987,11 @@ export function MinimalDevWorkspace({
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
               <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node v0.7.7+ on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              {pairingMismatchHint && (
+                <p className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
+                  {pairingMismatchHint}
+                </p>
+              )}
               <div className='mt-4 space-y-2'>
                 <a
                   href={FOUNDER_DEN_ONBOARD_URL}

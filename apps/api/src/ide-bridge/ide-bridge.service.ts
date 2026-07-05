@@ -57,6 +57,8 @@ export type RecentAgentsResponse = {
 const RECENT_AGENT_LIMIT = 5;
 const RECENT_MESSAGE_LIMIT = 5;
 const SNIPPET_LEN = 240;
+/** Match founder-node-sync ONLINE_WINDOW_MS — bridge rows can lag slightly. */
+const BRIDGE_ONLINE_MS = 180_000;
 
 function snippet(text: string | null | undefined): string | null {
   if (!text || typeof text !== 'string') return null;
@@ -76,7 +78,8 @@ export class IdeBridgeService {
   ) {}
 
   async getRecentAgents(userId: string): Promise<RecentAgentsResponse> {
-    const [bridges, activeRun, cursorEvents, cursorCred, founderNode] = await Promise.all([
+    const [bridges, activeRun, cursorEvents, cursorCred, founderNode, persistedWorkspaces, persistedSessions] =
+      await Promise.all([
       this.desktopBridge.listForUser(userId),
       this.agentRuns.getActive(userId),
       this.prisma.founderEvent.findMany({
@@ -94,16 +97,25 @@ export class IdeBridgeService {
         orderBy: { lastSeenAt: 'desc' },
         select: { lastSeenAt: true },
       }),
+      this.desktopBridge.listWorkspaces(userId),
+      this.desktopBridge.listSessions(userId),
     ]);
 
     const now = Date.now();
-    const founderNodeOnline = Boolean(
-      founderNode?.lastSeenAt && now - founderNode.lastSeenAt.getTime() < 180_000,
+    const bridgeFresh = bridges.some(
+      (b) => now - new Date(b.updatedAt).getTime() < BRIDGE_ONLINE_MS,
     );
-    const cursorConnected = Boolean(cursorCred);
-    const desktopOnline = bridges.some(
-      (b) => now - new Date(b.updatedAt).getTime() < 180_000,
+    const founderNodeDbOnline = Boolean(
+      founderNode?.lastSeenAt && now - founderNode.lastSeenAt.getTime() < BRIDGE_ONLINE_MS,
     );
+    const founderNodeOnline = founderNodeDbOnline || bridgeFresh;
+    const cursorViaBridge =
+      bridgeFresh ||
+      (founderNodeDbOnline &&
+        (persistedSessions.some((s) => (s.ideProvider ?? 'cursor') === 'cursor') ||
+          persistedWorkspaces.some((w) => (w.ideProvider ?? 'cursor') === 'cursor')));
+    const cursorConnected = Boolean(cursorCred) || cursorViaBridge;
+    const desktopOnline = bridgeFresh || founderNodeDbOnline;
 
     const agents: RecentAgent[] = [];
     const seen = new Set<string>();

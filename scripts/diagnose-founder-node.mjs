@@ -77,7 +77,13 @@ async function queryDb(nodeId) {
       take: 5,
       select: { code: true, usedAt: true, expiresAt: true, createdAt: true },
     });
-    return { node, codes };
+    const settings = node
+      ? await prisma.founderBuilderSettings.findUnique({
+          where: { userId: node.userId },
+          select: { memoryGraph: true },
+        })
+      : null;
+    return { node, codes, memoryGraph: settings?.memoryGraph ?? null };
   } finally {
     await prisma.$disconnect();
   }
@@ -131,6 +137,19 @@ async function main() {
         lastSeenAt: db.node.lastSeenAt?.toISOString(),
         showsOnline: online,
       });
+      const mg = db.memoryGraph;
+      if (mg && typeof mg === 'object' && !Array.isArray(mg)) {
+        const bridge = mg._desktopBridgeByNode?.[nodeId];
+        const ws = mg._workspacesByNode?.[nodeId];
+        const ss = mg._sessionsByNode?.[nodeId];
+        console.log('Bridge graph:', {
+          bridgeUpdatedAt: bridge?.updatedAt ?? null,
+          workspaces: Array.isArray(ws) ? ws.length : 0,
+          sessions: Array.isArray(ss) ? ss.length : 0,
+        });
+      } else {
+        console.log('Bridge graph: empty (workspaces/sessions never persisted — deploy API fix or Sync now)');
+      }
       console.log('Recent pairing codes:', db.codes);
     }
   }

@@ -165,30 +165,17 @@ export class FounderNodeService {
       },
     });
     void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
-    if (input.desktopBridge) {
-      void this.desktopBridge.saveFromHeartbeat(
-        node.userId,
-        node.nodeId,
-        input.label,
-        input.desktopBridge,
-      );
-    }
-    // Founder Node v0.6.0+ sends workspaces[] (up to 10 real Cursor workspaces).
-    // The typed heartbeat schema lags the desktop client, so read defensively.
     const workspaces = (input as FounderNodeHeartbeat & {
       workspaces?: BridgeWorkspace[];
     }).workspaces;
-    if (Array.isArray(workspaces) && workspaces.length > 0) {
-      void this.desktopBridge.saveWorkspaces(node.userId, node.nodeId, workspaces);
-    }
-    // Founder Node v0.6.1+ sends sessions[] — real Cursor chat/agent sessions
-    // read from state.vscdb. Persisted for /ide-bridge/sessions.
     const sessions = (input as FounderNodeHeartbeat & {
       sessions?: BridgeSession[];
     }).sessions;
-    if (Array.isArray(sessions) && sessions.length > 0) {
-      void this.desktopBridge.saveSessions(node.userId, node.nodeId, sessions);
-    }
+    await this.desktopBridge.saveBridgePayload(node.userId, node.nodeId, input.label, {
+      bridge: input.desktopBridge,
+      workspaces: Array.isArray(workspaces) ? workspaces : undefined,
+      sessions: Array.isArray(sessions) ? sessions : undefined,
+    });
     if (input.founderCloud) {
       void this.persistFounderCloudFromHeartbeat(node.userId, input.label, input.founderCloud);
     }
