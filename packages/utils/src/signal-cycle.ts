@@ -3,6 +3,16 @@ export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 
 /** Matches showcase bot DEFAULT_RESEARCH_LEVERAGE (100x on Bitfinex derivatives). */
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
+/** Live-copy sizing/stops use canonical showcase leverage (100x). Persisted intent envelopes may still carry legacy `leverage_hint: 20` from pre-c8178f30 API builds — never honor that for execution. */
+export function resolveSubscriberLeverage(
+  intent?: { risk?: { leverage_hint?: number | null } } | null,
+): number {
+  const hint = intent?.risk?.leverage_hint;
+  if (hint != null && Number.isFinite(hint) && hint === DEFAULT_SUBSCRIBER_LEVERAGE) {
+    return hint;
+  }
+  return DEFAULT_SUBSCRIBER_LEVERAGE;
+}
 
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS.
  *  2s â€” the relay must mirror showcase signals to user Bitfinex sim/live accounts within ~2s so
