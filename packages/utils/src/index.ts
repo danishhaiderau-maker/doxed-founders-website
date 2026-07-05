@@ -148,4 +148,8 @@ export * from './founder-import-wizard';
 export * from './founder-cloud-runtime';
 export * from './ide-adapters';
 export * from './ide-bridge-interface';
+export {
+  FOUNDER_OS_DISPATCH_PREFIX,
+  withFounderOsDispatchAttribution,
+} from './ide-bridge-interface';
 export * from './founder-identity';
