@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix dispatch Bing hijack v0.7.9
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
