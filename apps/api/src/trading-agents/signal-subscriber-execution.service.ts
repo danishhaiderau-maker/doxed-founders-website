@@ -282,6 +282,11 @@ const SHOWCASE_VANISHED_CONSECUTIVE_MISSES = 3;
  *  copy filled but showcase never opened. Fail-closed on unreachable fetch. */
 const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
 
+/** Belt-and-suspenders: OPEN copy lot while showcase is flat/closed for this long
+ *  triggers operator alert + forced SHOWCASE_MIRROR close (covers stale EXIT events
+ *  or any other idempotency gate that wrongly skips the normal mirror path). */
+const SHOWCASE_FLAT_OPEN_FAILSAFE_MS = 120_000;
+
 /** Fix E — throttle for surfacing an expired hire (lastError + warn log). */
 const HIRE_EXPIRY_NOTICE_THROTTLE_MS = 60 * 60_000;
 
@@ -381,6 +386,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly hireExpiryNoticeAt = new Map<string, number>();
   /** Action-miss audit throttle: userId:tradeId:reason → last event ms. */
   private readonly actionMissEntryThrottle = new Map<string, number>();
+  /** participantId → first ms showcase was flat/closed while copy lot stayed OPEN. */
+  private readonly showcaseFlatOpenSince = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -760,7 +767,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           creds,
           simActive,
         );
-        if (mirrorExited) continue;
+        if (mirrorExited) {
+          this.showcaseFlatOpenSince.delete(participant.id);
+          continue;
+        }
+        const failsafeExited = await this.enforceShowcaseFlatOpenFailsafe(
+          agentId,
+          instance.userId,
+          cycle,
+          participant,
+          meta,
+          creds,
+          simActive,
+        );
+        if (failsafeExited) {
+          this.showcaseFlatOpenSince.delete(participant.id);
+          continue;
+        }
         const attributed = await this.reconcileAttributedLotClose(
           agentId,
           instance.userId,
@@ -2623,6 +2646,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
 
     const priorCycleStatus = cycle.status;
+
+    const staleExitCount = await this.prisma.signalCycleEvent.count({
+      where: { participantId, eventType: 'EXIT' },
+    });
+    if (staleExitCount > 0) {
+      this.logger.warn(
+        `Cancel-race fill ${userId} cycle=${cycle.id}: superseding ${staleExitCount} stale EXIT event(s) (${cancelContext}) — participant will reopen via FILLED`,
+      );
+      await this.cycles
+        .recordHireExecutionEvent(userId, agentId, cycle.id, 'STALE_EXIT_SUPERSEDED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          participant_id: participantId,
+          stale_exit_count: staleExitCount,
+          cancel_context: cancelContext,
+        })
+        .catch(() => {});
+    }
+
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
@@ -4196,6 +4238,102 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
+   * Fail-safe when showcase is flat/closed but a copy lot remains OPEN after the
+   * normal mirror path did not close it (e.g. stale EXIT before hasParticipantExited
+   * fix, or a transient bot-state miss). Surfaces operator alert at 120s and forces
+   * market-close via executeShowcaseMirrorClose.
+   */
+  private async enforceShowcaseFlatOpenFailsafe(
+    agentId: string,
+    userId: string,
+    cycle: {
+      id: string;
+      status: SignalCycleStatus;
+      tradeId?: string | null;
+      showcasePnlUsd?: { toNumber?: () => number } | null;
+      intentEnvelope?: unknown;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    simActive = false,
+  ): Promise<boolean> {
+    if (simActive) return false;
+    if (!mirrorExitConvergenceEnabled() || !isShowcaseMirrorOnlyMode()) return false;
+
+    const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
+    const cycleTerminal =
+      cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED;
+
+    let showcaseFlat = cycleTerminal;
+    let showcaseExitPrice: number | undefined;
+    let showcaseExitReason: string | undefined;
+
+    if (!showcaseFlat && showcaseTradeId) {
+      const bot = await this.fetchExecutionBotState();
+      if (!bot) return false;
+      const det = this.detectShowcaseTradeClosed(bot, showcaseTradeId);
+      if (det.closed) {
+        showcaseFlat = true;
+        showcaseExitPrice = det.exitPrice;
+        showcaseExitReason = det.exitReason;
+      } else {
+        const inPositions = (bot.positions ?? []).some(
+          (p) => p.trade_id && tradeIdsMatch(p.trade_id, showcaseTradeId),
+        );
+        if (!inPositions && (bot.positions ?? []).length === 0) {
+          showcaseFlat = true;
+          showcaseExitReason = 'SHOWCASE_BOOK_FLAT';
+        } else {
+          this.showcaseFlatOpenSince.delete(participant.id);
+          return false;
+        }
+      }
+    }
+
+    if (!showcaseFlat) {
+      this.showcaseFlatOpenSince.delete(participant.id);
+      return false;
+    }
+
+    const now = Date.now();
+    const since = this.showcaseFlatOpenSince.get(participant.id) ?? now;
+    if (!this.showcaseFlatOpenSince.has(participant.id)) {
+      this.showcaseFlatOpenSince.set(participant.id, since);
+    }
+    const elapsed = now - since;
+
+    if (elapsed < SHOWCASE_FLAT_OPEN_FAILSAFE_MS) {
+      return false;
+    }
+
+    const staleExitCount = await this.prisma.signalCycleEvent.count({
+      where: { participantId: participant.id, eventType: 'EXIT' },
+    });
+    const alertMsg = `MIRROR EXIT FAIL-SAFE: showcase flat but copy OPEN ${Math.round(elapsed / 1000)}s (participant=${participant.id.slice(0, 8)}… stale_exit_events=${staleExitCount}) — forcing market close`;
+    this.logger.error(alertMsg);
+    await this.setInstanceLastError(userId, agentId, alertMsg);
+    await this.cycles
+      .recordHireExecutionEvent(userId, agentId, cycle.id, 'MIRROR_EXIT_FAILSAFE_ALERT', {
+        venue: 'bitfinex',
+        source: 'hire',
+        participant_id: participant.id,
+        trade_id: showcaseTradeId ?? cycle.tradeId,
+        elapsed_ms: elapsed,
+        stale_exit_events: staleExitCount,
+        showcase_exit_reason: showcaseExitReason,
+      })
+      .catch(() => {});
+
+    return this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
+      showcaseExitPrice,
+      showcaseExitReason: showcaseExitReason ?? 'SHOWCASE_FLAT_FAILSAFE',
+      mirrorRelinked: (cycle.tradeId ?? '').startsWith('adopt:'),
+      trigger: 'SHOWCASE_FLAT_FAILSAFE',
+    });
+  }
+
+  /**
    * Phase 2c — market-close copy lot on showcase closure with observability fields.
    * Idempotent via exitingLots + hasParticipantExited.
    */
@@ -4277,6 +4415,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         this.showcaseVanishedMisses.delete(participant.id);
         this.showcasePositionAbsentMisses.delete(participant.id);
+        this.showcaseFlatOpenSince.delete(participant.id);
         this.logger.log(
           `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
         );
@@ -4351,6 +4490,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
       this.showcaseVanishedMisses.delete(participant.id);
       this.showcasePositionAbsentMisses.delete(participant.id);
+      this.showcaseFlatOpenSince.delete(participant.id);
       return true;
     } finally {
       this.exitingLots.delete(participant.id);
@@ -5222,6 +5362,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
       this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcaseFlatOpenSince.delete(participantId);
     }
   }
 
