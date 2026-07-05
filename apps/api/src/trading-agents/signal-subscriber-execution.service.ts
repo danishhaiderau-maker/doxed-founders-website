@@ -5802,6 +5802,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async hasParticipantExited(participantId: string): Promise<boolean> {
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: participantId },
+      select: { status: true },
+    });
+    if (!participant) return false;
+    // Cancel-race recovery can record EXIT (RECONCILE_CANCEL_BY_EXCHANGE) before a
+    // real FILLED re-opens the lot — trust live participant status over event count.
+    if (
+      participant.status === SignalCycleStatus.OPEN ||
+      participant.status === SignalCycleStatus.PENDING_ENTRY ||
+      participant.status === SignalCycleStatus.INTENT
+    ) {
+      return false;
+    }
     const exits = await this.prisma.signalCycleEvent.count({
       where: { participantId, eventType: 'EXIT' },
     });
