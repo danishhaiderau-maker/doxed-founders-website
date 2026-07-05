@@ -854,6 +854,48 @@ export function resolveCursorComposerContext(composerId: string): {
 }
 
 /**
+ * Read the composer Cursor's workspace state marks as most recently focused.
+ * This reflects on-disk focus intent — the UI may still show another tab until
+ * the workspace window reloads that state.
+ */
+export function getFocusedComposerInWorkspaceState(
+  workspaceStorageId: string,
+): string | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+  const dbPath = getCursorWorkspaceStateDbPath(workspaceStorageId);
+  if (!dbPath) return null;
+
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+      .get() as { value?: string } | undefined;
+    if (!row || typeof row.value !== 'string') return null;
+    const data = JSON.parse(row.value) as { lastFocusedComposerIds?: string[] };
+    const focused = data.lastFocusedComposerIds;
+    return Array.isArray(focused) && typeof focused[0] === 'string' ? focused[0] : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** True when workspace state.vscdb lists `composerId` as the primary focused tab. */
+export function verifyComposerFocusedInWorkspaceState(
+  workspaceStorageId: string,
+  composerId: string,
+): boolean {
+  return getFocusedComposerInWorkspaceState(workspaceStorageId) === composerId;
+}
+
+/**
  * Move a composer to the front of Cursor's workspace tab focus list so the
  * next window activation shows that chat tab instead of whatever was last open.
  */
@@ -861,6 +903,13 @@ export function focusComposerInWorkspaceState(
   workspaceStorageId: string,
   composerId: string,
 ): boolean {
+  if (!resolveCursorComposerContext(composerId)) {
+    console.warn(
+      `focusComposerInWorkspaceState: composer ${composerId.slice(0, 8)} not found in Cursor headers`,
+    );
+    return false;
+  }
+
   const sqlite = loadNodeSqlite();
   if (!sqlite) return false;
   const dbPath = getCursorWorkspaceStateDbPath(workspaceStorageId);
@@ -901,7 +950,7 @@ export function focusComposerInWorkspaceState(
     db.prepare(
       "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('composer.composerData', ?)",
     ).run(JSON.stringify(data));
-    return true;
+    return verifyComposerFocusedInWorkspaceState(workspaceStorageId, composerId);
   } catch (err) {
     console.warn('focusComposerInWorkspaceState failed:', err);
     return false;

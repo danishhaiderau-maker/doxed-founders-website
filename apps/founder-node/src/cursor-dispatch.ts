@@ -7,6 +7,7 @@ import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
   focusComposerInWorkspaceState,
   resolveCursorComposerContext,
+  verifyComposerFocusedInWorkspaceState,
 } from './cursor-discovery';
 import { readNodeConfig } from './vault-manager';
 import { throwIfFounderNodeAuthResponse } from './sync-client';
@@ -37,6 +38,15 @@ const SENDKEYS_STEP_DELAY_MS = 350;
 const ENTER_SUBMIT_DELAY_MS = 500;
 const CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS = 3;
 const CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS = 500;
+const COMPOSER_REFOCUS_SETTLE_MS = 700;
+const IMAGE_PASTE_SETTLE_MS = 900;
+
+type ComposerFocusTarget = {
+  composerId: string;
+  workspaceStorageId: string;
+  folderPath?: string;
+  title?: string;
+};
 
 let dispatchCycleInFlight = false;
 const lastDispatchBySession = new Map<string, number>();
@@ -318,6 +328,64 @@ async function ensureCursorWindowFocused(): Promise<{ ok: boolean; foregroundTit
   return runVerifiedCursorSendKeys([]);
 }
 
+/**
+ * Minimize then restore Cursor so an already-open workspace reloads
+ * composer.composerData from state.vscdb (reuse-window alone does not switch tabs).
+ */
+async function nudgeCursorToReloadWorkspaceState(): Promise<{ ok: boolean; error?: string }> {
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows-only' };
+  const ps = [
+    WIN32_CURSOR_FOCUS_TYPE,
+    '$h=[FnCursorFocus]::FindCursorMainWindow();',
+    'if ($h -eq [IntPtr]::Zero) { Write-Output "FAIL:no-window"; exit 1 }',
+    '[FnCursorFocus]::ShowWindow($h, 6);',
+    'Start-Sleep -Milliseconds 450;',
+    '$ok=[FnCursorFocus]::EnsureCursorForeground(8,350);',
+    'if (-not $ok -or -not [FnCursorFocus]::IsCursorForeground()) {',
+    '  Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1',
+    '}',
+    'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())',
+  ].join('\n');
+  const result = await readCursorFocusResult(ps);
+  return result.ok ? { ok: true } : { ok: false, error: result.error ?? 'Cursor window nudge failed' };
+}
+
+function writeComposerFocusState(target: ComposerFocusTarget): boolean {
+  return focusComposerInWorkspaceState(target.workspaceStorageId, target.composerId);
+}
+
+function assertComposerFocusState(target: ComposerFocusTarget): void {
+  if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+    const label = target.title ? `"${target.title}"` : target.composerId.slice(0, 8);
+    throw new Error(
+      `Target composer ${label} is not focused in workspace state — refusing SendKeys (wrong tab would receive paste)`,
+    );
+  }
+}
+
+/** Re-assert composer tab focus immediately before each clipboard paste. */
+async function refocusComposerTarget(target: ComposerFocusTarget): Promise<void> {
+  if (!writeComposerFocusState(target)) {
+    throw new Error(
+      `Could not re-focus composer tab ${target.composerId.slice(0, 8)} in workspace state`,
+    );
+  }
+  if (target.folderPath) {
+    const result = await execAsync(`cursor --reuse-window "${target.folderPath}"`);
+    if (!result.ok) {
+      console.warn('cursor CLI refocus failed:', result.error);
+    }
+  }
+  await sleep(COMPOSER_REFOCUS_SETTLE_MS);
+  const foreground = await ensureCursorWindowFocused();
+  if (!foreground.ok) {
+    throw new Error(
+      foreground.error ?? 'Cursor.exe is not foreground — refusing paste into unknown composer',
+    );
+  }
+  assertComposerFocusState(target);
+}
+
 const ATTACH_IMAGE_RE =
   /<!--founder-attach:image:([^\n]+)\n(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\n-->/g;
 
@@ -409,7 +477,7 @@ type SendPromptResult = {
  */
 async function sendPromptToFocusedComposer(
   prompt: string,
-  composerFocusedInState: boolean,
+  focusTarget: ComposerFocusTarget,
 ): Promise<SendPromptResult> {
   const { text, images } = parseDispatchPrompt(prompt);
 
@@ -424,7 +492,8 @@ async function sendPromptToFocusedComposer(
     );
   }
 
-  await sleep(composerFocusedInState ? COMPOSER_TAB_SETTLE_MS : COMPOSER_TAB_SETTLE_MS + 600);
+  const hasImages = images.length > 0;
+  await sleep(hasImages ? COMPOSER_TAB_SETTLE_MS + IMAGE_PASTE_SETTLE_MS : COMPOSER_TAB_SETTLE_MS);
 
   const bodyText = withFounderOsDispatchAttribution(
     text ||
@@ -432,27 +501,15 @@ async function sendPromptToFocusedComposer(
         ? `[Attachments: ${images.map((i) => i.name).join(', ')}]`
         : prompt),
   );
-  try {
-    clipboard.writeText(bodyText);
-  } catch (err) {
-    throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
 
-  const focusBeforePaste = await ensureCursorWindowFocused();
-  if (!focusBeforePaste.ok) {
-    return {
-      pasted: false,
-      submitted: false,
-      clipboardReady: true,
-      warning:
-        focusBeforePaste.error ??
-        'Cursor.exe is not the foreground process — prompt copied to clipboard; paste with Ctrl+V',
-    };
-  }
+  await refocusComposerTarget(focusTarget);
 
   for (const img of images.slice(0, 3)) {
+    await refocusComposerTarget(focusTarget);
     const ok = await pasteImageDataUrl(img.dataUrl);
-    if (!ok) continue;
+    if (!ok) {
+      throw new Error(`Failed to load image "${img.name}" onto clipboard for Cursor paste`);
+    }
     const imgResult = await runVerifiedCursorSendKeys([
       { keys: '^v', delayMs: SENDKEYS_STEP_DELAY_MS },
     ]);
@@ -464,6 +521,14 @@ async function sendPromptToFocusedComposer(
         warning: `SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`,
       };
     }
+    await sleep(IMAGE_PASTE_SETTLE_MS);
+  }
+
+  await refocusComposerTarget(focusTarget);
+  try {
+    clipboard.writeText(bodyText);
+  } catch (err) {
+    throw new Error(`clipboard write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   await sleep(120);
@@ -502,18 +567,16 @@ async function sendPromptToFocusedComposer(
  * workspace state.vscdb before Cursor reads it on activation.
  */
 async function focusCursorComposer(
-  composerId: string,
-  workspaceStorageId?: string,
-  folderPath?: string,
-): Promise<{ focusedTab: boolean; openedWorkspace: boolean }> {
-  let focusedTab = false;
-  if (workspaceStorageId) {
-    focusedTab = focusComposerInWorkspaceState(workspaceStorageId, composerId);
+  target: ComposerFocusTarget,
+): Promise<{ focusedTab: boolean; openedWorkspace: boolean; reloadedUi: boolean }> {
+  let focusedTab = writeComposerFocusState(target);
+  if (!focusedTab) {
+    return { focusedTab: false, openedWorkspace: false, reloadedUi: false };
   }
 
   let openedWorkspace = false;
-  if (folderPath) {
-    const result = await execAsync(`cursor --reuse-window "${folderPath}"`);
+  if (target.folderPath) {
+    const result = await execAsync(`cursor --reuse-window "${target.folderPath}"`);
     openedWorkspace = result.ok;
     if (!result.ok) {
       console.warn('cursor CLI workspace focus failed:', result.error);
@@ -527,7 +590,25 @@ async function focusCursorComposer(
   }
 
   await sleep(CURSOR_FOCUS_WAIT_MS);
-  return { focusedTab, openedWorkspace };
+
+  focusedTab = writeComposerFocusState(target) && focusedTab;
+  const nudge = await nudgeCursorToReloadWorkspaceState();
+  if (nudge.ok) {
+    focusedTab = writeComposerFocusState(target) && focusedTab;
+  }
+
+  const foreground = await ensureCursorWindowFocused();
+  if (!foreground.ok) {
+    return { focusedTab: false, openedWorkspace, reloadedUi: nudge.ok };
+  }
+
+  try {
+    assertComposerFocusState(target);
+  } catch {
+    return { focusedTab: false, openedWorkspace, reloadedUi: nudge.ok };
+  }
+
+  return { focusedTab: true, openedWorkspace, reloadedUi: nudge.ok };
 }
 
 /**
@@ -562,27 +643,44 @@ export async function executeCursorDispatch(
   try {
     const composerId = dispatch.sessionId;
     const ctx = resolveCursorComposerContext(composerId);
-    const workspaceStorageId = ctx?.workspaceStorageId;
-    const folderPath = ctx?.folderPath;
-
-    const { focusedTab, openedWorkspace } = await focusCursorComposer(
-      composerId,
-      workspaceStorageId,
-      folderPath,
-    );
-
-    if (!focusedTab && !openedWorkspace) {
+    if (!ctx) {
       throw new Error(
-        'Could not focus Cursor workspace or composer tab — refusing SendKeys',
+        `Cursor composer ${composerId.slice(0, 8)} not found locally — sync Cursor sessions in Founder Node and retry`,
+      );
+    }
+    if (!ctx.workspaceStorageId) {
+      throw new Error(
+        `Composer "${ctx.title ?? composerId.slice(0, 8)}" has no workspace binding — cannot target Cursor tab`,
       );
     }
 
-    const sendResult = await sendPromptToFocusedComposer(dispatch.prompt, focusedTab);
+    const focusTarget: ComposerFocusTarget = {
+      composerId,
+      workspaceStorageId: ctx.workspaceStorageId,
+      folderPath: ctx.folderPath,
+      title: ctx.title,
+    };
+
+    const { focusedTab, openedWorkspace, reloadedUi } = await focusCursorComposer(focusTarget);
+
+    if (!focusedTab) {
+      throw new Error(
+        `Could not focus composer tab "${ctx.title ?? composerId.slice(0, 8)}" — refusing SendKeys (would paste into wrong chat)`,
+      );
+    }
+    if (ctx.folderPath && !openedWorkspace) {
+      throw new Error(
+        `Could not open Cursor workspace for "${ctx.title ?? composerId.slice(0, 8)}" — refusing SendKeys`,
+      );
+    }
+
+    const sendResult = await sendPromptToFocusedComposer(dispatch.prompt, focusTarget);
 
     const bits = [
       `composer=${composerId.slice(0, 8)}`,
-      focusedTab ? 'tab-focused' : 'tab-focus-skipped',
+      'tab-focused',
       openedWorkspace ? 'workspace-opened' : 'workspace-focus-best-effort',
+      reloadedUi ? 'ui-reloaded' : 'ui-reload-skipped',
     ];
 
     if (!sendResult.submitted) {
