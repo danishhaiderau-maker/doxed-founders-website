@@ -20,6 +20,7 @@ import {
   isSessionExpiredError,
   SESSION_EXPIRED_MESSAGE,
   dispatchToIdeSession,
+  fetchIdeDispatchStatus,
   type BridgeSession,
   type ConnectedWorkspace,
   type DesktopBridgeResponse,
@@ -208,6 +209,28 @@ function mergeBridgeHistory(
   return incoming;
 }
 
+function AgentTypingBubble({ prominent }: { prominent?: boolean }) {
+  return (
+    <div className={'flex justify-start ' + (prominent ? 'sticky bottom-0 z-10 pb-1' : '')}>
+      <div
+        className={
+          'rounded-2xl text-sm italic text-zinc-300 ' +
+          (prominent
+            ? 'border border-violet-400/30 bg-violet-500/15 px-4 py-3 shadow-lg shadow-violet-950/40 animate-pulse'
+            : 'bg-white/5 px-4 py-2.5')
+        }
+      >
+        <span className='font-medium not-italic text-violet-200/90'>Agent is typing</span>
+        <span className='ml-1 inline-flex gap-0.5 align-middle'>
+          <span className='inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-violet-300/90 [animation-delay:0ms]' />
+          <span className='inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-violet-300/90 [animation-delay:150ms]' />
+          <span className='inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-violet-300/90 [animation-delay:300ms]' />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function HistoryMessage({ msg }: { msg: BridgeMessage }) {
   const [expanded, setExpanded] = useState(false);
   const isUser = msg.role === 'user';
@@ -288,12 +311,7 @@ function HistoryThread({
         <HistoryMessage key={i} msg={m} />
       ))}
       {agentTyping && !messages.some((m) => m.streaming || m.partial) && (
-        <div className='flex justify-start'>
-          <div className='rounded-2xl bg-white/5 px-4 py-2.5 text-sm italic text-zinc-400'>
-            Agent is typing…
-            <span className='ml-1 inline-block animate-pulse'>▋</span>
-          </div>
-        </div>
+        <AgentTypingBubble prominent />
       )}
     </div>
   );
@@ -333,8 +351,10 @@ export function MinimalDevWorkspace({
   const [lastSync, setLastSync] = useState<string>('never');
   const [authStale, setAuthStale] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
+  const [optimisticAgentTyping, setOptimisticAgentTyping] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const historyPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dispatchPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const postDispatchUntilRef = useRef(0);
   const agentTypingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -350,6 +370,13 @@ export function MinimalDevWorkspace({
     if (historyPollRef.current) {
       clearTimeout(historyPollRef.current);
       historyPollRef.current = null;
+    }
+  }, []);
+
+  const stopDispatchPoll = useCallback(() => {
+    if (dispatchPollRef.current) {
+      clearTimeout(dispatchPollRef.current);
+      dispatchPollRef.current = null;
     }
   }, []);
 
@@ -424,7 +451,10 @@ export function MinimalDevWorkspace({
     [accessToken, stopHistoryPoll],
   );
 
-  useEffect(() => () => stopHistoryPoll(), [stopHistoryPoll]);
+  useEffect(() => () => {
+    stopHistoryPoll();
+    stopDispatchPoll();
+  }, [stopHistoryPoll, stopDispatchPoll]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const el = scrollRef.current;
@@ -693,12 +723,23 @@ export function MinimalDevWorkspace({
     return sessions.find((s) => s.id === selectedSessionId) ?? pinnedSession;
   }, [sessions, selectedSessionId, pinnedSession]);
   const selectedAgentTyping =
+    optimisticAgentTyping ||
     selectedSession?.agentTyping === true ||
     Boolean(history?.some((m) => m.streaming || m.partial));
 
   useEffect(() => {
     agentTypingRef.current = selectedAgentTyping;
+    if (selectedAgentTyping) {
+      forceScrollRef.current = true;
+    }
   }, [selectedAgentTyping]);
+
+  useEffect(() => {
+    if (!optimisticAgentTyping) return;
+    if (history?.some((m) => m.streaming || m.partial)) {
+      setOptimisticAgentTyping(false);
+    }
+  }, [history, optimisticAgentTyping]);
 
   const handleAttachFiles = useCallback(async (files: FileList | null) => {
     if (!files?.length) return;
@@ -807,6 +848,57 @@ export function MinimalDevWorkspace({
     setInput('');
   }, []);
 
+  const pollDispatchDelivery = useCallback(
+    (
+      dispatchId: string,
+      nodeOnline: boolean,
+      onDone: (outcome: 'delivered' | 'queued' | 'failed', detail?: string) => void,
+    ) => {
+      stopDispatchPoll();
+      const started = Date.now();
+      const maxMs = nodeOnline ? 90_000 : 8_000;
+      const tick = async () => {
+        try {
+          const status = await fetchIdeDispatchStatus(accessToken, dispatchId);
+          if (status.delivered) {
+            onDone('delivered');
+            return;
+          }
+          if (status.failed) {
+            const detail = status.result?.replace(/^error:\s*/i, '') ?? 'Delivery failed on your PC';
+            onDone('failed', detail);
+            return;
+          }
+          if (status.status === 'DISPATCHING') {
+            setDispatchNotice('Delivering to Cursor on your PC…');
+          } else if (status.status === 'PENDING' && nodeOnline) {
+            setDispatchNotice('Delivering to Cursor on your PC…');
+          } else if (status.status === 'PENDING' && !nodeOnline) {
+            onDone('queued');
+            return;
+          }
+          if (Date.now() - started >= maxMs) {
+            onDone(nodeOnline ? 'failed' : 'queued', nodeOnline ? 'Timed out waiting for Founder Node' : undefined);
+            return;
+          }
+          dispatchPollRef.current = setTimeout(() => {
+            void tick();
+          }, 2000);
+        } catch {
+          if (Date.now() - started >= maxMs) {
+            onDone('queued');
+            return;
+          }
+          dispatchPollRef.current = setTimeout(() => {
+            void tick();
+          }, 2000);
+        }
+      };
+      void tick();
+    },
+    [accessToken, stopDispatchPoll],
+  );
+
   const handleSend = useCallback(async () => {
     const prompt = cleanTranscriptText(input.trim());
     if ((!prompt && pendingAttachments.length === 0) || busy) return;
@@ -888,9 +980,10 @@ export function MinimalDevWorkspace({
       }
 
       forceScrollRef.current = true;
+      setOptimisticAgentTyping(false);
       setDispatchNotice(
         founderNodeHeartbeating
-          ? 'Dispatching to Cursor…'
+          ? 'Sending to server…'
           : accountHasPairedNode
             ? 'Queuing — Founder Node offline on your PC…'
             : 'Queuing — pair Founder Node on your PC to deliver…',
@@ -905,25 +998,47 @@ export function MinimalDevWorkspace({
       ]);
       const ideProvider = sessionForDispatch.ideProvider || 'cursor';
       try {
-        await dispatchToIdeSession(
+        const created = await dispatchToIdeSession(
           accessToken,
           sessionForDispatch.id,
           fullPrompt,
           ideProvider,
         );
-        if (founderNodeHeartbeating) {
-          setDispatchNotice('Sent to Cursor — agent working…');
-        } else if (accountHasPairedNode) {
-          setDispatchNotice(
-            'Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to Cursor.',
-          );
-        } else {
-          setDispatchNotice(
-            'Queued on server — install and pair Founder Node on your PC to deliver to Cursor.',
-          );
-        }
         pollSessionHistory(sessionForDispatch.id, { aggressiveMs: 45_000 });
-        setTimeout(() => setDispatchNotice(null), founderNodeHeartbeating ? 12_000 : 20_000);
+
+        if (!founderNodeHeartbeating) {
+          if (accountHasPairedNode) {
+            setDispatchNotice(
+              'Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to Cursor.',
+            );
+          } else {
+            setDispatchNotice(
+              'Queued on server — install and pair Founder Node on your PC to deliver to Cursor.',
+            );
+          }
+          setTimeout(() => setDispatchNotice(null), 20_000);
+        } else {
+          setDispatchNotice('Delivering to Cursor on your PC…');
+          pollDispatchDelivery(created.id, true, (outcome, detail) => {
+            if (outcome === 'delivered') {
+              setOptimisticAgentTyping(true);
+              setDispatchNotice('Delivered to Cursor — agent is working…');
+              setTimeout(() => setOptimisticAgentTyping(false), 45_000);
+              setTimeout(() => setDispatchNotice(null), 12_000);
+            } else if (outcome === 'queued') {
+              setDispatchNotice(
+                'Queued on server — waiting for Founder Node on your PC.',
+              );
+              setTimeout(() => setDispatchNotice(null), 20_000);
+            } else {
+              setDispatchNotice(
+                `Cursor delivery failed on your PC${detail ? `: ${detail.slice(0, 160)}` : ''}. Check Founder Node tray and that Cursor is open.`,
+              );
+              setError(detail ?? 'Cursor delivery failed on your PC');
+              setTimeout(() => setDispatchNotice(null), 16_000);
+            }
+          });
+        }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
         setDispatchNotice(`Cursor dispatch failed: ${msg}`);
@@ -1001,7 +1116,7 @@ export function MinimalDevWorkspace({
       setBusy(false);
       sendingRef.current = false;
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pendingAttachments, phase, stopVoice, resetTranscript, authStale, founderNodeHeartbeating, accountHasPairedNode]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pollDispatchDelivery, pendingAttachments, phase, stopVoice, resetTranscript, authStale, founderNodeHeartbeating, accountHasPairedNode]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -1332,14 +1447,27 @@ export function MinimalDevWorkspace({
             <div
               className={
                 'mb-2 text-xs ' +
-                (dispatchNotice.includes('failed') || dispatchNotice.includes('blocked')
+                (dispatchNotice.includes('failed') ||
+                dispatchNotice.includes('blocked') ||
+                dispatchNotice.includes('delivery failed')
                   ? 'text-rose-400'
-                  : dispatchNotice.includes('Queued') || dispatchNotice.includes('offline') || dispatchNotice.includes('pair')
+                  : dispatchNotice.includes('Queued') ||
+                      dispatchNotice.includes('offline') ||
+                      dispatchNotice.includes('pair') ||
+                      dispatchNotice.includes('Delivering') ||
+                      dispatchNotice.includes('Waiting')
                     ? 'text-amber-300/95'
-                    : 'text-emerald-400/90')
+                    : dispatchNotice.includes('Delivered')
+                      ? 'text-emerald-400/90'
+                      : 'text-zinc-400')
               }
             >
               → {dispatchNotice}
+            </div>
+          )}
+          {selectedSession && selectedAgentTyping && (
+            <div className='mx-auto mb-2 max-w-3xl md:hidden'>
+              <AgentTypingBubble prominent />
             </div>
           )}
           {pendingAttachments.length > 0 && (

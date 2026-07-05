@@ -48,6 +48,14 @@ export class IdeBridgeController {
       body.ideProvider ?? 'cursor',
     );
   }
+
+  @Get('dispatch/:dispatchId')
+  getDispatchStatus(
+    @CurrentUser() user: AuthUser,
+    @Param('dispatchId') dispatchId: string,
+  ) {
+    return this.ideBridge.getDispatchStatus(user.id, dispatchId);
+  }
 }
 
 /**

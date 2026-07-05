@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { FounderEventType } from '@prisma/client';
 import {
   CLAUDE_CODE_CAPABILITIES,
@@ -528,5 +528,38 @@ export class IdeBridgeService {
         ...(result ? { result: result.slice(0, 4000) } : {}),
       },
     });
+  }
+
+  /** Poll delivery outcome for a dispatch the web UI just created. */
+  async getDispatchStatus(userId: string, dispatchId: string) {
+    const row = (await this.dispatchModel.findFirst({
+      where: { id: dispatchId, userId },
+      select: {
+        id: true,
+        status: true,
+        result: true,
+        dispatchedAt: true,
+        createdAt: true,
+        sessionId: true,
+      },
+    })) as {
+      id: string;
+      status: string;
+      result: string | null;
+      dispatchedAt: Date | null;
+      createdAt: Date;
+      sessionId: string;
+    } | null;
+    if (!row) throw new NotFoundException('Dispatch not found');
+    return {
+      id: row.id,
+      status: row.status,
+      result: row.result,
+      dispatchedAt: row.dispatchedAt?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+      sessionId: row.sessionId,
+      delivered: row.status === 'DISPATCHED' && !row.result?.startsWith('error:'),
+      failed: row.status === 'DISPATCHED' && Boolean(row.result?.startsWith('error:')),
+    };
   }
 }
