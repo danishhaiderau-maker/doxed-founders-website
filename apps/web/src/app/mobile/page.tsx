@@ -1,14 +1,12 @@
 import Link from 'next/link';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AndroidAppDownloads } from '@/components/android-app-downloads';
-import { FounderNodeDownloads } from '@/components/founder-node-downloads';
 import { IosAppDownloads } from '@/components/ios-app-downloads';
-import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 export const metadata = {
-  title: 'Download — Doxxed Crypto Mobile & Founder Node',
+  title: 'Founder OS Mobile — Android & iOS',
   description:
-    'Install the Doxxed Crypto Android app. Discover, trading, agents, and Founder OS in your pocket. Desktop Founder Node for encrypted vault.',
+    'Install the Doxxed Crypto Android app or use Founder OS in Safari. Discover, trading, agents, and Founder OS in your pocket.',
 };
 
 export default function MobileDownloadPage() {
@@ -23,7 +21,7 @@ export default function MobileDownloadPage() {
 
       <div className="mx-auto w-full max-w-3xl space-y-10 px-4 py-10 sm:px-6">
         <section>
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Unified mobile app</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Founder OS Mobile</p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Doxxed Crypto for Android &amp; iOS</h1>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
             One app for Discover, trading, agents, and Founder OS — same account as{' '}
@@ -33,8 +31,11 @@ export default function MobileDownloadPage() {
             .
           </p>
           <p className="mt-2 text-sm text-zinc-500">
-            Founder OS + mobile vault live inside this app — not a separate Founder Node mobile app. Desktop{' '}
-            {FOUNDER_NODE_MIN_VERSION_LABEL} still powers Ollama, IDE bridge, and full vault files.
+            Need the desktop vault tray app? See{' '}
+            <Link href="/founder-node" className="font-semibold text-cyan-300 underline hover:text-cyan-200">
+              Founder Node for Windows, macOS &amp; Linux
+            </Link>
+            .
           </p>
           <div className="mt-6">
             <AndroidAppDownloads variant="hero" showInstallGuide />
@@ -56,21 +57,6 @@ export default function MobileDownloadPage() {
           <div className="mt-5">
             <IosAppDownloads />
           </div>
-        </section>
-
-        <section className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-6">
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Desktop — Founder Node</p>
-          <h2 className="mt-2 text-xl font-bold">Private vault on your PC</h2>
-          <p className="mt-2 text-sm text-zinc-400">
-            Goals, roadmap, and private notes live in <code className="text-zinc-300">~/FounderVault/</code> with
-            encrypted sync. Pair once in Settings → Builder.
-          </p>
-          <div className="mt-5">
-            <FounderNodeDownloads />
-          </div>
-          <Link href="/settings/builder" className="mt-4 inline-block text-sm font-semibold text-violet-300 hover:underline">
-            Open Founder Node settings →
-          </Link>
         </section>
 
         <section className="rounded-2xl border border-amber-500/20 bg-amber-950/10 p-6 text-sm text-zinc-300">
@@ -102,13 +88,14 @@ export default function MobileDownloadPage() {
               <strong className="text-white">Best:</strong> Android 10+ (Pixel 8, Samsung, etc.)
             </li>
             <li>
-              <strong className="text-white">Play Protect / Pixel:</strong> v0.4.2+ is <strong className="text-white">release-signed</strong>.
-              If blocked, tap <strong className="text-white">More details → Install anyway</strong>. Advanced Protection may
-              block sideloads entirely — use Chrome at doxxedcrypto.digital.
+              <strong className="text-white">Play Protect / Pixel:</strong> v0.4.2+ is{' '}
+              <strong className="text-white">release-signed</strong>. If blocked, tap{' '}
+              <strong className="text-white">More details → Install anyway</strong>. Advanced Protection may block
+              sideloads entirely — use Chrome at doxxedcrypto.digital.
             </li>
             <li>
-              <strong className="text-white">Android 6–7:</strong> update Android System WebView from Play Store; white screen
-              otherwise.
+              <strong className="text-white">Android 6–7:</strong> update Android System WebView from Play Store; white
+              screen otherwise.
             </li>
           </ul>
         </section>
@@ -130,6 +117,10 @@ export default function MobileDownloadPage() {
             >
               roadmap
             </a>
+            . Desktop vault + Ollama:{' '}
+            <Link href="/founder-node" className="text-cyan-300 underline">
+              Founder Node download
+            </Link>
             .
           </p>
         </section>

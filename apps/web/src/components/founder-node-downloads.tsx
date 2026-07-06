@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
+import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
@@ -107,7 +107,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
       .finally(() => setLoading(false));
   }, []);
 
-  const versionLabel = releaseVersion ?? 'latest';
+  const versionLabel = releaseVersion ?? FOUNDER_NODE_MIN_VERSION;
   const primary =
     os === 'windows'
       ? { label: 'Download for Windows', href: winUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
