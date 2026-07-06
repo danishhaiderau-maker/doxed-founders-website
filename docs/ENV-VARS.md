@@ -147,9 +147,68 @@ load; higher = cheaper but slower to reflect tier changes (e.g. a user
 connecting GitHub won't upgrade until the TTL elapses or
 `refreshUserScore` is called explicitly).
 
+## `AI_RUNTIME_ENABLED`
+
+**Default:** unset / `false` (runtime off)
+**Added:** 2026-07-06 (Founder AI Runtime Phase 0)
+
+When `true`, Founder Copilot non-stream completions check the prompt hash
+cache in `FounderAiRuntimeService` before calling LLM providers. Cache
+hits skip provider calls entirely. When unset or `false`, behavior is
+identical to pre-Phase-0 (no cache layer).
+
+### Where it's read
+
+- `apps/api/src/founder-ai-runtime/founder-ai-runtime.service.ts` — `isEnabled()`
+- `apps/api/src/builder/builder.service.ts` — `tryCopilotChatCompletion` pilot path
+
+## `AI_PROMPT_CACHE_TTL_SEC`
+
+**Default:** `3600` (1 hour)
+**Added:** 2026-07-06
+
+TTL for in-memory (Phase 0) prompt hash cache entries. Phase 1 uses the
+same variable when `REDIS_URL` backs the cache.
+
+## `AI_PROMPT_CACHE_MAX_ENTRIES`
+
+**Default:** `500`
+**Added:** 2026-07-06
+
+Maximum LRU entries in the in-process prompt cache per API instance.
+
+## `AI_RUNTIME_FAST_MODEL`
+
+**Default:** `deepseek-chat`
+**Added:** 2026-07-06
+
+Model slug for simple Q&A and social-draft routing (advisory in Phase 0).
+
+## `AI_RUNTIME_REASONING_MODEL`
+
+**Default:** `deepseek-reasoner`
+**Added:** 2026-07-06
+
+Model slug for reasoning / regulatory / architecture prompts.
+
+## `AI_RUNTIME_CODE_MODEL`
+
+**Default:** `glm-5.2`
+**Added:** 2026-07-06
+
+Model slug for code-draft and implementation prompts.
+
+## `REDIS_URL`
+
+**Default:** unset (in-memory cache only)
+**Added:** 2026-07-06 (documented for Phase 1)
+
+When set, Phase 1 will persist prompt hash cache across Railway instances.
+Phase 0 ignores this variable — safe to set in `.env` ahead of deploy.
+
 ## See also
 
-- `docs/API-ABUSE-AUDIT.md` — the full audit that motivated these vars
+- `docs/FOUNDER-AI-RUNTIME-SPEC.md` — runtime architecture + migration phases
 - `docs/SECRETS_STORAGE.md` — where to put API keys / DB URLs
 - `.env.example` (root) — connection string placeholders
 - `.env.production.example`, `.env.neon.example` — production / Neon

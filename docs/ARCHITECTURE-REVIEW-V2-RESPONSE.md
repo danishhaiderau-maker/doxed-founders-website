@@ -474,11 +474,28 @@ Insert **after Phase 1 validation layer**, **before** any public token metadata:
 
 ---
 
+## Part G: Parallel track — Founder AI Runtime
+
+**Added:** 6 Jul 2026 (same week as Phase 1.5 planning)
+
+Architecture Review v2 focuses on regulatory + trust infrastructure. In parallel we are building the **Founder AI Runtime** so every Founder OS AI call flows through cache before providers — reducing platform DeepSeek/GLM cost and enabling mandatory routing in Phase 1.
+
+| Track | Doc | Phase | Relationship to v2 |
+|-------|-----|-------|---------------------|
+| Regulatory + Launch Qualification | This doc, Part B #1–2 | 1.5 | Blocks token metadata until classification |
+| **Founder AI Runtime** | [FOUNDER-AI-RUNTIME-SPEC.md](./FOUNDER-AI-RUNTIME-SPEC.md) | 0 ✓ → 1 → 2 → 3 | Enables Tokenomics Advisor (#14) + Copilot at scale without runaway inference bills |
+| Raise Room UX theatre | [RAISE-ROOM-UX-VISION-V2.md](./RAISE-ROOM-UX-VISION-V2.md) | RR-UX-001–010 | Compliance Timeline (#7) + Graduation keynote (#6) |
+
+**Phase 0 shipped:** `apps/api/src/founder-ai-runtime/` + Copilot pilot (`AI_RUNTIME_ENABLED`). Phase 1.5 regulatory work proceeds independently; runtime Phase 1 lands as mandatory gateway before Phase 2 Tokenomics Advisor.
+
+---
+
 ## Changelog
 
 | Date | Change |
 |------|--------|
 | 6 Jul 2026 | Initial response — maps Architecture Review v2 (15 items), Phase 1.5, RR-001–020 |
+| 6 Jul 2026 | Part G — Founder AI Runtime parallel track + links to FOUNDER-AI-RUNTIME-SPEC, RAISE-ROOM-UX-VISION-V2 |
 
 ---
 
