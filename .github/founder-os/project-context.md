@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Downgrade GitHub CI failures to stack health warnings.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
