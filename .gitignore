@@ -232,6 +232,11 @@ docs/*.mp4
 # V2 research prompt drafts (source constants live in a160_v2_research.py)
 services/btc-conservative-agent/tmp_*.md
 services/btc-conservative-agent/tmp_research_*.json
+services/btc-conservative-agent/research/*.json
+services/btc-conservative-agent/research/*.html
+services/btc-conservative-agent/research/*.txt
+!services/btc-conservative-agent/research/genome/*.py
+apps/founder-node/app.asar
 
 # One-off local research scripts (not production tooling)
 scripts/tmp-*.mjs
