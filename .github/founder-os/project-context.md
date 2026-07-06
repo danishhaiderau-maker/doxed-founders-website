@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add Founder AI Runtime Phase 0 and Raise Room UX vision docs.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
