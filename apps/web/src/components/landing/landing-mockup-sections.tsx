@@ -60,10 +60,10 @@ export function LandingSinglePage({
             <p className="text-[10px] text-zinc-500">10% airdrop · 70% over 10 years · Ollama + Founder Node — you own the inference bill</p>
           </div>
           <div className="flex flex-wrap gap-3 text-[10px] text-zinc-500">
-            <Link href="/founder-node" className="font-semibold text-violet-300 hover:text-violet-200">
+            <Link href="/downloads#founder-node" className="font-semibold text-violet-300 hover:text-violet-200">
               Founder Node →
             </Link>
-            <Link href="/mobile" className="font-semibold text-emerald-300 hover:text-emerald-200">
+            <Link href="/downloads#mobile" className="font-semibold text-emerald-300 hover:text-emerald-200">
               Android app →
             </Link>
             <Link href="/privacy" className="hover:text-zinc-300">

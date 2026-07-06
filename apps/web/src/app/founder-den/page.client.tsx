@@ -295,7 +295,7 @@ export default function FounderDenPageClient() {
                 Settings → Founder Node
               </a>
               . Downloads:{' '}
-              <a href="/founder-node" className="text-emerald-400 underline">
+              <a href="/downloads#founder-node" className="text-emerald-400 underline">
                 Founder Node desktop page
               </a>
               .

@@ -62,8 +62,8 @@ export function MobileVaultPanel({ accessToken }: Props) {
             Founder Node settings
           </a>{' '}
           → Step 2 → <strong className="text-white">Code for Android</strong>. On your phone, install from{' '}
-          <a href="/mobile" className="text-violet-200 underline">
-            /mobile
+          <a href="/downloads#mobile" className="text-violet-200 underline">
+            /downloads#mobile
           </a>{' '}
           and paste the code under Android vault.
         </p>

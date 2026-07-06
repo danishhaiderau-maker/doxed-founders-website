@@ -127,7 +127,7 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
       {mobileOs === 'ios' && (
         <p className="rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-400">
           iOS — use Safari or Add to Home Screen. Native TestFlight beta:{' '}
-          <a href="/mobile#ios" className="text-cyan-300 underline">
+          <a href="/downloads#ios" className="text-cyan-300 underline">
             see iOS section
           </a>
           .

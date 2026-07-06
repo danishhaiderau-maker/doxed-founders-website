@@ -296,8 +296,8 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
           <CollapsibleInfo title="Pair Android phone" hint="Mobile vault" accent="violet">
             <p className="text-[11px] leading-relaxed text-violet-100/80">
               Install the APK from{' '}
-              <a href="/mobile" className="text-violet-200 underline">
-                doxxedcrypto.digital/mobile
+              <a href="/downloads#mobile" className="text-violet-200 underline">
+                doxxedcrypto.digital/downloads#mobile
               </a>
               , open <strong className="text-white">Founder Node</strong> in the app (or{' '}
               <a href="/settings/builder" className="text-violet-200 underline">

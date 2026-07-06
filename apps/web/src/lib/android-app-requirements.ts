@@ -1,4 +1,4 @@
-/** Shown on /mobile and APK download CTAs — keep in sync with apps/mobile-android/variables.gradle */
+/** Shown on /downloads and APK download CTAs — keep in sync with apps/mobile-android/variables.gradle */
 
 export const ANDROID_APK_MIN_VERSION = 'Android 7.0 (API 23)';
 export const ANDROID_APK_RECOMMENDED = 'Android 8.0+ (API 26+)';

@@ -211,7 +211,7 @@ export function InfrastructureConnectHub({ accessToken, onMessage }: Props) {
             {!p.connected && p.key === 'founder_node' && (
               <p className="mt-3 text-xs text-zinc-400">
                 Install and pair Founder Node →{' '}
-                <Link href="/founder-node" className="text-cyan-400 underline">
+                <Link href="/downloads#founder-node" className="text-cyan-400 underline">
                   setup guide
                 </Link>
               </p>
