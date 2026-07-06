@@ -26,7 +26,7 @@ const LIFECYCLE_LABEL: Record<string, string> = {
   IDEA: 'Idea',
   VALIDATION: 'Validation',
   PRE_LAUNCH: 'Pre-launch',
-  TOKEN_LAUNCH: 'Token launch',
+  TOKEN_LAUNCH: 'Founder Graduation',
   LIVE_TRADING: 'Live trading',
 };
 

@@ -50,7 +50,7 @@ export function RaiseRoomPanel({
     try {
       const data = await exportRaiseParticipants(raise!.id, accessToken);
       await navigator.clipboard.writeText(data.csv);
-      onMessage?.(`Copied ${data.participantCount} participants for token distribution`);
+      onMessage?.(`Copied ${data.participantCount} participants for allocation registration`);
     } catch (err) {
       onMessage?.(err instanceof Error ? err.message : 'Export failed');
     }
@@ -71,10 +71,10 @@ export function RaiseRoomPanel({
     <div className="space-y-5 rounded-2xl border border-violet-500/35 bg-gradient-to-br from-violet-950/30 to-zinc-950 p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-violet-400">Raise Room</p>
+          <p className="text-xs font-semibold uppercase tracking-widest text-violet-400">Proof Raise</p>
           <h3 className="mt-1 text-xl font-bold text-white">{room.name}</h3>
           <p className="mt-1 text-sm text-zinc-400">
-            Public demand validation · paper dollars locked · {raise.allocationFeePercent ?? 1}% burned on commit
+            Allocation registration · paper conviction only · {raise.allocationFeePercent ?? 1}% burned on commit
           </p>
         </div>
         {'momentumScore' in raise && (
@@ -102,9 +102,9 @@ export function RaiseRoomPanel({
           </p>
         </div>
         <div className="rounded-lg bg-black/30 px-3 py-2">
-          <p className="text-[10px] uppercase text-zinc-600">Community token</p>
+          <p className="text-[10px] uppercase text-zinc-600">Community allocation</p>
           <p className="font-semibold text-amber-200">
-            {raise.communityTokenPercent ?? 10}% for Raise Room
+            {raise.communityTokenPercent ?? 10}% at Founder Graduation
           </p>
         </div>
       </div>
@@ -164,7 +164,7 @@ export function RaiseRoomPanel({
             onClick={handleExport}
             className="rounded-lg border border-emerald-500/40 px-4 py-2 text-sm text-emerald-200"
           >
-            Copy distribution list (1-click export)
+            Copy allocation registration list
           </button>
           {!raise.slotsLocked && (
             <button
@@ -172,7 +172,7 @@ export function RaiseRoomPanel({
               onClick={handleLockSlots}
               className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white"
             >
-              Lock slots & close raise
+              Lock Proof Raise slots
             </button>
           )}
         </div>

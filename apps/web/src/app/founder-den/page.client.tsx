@@ -212,7 +212,7 @@ export default function FounderDenPageClient() {
         },
         session.accessToken,
       );
-      setMessage('Raise Room is live — public ICO slots open');
+      setMessage('Proof Raise is live — allocation registration slots open');
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start raise');
