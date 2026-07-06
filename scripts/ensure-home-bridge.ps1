@@ -50,6 +50,13 @@ if (Test-Path $supervisorPidFile) {
 }
 Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
 Close-WindowsByTitlePrefix @("Doxed Home Bridge :$Port", "TEST Bridge") | Out-Null
+
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='cmd.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*home-stack-launcher.ps1*" } |
+  ForEach-Object {
+    Log "  stop launcher pid $($_.ProcessId)"
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
 Stop-ListenPortFast $Port | Out-Null
 Start-Sleep -Seconds 3
 
@@ -74,7 +81,12 @@ Remove-Item (Join-Path $repoRoot ".home-bridge.err.log") -Force -ErrorAction Sil
 # -Force tells the launcher to bind even if :$Port still answers (we already
 # killed the old bridge above); without it the launcher's duplicate-guard would
 # no-op on a still-healthy bridge.
-Start-VisibleConsole $launcher @("-Force") -Title "Doxed Home Bridge :$Port"
+if (Test-BridgeHealthy) {
+  Log "Bridge OK on :$Port (existing listener)"
+  exit 0
+}
+
+Start-VisibleConsole $launcher @() -Title "Doxed Home Bridge :$Port"
 
 $deadline = (Get-Date).AddSeconds(35)
 while ((Get-Date) -lt $deadline) {
