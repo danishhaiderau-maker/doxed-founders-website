@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add unified stack-health-watch for 60s home stack probes.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
