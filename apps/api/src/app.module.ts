@@ -49,6 +49,7 @@ import { AiRoutingModule } from './ai-routing/ai-routing.module';
 import { FounderAiRuntimeModule } from './founder-ai-runtime/founder-ai-runtime.module';
 import { RateLimitModule } from './events/rate-limit.module';
 import { BuilderScoreModule } from './founder-os/builder-score.service';
+import { DdollarModule } from './ddollar/ddollar.module';
 import { DemoModule } from './demo/demo.module';
 
 @Module({
@@ -104,6 +105,7 @@ import { DemoModule } from './demo/demo.module';
     FounderAiRuntimeModule,
     RateLimitModule,
     BuilderScoreModule,
+    DdollarModule,
     DemoModule,
   ],
   providers: [

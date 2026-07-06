@@ -1413,6 +1413,7 @@ export interface ReputationMe {
   displayName: string;
   twitterHandle: string | null;
   reputationPoints: number;
+  lifetimeContributionEarned: number;
   contributorLevel: number;
   rank: number | null;
   totalParticipants: number;
@@ -6122,6 +6123,70 @@ export function resetDemoData(token: string) {
 
 export function runDemoSmokeChecks(token: string) {
   return apiFetch<DemoSmokeReport>('/admin/demo/smoke', { method: 'POST' }, token);
+}
+
+export type ObservatorySubsystemRow = {
+  id: string;
+  label: string;
+  description: string;
+  status: 'green' | 'yellow' | 'red' | 'unknown';
+  version: string | null;
+  latencyMs: number | null;
+  lastError: string | null;
+  lastTest: { name: string; passed: boolean; ranAt: string; detail?: string } | null;
+  coverage: string | null;
+};
+
+export type ObservatoryOverview = {
+  enabled: boolean;
+  message?: string;
+  version?: string;
+  gitSha?: string | null;
+  phase15Enabled?: boolean;
+  latencyMs?: number;
+  subsystems?: ObservatorySubsystemRow[];
+  lastSmoke?: DemoSmokeReport | null;
+};
+
+export type LaunchQualificationResponse = {
+  score: number;
+  tier: string;
+  passes: boolean;
+  launchStage: string;
+  components: Record<string, number>;
+  progressiveUnlock?: {
+    nextStage: string | null;
+    nextHint: string | null;
+  };
+};
+
+export type ComplianceTimelineResponse = {
+  enabled: boolean;
+  slug: string;
+  launchStage: string;
+  regulatoryClass: string;
+  launchQualification: { score: number; tier: string; passes: boolean };
+  steps: Array<{
+    key: string;
+    label: string;
+    status: 'pending' | 'active' | 'complete' | 'blocked';
+    date: string | null;
+    blockerReason: string | null;
+    remediationLink: string | null;
+  }>;
+  progressiveUnlock?: { nextStage: string | null; nextHint: string | null };
+};
+
+export function fetchObservatoryOverview(token: string) {
+  return apiFetch<ObservatoryOverview>('/admin/observatory', undefined, token);
+}
+
+export function fetchLaunchQualification(slug: string) {
+  return apiFetch<LaunchQualificationResponse>(`/projects/${slug}/launch-qualification`);
+}
+
+export function fetchComplianceTimeline(slug: string) {
+  return apiFetch<ComplianceTimelineResponse>(`/projects/${slug}/compliance-timeline`);
 }
 
 export function updateConnectedWorkspaceSession(

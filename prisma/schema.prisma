@@ -400,6 +400,7 @@ model User {
   banned        Boolean   @default(false)
   bannedReason  String?
   reputationPoints Int    @default(0)
+  lifetimeContributionEarned Int @default(0)
   contributorLevel Int    @default(1)
   progressTier     UserProgressTier @default(EXPLORER)
   /// Composite builder-score (0-100ish). Refreshed lazily by BuilderScoreService.
@@ -436,6 +437,8 @@ model User {
   economyEvents        VirtualEconomyEvent[]
   reputationAwards     ReputationAward[]
   pointLedger          PointLedger[]
+  marketplaceLedger    MarketplaceLedgerEntry[]
+  treasuryLedger       FounderTreasuryLedgerEntry[]
   following            UserFollow[] @relation("UserFollowing")
   followers            UserFollow[] @relation("UserFollowers")
   engagementLotteryWins EngagementLotteryWinner[]
@@ -1510,6 +1513,46 @@ model PointLedger {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// DDollar Slice 1 stub — full runtime in apps/api/src/ddollar/
+model MarketplaceLedgerEntry {
+  id            String   @id @default(cuid())
+  userId        String
+  listingKey    String
+  amountDdollar Int
+  label         String
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([listingKey])
+}
+
+model FounderTreasuryLedgerEntry {
+  id            String   @id @default(cuid())
+  userId        String?
+  amountDdollar Int
+  actionKey     String
+  label         String
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([actionKey])
+}
+
+model DdollarDailyEmission {
+  id           String   @id @default(cuid())
+  emissionDate DateTime @unique @db.Date
+  amountIssued Int
+  usersAwarded Int      @default(0)
+  note         String?
+  createdAt    DateTime @default(now())
 }
 
 model UserFollow {
