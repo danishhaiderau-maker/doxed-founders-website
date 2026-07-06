@@ -126,6 +126,9 @@ export default function AdminDemoPage() {
             <Link href="/admin/control" className="text-xs text-zinc-500 hover:text-white">
               ← Admin Control
             </Link>
+            <Link href="/admin/observatory" className="ml-3 text-xs text-violet-400 hover:text-violet-300">
+              Observatory →
+            </Link>
             <h1 className="text-xl font-bold">Demo Mode</h1>
             <p className="text-sm text-zinc-500">Seed synthetic Founder OS ecosystem for E2E testing</p>
           </div>

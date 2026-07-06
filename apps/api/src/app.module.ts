@@ -51,6 +51,10 @@ import { RateLimitModule } from './events/rate-limit.module';
 import { BuilderScoreModule } from './founder-os/builder-score.service';
 import { DdollarModule } from './ddollar/ddollar.module';
 import { DemoModule } from './demo/demo.module';
+import { RegulatoryModule } from './regulatory/regulatory.module';
+import { LaunchQualificationModule } from './launch-qualification/launch-qualification.module';
+import { TrustModule } from './trust/trust.module';
+import { ObservatoryModule } from './observatory/observatory.module';
 
 @Module({
   imports: [
@@ -107,6 +111,10 @@ import { DemoModule } from './demo/demo.module';
     BuilderScoreModule,
     DdollarModule,
     DemoModule,
+    RegulatoryModule,
+    LaunchQualificationModule,
+    TrustModule,
+    ObservatoryModule,
   ],
   providers: [
     {
