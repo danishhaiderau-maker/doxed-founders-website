@@ -6064,6 +6064,66 @@ export function fetchConnectedWorkspaceSession(
   );
 }
 
+
+export type DemoStatus = {
+  enabled: boolean;
+  scale: 'small' | 'medium' | 'large';
+  seeded: boolean;
+  counts: {
+    users: number;
+    projects: number;
+    founders: number;
+    activeRaises: number;
+    raiseAllocations: number;
+    totalPaperRaiseUsd: number;
+    lifetimeContributionPoints: number;
+  };
+  samples: {
+    projectSlug: string;
+    userEmail: string;
+  };
+};
+
+export type DemoSmokeCheck = {
+  name: string;
+  passed: boolean;
+  detail: string;
+  durationMs: number;
+};
+
+export type DemoSmokeReport = {
+  passed: number;
+  failed: number;
+  total: number;
+  ok: boolean;
+  ranAt: string;
+  checks: DemoSmokeCheck[];
+};
+
+export function fetchDemoStatus(token: string) {
+  return apiFetch<DemoStatus>('/admin/demo/status', undefined, token);
+}
+
+export function seedDemoEcosystem(token: string) {
+  return apiFetch<{ ok: boolean; message?: string; status?: DemoStatus; created?: Record<string, number> }>(
+    '/admin/demo/seed',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function resetDemoData(token: string) {
+  return apiFetch<{ ok: boolean; message?: string; deleted?: { users: number; projects: number; founders: number } }>(
+    '/admin/demo/reset',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function runDemoSmokeChecks(token: string) {
+  return apiFetch<DemoSmokeReport>('/admin/demo/smoke', { method: 'POST' }, token);
+}
+
 export function updateConnectedWorkspaceSession(
   token: string,
   workspaceId: string,

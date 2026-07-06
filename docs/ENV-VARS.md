@@ -206,6 +206,41 @@ Model slug for code-draft and implementation prompts.
 When set, Phase 1 will persist prompt hash cache across Railway instances.
 Phase 0 ignores this variable — safe to set in `.env` ahead of deploy.
 
+## `DEMO_MODE_ENABLED`
+
+**Default:** unset / false (demo endpoints disabled)
+**Added:** 2026-07-06 (Demo Mode MVP)
+
+Must be exactly `true` on the **Railway API service** to allow admin demo
+seed, reset, and smoke routes. Fail closed in production unless explicitly
+enabled.
+
+### Where it's read
+
+- `apps/api/src/demo/demo.constants.ts` — `isDemoModeEnabled()`
+- `apps/api/src/demo/demo-mode.guard.ts` — guards all `/admin/demo/*` routes
+
+### Related
+
+- `DEMO_SEED_SCALE` — controls user/project counts when seeding
+- `docs/DEMO-MODE-AND-VERIFICATION.md`
+
+## `DEMO_SEED_SCALE`
+
+**Default:** `medium`
+**Added:** 2026-07-06 (Demo Mode MVP)
+
+Controls how many synthetic records `POST /api/admin/demo/seed` creates.
+
+| Value | Users | Projects | Founders |
+|-------|-------|----------|----------|
+| `small` | 20 | 10 | 8 |
+| `medium` | 35 | 12 | 10 |
+| `large` | 50 | 15 | 12 |
+
+Set on Railway API service only. Web admin panel reads scale from
+`GET /api/admin/demo/status`.
+
 ## See also
 
 - `docs/FOUNDER-AI-RUNTIME-SPEC.md` — runtime architecture + migration phases

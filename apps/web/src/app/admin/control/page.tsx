@@ -791,6 +791,15 @@ export default function AdminControlPage() {
                 </div>
               </div>
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+                <h2 className="font-semibold">Demo Mode (E2E testing)</h2>
+                <p className="mt-1 text-sm text-zinc-500">
+                  Seed synthetic users, projects, Raise Room data, and run API smoke checks — admin only.
+                </p>
+                <Link href="/admin/demo" className="mt-2 inline-block text-sm text-violet-400 hover:underline">
+                  Open Demo Control Panel →
+                </Link>
+              </div>
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Listing inbox</h2>
                 <Link href="/admin/applications" className="mt-2 inline-block text-sm text-violet-400 hover:underline">
                   Review applications →
