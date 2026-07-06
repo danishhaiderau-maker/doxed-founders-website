@@ -41,7 +41,7 @@ export class PlatformAdoptionService {
   constructor(private readonly prisma: PrismaService) {}
 
   async recordAiUsage(input: {
-    userId: string;
+    userId?: string | null;
     provider: string;
     source: string;
     promptTokens: number;
@@ -52,7 +52,7 @@ export class PlatformAdoptionService {
     if (input.promptTokens <= 0 && input.completionTokens <= 0) return;
     await this.prisma.aiTokenUsageLog.create({
       data: {
-        userId: input.userId,
+        userId: input.userId ?? null,
         projectId: input.projectId ?? null,
         provider: input.provider,
         source: input.source,

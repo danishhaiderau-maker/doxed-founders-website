@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ProjectsModule } from '../projects/projects.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
@@ -10,6 +11,7 @@ import { SignalCyclesController } from './signal-cycles.controller';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { ShowcaseInferenceUsageService } from './showcase-inference-usage.service';
 import { ShowcaseRelayEventsService } from './showcase-relay-events.service';
 import { ShowcaseSnapshotService } from './showcase-snapshot.service';
 import { InternalShowcaseController } from './internal-showcase.controller';
@@ -21,7 +23,7 @@ import { TradingAgentsService } from './trading-agents.service';
 import { FlyControlService } from './fly-control.service';
 
 @Module({
-  imports: [NotificationsModule, PointsModule, ExchangesModule],
+  imports: [ProjectsModule, NotificationsModule, PointsModule, ExchangesModule],
   controllers: [TradingAgentsController, SignalCyclesController, AgentRegistryController, InternalShowcaseController],
   providers: [
     TradingAgentsService,
@@ -36,6 +38,7 @@ import { FlyControlService } from './fly-control.service';
     ShowcaseSessionSyncService,
     ShowcaseRelayEventsService,
     ShowcaseSnapshotService,
+    ShowcaseInferenceUsageService,
     FlyControlService,
   ],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],

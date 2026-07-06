@@ -56,9 +56,10 @@ export function LandingPlatformAdoption() {
             AI tokens & real traction — day by day
           </h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-zinc-500">
-            Input/output tokens are logged on every Development Workspace AI call (Copilot, drafts, Quick
-            Build). DDollar volume, GitHub sync events, and build posts show trader-visible activity
-            — not vanity metrics.
+            Input/output tokens are logged on Development Workspace AI calls (Copilot, drafts, Quick
+            Build) and on the public BTC showcase trading agent (DeepSeek inference every few
+            minutes). DDollar volume, GitHub sync events, and build posts show trader-visible
+            activity — not vanity metrics.
           </p>
         </div>
         {totals && (
