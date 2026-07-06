@@ -15,8 +15,8 @@ const HUB_PREFIXES = [
   '/portfolio',
   '/founder-den',
   '/settings/builder',
-  '/founder-node',
-  '/mobile',
+  '/settings/integrations',
+  '/downloads',
   '/raise-room',
   '/list-your-project',
   '/notifications',
@@ -56,8 +56,9 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/watchlist')) return 'Watchlist';
   if (pathname.startsWith('/portfolio')) return 'Portfolio';
   if (pathname.startsWith('/founder-den')) return 'Founder OS';
-  if (pathname.startsWith('/settings/builder') || pathname.startsWith('/founder-node')) return 'Founder Node';
-  if (pathname.startsWith('/mobile')) return 'Founder OS Mobile';
+  if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations'))
+    return 'Integrations';
+  if (pathname.startsWith('/downloads')) return 'Downloads';
   if (pathname.startsWith('/raise-room')) return 'Raise Room';
   if (pathname.startsWith('/list-your-project')) return 'List Project';
   if (pathname.startsWith('/notifications')) return 'Notifications';
@@ -129,17 +130,20 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     id: 'build',
     rowNumber: 'Row 3',
     label: 'Build',
-    subtitle: 'Founder OS · Local compute · Ship',
-    sidebarDescription: 'Development Workspace, Founder Node on your PC, raise capital, list your project.',
+    subtitle: 'Founder OS · Downloads · Ship',
+    sidebarDescription: 'Development Workspace, install apps, connect AI and infra, raise capital, list your project.',
     borderClass: 'border-violet-500/25',
     labelClass: 'text-violet-200',
     rowBgClass: 'bg-violet-950/20',
     items: [
       { href: '/founder-den', label: 'Founder OS', icon: '⚡', auth: true },
-      { href: '/founder-node', label: 'Founder Node', icon: '🖥' },
+      { href: '/downloads#founder-node', label: 'Founder Node', icon: '🖥' },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
       { href: '/list-your-project', label: 'List Project', icon: '📋' },
-      { href: '/mobile', label: 'Mobile app', icon: '📱' },
+      { href: '/downloads', label: 'Downloads', icon: '⬇️' },
+      { href: '/downloads#mobile', label: 'Android app', icon: '📱' },
+      { href: '/settings/builder?tab=ai', label: 'AI Providers', icon: '🧠', auth: true },
+      { href: '/settings/builder?tab=infra', label: 'Infrastructure', icon: '☁️', auth: true },
     ],
   },
 ];

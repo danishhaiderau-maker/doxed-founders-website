@@ -68,7 +68,7 @@ export function FounderCloudPanel({ accessToken, showImport }: Props) {
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Link
-          href="/founder-node"
+          href="/downloads#founder-node"
           className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-300 hover:text-white"
         >
           Download Founder Node

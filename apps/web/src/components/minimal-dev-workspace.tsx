@@ -54,7 +54,7 @@ import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
-const FOUNDER_NODE_DOWNLOAD_URL = '/founder-node';
+const FOUNDER_NODE_DOWNLOAD_URL = '/downloads#founder-node';
 
 const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
 const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };

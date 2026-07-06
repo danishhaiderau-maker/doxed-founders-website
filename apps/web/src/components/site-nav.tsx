@@ -78,9 +78,13 @@ function navActive(pathname: string, href: string) {
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
-  if (href === '/mobile') return pathname === '/mobile';
+  if (href === '/downloads' || href.startsWith('/downloads#')) return pathname.startsWith('/downloads');
+  if (href.startsWith('/settings/builder')) {
+    return pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations');
+  }
+  if (href === '/mobile') return pathname.startsWith('/downloads');
+  if (href === '/founder-node') return pathname.startsWith('/downloads');
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
-  if (href === '/founder-node') return pathname.startsWith('/founder-node');
   if (href === '/founder-den') {
     return (
       pathname.startsWith('/founder-den') ||

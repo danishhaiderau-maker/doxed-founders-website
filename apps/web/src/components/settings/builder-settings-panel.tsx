@@ -1,6 +1,8 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   BuilderSettings,
   connectAiProvider,
@@ -15,6 +17,7 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
+import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
 import { GitHubPatConnectGuide } from '@/components/settings/github-pat-connect-guide';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import { InfrastructureConnectHub } from '@/components/infrastructure-connect-hub';
@@ -24,13 +27,20 @@ type BuilderSettingsPanelProps = {
   accessToken: string;
 };
 
-type SettingsTabId = 'infra' | 'founder-node' | 'security';
+type SettingsTabId = 'downloads' | 'ai' | 'infra' | 'security';
 
 const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
+  { id: 'downloads', label: 'Downloads & pairing' },
+  { id: 'ai', label: 'AI Providers' },
   { id: 'infra', label: 'Infrastructure' },
-  { id: 'founder-node', label: 'Founder Node' },
   { id: 'security', label: 'Security' },
 ];
+
+function tabFromQuery(raw: string | null): SettingsTabId {
+  if (raw === 'ai' || raw === 'infra' || raw === 'security' || raw === 'downloads') return raw;
+  if (raw === 'founder-node') return 'downloads';
+  return 'downloads';
+}
 
 function SecuritySummaryCard() {
   return (
@@ -85,6 +95,8 @@ function SecuritySummaryCard() {
 }
 
 export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [settings, setSettings] = useState<BuilderSettings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -99,7 +111,18 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const [phalaKey, setPhalaKey] = useState('');
   const [phalaUrl, setPhalaUrl] = useState('https://api.redpill.ai/v1');
   const [phalaModel, setPhalaModel] = useState('phala/deepseek-chat-v3-0324');
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>('infra');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>(() =>
+    tabFromQuery(searchParams.get('tab')),
+  );
+
+  useEffect(() => {
+    setActiveSettingsTab(tabFromQuery(searchParams.get('tab')));
+  }, [searchParams]);
+
+  function selectSettingsTab(tab: SettingsTabId) {
+    setActiveSettingsTab(tab);
+    router.replace(`/settings/builder?tab=${tab}`, { scroll: false });
+  }
 
   const load = useCallback(async () => {
     try {
@@ -317,7 +340,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           <button
             key={tab.id}
             type="button"
-            onClick={() => setActiveSettingsTab(tab.id)}
+            onClick={() => selectSettingsTab(tab.id)}
             className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
               activeSettingsTab === tab.id
                 ? 'bg-violet-600/15 text-violet-300'
@@ -329,40 +352,71 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         ))}
       </div>
 
-      {activeSettingsTab === 'infra' && (
-        <div className="space-y-8">
-          <InfrastructureConnectHub accessToken={accessToken} onMessage={setMsg} />
-
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-            <h2 className="text-lg font-semibold text-white">Autopilot & production sync</h2>
-            <p className="mt-1 text-sm text-zinc-500">
-              Push schema to Neon, redeploy Vercel and Railway, and sync GitHub — without cluttering Mission
-              Control.
+      {activeSettingsTab === 'downloads' && (
+        <div className="space-y-6">
+          <section className="rounded-2xl border border-emerald-500/25 bg-emerald-950/10 p-6">
+            <h2 className="text-lg font-semibold text-white">Install apps</h2>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-500">
+              APK, iOS, and Founder Node installers live on the public downloads hub — not mixed with API keys or
+              deploy tokens.
             </p>
-            <div className="mt-4">
-              <HybridControlPlane
-                accessToken={accessToken}
-                onMessage={setMsg}
-                onRefresh={load}
-                autoRunWhenAutopilot={false}
-              />
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Link
+                href="/downloads"
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
+              >
+                Open all downloads
+              </Link>
+              <Link
+                href="/downloads#mobile"
+                className="rounded-lg border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:border-emerald-400/50"
+              >
+                Mobile section
+              </Link>
+              <Link
+                href="/downloads#founder-node"
+                className="rounded-lg border border-cyan-500/30 px-4 py-2 text-sm text-cyan-200 hover:border-cyan-400/50"
+              >
+                Founder Node section
+              </Link>
+            </div>
+          </section>
+
+          <FounderNodeHubPanel
+            accessToken={accessToken}
+            settings={settings}
+            onRefresh={load}
+            memoryMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
+            onMemoryModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
+            aiSection={aiSectionProps}
+            showAiSection={false}
+            showDownloads={false}
+          />
+        </div>
+      )}
+
+      {activeSettingsTab === 'ai' && (
+        <div className="space-y-8">
+          <section className="rounded-2xl border border-violet-500/25 bg-violet-950/10 p-6">
+            <h2 className="text-lg font-semibold text-white">AI Providers</h2>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-500">
+              Connect Copilot brains — DeepSeek, OpenRouter, GLM, Jatevo, Ollama, Phala TEE, OpenAI, Anthropic, and
+              more. Install apps on the{' '}
+              <Link href="/downloads" className="text-violet-300 underline">
+                Downloads
+              </Link>{' '}
+              page.
+            </p>
+            <div className="mt-5">
+              <FounderNodeAiSection {...aiSectionProps} settings={settings} />
             </div>
           </section>
 
           <section id="remote-builder" className="space-y-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 scroll-mt-24">
             <div>
-              <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
+              <h2 className="text-lg font-semibold text-white">Remote coding agents</h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys for Copilot
-                (OpenAI, Anthropic, Surplus, Ollama, etc.) live in the{' '}
-                <button
-                  type="button"
-                  onClick={() => setActiveSettingsTab('founder-node')}
-                  className="text-violet-300 underline"
-                >
-                  Founder Node
-                </button>{' '}
-                tab.
+                Cursor and OpenHands dispatch Quick Build tasks — separate from LLM brain keys above.
               </p>
             </div>
 
@@ -386,54 +440,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               </div>
             </div>
 
-            <div className="space-y-3 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
-              <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
-              <p className="text-xs text-zinc-500">
-                When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
-                connected), and resume your builder agent. Say &quot;take full control&quot; in Development Workspace.
-              </p>
-              <div className="flex flex-col gap-2 text-sm text-zinc-300">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={settings.autopilotEnabled ?? false}
-                    onChange={(e) => saveSettings({ autopilotEnabled: e.target.checked })}
-                  />
-                  Enable Autopilot (sync + publish + builder resume)
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={settings.autopilotRedeployHosts ?? false}
-                    onChange={(e) => saveSettings({ autopilotRedeployHosts: e.target.checked })}
-                  />
-                  Redeploy Vercel + Railway on Autopilot (requires tokens in Stack hub)
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={settings.autoPublishOnEvent}
-                    onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
-                  />
-                  Auto-publish on deploy webhooks
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={settings.autoCreateGitHubIssues}
-                    onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
-                  />
-                  Auto-create GitHub issues from Quick Build
-                </label>
-              </div>
-            </div>
-
             <div className="space-y-6">
               <div className="rounded-xl border border-sky-500/30 bg-sky-950/10 p-4">
                 <h3 className="font-semibold text-white">Cursor Cloud Agents</h3>
                 <p className="mt-1 text-sm text-zinc-500">
-                  Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an API key
-                  in{' '}
+                  Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an
+                  API key in{' '}
                   <a href="https://cursor.com/dashboard" className="text-sky-300 underline" target="_blank" rel="noreferrer">
                     Cursor Dashboard → Integrations
                   </a>
@@ -488,7 +500,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                   <a href="https://app.all-hands.dev" className="text-indigo-300 underline" target="_blank" rel="noreferrer">
                     OpenHands Cloud
                   </a>
-                  . When set as default, Quick Build dispatches specs directly — Cursor-like, no copy-paste.
+                  . When set as default, Quick Build dispatches specs directly.
                 </p>
                 {openHandsProvider?.connected && (
                   <p className="mt-2 text-xs text-emerald-300">Connected — tasks dispatch on Quick Build</p>
@@ -529,61 +541,132 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                   </div>
                 </div>
               </div>
-
-              <div className="rounded-xl border border-zinc-800 p-4">
-                <h3 className="font-semibold text-white">GitHub personal access token</h3>
-                <p className="mt-1 text-sm text-zinc-500">
-                  Optional for public repos; <strong className="text-zinc-300">required for private repos</strong> so Founder
-                  OS can sync commits, list PRs, publish issues, and update{' '}
-                  <code className="text-violet-300/90">.github/founder-os/</code> memory files.
-                </p>
-
-                <GitHubPatConnectGuide
-                  githubTokenConnected={settings.githubTokenConnected}
-                  repoLinked={settings.repoFullName ?? null}
-                />
-
-                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                  <input
-                    type="password"
-                    value={githubToken}
-                    onChange={(e) => setGithubToken(e.target.value)}
-                    placeholder="ghp_… (repo scope)"
-                    className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleGitHubToken}
-                    className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
-                  >
-                    {settings.githubTokenConnected ? 'Update token' : 'Save token'}
-                  </button>
-                  {settings.githubTokenConnected && (
-                    <button
-                      type="button"
-                      onClick={() => disconnectGitHubToken(accessToken).then(load)}
-                      className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </div>
             </div>
           </section>
         </div>
       )}
 
-      {activeSettingsTab === 'founder-node' && (
-        <FounderNodeHubPanel
-          accessToken={accessToken}
-          settings={settings}
-          onRefresh={load}
-          memoryMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
-          onMemoryModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
-          aiSection={aiSectionProps}
-          showAiSection
-        />
+      {activeSettingsTab === 'infra' && (
+        <div className="space-y-8">
+          <section className="rounded-2xl border border-cyan-500/25 bg-cyan-950/10 p-6">
+            <h2 className="text-lg font-semibold text-white">Infrastructure Providers</h2>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-500">
+              Vercel, Railway, Neon, Cloudflare, Phala deploy, and GitHub — your production stack. AI model keys live
+              in{' '}
+              <button
+                type="button"
+                onClick={() => selectSettingsTab('ai')}
+                className="text-violet-300 underline"
+              >
+                AI Providers
+              </button>
+              .
+            </p>
+          </section>
+
+          <InfrastructureConnectHub accessToken={accessToken} onMessage={setMsg} />
+
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+            <h2 className="text-lg font-semibold text-white">Autopilot &amp; production sync</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Push schema to Neon, redeploy Vercel and Railway, and sync GitHub — without cluttering Mission Control.
+              Remote coding agents (Cursor, OpenHands) live in{' '}
+              <button type="button" onClick={() => selectSettingsTab('ai')} className="text-violet-300 underline">
+                AI Providers
+              </button>
+              .
+            </p>
+            <div className="mt-4 space-y-4">
+              <HybridControlPlane
+                accessToken={accessToken}
+                onMessage={setMsg}
+                onRefresh={load}
+                autoRunWhenAutopilot={false}
+              />
+
+              <div className="space-y-3 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
+                <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
+                <p className="text-xs text-zinc-500">
+                  When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
+                  connected), and resume your builder agent.
+                </p>
+                <div className="flex flex-col gap-2 text-sm text-zinc-300">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={settings.autopilotEnabled ?? false}
+                      onChange={(e) => saveSettings({ autopilotEnabled: e.target.checked })}
+                    />
+                    Enable Autopilot (sync + publish + builder resume)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={settings.autopilotRedeployHosts ?? false}
+                      onChange={(e) => saveSettings({ autopilotRedeployHosts: e.target.checked })}
+                    />
+                    Redeploy Vercel + Railway on Autopilot (requires tokens above)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={settings.autoPublishOnEvent}
+                      onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
+                    />
+                    Auto-publish on deploy webhooks
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={settings.autoCreateGitHubIssues}
+                      onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
+                    />
+                    Auto-create GitHub issues from Quick Build
+                  </label>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+            <h2 className="text-lg font-semibold text-white">GitHub repository access</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Required for private repos — sync commits, list PRs, publish issues, and update{' '}
+              <code className="text-violet-300/90">.github/founder-os/</code> memory files.
+            </p>
+
+            <GitHubPatConnectGuide
+              githubTokenConnected={settings.githubTokenConnected}
+              repoLinked={settings.repoFullName ?? null}
+            />
+
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <input
+                type="password"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                placeholder="ghp_… (repo scope)"
+                className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+              />
+              <button
+                type="button"
+                onClick={handleGitHubToken}
+                className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
+              >
+                {settings.githubTokenConnected ? 'Update token' : 'Save token'}
+              </button>
+              {settings.githubTokenConnected && (
+                <button
+                  type="button"
+                  onClick={() => disconnectGitHubToken(accessToken).then(load)}
+                  className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
       )}
 
       {activeSettingsTab === 'security' && <SecuritySummaryCard />}

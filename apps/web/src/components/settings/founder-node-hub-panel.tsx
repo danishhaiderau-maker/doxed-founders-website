@@ -93,19 +93,35 @@ export function FounderNodeHubPanel({
         </div>
       </div>
 
-      {/* Primary CTAs — download */}
-      <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
-        <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
-        <p className="mt-0.5 text-xs text-zinc-500">
-          Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.{' '}
-          <a href="/founder-node" className="text-cyan-400 underline hover:text-cyan-300">
-            Full download page →
-          </a>
-        </p>
-        <div className="mt-4">
-          <FounderNodeDownloads />
+      {showDownloads ? (
+        <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
+          <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.{' '}
+            <a href="/downloads#founder-node" className="text-cyan-400 underline hover:text-cyan-300">
+              All downloads hub →
+            </a>
+          </p>
+          <div className="mt-4">
+            <FounderNodeDownloads />
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="mt-6 flex flex-wrap gap-3">
+          <a
+            href="/downloads#mobile"
+            className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 px-4 py-3 text-sm font-semibold text-emerald-100 hover:border-emerald-400/50"
+          >
+            Mobile installs →
+          </a>
+          <a
+            href="/downloads#founder-node"
+            className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 px-4 py-3 text-sm font-semibold text-cyan-100 hover:border-cyan-400/50"
+          >
+            Founder Node desktop →
+          </a>
+        </div>
+      )}
 
       {/* Quick status cards */}
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
