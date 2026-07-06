@@ -16,6 +16,10 @@ os.environ.setdefault(
     "SHOWCASE_RELAY_WEBHOOK_URL",
     "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
 )
+os.environ.setdefault(
+    "SHOWCASE_INFERENCE_USAGE_URL",
+    "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
+)
 
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVICE_DIR not in sys.path:

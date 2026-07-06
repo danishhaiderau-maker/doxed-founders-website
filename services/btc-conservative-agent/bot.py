@@ -5996,6 +5996,51 @@ def get_dynamic_flat_momentum_floor(base: float = None) -> float:
 
 _relay_push_state = {"seq": 0, "last_ts": 0.0, "last_event": None, "last_ok": None}
 
+SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
+
+
+def _estimate_token_count(text) -> int:
+    if not text:
+        return 0
+    return max(1, len(str(text)) // 4)
+
+
+def _report_showcase_inference_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    source: str = "showcase_bot",
+    model: str = "deepseek-chat",
+) -> None:
+    """Fire-and-forget push of DeepSeek token counts to platform adoption chart."""
+    url = SHOWCASE_INFERENCE_USAGE_URL
+    if not url or (prompt_tokens <= 0 and completion_tokens <= 0):
+        return
+    secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+    payload = {
+        "entries": [
+            {
+                "promptTokens": int(prompt_tokens),
+                "completionTokens": int(completion_tokens),
+                "provider": "deepseek",
+                "model": model,
+                "source": source,
+                "billingSource": "platform_showcase",
+            }
+        ]
+    }
+
+    def _post():
+        try:
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if secret:
+                headers["X-Bot-Control-Secret"] = secret
+            requests.post(url, json=payload, headers=headers, timeout=3.0)
+        except Exception as exc:
+            logger.debug(f"[INFERENCE USAGE] report failed: {exc}")
+
+    threading.Thread(target=_post, daemon=True).start()
+
 
 def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
     """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
@@ -9978,6 +10023,16 @@ def call_deepseek_api(messages, temperature=0.4):
     text = (choices[0].get("message") or {}).get("content")
     if not text:
         raise RuntimeError("EMPTY_CONTENT")
+    usage = payload.get("usage") or {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    if prompt_tokens <= 0 and completion_tokens <= 0:
+        prompt_text = "\n".join(
+            (m.get("content") or "") for m in messages if isinstance(m, dict)
+        )
+        prompt_tokens = _estimate_token_count(prompt_text)
+        completion_tokens = _estimate_token_count(text)
+    _report_showcase_inference_usage(prompt_tokens, completion_tokens)
     return text, latency_ms
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
