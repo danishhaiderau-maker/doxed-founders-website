@@ -51,16 +51,40 @@ if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Fo
 # --- Single-instance lock -----------------------------------------------------
 # Only one auto-restart monitor should ever run. If a stale lock points at a dead
 # PID, reclaim it; if a live monitor is already running, exit silently.
+function Test-AnalyzerMonitorCommandLine([int]$ProcId) {
+  if ($ProcId -le 0) { return $false }
+  try {
+    $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
+    if (-not $p -or $p.ProcessName -ne "powershell") { return $false }
+    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue).CommandLine
+    return ($cmd -and $cmd -like "*analyzer-auto-restart.ps1*")
+  } catch { return $false }
+}
+
+function Stop-StaleAnalyzerCrashMonitors([int]$ExceptPid = 0) {
+  $killed = @()
+  Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and $_.CommandLine -like "*analyzer-auto-restart.ps1*" -and
+      ($ExceptPid -le 0 -or $_.ProcessId -ne $ExceptPid)
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+  return $killed
+}
+
 function Test-LockHeldByLive {
   if (-not (Test-Path $lockFile)) { return $false }
   try {
     $raw = (Get-Content $lockFile -Raw -ErrorAction SilentlyContinue)
     $lockPid = [int]"$raw".Trim()
     if ($lockPid -le 0) { return $false }
-    $p = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-    return ($null -ne $p)
+    return (Test-AnalyzerMonitorCommandLine $lockPid)
   } catch { return $false }
 }
+
+Stop-StaleAnalyzerCrashMonitors | Out-Null
 if (Test-LockHeldByLive) { exit 0 }
 Set-Content -Path $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 $lockHeld = $true
