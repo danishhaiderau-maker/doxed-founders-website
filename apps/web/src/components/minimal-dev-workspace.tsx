@@ -793,6 +793,38 @@ export function MinimalDevWorkspace({
     if (next.length) setPendingAttachments((prev) => [...prev, ...next]);
   }, []);
 
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const cd = e.clipboardData;
+      if (!cd) return;
+
+      const imageFiles: File[] = [];
+      for (const item of Array.from(cd.items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (!imageFiles.length) {
+        for (const file of Array.from(cd.files)) {
+          if (file.type.startsWith('image/')) imageFiles.push(file);
+        }
+      }
+      if (!imageFiles.length) return;
+
+      e.preventDefault();
+      const dt = new DataTransfer();
+      for (const file of imageFiles) {
+        const name =
+          file.name ||
+          `pasted-image-${Date.now()}${file.type === 'image/png' ? '.png' : file.type === 'image/jpeg' ? '.jpg' : ''}`;
+        dt.items.add(file.name ? file : new File([file], name, { type: file.type }));
+      }
+      void handleAttachFiles(dt.files);
+    },
+    [handleAttachFiles],
+  );
+
   // Load the conversation thread whenever the user picks a session. We show
   // whatever was already embedded in the session list immediately (no network
   // wait), then refresh from the dedicated endpoint so the user sees the
@@ -1573,6 +1605,7 @@ export function MinimalDevWorkspace({
                   if (phase !== 'idle') stopVoice();
                   setInput(e.target.value);
                 }}
+                onPaste={handlePaste}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
