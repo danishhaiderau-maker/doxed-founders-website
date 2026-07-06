@@ -96,7 +96,12 @@ export function FounderNodeHubPanel({
       {/* Primary CTAs — download */}
       <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
         <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
-        <p className="mt-0.5 text-xs text-zinc-500">Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.</p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.{' '}
+          <a href="/founder-node" className="text-cyan-400 underline hover:text-cyan-300">
+            Full download page →
+          </a>
+        </p>
         <div className="mt-4">
           <FounderNodeDownloads />
         </div>

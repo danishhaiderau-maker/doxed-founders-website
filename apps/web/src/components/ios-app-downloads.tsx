@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 const SITE_ORIGIN = 'https://doxxedcrypto.digital';
 const TESTFLIGHT_URL = process.env.NEXT_PUBLIC_IOS_TESTFLIGHT_URL?.trim() || '';
@@ -62,7 +63,7 @@ export function IosAppDownloads() {
             vault — not a separate Founder Node listing).
           </li>
           <li>
-            Desktop vault + Ollama still requires <strong className="text-zinc-200">Founder Node v0.7.11+</strong> on your
+            Desktop vault + Ollama still requires <strong className="text-zinc-200">Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL}</strong> on your
             laptop.
           </li>
         </ul>

@@ -85,7 +85,6 @@ function navActive(pathname: string, href: string) {
     return (
       pathname.startsWith('/founder-den') ||
       pathname.startsWith('/settings/builder') ||
-      pathname.startsWith('/founder-node') ||
       pathname.startsWith('/developers')
     );
   }

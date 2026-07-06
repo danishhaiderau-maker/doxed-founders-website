@@ -294,14 +294,9 @@ export default function FounderDenPageClient() {
               <a href="/settings/builder" className="text-emerald-400 underline">
                 Settings → Founder Node
               </a>
-              . Release notes:{' '}
-              <a
-                href="https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_NODE_v0.7.11_RELEASE.md"
-                className="text-emerald-400 underline"
-                target="_blank"
-                rel="noreferrer"
-              >
-                v0.7.11
+              . Downloads:{' '}
+              <a href="/founder-node" className="text-emerald-400 underline">
+                Founder Node desktop page
               </a>
               .
             </p>

@@ -411,7 +411,7 @@ export function FounderOnboardingWizard({
                 {busy ? 'Generating…' : 'Generate pairing code'}
               </button>
               <Link
-                href="/founder-den?onboard=sovereign#founder-node-download"
+                href="/founder-node"
                 className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-300 hover:text-white"
               >
                 Full setup hub →

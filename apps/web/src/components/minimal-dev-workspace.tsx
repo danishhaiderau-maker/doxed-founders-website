@@ -54,7 +54,7 @@ import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
-const FOUNDER_DEN_ONBOARD_URL = '/founder-den?onboard=sovereign#founder-node-download';
+const FOUNDER_NODE_DOWNLOAD_URL = '/founder-node';
 
 const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
 const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };
@@ -1381,7 +1381,7 @@ export function MinimalDevWorkspace({
               )}
               <div className='mt-4 space-y-2'>
                 <a
-                  href={FOUNDER_DEN_ONBOARD_URL}
+                  href={FOUNDER_NODE_DOWNLOAD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
                   Download Founder Node v{FOUNDER_NODE_MIN_VERSION} — setup hub

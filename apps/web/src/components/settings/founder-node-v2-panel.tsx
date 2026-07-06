@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
-import { founderNodeNeedsUpdate } from '@/lib/founder-node-requirements';
+import { founderNodeNeedsUpdate, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
-/** Founder Node v0.7.11+ — single instance, one pairing dialog, hourly updates */
+/** Founder Node desktop tray — single instance, pairing dialog, hourly updates */
 function formatLastSeen(iso: string | null | undefined): string {
   if (!iso) return 'never (no heartbeat yet)';
   const ms = Date.now() - new Date(iso).getTime();
@@ -149,7 +149,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to v0.5.5+</p>
+          <p className="font-medium">Update Founder Node to {FOUNDER_NODE_MIN_VERSION_LABEL}</p>
           <p className="mt-1 text-xs text-zinc-400">
             Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing one-click Windows firewall fix, hourly auto-updates, and Linux downloads.
             Tray menu → <strong className="text-cyan-200">Check for updates</strong> (or download from Step 1), install, then leave the tray app open.
