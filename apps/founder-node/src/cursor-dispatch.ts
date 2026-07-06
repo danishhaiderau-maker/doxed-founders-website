@@ -1,4 +1,4 @@
-import { clipboard } from 'electron';
+import { clipboard, nativeImage } from 'electron';
 import { exec } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -428,39 +428,24 @@ function parseDispatchPrompt(raw: string): ParsedDispatchPrompt {
 }
 
 /**
- * Best-effort: write a data-URL image to the Windows clipboard as a PNG so
- * Cursor can receive it via Ctrl+V. Falls back silently on failure.
+ * Write a data-URL image to the OS clipboard so Cursor can receive it via Ctrl+V.
+ * Uses Electron nativeImage — PowerShell SetImage scripts do not emit the OK:
+ * marker that runPowerShellScriptFile requires, so they always looked like failures.
  */
 async function pasteImageDataUrl(dataUrl: string): Promise<boolean> {
   if (process.platform !== 'win32') return false;
   const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!m) return false;
   const b64 = m[2]!.replace(/\s+/g, '');
-  let tmpPng: string | null = null;
   try {
     const bytes = Buffer.from(b64, 'base64');
     if (bytes.length < 32 || bytes.length > 8 * 1024 * 1024) return false;
-    tmpPng = path.join(os.tmpdir(), `fn-attach-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
-    fs.writeFileSync(tmpPng, bytes);
-    const ps = [
-      'Add-Type -AssemblyName System.Windows.Forms;',
-      'Add-Type -AssemblyName System.Drawing;',
-      `$img=[System.Drawing.Image]::FromFile('${tmpPng.replace(/'/g, "''")}');`,
-      '[System.Windows.Forms.Clipboard]::SetImage($img);',
-      '$img.Dispose();',
-    ].join('\n');
-    const result = await runPowerShellScriptFile(ps, 'fn-attach-clip');
-    return result.ok;
+    const img = nativeImage.createFromBuffer(bytes);
+    if (img.isEmpty()) return false;
+    clipboard.writeImage(img);
+    return true;
   } catch {
     return false;
-  } finally {
-    if (tmpPng) {
-      try {
-        fs.unlinkSync(tmpPng);
-      } catch {
-        /* ignore */
-      }
-    }
   }
 }
 

@@ -422,26 +422,30 @@ export function MinimalDevWorkspace({
             }
           })
           .catch(() => undefined);
-        void fetchIdeBridgeSessions(accessToken)
-          .then((ss) => {
-            if (!Array.isArray(ss)) return;
-            setSessions(ss);
-            const match = ss.find((s) => s.id === sessionId);
-            if (match?.messages?.length) {
-              setHistory((prev) => mergeBridgeHistory(prev, match.messages));
-              setPinnedSession((pin) =>
-                pin?.id === sessionId ? { ...pin, ...match, messages: match.messages } : pin,
-              );
-            }
-          })
-          .catch(() => undefined);
+        // Full session list is expensive on mobile — only refresh it while
+        // aggressively polling after a dispatch (agent may update session meta).
+        if (agentTypingRef.current || Date.now() < postDispatchUntilRef.current) {
+          void fetchIdeBridgeSessions(accessToken)
+            .then((ss) => {
+              if (!Array.isArray(ss)) return;
+              setSessions(ss);
+              const match = ss.find((s) => s.id === sessionId);
+              if (match?.messages?.length) {
+                setHistory((prev) => mergeBridgeHistory(prev, match.messages));
+                setPinnedSession((pin) =>
+                  pin?.id === sessionId ? { ...pin, ...match, messages: match.messages } : pin,
+                );
+              }
+            })
+            .catch(() => undefined);
+        }
       };
       tick();
-      // 2s while agent is typing / post-dispatch; otherwise 3s.
+      // 2s while agent is typing / post-dispatch; otherwise 4s (lighter on mobile).
       const intervalMs = () =>
         agentTypingRef.current || Date.now() < postDispatchUntilRef.current
           ? 2000
-          : 3000;
+          : 4000;
       const schedule = () => {
         historyPollRef.current = setTimeout(() => {
           tick();
@@ -537,8 +541,17 @@ export function MinimalDevWorkspace({
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 8000);
-    return () => clearInterval(id);
+    let id = setInterval(refresh, 8000);
+    const onVisibility = () => {
+      clearInterval(id);
+      id = setInterval(refresh, document.hidden ? 20_000 : 8000);
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [refresh]);
 
   // Load BYOK key from localStorage (never sent to the DB) and fetch the
@@ -925,7 +938,7 @@ export function MinimalDevWorkspace({
           }
           dispatchPollRef.current = setTimeout(() => {
             void tick();
-          }, 2000);
+          }, 3000);
         } catch {
           if (Date.now() - started >= maxMs) {
             onDone('queued');
@@ -933,7 +946,7 @@ export function MinimalDevWorkspace({
           }
           dispatchPollRef.current = setTimeout(() => {
             void tick();
-          }, 2000);
+          }, 3000);
         }
       };
       void tick();
