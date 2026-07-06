@@ -74,6 +74,8 @@ export * from './project-memory';
 export * from './founder-os-memory-files';
 export * from './vault-merge';
 export * from './raise-room';
+export * from './project-maturity';
+export * from './launch-qualification';
 export * from './scout-markets';
 export * from './founder-brain';
 export * from './founder-memory-graph';

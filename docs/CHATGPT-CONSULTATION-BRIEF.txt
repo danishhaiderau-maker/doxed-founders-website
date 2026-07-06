@@ -1,0 +1,186 @@
+CHATGPT CONSULTATION BRIEF — DOXXED CRYPTO FOUNDER GRADUATION PLATFORM
+=======================================================================
+To: ChatGPT (product / regulatory consultation)
+From: Cursor / dev team — https://doxxedcrypto.digital
+Date: July 2026
+SAFE TO PASTE: No secrets, API keys, database URLs, or credentials.
+
+CONTEXT
+-------
+We (the Cursor / dev team) have read your recommendations and our internal platform architecture audit (PLATFORM-ARCHITECTURE-AUDIT.md, summary paste bundle, and ADDENDUM-V2). We merged your feedback into RAISE-ROOM-VALIDATION-VISION-SPEC and a new FOUNDER-GRADUATION-BUILD-PLAN. ChatGPT sent Architecture Review v2 on 6 July 2026; Cursor incorporated it in ARCHITECTURE-REVIEW-V2-RESPONSE.md; Phase 1.5 adds Regulatory Engine before token work.
+
+This brief states what we understood, what we agree with, what exists today (~38% of the full vision per our spec audit), what we will build in four phases, what we will NOT build yet, and ten specific questions for your review.
+
+WHAT WE UNDERSTOOD — YOUR REFINED VISION
+----------------------------------------
+
+INVERTED STACK (TRUST FIRST, NOT LAUNCH FIRST)
+
+The product stack flows in this order:
+
+  Community → Trust → Founder OS → Raise Room → Launch Qualification → Token Infrastructure → Liquidity → Trading
+
+We reject launch-first and Pump.fun-style anon deploy. Founders earn graduation. We compete with Product Hunt, GitHub, AngelList, Kickstarter, and YC — not meme coin factories.
+
+RAISE ROOM IS A MANDATORY PATH
+
+Every project follows:
+
+  Founder → List Project → Trust Review → Community Validation → Raise Room → Launch Qualification → Launch
+
+Nobody launches immediately. Eligibility is earned.
+
+PROJECT MATURITY STAGES
+
+  IDEA → BUILDING → VALIDATED → COMMUNITY → READY → LAUNCHING → TRADING → GROWING
+
+These drive UX badges and discovery filters. We map from legacy database lifecycle enums until migration.
+
+RENAME: TOKEN LAUNCH → FOUNDER GRADUATION
+
+Graduation is an achievement when launch qualification gates pass. A composite Founder Score (Builder + Trust + Community + Scout + Build + Delivery) displays at unlock. It is not a one-click mint.
+
+DDOLLAR REFRAME: PROOF OF CONTRIBUTION
+
+DDollar is earned via reviews, scouting, building, and validation — not only spent. Paper Raise Room uses simulated dollars; real economic effect waits for counsel-gated phases.
+
+COMMUNITY ALLOCATION BUCKETS (WEIGHTED, NOT EQUAL)
+
+  Validators .............. 25%
+  Scouts .................. 20%
+  Builders ................ 20%
+  Early Followers ......... 15%
+  Paper Raise ............. 10%
+  Bug Hunters ............. 10%
+
+We reject equal 10% airdrops to all active users (supersedes old TOKEN-LAUNCH-TRADING-ECOSYSTEM-PROPOSAL equal-split section).
+
+LAUNCH QUALIFICATION GATES (EXAMPLE THRESHOLDS)
+
+  Min project followers ............... ≥ 25
+  Paper conviction .................... ≥ $10,000 simulated
+  Community validation score .......... ≥ 70% weighted
+  AI / scam pass ...................... No active investigation
+  Identity ............................ X linked OR verified email + wallet
+  Founder Launch Score ................ ≥ 65 composite
+
+FOUNDER EXCHANGE (NOT "DOXXED DEX")
+
+Only graduated projects list. Trust metadata visible. Jupiter-routed swaps in Phase 3 with tier-based platform fees.
+
+REGULATORY ENGINE
+
+Founder questionnaire classifies: Community Project | Utility Token | Governance Token | Capital Raise | Restricted. Features gate per class. Capital Raise path requires consult AU counsel — we will not ship real raises without that.
+
+AUSTRALIAN LEGAL SEPARATION (ENGINEERING FRAMING, NOT LEGAL ADVICE)
+
+  Company ........... community / software platform
+  Blockchain ........ settlement for user-initiated transactions
+  Users ............. self-custody wallets; no platform custody in Phase 1–3
+
+WHAT WE AGREE WITH / WHAT WE ALREADY HAVE (~38%)
+------------------------------------------------
+
+SHIPPED TODAY:
+  • Raise Room paper engine — SimulatedRaise, RaiseAllocation, /raise-room heatmap, 1% paper burn on commit
+  • Trust Center — weighted validation, investigations, scout voting, Top Scouts
+  • List Project — application, community vote, admin approve
+  • Founder OS — Copilot, build queue, CEO inbox, Agent Bus, Founder Node pairing
+  • DDollar / points — PointLedger, reputationPoints, builder tiers
+  • Paper trading — virtual USD portfolios
+  • Wallet linking — Solana verify (no custody)
+  • Partial launch readiness — computeLaunchpadRequirements, Startup Genome
+  • Scout primitives — EarlyScoutRecord, trust weight labels
+
+MAJOR GAPS (YOUR VISION):
+  • Unified Founder Launch Score composite
+  • Validation signals on Raise Room project tab
+  • Weighted allocation buckets + Founder Points ledger
+  • Six-gate launch eligibility bar
+  • Regulatory Engine questionnaire
+  • Founder Exchange / Jupiter integration
+  • On-chain raise or custody (explicitly deferred)
+
+WHAT WE WILL BUILD
+------------------
+
+PHASE 1 (WEEKS 1–4) — VALIDATION LAYER ONLY
+Regulatory layer: community / paper only. No tokens. No real money.
+
+  RR-001  Proof Raise + Founder Graduation rebrand; remove ICO / launchpad copy
+  RR-002  Founder Launch Score (read path) — six components, API + UI
+  RR-003  Validation signals on Raise tab — weighted buttons, community score %
+  RR-004  Conviction score + enriched /raise-room trending cards
+  RR-005  Launch eligibility bar — six gates; Proof Raise disabled until all pass
+  RR-006  ProjectMaturity enum + badge (IDEA through GROWING)
+  RR-007  DDollar Proof of Contribution copy pass
+  Copy    Allocation registration disclaimers; AU-safe language
+
+Phase 1 guards: API rejects real SOL/USDC raise endpoints; no wallet raise CTAs.
+
+PHASE 2 (WEEKS 5–10) — TOKEN METADATA + REGULATORY
+
+  RR-008  Regulatory Engine v1 — questionnaire, classification, feature flags
+  RR-009  Founder Points ledger + weighted bucket export
+  RR-010  Bronze / Silver / Gold tier at Proof Raise open
+  Scout dashboard — discoveries, success rate, points by bucket
+  Vesting schedule (off-chain) — 25% / 75% × 12 months
+  Merkle export — snapshot CSV for off-platform founder mint
+
+PHASE 3 (WEEKS 10–16) — FOUNDER EXCHANGE
+
+  Jupiter swap UI with tier-based platform fees
+  Graduated-only listing with trust metadata
+  Paper trading mirror; DexScreener ingest for graduated projects
+
+PHASE 4 (COUNSEL-GATED) — CAPITAL PATH
+
+  Real raise vault (SOL / stablecoin) only after AU fintech counsel sign-off
+  Geo / KYC per Regulatory Engine class
+  Optional on-chain DDollar — separate product decision
+
+WHAT WE WILL NOT BUILD YET
+--------------------------
+  • Solana token contracts or platform custodial mint
+  • Holding or escrow of user funds
+  • Real capital raises, presales, or ICO mechanics
+  • Equal community airdrops
+  • Pump.fun-style anon deploy
+  • Investment advice or guaranteed allocation copy
+  • Full iOS native app (PWA interim)
+  • Legal opinions — we recommend consult AU counsel for Capital Raise class
+
+TEN QUESTIONS FOR YOUR REVIEW
+-----------------------------
+
+1. MANDATORY PIPELINE UX: Should Launch Qualification gates be visible to scouts on project pages before founders pass them (transparency vs. gaming)?
+
+2. FOUNDER GRADUATION NAMING: Is "Founder Graduation" clear to non-crypto founders, or should we pair it with a subtitle like "allocation registration unlock"?
+
+3. REGULATORY ENGINE UX: Should classification be founder self-attestation with admin override, or admin-only after questionnaire — for AU liability?
+
+4. CAPITAL RAISE CLASS: What minimum questionnaire fields before we show a "request legal review" CTA (token utility, revenue, investor geography, etc.)?
+
+5. PROOF OF CONTRIBUTION: Should spending DDollar on Raise Room escrow reduce reputation score or use a separate "committed" balance?
+
+6. WEIGHTED BUCKETS: Validators 25% vs Paper Raise 10% — does this under-weight capital conviction vs. "would you pay" signals?
+
+7. FOUNDER EXCHANGE LISTING: Should non-graduated projects appear in Discover with "not yet graduated" badge, or hide from trading-adjacent surfaces?
+
+8. AUSTRALIAN FRAMING (PHASE 1 PAPER ONLY): Is "allocation registration" + "simulated paper conviction" sufficient distance from CSF / managed investment scheme language?
+
+9. COMPETITIVE POSITIONING: Citing Product Hunt / AngelList — any risk when Raise Room shows dollar-denominated paper totals?
+
+10. PHASE ORDERING: Regulatory Engine before any public token metadata preview — agree?
+
+HOW TO RESPOND
+--------------
+Critique Phase 1–2 scope, AU product framing (not legal advice), Regulatory Engine UX, and bucket weights. Flag launch-first or securities-marketing language. We ship RR-001 through RR-005 next sprint.
+
+Related docs in repo: FOUNDER-GRADUATION-BUILD-PLAN.md, PLATFORM-ARCHITECTURE-AUDIT-ADDENDUM-V2.md, RAISE-ROOM-VALIDATION-VISION-SPEC.md
+
+Production: https://doxxedcrypto.digital — Raise Room at /raise-room
+
+This document is product engineering context only. Not legal, financial, or investment advice.
+
+END BRIEF
