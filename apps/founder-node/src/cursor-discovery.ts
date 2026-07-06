@@ -853,6 +853,47 @@ export function resolveCursorComposerContext(composerId: string): {
   };
 }
 
+export type ComposerWorkspaceFocusState = {
+  lastFocused: string | null;
+  selectedPrimary: string | null;
+  selectedCount: number;
+};
+
+function readComposerWorkspaceFocusState(
+  dbPath: string,
+  sqlite: { DatabaseSync: typeof import('node:sqlite').DatabaseSync },
+): ComposerWorkspaceFocusState | null {
+  let db: import('node:sqlite').DatabaseSync | null = null;
+  try {
+    db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+      .get() as { value?: string } | undefined;
+    if (!row || typeof row.value !== 'string') return null;
+    const data = JSON.parse(row.value) as {
+      lastFocusedComposerIds?: string[];
+      selectedComposerIds?: string[];
+    };
+    const focused = data.lastFocusedComposerIds;
+    const selected = data.selectedComposerIds;
+    return {
+      lastFocused:
+        Array.isArray(focused) && typeof focused[0] === 'string' ? focused[0] : null,
+      selectedPrimary:
+        Array.isArray(selected) && typeof selected[0] === 'string' ? selected[0] : null,
+      selectedCount: Array.isArray(selected) ? selected.length : 0,
+    };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /**
  * Read the composer Cursor's workspace state marks as most recently focused.
  * This reflects on-disk focus intent — the UI may still show another tab until
@@ -865,17 +906,95 @@ export function getFocusedComposerInWorkspaceState(
   if (!sqlite) return null;
   const dbPath = getCursorWorkspaceStateDbPath(workspaceStorageId);
   if (!dbPath) return null;
+  return readComposerWorkspaceFocusState(dbPath, sqlite)?.lastFocused ?? null;
+}
+
+/** Read both focus fields Cursor stores for composer tab selection. */
+export function getComposerWorkspaceFocusState(
+  workspaceStorageId: string,
+): ComposerWorkspaceFocusState | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+  const dbPath = getCursorWorkspaceStateDbPath(workspaceStorageId);
+  if (!dbPath) return null;
+  return readComposerWorkspaceFocusState(dbPath, sqlite);
+}
+
+/**
+ * True when workspace state.vscdb lists `composerId` as the primary tab in
+ * **both** lastFocusedComposerIds and selectedComposerIds. Checking only
+ * lastFocused caused false positives — paste still landed in a stale UI tab.
+ */
+export function verifyComposerFocusedInWorkspaceState(
+  workspaceStorageId: string,
+  composerId: string,
+): boolean {
+  const focus = getComposerWorkspaceFocusState(workspaceStorageId);
+  if (!focus) return false;
+  return focus.lastFocused === composerId && focus.selectedPrimary === composerId;
+}
+
+/**
+ * After SendKeys paste, confirm which composer in the workspace received the
+ * text. Returns the matching composer id, or null when not found yet.
+ */
+export function findComposerWithRecentUserText(
+  composerId: string,
+  textNeedle: string,
+  lookbackUserMessages = 6,
+): string | null {
+  const sqlite = loadNodeSqlite();
+  if (!sqlite) return null;
+  const dbPath = getCursorGlobalStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+  const needle = textNeedle.trim();
+  if (needle.length < 8) return null;
+  const normalizedNeedle = needle.toLowerCase();
+
+  const headers = readComposerHeaders(sqlite.DatabaseSync, dbPath);
+  if (!headers) return null;
+
+  const workspaceStorageId = resolveCursorComposerContext(composerId)?.workspaceStorageId;
+  const candidateIds = headers.allComposers
+    .filter((c) => {
+      if (!c.composerId || !c.name) return false;
+      if (c.workspaceIdentifier?.id !== workspaceStorageId) return false;
+      return true;
+    })
+    .map((c) => c.composerId!)
+    .filter(Boolean);
 
   let db: import('node:sqlite').DatabaseSync | null = null;
   try {
     db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
-    const row = db
-      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
-      .get() as { value?: string } | undefined;
-    if (!row || typeof row.value !== 'string') return null;
-    const data = JSON.parse(row.value) as { lastFocusedComposerIds?: string[] };
-    const focused = data.lastFocusedComposerIds;
-    return Array.isArray(focused) && typeof focused[0] === 'string' ? focused[0] : null;
+    const bubbleStmt = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?');
+
+    for (const candidateId of candidateIds) {
+      const parsed = readComposerDataRow(db, candidateId);
+      if (!parsed) continue;
+      const userHeaders = (parsed.fullConversationHeadersOnly ?? [])
+        .filter((h) => h.type === 1 && h.bubbleId)
+        .slice(-lookbackUserMessages);
+      for (const header of userHeaders.reverse()) {
+        const bubbleRow = bubbleStmt.get(
+          `bubbleId:${candidateId}:${header.bubbleId}`,
+        ) as { value?: string } | undefined;
+        if (!bubbleRow || typeof bubbleRow.value !== 'string') continue;
+        let bubble: CursorBubble;
+        try {
+          bubble = JSON.parse(bubbleRow.value) as CursorBubble;
+        } catch {
+          continue;
+        }
+        const text = extractBubbleText(bubble);
+        if (!text) continue;
+        if (text.toLowerCase().includes(normalizedNeedle)) {
+          return candidateId;
+        }
+      }
+    }
+    return null;
   } catch {
     return null;
   } finally {
@@ -885,14 +1004,6 @@ export function getFocusedComposerInWorkspaceState(
       /* ignore */
     }
   }
-}
-
-/** True when workspace state.vscdb lists `composerId` as the primary focused tab. */
-export function verifyComposerFocusedInWorkspaceState(
-  workspaceStorageId: string,
-  composerId: string,
-): boolean {
-  return getFocusedComposerInWorkspaceState(workspaceStorageId) === composerId;
 }
 
 /**
@@ -941,7 +1052,9 @@ export function focusComposerInWorkspaceState(
       selected.unshift(composerId);
     }
 
-    data.selectedComposerIds = selected;
+    // Cursor reads selectedComposerIds[0] for the visible Agents tab — keep both
+    // arrays aligned so vscdb focus matches what the UI should show after reload.
+    data.selectedComposerIds = [composerId, ...selected.filter((id) => id !== composerId)];
     data.lastFocusedComposerIds = [
       composerId,
       ...focused.filter((id) => id !== composerId),

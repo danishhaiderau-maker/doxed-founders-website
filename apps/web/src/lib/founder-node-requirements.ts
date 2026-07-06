@@ -1,5 +1,5 @@
 /** Minimum Founder Node semver — keep in sync with apps/founder-node/package.json */
-export const FOUNDER_NODE_MIN_VERSION = '0.7.14';
+export const FOUNDER_NODE_MIN_VERSION = '0.7.15';
 
 /** User-facing label for download CTAs and pairing hints */
 export const FOUNDER_NODE_MIN_VERSION_LABEL = `v${FOUNDER_NODE_MIN_VERSION}+`;
