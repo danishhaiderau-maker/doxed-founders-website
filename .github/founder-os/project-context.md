@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(showcase): enforce uniform 100x leverage on live execution paths
 
 ## Last Activity
 
