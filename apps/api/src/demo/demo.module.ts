@@ -4,6 +4,7 @@ import { AirdropModule } from '../airdrop/airdrop.module';
 import { DdollarModule } from '../ddollar/ddollar.module';
 import { FounderDenModule } from '../founder-den/founder-den.module';
 import { FounderOsModule } from '../founder-os/founder-os.module';
+import { LaunchQualificationModule } from '../launch-qualification/launch-qualification.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { DemoController } from './demo.controller';
 import { DemoModeGuard } from './demo-mode.guard';
@@ -18,6 +19,7 @@ import { BusinessJourneyService } from './business-journey.service';
     FounderOsModule,
     DdollarModule,
     AirdropModule,
+    LaunchQualificationModule,
   ],
   controllers: [DemoController],
   providers: [DemoSeedService, DemoModeGuard, BusinessJourneyService],

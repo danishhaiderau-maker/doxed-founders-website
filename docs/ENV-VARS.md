@@ -152,15 +152,46 @@ connecting GitHub won't upgrade until the TTL elapses or
 **Default:** unset / `false` (runtime off)
 **Added:** 2026-07-06 (Founder AI Runtime Phase 0)
 
-When `true`, Founder Copilot non-stream completions check the prompt hash
-cache in `FounderAiRuntimeService` before calling LLM providers. Cache
-hits skip provider calls entirely. When unset or `false`, behavior is
-identical to pre-Phase-0 (no cache layer).
+When `true`, Founder Copilot, share paraphrase, and wall summarizer check
+the prompt hash cache in `FounderAiRuntimeService` before calling LLM
+providers. Cache hits skip provider calls entirely. Context pruning and
+output token caps apply on wired sections. When unset or `false`, cache
+and pruning are off; share/wall still use the runtime gateway with no-op cache.
 
 ### Where it's read
 
 - `apps/api/src/founder-ai-runtime/founder-ai-runtime.service.ts` — `isEnabled()`
 - `apps/api/src/builder/builder.service.ts` — `tryCopilotChatCompletion` pilot path
+- `apps/api/src/share/share.service.ts` — paraphrase via runtime gateway
+- `apps/api/src/wall/wall.service.ts` — summarizer via runtime gateway
+
+## `AI_RUNTIME_CONTEXT_PRUNING`
+
+**Default:** enabled when runtime on (set `false` to disable)
+**Added:** 2026-07-06
+
+Trim oversized system/user prompts before provider calls.
+
+## `AI_RUNTIME_MAX_SYSTEM_CHARS`
+
+**Default:** `12000` · **Added:** 2026-07-06
+
+## `AI_RUNTIME_MAX_USER_PROMPT_CHARS`
+
+**Default:** `16000` · **Added:** 2026-07-06
+
+## `AI_RUNTIME_MAX_OUTPUT_TOKENS`
+
+**Default:** unset (per-intent defaults in `ContextBuilderService`)
+**Added:** 2026-07-06
+
+Per-intent override: `AI_RUNTIME_MAX_OUTPUT_{INTENT}` (e.g. `AI_RUNTIME_MAX_OUTPUT_CODE`).
+
+## `AI_RUNTIME_WALL_MAX_MESSAGES`
+
+**Default:** `40` · **Added:** 2026-07-06
+
+Max messages sent to wall summarizer LLM per run.
 
 ## `AI_PROMPT_CACHE_TTL_SEC`
 

@@ -69,6 +69,8 @@ import { BuilderService } from '../builder/builder.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 import { MetricsSyncService } from '../projects/metrics-sync.service';
 import { WallService } from '../wall/wall.service';
+import { Phase15GatesService } from '../launch-qualification/launch-qualification.service';
+import { AntiSybilService } from '../trust/anti-sybil.service';
 import { NotificationType, ScoutMarketStatus, ListingStatus, PaperTradeSide } from '@prisma/client';
 
 const founderRoomInclude = {
@@ -119,6 +121,8 @@ export class FounderDenService {
     private readonly predictionMarkets: PredictionMarketsService,
     private readonly metricsSync: MetricsSyncService,
     private readonly wall: WallService,
+    private readonly phase15Gates: Phase15GatesService,
+    private readonly antiSybil: AntiSybilService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -553,6 +557,8 @@ export class FounderDenService {
 
     const wallets = await this.prisma.walletConnection.findMany({ where: { userId } });
     const walletAddress = wallets[0]?.address ?? null;
+    const trustWeight = await this.antiSybil.forUser(userId);
+    const effectivePaperUsd = this.antiSybil.effectivePaperUsd(amountUsd, trustWeight);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.raiseAllocation.upsert({
@@ -562,12 +568,16 @@ export class FounderDenService {
           userId,
           amountUsd: new Prisma.Decimal(amountUsd),
           burnedUsd: new Prisma.Decimal(fee),
+          trustWeight,
+          effectivePaperUsd: new Prisma.Decimal(effectivePaperUsd),
           walletAddress,
           slotReserved: amountUsd > 0,
         },
         update: {
           amountUsd: new Prisma.Decimal(amountUsd),
           burnedUsd: new Prisma.Decimal(existingBurned + fee),
+          trustWeight,
+          effectivePaperUsd: new Prisma.Decimal(effectivePaperUsd),
           walletAddress: walletAddress ?? undefined,
           slotReserved: amountUsd > 0,
         },
@@ -881,6 +891,8 @@ export class FounderDenService {
     });
     if (!project) throw new NotFoundException('Project not found');
 
+    await this.phase15Gates.assertProofRaiseAllowed(projectId);
+
     const startsAt = new Date();
     const endsAt = new Date(startsAt.getTime() + dto.durationDays * 86400000);
 
@@ -934,6 +946,8 @@ export class FounderDenService {
       },
     });
     if (!project) throw new NotFoundException('Project not found');
+
+    await this.phase15Gates.assertProofRaiseAllowed(projectId);
 
     const totalDemand = project.simulatedRaises[0]?.allocations.reduce(
       (s, a) => s + Number(a.amountUsd),
@@ -2057,6 +2071,8 @@ export class FounderDenService {
     if (raise.project.founder?.userId !== userId) {
       throw new ForbiddenException('Only the project founder can lock slots');
     }
+
+    await this.phase15Gates.assertProofRaiseAllowed(raise.projectId);
 
     await this.prisma.simulatedRaise.update({
       where: { id: raiseId },

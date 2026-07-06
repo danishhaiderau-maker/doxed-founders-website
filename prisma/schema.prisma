@@ -163,6 +163,24 @@ enum ProjectLifecycleStage {
   LIVE_TRADING
 }
 
+enum LaunchStage {
+  BUILDER
+  WORKSPACE
+  PROJECT
+  RAISE_ROOM
+  GRADUATION
+  FOUNDER_EXCHANGE
+}
+
+enum RegulatoryClass {
+  PENDING
+  COMMUNITY
+  UTILITY
+  GOVERNANCE
+  CAPITAL_RAISE
+  RESTRICTED
+}
+
 enum UserProgressTier {
   EXPLORER
   TRADER
@@ -602,6 +620,10 @@ model AiTokenUsageLog {
   source           String
   /** byok | platform_promo | rule_based */
   billingSource    String?
+  /** L0_tool | L2_prompt_hash | L5_semantic | miss — Phase 1 telemetry */
+  cacheLevel       String?
+  localToolUsed    Boolean  @default(false)
+  confidenceScore  Float?
   promptTokens     Int
   completionTokens Int
   createdAt        DateTime @default(now())
@@ -639,6 +661,14 @@ model Project {
   approved        Boolean       @default(false)
   lifecycleStage  ProjectLifecycleStage @default(IDEA)
   launchReadiness Int           @default(0)
+  launchStage     LaunchStage   @default(BUILDER)
+  launchQualificationScore Int  @default(0)
+  launchQualificationTier  String?
+  launchQualificationMeta  Json?
+  launchQualificationAt    DateTime?
+  regulatoryClass          RegulatoryClass @default(PENDING)
+  regulatoryClassifiedAt   DateTime?
+  regulatoryQuestionnaireCompletedAt DateTime?
   plannedLaunchDate DateTime?
   launchRequestedAt DateTime?
   isLiveToken     Boolean       @default(false)
@@ -690,8 +720,12 @@ model Project {
   wallPins         ProjectWallPin[]
   wallSummary      ProjectWallSummary?
   wallReadCursors  ProjectWallReadCursor[]
+  regulatoryQuestionnaire RegulatoryQuestionnaire?
 
   @@index([slug])
+  @@index([launchStage])
+  @@index([launchQualificationScore])
+  @@index([regulatoryClass])
   @@index([lifecycleStage])
   @@index([bubbleScore])
   @@index([chainId])
@@ -700,6 +734,19 @@ model Project {
   @@index([approved])
   @@index([source])
   @@index([trackingActive])
+}
+
+model RegulatoryQuestionnaire {
+  id          String   @id @default(cuid())
+  projectId   String   @unique
+  answers     Json
+  completedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
 }
 
 model ProjectMetrics {
@@ -1288,6 +1335,8 @@ model RaiseAllocation {
   userId        String
   amountUsd     Decimal  @db.Decimal(16, 2)
   burnedUsd     Decimal  @default(0) @db.Decimal(16, 2)
+  trustWeight   Int      @default(1)
+  effectivePaperUsd Decimal @default(0) @db.Decimal(16, 2)
   slotReserved  Boolean  @default(true)
   walletAddress String?
   createdAt     DateTime @default(now())

@@ -3,7 +3,8 @@
 **Status:** Phase 0 shipped (audit + prompt hash cache + pilot path)  
 **Date:** 6 July 2026  
 **Audience:** Engineering, product  
-**Related:** [ARCHITECTURE-REVIEW-V2-RESPONSE.md](./ARCHITECTURE-REVIEW-V2-RESPONSE.md), [ENV-VARS.md](./ENV-VARS.md), [API-ABUSE-AUDIT.md](./API-ABUSE-AUDIT.md)
+**Vision doc:** [FOUNDER-BRAIN-AI-OS-SPEC.md](./FOUNDER-BRAIN-AI-OS-SPEC.md) — Founder Brain / AI OS roadmap, task economics, phased delivery  
+**Related:** [ARCHITECTURE-REVIEW-V2-RESPONSE.md](./ARCHITECTURE-REVIEW-V2-RESPONSE.md), [ENV-VARS.md](./ENV-VARS.md), [API-ABUSE-AUDIT.md](./API-ABUSE-AUDIT.md), [AI-TOKEN-OPTIMIZATION-QUICK-WINS.md](./AI-TOKEN-OPTIMIZATION-QUICK-WINS.md)
 
 ---
 

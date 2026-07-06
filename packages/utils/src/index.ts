@@ -76,6 +76,7 @@ export * from './vault-merge';
 export * from './raise-room';
 export * from './project-maturity';
 export * from './launch-qualification';
+export * from './progressive-unlock';
 export * from './scout-markets';
 export * from './founder-brain';
 export * from './founder-memory-graph';
