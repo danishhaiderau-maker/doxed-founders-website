@@ -84,7 +84,7 @@ function Test-LockHeldByLive {
   } catch { return $false }
 }
 
-Stop-StaleAnalyzerCrashMonitors | Out-Null
+Stop-StaleAnalyzerCrashMonitors -ExceptPid 3700 | Out-Null
 if (Test-LockHeldByLive) { exit 0 }
 Set-Content -Path $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 $lockHeld = $true
