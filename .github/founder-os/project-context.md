@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(demo): admin demo mode seed, smoke checks, and verification docs
+Add unified stack-health-watch for 60s home stack probes.
 
 ## Last Activity
 
