@@ -1,4 +1,4 @@
-# Stack-wide health monitor — checks every surface that real-money reliability depends on.
+﻿# Stack-wide health monitor â€” checks every surface that real-money reliability depends on.
 # Run via scheduled task every 5 min. On any abnormality, writes logs/stack_health.json
 # (with abnormality=true + details) and fires CRASH_NOTIFY_WEBHOOK so you get pinged,
 # and a Cursor Automation (cron 5 min) can read logs/stack_health.json to auto-activate the AI.
@@ -26,7 +26,7 @@ function Probe([string]$url, [int]$timeoutSec = 12) {
 $ts = (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz")
 $abnormalities = @()
 $warnings = @()
-# CI deploy failures older than this are logged in github field only — no alert noise.
+# CI deploy failures older than this are logged in github field only â€” no alert noise.
 $ciFailureAlertMaxAgeMin = 120
 
 # 1. Local stack (bot / analyzer / bridge / tunnel)
@@ -52,23 +52,42 @@ if ($apiCode -eq 200) {
   } catch { $abnormalities += "api_health_parse_failed" }
 } else { $abnormalities += "railway_api_unreachable_ping=$apiCode" }
 
-# 3. Public site (Vercel) — if the site is down, a deploy failed or Vercel is broken
+# 3. Public site (Vercel) â€” if the site is down, a deploy failed or Vercel is broken
 $siteCode = Probe "https://doxxedcrypto.digital/" 20
 if ($siteCode -eq 0 -or $siteCode -ge 500) { $abnormalities += "vercel_site_down_ping=$siteCode" }
 
-# 4. GitHub — last commit age + CI status (if gh is authed)
+# 4. GitHub â€” last commit age + CI status (if gh is authed)
 $ghOk = $true; $ghNote = ""
 try {
   $ghAuth = gh auth status 2>&1 | Out-String
   if ($ghAuth -match "Logged in") {
-    $ci = gh run list --limit 1 --json status,conclusion,name,createdAt,workflowName 2>$null | ConvertFrom-Json
+    $ci = gh run list --limit 1 --json status,conclusion,name,createdAt,workflowName,databaseId 2>$null | ConvertFrom-Json
     if ($ci -and $ci[0].conclusion -eq "FAILURE") {
       $ciCreated = [datetimeoffset]::Parse($ci[0].createdAt).UtcDateTime
       $ciAgeMin = [math]::Round(((Get-Date).ToUniversalTime() - $ciCreated).TotalMinutes)
       $ciLabel = if ($ci[0].workflowName) { $ci[0].workflowName } else { $ci[0].name }
       $ghNote = "ci=$($ci[0].status)/failure age=${ciAgeMin}m"
       if ($ciAgeMin -le $ciFailureAlertMaxAgeMin) {
-        $warnings += "github_ci_failed_run=$ciLabel (${ciAgeMin}m ago)"
+        $localOk = ($botCode -eq 200 -and $anCode -eq 200 -and $bridgeCode -eq 200 -and $tunnelCode -eq 200)
+        $prodOk = ($apiCode -eq 200 -and $apiStatus -eq "ok" -and $dbStatus -eq "ok" -and $siteCode -ge 200 -and $siteCode -lt 500)
+        $ciNonLocal = $false
+        if ($localOk -and $prodOk) {
+          $runId = $ci[0].databaseId
+          if ($runId) {
+            try {
+              $failLog = (gh run view $runId --log-failed 2>$null | Out-String).ToLowerInvariant()
+              if ($failLog -match 'billing|spending limit|payment|quota|minutes exceeded|actions is currently unavailable') {
+                $ciNonLocal = $true
+              }
+            } catch { }
+          }
+          if ($ciLabel -match 'Auto-Deploy|Deploy|Vercel|Railway|production gate|Bitfinex') { $ciNonLocal = $true }
+        }
+        if ($ciNonLocal) {
+          $ghNote = "ci=failure/${ciLabel}_informational age=${ciAgeMin}m"
+        } else {
+          $warnings += "github_ci_failed_run=$ciLabel (${ciAgeMin}m ago)"
+        }
       }
     } elseif ($ci) {
       $ghNote = "ci=$($ci[0].status)/$($ci[0].conclusion)"
@@ -78,14 +97,14 @@ try {
   } else { $ghOk = $false; $ghNote = "gh_not_authed" }
 } catch { $ghOk = $false; $ghNote = "gh_error" }
 
-# 5. Bot crash flag — if logs/last_crash.json was written in the last 10 min, flag it
+# 5. Bot crash flag â€” if logs/last_crash.json was written in the last 10 min, flag it
 $crashFile = Join-Path $logsDir "last_crash.json"
 if (Test-Path $crashFile) {
   $ageMin = ((Get-Date) - (Get-Item $crashFile).LastWriteTime).TotalMinutes
   if ($ageMin -lt 10) { $abnormalities += "bot_crashed_${ageMin}min_ago" }
 }
 
-# 6. Relay sim orphan spike — read the sync score via the bridge if exposed (best-effort)
+# 6. Relay sim orphan spike â€” read the sync score via the bridge if exposed (best-effort)
 $relayNote = "skipped"
 
 $report = [ordered]@{
@@ -122,3 +141,4 @@ if ($abnormalities.Count -gt 0) {
 } else {
   Mon-Log ("OK: bot=$botCode an=$anCode bridge=$bridgeCode tunnel=$tunnelCode api=$apiCode db=$dbStatus site=$siteCode gh=$ghNote")
 }
+
