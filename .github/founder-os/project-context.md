@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: add sanitized platform architecture for external audit
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
