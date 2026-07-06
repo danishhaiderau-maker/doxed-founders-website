@@ -1,0 +1,68 @@
+[
+  {
+    "id": "api",
+    "label": "API",
+    "description": "NestJS core health and version",
+    "probe": "health.api"
+  },
+  {
+    "id": "database",
+    "label": "Database",
+    "description": "PostgreSQL via Prisma",
+    "probe": "health.database"
+  },
+  {
+    "id": "demo",
+    "label": "Demo Mode",
+    "description": "Demo seed and smoke verification",
+    "probe": "demo.status"
+  },
+  {
+    "id": "ddollar",
+    "label": "DDollar Runtime",
+    "description": "Spendable balance and lifetime contribution ledgers",
+    "probe": "ddollar.ledger"
+  },
+  {
+    "id": "ai-runtime",
+    "label": "AI Runtime",
+    "description": "Founder AI gateway Phase 0/1",
+    "probe": "ai-runtime.status"
+  },
+  {
+    "id": "event-bus",
+    "label": "Event Bus",
+    "description": "Domain events and workers",
+    "probe": "events.status"
+  },
+  {
+    "id": "regulatory",
+    "label": "Regulatory Engine",
+    "description": "Phase 1.5 questionnaire and classification",
+    "probe": "trust.regulatory"
+  },
+  {
+    "id": "launch-qualification",
+    "label": "Launch Qualification",
+    "description": "Weighted launch score 0–100",
+    "probe": "trust.launch-qualification"
+  },
+  {
+    "id": "raise-room",
+    "label": "Raise Room",
+    "description": "Paper conviction and Proof Raise",
+    "probe": "raise-room.active"
+  },
+  {
+    "id": "trust-center",
+    "label": "Trust Center",
+    "description": "Weighted validation and investigations",
+    "probe": "trust-center.reports"
+  },
+  {
+    "id": "founder-os",
+    "label": "Founder OS",
+    "description": "Integrations and workspace health",
+    "probe": "founder-os.integrations"
+  }
+]
