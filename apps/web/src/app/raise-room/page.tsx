@@ -34,7 +34,7 @@ export default function RaiseRoomPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-semibold">Raise Room</h1>
             <p className="text-xs text-zinc-500">
-              Validate demand with paper capital — before any real raise
+              Discover tomorrow&apos;s founders — paper conviction before any real raise
             </p>
           </div>
           <SiteNav />
@@ -44,10 +44,10 @@ export default function RaiseRoomPage() {
       <div className="mx-auto max-w-4xl space-y-8 px-6 py-8">
         <section className="rounded-2xl border border-amber-500/25 bg-amber-950/10 p-6">
           <p className="text-xs font-semibold uppercase tracking-widest text-amber-400">Validate</p>
-          <h2 className="mt-2 text-2xl font-bold text-white">People allocating capital is a signal</h2>
+          <h2 className="mt-2 text-2xl font-bold text-white">Discover founders worth backing</h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
-            Followers are weak. Simulated allocations in Raise Room show who would commit paper dollars
-            — proof of demand founders can show investors and community before launch.
+            Followers are weak. Paper conviction and weighted community validation show who would
+            commit — allocation registration, not a token launchpad.
           </p>
           <Link
             href={session ? '/founder-den?tab=funding' : '/login?callbackUrl=/founder-den?tab=funding'}

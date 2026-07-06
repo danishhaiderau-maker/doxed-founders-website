@@ -128,7 +128,7 @@ export function RaiseRoomPanel({
 
       {raise.slotsLocked ? (
         <p className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2 text-sm text-amber-200">
-          ICO slots locked — participants reserved for token distribution.
+          Proof Raise slots locked — participants reserved for allocation registration.
         </p>
       ) : accessToken ? (
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -146,7 +146,7 @@ export function RaiseRoomPanel({
             disabled={slotsFull}
             className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
           >
-            {slotsFull ? 'Slots full' : 'Reserve ICO slot'}
+            {slotsFull ? 'Slots full' : 'Commit paper conviction'}
           </button>
         </div>
       ) : (
@@ -185,7 +185,7 @@ function AllocationLeaderboard({ entries }: { entries: RaiseAllocationLeaderboar
   if (entries.length === 0) {
     return (
       <p className="text-sm text-zinc-500">
-        No public allocations yet — be the first to reserve an ICO slot with paper dollars.
+        No public allocations yet — be the first to commit paper conviction.
       </p>
     );
   }
