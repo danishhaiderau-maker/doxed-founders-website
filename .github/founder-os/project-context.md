@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(showcase): report BTC bot DeepSeek tokens to adoption chart
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
