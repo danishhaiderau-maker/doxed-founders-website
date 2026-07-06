@@ -10,6 +10,12 @@
 
 ---
 
+## Platform Readiness Pivot (July 2026)
+
+Execution now follows **[PLATFORM-READINESS-PLAN.md](./PLATFORM-READINESS-PLAN.md)** — vertical slices (backend + frontend + demo seed + verification + telemetry + health + docs + flags + tests) instead of isolated RR tickets. Phase 1.5 deliverables below map to **Slice 4** (Trust Layer) and dependencies **Slices 1–3, 6–7** in that doc. Demo Mode is first-class; merge as independently testable slices without pausing for approval unless blocked.
+
+---
+
 ## Part A: Acknowledgment
 
 We are **~80% aligned** with Architecture Review v2. The remaining **20%** is not more launchpad code — it is **regulatory-first, trust-first, economically sustainable design**:
