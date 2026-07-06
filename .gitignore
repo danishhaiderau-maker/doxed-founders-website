@@ -175,6 +175,8 @@ docs/exports/*.zip
 # Runtime pid/lock/mode + watchdog artifacts (local only)
 .home-*.pid
 .home-*.lock
+.stack-health-watch.lock
+.live-copy-6h-watch.lock
 .home-production-mode
 .home-use-named-tunnel
 logs/
