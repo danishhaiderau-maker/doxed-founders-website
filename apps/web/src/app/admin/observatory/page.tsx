@@ -111,7 +111,7 @@ export default function AdminObservatoryPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {overview.subsystems.map((row) => (
+                  {(overview.subsystems ?? []).map((row) => (
                     <tr key={row.id} className="border-b border-zinc-800/80">
                       <td className="px-4 py-3">
                         <p className="font-medium text-white">{row.label}</p>
