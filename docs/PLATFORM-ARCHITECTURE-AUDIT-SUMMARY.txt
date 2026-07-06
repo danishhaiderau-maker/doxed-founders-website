@@ -1,0 +1,208 @@
+DOXXED CRYPTO / FOUNDER OS — PLATFORM ARCHITECTURE (PASTE BUNDLE FOR EXTERNAL AUDIT)
+====================================================================================
+Safe to paste into ChatGPT or share with consultants. NO secrets, API keys, DB URLs, tokens, or vault paths.
+Production: https://doxxedcrypto.digital | Showcase bot: https://bot.doxxedcrypto.digital
+Full doc: docs/PLATFORM-ARCHITECTURE-AUDIT.md | Code export: npm run audit:export
+
+WHAT THIS IS
+------------
+Doxxed Crypto is a crypto-native founder and community platform. It combines curated project discovery, a trust layer (List Project + Trust Center), a virtual economy (DDollar credits), paper trading, Raise Room demand validation, Founder OS (web command center for Copilot/build/deploy), Founder Node (desktop encrypted vault), and trading agents (paper desk + conservative BTC signal showcase).
+
+Mission: surface legitimate projects with public founders — pro-accountability, pro-builder — not an anonymous memecoin factory.
+
+Architecture is hybrid: public product data on Neon Postgres; private founder data (memory, sealed API keys) with optional Founder Node zero-knowledge relay; NestJS API on Railway as control plane; external workers (LLMs, Cursor, GitHub, Vercel) connected via BYOK.
+
+MONOREPO (private GitHub)
+-------------------------
+apps/web          Next.js 15 → Vercel (doxxedcrypto.digital)
+apps/api          NestJS 11 → Railway
+apps/founder-node Electron desktop vault (~/FounderVault/)
+apps/mobile-android Capacitor Android APK (WebView → production site)
+packages/*        utils, ui, types, config, founder-vault
+prisma/schema.prisma  Single Postgres schema (Neon)
+services/btc-conservative-agent  Python showcase bot (home PC :7002, public tunnel)
+docs/             Specs and this audit doc
+config/bot-architecture.lock.json  Two-bot policy — no blunt sync
+
+Secrets live OUTSIDE git in a sibling vault — never share with auditors.
+
+TECH STACK
+----------
+Frontend: Next.js 15, React 19, Tailwind 4, TanStack Query, NextAuth 4
+Backend: NestJS 11, Prisma 6, PostgreSQL (Neon)
+Deploy: Vercel (web), Railway (API), Cloudflare tunnel (home bot)
+Auth: Google OAuth, X/Twitter OAuth, credentials, JWT to API, optional 2FA/passkeys/wallet
+AI: BYOK (OpenRouter, DeepSeek, GLM, Gemini, OpenAI, Anthropic, Ollama, Phala TEE) + limited platform promo pool
+Mobile: Capacitor Android; iOS = Safari PWA interim
+Chain: Solana wallet verify, Base x402 micropayments, signal settlement
+
+Required env NAMES (no values): DATABASE_URL, JWT_SECRET, NEXTAUTH_SECRET, NEXTAUTH_URL, GOOGLE_CLIENT_*, TWITTER_CLIENT_*, INTERNAL_AUTH_SECRET, API_URL, RATE_LIMIT_FAIL_OPEN, TWITTER_VERIFIED_FREE_TOKEN_GATE, PARASITE_DAILY_TOKEN_CAP, BUILDER_DAILY_TOKEN_CAP, PHALA_CVM_* (optional).
+
+DEPLOYMENT TOPOLOGY
+-------------------
+Users → Vercel (Next.js) → Railway API → Neon Postgres
+Founder Node desktop ↔ API (pairing, encrypted vault relay)
+Showcase bot Python on operator home PC port 7002 → Cloudflare tunnel → bot.doxxedcrypto.digital
+Separate local lab bot on port 7800 (dev/research only, NOT public, different architecture)
+API connects to external LLM/Cursor/GitHub/Stripe/Solana as configured
+
+PUBLIC ROUTES (major)
+---------------------
+Auth: /, /login, /register, /account, /notifications
+Discovery: /discover, /projects, /project/[slug], /founders, /founder/[slug], /watchlist, /portfolio/[userId]
+Community: /feed, /build-feed, /town-hall, /ddollar, /reputation, /leaderboard, /builder-rewards, /airdrop, /scout-votes
+Trust: /trust-center, /list-your-project, /raise-room
+Trading: /paper-trading, /predict, /agent-hub, /agents, /docs/signal-api
+Founder: /founder-den, /downloads, /settings/builder, /settings/security, /mobile
+Legal: /privacy, /legal/*, /rules, /busted
+Admin (role-gated): /admin/control, /admin/applications, /admin/platform, /admin/agent-registrations
+Well-known: /.well-known/agent-card.json, /.well-known/agent.json
+
+Hub rows: (1) Trade & Agents, (2) Community & DDollar, (3) Build / Founder OS / Downloads.
+
+USER PERSONAS
+-------------
+Scout/community: discover → validate in Trust Center → paper trade → earn DDollar → leaderboard
+Founder/builder: Founder OS + Founder Node → list project → Raise Room → (planned) DDollar whitelist
+Trader: paper desk + agent hub showcase + optional signal API subscription (self-execute on own exchange)
+Admin: listing review, investigations, showcase bot control, agent registry, treasury
+Agent subscriber: signal API lifecycle (INTENT → ORDER → EXIT → success fee)
+
+AUTHENTICATION
+--------------
+NextAuth (web) syncs OAuth to API User record; API JWT on all non-@Public routes.
+X verification gates free AI promo when TWITTER_VERIFIED_FREE_TOKEN_GATE=true.
+Founder Node: pairing code → device nodeToken → FounderNodeGuard on sync routes.
+Optional: TOTP 2FA, WebAuthn passkeys, Solana/EVM wallet signature.
+Admin: User.role=ADMIN; actions logged in AdminAction.
+
+ECONOMY
+-------
+DDollar = User.reputationPoints + PointLedger (platform credits, NOT on-chain token today).
+Founder Credits = separate balance for Cursor build sessions.
+Builder tiers: PARASITE (default, low daily AI cap) vs VERIFIED_BUILDER (X + GitHub/Cursor + commits).
+Free AI promo pool: capped per user (~30M tokens/90d); pool preservation reserves remainder for verified builders.
+Engagement: badges, leaderboards, lottery, bounties, scout markets.
+
+FOUNDER OS (shipped capabilities)
+---------------------------------
+/founder-den command center:
+- Founder Brain: single auto-routing Copilot (no Ask/Build split)
+- CEO inbox queue: Needs Attention, Review, Approval, Publishing, Deployment, Decision
+- Agent Runtime: Cursor/OpenHands dispatch, live build streaming
+- Agent Bus: research→build→content handoffs
+- Decision journal injected into Brain context
+- Desktop Bridge: Founder Node heartbeat metadata only (branch, file names, task — NOT contents)
+- Build queue, connected workspace, publish pipeline
+
+/settings/builder tabs: downloads & pairing | AI providers | infrastructure | security
+/downloads: Founder Node installers, Android APK, pairing guides
+
+Privacy stack (optional): local vault → BYO AI → Phala TEE → Node v2 vector index → attestation
+
+RAISE ROOM & LAUNCH (current vs planned)
+----------------------------------------
+SHIPPED: SimulatedRaise + RaiseAllocation — paper USD demand signals on /raise-room. Simulation only, not real fundraising.
+
+PLANNED (spec docs: RAISE-ROOM-P0-INSPIRED-PLAN, DDOLLAR-LAUNCH-ALLOCATION-PROPOSAL, TOKEN-LAUNCH-TRADING-ECOSYSTEM-PROPOSAL):
+- Phase 1: TokenLaunch + LaunchInterestCommit — DDollar escrow for whitelist interest; snapshot → CSV export; founder mints off-platform
+- Phase 2: Merkle proof, optional claim program, bonding curve preview (no custody)
+- REJECTED: Pump.fun anon factory, platform custodial mint, pay-SOL-for-speed
+
+TRUST CENTER & LIST PROJECT
+---------------------------
+List Project: ListingApplication → community vote → admin approve → Project record
+Trust Center: community validation categories, ProjectInvestigation, ProjectTrustReport
+Lifecycle: IDEA → … → SIMULATED_RAISE → LAUNCH_READY → TOKEN_LAUNCH → LIVE_TRADING
+Listing approval gates Raise Room and future token launch windows.
+
+TRADING & AGENTS
+----------------
+Paper trading: virtual USD portfolio, limit orders, public portfolios (email redacted). Simulation, not brokerage.
+Showcase BTC bot: services/btc-conservative-agent/bot.py on home PC :7002, public at bot.doxxedcrypto.digital. Admin control only at /admin/control. Public dashboard sanitized (publicSafe).
+Signal copy: SignalCycle lifecycle; 10% success fee on profitable EXIT; DDollar debit else USDC to admin treasury; informational disclaimer (not investment advice). Optional x402 pay-per-poll on Base.
+Agent Hub: hire isolated instance (2000 DDollar fee); ERC-8004/SAID registration admin-only.
+
+BOT ARCHITECTURE LOCK (critical)
+--------------------------------
+TWO DIFFERENT BOTS — do not blunt-sync:
+  Local lab: external research script, port 7800, not public, diverged architecture
+  Global showcase: services/btc-conservative-agent/, port 7002, bot.doxxedcrypto.digital
+allowBluntSync: false. Edit monorepo bot in place. Blocked scripts: sync-local-btc-bot, sync-btc-research-bot.
+Safe ops (no bot code sync): sync:production, sync:all, wire:home-bot, start-home-bot.
+
+RATE LIMITING & ABUSE (July 2026 patches)
+-----------------------------------------
+Internal audit found AI endpoints could bypass limits when Neon DB unreachable (fail-open).
+Patches: RATE_LIMIT_FAIL_OPEN=false (fail closed → 503); atomic DDollar spend; extended Copilot limiter coverage; TWITTER_VERIFIED_FREE_TOKEN_GATE; PARASITE/BUILDER daily token caps; promo pool preservation for verified builders.
+Layers: global IP throttler (100/min, in-memory per replica) + custom RateLimit table (userId+endpoint) + promo token cap aggregate + tier caps.
+
+DATA MODEL (key Prisma models — names only)
+-------------------------------------------
+Identity: User, OAuthAccount, UserTotp, WebAuthnCredential, WalletConnection
+Projects: Founder, Project, ListingApplication, ListingVote, ProjectInvestigation
+Economy: PointLedger, ReputationAward, PlatformSettings, FounderCreditLedger
+Raise: SimulatedRaise, RaiseAllocation, DemandPoll, ScoutMarket
+Paper: PaperPortfolio, PaperTrade, PaperLimitOrder, LeaderboardEntry
+Founder OS: BuildQueueItem, IntegrationCredential, ConnectedWorkspace, AgentRun, AiTokenUsageLog
+Founder Node: FounderNode, FounderNodeVaultRelay, FounderNodeInferenceJob
+Signals: TradingAgent, SignalCycle, SignalApiKey
+Wall: ProjectWallMessage, ProjectWallSummary
+Ops: AdminAction, RateLimit, AnalyticsEvent
+
+Six data classes: public_product | founder_private | sealed_credential | founder_node_relay | audit_telemetry | platform_identity. Forbidden in browser JSON: token, accessTokenEncrypted, webhookSecret, secretHash, passwords, raw API keys.
+
+API MODULES (NestJS)
+--------------------
+Auth, Security, Account, Projects, ListingApplications, TrustCenter, FounderDen, FounderOs, Events (Copilot), Builder, BuildQueue, FounderNode, Credentials, Vault, Privacy, PaperTrading, TradingAgents, Points, Reputation, AdminControl, Feed, TownHall, Wall, Share, Agents, XSocial, Github, Analytics, AiRouting, RateLimit, Health (+ market data, airdrop, engagement modules).
+
+Major route prefixes: /auth, /security, /account, /projects, /copilot, /founder-os, /founder-node, /paper-trading, /trading-agents, /signals, /points, /admin, /trust-center, /listing-applications, /privacy, /vault, /wall
+
+MOBILE
+------
+Android: Capacitor WebView → doxxedcrypto.digital?app=android; APK at /downloads; appId digital.doxxedcrypto.app
+iOS: Safari PWA now; native TestFlight later
+Direction: one unified app with embedded vault sync; desktop Node stays heavy runtime (Ollama, Cursor bridge)
+
+REGULATORY POSITIONING (NOT LEGAL ADVICE)
+-----------------------------------------
+Layer 1 (shipped): community + paper + DDollar credits + simulated raise — reputation/entertainment framing
+Layer 2 (shipped): informational trading signals; subscriber self-executes
+Layer 3 (planned): DDollar escrow whitelist — explicit "not investment contracts" copy
+Layer 4 (greenfield): on-chain launch + Jupiter swap — requires counsel before ship
+Principles: no anon memecoin factory, no custodial mint, no investment advice, founder identity as transparency layer
+
+NOT IN SCOPE / GREENFIELD
+-------------------------
+Jupiter live swap, on-chain DDollar SPL, platform Pump.fun deploy, TokenLaunch schema (may not be merged), Merkle claim program, iOS native app, full Phala CVM production, custodial copy trading, blunt bot sync from external lab
+
+GLOSSARY
+--------
+DDollar: in-platform credits (reputationPoints + PointLedger)
+Founder Credits: Cursor build session currency
+SimulatedRaise / Proof Raise: paper USD demand in Raise Room
+PARASITE / VERIFIED_BUILDER: builder tiers for AI promo access
+Founder OS: web command center; Founder Node: desktop vault
+Founder Brain: auto-routing Copilot; CEO inbox: founder queue buckets
+BYOK: bring your own API key; sealed credential: AES-GCM in Neon
+Signal cycle: bot INTENT → subscriber orders → EXIT → success fee
+Blunt sync: blocked overwrite of showcase bot from external lab bot
+
+AUDIT QUESTIONS FOR REVIEWER
+----------------------------
+After reading this bundle, assess:
+1. Data class enforcement on @Public routes — are secrets excluded from JSON?
+2. Admin route protection and AdminAction audit trail
+3. Atomic DDollar spend under concurrency
+4. AI rate limits fail-closed when DB down (RATE_LIMIT_FAIL_OPEN=false)
+5. Builder tier gates on promo paths
+6. Founder Node vault — API cannot decrypt relay blob
+7. Showcase bot admin-only control; public endpoints sanitized
+8. SimulatedRaise vs real securities — UX/copy clarity
+9. Blunt sync blocked between :7800 lab and :7002 showcase
+10. Greenfield (Jupiter, on-chain raise) vs shipped features clearly separated
+
+Report format: Severity | Location (file+route) | Issue | Recommendation | False positive note
+DO NOT request: .env values, DATABASE_URL, JWT_SECRET, admin tokens, vault contents, exchange keys.
+
+END PASTE BUNDLE
