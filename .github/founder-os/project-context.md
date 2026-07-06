@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(analyzer): restore loadLanes closing brace in research dashboard
+Fix analyzer auto-restart monitor self-kill on startup.
 
 ## Last Activity
 
