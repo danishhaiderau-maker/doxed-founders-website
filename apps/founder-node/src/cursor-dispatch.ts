@@ -329,8 +329,26 @@ async function ensureCursorWindowFocused(): Promise<{ ok: boolean; foregroundTit
 }
 
 /**
- * Minimize then restore Cursor so an already-open workspace reloads
- * composer.composerData from state.vscdb (reuse-window alone does not switch tabs).
+ * Bring Cursor to the foreground without minimizing — enough for most tab switches.
+ */
+async function activateCursorWindow(): Promise<{ ok: boolean; error?: string }> {
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows-only' };
+  const ps = [
+    WIN32_CURSOR_FOCUS_TYPE,
+    '$ok=[FnCursorFocus]::EnsureCursorForeground(6,300);',
+    'if (-not $ok -or -not [FnCursorFocus]::IsCursorForeground()) {',
+    '  Write-Output ("FAIL:" + [FnCursorFocus]::ForegroundProcessName() + "|" + [FnCursorFocus]::ForegroundTitle()); exit 1',
+    '}',
+    'Write-Output ("OK:" + [FnCursorFocus]::ForegroundTitle())',
+  ].join('\n');
+  const result = await readCursorFocusResult(ps);
+  return result.ok ? { ok: true } : { ok: false, error: result.error ?? 'Cursor activation failed' };
+}
+
+/**
+ * Last resort: minimize then restore so an already-open workspace reloads
+ * composer.composerData from state.vscdb. Causes visible flicker — only use when
+ * workspace-state verification still fails after reuse-window + activate.
  */
 async function nudgeCursorToReloadWorkspaceState(): Promise<{ ok: boolean; error?: string }> {
   if (process.platform !== 'win32') return { ok: false, error: 'Windows-only' };
@@ -363,8 +381,24 @@ function assertComposerFocusState(target: ComposerFocusTarget): void {
   }
 }
 
-/** Re-assert composer tab focus immediately before each clipboard paste. */
-async function refocusComposerTarget(target: ComposerFocusTarget): Promise<void> {
+type RefocusMode = 'full' | 'light';
+
+/**
+ * Re-assert composer tab focus before paste. Full mode reopens workspace + steals
+ * foreground once per dispatch; light mode only checks workspace state (SendKeys
+ * batches already verify Cursor.exe foreground).
+ */
+async function refocusComposerTarget(
+  target: ComposerFocusTarget,
+  mode: RefocusMode = 'full',
+): Promise<void> {
+  if (mode === 'light') {
+    if (verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+      return;
+    }
+    mode = 'full';
+  }
+
   if (!writeComposerFocusState(target)) {
     throw new Error(
       `Could not re-focus composer tab ${target.composerId.slice(0, 8)} in workspace state`,
@@ -487,10 +521,10 @@ async function sendPromptToFocusedComposer(
         : prompt),
   );
 
-  await refocusComposerTarget(focusTarget);
+  await refocusComposerTarget(focusTarget, 'full');
 
   for (const img of images.slice(0, 3)) {
-    await refocusComposerTarget(focusTarget);
+    await refocusComposerTarget(focusTarget, 'light');
     const ok = await pasteImageDataUrl(img.dataUrl);
     if (!ok) {
       throw new Error(`Failed to load image "${img.name}" onto clipboard for Cursor paste`);
@@ -509,7 +543,7 @@ async function sendPromptToFocusedComposer(
     await sleep(IMAGE_PASTE_SETTLE_MS);
   }
 
-  await refocusComposerTarget(focusTarget);
+  await refocusComposerTarget(focusTarget, 'light');
   try {
     clipboard.writeText(bodyText);
   } catch (err) {
@@ -577,23 +611,36 @@ async function focusCursorComposer(
   await sleep(CURSOR_FOCUS_WAIT_MS);
 
   focusedTab = writeComposerFocusState(target) && focusedTab;
-  const nudge = await nudgeCursorToReloadWorkspaceState();
-  if (nudge.ok) {
-    focusedTab = writeComposerFocusState(target) && focusedTab;
+
+  let reloadedUi = false;
+  if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+    writeComposerFocusState(target);
+    if (target.folderPath) {
+      await execAsync(`cursor --reuse-window "${target.folderPath}"`);
+      await sleep(COMPOSER_TAB_SETTLE_MS);
+    }
+    await activateCursorWindow();
+    if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+      const nudge = await nudgeCursorToReloadWorkspaceState();
+      reloadedUi = nudge.ok;
+      if (nudge.ok) {
+        focusedTab = writeComposerFocusState(target) && focusedTab;
+      }
+    }
   }
 
   const foreground = await ensureCursorWindowFocused();
   if (!foreground.ok) {
-    return { focusedTab: false, openedWorkspace, reloadedUi: nudge.ok };
+    return { focusedTab: false, openedWorkspace, reloadedUi };
   }
 
   try {
     assertComposerFocusState(target);
   } catch {
-    return { focusedTab: false, openedWorkspace, reloadedUi: nudge.ok };
+    return { focusedTab: false, openedWorkspace, reloadedUi };
   }
 
-  return { focusedTab: true, openedWorkspace, reloadedUi: nudge.ok };
+  return { focusedTab: true, openedWorkspace, reloadedUi };
 }
 
 /**
