@@ -6,6 +6,8 @@ import {
 import { parseAnthropicUsage, parseOpenAiStyleUsage } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
+import { getGlmApiBaseUrl } from '../founder-os/glm-config';
+import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import { AiRoutingService } from './ai-routing.service';
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -56,6 +58,7 @@ export class AiInvokerService {
     private readonly prisma: PrismaService,
     private readonly routing: AiRoutingService,
     private readonly adoption: PlatformAdoptionService,
+    private readonly brainProviders: FounderBrainProvidersService,
   ) {}
 
   async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -81,15 +84,20 @@ export class AiInvokerService {
         `AI provider "${provider.label}" is disabled. Enable it in /admin/control → AI Routing.`,
       );
     }
-    const apiKey = await this.routing.getDecryptedKey(providerKey);
+    const apiKey =
+      providerKey === 'glm' || providerKey === 'deepseek'
+        ? (await this.brainProviders.resolveApiKey(providerKey)) ??
+          (await this.routing.getDecryptedKey(providerKey))
+        : await this.routing.getDecryptedKey(providerKey);
     if (!apiKey) {
       throw new ServiceUnavailableException(
-        `No AI key set for ${provider.label} — add it in /admin/control → AI Routing.`,
+        `No AI key set for ${provider.label} — add it in /admin/control → AI Keys.`,
       );
     }
 
     const model = options.model ?? provider.defaultModel;
     const temperature = options.temperature ?? 0.4;
+    const baseUrl = providerKey === 'glm' ? getGlmApiBaseUrl() : provider.baseUrl;
 
     let result: InvokeResult;
     try {
@@ -97,7 +105,7 @@ export class AiInvokerService {
         result = await this.invokeAnthropic(provider.baseUrl, apiKey, model, options, temperature);
       } else {
         // openai_compat and gemini_native (when baseUrl points at the compat layer) share this path.
-        result = await this.invokeOpenAiCompat(provider.baseUrl, apiKey, model, options, temperature);
+        result = await this.invokeOpenAiCompat(baseUrl, apiKey, model, options, temperature);
       }
       result.provider = providerKey;
       result.model = model;

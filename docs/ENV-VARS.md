@@ -229,6 +229,62 @@ Model slug for reasoning / regulatory / architecture prompts.
 
 Model slug for code-draft and implementation prompts.
 
+## `GLM_API_KEY`
+
+**Default:** unset
+**Added:** 2026-07-06 (z.ai GLM Coding Plan)
+
+Platform GLM API key for Founder Brain coding tier. Preferred over encrypted
+promo / AI Routing keys when set on the Railway API service. Never commit to
+git — set in Railway only.
+
+## `GLM_API_BASE`
+
+**Default:** `https://api.z.ai/api/coding/paas/v4`
+**Added:** 2026-07-06
+
+OpenAI-compatible base URL for **GLM Coding Plan** subscription quota. Do not
+use the general endpoint (`/api/paas/v4`) — it is not interchangeable with
+the coding endpoint. See `docs/GLM-ZAI-PROVIDER-SETUP.md`.
+
+## `DEEPSEEK_API_KEY`
+
+**Default:** unset (falls back to Platform Brain / promo / AI Routing keys)
+**Added:** 2026-07-06 (Founder Brain fast tier)
+
+Optional env override for platform DeepSeek calls. Showcase bot may use a
+separate encrypted key via Admin → Agent Control.
+
+## `FOUNDER_BRAIN_TWO_MODEL_ROUTING`
+
+**Default:** unset / `false`
+**Added:** 2026-07-06
+
+When `true`, Founder Brain runtime routes fast/simple intents to the fast
+provider and coding/architecture intents to the coding provider. Admin can
+also toggle via `/admin/control` → AI Keys → Founder Brain Providers (stored
+in `PlatformSettings.founderBrainProvidersJson`).
+
+## `FOUNDER_BRAIN_FAST_PROVIDER`
+
+**Default:** `deepseek`
+**Added:** 2026-07-06
+
+Provider slug for fast tier when two-model routing is on (`deepseek` or `glm`).
+
+## `FOUNDER_BRAIN_CODING_PROVIDER`
+
+**Default:** `glm`
+**Added:** 2026-07-06
+
+Provider slug for coding / reasoning tier when two-model routing is on.
+
+### Where Founder Brain provider env vars are read
+
+- `apps/api/src/founder-ai-runtime/founder-brain-providers.service.ts`
+- `apps/api/src/founder-ai-runtime/model-router.service.ts`
+- `apps/api/src/founder-os/glm-config.ts` — `GLM_API_BASE`
+
 ## `REDIS_URL`
 
 **Default:** unset (in-memory cache only)
@@ -322,6 +378,7 @@ demo smoke results.
 ## See also
 
 - `docs/FOUNDER-AI-RUNTIME-SPEC.md` — runtime architecture + migration phases
+- `docs/GLM-ZAI-PROVIDER-SETUP.md` — z.ai GLM Coding Plan API setup
 - `docs/SECRETS_STORAGE.md` — where to put API keys / DB URLs
 - `.env.example` (root) — connection string placeholders
 - `.env.production.example`, `.env.neon.example` — production / Neon

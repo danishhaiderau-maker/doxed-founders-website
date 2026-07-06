@@ -1392,6 +1392,8 @@ model PlatformSettings {
   /** Copilot rate limits (platform-enforced guardrails). */
   rateLimitDaily               Int      @default(50)
   rateLimitHourly              Int      @default(10)
+  /** Admin Founder Brain two-model routing — non-secret JSON (keys stay in env / encrypted columns). */
+  founderBrainProvidersJson    Json?
   updatedByUserId          String?
   updatedAt                DateTime @updatedAt
 }

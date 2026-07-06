@@ -40,9 +40,8 @@ const PROMO_PROVIDER_LABELS: Record<PromoCredentialProvider, string> = {
   deepseek: 'DeepSeek',
 };
 
-/** GLM (ZhipuAI) OpenAI-compatible endpoint + default model for promo Brain calls. */
-export const GLM_PROMO_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
-export const GLM_PROMO_DEFAULT_MODEL = 'glm-5.2';
+/** GLM (ZhipuAI / z.ai) OpenAI-compatible endpoint + default model for promo Brain calls. */
+export { getGlmApiBaseUrl, getGlmDefaultModel, GLM_PROMO_BASE_URL, GLM_PROMO_DEFAULT_MODEL } from './glm-config';
 
 @Injectable()
 export class FounderPromoService {
@@ -420,6 +419,12 @@ export class FounderPromoService {
   async getDecryptedPlatformGlmKey(): Promise<string | null> {
     const map = await this.loadDecryptedCredentials();
     return map.glm ?? null;
+  }
+
+  /** Decrypted platform DeepSeek promo key (distinct from platform brain fallback). */
+  async getDecryptedPlatformPromoDeepseekKey(): Promise<string | null> {
+    const map = await this.loadDecryptedCredentials();
+    return map.deepseek ?? null;
   }
 
   /**

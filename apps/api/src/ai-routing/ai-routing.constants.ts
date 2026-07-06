@@ -58,8 +58,8 @@ export const PROVIDER_SEEDS: ProviderSeed[] = [
   },
   {
     key: 'glm',
-    label: 'GLM 5.2 (ZhipuAI)',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    label: 'GLM 5.2 (z.ai Coding Plan)',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     defaultModel: 'glm-5.2',
     adapter: 'openai_compat',
   },
