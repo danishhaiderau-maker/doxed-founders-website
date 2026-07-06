@@ -55,6 +55,7 @@ import { RegulatoryModule } from './regulatory/regulatory.module';
 import { LaunchQualificationModule } from './launch-qualification/launch-qualification.module';
 import { TrustModule } from './trust/trust.module';
 import { ObservatoryModule } from './observatory/observatory.module';
+import { RaiseRoomModule } from './raise-room/raise-room.module';
 
 @Module({
   imports: [
@@ -105,8 +106,8 @@ import { ObservatoryModule } from './observatory/observatory.module';
     IdeBridgeModule,
     WallModule,
     ShareModule,
-    AiRoutingModule,
     FounderAiRuntimeModule,
+    AiRoutingModule,
     RateLimitModule,
     BuilderScoreModule,
     DdollarModule,
@@ -115,6 +116,7 @@ import { ObservatoryModule } from './observatory/observatory.module';
     LaunchQualificationModule,
     TrustModule,
     ObservatoryModule,
+    RaiseRoomModule,
   ],
   providers: [
     {
