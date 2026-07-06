@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(demo): admin demo mode seed, smoke checks, and verification docs
 
 ## Last Activity
 
