@@ -5,6 +5,9 @@ import {
   FounderEventType,
   FounderJourneyStage,
   FounderPresenceLevel,
+  LeaderboardPeriod,
+  NotificationType,
+  PaperTradeSide,
   ProjectLifecycleStage,
   SimulatedRaiseStatus,
   UserProgressTier,
@@ -13,6 +16,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { FounderDenService } from '../founder-den/founder-den.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
+import { DdollarRuntimeService } from '../ddollar/ddollar-runtime.service';
+import { isDdollarRuntimeEnabled } from '../ddollar/ddollar.constants';
 import {
   DEMO_HANDLE_PREFIX,
   DEMO_SCALE_PRESETS,
@@ -23,7 +28,29 @@ import {
   demoUserWhere,
   isDemoModeEnabled,
   parseDemoSeedScale,
+  type DemoSeedScale,
 } from './demo.constants';
+
+function projectBlueprintsForScale(count: number) {
+  const categories = ['defi', 'infrastructure', 'gaming', 'payments', 'identity'] as const;
+  const stages = Object.values(ProjectLifecycleStage);
+  const base = DEMO_PROJECT_BLUEPRINTS.slice(0, Math.min(count, DEMO_PROJECT_BLUEPRINTS.length));
+  if (base.length >= count) return base;
+  const extra = [];
+  for (let i = base.length; i < count; i += 1) {
+    const cat = categories[i % categories.length]!;
+    extra.push({
+      slugSuffix: `synthetic-${String(i + 1).padStart(3, '0')}`,
+      name: `Demo Synthetic ${i + 1}`,
+      ticker: `DS${String(i + 1).padStart(2, '0')}`,
+      categorySlug: cat,
+      stage: stages[i % stages.length]!,
+      withRaise: i % 3 !== 0,
+      raiseGoalUsd: 15000 + (i * 997) % 120000,
+    });
+  }
+  return [...base, ...extra];
+}
 
 type SmokeCheck = {
   name: string;
@@ -74,6 +101,7 @@ export class DemoSeedService {
     private readonly projects: ProjectsService,
     private readonly founderDen: FounderDenService,
     private readonly founderOs: FounderOsService,
+    private readonly ddollarRuntime: DdollarRuntimeService,
   ) {}
 
   async getStatus() {
@@ -136,7 +164,7 @@ export class DemoSeedService {
     });
     const categoryBySlug = Object.fromEntries(categories.map((c) => [c.slug, c.id]));
 
-    const projectBlueprints = DEMO_PROJECT_BLUEPRINTS.slice(0, preset.projects);
+    const projectBlueprints = projectBlueprintsForScale(preset.projects);
     const created = {
       usersCreated: 0,
       usersUpdated: 0,
@@ -147,9 +175,18 @@ export class DemoSeedService {
       trustReportsCreated: 0,
       eventsCreated: 0,
       ledgerEntriesCreated: 0,
+      marketplacePurchasesCreated: 0,
+      commentsCreated: 0,
+      aiUsageRowsCreated: 0,
+      notificationsCreated: 0,
+      leaderboardEntriesCreated: 0,
+      paperTradesCreated: 0,
+      graduationEventsCreated: 0,
     };
 
     const demoUsers: { id: string; role: 'founder' | 'builder' | 'scout'; index: number }[] = [];
+
+    const ledgerDetailLimit = scale === 'xlarge' ? 150 : preset.users;
 
     for (let i = 1; i <= preset.users; i += 1) {
       const role: 'founder' | 'builder' | 'scout' =
@@ -176,18 +213,20 @@ export class DemoSeedService {
           platformHandle: handle,
           role: 'USER',
           reputationPoints: spendable,
+          lifetimeContributionEarned: lifetimeEarned,
           contributorLevel: Math.min(10, Math.floor(spendable / 200) + 1),
           progressTier,
           builderTier: role === 'founder' ? BuilderTier.VERIFIED_BUILDER : BuilderTier.PARASITE,
           xVerified: role === 'founder',
-          notificationPrefs: { isDemo: true, lifetimeContributionEarned: lifetimeEarned },
+          notificationPrefs: { isDemo: true },
         },
         update: {
           name: `demo_${role}_${String(i).padStart(3, '0')}`,
           platformHandle: handle,
           reputationPoints: spendable,
+          lifetimeContributionEarned: lifetimeEarned,
           progressTier,
-          notificationPrefs: { isDemo: true, lifetimeContributionEarned: lifetimeEarned },
+          notificationPrefs: { isDemo: true },
         },
       });
 
@@ -200,7 +239,7 @@ export class DemoSeedService {
       demoUsers.push({ id: user.id, role, index: i });
 
       const ledgerCount = await this.prisma.pointLedger.count({ where: { userId: user.id } });
-      if (ledgerCount === 0) {
+      if (ledgerCount === 0 && i <= ledgerDetailLimit) {
         const chunks = [
           { amount: Math.floor(lifetimeEarned * 0.4), actionKey: 'SCOUT_EARLY', label: 'Demo — early scout conviction' },
           { amount: Math.floor(lifetimeEarned * 0.35), actionKey: 'COMMUNITY_HELPFUL', label: 'Demo — helpful validation' },
@@ -231,9 +270,12 @@ export class DemoSeedService {
           created.ledgerEntriesCreated += 1;
         }
       }
+      if (scale === 'xlarge' && i % 250 === 0) {
+        this.logger.log(`Demo user seed progress: ${i}/${preset.users}`);
+      }
     }
 
-    const founderUsers = demoUsers.filter((u) => u.role === 'founder');
+    const founderUsers = demoUsers.filter((u) => u.role === 'founder').slice(0, preset.founders);
     const scoutUsers = demoUsers.filter((u) => u.role !== 'founder');
 
     for (let p = 0; p < projectBlueprints.length; p += 1) {
@@ -438,6 +480,208 @@ export class DemoSeedService {
     };
   }
 
+  private async seedMarketplacePurchases(
+    users: { id: string; index: number }[],
+  ): Promise<number> {
+    let created = 0;
+    for (let i = 0; i < Math.min(6, users.length); i += 1) {
+      const user = users[i]!;
+      const listingKey = `demo-agent-hire-${String(i + 1).padStart(2, '0')}`;
+      const existing = await this.prisma.marketplaceLedgerEntry.count({
+        where: { userId: user.id, listingKey },
+      });
+      if (existing > 0) continue;
+
+      const amount = 40 + (i * 17) % 120;
+      if (isDdollarRuntimeEnabled()) {
+        await this.ddollarRuntime.purchaseMarketplace(
+          user.id,
+          amount,
+          listingKey,
+          `[Demo] Agent marketplace hire #${i + 1}`,
+        );
+      } else {
+        await this.prisma.marketplaceLedgerEntry.create({
+          data: {
+            userId: user.id,
+            listingKey,
+            amountDdollar: -amount,
+            label: `[Demo] Agent marketplace hire #${i + 1}`,
+            metadata: { demo: true },
+          },
+        });
+        await this.prisma.founderTreasuryLedgerEntry.create({
+          data: {
+            userId: user.id,
+            amountDdollar: Math.max(1, Math.floor(amount * 0.1)),
+            actionKey: 'TREASURY_FEE',
+            label: `[Demo] Treasury fee — hire #${i + 1}`,
+            metadata: { listingKey, grossSpend: amount },
+          },
+        });
+      }
+      created += 1;
+    }
+    return created;
+  }
+
+  private async seedExtendedEcosystem(
+    scale: DemoSeedScale,
+    demoUsers: { id: string; role: string; index: number }[],
+  ) {
+    const counts = {
+      commentsCreated: 0,
+      aiUsageRowsCreated: 0,
+      notificationsCreated: 0,
+      leaderboardEntriesCreated: 0,
+      paperTradesCreated: 0,
+      graduationEventsCreated: 0,
+    };
+    if (scale === 'small') return counts;
+
+    const projects = await this.prisma.project.findMany({
+      where: demoProjectWhere(),
+      select: { id: true, slug: true, founderId: true },
+      take: scale === 'xlarge' ? 150 : 20,
+    });
+    if (projects.length === 0) return counts;
+
+    const targetComments = scale === 'xlarge' ? 5000 : scale === 'large' ? 800 : 120;
+    const targetAiRows = scale === 'xlarge' ? 10000 : scale === 'large' ? 1500 : 200;
+    const batchSize = scale === 'xlarge' ? 500 : 100;
+
+    for (let b = 0; b < targetAiRows; b += batchSize) {
+      const rows = [];
+      for (let j = 0; j < batchSize && b + j < targetAiRows; j += 1) {
+        const user = demoUsers[(b + j) % demoUsers.length];
+        const project = projects[(b + j) % projects.length];
+        if (!user || !project) continue;
+        rows.push({
+          userId: user.id,
+          projectId: project.id,
+          provider: ['deepseek', 'gemini', 'cursor'][j % 3]!,
+          source: ['copilot', 'wall', 'founder-os'][j % 3]!,
+          billingSource: 'platform_promo',
+          promptTokens: 120 + (j % 400),
+          completionTokens: 80 + (j % 300),
+          createdAt: new Date(Date.now() - (b + j) * 3600000),
+        });
+      }
+      if (rows.length > 0) {
+        await this.prisma.aiTokenUsageLog.createMany({ data: rows });
+        counts.aiUsageRowsCreated += rows.length;
+      }
+    }
+
+    for (let n = 0; n < (scale === 'xlarge' ? 800 : 40); n += 1) {
+      const user = demoUsers[n % demoUsers.length];
+      if (!user) continue;
+      const dedupe = `demo-notif-${user.id}-${n % 5}`;
+      const existing = await this.prisma.notification.findFirst({
+        where: { userId: user.id, title: dedupe },
+      });
+      if (existing) continue;
+      await this.prisma.notification.create({
+        data: {
+          userId: user.id,
+          type: NotificationType.POINTS_EARNED,
+          title: dedupe,
+          body: '[Demo] Synthetic notification for smoke checks.',
+          link: '/ddollar',
+        },
+      });
+      counts.notificationsCreated += 1;
+    }
+
+    for (let l = 0; l < Math.min(demoUsers.length, scale === 'xlarge' ? 500 : 35); l += 1) {
+      const user = demoUsers[l]!;
+      for (const period of [LeaderboardPeriod.WEEKLY, LeaderboardPeriod.ALL_TIME]) {
+        await this.prisma.leaderboardEntry.upsert({
+          where: { userId_period: { userId: user.id, period } },
+          create: {
+            userId: user.id,
+            period,
+            roi: (l % 50) / 10,
+            pnl: 100 + l * 13,
+            rank: l + 1,
+          },
+          update: { rank: l + 1, pnl: 100 + l * 13 },
+        });
+        counts.leaderboardEntriesCreated += 1;
+      }
+    }
+
+    const graduated = projects.filter((_, idx) => idx % 12 === 0).slice(0, scale === 'xlarge' ? 12 : 4);
+    for (const project of graduated) {
+      await this.prisma.project.update({
+        where: { id: project.id },
+        data: { lifecycleStage: ProjectLifecycleStage.LIVE_TRADING },
+      });
+      if (project.founderId) {
+        const dedupeKey = `demo-graduation-${project.id}`;
+        const existing = await this.prisma.founderEvent.findUnique({ where: { dedupeKey } });
+        if (!existing) {
+          await this.prisma.founderEvent.create({
+            data: {
+              founderId: project.founderId,
+              projectId: project.id,
+              type: FounderEventType.COMMUNITY_ACTIVITY,
+              source: 'demo-seed',
+              title: `[Demo] Graduation keynote — ${project.slug}`,
+              payload: { demo: true, graduated: true },
+              dedupeKey,
+            },
+          });
+          counts.graduationEventsCreated += 1;
+        }
+      }
+    }
+
+    let commentsMade = 0;
+    const commentCap = scale === 'xlarge' ? targetComments : Math.min(targetComments, 120);
+    while (commentsMade < commentCap) {
+      const chunk = Math.min(scale === 'xlarge' ? 50 : commentCap, commentCap - commentsMade);
+      for (let c = 0; c < chunk; c += 1) {
+        const user = demoUsers[(commentsMade + c) % demoUsers.length];
+        const project = projects[(commentsMade + c) % projects.length];
+        if (!user || !project) continue;
+
+        const trade = await this.prisma.paperTrade.create({
+          data: {
+            userId: user.id,
+            projectId: project.id,
+            side: PaperTradeSide.BUY,
+            quantity: 1,
+            priceUsd: 0.05,
+            totalUsd: 50,
+          },
+        });
+        counts.paperTradesCreated += 1;
+
+        const post = await this.prisma.feedPost.create({
+          data: {
+            paperTradeId: trade.id,
+            userId: user.id,
+            projectId: project.id,
+            initialComment: '[Demo] Paper trade feed seed',
+          },
+        });
+
+        await this.prisma.feedComment.create({
+          data: {
+            feedPostId: post.id,
+            userId: user.id,
+            body: `[Demo] Feed comment #${commentsMade + c + 1}`,
+          },
+        });
+        counts.commentsCreated += 1;
+      }
+      commentsMade += chunk;
+    }
+
+    return counts;
+  }
+
   async resetDemoData() {
     const demoUserIds = (
       await this.prisma.user.findMany({ where: demoUserWhere(), select: { id: true } })
@@ -561,17 +805,16 @@ export class DemoSeedService {
           select: {
             email: true,
             reputationPoints: true,
-            notificationPrefs: true,
+            lifetimeContributionEarned: true,
             pointLedger: { where: { amount: { gt: 0 } }, select: { amount: true } },
           },
         });
         if (!user) return { passed: false, detail: 'No demo user found' };
         const lifetimeFromLedger = user.pointLedger.reduce((s, row) => s + row.amount, 0);
-        const prefs = user.notificationPrefs as { lifetimeContributionEarned?: number } | null;
-        const lifetime = prefs?.lifetimeContributionEarned ?? lifetimeFromLedger;
+        const lifetime = user.lifetimeContributionEarned || lifetimeFromLedger;
         return {
           passed: user.reputationPoints >= 0 && lifetime >= user.reputationPoints,
-          detail: `${user.email}: spendable=${user.reputationPoints} DDollar, lifetime≈${lifetime}`,
+          detail: `${user.email}: spendable=${user.reputationPoints} DDollar, lifetime=${lifetime}`,
         };
       }),
     );
@@ -640,10 +883,181 @@ export class DemoSeedService {
       }),
     );
 
+    checks.push(
+      await this.runCheck('regulatory_gate_enforced', async () => {
+        if (!isPhase15TrustLayerEnabled()) {
+          return { passed: true, detail: 'PHASE_15_TRUST_LAYER_ENABLED=false (skipped)' };
+        }
+        const classes = await this.prisma.project.findMany({
+          where: demoProjectWhere(),
+          select: { regulatoryClass: true },
+          distinct: ['regulatoryClass'],
+        );
+        return {
+          passed: classes.length >= 3,
+          detail: `${classes.length} regulatory classes on demo projects`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('launch_qualification_api', async () => {
+        if (!isPhase15TrustLayerEnabled()) {
+          return { passed: true, detail: 'PHASE_15_TRUST_LAYER_ENABLED=false (skipped)' };
+        }
+        const lq = await this.launchQualification.getBySlug(sampleSlug);
+        return {
+          passed: typeof lq.score === 'number' && lq.score >= 0,
+          detail: `${sampleSlug} LQ=${lq.score} tier=${lq.tier}`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('compliance_timeline_api', async () => {
+        if (!isPhase15TrustLayerEnabled()) {
+          return { passed: true, detail: 'PHASE_15_TRUST_LAYER_ENABLED=false (skipped)' };
+        }
+        const timeline = await this.complianceTimeline.getTimeline(sampleSlug);
+        return {
+          passed: Array.isArray(timeline.steps) && timeline.steps.length >= 5,
+          detail: `${timeline.steps.length} timeline steps for ${sampleSlug}`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('progressive_unlock_stages', async () => {
+        if (!isPhase15TrustLayerEnabled()) {
+          return { passed: true, detail: 'PHASE_15_TRUST_LAYER_ENABLED=false (skipped)' };
+        }
+        const stages = await this.prisma.project.findMany({
+          where: demoProjectWhere(),
+          select: { launchStage: true },
+          distinct: ['launchStage'],
+        });
+        return {
+          passed: stages.length >= 4,
+          detail: `${stages.length} distinct launch stages seeded`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('ddollar_spend_lifetime_unchanged', async () => {
+        const user = await this.prisma.user.findFirst({
+          where: demoUserWhere(),
+          select: { id: true, reputationPoints: true, lifetimeContributionEarned: true },
+        });
+        if (!user) return { passed: false, detail: 'No demo user' };
+        const beforeLifetime = user.lifetimeContributionEarned;
+        const beforeSpendable = user.reputationPoints;
+        if (beforeSpendable < 5) {
+          return { passed: true, detail: 'Skipped — spendable balance too low for probe spend' };
+        }
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { reputationPoints: { decrement: 1 } },
+        });
+        const after = await this.prisma.user.findUnique({
+          where: { id: user.id },
+          select: { reputationPoints: true, lifetimeContributionEarned: true },
+        });
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { reputationPoints: beforeSpendable },
+        });
+        const passed =
+          !!after &&
+          after.lifetimeContributionEarned === beforeLifetime &&
+          after.reputationPoints === beforeSpendable - 1;
+        return {
+          passed,
+          detail: passed
+            ? `Spend probe OK — lifetime=${beforeLifetime} unchanged`
+            : `Invariant failed — lifetime before=${beforeLifetime} after=${after?.lifetimeContributionEarned}`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('marketplace_ledger_balanced', async () => {
+        const [purchases, treasury] = await Promise.all([
+          this.prisma.marketplaceLedgerEntry.count({ where: { user: demoUserWhere() } }),
+          this.prisma.founderTreasuryLedgerEntry.count({
+            where: { user: demoUserWhere() },
+          }),
+        ]);
+        return {
+          passed: purchases >= 3 && treasury >= 3,
+          detail: `${purchases} marketplace rows, ${treasury} treasury audit rows for demo users`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('treasury_audit_trail', async () => {
+        const audit = await this.ddollarRuntime.getTreasuryAudit(5);
+        return {
+          passed: audit.entryCount >= 3,
+          detail: `${audit.entryCount} treasury entries (${audit.totalInflowDdollar} DDollar inflow)`,
+        };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('ai_usage_history_seeded', async () => {
+        const count = await this.prisma.aiTokenUsageLog.count({
+          where: { user: demoUserWhere() },
+        });
+        return { passed: count >= 50, detail: `${count} AiTokenUsageLog rows for demo users` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('leaderboard_entries_populated', async () => {
+        const count = await this.prisma.leaderboardEntry.count({ where: { user: demoUserWhere() } });
+        return { passed: count >= 10, detail: `${count} leaderboard entries for demo users` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('demo_notifications_seeded', async () => {
+        const count = await this.prisma.notification.count({ where: { user: demoUserWhere() } });
+        return { passed: count >= 5, detail: `${count} in-app notifications for demo users` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('graduation_events_seeded', async () => {
+        const count = await this.prisma.founderEvent.count({
+          where: {
+            project: demoProjectWhere(),
+            title: { contains: 'Graduation keynote' },
+          },
+        });
+        return { passed: count >= 3, detail: `${count} graduation keynote events on demo projects` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('feed_comments_seeded', async () => {
+        const count = await this.prisma.feedComment.count({ where: { user: demoUserWhere() } });
+        return { passed: count >= 20, detail: `${count} feed comments from demo users` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('paper_trades_seeded', async () => {
+        const count = await this.prisma.paperTrade.count({ where: { user: demoUserWhere() } });
+        return { passed: count >= 10, detail: `${count} paper trades for demo users` };
+      }),
+    );
+
     const passed = checks.filter((c) => c.passed).length;
     const failed = checks.filter((c) => !c.passed).length;
 
-    return {
+    const report = {
       passed,
       failed,
       total: checks.length,
@@ -651,5 +1065,7 @@ export class DemoSeedService {
       ranAt: new Date().toISOString(),
       checks,
     };
+
+    return report;
   }
 }

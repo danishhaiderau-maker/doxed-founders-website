@@ -10,7 +10,7 @@ the platform end-to-end without manually fixing bugs one at a time. API-level
 
 ```bash
 DEMO_MODE_ENABLED=true
-DEMO_SEED_SCALE=medium   # optional: small | medium | large
+DEMO_SEED_SCALE=medium   # optional: small | medium | large | xlarge
 ```
 
 Redeploy the API service after setting vars. Demo seed/reset/smoke **fail closed**
@@ -26,7 +26,7 @@ Requires **ADMIN** role (same as `/admin/control`).
 ### 3. Seed → Smoke → Browse
 
 1. Click **Generate Demo Ecosystem**
-2. Click **Run Smoke Checks** (target: 12/12 passed)
+2. Click **Run Smoke Checks** (target: 25+ passed on medium scale)
 3. Visit sample links: `/projects/demo-payflow`, `/raise-room`, Founder OS dashboards
 
 ### 4. Reset when done
@@ -66,22 +66,36 @@ All routes require `Authorization: Bearer <admin JWT>` and `DEMO_MODE_ENABLED=tr
 
 Demo names are prefixed `[Demo]` / `demo_` — clearly fake.
 
-## Smoke checks (MVP)
+| `xlarge` | 2,500 | 150 | 500 |
 
-Golden journeys verified at API layer:
+Also seeds marketplace purchases, AI usage logs, leaderboards, notifications,
+feed comments, paper trades, and graduation events (medium+ scales).
+
+## Smoke checks
+
+Golden journeys verified at API layer (25+ checks on medium scale):
 
 1. Demo mode enabled
 2. Demo users exist (`@doxxed.demo`)
 3. `GET /projects` includes demo slugs
 4. Raise Room demand heatmap has demo rows
 5. Project detail loads for a demo slug
-6. DDollar spendable balance readable for demo user
+6. DDollar spendable + lifetime on real column
 7. Point ledger entries exist
 8. Trust validation signals on demo projects
 9. Active simulated raises
 10. Founder OS integrations endpoint healthy
 11. Founder events for activity feed
 12. Lifecycle stage coverage across demo projects
+13. `ddollar_spend_lifetime_unchanged`
+14. `marketplace_ledger_balanced`
+15. `treasury_audit_trail`
+16. AI usage history seeded
+17. Leaderboard entries populated
+18. Demo notifications seeded
+19. Graduation events seeded
+20. Feed comments + paper trades seeded
+21. `golden_ddollar_business_journey` (Slice 7)
 
 Example response:
 
