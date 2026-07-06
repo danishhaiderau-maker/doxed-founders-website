@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): wire showDownloads prop on Founder Node hub panel
+docs: add sanitized platform architecture for external audit
 
 ## Last Activity
 
