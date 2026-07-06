@@ -5,7 +5,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
+  findComposerWithRecentUserText,
   focusComposerInWorkspaceState,
+  getComposerWorkspaceFocusState,
   resolveCursorComposerContext,
   verifyComposerFocusedInWorkspaceState,
 } from './cursor-discovery';
@@ -40,6 +42,8 @@ const CURSOR_FOREGROUND_STRICT_VERIFY_ROUNDS = 3;
 const CURSOR_FOREGROUND_STRICT_VERIFY_DELAY_MS = 500;
 const COMPOSER_REFOCUS_SETTLE_MS = 700;
 const IMAGE_PASTE_SETTLE_MS = 900;
+const POST_SUBMIT_VERIFY_DELAY_MS = 1200;
+const COMPOSER_UI_RELOAD_ATTEMPTS = 2;
 
 type ComposerFocusTarget = {
   composerId: string;
@@ -487,6 +491,7 @@ type SendPromptResult = {
   pasted: boolean;
   submitted: boolean;
   clipboardReady: boolean;
+  imagesPasted: number;
   warning?: string;
 };
 
@@ -523,6 +528,7 @@ async function sendPromptToFocusedComposer(
 
   await refocusComposerTarget(focusTarget, 'full');
 
+  let imagesPasted = 0;
   for (const img of images.slice(0, 3)) {
     await refocusComposerTarget(focusTarget, 'light');
     const ok = await pasteImageDataUrl(img.dataUrl);
@@ -537,9 +543,11 @@ async function sendPromptToFocusedComposer(
         pasted: false,
         submitted: false,
         clipboardReady: true,
+        imagesPasted,
         warning: `SendKeys image paste failed: ${imgResult.error ?? 'unknown error'}`,
       };
     }
+    imagesPasted += 1;
     await sleep(IMAGE_PASTE_SETTLE_MS);
   }
 
@@ -560,6 +568,7 @@ async function sendPromptToFocusedComposer(
       pasted: false,
       submitted: false,
       clipboardReady: true,
+      imagesPasted,
       warning: `SendKeys paste failed: ${pasteResult.error ?? 'unknown error'}`,
     };
   }
@@ -574,11 +583,42 @@ async function sendPromptToFocusedComposer(
       pasted: true,
       submitted: false,
       clipboardReady: true,
+      imagesPasted,
       warning: `SendKeys submit refused — Cursor lost focus before Enter (${submitResult.error ?? 'unknown'})`,
     };
   }
 
-  return { pasted: true, submitted: true, clipboardReady: true };
+  return { pasted: true, submitted: true, clipboardReady: true, imagesPasted };
+}
+
+async function reloadComposerUiForTarget(
+  target: ComposerFocusTarget,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < COMPOSER_UI_RELOAD_ATTEMPTS; attempt += 1) {
+    writeComposerFocusState(target);
+    const nudge = await nudgeCursorToReloadWorkspaceState();
+    if (!nudge.ok) {
+      console.warn('Composer UI reload nudge failed:', nudge.error);
+      continue;
+    }
+    await sleep(COMPOSER_TAB_SETTLE_MS);
+    writeComposerFocusState(target);
+    await sleep(COMPOSER_REFOCUS_SETTLE_MS);
+    if (verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+      return true;
+    }
+  }
+  return verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId);
+}
+
+function composerFocusNeedsUiReload(
+  workspaceStorageId: string,
+  composerId: string,
+): boolean {
+  const focus = getComposerWorkspaceFocusState(workspaceStorageId);
+  if (!focus) return true;
+  if (focus.lastFocused !== composerId || focus.selectedPrimary !== composerId) return true;
+  return focus.selectedCount > 1;
 }
 
 /**
@@ -613,7 +653,10 @@ async function focusCursorComposer(
   focusedTab = writeComposerFocusState(target) && focusedTab;
 
   let reloadedUi = false;
-  if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
+  if (composerFocusNeedsUiReload(target.workspaceStorageId, target.composerId)) {
+    reloadedUi = await reloadComposerUiForTarget(target);
+    focusedTab = reloadedUi && focusedTab;
+  } else if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
     writeComposerFocusState(target);
     if (target.folderPath) {
       await execAsync(`cursor --reuse-window "${target.folderPath}"`);
@@ -621,12 +664,12 @@ async function focusCursorComposer(
     }
     await activateCursorWindow();
     if (!verifyComposerFocusedInWorkspaceState(target.workspaceStorageId, target.composerId)) {
-      const nudge = await nudgeCursorToReloadWorkspaceState();
-      reloadedUi = nudge.ok;
-      if (nudge.ok) {
-        focusedTab = writeComposerFocusState(target) && focusedTab;
-      }
+      reloadedUi = await reloadComposerUiForTarget(target);
+      focusedTab = reloadedUi && focusedTab;
     }
+  } else if (openedWorkspace) {
+    reloadedUi = await reloadComposerUiForTarget(target);
+    focusedTab = reloadedUi && focusedTab;
   }
 
   const foreground = await ensureCursorWindowFocused();
@@ -708,12 +751,37 @@ export async function executeCursorDispatch(
 
     const sendResult = await sendPromptToFocusedComposer(dispatch.prompt, focusTarget);
 
+    const { text: dispatchText, images: dispatchImages } = parseDispatchPrompt(dispatch.prompt);
+    if (dispatchImages.length > 0 && sendResult.imagesPasted < dispatchImages.length) {
+      throw new Error(
+        `Only ${sendResult.imagesPasted}/${dispatchImages.length} image(s) pasted into Cursor — refusing to mark dispatch complete`,
+      );
+    }
+
+    await sleep(POST_SUBMIT_VERIFY_DELAY_MS);
+    const verifyNeedle = (dispatchText || dispatch.prompt).trim().slice(0, 80);
+    const landedComposerId = verifyNeedle
+      ? findComposerWithRecentUserText(focusTarget.composerId, verifyNeedle)
+      : null;
+    if (landedComposerId && landedComposerId !== focusTarget.composerId) {
+      const landedCtx = resolveCursorComposerContext(landedComposerId);
+      throw new Error(
+        `Paste landed in wrong chat "${landedCtx?.title ?? landedComposerId.slice(0, 8)}" — target was "${ctx.title ?? composerId.slice(0, 8)}"`,
+      );
+    }
+    if (verifyNeedle && !landedComposerId) {
+      throw new Error(
+        `Could not verify prompt landed in target composer "${ctx.title ?? composerId.slice(0, 8)}" — refusing silent wrong-tab paste`,
+      );
+    }
+
     const bits = [
       `composer=${composerId.slice(0, 8)}`,
       'tab-focused',
       openedWorkspace ? 'workspace-opened' : 'workspace-focus-best-effort',
       reloadedUi ? 'ui-reloaded' : 'ui-reload-skipped',
-    ];
+      dispatchImages.length > 0 ? `images=${sendResult.imagesPasted}` : undefined,
+    ].filter(Boolean);
 
     if (!sendResult.submitted) {
       const fallback = sendResult.clipboardReady
