@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AiInvokerService } from '../ai-routing/ai-invoker.service';
+import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
+import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 import { RateLimiterService } from '../events/rate-limiter.service';
 
 /**
@@ -40,6 +42,7 @@ export class ShareService {
     private readonly prisma: PrismaService,
     private readonly aiInvoker: AiInvokerService,
     private readonly rateLimiter: RateLimiterService,
+    private readonly founderAiRuntime: FounderAiRuntimeService,
   ) {}
 
   /**
@@ -82,22 +85,48 @@ export class ShareService {
 
     const projectId = await this.resolveProjectId(input.slug);
 
+    const runtimeRequest: AiRuntimeRequest = {
+      userId,
+      system: PARAPHRASE_SYSTEM_PROMPT,
+      userPrompt,
+      section: 'share_paraphrase',
+      projectId,
+    };
+
     let text: string;
     try {
-      const result = await this.aiInvoker.invoke({
-        section: 'share_paraphrase',
-        messages: [
-          { role: 'system', content: PARAPHRASE_SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.4,
-        userId,
-        projectId,
-        // Preserve the conventional billing source for share paraphrase so the
-        // adoption chart's existing bucketing continues to work.
-        billingSource: 'platform_brain',
-      });
-      text = result.content;
+      const runtimeResult = await this.founderAiRuntime.complete(
+        runtimeRequest,
+        async (_route, ctx) => {
+          const result = await this.aiInvoker.invoke({
+            section: 'share_paraphrase',
+            messages: [
+              { role: 'system', content: ctx.request.system },
+              { role: 'user', content: ctx.request.userPrompt },
+            ],
+            temperature: 0.4,
+            maxTokens: ctx.maxOutputTokens,
+            userId,
+            projectId,
+            billingSource: 'platform_brain',
+          });
+          return {
+            ok: true,
+            text: result.content,
+            provider: result.provider,
+            model: result.model,
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens,
+          };
+        },
+      );
+
+      if (!runtimeResult.ok || !runtimeResult.text?.trim()) {
+        throw new ServiceUnavailableException(
+          'AI paraphrase call failed. Try again in a moment.',
+        );
+      }
+      text = runtimeResult.text;
     } catch (err) {
       // Re-raise ServiceUnavailableException (carries the admin-friendly message
       // from the invoker); wrap anything unexpected.

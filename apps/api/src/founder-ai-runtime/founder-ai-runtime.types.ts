@@ -29,6 +29,13 @@ export type AiRuntimeRequest = {
   skipCache?: boolean;
 };
 
+/** Cache layer id — aligns with FOUNDER-BRAIN-AI-OS-SPEC § multi-level cache. */
+export type AiRuntimeCacheLevel =
+  | 'L0_tool'
+  | 'L2_prompt_hash'
+  | 'L5_semantic'
+  | 'miss';
+
 export type AiRuntimeResponse = {
   ok: boolean;
   text?: string;
@@ -37,6 +44,9 @@ export type AiRuntimeResponse = {
   intent?: AiRuntimeIntent;
   cacheHit?: boolean;
   cacheKey?: string;
+  cacheLevel?: AiRuntimeCacheLevel;
+  localToolUsed?: boolean;
+  confidenceScore?: number;
   promptTokens?: number;
   completionTokens?: number;
 };

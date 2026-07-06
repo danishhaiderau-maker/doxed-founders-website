@@ -2,6 +2,9 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { AiInvokerService } from '../ai-routing/ai-invoker.service';
+import { ContextBuilderService } from '../founder-ai-runtime/context-builder.service';
+import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
+import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 
 /** DDollar cost to upgrade (pin/highlight/promote) a subtopic on a wall. Flat for all three kinds. */
 export const WALL_PIN_COST_DDOLLAR = 10;
@@ -88,6 +91,8 @@ export class WallService {
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly aiInvoker: AiInvokerService,
+    private readonly founderAiRuntime: FounderAiRuntimeService,
+    private readonly contextBuilder: ContextBuilderService,
   ) {}
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -764,7 +769,10 @@ export class WallService {
       };
     }
 
-    const transcript = messages
+    const maxLines = this.contextBuilder.maxWallTranscriptMessages();
+    const windowMessages = messages.slice(-maxLines);
+
+    const transcript = windowMessages
       .slice()
       .reverse() // chronological order for the model
       .map((m, i) => {
@@ -783,25 +791,48 @@ export class WallService {
 
     const userPrompt =
       `Project: ${projectName} ($${ticker}).\n` +
-      `Transcript of the last ${messages.length} messages (oldest first):\n\n${transcript}\n\n` +
+      `Transcript of the last ${windowMessages.length} messages (oldest first):\n\n${transcript}\n\n` +
       `Return the JSON object now.`;
+
+    const runtimeRequest: AiRuntimeRequest = {
+      userId: ctx.userId,
+      system,
+      userPrompt,
+      section: 'wall_summarizer',
+      projectId: ctx.projectId,
+    };
 
     let text: string;
     try {
-      const result = await this.aiInvoker.invoke({
-        section: 'wall_summarizer',
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.3,
-        userId: ctx.userId,
-        projectId: ctx.projectId,
-        // Preserve the conventional billing source for the summarizer so the
-        // adoption chart's existing platform_promo bucketing continues to work.
-        billingSource: 'platform_promo',
-      });
-      text = result.content;
+      const runtimeResult = await this.founderAiRuntime.complete(
+        runtimeRequest,
+        async (_route, invokeCtx) => {
+          const result = await this.aiInvoker.invoke({
+            section: 'wall_summarizer',
+            messages: [
+              { role: 'system', content: invokeCtx.request.system },
+              { role: 'user', content: invokeCtx.request.userPrompt },
+            ],
+            temperature: 0.3,
+            maxTokens: invokeCtx.maxOutputTokens,
+            userId: ctx.userId,
+            projectId: ctx.projectId,
+            billingSource: 'platform_promo',
+          });
+          return {
+            ok: true,
+            text: result.content,
+            provider: result.provider,
+            model: result.model,
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens,
+          };
+        },
+      );
+      if (!runtimeResult.ok || !runtimeResult.text?.trim()) {
+        throw new ServiceUnavailableException('Chat Summarizer LLM call failed. Try again in a moment.');
+      }
+      text = runtimeResult.text;
     } catch (err) {
       if (err instanceof ServiceUnavailableException) throw err;
       this.logger.warn(
