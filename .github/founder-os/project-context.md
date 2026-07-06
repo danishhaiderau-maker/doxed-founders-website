@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(showcase): enforce uniform 100x leverage on live execution paths
+fix(web): wire showDownloads prop on Founder Node hub panel
 
 ## Last Activity
 
