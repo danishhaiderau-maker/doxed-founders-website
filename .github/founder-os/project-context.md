@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(web): clipboard image paste in Founder OS composer; bump min Founder Node to 0.7.12
 
 ## Last Activity
 
