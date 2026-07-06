@@ -52,6 +52,8 @@ type Props = {
    * providers in their own hub.
    */
   showAiSection?: boolean;
+  /** When false, inline download cards are replaced with links to /downloads. */
+  showDownloads?: boolean;
 };
 
 export function FounderNodeHubPanel({
@@ -62,6 +64,7 @@ export function FounderNodeHubPanel({
   onMemoryModeChange,
   aiSection,
   showAiSection = true,
+  showDownloads = true,
 }: Props) {
   const v2 = settings.founderNodeV2;
   const paired = v2?.paired ?? false;
