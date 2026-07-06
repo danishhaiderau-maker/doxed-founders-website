@@ -46,6 +46,7 @@ import { IdeBridgeModule } from './ide-bridge/ide-bridge.module';
 import { WallModule } from './wall/wall.module';
 import { ShareModule } from './share/share.module';
 import { AiRoutingModule } from './ai-routing/ai-routing.module';
+import { FounderAiRuntimeModule } from './founder-ai-runtime/founder-ai-runtime.module';
 import { RateLimitModule } from './events/rate-limit.module';
 import { BuilderScoreModule } from './founder-os/builder-score.service';
 
@@ -99,6 +100,7 @@ import { BuilderScoreModule } from './founder-os/builder-score.service';
     WallModule,
     ShareModule,
     AiRoutingModule,
+    FounderAiRuntimeModule,
     RateLimitModule,
     BuilderScoreModule,
   ],

@@ -74,6 +74,8 @@ import {
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
 import { AiInvokerService } from '../ai-routing/ai-invoker.service';
+import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
+import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -115,6 +117,7 @@ export class BuilderService {
     private readonly agentRuntime: AgentRuntimeService,
     private readonly founderPromo: FounderPromoService,
     private readonly aiInvoker: AiInvokerService,
+    private readonly founderAiRuntime: FounderAiRuntimeService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -1064,6 +1067,65 @@ export class BuilderService {
     }
   }
 
+  private shouldUseCopilotRuntimeCache(options?: {
+    forceProvider?: AiProvider;
+    userApiKey?: string;
+  }): boolean {
+    return (
+      this.founderAiRuntime.isEnabled() &&
+      !options?.forceProvider &&
+      !options?.userApiKey
+    );
+  }
+
+  private buildCopilotRuntimeRequest(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    founderBrainTask?: FounderBrainTask,
+  ): AiRuntimeRequest {
+    return {
+      userId,
+      system,
+      userPrompt,
+      section: 'copilot',
+      founderBrainTask,
+    };
+  }
+
+  private async copilotRuntimeCacheHit(
+    request: AiRuntimeRequest,
+    founderBrainTask: FounderBrainTask,
+  ): Promise<
+    | { ok: true; text: string; provider: AiProvider; founderBrainTask: FounderBrainTask }
+    | null
+  > {
+    const hit = await this.founderAiRuntime.tryCacheHit(request);
+    if (!hit?.ok || !hit.text?.trim()) return null;
+    const provider =
+      typeof hit.provider === 'string'
+        ? this.enumProviderForRoutingKey(hit.provider)
+        : hit.provider ?? AiProvider.DEEPSEEK;
+    return {
+      ok: true,
+      text: hit.text,
+      provider,
+      founderBrainTask: request.founderBrainTask ?? founderBrainTask,
+    };
+  }
+
+  private returnCopilotSuccess<T extends { ok: true; text: string; provider: AiProvider }>(
+    request: AiRuntimeRequest,
+    result: T,
+  ): T {
+    void this.founderAiRuntime.recordResponse(request, {
+      ok: true,
+      text: result.text,
+      provider: result.provider,
+    });
+    return result;
+  }
+
   /** Map a routing provider key slug to the AiProvider enum used by the cascade. */
   private enumProviderForRoutingKey(key: string): AiProvider {
     const up = key.toUpperCase();
@@ -1104,6 +1166,20 @@ export class BuilderService {
       effectiveSystem = `${prefix}${system}`;
     }
 
+    const founderBrainTask =
+      options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt);
+    const runtimeRequest = this.buildCopilotRuntimeRequest(
+      userId,
+      effectiveSystem,
+      userPrompt,
+      founderBrainTask,
+    );
+
+    if (this.shouldUseCopilotRuntimeCache(options)) {
+      const cached = await this.copilotRuntimeCacheHit(runtimeRequest, founderBrainTask);
+      if (cached) return cached;
+    }
+
     // AI Routing hook: if an admin routed the `copilot` section to an enabled
     // provider with a key, prefer the generic invoker and skip the cascade.
     if (!options?.forceProvider && !options?.userApiKey) {
@@ -1114,7 +1190,11 @@ export class BuilderService {
         userPrompt,
         { founderBrainTask: options?.founderBrainTask },
       );
-      if (routed?.ok) return routed;
+      if (routed?.ok) {
+        return this.shouldUseCopilotRuntimeCache(options)
+          ? this.returnCopilotSuccess(runtimeRequest, routed)
+          : routed;
+      }
     }
 
     if (options?.forceProvider) {
@@ -1133,9 +1213,6 @@ export class BuilderService {
       }
       return forced;
     }
-
-    const founderBrainTask =
-      options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt);
 
     const settings = await this.ensureSettings(userId);
     const usable = await this.listUsableLlmCredentialProviders(userId);
@@ -1157,7 +1234,15 @@ export class BuilderService {
         // Token usage for the Founder Node Ollama path is logged by the node
         // itself via POST /founder-node/inference-usage (real Ollama usage
         // counts). Logging here too would double-count the same inference.
-        return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL, founderBrainTask };
+        const nodeOk = {
+          ok: true as const,
+          text: nodeResult.text,
+          provider: AiProvider.OLLAMA_LOCAL,
+          founderBrainTask,
+        };
+        return this.shouldUseCopilotRuntimeCache(options)
+          ? this.returnCopilotSuccess(runtimeRequest, nodeOk)
+          : nodeOk;
       }
       llmErrors.push(...nodeResult.errors);
 
@@ -1294,7 +1379,15 @@ export class BuilderService {
 
     const platformBrain = await this.tryPlatformDeepseekFallback(userId, effectiveSystem, userPrompt, llmErrors);
     if (platformBrain) {
-      return { ok: true, text: platformBrain.text, provider: AiProvider.DEEPSEEK, founderBrainTask };
+      const platformOk = {
+        ok: true as const,
+        text: platformBrain.text,
+        provider: AiProvider.DEEPSEEK,
+        founderBrainTask,
+      };
+      return this.shouldUseCopilotRuntimeCache(options)
+        ? this.returnCopilotSuccess(runtimeRequest, platformOk)
+        : platformOk;
     }
 
     const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
