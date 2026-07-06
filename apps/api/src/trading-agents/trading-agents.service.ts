@@ -709,16 +709,23 @@ export class TradingAgentsService implements OnModuleInit {
     }
     const flyUrl = this.botBridge.getFlyUrl();
     const cfUrl = (await this.botBridge.resolveBotUrl()) ?? 'https://bot.doxxedcrypto.digital';
-    const probe = async (base: string, path = '/api/ping'): Promise<boolean> => {
+    const probeOnce = async (base: string, path = '/api/ping'): Promise<boolean> => {
       try {
         const res = await fetch(`${base}${path}`, {
-          signal: AbortSignal.timeout(6_000),
+          signal: AbortSignal.timeout(10_000),
           headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
         });
         return res.ok;
       } catch {
         return false;
       }
+    };
+    const probe = async (base: string, path = '/api/ping'): Promise<boolean> => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (await probeOnce(base, path)) return true;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+      }
+      return false;
     };
     const [fly, cloudflare] = await Promise.all([probe(flyUrl), probe(cfUrl)]);
     // Canonical showcase is the home tunnel — Fly is legacy and must not gate botConnected.
