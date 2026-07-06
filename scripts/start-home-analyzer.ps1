@@ -124,6 +124,9 @@ if ($NoWait) {
   # the space in the repo path ("Final Bots") - array form splits the path and the
   # monitor never starts.
   if ($analyzerProc -and $analyzerProc.Id -gt 0 -and -not $Once) {
+    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer-auto-restart.ps1*" } |
+      ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") -Value "$($analyzerProc.Id)" -NoNewline -Encoding UTF8
     $monitorScript = Join-Path $scriptDir "analyzer-auto-restart.ps1"
     $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -AnalyzerPid $($analyzerProc.Id) -Port $AnalyzerPort"

@@ -680,6 +680,9 @@ STOP_LADDER_2D_GRID_STOPS = [-6, -10, -12, -14, -16, -18, -20, -25, -30, -40]
 MFE_PROTECT_SWEEP = [0, 2, 4, 6, 8, 10]
 STOP_LADDER_MFE_3D_STOPS = [-6, -10, -12, -20, -30]
 STOP_LADDER_MFE_3D_LADDERS = [(8, 5), (10, 6), (12, 8)]
+GRID_SWEEP_MAX_REPLAYS = int(os.getenv("ANALYZER_GRID_SWEEP_MAX_REPLAYS", "200"))
+ANALYZER_SKIP_3D_SWEEP = os.getenv("ANALYZER_SKIP_3D_SWEEP", "").strip().lower() in ("1", "true", "yes")
+_replay_cache = None
 # Entry gate research sweeps (signal_snapshot.jsonl @ APPROVE + tick replay PnL)
 LIVE_ADX_BLOCK_MIN = 15.0
 LIVE_MOMENTUM_CHOP_MAX = 0.8  # v86 golden stack live; 0.5 kept for strict sweep reference
@@ -1810,7 +1813,10 @@ def _signal_replay_paths():
     return paths
 
 
-def _load_jsonl_replays():
+def _load_jsonl_replays(use_cache=True):
+    global _replay_cache
+    if use_cache and _replay_cache is not None:
+        return _replay_cache
     replays = {}
     try:
         for path in _signal_replay_paths():
@@ -1827,7 +1833,36 @@ def _load_jsonl_replays():
                         replays[tid] = row
     except Exception as e:
         print(f"⚠️ signal_replay read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    if use_cache:
+        _replay_cache = replays
     return replays
+
+
+def _cap_replays_for_sweep(replays, label="grid sweep"):
+    if not replays:
+        return replays
+    cap = GRID_SWEEP_MAX_REPLAYS
+    n = len(replays)
+    if cap <= 0 or n <= cap:
+        return replays
+    keys = list(replays.keys())[-cap:]
+    capped = {k: replays[k] for k in keys}
+    print(
+        f"⚠️ Capping {label} replays {n}→{cap} "
+        f"(raise ANALYZER_GRID_SWEEP_MAX_REPLAYS to include more). {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return capped
+
+
+def _safe_replay_sweep(name, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except MemoryError:
+        print(f"⚠️ {name} skipped: MemoryError (replay sample too large). {PIPELINE_ENFORCEMENT_TAG}")
+        return None
+    except Exception as e:
+        print(f"⚠️ {name} failed: {type(e).__name__}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+        return None
 
 
 def _load_jsonl_by_trade_id(path):
@@ -2446,7 +2481,7 @@ def stop_thesis_wide_sweep_all_replays(trades_df=None):
         f"Sweep: {len(sweep_levels)} levels from -6% to -{int(STOP_THESIS_SWEEP_MAX_MARGIN_PCT):.0f}% margin. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
-    replays = _load_jsonl_replays()
+    replays = _cap_replays_for_sweep(_load_jsonl_replays(), "thesis stop wide sweep")
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE} — run bot longer to collect APPROVE replays. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -2644,7 +2679,7 @@ def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
         f"Grid: {len(stop_levels)} stops × {len(ladder_candidates)} ladders = {n_cells} cells. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
-    replays = _load_jsonl_replays()
+    replays = _cap_replays_for_sweep(_load_jsonl_replays(), "stop x ladder 2D sweep")
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE} — run bot longer to collect APPROVE replays. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -2808,6 +2843,14 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE}. {PIPELINE_ENFORCEMENT_TAG}")
         return None
+    if ANALYZER_SKIP_3D_SWEEP or len(replays) > GRID_SWEEP_MAX_REPLAYS:
+        print(
+            f"⚠️ 3D sweep skipped: {len(replays)} replays "
+            f"(cap {GRID_SWEEP_MAX_REPLAYS}, set ANALYZER_SKIP_3D_SWEEP=0 to force). "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
+        return None
+    replays = _cap_replays_for_sweep(replays, "stop x ladder x MFE 3D sweep")
 
     rows = []
     for stop in stop_levels:
@@ -5688,9 +5731,9 @@ def run_v55_analysis(df, decisions, blocked, ai_log):
             f"{PIPELINE_ENFORCEMENT_TAG}"
         )
     print("=" * 60)
-    stop_thesis_wide_sweep_all_replays(df if not df.empty else None)
-    stop_ladder_2d_grid_sweep_all_replays(df if not df.empty else None)
-    stop_ladder_mfe_3d_sweep_all_replays(df if not df.empty else None)
+    _safe_replay_sweep("thesis stop wide sweep", stop_thesis_wide_sweep_all_replays, df if not df.empty else None)
+    _safe_replay_sweep("stop x ladder 2D grid sweep", stop_ladder_2d_grid_sweep_all_replays, df if not df.empty else None)
+    _safe_replay_sweep("stop x ladder x MFE 3D sweep", stop_ladder_mfe_3d_sweep_all_replays, df if not df.empty else None)
     entry_gate_replay_sweeps(blocked)
     entry_gate_mtf_chop_sweet_spot_sweep(blocked)
     pullback_replay_fill_sweep(blocked)
