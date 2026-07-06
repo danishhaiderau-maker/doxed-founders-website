@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Expand ChatGPT consultation brief txt to full paste length.
+feat(showcase): report BTC bot DeepSeek tokens to adoption chart
 
 ## Last Activity
 
