@@ -2,7 +2,7 @@ export const DEMO_EMAIL_DOMAIN = '@doxxed.demo';
 export const DEMO_SLUG_PREFIX = 'demo-';
 export const DEMO_HANDLE_PREFIX = 'demo_';
 
-export type DemoSeedScale = 'small' | 'medium' | 'large';
+export type DemoSeedScale = 'small' | 'medium' | 'large' | 'xlarge';
 
 export const DEMO_SCALE_PRESETS: Record<
   DemoSeedScale,
@@ -11,11 +11,12 @@ export const DEMO_SCALE_PRESETS: Record<
   small: { users: 20, projects: 10, founders: 8 },
   medium: { users: 35, projects: 12, founders: 10 },
   large: { users: 50, projects: 15, founders: 12 },
+  xlarge: { users: 2500, projects: 150, founders: 500 },
 };
 
 export function parseDemoSeedScale(raw?: string): DemoSeedScale {
   const v = raw?.trim().toLowerCase();
-  if (v === 'small' || v === 'medium' || v === 'large') return v;
+  if (v === 'small' || v === 'medium' || v === 'large' || v === 'xlarge') return v;
   return 'medium';
 }
 
