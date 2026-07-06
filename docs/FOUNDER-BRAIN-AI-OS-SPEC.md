@@ -172,4 +172,21 @@ See [ENV-VARS.md](./ENV-VARS.md) for full list.
 
 ---
 
+## 10. UI Principles: Provider-agnostic Founder Brain
+
+Founder OS surfaces **Founder Brain** as the single product identity for AI — not Claude, DeepSeek, GLM, or other vendor names in default UI.
+
+| Principle | Implementation |
+|-----------|------------------|
+| **No provider pickers in workspace** | Founder Den shows mode (`Automatic` / `Fast` / `Balanced` / `Deep Thinking`), not model dropdowns |
+| **Automatic routing** | `brainMode=automatic` (default) → existing AI runtime router + cascade; no `forceProvider` |
+| **Explicit modes** | `FOUNDER_BRAIN_MODES=automatic\|fast\|balanced\|deep` — maps to tier hints server-side (`fast`→GLM, `deep`→reasoning) |
+| **Status panel** | Online dot, project/repo/workspace/context, AI Power %, Cost Saved Today (telemetry or estimate) |
+| **Vendor config elsewhere** | Settings → AI Stack for BYOK and infra; never primary workspace chrome |
+| **Chat attribution** | Messages show `Founder Brain`, not `via DEEPSEEK` |
+
+Tooltip on mode selector: *Routes automatically by task complexity* (Automatic mode).
+
+---
+
 *Product engineering context only. No API keys in this document.*

@@ -51,6 +51,17 @@ export default function RaiseRoomPage() {
 
       <div className="mx-auto max-w-4xl space-y-8 px-6 py-8">
         <section className="rounded-2xl border border-amber-500/25 bg-amber-950/10 p-6">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-300">
+              Dedicated destination
+            </span>
+            <Link
+              href="/founder-den"
+              className="text-xs font-semibold text-violet-300 hover:text-violet-200"
+            >
+              ← Back to Founder OS
+            </Link>
+          </div>
           <p className="text-xs font-semibold uppercase tracking-widest text-amber-400">Validate</p>
           <h2 className="mt-2 text-2xl font-bold text-white">Discover founders worth backing</h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
