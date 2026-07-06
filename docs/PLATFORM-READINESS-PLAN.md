@@ -5,7 +5,7 @@
 **Framing:** Production platform readiness — not isolated RR tickets  
 **Owner feedback (Danish):** Complete Phase 1.5 as cohesive vertical slices; Demo Mode is first-class; every feature needs seed data; merge as independently testable slices; do not stop for approval unless blocked.
 
-**Related:** [ARCHITECTURE-REVIEW-V2-RESPONSE.md](./ARCHITECTURE-REVIEW-V2-RESPONSE.md), [DEMO-MODE-AND-VERIFICATION.md](./DEMO-MODE-AND-VERIFICATION.md), [DDOLLAR-POC-TWO-LEDGER-SPEC.md](./DDOLLAR-POC-TWO-LEDGER-SPEC.md), [FOUNDER-AI-RUNTIME-SPEC.md](./FOUNDER-AI-RUNTIME-SPEC.md), [RAISE-ROOM-UX-VISION-V2.md](./RAISE-ROOM-UX-VISION-V2.md), [FOUNDER-GRADUATION-BUILD-PLAN.md](./FOUNDER-GRADUATION-BUILD-PLAN.md)
+**Related:** [ARCHITECTURE-REVIEW-V2-RESPONSE.md](./ARCHITECTURE-REVIEW-V2-RESPONSE.md), [DEMO-MODE-AND-VERIFICATION.md](./DEMO-MODE-AND-VERIFICATION.md), [PLATFORM-VERIFICATION-VISION.md](./PLATFORM-VERIFICATION-VISION.md), [DDOLLAR-POC-TWO-LEDGER-SPEC.md](./DDOLLAR-POC-TWO-LEDGER-SPEC.md), [FOUNDER-AI-RUNTIME-SPEC.md](./FOUNDER-AI-RUNTIME-SPEC.md), [RAISE-ROOM-UX-VISION-V2.md](./RAISE-ROOM-UX-VISION-V2.md), [FOUNDER-GRADUATION-BUILD-PLAN.md](./FOUNDER-GRADUATION-BUILD-PLAN.md)
 
 **Safe to share:** No secrets, credentials, or legal advice in this document.
 
@@ -26,7 +26,7 @@ Founder OS is moving from **feature tickets** to **platform readiness vertical s
 | DDollar economy | ~35% | `PointsService` + `PointLedger`; no two-ledger runtime |
 | AI Runtime | ~15% | Phase 0 pilot only (~93% paths bypass) |
 | Phase 1.5 Trust Layer | ~10% | Constants in `@dcf/utils`; no NestJS modules |
-| Verification / Observatory | ~20% | Basic `/health` + 12 demo smoke checks |
+| Verification / Observatory | ~20% | Basic `/health` + 25+ demo smoke checks; see [PLATFORM-VERIFICATION-VISION.md](./PLATFORM-VERIFICATION-VISION.md) |
 | Event bus + workers | ~5% | `FounderEvent` feed only; no domain bus |
 | Simulators | 0% | Planned in docs only |
 | Business smoke tests | ~15% | Infra checks; not full DDollar journey |

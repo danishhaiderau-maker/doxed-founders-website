@@ -44,6 +44,9 @@ if ($useNamed -and -not $Force) {
   Start-Sleep -Seconds 2
 }
 
+# Brief grace window for stack-monitor: public URL may 530 while connector restarts.
+Set-Content -Path (Join-Path $repoRoot ".home-tunnel-restarting") -Value (Get-Date -Format "o") -NoNewline
+
 $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File")
 if ($useNamed) {
   Set-Content -Path $tunnelUrlFile -Value $stableUrl -NoNewline

@@ -52,7 +52,7 @@ function projectBlueprintsForScale(count: number) {
       ticker: `DS${String(i + 1).padStart(2, '0')}`,
       categorySlug: cat,
       stage: stages[i % stages.length]!,
-      withRaise: i % 3 !== 0,
+      withRaise: true,
       raiseGoalUsd: 15000 + (i * 997) % 120000,
     });
   }
@@ -824,6 +824,18 @@ export class DemoSeedService {
         const all = await this.projects.findAll({});
         const demo = all.filter((p) => p.slug.startsWith(DEMO_SLUG_PREFIX));
         return { passed: demo.length >= 5, detail: `${demo.length} demo projects in GET /projects` };
+      }),
+    );
+
+    checks.push(
+      await this.runCheck('raise_room_active_raises', async () => {
+        const count = await this.prisma.simulatedRaise.count({
+          where: { status: SimulatedRaiseStatus.ACTIVE, project: demoProjectWhere() },
+        });
+        return {
+          passed: count >= 42,
+          detail: `${count} active demo Proof Raises (target ≥42 for discovery hub)`,
+        };
       }),
     );
 

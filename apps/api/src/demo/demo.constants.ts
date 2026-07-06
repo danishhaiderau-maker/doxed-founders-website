@@ -9,7 +9,7 @@ export const DEMO_SCALE_PRESETS: Record<
   { users: number; projects: number; founders: number }
 > = {
   small: { users: 20, projects: 10, founders: 8 },
-  medium: { users: 35, projects: 12, founders: 10 },
+  medium: { users: 50, projects: 48, founders: 40 },
   large: { users: 50, projects: 15, founders: 12 },
   xlarge: { users: 2500, projects: 150, founders: 500 },
 };
