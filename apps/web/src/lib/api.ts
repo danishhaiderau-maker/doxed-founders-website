@@ -2534,7 +2534,19 @@ export function unfollowProject(projectId: string, token: string) {
 
 export function fetchDemandHeatmap() {
   return apiFetch<
-    { project: { slug: string; name: string; ticker: string; logoUrl: string | null }; goalUsd: number; totalDemand: number; allocatorCount: number }[]
+    {
+      project: {
+        slug: string;
+        name: string;
+        ticker: string;
+        logoUrl: string | null;
+        lifecycleStage?: string;
+        isLiveToken?: boolean;
+      };
+      goalUsd: number;
+      totalDemand: number;
+      allocatorCount: number;
+    }[]
   >('/founder-den/demand-heatmap');
 }
 

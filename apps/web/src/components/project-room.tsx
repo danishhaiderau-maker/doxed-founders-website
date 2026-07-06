@@ -343,7 +343,9 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
               onRefresh={load}
             />
           ) : (
-            <p className="text-sm text-zinc-500">No active Raise Room — founder has not opened public ICO slots yet.</p>
+            <p className="text-sm text-zinc-500">
+              No active Proof Raise — founder has not opened allocation registration yet.
+            </p>
           )}
           {room.demandPolls.map((poll) => (
             <div key={poll.id} className="rounded-xl border border-zinc-800 p-5">

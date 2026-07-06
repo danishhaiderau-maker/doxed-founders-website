@@ -409,7 +409,16 @@ export class FounderDenService {
     const raises = await this.prisma.simulatedRaise.findMany({
       where: { status: SimulatedRaiseStatus.ACTIVE },
       include: {
-        project: { select: { slug: true, name: true, ticker: true, logoUrl: true } },
+        project: {
+          select: {
+            slug: true,
+            name: true,
+            ticker: true,
+            logoUrl: true,
+            lifecycleStage: true,
+            isLiveToken: true,
+          },
+        },
         allocations: true,
       },
     });
@@ -528,7 +537,7 @@ export class FounderDenService {
     if (raise.maxParticipantSlots != null && !existing && amountUsd > 0) {
       const participantCount = raise.allocations.filter((a) => Number(a.amountUsd) > 0).length;
       if (participantCount >= raise.maxParticipantSlots) {
-        throw new BadRequestException(`All ${raise.maxParticipantSlots} ICO slots are reserved`);
+        throw new BadRequestException(`All ${raise.maxParticipantSlots} Proof Raise slots are reserved`);
       }
     }
 
@@ -934,7 +943,7 @@ export class FounderDenService {
     const reqs = this.computeLaunchpadRequirements(project, totalDemand, readiness);
 
     if (!reqs.unlocked) {
-      throw new BadRequestException('Launchpad requirements not met yet.');
+      throw new BadRequestException('Launch qualification requirements not met yet.');
     }
 
     await this.prisma.project.update({
@@ -2061,12 +2070,12 @@ export class FounderDenService {
         userId,
         type: FounderEventType.RAISE_ALLOCATION,
         source: 'raise-room',
-        title: 'Raise Room slots locked — ready for token distribution',
+        title: 'Proof Raise slots locked — allocation registration ready',
         payload: { raiseId, action: 'lock_slots' },
       });
     }
 
-    return { success: true, message: 'ICO slots locked. Export participant list for one-click distribution.' };
+    return { success: true, message: 'Proof Raise slots locked. Export participant list for allocation registration.' };
   }
 
   async getPlatformEconomy() {
