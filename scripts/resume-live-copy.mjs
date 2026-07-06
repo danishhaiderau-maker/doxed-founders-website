@@ -32,7 +32,7 @@ if (fs.existsSync(neonPath)) {
 }
 
 const prisma = new PrismaClient();
-const handle = process.argv.find((a) => !a.startsWith('-') && a !== process.argv[1]) ?? 'Cheetah';
+const handle = process.argv.slice(2).find((a) => !a.startsWith('-')) ?? 'Cheetah';
 
 async function main() {
   const agent = await prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
