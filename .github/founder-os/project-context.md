@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Use PowerShell $PID in analyzer auto-restart stale-monitor cleanup.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
