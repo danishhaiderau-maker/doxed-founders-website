@@ -25,6 +25,9 @@ function Probe([string]$url, [int]$timeoutSec = 12) {
 
 $ts = (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz")
 $abnormalities = @()
+$warnings = @()
+# CI deploy failures older than this are logged in github field only — no alert noise.
+$ciFailureAlertMaxAgeMin = 120
 
 # 1. Local stack (bot / analyzer / bridge / tunnel)
 $botCode = Probe "http://127.0.0.1:7002/api/ping"
@@ -58,9 +61,20 @@ $ghOk = $true; $ghNote = ""
 try {
   $ghAuth = gh auth status 2>&1 | Out-String
   if ($ghAuth -match "Logged in") {
-    $ci = gh run list --limit 1 --json status,conclusion,name 2>$null | ConvertFrom-Json
-    if ($ci -and $ci[0].conclusion -eq "FAILURE") { $abnormalities += "github_ci_failed_run=$($ci[0].name)" }
-    $ghNote = "ci=$($ci[0].status)/$($ci[0].conclusion)"
+    $ci = gh run list --limit 1 --json status,conclusion,name,createdAt,workflowName 2>$null | ConvertFrom-Json
+    if ($ci -and $ci[0].conclusion -eq "FAILURE") {
+      $ciCreated = [datetimeoffset]::Parse($ci[0].createdAt).UtcDateTime
+      $ciAgeMin = [math]::Round(((Get-Date).ToUniversalTime() - $ciCreated).TotalMinutes)
+      $ciLabel = if ($ci[0].workflowName) { $ci[0].workflowName } else { $ci[0].name }
+      $ghNote = "ci=$($ci[0].status)/failure age=${ciAgeMin}m"
+      if ($ciAgeMin -le $ciFailureAlertMaxAgeMin) {
+        $warnings += "github_ci_failed_run=$ciLabel (${ciAgeMin}m ago)"
+      }
+    } elseif ($ci) {
+      $ghNote = "ci=$($ci[0].status)/$($ci[0].conclusion)"
+    } else {
+      $ghNote = "ci=unknown"
+    }
   } else { $ghOk = $false; $ghNote = "gh_not_authed" }
 } catch { $ghOk = $false; $ghNote = "gh_error" }
 
@@ -77,7 +91,9 @@ $relayNote = "skipped"
 $report = [ordered]@{
   ts             = $ts
   abnormality    = ($abnormalities.Count -gt 0)
+  warning        = ($warnings.Count -gt 0)
   abnormalities  = $abnormalities
+  warnings       = $warnings
   local          = [ordered]@{ bot=$botCode; analyzer=$anCode; bridge=$bridgeCode; tunnel=$tunnelCode }
   railway_api    = $apiCode
   api_status     = $apiStatus
@@ -101,6 +117,8 @@ if ($abnormalities.Count -gt 0) {
     } catch { }
   }
   try { msg * /TIME:30 "Stack abnormality: $($abnormalities -join ', '). See logs\stack_health.json" 2>$null } catch { }
+} elseif ($warnings.Count -gt 0) {
+  Mon-Log ("WARN: " + ($warnings -join " | ") + " | bot=$botCode an=$anCode bridge=$bridgeCode tunnel=$tunnelCode api=$apiCode db=$dbStatus site=$siteCode gh=$ghNote")
 } else {
   Mon-Log ("OK: bot=$botCode an=$anCode bridge=$bridgeCode tunnel=$tunnelCode api=$apiCode db=$dbStatus site=$siteCode gh=$ghNote")
 }
