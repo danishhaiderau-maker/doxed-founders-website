@@ -69,13 +69,15 @@ export function DdollarWalletPage() {
   }, [load]);
 
   const stats = useMemo(() => {
-    const lifetimeEarned = ledger.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
+    const lifetimeEarned =
+      overview?.reputation.lifetimeContributionEarned ??
+      ledger.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
     const lifetimeSpent = ledger.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0);
     const pendingRewards = ledger
       .filter((e) => e.amount > 0 && e.actionKey.includes('PENDING'))
       .reduce((s, e) => s + e.amount, 0);
     return { lifetimeEarned, lifetimeSpent, pendingRewards };
-  }, [ledger]);
+  }, [ledger, overview?.reputation.lifetimeContributionEarned]);
 
   const recentLedger = ledger.slice(0, 12);
 
@@ -102,8 +104,13 @@ export function DdollarWalletPage() {
           {formatDdollar(overview?.reputation.reputationPoints ?? 0)}
         </p>
         <p className="mt-1 text-sm text-zinc-400">
-          Current balance — in-game {DDOLLAR_CURRENCY_NAME} for participation, agents, and paper trading
+          Spendable balance — in-game {DDOLLAR_CURRENCY_NAME} for participation, agents, and paper trading
         </p>
+        {overview?.reputation.lifetimeContributionEarned != null && (
+          <p className="mt-2 text-sm text-emerald-200/90">
+            Lifetime contribution: {formatDdollar(overview.reputation.lifetimeContributionEarned, 0)} (never decreases on spend)
+          </p>
+        )}
         {overview && overview.reputation.totalPoints > 0 && (
           <p className="mt-2 text-sm text-amber-200/90">
             {(
@@ -116,9 +123,9 @@ export function DdollarWalletPage() {
         )}
 
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
-          <Stat label="Lifetime earned" value={formatDdollar(stats.lifetimeEarned || overview?.reputation.reputationPoints || 0)} />
+          <Stat label="Balance (spendable)" value={formatDdollar(overview?.reputation.reputationPoints ?? 0)} />
+          <Stat label="Lifetime contribution" value={formatDdollar(stats.lifetimeEarned || overview?.reputation.lifetimeContributionEarned || 0)} />
           <Stat label="Lifetime spent" value={formatDdollar(stats.lifetimeSpent)} />
-          <Stat label="Pending rewards" value={formatDdollar(stats.pendingRewards)} />
         </div>
       </section>
 

@@ -25,6 +25,7 @@ import {
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { labelForUser } from '../account/user-identity.util';
+import { isDdollarRuntimeEnabled } from '../ddollar/ddollar.constants';
 
 const ACTIVITY_SINCE_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -101,6 +102,7 @@ export class AirdropService {
         twitterHandle: true,
         oauthAccounts: { select: { provider: true }, take: 5 },
         reputationPoints: true,
+        lifetimeContributionEarned: true,
         contributorLevel: true,
         createdAt: true,
         paperPortfolio: { select: { cashBalance: true } },
@@ -277,8 +279,9 @@ export class AirdropService {
     const status = computeBuilderRewardStatus({ lastActiveAt, activityEventCount });
     const twitterConnected = userHasTwitterConnected(user);
     const accountAgeDays = daysSince(user.createdAt.toISOString()) ?? 0;
-    const ddollarEarnedApprox =
-      agg?.ddollarEarned ?? Number(user.paperPortfolio?.cashBalance ?? 0);
+    const ddollarEarnedApprox = isDdollarRuntimeEnabled()
+      ? user.lifetimeContributionEarned
+      : agg?.ddollarEarned ?? Number(user.paperPortfolio?.cashBalance ?? 0);
 
     const subInput = {
       reputationPoints: user.reputationPoints,
@@ -426,6 +429,7 @@ export class AirdropService {
         twitterHandle: true,
         oauthAccounts: { select: { provider: true }, take: 5 },
         reputationPoints: true,
+        lifetimeContributionEarned: true,
         createdAt: true,
         banned: true,
         paperPortfolio: { select: { cashBalance: true } },
@@ -451,6 +455,7 @@ export class AirdropService {
           twitterHandle: true,
           oauthAccounts: { select: { provider: true }, take: 5 },
           reputationPoints: true,
+          lifetimeContributionEarned: true,
           contributorLevel: true,
           createdAt: true,
           paperPortfolio: { select: { cashBalance: true } },

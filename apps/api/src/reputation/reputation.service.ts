@@ -21,6 +21,7 @@ export type ReputationMe = {
   displayName: string;
   twitterHandle: string | null;
   reputationPoints: number;
+  lifetimeContributionEarned: number;
   contributorLevel: number;
   rank: number | null;
   totalParticipants: number;
@@ -46,6 +47,7 @@ export class ReputationService {
         twitterHandle: true,
         oauthAccounts: { select: { provider: true }, take: 3 },
         reputationPoints: true,
+        lifetimeContributionEarned: true,
         contributorLevel: true,
       },
       orderBy: [{ reputationPoints: 'desc' }, { createdAt: 'asc' }],
@@ -90,6 +92,7 @@ export class ReputationService {
         twitterHandle: true,
         oauthAccounts: { select: { provider: true }, take: 3 },
         reputationPoints: true,
+        lifetimeContributionEarned: true,
         contributorLevel: true,
         banned: true,
       },
@@ -109,6 +112,7 @@ export class ReputationService {
       displayName: labelForUser(user),
       twitterHandle: user.twitterHandle,
       reputationPoints: user.reputationPoints,
+      lifetimeContributionEarned: user.lifetimeContributionEarned,
       contributorLevel:
         user.reputationPoints > 0
           ? user.contributorLevel

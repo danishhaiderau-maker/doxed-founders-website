@@ -55,6 +55,8 @@ This matches the product story: users **earn** contribution, **spend** a subset.
 
 ## Required migration (future)
 
+**Status:** Shipped 2026-07-06 — migration `20260706120000_ddollar_two_ledger`.
+
 ```prisma
 model User {
   // ...
@@ -62,6 +64,12 @@ model User {
   lifetimeContributionEarned  Int @default(0)  // PoC score — monotonic
 }
 ```
+
+Additional tables: `MarketplaceLedgerEntry`, `FounderTreasuryLedgerEntry`,
+`DdollarDailyEmission` (stub).
+
+Feature flag: `DDOLLAR_RUNTIME_ENABLED=true` routes `PointsService` through
+`apps/api/src/ddollar/DdollarRuntimeService`.
 
 ### `PointsService` changes
 

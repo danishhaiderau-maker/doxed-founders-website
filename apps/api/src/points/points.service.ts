@@ -10,6 +10,8 @@ import { contributorLevelFromPoints, pointActionLabel } from '@dcf/utils';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuilderScoreService } from '../founder-os/builder-score.service';
+import { DdollarRuntimeService } from '../ddollar/ddollar-runtime.service';
+import { isDdollarRuntimeEnabled } from '../ddollar/ddollar.constants';
 
 const DB_DOWN_RE = /connection|timeout|unreachable|refused|terminated/i;
 
@@ -30,10 +32,20 @@ export class PointsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly builderScore: BuilderScoreService,
+    private readonly ddollarRuntime: DdollarRuntimeService,
   ) {}
+
+  private useRuntime(): boolean {
+    return isDdollarRuntimeEnabled();
+  }
 
   async award(userId: string, amount: number, actionKey?: string) {
     if (amount <= 0) return;
+
+    if (this.useRuntime()) {
+      await this.ddollarRuntime.award(userId, amount, actionKey);
+      return;
+    }
 
     const user = await this.prisma.user.update({
       where: { id: userId },
@@ -72,6 +84,11 @@ export class PointsService {
    */
   async spend(userId: string, amount: number, actionKey?: string, aiSpend = false) {
     if (amount <= 0) return;
+
+    if (this.useRuntime()) {
+      await this.ddollarRuntime.spend(userId, amount, actionKey, aiSpend);
+      return;
+    }
 
     // Tier pre-check: for spends that gate an AI call (e.g. wall summarizer),
     // reject parasites before they burn a single token. Stops the spend AND

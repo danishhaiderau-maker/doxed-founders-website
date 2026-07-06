@@ -299,10 +299,13 @@ export function AccountHub({
                 </p>
               </Link>
               <StatCard
+                label="Lifetime contribution"
+                value={formatDdollar(overview.reputation.lifetimeContributionEarned ?? overview.reputation.reputationPoints, 0)}
+              />
+              <StatCard
                 label="Rank"
                 value={contributorLevelLabel(overview.reputation.contributorLevel)}
               />
-              <StatCard label="Following" value={String(overview.followingCount)} />
             </div>
 
             {token && <ReferralPanel accessToken={token} />}

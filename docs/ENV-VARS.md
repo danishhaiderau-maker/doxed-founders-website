@@ -237,9 +237,56 @@ Controls how many synthetic records `POST /api/admin/demo/seed` creates.
 | `small` | 20 | 10 | 8 |
 | `medium` | 35 | 12 | 10 |
 | `large` | 50 | 15 | 12 |
+| `xlarge` | 2,500 | 150 | 500 |
 
 Set on Railway API service only. Web admin panel reads scale from
 `GET /api/admin/demo/status`.
+
+## `DDOLLAR_RUNTIME_ENABLED`
+
+**Default:** unset / false
+**Added:** 2026-07-06 (Platform Readiness Slice 1)
+
+When `true`, `PointsService.award()` / `spend()` delegate to
+`DdollarRuntimeService` — incrementing both spendable balance and
+`User.lifetimeContributionEarned` on earn; decrementing spendable only on spend.
+
+Also enables marketplace treasury ledger writes on marketplace purchases.
+
+### Related
+
+- `docs/DDOLLAR-POC-TWO-LEDGER-SPEC.md`
+- Admin audit: `GET /api/admin/ddollar/treasury`
+
+## `PHASE_15_TRUST_LAYER_ENABLED`
+
+**Default:** `false`
+**Added:** 2026-07-06 (Platform Readiness Slice 4)
+
+When `true`, enables the Phase 1.5 trust layer: regulatory questionnaire,
+Launch Qualification score (0–100), progressive unlock stages 1–6, compliance
+timeline API, and gates on Proof Raise + token metadata preview.
+
+Requires regulatory classification + LQ ≥ 70 + launch stage ≥ Graduation.
+
+### Where it's read
+
+- `apps/api/src/phase15/phase15.constants.ts`
+- `apps/api/src/regulatory/`, `launch-qualification/`, `trust/`
+
+## `OBSERVATORY_ENABLED`
+
+**Default:** `false` (admin-only)
+**Added:** 2026-07-06 (Platform Readiness Slice 6)
+
+When `true`, exposes `GET /api/admin/observatory` and the web control room at
+`/admin/observatory`. Aggregates subsystem health, git SHA version, and last
+demo smoke results.
+
+### Where it's read
+
+- `apps/api/src/phase15/phase15.constants.ts` — `isObservatoryEnabled()`
+- `apps/api/src/observatory/observatory.service.ts`
 
 ## See also
 
