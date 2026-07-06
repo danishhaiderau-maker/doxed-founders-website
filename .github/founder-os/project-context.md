@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+docs: incorporate Architecture Review v2 — regulatory engine and launch score roadmap
 
 ## Last Activity
 
