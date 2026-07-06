@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(api): retry Cloudflare bot-health probes for flaky tunnel
+fix(analyzer): restore loadLanes closing brace in research dashboard
 
 ## Last Activity
 
