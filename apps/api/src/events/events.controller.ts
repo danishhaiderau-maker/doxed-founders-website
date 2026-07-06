@@ -152,7 +152,7 @@ export class EventsController {
   @Post('copilot/ask')
   async ask(
     @CurrentUser() user: AuthUser,
-    @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
+    @Body() body: { prompt: string; agentTemplate?: string; provider?: string; brainMode?: string },
     @Headers('x-user-api-key') userApiKey: string | undefined,
   ) {
     const rateCheck = await this.rateLimiter.checkLimit(user.id, 'copilot:ask');
@@ -171,6 +171,7 @@ export class EventsController {
     return this.copilot.ask(user.id, body.prompt, {
       agentTemplate: body.agentTemplate,
       provider: body.provider,
+      brainMode: body.brainMode,
       userApiKey: userApiKey?.trim() || undefined,
     });
   }
@@ -178,7 +179,7 @@ export class EventsController {
   @Post('copilot/ask/stream')
   async askStream(
     @CurrentUser() user: AuthUser,
-    @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
+    @Body() body: { prompt: string; agentTemplate?: string; provider?: string; brainMode?: string },
     @Res({ passthrough: false }) res: Response,
     @Headers('x-user-api-key') userApiKey: string | undefined,
   ) {
@@ -214,6 +215,7 @@ export class EventsController {
         {
           agentTemplate: body.agentTemplate,
           provider: body.provider,
+          brainMode: body.brainMode,
           userApiKey: userApiKey?.trim() || undefined,
         },
         (event) => {

@@ -79,6 +79,7 @@ export * from './launch-qualification';
 export * from './progressive-unlock';
 export * from './scout-markets';
 export * from './founder-brain';
+export * from './founder-brain-modes';
 export * from './founder-memory-graph';
 export * from './mission-state';
 export * from './founder-brain-router';

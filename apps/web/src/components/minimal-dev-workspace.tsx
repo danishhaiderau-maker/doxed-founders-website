@@ -1,13 +1,20 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FOUNDER_BRAIN_MODE_HINTS,
+  FOUNDER_BRAIN_MODE_LABELS,
+  FOUNDER_BRAIN_MODES,
+  parseFounderBrainMode,
+  type FounderBrainMode,
+} from '@dcf/utils';
 import {
   connectAiProvider,
   connectCursorCloud,
   connectGitHubRepo,
   copilotAskStream,
   type CopilotMissingConnection,
-  fetchAvailableBrains,
   fetchConnectedWorkspaces,
   fetchDesktopBridge,
   type BridgeMessage,
@@ -46,19 +53,15 @@ type ChatMsg = {
   attachments?: PendingAttachment[];
 };
 
-type BrainOption = { key: string; label: string; hint: string };
-
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
 import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
+import { formatMessageProviderLabel } from '@/lib/copilot-ai-stack';
 
 const FOUNDER_NODE_DOWNLOAD_URL = '/downloads#founder-node';
-
-const BYOK_STORAGE_KEY = 'dcf.byok.apiKey';
-const BYOK_BRAIN: BrainOption = { key: 'BYOK', label: 'Bring Your Own Key', hint: 'Paste Z.ai / OpenAI key' };
-const RULE_BASED_BRAIN: BrainOption = { key: 'RULE_BASED', label: 'Rule-based', hint: 'Free fallback' };
+const FOUNDER_BRAIN_MODE_STORAGE_KEY = 'dcf.founder-brain.mode';
 
 type IdeOption = { key: string; label: string };
 
@@ -338,10 +341,7 @@ export function MinimalDevWorkspace({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
   const [pairedNodes, setPairedNodes] = useState<FounderNodeStatusRow[]>([]);
-  const [brains, setBrains] = useState<BrainOption[] | null>(null);
-  const [byokKey, setByokKey] = useState<string>('');
-  const [byokDraft, setByokDraft] = useState<string>('');
-  const [selectedBrain, setSelectedBrain] = useState<string>('GLM');
+  const [founderBrainMode, setFounderBrainMode] = useState<FounderBrainMode>('automatic');
   const [selectedIde, setSelectedIde] = useState<string>('cursor');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -554,44 +554,23 @@ export function MinimalDevWorkspace({
     };
   }, [refresh]);
 
-  // Load BYOK key from localStorage (never sent to the DB) and fetch the
-  // dynamic brain list from the API (reflects which promo keys are configured).
+  // Persist Founder Brain mode locally — routes internally, never shows vendor names.
   useEffect(() => {
     try {
-      const stored = window.localStorage.getItem(BYOK_STORAGE_KEY);
-      if (stored && stored.trim().length >= 8) setByokKey(stored.trim());
+      const stored = window.localStorage.getItem(FOUNDER_BRAIN_MODE_STORAGE_KEY);
+      if (stored) setFounderBrainMode(parseFounderBrainMode(stored));
     } catch {
-      // localStorage may be unavailable (private mode) — BYOK just won't persist.
+      // localStorage unavailable — default Automatic.
     }
-    if (!accessToken) return;
-    let cancelled = false;
-    fetchAvailableBrains(accessToken)
-      .then((available) => {
-        if (cancelled || !Array.isArray(available)) return;
-        const opts: BrainOption[] = available
-          .filter((b) => b.available)
-          .map((b) => ({ key: b.key, label: b.label, hint: b.hint }));
-        // Always append BYOK so users with their own Z.ai/OpenAI key can use it.
-        if (!opts.some((b) => b.key === 'BYOK')) opts.push(BYOK_BRAIN);
-        setBrains(opts);
-        // If the currently-selected brain isn't in the new list, fall back to
-        // the first real provider or RULE_BASED.
-        setSelectedBrain((curr) => {
-          if (opts.some((b) => b.key === curr)) return curr;
-          const firstReal = opts.find((b) => b.key !== 'RULE_BASED' && b.key !== 'BYOK');
-          return firstReal?.key ?? 'RULE_BASED';
-        });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // Endpoint unreachable — degrade to rule-based only so chat still works.
-        setBrains([RULE_BASED_BRAIN, BYOK_BRAIN]);
-        setSelectedBrain((curr) => (curr === 'GLM' ? 'RULE_BASED' : curr));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken]);
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FOUNDER_BRAIN_MODE_STORAGE_KEY, founderBrainMode);
+    } catch {
+      // ignore
+    }
+  }, [founderBrainMode]);
 
   useEffect(() => {
     if (!selectedSessionId || !accessToken) {
@@ -660,10 +639,7 @@ export function MinimalDevWorkspace({
         ? 'Your account has a paired node but it is not heartbeating. Open Founder Node from the tray, click Sync now, or re-pair with a fresh code from Settings → Builder.'
         : null;
   const agentCount = agents.length;
-  const resolvedBrains = brains ?? [RULE_BASED_BRAIN];
-  const brainLabel = resolvedBrains.find((b) => b.key === selectedBrain)?.label || selectedBrain;
-  const realBrainsAvailable = resolvedBrains.some((b) => b.key !== 'RULE_BASED' && b.key !== 'BYOK');
-  const byokConfigured = byokKey.trim().length >= 8;
+  const workspaceConnected = isNodeLive || workspaces.length > 0;
   const repoFullName =
     ideWorkspaces.find((w) => w.repository?.trim())?.repository ||
     connected.find((c) => c.repository?.trim())?.repository ||
@@ -677,6 +653,24 @@ export function MinimalDevWorkspace({
     ideWorkspaces.find((w) => w.branch?.trim())?.branch ||
     connected.find((c) => c.branch?.trim())?.branch ||
     'unknown';
+  const contextReady = Boolean(repoFullName) || sessions.length > 0 || messages.length > 0;
+  const projectLabel =
+    workspaces.find((w) => w.id === selectedWsId)?.label ||
+    workspaces[0]?.label ||
+    repoName;
+  const aiPowerPct = useMemo(() => {
+    let score = 38;
+    if (founderNodeHeartbeating) score += 28;
+    if (cursorConnected) score += 18;
+    if (repoFullName) score += 10;
+    if (sessions.length > 0) score += 6;
+    return Math.min(98, score);
+  }, [founderNodeHeartbeating, cursorConnected, repoFullName, sessions.length]);
+  const costSavedPct = useMemo(
+    () => Math.min(92, 58 + Math.floor(aiPowerPct / 4)),
+    [aiPowerPct],
+  );
+  const founderBrainOnline = founderNodeHeartbeating || workspaceConnected;
 
   // Group Cursor chat sessions by their owning workspace so the sidebar
   // reads like WhatsApp's conversation list (chats grouped per workspace)
@@ -1112,24 +1106,20 @@ export function MinimalDevWorkspace({
     setMessages((m) => [...m, userMsg, assistantMsg]);
 
     let firstTokenSeen = false;
-    let providerLabel = selectedBrain;
 
     const patch = (mut: (msg: ChatMsg) => ChatMsg) =>
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? mut(msg) : msg)));
 
     try {
-      const effectiveProvider = selectedBrain === 'BYOK' ? 'BYOK' : selectedBrain;
       await copilotAskStream(
         fullPrompt,
         accessToken,
         {
-          provider: effectiveProvider,
-          userApiKey: selectedBrain === 'BYOK' ? byokKey : null,
+          brainMode: founderBrainMode,
         },
         {
-          onAttribution: ({ provider }) => {
-            providerLabel = provider;
-            patch((msg) => ({ ...msg, provider }));
+          onAttribution: () => {
+            patch((msg) => ({ ...msg, provider: 'FOUNDER_BRAIN' }));
           },
           onToken: (text) => {
             if (!firstTokenSeen) {
@@ -1144,7 +1134,7 @@ export function MinimalDevWorkspace({
               ...msg,
               pending: false,
               thinking: false,
-              provider: answerProvider || providerLabel,
+              provider: 'FOUNDER_BRAIN',
               text: answer || msg.text || 'No response.',
               missingConnections: missingConnections?.length ? missingConnections : undefined,
             }));
@@ -1171,7 +1161,7 @@ export function MinimalDevWorkspace({
       setBusy(false);
       sendingRef.current = false;
     }
-  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions, byokKey, pollSessionHistory, pollDispatchDelivery, pendingAttachments, phase, stopVoice, resetTranscript, authStale, founderNodeHeartbeating, accountHasPairedNode]);
+  }, [input, busy, accessToken, founderBrainMode, selectedSessionId, sessions, pollSessionHistory, pollDispatchDelivery, pendingAttachments, phase, stopVoice, resetTranscript, authStale, founderNodeHeartbeating, accountHasPairedNode]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -1271,35 +1261,166 @@ export function MinimalDevWorkspace({
             </div>
           )}
         </div>
-        <div className='border-t border-white/5 px-2 py-2'>
-          <button onClick={() => setFullScreenPanel('social')} className='mb-1 block w-full rounded-md px-3 py-1.5 text-left text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-200'>Show social</button>
-          <button onClick={() => setFullScreenPanel('settings')} className='block w-full rounded-md px-3 py-1.5 text-left text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-200'>Show settings</button>
-        </div>
       </aside>
 
       <main className='flex min-h-0 min-w-0 flex-1 flex-col'>
-        {/* Today card */}
+        <div className='shrink-0 border-b border-white/5 bg-[#0a0a0f] px-3 py-2 sm:px-4'>
+          <div className='mx-auto flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-1.5 text-sm'>
+            <Link
+              href='/raise-room'
+              className='font-bold text-amber-300 transition hover:text-amber-200'
+            >
+              Raise Room
+            </Link>
+            <span className='hidden text-zinc-600 sm:inline' aria-hidden>
+              |
+            </span>
+            <button
+              type='button'
+              onClick={() => setFullScreenPanel('social')}
+              className='font-bold text-zinc-200 transition hover:text-white'
+            >
+              Show social
+            </button>
+            <span className='hidden text-zinc-600 sm:inline' aria-hidden>
+              |
+            </span>
+            <button
+              type='button'
+              onClick={() => setFullScreenPanel('settings')}
+              className='font-bold text-zinc-200 transition hover:text-white'
+            >
+              Show settings
+            </button>
+          </div>
+        </div>
+
+        {/* Founder Brain status */}
         <div className='shrink-0 border-b border-white/5 bg-[#0a0a0f] px-3 py-2 sm:px-4 sm:py-3'>
           <div className='mx-auto max-w-3xl'>
-            <div className='mb-2 flex items-center gap-3'>
-              <span className='text-xs font-semibold uppercase tracking-wider text-zinc-400'>Today</span>
-              <div className='ml-auto flex items-center gap-2'>
-                <select value={selectedIde} onChange={(e) => setSelectedIde(e.target.value)} className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-violet-400/40'>
-                  {IDES.map((ide) => (<option key={ide.key} value={ide.key}>{ide.label}</option>))}
+            <div className='mb-2 flex flex-wrap items-center gap-2'>
+              <div className='flex items-center gap-2'>
+                <span
+                  className={
+                    'h-2 w-2 rounded-full ' +
+                    (founderBrainOnline ? 'bg-emerald-400' : 'bg-zinc-600')
+                  }
+                />
+                <span className='text-sm font-semibold text-zinc-100'>Founder Brain</span>
+                <span className='text-xs text-zinc-500'>
+                  {founderBrainOnline ? 'Online' : 'Standby'}
+                </span>
+              </div>
+              <div className='ml-auto flex flex-wrap items-center gap-2'>
+                <select
+                  value={selectedIde}
+                  onChange={(e) => setSelectedIde(e.target.value)}
+                  className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-400/40'
+                  aria-label='IDE target'
+                >
+                  {IDES.map((ide) => (
+                    <option key={ide.key} value={ide.key}>
+                      {ide.label}
+                    </option>
+                  ))}
                 </select>
-                <select value={selectedBrain} onChange={(e) => setSelectedBrain(e.target.value)} className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'>
-                  {resolvedBrains.map((b) => (<option key={b.key} value={b.key}>{b.label} - {b.hint}</option>))}
+                <select
+                  value={founderBrainMode}
+                  onChange={(e) =>
+                    setFounderBrainMode(parseFounderBrainMode(e.target.value))
+                  }
+                  title={FOUNDER_BRAIN_MODE_HINTS[founderBrainMode]}
+                  className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs font-medium text-emerald-300 focus:outline-none focus:ring-1 focus:ring-emerald-400/40'
+                  aria-label='Founder Brain mode'
+                >
+                  {FOUNDER_BRAIN_MODES.map((mode) => (
+                    <option key={mode} value={mode} title={FOUNDER_BRAIN_MODE_HINTS[mode]}>
+                      Mode: {FOUNDER_BRAIN_MODE_LABELS[mode]}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
-            <div className='grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-3'>
-              <div className='flex items-center gap-2'><span className={'h-2 w-2 rounded-full ' + (founderNodeHeartbeating ? 'bg-emerald-400' : 'bg-zinc-600')} /><span className='text-zinc-500'>Founder Node</span><span className='ml-auto text-zinc-200'>{founderNodeHeartbeating ? 'Online' : accountHasPairedNode ? 'Offline' : 'Not paired'}</span></div>
-              <div className='flex items-center gap-2'><span className={'h-2 w-2 rounded-full ' + (cursorConnected ? 'bg-emerald-400' : 'bg-zinc-600')} /><span className='text-zinc-500'>Cursor</span><span className='ml-auto text-zinc-200'>{cursorConnected ? 'Connected' : 'Not connected'}</span></div>
-              <div className='flex items-center gap-2'><span className='text-zinc-500'>Repository</span><span className='ml-auto truncate text-zinc-200'>{repoName}</span></div>
-              <div className='flex items-center gap-2'><span className='text-zinc-500'>Branch</span><span className='ml-auto text-zinc-200'>{branchName}</span></div>
-              <div className='flex items-center gap-2'><span className='text-zinc-500'>AI</span><span className='ml-auto text-emerald-400'>{brainLabel}</span></div>
-              <div className='flex items-center gap-2'><span className='text-zinc-500'>Active Agents</span><span className='ml-auto text-zinc-200'>{agentCount}</span></div>
-              <div className='flex items-center gap-2'><span className='text-zinc-500'>Last Sync</span><span className='ml-auto text-zinc-400'>{timeAgo(lastSync)}</span></div>
+            <div className='flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400'>
+              <span>
+                Project: <span className='text-zinc-200'>{projectLabel}</span>
+              </span>
+              <span>
+                Repository: <span className='text-zinc-200'>{repoName}</span>
+              </span>
+              <span>
+                Workspace:{' '}
+                <span className={workspaceConnected ? 'text-emerald-400' : 'text-zinc-500'}>
+                  {workspaceConnected ? 'Connected' : 'Not connected'}
+                </span>
+              </span>
+              <span>
+                Context:{' '}
+                <span className={contextReady ? 'text-emerald-400' : 'text-zinc-500'}>
+                  {contextReady ? 'Ready' : 'Building…'}
+                </span>
+              </span>
+            </div>
+            <div className='mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs'>
+              <span className='text-zinc-500'>
+                AI Power:{' '}
+                <span className='font-semibold text-emerald-400'>{aiPowerPct}%</span>
+              </span>
+              <span className='text-zinc-500'>
+                Cost Saved Today:{' '}
+                <span className='font-semibold text-amber-300/90'>{costSavedPct}%</span>
+              </span>
+              <span
+                className='text-zinc-500'
+                title={FOUNDER_BRAIN_MODE_HINTS[founderBrainMode]}
+              >
+                Mode:{' '}
+                <span className='font-medium text-violet-200'>
+                  {FOUNDER_BRAIN_MODE_LABELS[founderBrainMode]}
+                </span>
+              </span>
+            </div>
+            <div className='mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-3'>
+              <div className='flex items-center gap-2'>
+                <span
+                  className={
+                    'h-2 w-2 rounded-full ' +
+                    (founderNodeHeartbeating ? 'bg-emerald-400' : 'bg-zinc-600')
+                  }
+                />
+                <span className='text-zinc-500'>Founder Node</span>
+                <span className='ml-auto text-zinc-200'>
+                  {founderNodeHeartbeating
+                    ? 'Online'
+                    : accountHasPairedNode
+                      ? 'Offline'
+                      : 'Not paired'}
+                </span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <span
+                  className={
+                    'h-2 w-2 rounded-full ' +
+                    (cursorConnected ? 'bg-emerald-400' : 'bg-zinc-600')
+                  }
+                />
+                <span className='text-zinc-500'>Cursor</span>
+                <span className='ml-auto text-zinc-200'>
+                  {cursorConnected ? 'Connected' : 'Not connected'}
+                </span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <span className='text-zinc-500'>Branch</span>
+                <span className='ml-auto text-zinc-200'>{branchName}</span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <span className='text-zinc-500'>Active Agents</span>
+                <span className='ml-auto text-zinc-200'>{agentCount}</span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <span className='text-zinc-500'>Last Sync</span>
+                <span className='ml-auto text-zinc-400'>{timeAgo(lastSync)}</span>
+              </div>
             </div>
             {authStale && (
               <div className='mt-3 rounded-lg border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-xs text-rose-200/90'>
@@ -1311,59 +1432,6 @@ export function MinimalDevWorkspace({
                 {accountHasPairedNode
                   ? 'Founder Node is offline on your PC. Messages queue on the server — open Founder Node on your desktop to deliver them to Cursor.'
                   : 'Pair Founder Node on your PC to relay phone messages into Cursor. Until then, dispatches stay queued on the server.'}
-              </div>
-            )}
-            {!realBrainsAvailable && (
-              <div className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
-                No AI key configured — using free fallback. Pick <span className='font-semibold'>Bring Your Own Key</span> below to paste a Z.ai/OpenAI key, or ask an admin to enable the promo pool.
-              </div>
-            )}
-            {selectedBrain === 'BYOK' && (
-              <div className='mt-3 rounded-lg border border-violet-400/20 bg-violet-500/[0.06] px-3 py-2.5 text-xs'>
-                <div className='flex flex-wrap items-center gap-2'>
-                  <span className='font-medium text-violet-200'>Your API key (Z.ai / OpenAI-compatible)</span>
-                  {byokConfigured && <span className='rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300'>Saved in browser</span>}
-                </div>
-                <p className='mt-1 text-zinc-400'>Stored locally in your browser only — never sent to the Founder OS database. Get a GLM 5.2 key from <a href='https://z.ai' target='_blank' rel='noreferrer' className='text-violet-300 underline hover:text-violet-200'>z.ai</a>; the OpenAI-compatible endpoint is <code className='text-zinc-300'>https://api.z.ai/api/coding/paas/v4</code>.</p>
-                <div className='mt-2 flex flex-wrap items-center gap-2'>
-                  <input
-                    type='password'
-                    value={byokDraft}
-                    onChange={(e) => setByokDraft(e.target.value)}
-                    placeholder={byokConfigured ? 'Enter a new key to replace…' : 'Paste your Z.ai / OpenAI key'}
-                    className='min-w-0 flex-1 rounded-lg border border-white/10 bg-[#12121a] px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-400/40'
-                  />
-                  <button
-                    type='button'
-                    disabled={!byokDraft.trim()}
-                    onClick={() => {
-                      const v = byokDraft.trim();
-                      if (v.length < 8) return;
-                      try { window.localStorage.setItem(BYOK_STORAGE_KEY, v); } catch { /* private mode */ }
-                      setByokKey(v);
-                      setByokDraft('');
-                    }}
-                    className='rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-violet-500 disabled:opacity-40'
-                  >
-                    Save key
-                  </button>
-                  {byokConfigured && (
-                    <button
-                      type='button'
-                      onClick={() => {
-                        try { window.localStorage.removeItem(BYOK_STORAGE_KEY); } catch { /* private mode */ }
-                        setByokKey('');
-                        setByokDraft('');
-                      }}
-                      className='rounded-lg bg-white/5 px-3 py-2 text-xs text-zinc-300 transition hover:bg-white/10'
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-                {!byokConfigured && (
-                  <p className='mt-2 text-[0.65rem] text-amber-300/80'>Paste and save a key before sending — BYOK routes your prompt directly through your key.</p>
-                )}
               </div>
             )}
           </div>
@@ -1408,7 +1476,7 @@ export function MinimalDevWorkspace({
                   </li>
                 </ol>
               </CollapsibleInfo>
-              <p className='mt-3 text-xs text-zinc-500'>Meanwhile, chat below works with any Brain - no Cursor key needed.</p>
+              <p className='mt-3 text-xs text-zinc-500'>Meanwhile, chat below works with Founder Brain — no IDE required.</p>
             </div>
           </div>
         )}
@@ -1454,7 +1522,7 @@ export function MinimalDevWorkspace({
           )}
           {showEmptyChatPlaceholder && (
             <div className='py-6 text-center text-sm text-zinc-600 sm:py-10'>
-              Ask anything. Founder OS will route your request to the right Brain and dispatch to your IDE.
+              Ask anything. Founder Brain routes by task complexity and dispatches to your IDE when needed.
             </div>
           )}
           {!selectedSession && (
@@ -1487,7 +1555,11 @@ export function MinimalDevWorkspace({
                       )}
                     </div>
                   )}
-                  {m.provider && !m.pending && m.role === 'assistant' && <p className='mt-1 text-xs text-zinc-500'>via {m.provider}</p>}
+                  {m.provider && !m.pending && m.role === 'assistant' && (
+                    <p className='mt-1 text-xs text-zinc-500'>
+                      {formatMessageProviderLabel(m.provider)}
+                    </p>
+                  )}
                   {m.role === 'assistant' && !m.pending && m.missingConnections && m.missingConnections.length > 0 && (
                     <InlineOnboarding
                       connections={m.missingConnections}

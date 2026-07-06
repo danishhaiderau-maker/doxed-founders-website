@@ -399,6 +399,19 @@ function MobileNavDrawer({
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-3">
+          <Link
+            href="/raise-room"
+            onClick={onClose}
+            className={cn(
+              'mb-3 flex items-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition',
+              navActive(pathname, '/raise-room')
+                ? 'border-amber-400/40 bg-amber-500/15 text-amber-50'
+                : 'border-amber-500/25 bg-amber-950/20 text-amber-200 hover:bg-amber-500/10',
+            )}
+          >
+            <span aria-hidden>🚀</span>
+            Raise Room
+          </Link>
           {filteredRows.map((row) => {
             const accent = sectionAccent(row.id);
             const isExpanded = expanded.has(row.id) || query.length > 0;
@@ -657,6 +670,18 @@ function SiteNavInner() {
         {/* Founder Chat launcher — placed before nav dropdowns (between brand and section links) */}
         <FounderChatLauncher />
 
+        <Link
+          href="/raise-room"
+          className={cn(
+            'hidden rounded-lg px-3 py-2 text-sm font-bold transition md:inline-flex',
+            navActive(pathname, '/raise-room')
+              ? 'bg-amber-500/20 text-amber-50 ring-1 ring-amber-400/40'
+              : 'text-amber-200/90 hover:bg-amber-500/10 hover:text-amber-50',
+          )}
+        >
+          Raise Room
+        </Link>
+
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
         <div className="hidden items-center gap-0.5 md:flex">
           {HUB_NAV_ROWS.map((row) => (
@@ -712,6 +737,18 @@ function SiteNavInner() {
 
       {/* Mobile section tabs — each opens its own dropdown, always visible */}
       <div className="flex items-center gap-1.5 md:hidden" aria-label="Sections">
+        <Link
+          href="/raise-room"
+          onClick={() => setOpenDropdown(null)}
+          className={cn(
+            'inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-bold transition',
+            navActive(pathname, '/raise-room')
+              ? 'border-amber-400/40 bg-amber-500/20 text-amber-50'
+              : 'border-amber-500/30 bg-amber-950/30 text-amber-200/90 hover:bg-amber-500/10',
+          )}
+        >
+          Raise Room
+        </Link>
         {HUB_NAV_ROWS.map((row) => {
           const accent = sectionAccent(row.id);
           const active = sectionHasActive(pathname, row, (item) => resolveHref(item) ?? '');

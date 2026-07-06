@@ -1440,7 +1440,16 @@ export class FounderCopilotService {
     }
   }
 
-  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null; provider?: string | null; userApiKey?: string | null }) {
+  async ask(
+    userId: string,
+    prompt: string,
+    options?: {
+      agentTemplate?: string | null;
+      provider?: string | null;
+      userApiKey?: string | null;
+      brainMode?: string | null;
+    },
+  ) {
     const text = prompt.trim();
     if (!text) throw new BadRequestException('Prompt required');
 
@@ -1655,7 +1664,7 @@ export class FounderCopilotService {
       shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
       isRecapOrHistoryPrompt(text);
 
-    const forcedProvider = this.resolveRequestedAiProvider(options?.provider);
+    const forcedProvider = this.resolveForcedAiProvider(options);
 
     // When the user explicitly selected a model (forceProvider), the LLM MUST be called.
     // Never bypass the LLM based on preferGrounded when a model is selected — the user's
@@ -1769,7 +1778,14 @@ export class FounderCopilotService {
   async askStream(
     userId: string,
     prompt: string,
-    options: { agentTemplate?: string | null; provider?: string | null; userApiKey?: string | null } | undefined,
+    options:
+      | {
+          agentTemplate?: string | null;
+          provider?: string | null;
+          userApiKey?: string | null;
+          brainMode?: string | null;
+        }
+      | undefined,
     emit: (event: CopilotStreamEvent) => void,
   ): Promise<void> {
     const text = prompt.trim();
@@ -1916,7 +1932,7 @@ export class FounderCopilotService {
         : '');
 
     const systemPrompt = `${FOUNDER_BRAIN_LIVE_FIRST_SYSTEM_PROMPT}`;
-    const forcedProvider = this.resolveRequestedAiProvider(options?.provider);
+    const forcedProvider = this.resolveForcedAiProvider(options);
 
     const preferGrounded =
       shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
@@ -2314,9 +2330,29 @@ export class FounderCopilotService {
     return lines.join('\n');
   }
 
+  private resolveForcedAiProvider(options?: {
+    provider?: string | null;
+    brainMode?: string | null;
+  }): AiProvider | null {
+    const explicit = this.resolveRequestedAiProvider(options?.provider);
+    if (explicit) return explicit;
+    return this.resolveBrainModeProvider(options?.brainMode);
+  }
+
+  /** Map user-facing Founder Brain mode to a forced provider, or null for automatic routing. */
+  private resolveBrainModeProvider(mode: string | null | undefined): AiProvider | null {
+    const m = mode?.trim().toLowerCase();
+    if (!m || m === 'automatic') return null;
+    if (m === 'fast') return AiProvider.GLM;
+    if (m === 'balanced') return null;
+    if (m === 'deep') return AiProvider.DEEPSEEK;
+    return null;
+  }
+
   private resolveRequestedAiProvider(providerKey: string | null | undefined): AiProvider | null {
     if (!providerKey?.trim()) return null;
     const key = providerKey.trim().toUpperCase();
+    if (key === 'AUTOMATIC' || key === 'FOUNDER_BRAIN') return null;
     // IDEs / build agents are NOT chat-completion brains. When the user
     // selects an IDE (Cursor, OpenHands, Claude Code, VS Code, Windsurf)
     // as the runtime target, we must NOT force it as the chat LLM — that

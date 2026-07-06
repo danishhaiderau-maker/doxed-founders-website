@@ -5068,7 +5068,11 @@ export function fetchCopilotSocialDraft(
 export function copilotAsk(
   prompt: string,
   token: string,
-  options?: { agentTemplate?: string | null; provider?: string | null },
+  options?: {
+    agentTemplate?: string | null;
+    provider?: string | null;
+    brainMode?: string | null;
+  },
 ) {
   return apiFetch<{
     answer: string;
@@ -5108,6 +5112,7 @@ export function copilotAsk(
         prompt,
         agentTemplate: options?.agentTemplate ?? undefined,
         provider: options?.provider ?? undefined,
+        brainMode: options?.brainMode ?? undefined,
       }),
     },
     token,
@@ -5153,7 +5158,12 @@ export type CopilotStreamHandlers = {
 export async function copilotAskStream(
   prompt: string,
   token: string,
-  options: { agentTemplate?: string | null; provider?: string | null; userApiKey?: string | null } | undefined,
+  options: {
+    agentTemplate?: string | null;
+    provider?: string | null;
+    userApiKey?: string | null;
+    brainMode?: string | null;
+  } | undefined,
   handlers: CopilotStreamHandlers,
 ): Promise<void> {
   let res: Response;
@@ -5170,6 +5180,7 @@ export async function copilotAskStream(
         prompt,
         agentTemplate: options?.agentTemplate ?? undefined,
         provider: options?.provider ?? undefined,
+        brainMode: options?.brainMode ?? undefined,
       }),
     });
   } catch {
