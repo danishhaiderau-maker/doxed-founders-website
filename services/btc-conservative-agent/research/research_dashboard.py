@@ -2220,6 +2220,7 @@ async function loadLanes() {
     return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
   }).join('') || '<tr><td colspan="12">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
 
+}
 async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());
   const d = await r.json();
