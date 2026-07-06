@@ -18,6 +18,7 @@ import { FounderDenService } from '../founder-den/founder-den.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import { DdollarRuntimeService } from '../ddollar/ddollar-runtime.service';
 import { isDdollarRuntimeEnabled } from '../ddollar/ddollar.constants';
+import { BusinessJourneyService } from './business-journey.service';
 import {
   DEMO_HANDLE_PREFIX,
   DEMO_SCALE_PRESETS,
@@ -102,6 +103,7 @@ export class DemoSeedService {
     private readonly founderDen: FounderDenService,
     private readonly founderOs: FounderOsService,
     private readonly ddollarRuntime: DdollarRuntimeService,
+    private readonly businessJourney: BusinessJourneyService,
   ) {}
 
   async getStatus() {
@@ -1052,6 +1054,12 @@ export class DemoSeedService {
         const count = await this.prisma.paperTrade.count({ where: { user: demoUserWhere() } });
         return { passed: count >= 10, detail: `${count} paper trades for demo users` };
       }),
+    );
+
+    checks.push(
+      await this.runCheck('golden_ddollar_business_journey', async () =>
+        this.businessJourney.runGoldenDdollarJourney(),
+      ),
     );
 
     const passed = checks.filter((c) => c.passed).length;
