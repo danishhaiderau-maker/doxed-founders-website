@@ -864,10 +864,10 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "dir": direction,
         "entry": entry,
         "qty": order.get("qty") or signal.get("qty"),
-        "leverage": state.get("leverage", 20),
+        "leverage": _state_leverage(),
         "entry_ts": fill_ts,
-        "sl": entry * (1 - sl_price_pct(state.get("leverage", 20))) if direction == "LONG" else entry * (1 + sl_price_pct(state.get("leverage", 20))),
-        "tp": compute_tp(entry, direction, TP_TARGET_PCT, state.get("leverage", 20)),
+        "sl": entry * (1 - sl_price_pct(_state_leverage())) if direction == "LONG" else entry * (1 + sl_price_pct(_state_leverage())),
+        "tp": compute_tp(entry, direction, TP_TARGET_PCT, _state_leverage()),
         "regime_birth": signal.get("regime", "UNKNOWN"),
         "strategy_birth": "SR",
         "conf": signal.get("ai_win_prob", ai.get("win_prob", 0)),
@@ -1728,7 +1728,7 @@ def unrealized_margin_pct(pos: dict, price: float = None) -> float:
         return 0.0
     dir_factor = 1 if pos.get("dir") == "LONG" else -1
     price_move = ((mark - entry) / entry) * dir_factor
-    return price_move * pos.get("leverage", 20) * 100
+    return price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * 100
 
 def check_thesis_invalidation(pos: dict, price: float) -> bool:
     if not THESIS_INVALIDATION_ENABLED:
@@ -3675,7 +3675,7 @@ FLAT_MARGIN_EVERY_TRADE = True
 MAX_SL_MARGIN_PCT = 30.0
 
 def sl_price_pct(leverage: int = None) -> float:
-    lev = max(int(leverage or state.get("leverage", 20) or 20), 1)
+    lev = max(int(leverage or _state_leverage()), 1)
     return MAX_SL_MARGIN_PCT / (lev * 100.0)
 
 SL_PCT = sl_price_pct(20)
@@ -13762,7 +13762,7 @@ def process_positions():
 
 def place_postonly_tp(pos, target_pct):
     entry = pos.get("entry", 0)
-    lev = pos.get("leverage", 20)
+    lev = pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
     direction = pos.get("dir")
     tp_price = compute_tp(entry, direction, target_pct, lev)
     order = {
@@ -13806,7 +13806,7 @@ def atomic_freeze_signal(signal, edge_score, pipeline_eff_thr=None):
         "edge_threshold_max": get_edge_threshold_max(),
         "edge_range_preset": state.get("edge_range_preset"),
         "ai_threshold": get_ai_threshold(),
-        "leverage": state.get("leverage"),
+        "leverage": _state_leverage(),
         "pullback_threshold": state.get("pullback_threshold")
     })
     signal["indicators"] = copy.deepcopy(state.get("ema_status", {}))
@@ -15459,7 +15459,7 @@ def execute_market_order(signal):
         enforce_log(signal, "BLOCKED_INSUFFICIENT_CAPITAL")
         exit_pipeline(signal, None, "BLOCKED_INSUFFICIENT_CAPITAL")
         return
-    qty = calc_position_qty(price, state.get("leverage", 20), signal.get("margin_usdt"))
+    qty = calc_position_qty(price, _state_leverage(), signal.get("margin_usdt"))
     assert qty > 0, "INVALID QTY"
     side = map_signal_to_exchange_side(signal["final_direction"])
     sim = simulate_market_fill(side, qty)
@@ -15522,7 +15522,7 @@ def create_limit_order(signal):
         return None
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return None
-    qty = calc_position_qty(price, state.get("leverage", 20))
+    qty = calc_position_qty(price, _state_leverage())
     assert qty > 0, "INVALID QTY"
     assert limit_price > 0, "INVALID LIMIT PRICE"
     order = {
@@ -15901,7 +15901,7 @@ def close_position(pos: dict, exit_reason: str):
         dir_factor = 1 if pos.get("dir") == "LONG" else -1
         price_move = ((price - entry) / entry) * dir_factor if entry > 0 else 0
         margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
-        gross_pnl = price_move * pos.get("leverage", 20) * margin_usdt
+        gross_pnl = price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * margin_usdt
 
         position_value_entry = entry * qty
         position_value_exit = price * qty
@@ -15979,7 +15979,7 @@ def close_position(pos: dict, exit_reason: str):
             "funding_fees_usd": round(funding_total, 2),
             "total_cost_usd": round(trading_fees + funding_total, 2),
             "exit_reason": exit_reason,
-            "leverage": pos.get("leverage", 20),
+            "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
             "ai_win_prob": pos.get("ai_win_prob") or master.get("ai_win_prob"),
             "ai_threshold": get_ai_threshold(),
@@ -17759,6 +17759,11 @@ def _buf_int(val, default=0):
 
 def _replay_leverage_default() -> int:
     return _buf_int(state.get("leverage"), DEFAULT_RESEARCH_LEVERAGE)
+
+
+def _state_leverage() -> int:
+    """Canonical showcase leverage — never fall back to legacy 20x on live paths."""
+    return max(1, int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE))
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
@@ -20274,7 +20279,7 @@ def _adopted_open_position_view(exch_pos: dict, trade_id: str, fill_price: float
     direction = "LONG" if side_raw in ("long", "buy") else "SHORT"
     entry = float(fill_price or exch_pos.get("entry") or 0)
     qty = abs(float(exch_pos.get("contracts") or exch_pos.get("amount") or 0))
-    lev = int(exch_pos.get("leverage") or state.get("leverage", 20) or 20)
+    lev = int(exch_pos.get("leverage") or _state_leverage())
     sl_pct = sl_price_pct(lev)
     sl_price = entry * (1 - sl_pct) if direction == "LONG" else entry * (1 + sl_pct)
     exit_cfg = get_exit_config_for_lane(RESEARCH_LANE_CONTINUOUS)
@@ -20683,7 +20688,7 @@ def build_paper_order_book() -> dict:
             continue
         entry = float(p.get("entry") or 0)
         qty = float(p.get("qty") or 0)
-        lev = int(p.get("leverage") or state.get("leverage") or 20)
+        lev = int(p.get("leverage") or _state_leverage())
         direction = p.get("dir")
         mark = price
         if direction == "LONG" and entry > 0:
@@ -20727,7 +20732,7 @@ def build_paper_order_book() -> dict:
             "current_price": price,
             "sl": o.get("sl"),
             "tp": o.get("tp"),
-            "leverage": int(o.get("leverage") or state.get("leverage") or 20),
+            "leverage": int(o.get("leverage") or _state_leverage()),
             "entry_ts": None,
             "entry_age_sec": None,
             "unrealized_pnl_usd": None,
@@ -20753,7 +20758,7 @@ def build_paper_order_book() -> dict:
             "current_price": None,
             "sl": None,
             "tp": None,
-            "leverage": int(t.get("leverage") or state.get("leverage") or 20),
+            "leverage": int(t.get("leverage") or _state_leverage()),
             "entry_ts": t.get("entry_ts"),
             "entry_age_sec": None,
             "unrealized_pnl_usd": None,
@@ -21186,8 +21191,8 @@ def _build_api_state_snapshot():
             pos_copy["mark_side"] = "depth_vwap" if float(pos.get("qty") or 0) > 0 else ("bid" if pos.get("dir") == "LONG" else "ask")
             dir_factor = 1 if pos["dir"] == "LONG" else -1
             move_pct = ((mark - pos["entry"]) / pos["entry"] * 100 * dir_factor) if mark and pos["entry"] else 0
-            pnl_usd = (move_pct / 100) * FIXED_MARGIN_USDT * pos.get("leverage", 20)
-            pnl_pct_margin = move_pct * pos.get("leverage", 20)
+            pnl_usd = (move_pct / 100) * FIXED_MARGIN_USDT * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
+            pnl_pct_margin = move_pct * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
             funding_acc = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
             pos_copy["pnl_pct_margin"] = pnl_pct_margin
             pos_copy["unreal_usd_gross"] = pnl_usd
@@ -22022,7 +22027,7 @@ def calc_position_qty(price, leverage, margin_usdt=None):
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.001)
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
         fee_buffer = 1 - (MAKER_FEE_PCT + TAKER_FEE_PCT)
-        notional = float(margin_usdt or FIXED_MARGIN_USDT) * (leverage or 20) * fee_buffer
+        notional = float(margin_usdt or FIXED_MARGIN_USDT) * (leverage or DEFAULT_RESEARCH_LEVERAGE) * fee_buffer
         if notional < min_notional:
             notional = min_notional
         qty = notional / price
@@ -23634,7 +23639,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "start_price": replay.get("start_price"),
             "ticks": replay.get("ticks", []),
             "direction": snapshot.get("direction") or replay.get("direction"),
-            "leverage": cfg.get("leverage", state.get("leverage", 20)),
+            "leverage": cfg.get("leverage", _state_leverage()),
             "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
             "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
             "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
@@ -23905,6 +23910,14 @@ def load_persistent_config():
                     state["_threshold_locked"] = config["_threshold_locked"]
         with state_lock:
             lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE) or DEFAULT_RESEARCH_LEVERAGE)
+            leverage_raised = False
+            if lev < DEFAULT_RESEARCH_LEVERAGE:
+                state["leverage"] = DEFAULT_RESEARCH_LEVERAGE
+                logger.warning(
+                    f"[CONFIG] Raised leverage {lev} -> {DEFAULT_RESEARCH_LEVERAGE}x [PIPELINE ENFORCEMENT]"
+                )
+                lev = DEFAULT_RESEARCH_LEVERAGE
+                leverage_raised = True
             if lev > MAX_RESEARCH_LEVERAGE:
                 state["leverage"] = MAX_RESEARCH_LEVERAGE
                 logger.warning(
@@ -23940,6 +23953,8 @@ def load_persistent_config():
                         if k in raw_sg:
                             out_sg[k] = bool(raw_sg[k])
                 state["spread_gate"] = out_sg
+        if leverage_raised:
+            save_persistent_config()
         logger.info(f"Loaded persistent config from {config_path} - ai_threshold restored")
 
 def save_persistent_config():
