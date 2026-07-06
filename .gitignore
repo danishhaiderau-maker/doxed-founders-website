@@ -12,6 +12,7 @@ build/
 *.tsbuildinfo
 apps/founder-node/release/
 apps/founder-node/release-*/
+apps/founder-node/app.asar
 .tools/
 apps/mobile-android/android/.gradle/
 apps/mobile-android/android/app/build/
@@ -137,6 +138,11 @@ services/btc-conservative-agent/research/*_report.json
 services/btc-conservative-agent/research/genome/data_integrity_audit.json
 # Tracked source lives at services/btc-conservative-agent/research/genome/ — do NOT
 # broaden the research/ ignore to the whole subtree; only ignore the runtime dirs above.
+# Runtime reports at research/ root (README.md stays tracked).
+services/btc-conservative-agent/research/*.json
+services/btc-conservative-agent/research/*.txt
+services/btc-conservative-agent/research/*.html
+!services/btc-conservative-agent/research/README.md
 
 # Local-only dev scripts (personal machine launchers / probes)
 scripts/win1.ps1
