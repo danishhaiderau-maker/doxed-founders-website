@@ -1129,7 +1129,7 @@ export function MinimalDevWorkspace({
               patch((msg) => ({ ...msg, thinking: false, text: msg.text + text }));
             }
           },
-          onDone: ({ answer, answerProvider, missingConnections, llmErrors }) => {
+          onDone: ({ answer, answerProvider: _answerProvider, missingConnections, llmErrors }) => {
             patch((msg) => ({
               ...msg,
               pending: false,

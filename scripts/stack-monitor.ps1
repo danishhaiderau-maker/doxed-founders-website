@@ -34,10 +34,28 @@ $botCode = Probe "http://127.0.0.1:7002/api/ping"
 $anCode = Probe "http://127.0.0.1:9001/"
 $bridgeCode = Probe "http://127.0.0.1:7810/health"
 $tunnelCode = Probe "https://bot.doxxedcrypto.digital/api/ping" 15
+$tunnelRestartGraceSec = 180
+$tunnelRestartFile = Join-Path $repoRoot ".home-tunnel-restarting"
+$tunnelInRestartGrace = $false
+if ($tunnelCode -ne 200 -and (Test-Path $tunnelRestartFile)) {
+  try {
+    $restartTs = [datetimeoffset]::Parse((Get-Content $tunnelRestartFile -Raw).Trim()).UtcDateTime
+    $tunnelInRestartGrace = (((Get-Date).ToUniversalTime() - $restartTs).TotalSeconds -le $tunnelRestartGraceSec)
+  } catch { $tunnelInRestartGrace = $false }
+}
+if ($tunnelCode -eq 200 -and (Test-Path $tunnelRestartFile)) {
+  Remove-Item $tunnelRestartFile -Force -ErrorAction SilentlyContinue
+}
 if ($botCode -ne 200)    { $abnormalities += "bot_offline_ping=$botCode" }
 if ($anCode -ne 200)     { $abnormalities += "analyzer_offline_ping=$anCode" }
 if ($bridgeCode -ne 200) { $abnormalities += "bridge_offline_ping=$bridgeCode" }
-if ($tunnelCode -ne 200) { $abnormalities += "tunnel_offline_ping=$tunnelCode" }
+if ($tunnelCode -ne 200) {
+  if ($tunnelInRestartGrace -and $botCode -eq 200) {
+    $warnings += "tunnel_restart_grace_ping=$tunnelCode"
+  } else {
+    $abnormalities += "tunnel_offline_ping=$tunnelCode"
+  }
+}
 
 # 2. Railway API + Neon DB (via the API health endpoint)
 $apiCode = Probe "https://doxxedcrypto.digital/api/health" 20

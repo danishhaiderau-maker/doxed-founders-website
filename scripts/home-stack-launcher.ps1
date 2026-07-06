@@ -41,8 +41,11 @@ function Test-BridgeAlreadyBound([int]$ProbePort) {
 
 if (Test-BridgeAlreadyBound $Port) {
   $Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port (already running)"
-  Write-Host "Bridge already OK on :$Port (skipping second listener) - close this window." -ForegroundColor Green
-  Start-Sleep -Seconds 4
+  Write-Host "Bridge already OK on :$Port (skipping second listener) - auto-closing duplicate window." -ForegroundColor Green
+  try {
+    $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
+    if ($parent -gt 0) { Stop-Process -Id $parent -Force -ErrorAction SilentlyContinue }
+  } catch { }
   exit 0
 }
 
