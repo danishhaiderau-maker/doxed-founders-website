@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix analyzer auto-restart monitor self-kill on startup.
+Use PowerShell $PID in analyzer auto-restart stale-monitor cleanup.
 
 ## Last Activity
 
