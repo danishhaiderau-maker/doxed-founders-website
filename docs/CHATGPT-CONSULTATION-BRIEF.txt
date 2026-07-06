@@ -183,4 +183,61 @@ Production: https://doxxedcrypto.digital — Raise Room at /raise-room
 
 This document is product engineering context only. Not legal, financial, or investment advice.
 
+PLATFORM SNAPSHOT (FOR CONTEXT)
+-------------------------------
+Doxxed Crypto is a hybrid monorepo: Next.js 15 web on Vercel, NestJS API on Railway, Neon Postgres, optional Founder Node desktop vault. Public site: doxxedcrypto.digital. Raise Room: /raise-room. Trust Center and List Project gate who can open Proof Raise windows.
+
+We serve three overlapping personas:
+  • Scouts / community — discover projects, validate in Trust Center, paper trade, earn DDollar Proof of Contribution
+  • Founders — build in Founder OS, list projects, earn launch qualification, open Proof Raise when eligible
+  • Traders — paper desk, agent hub showcase, optional signal API (informational only; self-execute)
+
+DDollar today is off-chain reputationPoints plus PointLedger — not an SPL token. Paper trading uses virtual USD with no brokerage relationship. SimulatedRaise debits paper cash for conviction signals; nothing moves on-chain in Phase 1.
+
+COMPETITOR FRAMING (YOUR GUIDANCE)
+----------------------------------
+We position against Product Hunt (discovery), GitHub (build proof), AngelList (founder identity), Kickstarter (demand validation), and YC (milestone narrative) — not Pump.fun or anon bonding-curve deployers. Speed-to-coin is an anti-goal. Trust accrual is the moat.
+
+MANDATORY PIPELINE — OPERATIONAL DETAIL
+---------------------------------------
+Step 1 — List Project: founder submits ListingApplication; community votes; admin approves; Project record created.
+Step 2 — Trust Review: Trust Center categories, investigations, scout votes; weighted validation score.
+Step 3 — Community Validation: validation signals on Raise tab (Phase 1 RR-003); sync with Trust Center.
+Step 4 — Raise Room: founder opens Proof Raise only after launch qualification (Phase 1 RR-005); community commits paper conviction; 1% paper burn on allocation fee.
+Step 5 — Launch Qualification: six gates (followers, paper $, community score, AI pass, identity, Founder Launch Score).
+Step 6 — Founder Graduation: snapshot + export; composite scores displayed at unlock; allocation registration CSV.
+Step 7 — Founder Exchange (Phase 3): graduated projects only; Jupiter swaps; trust metadata on pair pages.
+
+FOUNDER SCORE COMPONENTS (AT GRADUATION UNLOCK)
+------------------------------------------------
+  Builder .......... GitHub, commits, verified builder tier
+  Trust ............ Trust Center weighted validation, investigation status
+  Community ........ Validation signals, follower engagement
+  Scout ............ EarlyScoutRecord, scout accuracy (Phase 2 ScoutProfile)
+  Build ............ Videos, build posts, Startup Genome transparency
+  Delivery ......... Launch readiness, milestone completion
+
+Overall Founder Launch Score 0–100 gates Proof Raise alongside the five other qualification checks.
+
+REGULATORY ENGINE — PLANNED UX (PHASE 2)
+----------------------------------------
+Founder completes questionnaire before token metadata or real economic features unlock. Outcomes:
+  Community Project — paper + DDollar simulation only
+  Utility Token — metadata + swap after graduation; no raise vault
+  Governance Token — enhanced disclosure for voting rights
+  Capital Raise — block raise UI; show "consult AU fintech counsel" only; no legal advice from platform
+  Restricted — admin review; graduation blocked
+
+Australian separation we intend to reflect in copy: company operates community software; blockchain is settlement for user-initiated transactions; users retain self-custody. Platform does not hold user funds in Phases 1–3.
+
+PHASE 1 CODE SHIPPED (RR-001 + RR-006 START)
+--------------------------------------------
+  • Proof Raise / Founder Graduation rebrand on /raise-room, raise-room-panel, project-room, founder-den success copy
+  • API strings: ICO slots → Proof Raise slots; launchpad errors → launch qualification
+  • ProjectMaturity enum (packages/utils/project-maturity.ts) + ProjectMaturityBadge on heatmap rows
+  • Heatmap API returns lifecycleStage for maturity display
+  • Zero user-visible "ICO" on Raise Room surfaces
+
+Remaining Phase 1 sprint: RR-002 through RR-005 (Founder Launch Score, validation signals, conviction trending, eligibility bar).
+
 END BRIEF
