@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: incorporate Architecture Review v2 — regulatory engine and launch score roadmap
+Expand ChatGPT consultation brief txt to full paste length.
 
 ## Last Activity
 
