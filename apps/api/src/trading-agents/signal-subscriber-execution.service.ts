@@ -2071,11 +2071,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const maxByMargin = Math.max(0, Math.floor((available * 0.95) / marginCap));
     const maxLegs = Math.min(maxConcurrent, maxByMargin);
+    const minRequired = marginCap * 0.9;
 
     if (totalLegs >= maxLegs) {
+      if (maxLegs <= 0 || available < minRequired) {
+        return {
+          canEnter: false,
+          reason: `Insufficient Derivatives margin ($${available.toFixed(2)} available, need ~$${marginCap} per leg).`,
+          availableUsd: available,
+          slotsRemaining: 0,
+        };
+      }
       return {
         canEnter: false,
-        reason: `Max ${maxConcurrent} concurrent signals (showcase dashboard) — ${totalLegs} active (${managed.open} open, ${managed.pending} pending).`,
+        reason: `Capacity cap: OPEN(${managed.open}) + PENDING(${managed.pending}) = ${totalLegs} >= limit ${maxLegs} (showcase max_active_signals).`,
         availableUsd: available,
         slotsRemaining: 0,
       };
@@ -2099,7 +2108,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
 
-    const minRequired = marginCap * 0.9;
     if (available < minRequired) {
       return {
         canEnter: false,
@@ -2115,6 +2123,52 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       availableUsd: available,
       slotsRemaining: maxLegs - totalLegs,
     };
+  }
+
+  /**
+   * Showcase filled OPEN while copy still holds a resting limit for the same
+   * trade_id. Cancel the stale limit so mirror catch-up can market-enter.
+   */
+  private async clearPendingForShowcaseCatchup(
+    agentId: string,
+    userId: string,
+    participant: { id: string; cycleId: string },
+    creds: ExchangeCredentials,
+  ): Promise<boolean> {
+    const meta = await this.loadExecutionMeta(participant.id);
+    const orderId = meta.bitfinexOrderId;
+    if (orderId) {
+      const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+      if (fill) {
+        this.logger.warn(
+          `[MIRROR-CATCHUP] pending ${participant.id} trade had real fill before clear — deferring to fill path`,
+        );
+        return false;
+      }
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        orderId,
+        `Showcase catch-up clear ${userId} cycle=${participant.cycleId} cancel stale limit ${orderId}`,
+      );
+      if (!cancel.gone) {
+        this.logger.warn(
+          `[MIRROR-CATCHUP] could not clear pending ${participant.id} order ${orderId} — cancel failed`,
+        );
+        return false;
+      }
+    }
+
+    await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXPIRED', {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'SHOWCASE_FILLED_CATCHUP_CLEAR',
+      pnl_usd: 0,
+      bitfinex_order_id: orderId ?? undefined,
+    });
+    this.logger.warn(
+      `[MIRROR-CATCHUP] cleared stale pending ${participant.id} cycle=${participant.cycleId} for showcase catch-up`,
+    );
+    return true;
   }
 
   /**
@@ -4571,11 +4625,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const tradeId = pos.trade_id!;
 
-      // Entry action already in flight or filled for this trade_id.
-      const hasCopy = openParticipants.some(
+      const matching = openParticipants.filter(
         (p) => p.cycle?.tradeId && tradeIdsMatch(p.cycle.tradeId, tradeId),
       );
-      if (hasCopy) continue;
+      if (matching.some((p) => p.status === SignalCycleStatus.OPEN)) continue;
+      if (matching.some((p) => p.status === SignalCycleStatus.INTENT)) continue;
+
+      const pendingMatch = matching.find((p) => p.status === SignalCycleStatus.PENDING_ENTRY);
+      if (pendingMatch) {
+        const cleared = await this.clearPendingForShowcaseCatchup(
+          agentId,
+          instance.userId,
+          pendingMatch,
+          creds,
+        );
+        if (!cleared) continue;
+        lotSummary.pending = Math.max(0, lotSummary.pending - 1);
+      }
 
       const showcaseEntry = typeof pos.entry === 'number' && pos.entry > 0 ? pos.entry : mark;
       const slipUsd = Math.abs(mark - showcaseEntry);
