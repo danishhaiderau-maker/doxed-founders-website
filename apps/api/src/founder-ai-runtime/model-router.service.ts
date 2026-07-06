@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { classifyFounderBrainTask } from '@dcf/utils';
+import { FounderBrainProvidersService } from './founder-brain-providers.service';
 import type {
   AiRuntimeIntent,
   AiRuntimeRequest,
@@ -16,6 +17,8 @@ const SIMPLE_PATTERN =
 
 @Injectable()
 export class ModelRouterService {
+  constructor(private readonly brainProviders: FounderBrainProvidersService) {}
+
   classifyIntent(request: AiRuntimeRequest): AiRuntimeIntent {
     const text = `${request.userPrompt} ${request.section}`;
     if (request.section === 'wall_summarizer') return 'summarize';
@@ -33,57 +36,77 @@ export class ModelRouterService {
 
   route(request: AiRuntimeRequest): ModelRoute {
     const intent = this.classifyIntent(request);
-    const fastModel = process.env.AI_RUNTIME_FAST_MODEL?.trim() || 'deepseek-chat';
-    const reasoningModel =
-      process.env.AI_RUNTIME_REASONING_MODEL?.trim() || 'deepseek-reasoner';
-    const codeModel = process.env.AI_RUNTIME_CODE_MODEL?.trim() || 'glm-5.2';
+    const cfg = this.brainProviders.getSyncConfig();
+    const fastModel = cfg.fastModel;
+    const codingModel = cfg.codingModel;
+    const fastProvider = cfg.fastProvider;
+    const codingProvider = cfg.codingProvider;
+    const twoModel = cfg.twoModelRoutingEnabled;
+
+    let route: ModelRoute;
 
     switch (intent) {
       case 'code':
-        return {
+        route = {
           intent,
-          providerKey: 'glm',
-          model: codeModel,
+          providerKey: twoModel ? codingProvider : 'glm',
+          model: codingModel,
           tier: 'code',
         };
+        break;
       case 'reasoning':
-        return {
+        route = {
           intent,
-          providerKey: 'deepseek',
-          model: reasoningModel,
+          providerKey: twoModel ? codingProvider : 'deepseek',
+          model: twoModel && codingProvider === 'glm' ? codingModel : fastModel,
           tier: 'reasoning',
         };
+        break;
       case 'summarize':
-        return {
+        route = {
           intent,
-          providerKey: 'glm',
+          providerKey: twoModel ? fastProvider : 'glm',
           model: fastModel,
           tier: 'fast',
         };
+        break;
       case 'social_draft':
-        return {
-          intent,
-          providerKey: 'deepseek',
-          model: fastModel,
-          tier: 'fast',
-        };
       case 'simple_qa':
-        return {
+        route = {
           intent,
-          providerKey: 'deepseek',
+          providerKey: twoModel ? fastProvider : 'deepseek',
           model: fastModel,
           tier: 'fast',
         };
+        break;
       default:
-        return this.defaultRouteForSection(request.section, intent);
+        route = this.defaultRouteForSection(request.section, intent, twoModel, fastProvider, fastModel);
+        break;
     }
+
+    return this.brainProviders.resolveRouteProviders(route);
   }
 
-  private defaultRouteForSection(section: AiRuntimeSection, intent: AiRuntimeIntent): ModelRoute {
-    const fastModel = process.env.AI_RUNTIME_FAST_MODEL?.trim() || 'deepseek-chat';
+  private defaultRouteForSection(
+    section: AiRuntimeSection,
+    intent: AiRuntimeIntent,
+    twoModel: boolean,
+    fastProvider: string,
+    fastModel: string,
+  ): ModelRoute {
     if (section === 'wall_summarizer') {
-      return { intent, providerKey: 'glm', model: fastModel, tier: 'fast' };
+      return {
+        intent,
+        providerKey: twoModel ? fastProvider : 'glm',
+        model: fastModel,
+        tier: 'fast',
+      };
     }
-    return { intent, providerKey: 'deepseek', model: fastModel, tier: 'fast' };
+    return {
+      intent,
+      providerKey: twoModel ? fastProvider : 'deepseek',
+      model: fastModel,
+      tier: 'fast',
+    };
   }
 }

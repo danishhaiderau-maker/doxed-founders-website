@@ -2551,6 +2551,124 @@ export function fetchDemandHeatmap() {
   >('/founder-den/demand-heatmap');
 }
 
+export type RaiseRoomFilter =
+  | 'trending'
+  | 'newest'
+  | 'almost_qualified'
+  | 'ai_picks'
+  | 'high_conviction'
+  | 'near_graduation'
+  | 'needs_review';
+
+export interface RaiseRoomProjectCard {
+  raiseId: string;
+  slug: string;
+  name: string;
+  ticker: string;
+  summary: string | null;
+  logoUrl: string | null;
+  category: { slug: string; name: string } | null;
+  chain: { slug: string; name: string } | null;
+  goalUsd: number;
+  paperConviction: number;
+  demandPct: number;
+  momentumScore: number;
+  allocatorCount: number;
+  followerCount: number;
+  scoutInterest: number;
+  launchEtaDays: number;
+  endsAt: string | null;
+  founderVerified: boolean;
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    reputationScore: number;
+    buildStreakDays: number;
+  } | null;
+  rewardTier: string;
+  communityAllocationPct: number;
+  allocationFeePercent: number;
+  launchQualityScore: number;
+  launchQualityTier: string;
+  launchQualityBreakdown: {
+    founder: number;
+    community: number;
+    aiReview: number;
+    transparency: number;
+    code: number;
+  };
+  launchStage: string;
+  launchStageProgress: {
+    currentStage: string;
+    nextStage: string | null;
+    steps: { key: string; label: string; complete: boolean; current: boolean }[];
+  };
+  lifecycleSteps: { key: string; label: string; complete: boolean; current: boolean }[];
+  lifecycleStage: string;
+  validationCounts: { category: string; label: string; count: number }[];
+  validationTally: { yesPercent: number; totalReports: number };
+  aiSummary: string;
+  lastUpdateHeadline: string | null;
+  createdAt: string;
+  needsReview: boolean;
+  nearGraduation: boolean;
+}
+
+export interface RaiseRoomDashboard {
+  demoMode: boolean;
+  hasData: boolean;
+  stats: {
+    paperConvictionTotal: number;
+    activeFounders: number;
+    activeRaises: number;
+    launchesWaiting: number;
+    trendingCount: number;
+    communityScore: number;
+  };
+  trending: RaiseRoomProjectCard[];
+  activityFeed: {
+    id: string;
+    type: string;
+    title: string;
+    source: string;
+    at: string;
+    project: { slug: string; name: string; ticker: string } | null;
+    user: { name: string | null; handle: string | null } | null;
+  }[];
+  leaderboards: {
+    topFounders: { rank: number; slug: string; name: string; photoUrl: string | null; score: number; buildStreakDays: number }[];
+    topScouts: { rank: number; name: string | null; handle: string | null; points: number; tier: string }[];
+    topBuilders: { rank: number; slug: string; name: string; photoUrl: string | null; buildStreakDays: number; score: number }[];
+    topDdollarEarners: { rank: number; name: string | null; handle: string | null; earned: number }[];
+  };
+  scoutLeaderboardWeek: { rank: number; name: string | null; handle: string | null; weeklyPoints: number }[];
+  rewardTiers: { tier: string; communityPercent: number; feePercent: number; minScore: number }[];
+  communityAllocation: {
+    paperContributors: number;
+    reviewers: number;
+    scouts: number;
+    builders: number;
+  };
+  marketplaceNeeds: { slug: string; label: string; href: string }[];
+  validationActions: { category: string; label: string }[];
+}
+
+export function fetchRaiseRoomDashboard() {
+  return apiFetch<RaiseRoomDashboard>('/raise-room/dashboard');
+}
+
+export function fetchRaiseRoomProjects(filter: RaiseRoomFilter = 'trending', limit = 48) {
+  const qs = new URLSearchParams({ filter, limit: String(limit) });
+  return apiFetch<{
+    filter: RaiseRoomFilter;
+    projects: RaiseRoomProjectCard[];
+    total: number;
+    demoMode: boolean;
+    hasData: boolean;
+  }>(`/raise-room/projects?${qs.toString()}`);
+}
+
 export function createBuildPost(
   data: { headline: string; body: string; projectId?: string; dayNumber?: number; githubUrl?: string },
   token: string,
@@ -3564,6 +3682,66 @@ export function saveAdminFounderPromoCredentials(
     { method: 'POST', body: JSON.stringify(body) },
     token,
   );
+}
+
+export type FounderBrainProviderKeyStatus = {
+  configured: boolean;
+  source: 'env' | 'promo' | 'routing' | 'platform_brain' | null;
+  last4: string | null;
+};
+
+export type FounderBrainProvidersSettings = {
+  twoModelRoutingEnabled: boolean;
+  fastProvider: 'deepseek' | 'glm';
+  codingProvider: 'deepseek' | 'glm';
+  defaultMode: 'automatic' | 'fast' | 'balanced' | 'deep';
+  fastModel: string;
+  codingModel: string;
+  keys: {
+    deepseek: FounderBrainProviderKeyStatus;
+    glm: FounderBrainProviderKeyStatus;
+  };
+  glmApiBase: string;
+  updatedAt: string | null;
+};
+
+export type FounderBrainProviderTestResult = {
+  provider: 'deepseek' | 'glm';
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+};
+
+export function fetchFounderBrainProviders(token: string) {
+  return apiFetch<FounderBrainProvidersSettings>(
+    '/admin-control/founder-brain-providers',
+    undefined,
+    token,
+  );
+}
+
+export function updateFounderBrainProviders(
+  token: string,
+  body: Partial<
+    Pick<
+      FounderBrainProvidersSettings,
+      'twoModelRoutingEnabled' | 'fastProvider' | 'codingProvider' | 'defaultMode' | 'fastModel' | 'codingModel'
+    >
+  >,
+) {
+  return apiFetch<FounderBrainProvidersSettings>(
+    '/admin-control/founder-brain-providers',
+    { method: 'PATCH', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function testFounderBrainProviders(token: string, provider?: 'deepseek' | 'glm') {
+  return apiFetch<FounderBrainProviderTestResult | FounderBrainProviderTestResult[]>(
+    '/admin-control/founder-brain-providers/test',
+    { method: 'POST', body: JSON.stringify(provider ? { provider } : {}) },
+    token,
+  ).then((res) => (Array.isArray(res) ? res : [res]));
 }
 
 export type BuilderTierBreakdown = {

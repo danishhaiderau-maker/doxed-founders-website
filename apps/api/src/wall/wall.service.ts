@@ -806,9 +806,11 @@ export class WallService {
     try {
       const runtimeResult = await this.founderAiRuntime.complete(
         runtimeRequest,
-        async (_route, invokeCtx) => {
+        async (route, invokeCtx) => {
           const result = await this.aiInvoker.invoke({
             section: 'wall_summarizer',
+            providerKey: route.providerKey,
+            model: route.model,
             messages: [
               { role: 'system', content: invokeCtx.request.system },
               { role: 'user', content: invokeCtx.request.userPrompt },

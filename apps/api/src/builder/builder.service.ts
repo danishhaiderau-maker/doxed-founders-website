@@ -69,12 +69,12 @@ import { AgentRuntimeService } from './agent-runtime.service';
 import { isAgentRunActive } from '@dcf/utils';
 import {
   FounderPromoService,
-  GLM_PROMO_BASE_URL,
-  GLM_PROMO_DEFAULT_MODEL,
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
+import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
 import { AiInvokerService } from '../ai-routing/ai-invoker.service';
 import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
+import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
@@ -118,6 +118,7 @@ export class BuilderService {
     private readonly founderPromo: FounderPromoService,
     private readonly aiInvoker: AiInvokerService,
     private readonly founderAiRuntime: FounderAiRuntimeService,
+    private readonly brainProviders: FounderBrainProvidersService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -1187,6 +1188,59 @@ export class BuilderService {
       if (cached) return cached;
     }
 
+    if (
+      this.brainProviders.isTwoModelRoutingEnabled() &&
+      !options?.forceProvider &&
+      !options?.userApiKey
+    ) {
+      const runtimeResult = await this.founderAiRuntime.complete(
+        preparedRequest,
+        async (route, ctx) => {
+          try {
+            const result = await this.aiInvoker.invoke({
+              section: 'copilot',
+              providerKey: route.providerKey,
+              model: route.model,
+              messages: [
+                { role: 'system', content: ctx.request.system },
+                { role: 'user', content: ctx.request.userPrompt },
+              ],
+              temperature: 0.4,
+              maxTokens: ctx.maxOutputTokens,
+              userId,
+              billingSource: 'platform_routed',
+            });
+            return {
+              ok: true,
+              text: result.content,
+              provider: route.providerKey,
+              model: result.model,
+              promptTokens: result.usage.promptTokens,
+              completionTokens: result.usage.completionTokens,
+            };
+          } catch {
+            return {
+              ok: false,
+              intent: route.intent,
+              model: route.model,
+              cacheHit: false,
+            };
+          }
+        },
+      );
+      if (runtimeResult.ok && runtimeResult.text?.trim()) {
+        const mapped = {
+          ok: true as const,
+          text: runtimeResult.text.trim(),
+          provider: this.enumProviderForRoutingKey(String(runtimeResult.provider ?? 'deepseek')),
+          founderBrainTask,
+        };
+        return this.shouldUseCopilotRuntimeCache(options)
+          ? this.returnCopilotSuccess(preparedRequest, mapped)
+          : mapped;
+      }
+    }
+
     // AI Routing hook: if an admin routed the `copilot` section to an enabled
     // provider with a key, prefer the generic invoker and skip the cascade.
     if (!options?.forceProvider && !options?.userApiKey) {
@@ -1745,11 +1799,11 @@ export class BuilderService {
         );
       case AiProvider.GLM:
         return yield* this.streamOpenAiCompatible(
-          `${GLM_PROMO_BASE_URL}/chat/completions`,
+          `${getGlmApiBaseUrl()}/chat/completions`,
           apiKey,
           system,
           userPrompt,
-          model ?? GLM_PROMO_DEFAULT_MODEL,
+          model ?? getGlmDefaultModel(),
         );
       case AiProvider.DEEPSEEK:
         return yield* this.streamOpenAiCompatible(
@@ -2881,7 +2935,7 @@ export class BuilderService {
         return { accountName: 'OpenAI account' };
       }
       case 'glm': {
-        const res = await fetch(`${GLM_PROMO_BASE_URL}/models?limit=1`, {
+        const res = await fetch(`${getGlmApiBaseUrl()}/models?limit=1`, {
           headers: { Authorization: `Bearer ${key}` },
         });
         if (!res.ok) throw new BadRequestException('Invalid GLM (ZhipuAI) API key');
@@ -2987,11 +3041,11 @@ export class BuilderService {
 
   /** GLM 5.2 (ZhipuAI) — OpenAI-compatible endpoint, cheapest promo LLM. */
   private async callGlm(key: string, system: string, user: string, model?: string) {
-    const res = await fetch(`${GLM_PROMO_BASE_URL}/chat/completions`, {
+    const res = await fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model ?? GLM_PROMO_DEFAULT_MODEL,
+        model: model ?? getGlmDefaultModel(),
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

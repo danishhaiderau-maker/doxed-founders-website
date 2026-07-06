@@ -97,9 +97,11 @@ export class ShareService {
     try {
       const runtimeResult = await this.founderAiRuntime.complete(
         runtimeRequest,
-        async (_route, ctx) => {
+        async (route, ctx) => {
           const result = await this.aiInvoker.invoke({
             section: 'share_paraphrase',
+            providerKey: route.providerKey,
+            model: route.model,
             messages: [
               { role: 'system', content: ctx.request.system },
               { role: 'user', content: ctx.request.userPrompt },

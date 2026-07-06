@@ -9,6 +9,9 @@ import { ShowcaseRuntimeService } from './showcase-runtime.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { BuilderScoreService } from '../founder-os/builder-score.service';
+import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
+import type { FounderBrainProviderSlug } from '../founder-ai-runtime/founder-brain-providers.types';
+import { parseFounderBrainMode } from '@dcf/utils';
 
 @SkipThrottle()
 @Controller('admin-control')
@@ -19,6 +22,7 @@ export class AdminControlController {
     private readonly tradingAgents: TradingAgentsService,
     private readonly founderPromo: FounderPromoService,
     private readonly builderScore: BuilderScoreService,
+    private readonly founderBrainProviders: FounderBrainProvidersService,
   ) {}
 
   @Public()
@@ -173,5 +177,41 @@ export class AdminControlController {
   @Post('builder-breakdown/flag')
   flagParasite(@Body() body: { userId: string }) {
     return this.builderScore.flagParasite(body.userId).then(() => ({ ok: true }));
+  }
+
+  @UseGuards(AdminGuard)
+  @Get('founder-brain-providers')
+  getFounderBrainProviders() {
+    return this.founderBrainProviders.getAdminView();
+  }
+
+  @UseGuards(AdminGuard)
+  @Patch('founder-brain-providers')
+  updateFounderBrainProviders(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: Partial<{
+      twoModelRoutingEnabled: boolean;
+      fastProvider: FounderBrainProviderSlug;
+      codingProvider: FounderBrainProviderSlug;
+      defaultMode: string;
+      fastModel: string;
+      codingModel: string;
+    }>,
+  ) {
+    const { defaultMode, ...rest } = body;
+    return this.founderBrainProviders.updateSettings(user.id, {
+      ...rest,
+      ...(defaultMode !== undefined ? { defaultMode: parseFounderBrainMode(defaultMode) } : {}),
+    });
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('founder-brain-providers/test')
+  testFounderBrainProviders(@Body() body: { provider?: 'deepseek' | 'glm' }) {
+    if (body.provider) {
+      return this.founderBrainProviders.testProvider(body.provider);
+    }
+    return this.founderBrainProviders.testAllProviders();
   }
 }
