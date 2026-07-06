@@ -9,6 +9,8 @@ import {
   NotificationType,
   PaperTradeSide,
   ProjectLifecycleStage,
+  LaunchStage,
+  RegulatoryClass,
   SimulatedRaiseStatus,
   UserProgressTier,
 } from '@prisma/client';
@@ -19,6 +21,10 @@ import { FounderOsService } from '../founder-os/founder-os.service';
 import { DdollarRuntimeService } from '../ddollar/ddollar-runtime.service';
 import { isDdollarRuntimeEnabled } from '../ddollar/ddollar.constants';
 import { BusinessJourneyService } from './business-journey.service';
+import { LaunchQualificationService } from '../launch-qualification/launch-qualification.service';
+import { ComplianceTimelineService } from '../projects/compliance-timeline.service';
+import { ObservatoryService } from '../observatory/observatory.service';
+import { isPhase15TrustLayerEnabled } from '../phase15/phase15.constants';
 import {
   DEMO_HANDLE_PREFIX,
   DEMO_SCALE_PRESETS,
@@ -93,6 +99,24 @@ const TRUST_CATEGORIES: CommunityValidationCategory[] = [
   CommunityValidationCategory.NEEDS_MORE_PROOF,
 ];
 
+const DEMO_LAUNCH_STAGES: LaunchStage[] = [
+  LaunchStage.BUILDER,
+  LaunchStage.WORKSPACE,
+  LaunchStage.PROJECT,
+  LaunchStage.RAISE_ROOM,
+  LaunchStage.GRADUATION,
+  LaunchStage.FOUNDER_EXCHANGE,
+];
+
+const DEMO_REGULATORY_CLASSES: RegulatoryClass[] = [
+  RegulatoryClass.COMMUNITY,
+  RegulatoryClass.UTILITY,
+  RegulatoryClass.GOVERNANCE,
+  RegulatoryClass.CAPITAL_RAISE,
+  RegulatoryClass.RESTRICTED,
+  RegulatoryClass.PENDING,
+];
+
 @Injectable()
 export class DemoSeedService {
   private readonly logger = new Logger(DemoSeedService.name);
@@ -104,6 +128,8 @@ export class DemoSeedService {
     private readonly founderOs: FounderOsService,
     private readonly ddollarRuntime: DdollarRuntimeService,
     private readonly businessJourney: BusinessJourneyService,
+    private readonly launchQualification: LaunchQualificationService,
+    private readonly complianceTimeline: ComplianceTimelineService,
   ) {}
 
   async getStatus() {
@@ -316,6 +342,10 @@ export class DemoSeedService {
       });
 
       const categoryId = categoryBySlug[blueprint.categorySlug];
+      const launchStage = DEMO_LAUNCH_STAGES[p % DEMO_LAUNCH_STAGES.length]!;
+      const regulatoryClass = DEMO_REGULATORY_CLASSES[p % DEMO_REGULATORY_CLASSES.length]!;
+      const seedLqScore = 45 + ((p * 11) % 50);
+
       const project = await this.prisma.project.upsert({
         where: { slug },
         create: {
@@ -331,6 +361,12 @@ export class DemoSeedService {
           source: 'CURATED',
           lifecycleStage: blueprint.stage,
           launchReadiness: 20 + (p * 7) % 80,
+          launchStage,
+          launchQualificationScore: seedLqScore,
+          regulatoryClass,
+          regulatoryClassifiedAt: regulatoryClass !== RegulatoryClass.PENDING ? new Date() : null,
+          regulatoryQuestionnaireCompletedAt: regulatoryClass !== RegulatoryClass.PENDING ? new Date() : null,
+          launchRequestedAt: launchStage === LaunchStage.FOUNDER_EXCHANGE ? new Date() : null,
           bubbleScore: 10 + (p * 13) % 90,
           featured: p < 3,
           socials: {
@@ -352,11 +388,32 @@ export class DemoSeedService {
           lifecycleStage: blueprint.stage,
           founderId: founder.id,
           launchReadiness: 20 + (p * 7) % 80,
+          launchStage,
+          launchQualificationScore: seedLqScore,
+          regulatoryClass,
           approved: true,
         },
       });
       if (project.createdAt.getTime() === project.updatedAt.getTime()) {
         created.projectsCreated += 1;
+      }
+
+      if (regulatoryClass !== RegulatoryClass.PENDING) {
+        await this.prisma.regulatoryQuestionnaire.upsert({
+          where: { projectId: project.id },
+          create: {
+            projectId: project.id,
+            answers: { tokenPurpose: regulatoryClass, acknowledgesNotLegalAdvice: true, demo: true },
+            completedAt: new Date(),
+          },
+          update: {
+            answers: { tokenPurpose: regulatoryClass, acknowledgesNotLegalAdvice: true, demo: true },
+          },
+        });
+      }
+
+      if (isPhase15TrustLayerEnabled()) {
+        await this.launchQualification.computeAndPersist(project.id).catch(() => undefined);
       }
 
       if (blueprint.withRaise) {
@@ -894,7 +951,7 @@ export class DemoSeedService {
           where: demoProjectWhere(),
           select: { regulatoryClass: true },
           distinct: ['regulatoryClass'],
-        );
+        });
         return {
           passed: classes.length >= 3,
           detail: `${classes.length} regulatory classes on demo projects`,
@@ -1073,6 +1130,8 @@ export class DemoSeedService {
       ranAt: new Date().toISOString(),
       checks,
     };
+
+    ObservatoryService.setLastSmokeReport(report);
 
     return report;
   }

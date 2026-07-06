@@ -5,6 +5,8 @@ import { EventsModule } from '../events/events.module';
 import { BuilderModule } from '../builder/builder.module';
 import { PredictionMarketsModule } from '../prediction-markets/prediction-markets.module';
 import { ProjectsModule } from '../projects/projects.module';
+import { LaunchQualificationModule } from '../launch-qualification/launch-qualification.module';
+import { TrustModule } from '../trust/trust.module';
 import { FounderDenController } from './founder-den.controller';
 import { FounderDenService } from './founder-den.service';
 
@@ -16,6 +18,8 @@ import { FounderDenService } from './founder-den.service';
     BuilderModule,
     PredictionMarketsModule,
     ProjectsModule,
+    LaunchQualificationModule,
+    TrustModule,
   ],
   controllers: [FounderDenController],
   providers: [FounderDenService],

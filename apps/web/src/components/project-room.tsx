@@ -22,6 +22,9 @@ import { RaiseRoomPanel } from '@/components/raise-room-panel';
 import { ScoutMarketsPanel } from '@/components/scout-markets-panel';
 import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
+import { ComplianceTimeline, type ComplianceTimelineData } from '@/components/compliance-timeline';
+import { LaunchQualificationBadge } from '@/components/launch-qualification-badge';
+import { fetchComplianceTimeline, fetchLaunchQualification } from '@/lib/api';
 
 const TABS = ['Overview', 'Scout Markets', 'Community', 'Raise Room', 'Build log', 'Trade'] as const;
 
@@ -38,10 +41,18 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [replyThreadId, setReplyThreadId] = useState<string | null>(null);
   const [replyBody, setReplyBody] = useState('');
+  const [complianceTimeline, setComplianceTimeline] = useState<ComplianceTimelineData | null>(null);
+  const [launchScore, setLaunchScore] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
       setRoom(await fetchProjectRoom(slug, session?.accessToken));
+      const [timeline, lq] = await Promise.all([
+        fetchComplianceTimeline(slug).catch(() => null),
+        fetchLaunchQualification(slug).catch(() => null),
+      ]);
+      setComplianceTimeline(timeline);
+      setLaunchScore(lq?.score ?? null);
     } catch {
       setRoom(null);
     }
@@ -332,6 +343,16 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
 
       {tab === 'Raise Room' && (
         <div className="space-y-6">
+          {launchScore != null && (
+            <div className="flex flex-wrap items-center gap-2">
+              <LaunchQualificationBadge score={launchScore} />
+              <span className="text-xs text-zinc-500">Launch Qualification — Phase 1.5 gate</span>
+            </div>
+          )}
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-5">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Compliance timeline</p>
+            <ComplianceTimeline data={complianceTimeline} />
+          </div>
           {room.activeRaise ? (
             <RaiseRoomPanel
               room={room}
