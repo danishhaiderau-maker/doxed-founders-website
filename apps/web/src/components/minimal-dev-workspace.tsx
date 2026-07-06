@@ -441,11 +441,11 @@ export function MinimalDevWorkspace({
         }
       };
       tick();
-      // 2s while agent is typing / post-dispatch; otherwise 4s (lighter on mobile).
+      // 2s while agent is typing / post-dispatch; otherwise 5s (lighter on mobile).
       const intervalMs = () =>
         agentTypingRef.current || Date.now() < postDispatchUntilRef.current
           ? 2000
-          : 4000;
+          : 5000;
       const schedule = () => {
         historyPollRef.current = setTimeout(() => {
           tick();
@@ -541,10 +541,10 @@ export function MinimalDevWorkspace({
 
   useEffect(() => {
     refresh();
-    let id = setInterval(refresh, 8000);
+    let id = setInterval(refresh, 10_000);
     const onVisibility = () => {
       clearInterval(id);
-      id = setInterval(refresh, document.hidden ? 20_000 : 8000);
+      id = setInterval(refresh, document.hidden ? 25_000 : 10_000);
       if (!document.hidden) void refresh();
     };
     document.addEventListener('visibilitychange', onVisibility);
@@ -938,7 +938,7 @@ export function MinimalDevWorkspace({
           }
           dispatchPollRef.current = setTimeout(() => {
             void tick();
-          }, 3000);
+          }, 4000);
         } catch {
           if (Date.now() - started >= maxMs) {
             onDone('queued');
@@ -946,7 +946,7 @@ export function MinimalDevWorkspace({
           }
           dispatchPollRef.current = setTimeout(() => {
             void tick();
-          }, 3000);
+          }, 4000);
         }
       };
       void tick();
