@@ -1024,7 +1024,7 @@ export class BuilderService {
     userId: string,
     system: string,
     userPrompt: string,
-    options?: { founderBrainTask?: FounderBrainTask },
+    options?: { founderBrainTask?: FounderBrainTask; runtimeRequest?: AiRuntimeRequest },
   ): Promise<
     | { ok: true; text: string; provider: AiProvider; founderBrainTask: FounderBrainTask }
     | { ok: false }
@@ -1036,6 +1036,9 @@ export class BuilderService {
       // Only short-circuit when the routed provider is actually enabled + keyed.
       // resolveProviderKey does not check enabled/key, so probe via invoke; if
       // it throws ServiceUnavailableException (disabled / no key), fall through.
+      const maxTokens = options?.runtimeRequest
+        ? this.founderAiRuntime.maxOutputTokensFor(options.runtimeRequest)
+        : undefined;
       const result = await this.aiInvoker.invoke({
         section,
         messages: [
@@ -1043,6 +1046,7 @@ export class BuilderService {
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.4,
+        maxTokens,
         userId,
         billingSource: 'platform_routed',
       });
@@ -1174,9 +1178,12 @@ export class BuilderService {
       userPrompt,
       founderBrainTask,
     );
+    const preparedRequest = this.founderAiRuntime.prepareRequest(runtimeRequest);
+    const llmSystem = this.founderAiRuntime.isEnabled() ? preparedRequest.system : effectiveSystem;
+    const llmUserPrompt = this.founderAiRuntime.isEnabled() ? preparedRequest.userPrompt : userPrompt;
 
     if (this.shouldUseCopilotRuntimeCache(options)) {
-      const cached = await this.copilotRuntimeCacheHit(runtimeRequest, founderBrainTask);
+      const cached = await this.copilotRuntimeCacheHit(preparedRequest, founderBrainTask);
       if (cached) return cached;
     }
 
@@ -1186,13 +1193,13 @@ export class BuilderService {
       const routed = await this.tryRoutedInvoker(
         'copilot',
         userId,
-        effectiveSystem,
-        userPrompt,
-        { founderBrainTask: options?.founderBrainTask },
+        preparedRequest.system,
+        preparedRequest.userPrompt,
+        { founderBrainTask: options?.founderBrainTask, runtimeRequest: preparedRequest },
       );
       if (routed?.ok) {
         return this.shouldUseCopilotRuntimeCache(options)
-          ? this.returnCopilotSuccess(runtimeRequest, routed)
+          ? this.returnCopilotSuccess(preparedRequest, routed)
           : routed;
       }
     }
@@ -1226,8 +1233,8 @@ export class BuilderService {
     if (settings.defaultProvider === AiProvider.OLLAMA_LOCAL) {
       const nodeResult = await this.founderNodeInference.runViaFounderNode(
         userId,
-        effectiveSystem,
-        userPrompt,
+        llmSystem,
+        llmUserPrompt,
         settings.preferredModel,
       );
       if (nodeResult.ok) {
@@ -1241,23 +1248,23 @@ export class BuilderService {
           founderBrainTask,
         };
         return this.shouldUseCopilotRuntimeCache(options)
-          ? this.returnCopilotSuccess(runtimeRequest, nodeOk)
+          ? this.returnCopilotSuccess(preparedRequest, nodeOk)
           : nodeOk;
       }
       llmErrors.push(...nodeResult.errors);
 
       const direct = await this.tryDirectOllama(
         userId,
-        effectiveSystem,
-        userPrompt,
+        llmSystem,
+        llmUserPrompt,
         settings.preferredModel,
       );
       if (direct.ok) {
         await this.logAiTokenUsage(
           userId,
           AiProvider.OLLAMA_LOCAL,
-          effectiveSystem,
-          userPrompt,
+          llmSystem,
+          llmUserPrompt,
           direct.text,
           'founder_node_local',
           direct.usage,
@@ -1276,16 +1283,16 @@ export class BuilderService {
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model: settings.preferredModel ?? phala.model,
-            system: effectiveSystem,
-            userPrompt,
+            system: llmSystem,
+            userPrompt: llmUserPrompt,
           });
           if (chat?.text) {
             await this.recordPhalaChat(userId, chat);
             await this.logAiTokenUsage(
               userId,
               AiProvider.PHALA,
-              effectiveSystem,
-              userPrompt,
+              llmSystem,
+              llmUserPrompt,
               chat.text,
               'copilot',
             );
@@ -1315,16 +1322,16 @@ export class BuilderService {
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model,
-            system: effectiveSystem,
-            userPrompt,
+            system: llmSystem,
+            userPrompt: llmUserPrompt,
           });
           if (chat?.text) {
             await this.recordPhalaChat(userId, chat);
             await this.logAiTokenUsage(
               userId,
               provider,
-              effectiveSystem,
-              userPrompt,
+              llmSystem,
+              llmUserPrompt,
               chat.text,
               'copilot',
             );
@@ -1352,16 +1359,16 @@ export class BuilderService {
         const result = await this.completionWithProvider(
           provider,
           apiKey,
-          effectiveSystem,
-          userPrompt,
+          llmSystem,
+          llmUserPrompt,
           model,
         );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
             provider,
-            effectiveSystem,
-            userPrompt,
+            llmSystem,
+            llmUserPrompt,
             result.text.trim(),
             'copilot',
             result.usage,
@@ -1377,7 +1384,7 @@ export class BuilderService {
       }
     }
 
-    const platformBrain = await this.tryPlatformDeepseekFallback(userId, effectiveSystem, userPrompt, llmErrors);
+    const platformBrain = await this.tryPlatformDeepseekFallback(userId, llmSystem, llmUserPrompt, llmErrors);
     if (platformBrain) {
       const platformOk = {
         ok: true as const,
@@ -1386,7 +1393,7 @@ export class BuilderService {
         founderBrainTask,
       };
       return this.shouldUseCopilotRuntimeCache(options)
-        ? this.returnCopilotSuccess(runtimeRequest, platformOk)
+        ? this.returnCopilotSuccess(preparedRequest, platformOk)
         : platformOk;
     }
 

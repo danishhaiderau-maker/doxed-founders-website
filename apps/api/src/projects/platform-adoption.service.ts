@@ -48,8 +48,11 @@ export class PlatformAdoptionService {
     completionTokens: number;
     projectId?: string | null;
     billingSource?: string | null;
+    cacheLevel?: string | null;
+    localToolUsed?: boolean;
+    confidenceScore?: number | null;
   }) {
-    if (input.promptTokens <= 0 && input.completionTokens <= 0) return;
+    if (input.promptTokens <= 0 && input.completionTokens <= 0 && !input.cacheLevel) return;
     await this.prisma.aiTokenUsageLog.create({
       data: {
         userId: input.userId ?? null,
@@ -57,6 +60,9 @@ export class PlatformAdoptionService {
         provider: input.provider,
         source: input.source,
         billingSource: input.billingSource ?? 'byok',
+        cacheLevel: input.cacheLevel ?? null,
+        localToolUsed: input.localToolUsed ?? false,
+        confidenceScore: input.confidenceScore ?? null,
         promptTokens: input.promptTokens,
         completionTokens: input.completionTokens,
       },
