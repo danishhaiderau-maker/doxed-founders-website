@@ -42,11 +42,14 @@ export class AdminControlService {
     if (!enabled) {
       return { status: 'offline', label: 'Agent offline' };
     }
-    const reachable = await this.botBridge.isReachable(true);
-    if (!reachable) {
-      return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
-    }
-    const state = await this.botBridge.fetchState(true);
+    // Use the SAME state-fetch the public dashboard uses, so the status dot
+    // and the dashboard's botConnected flag can never disagree. The previous
+    // isReachable() + fetchState() chain probed the tunnel twice with
+    // different paths/timeouts and intermittently returned 'offline' even
+    // while the dashboard was streaming fresh live trades from the same bot.
+    // fetchPublicShowcaseState(true) already has the full reachability +
+    // 10-minute relay-snapshot fallback chain baked in.
+    const state = await this.botBridge.fetchPublicShowcaseState(true);
     if (!state) {
       return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
     }
