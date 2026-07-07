@@ -12,7 +12,7 @@ Product & platform (19 recent commits)
 
 ## Last Commit
 
-fix(home-stack): hidden named tunnel and resilient home-bot env
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
