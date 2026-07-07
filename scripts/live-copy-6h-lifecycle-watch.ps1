@@ -220,7 +220,7 @@ while ([DateTimeOffset]::UtcNow -lt $endAt) {
       pendingOrders = @($probe.copy.openParticipants | Where-Object { $_.status -eq "PENDING_ENTRY" } | ForEach-Object { $_.tradeId })
     }
     monitorAlerts = $alerts
-    lifecycleTail = $lcTail
+    lifecycleTail = (( | ForEach-Object { [string] }) -join [char]10)$lcTail
     autoHeal = $healNote
   }
 
