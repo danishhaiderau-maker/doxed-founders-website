@@ -10,6 +10,7 @@ import { FounderNodeGuard } from '../founder-node/founder-node.guard';
 import { AiRoutingModule } from '../ai-routing/ai-routing.module';
 import { CapabilityRegistryModule } from '../capability-registry/capability-registry.module';
 import { FlightRecorderModule } from '../flight-recorder/flight-recorder.module';
+import { LearningEngineModule } from '../learning-engine/learning-engine.module';
 import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
 
 @Module({
@@ -22,6 +23,7 @@ import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
     CapabilityRegistryModule,
     FlightRecorderModule,
     RoutingEngineModule,
+    LearningEngineModule,
   ],
   controllers: [AiProxyController],
   providers: [AiProxyRuntimeService, AiProxyUsageService, FounderNodeGuard],
