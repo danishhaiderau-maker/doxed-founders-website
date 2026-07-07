@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge remote-tracking branch 'origin/master'
+fix(monitor): repair lifecycleTail expression in 6h watch
 
 ## Last Activity
 
