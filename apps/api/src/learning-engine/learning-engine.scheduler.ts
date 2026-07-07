@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { LearningEngineService } from './learning-engine.service';
 
@@ -15,13 +15,29 @@ import { LearningEngineService } from './learning-engine.service';
  *     those flags in batches.
  */
 @Injectable()
-export class LearningEngineScheduler {
+export class LearningEngineScheduler implements OnModuleInit {
   private readonly logger = new Logger(LearningEngineScheduler.name);
 
   constructor(private readonly learningEngine: LearningEngineService) {}
 
+  /**
+   * Fire one rollup on boot so the first reputation pass doesn't wait up
+   * to 6h after every deploy/restart. Fire-and-forget: the app boots
+   * regardless of whether the rollup succeeds.
+   */
+  onModuleInit(): void {
+    this.logger.log('boot-time rollup: firing initial rollup');
+    void this.runRollup().catch((err: unknown) => {
+      this.logger.warn(
+        `boot-time rollup failed (will retry on next cron tick): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
   /** Every 6 hours at minute 0 (00:00, 06:00, 12:00, 18:00 UTC). */
-  @Cron('0 */6 * * *')
+  @Cron('0 */6 * * *', { timeZone: 'UTC' })
   async runRollup(): Promise<void> {
     this.logger.log('scheduled rollup starting');
     try {
