@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ops): plug orphan cmd.exe leak in Start-VisibleConsole (F9)
+feat(kernel): ship Phase 1 kernel foundation + recover AI Proxy
 
 ## Last Activity
 
