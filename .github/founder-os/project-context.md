@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+ci: silence founder-os memory-sync noise (saves ~64% of Actions minutes)
 
 ## Last Activity
 
