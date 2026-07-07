@@ -1,7 +1,9 @@
 # 24/7 home stack supervisor - HTTP health checks + auto-recovery with cooldowns.
 # Replaces tunnel-watchdog for long runs (48h-1 week). Started by Start everything.
+# F4c (2026-07-07 incident) — default BotPort is 7002 (canonical showcase per
+# config/bot-architecture.lock.json), not 7800 (legacy local lab).
 param(
-  [int]$BotPort = 7800,
+  [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9001,
   [int]$BridgePort = 7810,
   [int]$IntervalSec = 60,
@@ -60,7 +62,13 @@ function Stop-DuplicateSupervisors {
 }
 
 function Get-TunnelPublicUrl {
-  if ((Test-Path $namedFlag) -and (Use-NamedTunnel)) {
+  # F4c (2026-07-07 incident) — Use-NamedTunnel already does the full check
+  # (namedFlag file OR showcase lock frozen). The previous extra Test-Path
+  # $namedFlag AND meant the supervisor could only recover the tunnel when
+  # the legacy flag file existed - if only the lock file was frozen, the
+  # supervisor logged named=False and skipped tunnel recovery entirely,
+  # which is exactly why the 2026-07-07 outage lasted 4h instead of ~5min.
+  if (Use-NamedTunnel) {
     return "https://bot.doxxedcrypto.digital"
   }
   return Get-TunnelUrl
@@ -131,7 +139,7 @@ if (-not (Test-SupervisorLock)) {
 
 Set-Content -Path (Join-Path $repoRoot ".home-stack-supervisor.pid") -Value $PID -NoNewline
 Prevent-Sleep
-Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Test-Path $namedFlag)"
+Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Use-NamedTunnel)"
 
 $hygieneTick = 0
 
