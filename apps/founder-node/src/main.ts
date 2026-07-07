@@ -57,6 +57,12 @@ import {
   discoverClaudeCodeSessions,
   discoverClaudeCodeWorkspaces,
 } from './claude-code-discovery';
+import {
+  connectCursor,
+  connectShellEnv,
+  disconnectCursor,
+  type ConnectResult,
+} from './connect-ide';
 import { CLAUDE_CODE_CAPABILITIES, CURSOR_CAPABILITIES } from '@dcf/utils';
 import { FOUNDER_NODE_LOCAL_VERSION } from './app-version';
 import type { FounderNodeHeartbeatExt } from './sync-client';
@@ -767,6 +773,42 @@ app.whenReady().then(() => {
     apiBaseUrl: DEFAULT_API,
     label: `${os.hostname()} Founder Node`,
   }));
+
+  // ─── Founder OS AI Proxy — IDE connect/disconnect ────────────────────────
+  // One click in the UI writes Founder OS proxy credentials into the IDE
+  // config (Cursor's settings.json or shell env for OpenAI-compat tools).
+  ipcMain.handle(
+    'connect-cursor',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return connectCursor(config);
+    },
+  );
+
+  ipcMain.handle(
+    'connect-shell-env',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return connectShellEnv(config);
+    },
+  );
+
+  ipcMain.handle(
+    'disconnect-cursor',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return disconnectCursor(config);
+    },
+  );
 
   ipcMain.handle(
     'pair',

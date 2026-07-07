@@ -335,19 +335,25 @@ enum MemoryStorageMode {
   FOUNDER_NODE
 }
 
-/** Sprint 6 — how integration API keys are sealed (display + Phala inference-only tier). */
+/**
+ * Sprint 6 — how integration API keys are sealed (display + Phala inference-only tier).
+ */
 enum SecretsStorageMode {
   PLATFORM_ENCRYPTED
   PHALA_SEALED
 }
 
-/** Hybrid control plane entry: minimal Cursor path vs full stack orchestration. */
+/**
+ * Hybrid control plane entry: minimal Cursor path vs full stack orchestration.
+ */
 enum ControlPlaneMode {
   CURSOR_FIRST
   FULL_STACK
 }
 
-/** Phase 1 — onboarding path chosen at Founder Den activation. */
+/**
+ * Phase 1 — onboarding path chosen at Founder Den activation.
+ */
 enum OnboardingPath {
   SOVEREIGN
   BYO_CLOUD
@@ -356,7 +362,9 @@ enum OnboardingPath {
   FOUNDER_CLOUD
 }
 
-/** Where compute + memory primarily run for this founder. */
+/**
+ * Where compute + memory primarily run for this founder.
+ */
 enum ComputePlaneMode {
   LOCAL
   CLOUD
@@ -402,112 +410,112 @@ enum TopUpPaymentAsset {
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  passwordHash  String?
-  name          String?
-  avatarUrl     String?
-  twitterHandle   String?
-  platformHandle  String?   @unique
-  referralCode      String?   @unique
-  referredByUserId  String?
-  xVerified         Boolean   @default(false)
-  xVerifiedAt       DateTime?
-  role            UserRole  @default(USER)
-  emailVerified DateTime?
-  banned        Boolean   @default(false)
-  bannedReason  String?
-  reputationPoints Int    @default(0)
-  lifetimeContributionEarned Int @default(0)
-  contributorLevel Int    @default(1)
-  progressTier     UserProgressTier @default(EXPLORER)
+  id                         String           @id @default(cuid())
+  email                      String           @unique
+  passwordHash               String?
+  name                       String?
+  avatarUrl                  String?
+  twitterHandle              String?
+  platformHandle             String?          @unique
+  referralCode               String?          @unique
+  referredByUserId           String?
+  xVerified                  Boolean          @default(false)
+  xVerifiedAt                DateTime?
+  role                       UserRole         @default(USER)
+  emailVerified              DateTime?
+  banned                     Boolean          @default(false)
+  bannedReason               String?
+  reputationPoints           Int              @default(0)
+  lifetimeContributionEarned Int              @default(0)
+  contributorLevel           Int              @default(1)
+  progressTier               UserProgressTier @default(EXPLORER)
   /// Composite builder-score (0-100ish). Refreshed lazily by BuilderScoreService.
-  builderScore      Int       @default(0)
+  builderScore               Int              @default(0)
   /// Tier derived from builderScore. PARASITE = default. Gates promo pool access.
-  builderTier       BuilderTier @default(PARASITE)
+  builderTier                BuilderTier      @default(PARASITE)
   /// When builderScore/builderTier were last recomputed. Null = never.
-  scoreRefreshedAt  DateTime?
-  notificationPrefs Json?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  scoreRefreshedAt           DateTime?
+  notificationPrefs          Json?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
 
-  watchlists           Watchlist[]
-  paperPortfolio       PaperPortfolio?
-  paperTrades          PaperTrade[]
-  inspiredPaperTrades  PaperTrade[] @relation("PaperTradeInspiredBy")
-  paperLimitOrders     PaperLimitOrder[]
-  feedPosts            FeedPost[]
-  feedComments         FeedComment[]
-  listingApplications  ListingApplication[]
-  listingVotes         ListingVote[]
-  projectTrustReports  ProjectTrustReport[]
-  analyticsEvents      AnalyticsEvent[]
-  searchLogs           SearchLog[]
-  adminActions         AdminAction[]        @relation("AdminActions")
-  leaderboardEntries   LeaderboardEntry[]
-  oauthAccounts        OAuthAccount[]
-  notifications        Notification[]
-  founder              Founder?
-  raiseAllocations     RaiseAllocation[]
-  demandPollVotes      DemandPollVote[]
-  projectFollows       ProjectFollow[]
-  founderApplications  FounderApplication[]
-  economyEvents        VirtualEconomyEvent[]
-  reputationAwards     ReputationAward[]
-  pointLedger          PointLedger[]
-  marketplaceLedger    MarketplaceLedgerEntry[]
-  treasuryLedger       FounderTreasuryLedgerEntry[]
-  following            UserFollow[] @relation("UserFollowing")
-  followers            UserFollow[] @relation("UserFollowers")
-  engagementLotteryWins EngagementLotteryWinner[]
-  helpfulMarksGiven    HelpfulMark[] @relation("HelpfulMarker")
-  helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
-  userBadges           UserBadge[]
-  scoutMarketPositions ScoutMarketPosition[]
-  predictionMarketsCreated ScoutMarket[] @relation("PredictionMarketCreator")
-  githubConnection     GitHubConnection?
-  connectedApps           ConnectedAppStatus[]
-  integrationCredentials  IntegrationCredential[]
-  cursorBuildSessions     CursorBuildSession[]
-  founderCreditLedger  FounderCreditLedger[]
-  bountyAwards         FounderBounty[] @relation("BountyAwardee")
-  earlyScouts          EarlyScoutRecord[]
-  totp                 UserTotp?
-  webAuthnCredentials  WebAuthnCredential[]
-  recoveryCodes        RecoveryCode[]
-  walletConnections    WalletConnection[]
-  authPendingChallenges AuthPendingChallenge[]
-  createdAgents        FounderAgent[] @relation("AgentCreator")
-  agentInstalls        AgentInstall[]
-  agentRuns            AgentRun[]
-  agentFollows         AgentFollow[]
-  tradingAgentFollows  TradingAgentFollow[]
-  tradingAgentInstances TradingAgentInstance[]
-  signalApiKeys        SignalApiKey[]
-  signalCycleParticipants SignalCycleParticipant[]
-  builderSettings      FounderBuilderSettings?
-  projectMemorySync    ProjectMemoryDeviceSync?
-  workspaceSessions    WorkspaceSession[]
-  connectedWorkspaces  ConnectedWorkspace[]
-  founderNodes              FounderNode[]
-  founderNodePairings       FounderNodePairingCode[]
-  founderNodeVaultRelays    FounderNodeVaultRelay[]
+  watchlists               Watchlist[]
+  paperPortfolio           PaperPortfolio?
+  paperTrades              PaperTrade[]
+  inspiredPaperTrades      PaperTrade[]                 @relation("PaperTradeInspiredBy")
+  paperLimitOrders         PaperLimitOrder[]
+  feedPosts                FeedPost[]
+  feedComments             FeedComment[]
+  listingApplications      ListingApplication[]
+  listingVotes             ListingVote[]
+  projectTrustReports      ProjectTrustReport[]
+  analyticsEvents          AnalyticsEvent[]
+  searchLogs               SearchLog[]
+  adminActions             AdminAction[]                @relation("AdminActions")
+  leaderboardEntries       LeaderboardEntry[]
+  oauthAccounts            OAuthAccount[]
+  notifications            Notification[]
+  founder                  Founder?
+  raiseAllocations         RaiseAllocation[]
+  demandPollVotes          DemandPollVote[]
+  projectFollows           ProjectFollow[]
+  founderApplications      FounderApplication[]
+  economyEvents            VirtualEconomyEvent[]
+  reputationAwards         ReputationAward[]
+  pointLedger              PointLedger[]
+  marketplaceLedger        MarketplaceLedgerEntry[]
+  treasuryLedger           FounderTreasuryLedgerEntry[]
+  following                UserFollow[]                 @relation("UserFollowing")
+  followers                UserFollow[]                 @relation("UserFollowers")
+  engagementLotteryWins    EngagementLotteryWinner[]
+  helpfulMarksGiven        HelpfulMark[]                @relation("HelpfulMarker")
+  helpfulMarksReceived     HelpfulMark[]                @relation("HelpfulRecipient")
+  userBadges               UserBadge[]
+  scoutMarketPositions     ScoutMarketPosition[]
+  predictionMarketsCreated ScoutMarket[]                @relation("PredictionMarketCreator")
+  githubConnection         GitHubConnection?
+  connectedApps            ConnectedAppStatus[]
+  integrationCredentials   IntegrationCredential[]
+  cursorBuildSessions      CursorBuildSession[]
+  founderCreditLedger      FounderCreditLedger[]
+  bountyAwards             FounderBounty[]              @relation("BountyAwardee")
+  earlyScouts              EarlyScoutRecord[]
+  totp                     UserTotp?
+  webAuthnCredentials      WebAuthnCredential[]
+  recoveryCodes            RecoveryCode[]
+  walletConnections        WalletConnection[]
+  authPendingChallenges    AuthPendingChallenge[]
+  createdAgents            FounderAgent[]               @relation("AgentCreator")
+  agentInstalls            AgentInstall[]
+  agentRuns                AgentRun[]
+  agentFollows             AgentFollow[]
+  tradingAgentFollows      TradingAgentFollow[]
+  tradingAgentInstances    TradingAgentInstance[]
+  signalApiKeys            SignalApiKey[]
+  signalCycleParticipants  SignalCycleParticipant[]
+  builderSettings          FounderBuilderSettings?
+  projectMemorySync        ProjectMemoryDeviceSync?
+  workspaceSessions        WorkspaceSession[]
+  connectedWorkspaces      ConnectedWorkspace[]
+  founderNodes             FounderNode[]
+  founderNodePairings      FounderNodePairingCode[]
+  founderNodeVaultRelays   FounderNodeVaultRelay[]
   founderNodeVaultSyncAcks FounderNodeVaultSyncAck[]
-  founderNodeInferenceJobs  FounderNodeInferenceJob[]
-  founderNodeSyncJobs       FounderNodeSyncJob[]
-  townHallPosts             TownHallPost[]
-  privacyAttestationLogs    PrivacyAttestationLog[]
-  founderEvents        FounderEvent[]
-  topUpPayments        TopUpPayment[]
-  aiTokenUsageLogs     AiTokenUsageLog[]
-  messagesSent         PlatformMessage[] @relation("MessageFrom")
-  messagesReceived     PlatformMessage[] @relation("MessageTo")
-  wallMessages         ProjectWallMessage[]
-  wallPins             ProjectWallPin[]
-  wallSummaryActivations ProjectWallSummary[]
-  wallReadCursors      ProjectWallReadCursor[]
-  referredBy           User?  @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
-  referrals            User[] @relation("UserReferrals")
+  founderNodeInferenceJobs FounderNodeInferenceJob[]
+  founderNodeSyncJobs      FounderNodeSyncJob[]
+  townHallPosts            TownHallPost[]
+  privacyAttestationLogs   PrivacyAttestationLog[]
+  founderEvents            FounderEvent[]
+  topUpPayments            TopUpPayment[]
+  aiTokenUsageLogs         AiTokenUsageLog[]
+  messagesSent             PlatformMessage[]            @relation("MessageFrom")
+  messagesReceived         PlatformMessage[]            @relation("MessageTo")
+  wallMessages             ProjectWallMessage[]
+  wallPins                 ProjectWallPin[]
+  wallSummaryActivations   ProjectWallSummary[]
+  wallReadCursors          ProjectWallReadCursor[]
+  referredBy               User?                        @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
+  referrals                User[]                       @relation("UserReferrals")
 
   @@index([email])
   @@index([role])
@@ -581,13 +589,13 @@ model Founder {
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
 
-  user               User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
-  projects           Project[]
-  verifications      FounderVerification[]
-  founderUpdates     FounderUpdate[]
-  videos             FounderVideo[]
-  buildPosts         FounderBuildPost[]
-  creditLedger     FounderCreditLedger[]
+  user                User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  projects            Project[]
+  verifications       FounderVerification[]
+  founderUpdates      FounderUpdate[]
+  videos              FounderVideo[]
+  buildPosts          FounderBuildPost[]
+  creditLedger        FounderCreditLedger[]
   suggestedUpdates    SuggestedBuildUpdate[]
   cursorBuildSessions CursorBuildSession[]
   agents              FounderAgent[]
@@ -618,9 +626,13 @@ model AiTokenUsageLog {
   projectId        String?
   provider         String
   source           String
-  /** byok | platform_promo | rule_based */
+  /**
+   * byok | platform_promo | rule_based
+   */
   billingSource    String?
-  /** L0_tool | L2_prompt_hash | L5_semantic | miss — Phase 1 telemetry */
+  /**
+   * L0_tool | L2_prompt_hash | L5_semantic | miss — Phase 1 telemetry
+   */
   cacheLevel       String?
   localToolUsed    Boolean  @default(false)
   confidenceScore  Float?
@@ -639,87 +651,87 @@ model AiTokenUsageLog {
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 model Project {
-  id              String        @id @default(cuid())
-  slug            String        @unique
-  name            String
-  ticker          String
-  description     String?       @db.Text
-  summary         String?       @db.Text
-  logoUrl         String?
-  websiteUrl      String?
-  docsUrl         String?
-  whitepaperUrl   String?
-  contractAddress String?
-  dexscreenerUrl  String?
-  chainId         String
-  categoryId      String?
-  founderId       String?
-  source          ProjectSource @default(CURATED)
-  trackingActive  Boolean       @default(true)
-  lastTradeAt     DateTime?
-  featured        Boolean       @default(false)
-  approved        Boolean       @default(false)
-  lifecycleStage  ProjectLifecycleStage @default(IDEA)
-  launchReadiness Int           @default(0)
-  launchStage     LaunchStage   @default(BUILDER)
-  launchQualificationScore Int  @default(0)
-  launchQualificationTier  String?
-  launchQualificationMeta  Json?
-  launchQualificationAt    DateTime?
-  regulatoryClass          RegulatoryClass @default(PENDING)
-  regulatoryClassifiedAt   DateTime?
+  id                                 String                @id @default(cuid())
+  slug                               String                @unique
+  name                               String
+  ticker                             String
+  description                        String?               @db.Text
+  summary                            String?               @db.Text
+  logoUrl                            String?
+  websiteUrl                         String?
+  docsUrl                            String?
+  whitepaperUrl                      String?
+  contractAddress                    String?
+  dexscreenerUrl                     String?
+  chainId                            String
+  categoryId                         String?
+  founderId                          String?
+  source                             ProjectSource         @default(CURATED)
+  trackingActive                     Boolean               @default(true)
+  lastTradeAt                        DateTime?
+  featured                           Boolean               @default(false)
+  approved                           Boolean               @default(false)
+  lifecycleStage                     ProjectLifecycleStage @default(IDEA)
+  launchReadiness                    Int                   @default(0)
+  launchStage                        LaunchStage           @default(BUILDER)
+  launchQualificationScore           Int                   @default(0)
+  launchQualificationTier            String?
+  launchQualificationMeta            Json?
+  launchQualificationAt              DateTime?
+  regulatoryClass                    RegulatoryClass       @default(PENDING)
+  regulatoryClassifiedAt             DateTime?
   regulatoryQuestionnaireCompletedAt DateTime?
-  plannedLaunchDate DateTime?
-  launchRequestedAt DateTime?
-  isLiveToken     Boolean       @default(false)
-  launchPriceUsd  Decimal?      @db.Decimal(24, 12)
-  bubbleScore     Int           @default(0)
-  communityRewardPool Int       @default(10000)
-  githubRepoFullName  String?
+  plannedLaunchDate                  DateTime?
+  launchRequestedAt                  DateTime?
+  isLiveToken                        Boolean               @default(false)
+  launchPriceUsd                     Decimal?              @db.Decimal(24, 12)
+  bubbleScore                        Int                   @default(0)
+  communityRewardPool                Int                   @default(10000)
+  githubRepoFullName                 String?
   /// Set by verified founder after claim — blocks hijack via fake X handles
-  profileLockHash     String?
-  profileLockedAt     DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  profileLockHash                    String?
+  profileLockedAt                    DateTime?
+  createdAt                          DateTime              @default(now())
+  updatedAt                          DateTime              @updatedAt
 
   chain    Chain     @relation(fields: [chainId], references: [id])
   category Category? @relation(fields: [categoryId], references: [id])
   founder  Founder?  @relation(fields: [founderId], references: [id])
 
-  metrics       ProjectMetrics?
-  socials       ProjectSocials?
-  documents     ProjectDocument[]
-  watchlists    Watchlist[]
-  paperTrades    PaperTrade[]
-  paperLimitOrders PaperLimitOrder[]
-  paperPositions PaperPosition[]
-  feedPosts      FeedPost[]
-  featuredEntry  FeaturedProject?
-  auditReports  AuditReport[]
-  trendingScore TrendingScore?
-  analyticsEvents AnalyticsEvent[]
-  founderUpdates FounderUpdate[]
-  roadmapItems   ProjectRoadmapItem[]
-  simulatedRaises SimulatedRaise[]
-  demandPolls    DemandPoll[]
-  founderVideos  FounderVideo[]
-  buildPosts     FounderBuildPost[]
-  followers      ProjectFollow[]
-  communityThreads CommunityThread[]
-  bounties         FounderBounty[]
-  helpfulMarks     HelpfulMark[]
-  earlyScouts      EarlyScoutRecord[]
-  agents           FounderAgent[]
-  buildQueueItems  BuildQueueItem[]
-  founderEvents    FounderEvent[]
-  scoutMarkets     ScoutMarket[]
-  investigations   ProjectInvestigation[]
-  trustReports     ProjectTrustReport[]
-  aiTokenUsageLogs AiTokenUsageLog[]
-  wallMessages     ProjectWallMessage[]
-  wallPins         ProjectWallPin[]
-  wallSummary      ProjectWallSummary?
-  wallReadCursors  ProjectWallReadCursor[]
+  metrics                 ProjectMetrics?
+  socials                 ProjectSocials?
+  documents               ProjectDocument[]
+  watchlists              Watchlist[]
+  paperTrades             PaperTrade[]
+  paperLimitOrders        PaperLimitOrder[]
+  paperPositions          PaperPosition[]
+  feedPosts               FeedPost[]
+  featuredEntry           FeaturedProject?
+  auditReports            AuditReport[]
+  trendingScore           TrendingScore?
+  analyticsEvents         AnalyticsEvent[]
+  founderUpdates          FounderUpdate[]
+  roadmapItems            ProjectRoadmapItem[]
+  simulatedRaises         SimulatedRaise[]
+  demandPolls             DemandPoll[]
+  founderVideos           FounderVideo[]
+  buildPosts              FounderBuildPost[]
+  followers               ProjectFollow[]
+  communityThreads        CommunityThread[]
+  bounties                FounderBounty[]
+  helpfulMarks            HelpfulMark[]
+  earlyScouts             EarlyScoutRecord[]
+  agents                  FounderAgent[]
+  buildQueueItems         BuildQueueItem[]
+  founderEvents           FounderEvent[]
+  scoutMarkets            ScoutMarket[]
+  investigations          ProjectInvestigation[]
+  trustReports            ProjectTrustReport[]
+  aiTokenUsageLogs        AiTokenUsageLog[]
+  wallMessages            ProjectWallMessage[]
+  wallPins                ProjectWallPin[]
+  wallSummary             ProjectWallSummary?
+  wallReadCursors         ProjectWallReadCursor[]
   regulatoryQuestionnaire RegulatoryQuestionnaire?
 
   @@index([slug])
@@ -750,16 +762,16 @@ model RegulatoryQuestionnaire {
 }
 
 model ProjectMetrics {
-  id           String   @id @default(cuid())
-  projectId    String   @unique
-  priceUsd     Decimal? @db.Decimal(24, 12)
-  marketCap    Decimal? @db.Decimal(24, 2)
-  fdv          Decimal? @db.Decimal(24, 2)
-  volume24h    Decimal? @db.Decimal(24, 2)
-  liquidity    Decimal? @db.Decimal(24, 2)
-  holders      Int?
+  id             String   @id @default(cuid())
+  projectId      String   @unique
+  priceUsd       Decimal? @db.Decimal(24, 12)
+  marketCap      Decimal? @db.Decimal(24, 2)
+  fdv            Decimal? @db.Decimal(24, 2)
+  volume24h      Decimal? @db.Decimal(24, 2)
+  liquidity      Decimal? @db.Decimal(24, 2)
+  holders        Int?
   priceChange24h Decimal? @db.Decimal(10, 4)
-  updatedAt    DateTime @updatedAt
+  updatedAt      DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
@@ -790,12 +802,12 @@ model ProjectDocument {
 }
 
 model AuditReport {
-  id         String   @id @default(cuid())
-  projectId  String
-  auditor    String
-  reportUrl  String
-  auditedAt  DateTime?
-  createdAt  DateTime @default(now())
+  id        String    @id @default(cuid())
+  projectId String
+  auditor   String
+  reportUrl String
+  auditedAt DateTime?
+  createdAt DateTime  @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -844,20 +856,20 @@ model PaperPortfolio {
 }
 
 model PaperPosition {
-  id           String   @id @default(cuid())
-  portfolioId  String
-  projectId    String
-  quantity     Decimal  @db.Decimal(24, 12)
-  avgBuyPrice  Decimal  @db.Decimal(24, 12)
-  convictionThesis    String?  @db.Text
-  convictionCatalyst  String?
-  convictionTargetUsd Decimal? @db.Decimal(24, 12)
-  convictionStopUsd   Decimal? @db.Decimal(24, 12)
+  id                    String    @id @default(cuid())
+  portfolioId           String
+  projectId             String
+  quantity              Decimal   @db.Decimal(24, 12)
+  avgBuyPrice           Decimal   @db.Decimal(24, 12)
+  convictionThesis      String?   @db.Text
+  convictionCatalyst    String?
+  convictionTargetUsd   Decimal?  @db.Decimal(24, 12)
+  convictionStopUsd     Decimal?  @db.Decimal(24, 12)
   convictionTimeHorizon String?
-  convictionRecordedAt DateTime?
-  peakPriceUsd       Decimal? @db.Decimal(24, 12)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  convictionRecordedAt  DateTime?
+  peakPriceUsd          Decimal?  @db.Decimal(24, 12)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   portfolio PaperPortfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -868,32 +880,32 @@ model PaperPosition {
 }
 
 model PaperTrade {
-  id             String         @id @default(cuid())
-  userId         String
-  inspiredByUserId String?
-  projectId      String
-  side           PaperTradeSide
-  quantity       Decimal        @db.Decimal(24, 12)
-  priceUsd       Decimal        @db.Decimal(24, 12)
-  totalUsd       Decimal        @db.Decimal(16, 2)
-  realizedPnlUsd Decimal?       @db.Decimal(16, 2)
-  whatIfHeldPct  Decimal?       @db.Decimal(8, 2)
-  missedAlphaPct Decimal?       @db.Decimal(8, 2)
-  convictionScore Int?
-  verifiedOutcome String?
-  entryPriceSnapshot Decimal?  @db.Decimal(24, 12)
-  takeProfitSnapshot Decimal?  @db.Decimal(24, 12)
-  stopLossSnapshot   Decimal?  @db.Decimal(24, 12)
-  achievedRR         Decimal?  @db.Decimal(8, 4)
-  peakPriceUsd   Decimal?       @db.Decimal(24, 12)
-  postExitPeakPriceUsd   Decimal? @db.Decimal(24, 12)
-  postExitTroughPriceUsd Decimal? @db.Decimal(24, 12)
+  id                     String         @id @default(cuid())
+  userId                 String
+  inspiredByUserId       String?
+  projectId              String
+  side                   PaperTradeSide
+  quantity               Decimal        @db.Decimal(24, 12)
+  priceUsd               Decimal        @db.Decimal(24, 12)
+  totalUsd               Decimal        @db.Decimal(16, 2)
+  realizedPnlUsd         Decimal?       @db.Decimal(16, 2)
+  whatIfHeldPct          Decimal?       @db.Decimal(8, 2)
+  missedAlphaPct         Decimal?       @db.Decimal(8, 2)
+  convictionScore        Int?
+  verifiedOutcome        String?
+  entryPriceSnapshot     Decimal?       @db.Decimal(24, 12)
+  takeProfitSnapshot     Decimal?       @db.Decimal(24, 12)
+  stopLossSnapshot       Decimal?       @db.Decimal(24, 12)
+  achievedRR             Decimal?       @db.Decimal(8, 4)
+  peakPriceUsd           Decimal?       @db.Decimal(24, 12)
+  postExitPeakPriceUsd   Decimal?       @db.Decimal(24, 12)
+  postExitTroughPriceUsd Decimal?       @db.Decimal(24, 12)
   postExitUpdatedAt      DateTime?
-  createdAt      DateTime       @default(now())
+  createdAt              DateTime       @default(now())
 
-  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  inspiredByUser User?    @relation("PaperTradeInspiredBy", fields: [inspiredByUserId], references: [id], onDelete: SetNull)
-  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inspiredByUser User?     @relation("PaperTradeInspiredBy", fields: [inspiredByUserId], references: [id], onDelete: SetNull)
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   feedPost       FeedPost?
 
   @@index([userId])
@@ -928,15 +940,15 @@ model PaperLimitOrder {
 // ─── Social Feed ───────────────────────────────────────────────────────────────
 
 model FeedPost {
-  id              String    @id @default(cuid())
-  paperTradeId    String    @unique
-  userId          String
-  projectId       String
-  initialComment  String?
-  commentCount    Int       @default(0)
+  id               String    @id @default(cuid())
+  paperTradeId     String    @unique
+  userId           String
+  projectId        String
+  initialComment   String?
+  commentCount     Int       @default(0)
   highlightedUntil DateTime?
-  lastCommentAt   DateTime?
-  createdAt       DateTime  @default(now())
+  lastCommentAt    DateTime?
+  createdAt        DateTime  @default(now())
 
   paperTrade PaperTrade    @relation(fields: [paperTradeId], references: [id], onDelete: Cascade)
   user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -966,13 +978,13 @@ model FeedComment {
 // ─── Leaderboard ───────────────────────────────────────────────────────────────
 
 model LeaderboardEntry {
-  id        String            @id @default(cuid())
-  userId    String
-  period    LeaderboardPeriod
-  roi       Decimal           @db.Decimal(10, 4)
-  pnl       Decimal           @db.Decimal(16, 2)
-  rank      Int
-  computedAt DateTime         @default(now())
+  id         String            @id @default(cuid())
+  userId     String
+  period     LeaderboardPeriod
+  roi        Decimal           @db.Decimal(10, 4)
+  pnl        Decimal           @db.Decimal(16, 2)
+  rank       Int
+  computedAt DateTime          @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -983,47 +995,47 @@ model LeaderboardEntry {
 // ─── Listing Applications ──────────────────────────────────────────────────────
 
 model ListingApplication {
-  id              String        @id @default(cuid())
-  userId          String?
-  projectName     String
-  ticker          String
-  websiteUrl      String?
-  docsUrl         String?
-  whitepaperUrl   String?
-  contractAddress String?
-  chainSlug       ChainSlug?
-  dexscreenerUrl  String?
-  logoUrl         String?
-  telegramUrl     String?
-  founderName     String?
-  founderLinkedIn String?
-  founderTwitter  String?
-  founderGithub       String?
+  id                   String        @id @default(cuid())
+  userId               String?
+  projectName          String
+  ticker               String
+  websiteUrl           String?
+  docsUrl              String?
+  whitepaperUrl        String?
+  contractAddress      String?
+  chainSlug            ChainSlug?
+  dexscreenerUrl       String?
+  logoUrl              String?
+  telegramUrl          String?
+  founderName          String?
+  founderLinkedIn      String?
+  founderTwitter       String?
+  founderGithub        String?
   /// Public project repo (owner/repo) — synced for Discover GitHub activity ranking
-  projectGithubUrl    String?
-  founderVideoUrl     String?
-  founderInterviewUrl String?
-  companyDetails      String?       @db.Text
-  auditUrl            String?
-  summary             String?       @db.Text
-  marketPreview       Json?
-  verificationScore   Int           @default(0)
+  projectGithubUrl     String?
+  founderVideoUrl      String?
+  founderInterviewUrl  String?
+  companyDetails       String?       @db.Text
+  auditUrl             String?
+  summary              String?       @db.Text
+  marketPreview        Json?
+  verificationScore    Int           @default(0)
   verificationCriteria Json?
-  whyList             String?       @db.Text
-  whyDoxxed           String?       @db.Text
-  founderDoxxedStatus String?       @default("DOXXED")
-  scoutHighlightNote  String?       @db.Text
-  votingOpensAt       DateTime?
-  votingClosesAt      DateTime?
-  requiredVoters      Int           @default(5)
-  minYesPercent       Int           @default(65)
-  status              ListingStatus @default(COMMUNITY_VOTING)
-  reviewNotes     String?       @db.Text
-  reviewedAt      DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  whyList              String?       @db.Text
+  whyDoxxed            String?       @db.Text
+  founderDoxxedStatus  String?       @default("DOXXED")
+  scoutHighlightNote   String?       @db.Text
+  votingOpensAt        DateTime?
+  votingClosesAt       DateTime?
+  requiredVoters       Int           @default(5)
+  minYesPercent        Int           @default(65)
+  status               ListingStatus @default(COMMUNITY_VOTING)
+  reviewNotes          String?       @db.Text
+  reviewedAt           DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
-  user     User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user     User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
   votes    ListingVote[]
   messages PlatformMessage[]
 
@@ -1033,16 +1045,16 @@ model ListingApplication {
 }
 
 model ListingVote {
-  id                   String                      @id @default(cuid())
-  applicationId        String
-  userId               String
-  vote                 ListingVoteValue
-  validationCategory   CommunityValidationCategory?
-  voteWeight           Int                         @default(1)
-  whyList              String?                     @db.Text
-  whyDoxxed            String?                     @db.Text
-  comment              String?                     @db.Text
-  createdAt            DateTime                    @default(now())
+  id                 String                       @id @default(cuid())
+  applicationId      String
+  userId             String
+  vote               ListingVoteValue
+  validationCategory CommunityValidationCategory?
+  voteWeight         Int                          @default(1)
+  whyList            String?                      @db.Text
+  whyDoxxed          String?                      @db.Text
+  comment            String?                      @db.Text
+  createdAt          DateTime                     @default(now())
 
   application ListingApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1053,23 +1065,23 @@ model ListingVote {
 }
 
 model ProjectInvestigation {
-  id              String              @id @default(cuid())
-  projectId       String
-  status          InvestigationStatus @default(ACTIVE)
-  reason          String?             @db.Text
-  opensAt         DateTime            @default(now())
-  closesAt        DateTime
-  scamThreshold   Int                 @default(40)
-  minVoters       Int                 @default(5)
-  trustScore      Int                 @default(0)
-  scamScore       Int                 @default(0)
-  reviewNotes     String?             @db.Text
-  reviewedAt      DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  id            String              @id @default(cuid())
+  projectId     String
+  status        InvestigationStatus @default(ACTIVE)
+  reason        String?             @db.Text
+  opensAt       DateTime            @default(now())
+  closesAt      DateTime
+  scamThreshold Int                 @default(40)
+  minVoters     Int                 @default(5)
+  trustScore    Int                 @default(0)
+  scamScore     Int                 @default(0)
+  reviewNotes   String?             @db.Text
+  reviewedAt    DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
 
-  project  Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  reports  ProjectTrustReport[]
+  project Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reports ProjectTrustReport[]
 
   @@index([projectId])
   @@index([status])
@@ -1077,16 +1089,16 @@ model ProjectInvestigation {
 }
 
 model ProjectTrustReport {
-  id                 String                       @id @default(cuid())
-  projectId          String
-  userId             String
-  investigationId    String?
-  category           CommunityValidationCategory
-  voteWeight         Int                          @default(1)
-  evidenceUrl        String?
-  comment            String?                      @db.Text
-  rewarded           Boolean                      @default(false)
-  createdAt          DateTime                     @default(now())
+  id              String                      @id @default(cuid())
+  projectId       String
+  userId          String
+  investigationId String?
+  category        CommunityValidationCategory
+  voteWeight      Int                         @default(1)
+  evidenceUrl     String?
+  comment         String?                     @db.Text
+  rewarded        Boolean                     @default(false)
+  createdAt       DateTime                    @default(now())
 
   project       Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1154,13 +1166,13 @@ enum XSocialPostKind {
 }
 
 model XSocialPostLog {
-  id         String           @id @default(cuid())
-  kind       XSocialPostKind
-  dedupeKey  String           @unique
-  tweetId    String?
-  tweetUrl   String?
-  metadata   Json?
-  createdAt  DateTime         @default(now())
+  id        String          @id @default(cuid())
+  kind      XSocialPostKind
+  dedupeKey String          @unique
+  tweetId   String?
+  tweetUrl  String?
+  metadata  Json?
+  createdAt DateTime        @default(now())
 
   @@index([kind, createdAt])
 }
@@ -1183,13 +1195,13 @@ model Notification {
 }
 
 model PlatformMessage {
-  id              String   @id @default(cuid())
-  fromUserId      String
-  toUserId        String
-  applicationId   String?
-  body            String   @db.Text
-  readAt          DateTime?
-  createdAt       DateTime @default(now())
+  id            String    @id @default(cuid())
+  fromUserId    String
+  toUserId      String
+  applicationId String?
+  body          String    @db.Text
+  readAt        DateTime?
+  createdAt     DateTime  @default(now())
 
   from        User                @relation("MessageFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
   to          User                @relation("MessageTo", fields: [toUserId], references: [id], onDelete: Cascade)
@@ -1330,17 +1342,17 @@ model SimulatedRaise {
 }
 
 model RaiseAllocation {
-  id            String   @id @default(cuid())
-  raiseId       String
-  userId        String
-  amountUsd     Decimal  @db.Decimal(16, 2)
-  burnedUsd     Decimal  @default(0) @db.Decimal(16, 2)
-  trustWeight   Int      @default(1)
-  effectivePaperUsd Decimal @default(0) @db.Decimal(16, 2)
-  slotReserved  Boolean  @default(true)
-  walletAddress String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                String   @id @default(cuid())
+  raiseId           String
+  userId            String
+  amountUsd         Decimal  @db.Decimal(16, 2)
+  burnedUsd         Decimal  @default(0) @db.Decimal(16, 2)
+  trustWeight       Int      @default(1)
+  effectivePaperUsd Decimal  @default(0) @db.Decimal(16, 2)
+  slotReserved      Boolean  @default(true)
+  walletAddress     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   raise SimulatedRaise @relation(fields: [raiseId], references: [id], onDelete: Cascade)
   user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1357,60 +1369,86 @@ model PlatformTreasury {
   updatedAt             DateTime @updatedAt
 }
 
-/** Singleton platform ops — admin-editable copy and flags. */
+/**
+ * Singleton platform ops — admin-editable copy and flags.
+ */
 model PlatformSettings {
-  id                       String   @id @default("default")
-  globalShareFooter        String?  @db.Text
-  /** Admin showcase agent — never used for user instances */
-  showcaseExchangeProvider String   @default("bybit")
-  showcaseAiProvider       String   @default("deepseek")
-  /** Encrypted JSON: { apiKey, apiSecret, passphrase?, testnet? } */
-  showcaseExchangeCredentialEnc String? @db.Text
-  /** Encrypted AI API key for showcase bot runtime */
-  showcaseAiCredentialEnc     String? @db.Text
-  /** Public URL of btc-conservative-agent Railway service (for admin reference) */
-  showcaseBotPublicUrl        String?
-  /** Push-cache relay snapshot from home bot (JSON); bot remains authoritative */
-  showcaseRelaySnapshot       Json?
-  showcaseRelaySnapshotSeq    BigInt?
-  showcaseRelaySnapshotAt     DateTime?
-  showcaseCredentialsUpdatedAt DateTime?
-  showcaseRuntimePushedAt      DateTime?
-  /** Admin: offer platform-billed AI to new founders (Gemini, DeepSeek, Cursor, Ollama). */
-  founderPromoAiEnabled        Boolean  @default(false)
-  founderPromoTokenCap         Int      @default(10000000)
-  founderPromoWindowDays       Int      @default(30)
-  founderPromoMessage          String?  @db.Text
-  /** Encrypted JSON map: { gemini?, deepseek?, cursor?, openai?, anthropic? } */
-  founderPromoAiCredentialsEnc String?  @db.Text
-  /** Permanent platform-level DeepSeek API key — always-available fallback brain for all users. */
-  platformBrainDeepseekKeyEnc String?  @db.Text
-  /** Admin-recommended agent settings shown to users on hire/observe flows */
-  agentShowcaseDefaultSettings String? @db.Text
-  /** Max USD margin per hire/signal trade (platform-enforced; default $20). */
-  subscriberMaxMarginUsd       Int      @default(20)
-  /** Copilot rate limits (platform-enforced guardrails). */
-  rateLimitDaily               Int      @default(50)
-  rateLimitHourly              Int      @default(10)
-  /** Admin Founder Brain two-model routing — non-secret JSON (keys stay in env / encrypted columns). */
-  founderBrainProvidersJson    Json?
-  updatedByUserId          String?
-  updatedAt                DateTime @updatedAt
+  id                            String    @id @default("default")
+  globalShareFooter             String?   @db.Text
+  /**
+   * Admin showcase agent — never used for user instances
+   */
+  showcaseExchangeProvider      String    @default("bybit")
+  showcaseAiProvider            String    @default("deepseek")
+  /**
+   * Encrypted JSON: { apiKey, apiSecret, passphrase?, testnet? }
+   */
+  showcaseExchangeCredentialEnc String?   @db.Text
+  /**
+   * Encrypted AI API key for showcase bot runtime
+   */
+  showcaseAiCredentialEnc       String?   @db.Text
+  /**
+   * Public URL of btc-conservative-agent Railway service (for admin reference)
+   */
+  showcaseBotPublicUrl          String?
+  /**
+   * Push-cache relay snapshot from home bot (JSON); bot remains authoritative
+   */
+  showcaseRelaySnapshot         Json?
+  showcaseRelaySnapshotSeq      BigInt?
+  showcaseRelaySnapshotAt       DateTime?
+  showcaseCredentialsUpdatedAt  DateTime?
+  showcaseRuntimePushedAt       DateTime?
+  /**
+   * Admin: offer platform-billed AI to new founders (Gemini, DeepSeek, Cursor, Ollama).
+   */
+  founderPromoAiEnabled         Boolean   @default(false)
+  founderPromoTokenCap          Int       @default(10000000)
+  founderPromoWindowDays        Int       @default(30)
+  founderPromoMessage           String?   @db.Text
+  /**
+   * Encrypted JSON map: { gemini?, deepseek?, cursor?, openai?, anthropic? }
+   */
+  founderPromoAiCredentialsEnc  String?   @db.Text
+  /**
+   * Permanent platform-level DeepSeek API key — always-available fallback brain for all users.
+   */
+  platformBrainDeepseekKeyEnc   String?   @db.Text
+  /**
+   * Admin-recommended agent settings shown to users on hire/observe flows
+   */
+  agentShowcaseDefaultSettings  String?   @db.Text
+  /**
+   * Max USD margin per hire/signal trade (platform-enforced; default $20).
+   */
+  subscriberMaxMarginUsd        Int       @default(20)
+  /**
+   * Copilot rate limits (platform-enforced guardrails).
+   */
+  rateLimitDaily                Int       @default(50)
+  rateLimitHourly               Int       @default(10)
+  /**
+   * Admin Founder Brain two-model routing — non-secret JSON (keys stay in env / encrypted columns).
+   */
+  founderBrainProvidersJson     Json?
+  updatedByUserId               String?
+  updatedAt                     DateTime  @updatedAt
 }
 
 model TopUpPayment {
-  id              String              @id @default(cuid())
+  id              String             @id @default(cuid())
   userId          String
-  reference       String              @unique
-  asset           TopUpPaymentAsset   @default(USDC)
-  amountUsd       Decimal             @db.Decimal(16, 2)
+  reference       String             @unique
+  asset           TopUpPaymentAsset  @default(USDC)
+  amountUsd       Decimal            @db.Decimal(16, 2)
   treasuryAddress String
   payerAddress    String?
-  txSignature     String?             @unique
-  status          TopUpPaymentStatus  @default(PENDING)
+  txSignature     String?            @unique
+  status          TopUpPaymentStatus @default(PENDING)
   expiresAt       DateTime
   confirmedAt     DateTime?
-  createdAt       DateTime            @default(now())
+  createdAt       DateTime           @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1438,8 +1476,8 @@ model ScoutMarket {
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
-  project   Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  creator   User?                  @relation("PredictionMarketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  project   Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator   User?                 @relation("PredictionMarketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   positions ScoutMarketPosition[]
 
   @@index([projectId])
@@ -1472,7 +1510,7 @@ model DemandPoll {
   active    Boolean        @default(true)
   createdAt DateTime       @default(now())
 
-  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   votes   DemandPollVote[]
 
   @@index([projectId])
@@ -1506,19 +1544,19 @@ model ProjectFollow {
 }
 
 model FounderApplication {
-  id              String                    @id @default(cuid())
+  id              String                   @id @default(cuid())
   userId          String
   projectName     String
   websiteUrl      String?
   twitterHandle   String?
   githubUrl       String?
   videoUrl        String?
-  ideaDescription String                    @db.Text
-  lifecycleStage  ProjectLifecycleStage     @default(IDEA)
-  status          FounderApplicationStatus  @default(SUBMITTED)
+  ideaDescription String                   @db.Text
+  lifecycleStage  ProjectLifecycleStage    @default(IDEA)
+  status          FounderApplicationStatus @default(SUBMITTED)
   projectId       String?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1642,7 +1680,7 @@ model EngagementLotteryWinner {
   createdAt     DateTime @default(now())
 
   draw EngagementLotteryDraw @relation(fields: [drawId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([drawId])
@@ -1672,9 +1710,9 @@ model CommunityComment {
   body      String   @db.Text
   createdAt DateTime @default(now())
 
-  thread  CommunityThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  parent  CommunityComment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
-  replies CommunityComment[] @relation("CommentReplies")
+  thread      CommunityThread    @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parent      CommunityComment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     CommunityComment[] @relation("CommentReplies")
   helpfulMark HelpfulMark?
 
   @@index([threadId])
@@ -1765,53 +1803,67 @@ model FounderCreditLedger {
 }
 
 model GitHubConnection {
-  id                    String    @id @default(cuid())
-  userId                String    @unique
-  githubUsername        String
-  repoFullName          String
-  accessTokenEncrypted  String?   @db.Text
-  lastSyncedAt          DateTime?
-  lastCommitSha         String?
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+  id                   String    @id @default(cuid())
+  userId               String    @unique
+  githubUsername       String
+  repoFullName         String
+  accessTokenEncrypted String?   @db.Text
+  lastSyncedAt         DateTime?
+  lastCommitSha        String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model FounderBuilderSettings {
-  id                     String     @id @default(cuid())
-  userId                 String     @unique
-  defaultProvider        AiProvider @default(RULE_BASED)
+  id                     String             @id @default(cuid())
+  userId                 String             @unique
+  defaultProvider        AiProvider         @default(RULE_BASED)
   preferredModel         String?
-  autoCreateGitHubIssues Boolean    @default(false)
-  autoPublishOnEvent     Boolean    @default(false)
-  autopilotEnabled       Boolean    @default(false)
-  autopilotRedeployHosts Boolean    @default(false)
-  controlPlaneMode       ControlPlaneMode @default(FULL_STACK)
+  autoCreateGitHubIssues Boolean            @default(false)
+  autoPublishOnEvent     Boolean            @default(false)
+  autopilotEnabled       Boolean            @default(false)
+  autopilotRedeployHosts Boolean            @default(false)
+  controlPlaneMode       ControlPlaneMode   @default(FULL_STACK)
   onboardingPath         OnboardingPath?
-  computePlaneMode       ComputePlaneMode @default(CLOUD)
-  /** render | railway | vercel_neon | supabase — recommendation only (FREE_STARTER path). */
+  computePlaneMode       ComputePlaneMode   @default(CLOUD)
+  /**
+   * render | railway | vercel_neon | supabase — recommendation only (FREE_STARTER path).
+   */
   starterPack            String?
-  /** Phase 2+ connect hub: per-destination publish/sync/ai-context toggles. */
+  /**
+   * Phase 2+ connect hub: per-destination publish/sync/ai-context toggles.
+   */
   platformConnections    Json?
-  /** Phase 4 — universal graph (initiative → commit → PR → deploy → update). */
+  /**
+   * Phase 4 — universal graph (initiative → commit → PR → deploy → update).
+   */
   founderGraph           Json?
-  /** Phase 5 — import wizard + local stack state. */
+  /**
+   * Phase 5 — import wizard + local stack state.
+   */
   founderCloudState      Json?
   currentGoalFocus       String?
-  /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
+  /**
+   * Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes.
+   */
   memoryGraph            Json?
-  memoryStorageMode      MemoryStorageMode @default(PLATFORM)
+  memoryStorageMode      MemoryStorageMode  @default(PLATFORM)
   secretsStorageMode     SecretsStorageMode @default(PLATFORM_ENCRYPTED)
-  /** LWW tie-breaker for vault merge (desktop | mobile). */
+  /**
+   * LWW tie-breaker for vault merge (desktop | mobile).
+   */
   vaultPrimaryPlatform   String?
-  createdAt              DateTime   @default(now())
-  updatedAt              DateTime   @updatedAt
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-/** Lightweight cross-device relay for local-first project memory (not full AI chat logs). */
+/**
+ * Lightweight cross-device relay for local-first project memory (not full AI chat logs).
+ */
 model ProjectMemoryDeviceSync {
   id          String   @id @default(cuid())
   userId      String   @unique
@@ -1876,48 +1928,52 @@ model WorkspaceSession {
   @@index([workspaceId])
 }
 
-/** Paired Founder Node (desktop vault) — control plane metadata only. */
+/**
+ * Paired Founder Node (desktop vault) — control plane metadata only.
+ */
 model FounderNode {
-  id            String   @id @default(cuid())
-  userId        String
-  nodeId        String   @unique
-  label         String
-  secretHash    String   @db.Text
-  status        String   @default("offline")
-  lastSeenAt    DateTime?
-  ramGb         Int?
-  storageGb     Int?
-  storageFreeGb Int?
-  vaultHealthy  Boolean  @default(true)
-  platform      String?
-  appVersion    String?
-  ollamaEnabled Boolean  @default(false)
-  ollamaBaseUrl String?
-  ollamaModel   String?
-  vectorChunks     Int?
-  vectorIndexedAt  DateTime?
-  lastPullSyncAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id              String    @id @default(cuid())
+  userId          String
+  nodeId          String    @unique
+  label           String
+  secretHash      String    @db.Text
+  status          String    @default("offline")
+  lastSeenAt      DateTime?
+  ramGb           Int?
+  storageGb       Int?
+  storageFreeGb   Int?
+  vaultHealthy    Boolean   @default(true)
+  platform        String?
+  appVersion      String?
+  ollamaEnabled   Boolean   @default(false)
+  ollamaBaseUrl   String?
+  ollamaModel     String?
+  vectorChunks    Int?
+  vectorIndexedAt DateTime?
+  lastPullSyncAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
 
-/** Bidirectional sync job pulled by Founder Node (Step 4). */
+/**
+ * Bidirectional sync job pulled by Founder Node (Step 4).
+ */
 model FounderNodeSyncJob {
-  id          String                   @id @default(cuid())
-  userId      String
-  nodeId      String
-  kind        FounderNodeSyncJobKind
-  payload     Json
-  status      FounderNodeSyncJobStatus @default(PENDING)
-  result      Json?
-  error       String?
-  expiresAt   DateTime
-  createdAt   DateTime                 @default(now())
-  updatedAt   DateTime                 @updatedAt
+  id        String                   @id @default(cuid())
+  userId    String
+  nodeId    String
+  kind      FounderNodeSyncJobKind
+  payload   Json
+  status    FounderNodeSyncJobStatus @default(PENDING)
+  result    Json?
+  error     String?
+  expiresAt DateTime
+  createdAt DateTime                 @default(now())
+  updatedAt DateTime                 @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1926,24 +1982,26 @@ model FounderNodeSyncJob {
   @@index([expiresAt])
 }
 
-/** Privacy stack attestation receipts (Step 5 — Phala TEE + vault integrity). */
+/**
+ * Privacy stack attestation receipts (Step 5 — Phala TEE + vault integrity).
+ */
 model PrivacyAttestationLog {
-  id             String              @id @default(cuid())
+  id             String             @id @default(cuid())
   userId         String
   kind           String
-  status         String              @default("pending")
+  status         String             @default("pending")
   provider       String?
   model          String?
   requestId      String?
   signingAddress String?
   nonce          String?
-  verified       Boolean             @default(false)
+  verified       Boolean            @default(false)
   verifiedAt     DateTime?
   summary        String?
   checks         Json?
   reportSnapshot Json?
   memoryMode     MemoryStorageMode?
-  createdAt      DateTime            @default(now())
+  createdAt      DateTime           @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1951,7 +2009,9 @@ model PrivacyAttestationLog {
   @@index([userId, kind])
 }
 
-/** Copilot LLM job executed on a paired Founder Node (Ollama). */
+/**
+ * Copilot LLM job executed on a paired Founder Node (Ollama).
+ */
 model FounderNodeInferenceJob {
   id         String                     @id @default(cuid())
   userId     String
@@ -1973,7 +2033,9 @@ model FounderNodeInferenceJob {
   @@index([expiresAt])
 }
 
-/** Short-lived pairing code shown in Founder OS settings. */
+/**
+ * Short-lived pairing code shown in Founder OS settings.
+ */
 model FounderNodePairingCode {
   id             String    @id @default(cuid())
   userId         String
@@ -1989,7 +2051,9 @@ model FounderNodePairingCode {
   @@index([expiresAt])
 }
 
-/** Per-device encrypted vault blob relay (mobile + desktop nodes). */
+/**
+ * Per-device encrypted vault blob relay (mobile + desktop nodes).
+ */
 model FounderNodeVaultRelay {
   id                 String   @id @default(cuid())
   userId             String
@@ -2008,7 +2072,9 @@ model FounderNodeVaultRelay {
   @@index([userId])
 }
 
-/** Per-device ack of applied merge from a peer relay (Phase 4). */
+/**
+ * Per-device ack of applied merge from a peer relay (Phase 4).
+ */
 model FounderNodeVaultSyncAck {
   id               String   @id @default(cuid())
   userId           String
@@ -2047,21 +2113,21 @@ model FounderEvent {
 }
 
 model SuggestedBuildUpdate {
-  id                  String                @id @default(cuid())
-  founderId           String
-  projectId           String?
-  headline            String
-  body                String                @db.Text
-  devSummary          String                @db.Text
-  traderSummary       String                @db.Text
-  commitShas          Json                  @default("[]")
-  status              SuggestedUpdateStatus @default(PENDING)
-  buildPostId         String?
-  communityThreadId   String?
-  xTweetUrl           String?
-  publishLog          Json?
-  source              String                @default("github")
-  createdAt           DateTime              @default(now())
+  id                String                @id @default(cuid())
+  founderId         String
+  projectId         String?
+  headline          String
+  body              String                @db.Text
+  devSummary        String                @db.Text
+  traderSummary     String                @db.Text
+  commitShas        Json                  @default("[]")
+  status            SuggestedUpdateStatus @default(PENDING)
+  buildPostId       String?
+  communityThreadId String?
+  xTweetUrl         String?
+  publishLog        Json?
+  source            String                @default("github")
+  createdAt         DateTime              @default(now())
 
   founder Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
 
@@ -2083,15 +2149,15 @@ model ConnectedAppStatus {
 }
 
 model IntegrationCredential {
-  id           String   @id @default(cuid())
-  userId       String
-  provider     String
-  token        String?  @db.Text
-  metadata     Json?
-  webhookSecret String? @unique
-  verifiedAt   DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String    @id @default(cuid())
+  userId        String
+  provider      String
+  token         String?   @db.Text
+  metadata      Json?
+  webhookSecret String?   @unique
+  verifiedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -2165,9 +2231,9 @@ model SearchLog {
 }
 
 model TrendingScore {
-  id        String   @id @default(cuid())
-  projectId String   @unique
-  score     Decimal  @db.Decimal(16, 6)
+  id         String   @id @default(cuid())
+  projectId  String   @unique
+  score      Decimal  @db.Decimal(16, 6)
   computedAt DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -2197,11 +2263,11 @@ model FounderAgent {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
-  founder Founder  @relation(fields: [founderId], references: [id], onDelete: Cascade)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  creator User     @relation("AgentCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
-  installs AgentInstall[]
-  runs     AgentRun[]
+  founder   Founder        @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  project   Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  creator   User           @relation("AgentCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  installs  AgentInstall[]
+  runs      AgentRun[]
   followers AgentFollow[]
 
   @@index([founderId])
@@ -2236,8 +2302,8 @@ model AgentRun {
   createdAt    DateTime       @default(now())
   completedAt  DateTime?
 
-  agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent           FounderAgent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   buildQueueItems BuildQueueItem[]
 
   @@index([agentId])
@@ -2301,7 +2367,9 @@ model TradingAgent {
   tradeCount      Int                @default(0)
   winRatePct      Decimal            @db.Decimal(5, 2)
   costDdollarDay  Int                @default(1000)
-  /** One-time hire fee for a 1-week live instance rental */
+  /**
+   * One-time hire fee for a 1-week live instance rental
+   */
   costDdollarWeek Int                @default(2000)
   liveSince       DateTime
   followerCount   Int                @default(0)
@@ -2311,8 +2379,8 @@ model TradingAgent {
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
-  activities TradingAgentActivity[]
-  followers  TradingAgentFollow[]
+  activities      TradingAgentActivity[]
+  followers       TradingAgentFollow[]
   instances       TradingAgentInstance[]
   signalApiKeys   SignalApiKey[]
   signalCycles    SignalCycle[]
@@ -2343,23 +2411,25 @@ enum AgentRegistryStatus {
   FAILED
 }
 
-/** On-chain / directory registration for trading agents (SAID, Spawn, etc.). */
+/**
+ * On-chain / directory registration for trading agents (SAID, Spawn, etc.).
+ */
 model AgentRegistryEntry {
-  id            String              @id @default(cuid())
-  agentId       String
-  registry      AgentRegistryKind
-  chainSlug     ChainSlug?
-  externalId    String?
-  ownerAddress  String?
-  metadataUri   String?
-  registryUrl   String?
-  txSignature   String?
-  status        AgentRegistryStatus @default(PENDING)
-  notes         String?             @db.Text
-  registeredAt  DateTime?
-  verifiedAt    DateTime?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  id           String              @id @default(cuid())
+  agentId      String
+  registry     AgentRegistryKind
+  chainSlug    ChainSlug?
+  externalId   String?
+  ownerAddress String?
+  metadataUri  String?
+  registryUrl  String?
+  txSignature  String?
+  status       AgentRegistryStatus @default(PENDING)
+  notes        String?             @db.Text
+  registeredAt DateTime?
+  verifiedAt   DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 
   agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
@@ -2383,7 +2453,9 @@ enum SignalCycleSettlementStatus {
   FAILED
 }
 
-/** API keys for signal-cycle webhooks (hashed at rest). */
+/**
+ * API keys for signal-cycle webhooks (hashed at rest).
+ */
 model SignalApiKey {
   id         String    @id @default(cuid())
   userId     String
@@ -2403,23 +2475,25 @@ model SignalApiKey {
   @@index([keyHash])
 }
 
-/** One research APPROVE → close lifecycle (showcase + subscriber tracking). */
+/**
+ * One research APPROVE → close lifecycle (showcase + subscriber tracking).
+ */
 model SignalCycle {
-  id               String            @id @default(cuid())
-  agentId          String
-  tradeId          String
-  status           SignalCycleStatus @default(INTENT)
-  botVersion       String?
-  intentEnvelope   Json
-  researchVenue    String            @default("bitfinex")
-  expiresAt        DateTime?
-  showcasePnlUsd   Decimal?          @db.Decimal(16, 4)
+  id                 String            @id @default(cuid())
+  agentId            String
+  tradeId            String
+  status             SignalCycleStatus @default(INTENT)
+  botVersion         String?
+  intentEnvelope     Json
+  researchVenue      String            @default("bitfinex")
+  expiresAt          DateTime?
+  showcasePnlUsd     Decimal?          @db.Decimal(16, 4)
   showcaseExitReason String?
-  closedAt         DateTime?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  closedAt           DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-  agent        TradingAgent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agent        TradingAgent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
   participants SignalCycleParticipant[]
   events       SignalCycleEvent[]
 
@@ -2512,7 +2586,9 @@ enum TradingAgentInstanceStatus {
   ERROR
 }
 
-/** User-owned isolated agent runtime — separate from public showcase bot. */
+/**
+ * User-owned isolated agent runtime — separate from public showcase bot.
+ */
 model TradingAgentInstance {
   id                   String                     @id @default(cuid())
   agentId              String
@@ -2554,16 +2630,16 @@ model UserTotp {
 }
 
 model WebAuthnCredential {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   userId       String
-  credentialId String   @unique
-  publicKey    String   @db.Text
-  counter      BigInt   @default(0)
+  credentialId String    @unique
+  publicKey    String    @db.Text
+  counter      BigInt    @default(0)
   deviceType   String?
-  backedUp     Boolean  @default(false)
+  backedUp     Boolean   @default(false)
   transports   String?
   label        String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   lastUsedAt   DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -2628,17 +2704,17 @@ model ApiCache {
 /// stored for AI context. Content is kept as base64 so it works on serverless
 /// hosts without a persistent filesystem; a Founder Node can later mirror/sync.
 model FounderVaultItem {
-  id          String   @id @default(cuid())
-  userId      String
-  name        String
-  mime        String
-  sizeBytes   Int
-  category    String   @default("screenshot")
-  dataUrl     String   @db.Text
-  width       Int?
-  height      Int?
-  indexedForAi Boolean @default(true)
-  createdAt   DateTime @default(now())
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  mime         String
+  sizeBytes    Int
+  category     String   @default("screenshot")
+  dataUrl      String   @db.Text
+  width        Int?
+  height       Int?
+  indexedForAi Boolean  @default(true)
+  createdAt    DateTime @default(now())
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -2657,8 +2733,8 @@ model ProjectWallMessage {
   sourceRefId String?
   createdAt   DateTime @default(now())
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  project Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author  User            @relation(fields: [authorId], references: [id], onDelete: Cascade)
   pin     ProjectWallPin?
 
   @@index([projectId, createdAt])
@@ -2668,13 +2744,13 @@ model ProjectWallMessage {
 
 /// A DDollar-funded subtopic upgrade (pin / highlight / promote) on a wall message.
 model ProjectWallPin {
-  id          String   @id @default(cuid())
-  messageId   String   @unique
-  projectId   String
-  userId      String
-  kind        String   @default("pin")
-  cost        Int      @default(0)
-  createdAt   DateTime @default(now())
+  id        String   @id @default(cuid())
+  messageId String   @unique
+  projectId String
+  userId    String
+  kind      String   @default("pin")
+  cost      Int      @default(0)
+  createdAt DateTime @default(now())
 
   message ProjectWallMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
   project Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -2688,29 +2764,29 @@ model ProjectWallPin {
 /// state for a project wall. 1 row per project (upserted). Active while expiresAt > now.
 /// Activation cost is 1,000 DDollar/month (action key WALL_SUMMARIZER_MONTHLY).
 model ProjectWallSummary {
-  id                String   @id @default(cuid())
-  projectId         String   @unique
+  id                 String    @id @default(cuid())
+  projectId          String    @unique
   /// Concise LLM-generated summary of the most recent summarizer window (last 500 messages).
-  summaryBody       String   @db.Text
+  summaryBody        String    @db.Text
   /// Sentiment label: "positive" | "neutral" | "negative".
-  sentimentLabel    String   @default("neutral")
+  sentimentLabel     String    @default("neutral")
   /// LLM reasoning for the chosen sentiment ("what is the sentiment and why").
-  sentimentReasoning String  @default("") @db.Text
+  sentimentReasoning String    @default("") @db.Text
   /// UserId of whoever activated/renewed most recently.
-  activatedBy       String
+  activatedBy        String
   /// DDollar cost per month (1,000 by default).
-  cost              Int      @default(1000)
+  cost               Int       @default(1000)
   /// Start of the current subscription month.
-  activatedAt       DateTime @default(now())
+  activatedAt        DateTime  @default(now())
   /// When the subscription lapses (activatedAt + 30 days). Active while > now.
-  expiresAt         DateTime
+  expiresAt          DateTime
   /// Last renewal timestamp (set on renewals, null on first activation).
-  renewedAt         DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  renewedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  project    Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  activator  User    @relation(fields: [activatedBy], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activator User    @relation(fields: [activatedBy], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
 }
@@ -2741,6 +2817,7 @@ model RateLimit {
   windowStart DateTime @default(now())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
   @@unique([userId, endpoint, windowStart])
 }
 
@@ -2805,4 +2882,111 @@ model PendingIdeDispatch {
 
   @@index([userId, status])
   @@index([createdAt])
+}
+
+// ─── Founder OS Kernel — Phase 1 ─────────────────────────────────────────────
+// See docs/KERNEL.md §8, §9 for the design rationale. These three models are
+// the data backbone of the Routing Engine v2 + Flight Recorder + Execution
+// Profiles. The Learning Engine (Phase 4) will refine `Capability.successRate`
+// / `retryRate` / `sampleCount` from real traffic.
+
+/// Data-driven description of every AI capability the platform can route to.
+/// Replaces hardcoded model-name lookups in the kernel — see KERNEL.md rule §2:
+/// "No kernel code references a provider key or model name by string."
+model Capability {
+  id          String  @id @default(cuid())
+  provider    String // "glm" | "deepseek" | "claude" | "gpt" | "gemini" | "kimi" | ...
+  model       String // provider-specific model id, e.g. "glm-5.2"
+  displayName String
+  isActive    Boolean @default(true)
+
+  // Capability flags (used by Layer 2 of the routing pipeline)
+  toolUse            Boolean @default(false)
+  jsonMode           Boolean @default(false)
+  largeContext       Boolean @default(false) // >128K context window
+  largeContextWindow Int? // actual window size in tokens, if largeContext = true
+  vision             Boolean @default(false)
+  streaming          Boolean @default(true)
+
+  // Costs in USD per 1M tokens (used by Layer 3 cost-latency scoring)
+  inputCostPer1M  Float
+  outputCostPer1M Float
+
+  // Observed median latency in ms (used by Layer 3 cost-latency scoring)
+  latencyP50Ms Int
+
+  // Intent scores (0..1, how well-suited this model is for each intent).
+  // These are PROPOSAL values seeded by scripts/seed-capabilities.ts; the
+  // Learning Engine will refine them from Flight Recorder outcomes.
+  codeScore      Float @default(0.5)
+  reasoningScore Float @default(0.5)
+  simpleQaScore  Float @default(0.5)
+  agentScore     Float @default(0.5)
+  visionScore    Float @default(0.0)
+
+  // Reputation columns — owned by the Learning Engine (Phase 4).
+  // Seeders must never clobber these once they've been touched.
+  successRate Float @default(1.0)
+  retryRate   Float @default(0.0)
+  sampleCount Int   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, model])
+  @@index([provider])
+  @@index([isActive])
+}
+
+/// One row per routing decision made by the Routing Engine v2. The Flight
+/// Recorder writes here on every request; the Learning Engine (Phase 4)
+/// consumes the outcome signals to update Capability reputation.
+model RoutingDecision {
+  id          String  @id @default(cuid())
+  requestId   String // correlation ID, joins to AiTokenUsageLog
+  userId      String
+  workspaceId String?
+
+  intent  String // "code" | "reasoning" | "simple_qa" | "agent" | "vision"
+  profile String // "turbo" | "balanced" | "architect" | "autonomous"
+
+  // Snapshot of the scored candidates pre-selection, for replay/debug.
+  candidates     Json // array of { provider, model, score }
+  chosenProvider String
+  chosenModel    String
+
+  cacheLevel String // "hit" | "partial" | "miss"
+  cacheKey   String?
+
+  promptHash           String // SHA-256 of normalized prompt prefix
+  tokenCountPrompt     Int?
+  tokenCountCompletion Int?
+
+  latencyMs Int?
+  costUsd   Float? // computed from token counts + Capability costs
+
+  // Outcome signals — populated async after the response is consumed.
+  // These are the training inputs the Learning Engine reads in Phase 4.
+  accepted Boolean? // user accepted the response
+  retried  Boolean? // user retried within 60s
+  edited   Boolean? // user heavily edited the response
+  rating   Int? // 1..5 if explicitly collected
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([chosenProvider, chosenModel])
+  @@index([createdAt])
+}
+
+/// Workspace-scoped router overrides. A founder picks one Execution Profile
+/// per workspace; the Routing Engine reads it as a soft override of the
+/// global "balanced" defaults. See KERNEL.md §7.
+model WorkspaceExecutionProfile {
+  id          String   @id @default(cuid())
+  workspaceId String   @unique
+  profile     String   @default("balanced") // turbo | balanced | architect | autonomous
+  overrides   Json? // optional per-workspace weight overrides
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
 }
