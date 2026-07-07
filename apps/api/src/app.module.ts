@@ -62,6 +62,7 @@ import { FlightRecorderModule } from './flight-recorder/flight-recorder.module';
 import { RoutingEngineModule } from './routing-engine/routing-engine.module';
 import { MemoryEngineModule } from './memory-engine/memory-engine.module';
 import { FounderApplicationsModule } from './founder-applications/founder-applications.module';
+import { ExecutionManagerModule } from './execution-manager/execution-manager.module';
 
 @Module({
   imports: [
@@ -129,6 +130,7 @@ import { FounderApplicationsModule } from './founder-applications/founder-applic
     RoutingEngineModule,
     MemoryEngineModule,
     FounderApplicationsModule,
+    ExecutionManagerModule,
   ],
   providers: [
     {
