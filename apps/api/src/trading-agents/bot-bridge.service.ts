@@ -411,23 +411,42 @@ export class BotBridgeService {
   }
 
   /** True when the canonical Cloudflare showcase tunnel responds.
-   *  The home Cloudflare tunnel has bimodal latency — pings usually land in
-   *  ~0.3s but occasionally spike past 6s (cold cloudflared connection, host
-   *  is on the other side of the world). The old 6s budget made the public
-   *  agent-status dot flick red even when the bot was healthy, because
-   *  getPublicAgentStatus() only falls through to the heavier state probe
-   *  when `force=true`. 12s clears the observed tail latency while still
-   *  failing fast when the tunnel is genuinely down. */
+   *  Mirrors fetchHealth()'s probe pattern: race `/api/ping` AND `/health`
+   *  across ALL candidate bot URLs (Cloudflare + Fly legacy) with
+   *  Promise.any, so the first 200 wins. The previous ping-only probe on
+   *  the canonical Cloudflare URL was fragile — from inside Railway's
+   *  network the home tunnel's `/api/ping` occasionally fails while its
+   *  `/health` and Fly's `/api/ping` succeed, which made the public
+   *  agent-status dot flick red even when the dashboard was happily
+   *  streaming live trades. Racing all probes the way fetchHealth already
+   *  does keeps the status dot consistent with the dashboard's botConnected
+   *  flag — they now use the same reachability definition. */
   async isReachable(force = false): Promise<boolean> {
-    const cf = await this.resolveShowcaseUrl();
+    const bases = await this.resolveBotUrls();
+    if (bases.length === 0) return false;
+    const probes: Promise<boolean>[] = [];
+    for (const base of bases) {
+      for (const path of ['/api/ping', '/health'] as const) {
+        // Each probe REJECTs on any non-success so Promise.any only resolves
+        // to true on a real 200. Resolving false would let Promise.any
+        // short-circuit on a failure before a later probe succeeds.
+        probes.push(
+          (async () => {
+            const res = await fetch(`${base}${path}`, {
+              signal: AbortSignal.timeout(12_000),
+              headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return true as const;
+          })(),
+        );
+      }
+    }
     try {
-      const res = await fetch(`${cf}/api/ping`, {
-        signal: AbortSignal.timeout(12_000),
-        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
-      });
-      if (res.ok) return true;
+      await Promise.any(probes);
+      return true;
     } catch {
-      // fall through
+      // all probes rejected — fall through to state probe
     }
     if (!force) return false;
     const state = await this.fetchPublicShowcaseState(true);
