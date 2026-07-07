@@ -61,6 +61,7 @@ import { CapabilityRegistryModule } from './capability-registry/capability-regis
 import { FlightRecorderModule } from './flight-recorder/flight-recorder.module';
 import { RoutingEngineModule } from './routing-engine/routing-engine.module';
 import { MemoryEngineModule } from './memory-engine/memory-engine.module';
+import { FounderApplicationsModule } from './founder-applications/founder-applications.module';
 
 @Module({
   imports: [
@@ -127,6 +128,7 @@ import { MemoryEngineModule } from './memory-engine/memory-engine.module';
     FlightRecorderModule,
     RoutingEngineModule,
     MemoryEngineModule,
+    FounderApplicationsModule,
   ],
   providers: [
     {
