@@ -129,7 +129,8 @@ export class RoutingEngineService {
     const intentScore = this.intentScoreFor(c, intent); // 0..1
     const costScore = Math.max(0, 1 - c.inputCostPer1M / 5); // normalize against $5/1M
     const latencyScore = Math.max(0, 1 - c.latencyP50Ms / 5000); // normalize against 5s
-    const reputation = Math.max(0, c.successRate - c.retryRate);
+    // Multiplicative form: rewards low retries even at low success; no clamp needed.
+    const reputation = c.successRate * (1 - c.retryRate);
     const w = PROFILE_WEIGHTS[profile];
     return (
       w.intent * intentScore +

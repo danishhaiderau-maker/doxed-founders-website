@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { CapabilityRegistryService } from '../capability-registry/capability-registry.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -191,11 +191,14 @@ export class LearningEngineService {
         processed: next.processed,
         updated: next.updated,
       };
-      writeFileSync(
-        LearningEngineService.STATE_FILE,
-        JSON.stringify(payload, null, 2),
-        'utf8',
-      );
+      // Atomic write: write to a sibling temp file, then rename. A crash
+      // mid-write leaves either the temp file orphaned or the old state
+      // intact — never a half-written JSON. `renameSync` is atomic for
+      // same-volume renames (tmp is next to STATE_FILE, so always same vol),
+      // which holds on Windows (NTFS), Linux, and macOS.
+      const tmp = `${LearningEngineService.STATE_FILE}.tmp`;
+      writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+      renameSync(tmp, LearningEngineService.STATE_FILE);
     } catch (err) {
       // The rollup itself still succeeded — we just can't persist the new
       // watermark. Next run will reprocess the same window, which is safe.
