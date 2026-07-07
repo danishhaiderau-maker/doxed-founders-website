@@ -31,6 +31,14 @@ export type CumulativeSessionMetrics = {
 export class BotBridgeService {
   private readonly logger = new Logger(BotBridgeService.name);
   private lastFetchAt = 0;
+  /**
+   * Wall-clock of the most recent SUCCESSFUL live-bot state fetch. NEVER
+   * reset by invalidateCache() — relay-event webhooks call invalidateCache
+   * on every push (which is a sign of life, not failure), so coupling
+   * lastLiveFetchAt to cache invalidation would wipe our liveness signal
+   * on every bot event. Updated only by successful fetches.
+   */
+  private lastLiveFetchAt = 0;
   private cached: BotApiState | null = null;
   private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 5000);
   /**
@@ -137,14 +145,17 @@ export class BotBridgeService {
     this.lastFetchAt = 0;
   }
 
-  /** Wall-clock of the most recent successful live-bot state fetch, OR 0 if
-   *  the bridge has never seen the bot. Used by getPublicAgentStatus() as a
-   *  last-resort liveness signal when the tunnel is momentarily unreachable
-   *  from Railway — the dashboard polls the same bot every few seconds via
-   *  the same BotBridge instance, so a fresh timestamp here proves the bot
-   *  is alive even when this specific status probe loses the tunnel race. */
+  /** Wall-clock of the most recent SUCCESSFUL live-bot state fetch. NEVER
+   *  reset by invalidateCache() — relay-event webhooks call invalidateCache
+   *  on every bot push (which is itself a sign of life), so coupling this
+   *  timestamp to cache invalidation would wipe our liveness signal on
+   *  every bot event. Used by getPublicAgentStatus() as a last-resort
+   *  liveness signal when the tunnel is momentarily unreachable from
+   *  Railway — the dashboard polls the same BotBridge instance every few
+   *  seconds, so a fresh timestamp here proves the bot is alive even when
+   *  this specific status probe loses the tunnel race. */
   getLastLiveFetchAt(): number {
-    return this.lastFetchAt;
+    return this.lastLiveFetchAt;
   }
 
   /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
@@ -171,6 +182,7 @@ export class BotBridgeService {
         if (!data || typeof data !== 'object') continue;
         this.cached = data;
         this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
         return data;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -181,6 +193,7 @@ export class BotBridgeService {
     if (cached) {
       this.cached = cached;
       this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
       return cached;
     }
     return null;
@@ -273,6 +286,7 @@ export class BotBridgeService {
       if (!data || typeof data !== 'object') return null;
       this.cached = data;
       this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
       return data;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -292,6 +306,7 @@ export class BotBridgeService {
     if (cached) {
       this.cached = cached;
       this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
       return cached;
     }
 
@@ -303,6 +318,7 @@ export class BotBridgeService {
     if (data) {
       this.cached = data;
       this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
     }
     return data;
   }
@@ -318,6 +334,7 @@ export class BotBridgeService {
       if (cached) {
         this.cached = cached;
         this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
         return cached;
       }
     }
@@ -330,6 +347,7 @@ export class BotBridgeService {
     if (data) {
       this.cached = data;
       this.lastFetchAt = now;
+        this.lastLiveFetchAt = now;
       return data;
     }
 
