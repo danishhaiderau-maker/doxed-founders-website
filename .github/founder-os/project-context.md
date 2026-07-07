@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (19 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(observatory): default undefined subsystems before map
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
