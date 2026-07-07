@@ -88,15 +88,14 @@ function Restart-TunnelComponent {
   Log ("RECOVER tunnel - " + $Reason)
   Stop-Cloudflared | Out-Null
   Start-Sleep -Seconds 3
-  if ((Test-Path $namedFlag) -and (Use-NamedTunnel)) {
-    try {
-      Start-CloudflaredNamedHidden -Port $BotPort
-    } catch {
-      Log ("RECOVER tunnel hidden start failed: " + $_.Exception.Message + " - opening visible tunnel window")
-      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
+  try {
+    if (Use-NamedTunnel) {
+      Start-HomeTunnel -Port $BotPort -Force
+    } else {
+      Start-HomeTunnel -Port $BotPort -Force -PreferVisible
     }
-  } else {
-    Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
+  } catch {
+    Log ("RECOVER tunnel start failed: " + $_.Exception.Message)
   }
 }
 

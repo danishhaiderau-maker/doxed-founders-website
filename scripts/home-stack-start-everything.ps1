@@ -137,7 +137,7 @@ if (-not (Test-AnalyzerHealthy)) {
 }
 
 # Step 3 — tunnel (named = hidden background; quick = visible console)
-$tunnelUrl = if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) { $stableUrl } else { Get-TunnelUrl }
+$tunnelUrl = if (Use-NamedTunnel) { $stableUrl } else { Get-TunnelUrl }
 $tunnelOk = if ($tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
 $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
 
@@ -150,15 +150,15 @@ if ($tunnelOk) {
     Stop-Cloudflared | Out-Null
     Start-Sleep -Seconds 2
   }
-  if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
+  if (Use-NamedTunnel) {
     Write-Step "[3/4] Starting named tunnel hidden (stable URL)..."
-    & (Join-Path $scriptDir "restart-home-tunnel.ps1") -Port $BotPort -Force -Hidden | Out-Null
+    Start-HomeTunnel -Port $BotPort -Force
     $messages.Add("[3/4] Named tunnel started hidden - $stableUrl")
     Start-Sleep -Seconds 6
   } else {
-    Write-Step "[3/4] Opening tunnel console (Doxed Cloudflare Tunnel)..."
-    Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
-    $messages.Add("[3/4] Quick tunnel window opened - URL in .home-tunnel-url")
+    Write-Step "[3/4] Opening quick tunnel console..."
+    Start-HomeTunnel -Port $BotPort -Force -PreferVisible
+    $messages.Add("[3/4] Quick tunnel console opened - URL in .home-tunnel-url")
     Start-Sleep -Seconds 8
   }
 }

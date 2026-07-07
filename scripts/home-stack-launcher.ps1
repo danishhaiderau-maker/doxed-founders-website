@@ -280,19 +280,19 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           error = "Bot not running on :$BotPort - click Start bot first, wait for /api/ping, then Start tunnel."
         }
       }
-      if (-not ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel")))) {
-        Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
-        return @{ ok = $true; message = "Quick tunnel window opened - watch Doxed Cloudflare Tunnel for the URL" }
-      }
       try {
-        Start-CloudflaredNamedHidden -Port $BotPort
+        if (Use-NamedTunnel) {
+          Start-HomeTunnel -Port $BotPort -Force
+          $stableUrl = "https://bot.doxxedcrypto.digital"
+          return @{
+            ok = $true
+            message = "Named tunnel starting hidden at $stableUrl - refresh status in 30-60s."
+          }
+        }
+        Start-HomeTunnel -Port $BotPort -Force -PreferVisible
+        return @{ ok = $true; message = "Quick tunnel console opened - copy URL from the window when ready." }
       } catch {
         return @{ ok = $false; error = "Tunnel start failed: $($_.Exception.Message)" }
-      }
-      $stableUrl = "https://bot.doxxedcrypto.digital"
-      return @{
-        ok = $true
-        message = "Named tunnel starting at $stableUrl - refresh status in 30-60s (bridge stays responsive)."
       }
     }
     "enable-named-tunnel" {
