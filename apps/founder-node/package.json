@@ -43,6 +43,18 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "pair.html",
+        "to": "pair/pair.html"
+      },
+      {
+        "from": "pair.js",
+        "to": "pair/pair.js"
+      },
+      {
+        "from": "dist/pair-preload.js",
+        "to": "pair/pair-preload.js"
       }
     ],
     "asar": true,
@@ -54,17 +66,29 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico",
       "signAndEditExecutable": false,
-      "signingHashAlgorithms": ["sha256"],
+      "signingHashAlgorithms": [
+        "sha256"
+      ],
       "rfc3161TimeStampServer": "http://timestamp.digicert.com",
       "sign": "build/sign.js"
     },
     "mac": {
-      "target": [{"target": "dmg", "arch": ["arm64", "x64"]}],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.png",
       "category": "public.app-category.productivity",
       "hardenedRuntime": false,
@@ -75,7 +99,14 @@
       "title": "Founder Node ${version}"
     },
     "linux": {
-      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "category": "Utility",
       "icon": "build/icon.png",
       "executableName": "founder-node",

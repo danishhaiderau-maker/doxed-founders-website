@@ -496,6 +496,13 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   }
 }
 
+function pairWindowAssetsDir(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'pair');
+  }
+  return path.join(__dirname, '..');
+}
+
 function openPairWindow(): void {
   if (pairWindow) {
     pairWindow.focus();
@@ -503,72 +510,47 @@ function openPairWindow(): void {
   }
 
   const icon = loadAppIcon();
+  const assetsDir = pairWindowAssetsDir();
+  const pairHtml = path.join(assetsDir, 'pair.html');
+  const pairPreload = app.isPackaged
+    ? path.join(process.resourcesPath, 'pair', 'pair-preload.js')
+    : path.join(__dirname, 'pair-preload.js');
+
+  if (!fs.existsSync(pairHtml)) {
+    console.error('Pair window assets missing:', pairHtml);
+    dialog.showErrorBox(
+      'Founder Node install incomplete',
+      `Pairing UI files are missing from this build.\n\nExpected:\n${pairHtml}\n\nReinstall Founder Node from a fresh release build (npm run pack:win).`,
+    );
+    return;
+  }
+
   pairWindow = new BrowserWindow({
     width: 440,
     height: 520,
     title: 'Pair Founder Node',
     autoHideMenuBar: true,
+    show: false,
     icon: icon.isEmpty() ? undefined : icon,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: pairPreload,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
     },
   });
 
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Pair Founder Node</title>
-<style>
-  body { font-family: system-ui, sans-serif; background: #0a0a0f; color: #e4e4e7; padding: 24px; margin: 0; }
-  h1 { font-size: 1.25rem; margin: 0 0 8px; }
-  p { color: #a1a1aa; font-size: 0.875rem; line-height: 1.5; }
-  label { display: block; font-size: 0.75rem; color: #a1a1aa; margin: 16px 0 6px; }
-  input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #3f3f46; background: #18181b; color: white; }
-  button { margin-top: 20px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #7c3aed; color: white; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: 0.5; }
-  .err { color: #f87171; font-size: 0.8rem; margin-top: 12px; }
-  .ok { color: #34d399; font-size: 0.8rem; margin-top: 12px; }
-  code { background: #27272a; padding: 2px 6px; border-radius: 4px; }
-</style></head><body>
-  <h1>Pair this machine</h1>
-  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then paste the <strong>8-character code here</strong> (not in the browser).</p>
-  <p style="font-size:0.8rem;color:#fbbf24">If you already generated a new code after pairing once, the old link is dead — use the latest code only.</p>
-  <p style="margin-top:12px"><button type="button" id="openWeb" style="width:100%;padding:10px;border-radius:8px;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;cursor:pointer;font-weight:600">Open Builder settings in browser</button></p>
-  <label>Founder OS URL</label>
-  <input id="api" value="${DEFAULT_API}" />
-  <label>Pairing code</label>
-  <input id="code" placeholder="8-character code" maxlength="12" />
-  <label>Node label</label>
-  <input id="label" value="${os.hostname()} Founder Node" />
-  <button id="pair">Connect vault</button>
-  <div id="msg"></div>
-  <script>
-    const { ipcRenderer } = require('electron');
-    document.getElementById('openWeb').onclick = () => ipcRenderer.invoke('open-settings');
-    document.getElementById('pair').onclick = async () => {
-      const btn = document.getElementById('pair');
-      const msg = document.getElementById('msg');
-      btn.disabled = true;
-      msg.textContent = '';
-      msg.className = '';
-      try {
-        await ipcRenderer.invoke('pair', {
-          apiBaseUrl: document.getElementById('api').value.trim(),
-          code: document.getElementById('code').value.trim(),
-          label: document.getElementById('label').value.trim(),
-        });
-        msg.textContent = 'Paired! This window will close — Founder Node keeps running in your system tray (icon near the clock). Do not click Quit in the tray menu.';
-        msg.className = 'ok';
-        setTimeout(() => window.close(), 5000);
-      } catch (e) {
-        msg.textContent = e.message || String(e);
-        msg.className = 'err';
-        btn.disabled = false;
-      }
-    };
-  </script>
-</body></html>`;
+  pairWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error('Pair window failed to load:', errorCode, errorDescription, validatedURL);
+    dialog.showErrorBox(
+      'Pair window failed to load',
+      `${errorDescription} (${errorCode})\n\nTry quitting Founder Node from the tray and reinstalling from a fresh build.`,
+    );
+  });
 
-  pairWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  void pairWindow.loadFile(pairHtml).then(() => {
+    pairWindow?.show();
+  });
   pairWindow.on('closed', () => {
     pairWindow = null;
   });
@@ -780,6 +762,11 @@ app.whenReady().then(() => {
   ipcMain.handle('open-settings', async () => {
     await shell.openExternal(SETTINGS_BUILDER_URL);
   });
+
+  ipcMain.handle('get-pair-defaults', async () => ({
+    apiBaseUrl: DEFAULT_API,
+    label: `${os.hostname()} Founder Node`,
+  }));
 
   ipcMain.handle(
     'pair',
