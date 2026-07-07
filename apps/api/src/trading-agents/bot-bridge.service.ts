@@ -33,6 +33,15 @@ export class BotBridgeService {
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
   private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 5000);
+  /**
+   * F7 (2026-07-07 incident) — Execution-path cache TTL. The execution relay
+   * polls every SUBSCRIBER_EXECUTION_POLL_MS (default 2000ms); a 5s cache
+   * meant exits lagged the showcase by up to 5s on every cycle. Drop to 2s
+   * so the bridge stays fresh against the relay's own poll cadence. Still
+   * env-overridable for high-throughput tunnels (set BOT_BRIDGE_EXEC_CACHE_MS
+   * back to 5000 if the tunnel can't take the load).
+   */
+  private execCacheMs = Number(process.env.BOT_BRIDGE_EXEC_CACHE_MS ?? 2000);
   private dbUrlCache: { url: string | null; at: number } | null = null;
   /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
   private execCached: BotApiState | null = null;
@@ -197,7 +206,7 @@ export class BotBridgeService {
    *  reads keep the Fly race via fetchState / fetchStateForAdmin / fetchHealth. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
     const now = Date.now();
-    if (!force && this.execCached && now - this.execFetchAt < this.cacheMs) {
+    if (!force && this.execCached && now - this.execFetchAt < this.execCacheMs) {
       return this.execCached;
     }
     const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
