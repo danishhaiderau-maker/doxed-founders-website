@@ -49,10 +49,15 @@ if (Test-Path $modeScript) {
 }
 
 try {
-  Start-Process -FilePath "powershell" -ArgumentList @(
-    "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",$supervisorScript,
-    "-BotPort","$botPort","-AnalyzerPort","$analyzerPort","-BridgePort","$bridgePort"
-  ) -WindowStyle Hidden
+  # Build arg list as a single quoted string - repo path has a space ("Final
+  # Bots") and Start-Process -ArgumentList @("-File", $path) splits the path
+  # on the space, producing "Processing -File 'C:\...\Final' failed because
+  # the file does not have a '.ps1' extension" and the supervisor never starts
+  # (so the bot has NO 24/7 health watcher). Same fix start-home-bot.ps1 uses
+  # for the monitor spawn. Quoting the -File value inside one argument string
+  # is the reliable solution.
+  $supArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisorScript`" -BotPort $botPort -AnalyzerPort $analyzerPort -BridgePort $bridgePort -Quiet"
+  Start-Process -FilePath "powershell" -ArgumentList $supArgString -WindowStyle Hidden | Out-Null
   Wd-Log "supervisor relaunch issued bot=:$botPort analyzer=:$analyzerPort"
 } catch {
   Wd-Log "supervisor relaunch FAILED: $($_.Exception.Message)"
