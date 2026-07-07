@@ -584,11 +584,28 @@ function Start-HiddenPs1 {
 }
 
 function Start-VisibleConsole {
+  # F9 (2026-07-07 follow-up) --plugged the orphan cmd.exe leak identified by
+  # the tidy-shells verifier. Previous version always used cmd /k + pause>nul
+  # for non -NoPause callers (which is the default), so every supervisor
+  # recovery spawned a cmd window that sat at "Press any key" forever because
+  # no human was watching. Result: 14+ orphan cmd.exe processes, ~71 stale
+  # launcher .cmd files in logs/launchers, growing at ~1/hour.
+  #
+  # Fix:
+  #   - Default mode is now self-closing (cmd /c, no pause). Safe for
+  #     unattended supervisor recovery paths.
+  #   - New -Wait switch opts INTO the old behavior (visible window with
+  #     "Press any key" prompt) for first-run / interactive use.
+  #   - -NoPause still respected as alias for the new default (back-compat).
+  #   - Old callers that pass -NoPause explicitly still work; old callers
+  #     that relied on the pause prompt should switch to -Wait if they want
+  #     a human to see the output.
   param(
     [string]$ScriptPath,
     [string[]]$ExtraArgs = @(),
     [string]$Title = "Doxed Home Stack",
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$Wait
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
   $launcherDir = Join-Path $repoRoot "logs\launchers"
@@ -600,10 +617,20 @@ function Start-VisibleConsole {
     if ($null -eq $a -or "$a" -eq "") { continue }
     if ("$a" -match '\s') { $argLine += " `"$a`"" } else { $argLine += " $a" }
   }
+  # Periodically prune stale launcher .cmd files so logs/launchers/ doesn't
+  # grow unbounded across weeks of supervisor restarts. Anything older than
+  # 1 day is safe to remove - the launcher has either run or failed by then.
+  try {
+    Get-ChildItem -Path $launcherDir -Filter "run-*.cmd" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CreationTime -lt (Get-Date).AddDays(-1) } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  } catch { }
+
   $launcher = Join-Path $launcherDir ("run-" + [guid]::NewGuid().ToString("n") + ".cmd")
   $titleSafe = ($Title -replace '"', '')
   $scriptSafe = $ScriptPath
   $repoSafe = $repoRoot
+  $wantPause = $Wait -and -not $NoPause
   $launcherLines = @(
     "@echo off",
     "title `"$titleSafe`"",
@@ -611,7 +638,7 @@ function Start-VisibleConsole {
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptSafe`"$argLine",
     "if errorlevel 1 echo [ERROR] Script exited with code %errorlevel%"
   )
-  if (-not $NoPause) {
+  if ($wantPause) {
     $launcherLines += @(
       "echo.",
       "echo --- Press any key to close this window ---",
@@ -619,10 +646,13 @@ function Start-VisibleConsole {
     )
   }
   $launcherLines | Set-Content -Path $launcher -Encoding ASCII
-  $cmdMode = if ($NoPause) { "/c" } else { "/k" }
-  # Pure cmd.exe window — avoids cmd parsing bugs with :7002 in title and keeps window open.
+  # /c = exit when script exits (default, no leak).
+  # /k = keep open after script exits (only when -Wait requested, pauses).
+  $cmdMode = if ($wantPause) { "/k" } else { "/c" }
+  # Pure cmd.exe window - avoids cmd parsing bugs with :7002 in title.
+  $windowStyle = if ($wantPause) { "Normal" } else { "Minimized" }
   Start-Process -FilePath "cmd.exe" -ArgumentList @($cmdMode, "`"$launcher`"") `
-    -WorkingDirectory $repoRoot -WindowStyle Normal
+    -WorkingDirectory $repoRoot -WindowStyle $windowStyle
 }
 
 
