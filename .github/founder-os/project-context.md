@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(kernel): ship Phase 1 kernel foundation + recover AI Proxy
+fix(learning-engine): boot-time rollup + atomic state write + tz + reputation formula
 
 ## Last Activity
 
