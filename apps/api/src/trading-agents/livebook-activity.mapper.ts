@@ -3,7 +3,31 @@ import type { BotActivityEntry } from './bot-state.mapper';
 
 function parseLiveBookTime(raw: string): string {
   if (!raw) return new Date().toISOString();
-  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+  // F7a (2026-07-07 incident) — handle the bot/API pre-formatted Melbourne
+  // timestamp form `2026-07-07 21:37:51 AEST` (or AEDT). The previous parser
+  // appended 'Z' to this string and produced an invalid ISO date that V8
+  // rejected with NaN, causing every tile to fall through to `new Date()`
+  // (i.e. NOW). That made the "last 30 min" window meaningless — trades from
+  // hours ago appeared alongside just-closed ones, looking "random".
+  //
+  // Strategy: strip a trailing timezone word and convert to ISO-8601 with the
+  // right fixed offset (Melbourne = +10:00 AEST / +11:00 AEDT). If parsing
+  // fails for any reason, fall back to NOW (preserves legacy behavior).
+  const trimmed = raw.trim();
+  const aestMatch = /^(.*?)(?:\s+(AEST|AEDT))?$/.exec(trimmed);
+  const core = aestMatch?.[1] ?? trimmed;
+  const tz = aestMatch?.[2];
+  const normalized = core.includes('T') ? core : core.replace(' ', 'T');
+  if (tz === 'AEST') {
+    const iso = `${normalized}+10:00`;
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  } else if (tz === 'AEDT') {
+    const iso = `${normalized}+11:00`;
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  }
+  // No TZ suffix — preserve legacy "assume UTC" behavior for already-ISO strings.
   const ms = Date.parse(normalized.endsWith('Z') ? normalized : `${normalized}Z`);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString();
 }

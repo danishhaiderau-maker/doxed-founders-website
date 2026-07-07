@@ -85,12 +85,28 @@ export function mapSubscriberExchangeLiveBook(input: {
 
   if (exchangeHasPosition && input.position) {
     const p = input.position;
+    // F7c (2026-07-07 incident) — sanity-check the mark price before rendering.
+    // The showcase bot's `bot.price` (which feeds markPrice here) can glitch
+    // and return a stale or wrong-instrument value (observed: 73,642 when
+    // real BTC was 63,2xx — a 16% phantom move). If the mark deviates >15%
+    // from the entry, fall back to the entry price (PnL shows ~0 instead of
+    // a wildly wrong number) so the dashboard never prints a phantom P&L.
+    // The next tick with a fresh mark will restore correct display.
+    const entryAbs = Math.abs(Number(p.basePrice ?? 0));
+    let displayMark = mark;
+    if (
+      mark > 0 &&
+      entryAbs > 0 &&
+      Math.abs(mark - entryAbs) / entryAbs > 0.15
+    ) {
+      displayMark = 0; // fall back to entry below
+    }
     positions.push({
       leg: 'Bitfinex',
       side: p.direction,
       qty: Math.abs(p.amount),
       entry: p.basePrice,
-      current: mark > 0 ? mark : p.basePrice,
+      current: displayMark > 0 ? displayMark : p.basePrice,
       stopLoss: 0,
       takeProfit: 0,
       pnlUsd: p.pnlUsd,
@@ -217,6 +233,19 @@ export function mapSubscriberExchangeLiveBook(input: {
     }
 
     if (row.status === 'CLOSED') {
+      // F7b (2026-07-07 incident) — suppress never-filled cancelled orders.
+      // A CLOSED participant with no fillPrice, no exitPrice, and zero PnL is
+      // an order that was placed then cancelled/expired without ever trading
+      // (RECONCILE_CANCEL_BY_EXCHANGE, DUPLICATE_LIMIT_SKIPPED, SIGNAL_TTL_EXPIRED,
+      // etc.). Rendering these as "$entry → $entry +0.00% Win" tiles in the
+      // trade journey misled the user into thinking fake trades were being
+      // generated. They belong in an "expired/abandoned" view, not the journey.
+      const isUnfilledNoPnl =
+        row.fillPrice == null &&
+        row.exitPrice == null &&
+        Math.abs(Number(row.pnlUsd ?? 0)) < 0.01;
+      if (isUnfilledNoPnl) continue;
+
       const entry = Number(row.fillPrice ?? limitPrice);
       const exit = Number(row.exitPrice ?? entry);
       const pnlPct = Number(row.pnlMarginPct ?? 0);
