@@ -506,11 +506,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED') {
+  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
     if (!executionEnabled()) return;
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();
-      this.lastShowcaseWakeTrigger = trigger;
+      this.lastShowcaseWakeTrigger =
+        trigger === 'POSITION_CLOSED'
+          ? 'POSITION_CLOSED'
+          : null; // USER_RESUME / USER_PAUSE / etc are not showcase webhook events
     }
     if (this.running) {
       this.wakeQueued = true;
