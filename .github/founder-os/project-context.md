@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(ops): add local staging workflow to batch changes and save Actions minutes
+fix(ops): plug orphan cmd.exe leak in Start-VisibleConsole (F9)
 
 ## Last Activity
 
