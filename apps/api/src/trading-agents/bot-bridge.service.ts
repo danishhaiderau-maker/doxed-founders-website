@@ -410,12 +410,19 @@ export class BotBridgeService {
     return null;
   }
 
-  /** True when the canonical Cloudflare showcase tunnel responds. */
+  /** True when the canonical Cloudflare showcase tunnel responds.
+   *  The home Cloudflare tunnel has bimodal latency — pings usually land in
+   *  ~0.3s but occasionally spike past 6s (cold cloudflared connection, host
+   *  is on the other side of the world). The old 6s budget made the public
+   *  agent-status dot flick red even when the bot was healthy, because
+   *  getPublicAgentStatus() only falls through to the heavier state probe
+   *  when `force=true`. 12s clears the observed tail latency while still
+   *  failing fast when the tunnel is genuinely down. */
   async isReachable(force = false): Promise<boolean> {
     const cf = await this.resolveShowcaseUrl();
     try {
       const res = await fetch(`${cf}/api/ping`, {
-        signal: AbortSignal.timeout(6_000),
+        signal: AbortSignal.timeout(12_000),
         headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
       });
       if (res.ok) return true;
