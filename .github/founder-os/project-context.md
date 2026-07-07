@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ci: remove debug marker
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
