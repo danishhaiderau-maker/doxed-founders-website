@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Pair Founder Node</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0a0a0f; color: #e4e4e7; padding: 24px; margin: 0; }
+    h1 { font-size: 1.25rem; margin: 0 0 8px; }
+    p { color: #a1a1aa; font-size: 0.875rem; line-height: 1.5; }
+    label { display: block; font-size: 0.75rem; color: #a1a1aa; margin: 16px 0 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #3f3f46; background: #18181b; color: white; }
+    button { margin-top: 20px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #7c3aed; color: white; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.5; }
+    .err { color: #f87171; font-size: 0.8rem; margin-top: 12px; }
+    .ok { color: #34d399; font-size: 0.8rem; margin-top: 12px; }
+    code { background: #27272a; padding: 2px 6px; border-radius: 4px; }
+    #openWeb { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #3f3f46; background: #27272a; color: #e4e4e7; cursor: pointer; font-weight: 600; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Pair this machine</h1>
+  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then paste the <strong>8-character code here</strong> (not in the browser).</p>
+  <p style="font-size:0.8rem;color:#fbbf24">If you already generated a new code after pairing once, the old link is dead — use the latest code only.</p>
+  <p><button type="button" id="openWeb">Open Builder settings in browser</button></p>
+  <label for="api">Founder OS URL</label>
+  <input id="api" autocomplete="off" />
+  <label for="code">Pairing code</label>
+  <input id="code" placeholder="8-character code" maxlength="12" autocomplete="off" />
+  <label for="label">Node label</label>
+  <input id="label" autocomplete="off" />
+  <button id="pair">Connect vault</button>
+  <div id="msg"></div>
+  <script src="pair.js"></script>
+</body>
+</html>

@@ -71,12 +71,12 @@ function parsePidList(out: string): number[] {
 export function listMainFounderNodePids(): number[] {
   if (process.platform !== 'win32') return [];
   try {
-    const script = [
+    const ps = [
       "Get-CimInstance Win32_Process -Filter \"Name = 'Founder Node.exe'\"",
       "| Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' }",
       '| Select-Object -ExpandProperty ProcessId',
     ].join(' ');
-    const out = execSync(`powershell -NoProfile -Command "${script}"`, {
+    const out = execSync(`powershell -NoProfile -Command ${JSON.stringify(ps)}`, {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 15_000,
