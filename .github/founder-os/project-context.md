@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ci: probe - test if Actions budget unblocked
+chore(ops): add local staging workflow to batch changes and save Actions minutes
 
 ## Last Activity
 
