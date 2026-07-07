@@ -107,7 +107,7 @@ export function AiProxyDashboard({ accessToken }: Props) {
     setLoading(true);
     setErr(null);
     try {
-      const res = await fetch(apiUrl('/v1/usage?days=30'), {
+      const res = await fetch(apiUrl('/v1/usage-for-me?days=30'), {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },

@@ -11,6 +11,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Public } from '../auth/public.decorator';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import {
   FounderNodeGuard,
   type FounderNodeRequestUser,
@@ -23,6 +24,10 @@ import { AiProxyUsageService } from './ai-proxy-usage.service';
 import { ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 import type { Response, Request } from 'express';
 import { Readable } from 'node:stream';
+
+type AuthedRequest = Request & {
+  user?: { id?: string; sub?: string; userId?: string };
+};
 
 /**
  * OpenAI-compatible AI Proxy.
@@ -50,7 +55,7 @@ export class AiProxyController {
     return this.runtimeService.listModels();
   }
 
-  /** Aggregated usage for the /settings/ai-usage dashboard. */
+  /** Aggregated usage for the /settings/ai-usage dashboard (Founder Node auth). */
   @UseGuards(FounderNodeGuard)
   @Get('usage')
   async usage(
@@ -61,6 +66,33 @@ export class AiProxyController {
     const to = new Date();
     const from = new Date(to.getTime() - parsedDays * 24 * 60 * 60 * 1000);
     return this.usageService.summarize(req.founderNode.userId, { from, to });
+  }
+
+  /**
+   * JWT-guarded usage endpoint for the web dashboard.
+   *
+   * The web dashboard at /settings/ai-usage sends `Authorization: Bearer <jwt>`
+   * (NextAuth session token), not a Founder Node token. The FounderNode-guarded
+   * /v1/usage above is for the Founder Node itself. This route accepts either
+   * an anonymous request (returns 401) or a JWT-authenticated request.
+   *
+   * Marked @Public() at controller level + route-level OptionalJwtAuthGuard so
+   * we can resolve the user from the JWT if present, otherwise 401.
+   */
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get('usage-for-me')
+  async usageForMe(@Req() req: AuthedRequest, @Query('days') days?: string) {
+    const userId = req.user?.id ?? req.user?.sub ?? req.user?.userId;
+    if (!userId) {
+      throw new HttpException(
+        { error: { message: 'Authentication required' } },
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+    const parsedDays = Math.max(1, Math.min(365, Number(days ?? '30') || 30));
+    const to = new Date();
+    const from = new Date(to.getTime() - parsedDays * 24 * 60 * 60 * 1000);
+    return this.usageService.summarize(userId, { from, to });
   }
 
   /** OpenAI-compatible /v1/chat/completions — routes through the proxy. */
