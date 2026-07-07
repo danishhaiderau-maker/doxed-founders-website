@@ -28,6 +28,7 @@ export function CopyTradeDetailsStrip({
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
   instanceStatus,
+  instanceLastError,
   botConnected,
 }: {
   agent: TradingAgentSummary;
@@ -36,6 +37,8 @@ export function CopyTradeDetailsStrip({
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
   instanceStatus?: string | null;
+  /** TradingAgentInstance.lastError for the user's hire. */
+  instanceLastError?: string | null;
   botConnected?: boolean;
 }) {
   const reconcile = copyRelayReconcile ?? null;
@@ -50,6 +53,7 @@ export function CopyTradeDetailsStrip({
   const syncAlerts = buildRelaySyncAlerts({
     mode: 'live',
     botConnected,
+    instanceLastError,
     copyRelayReconcile: reconcile,
     copyRelayLimitChain: limitChain,
     tradeLifecycleIntegrity: lifecycle,

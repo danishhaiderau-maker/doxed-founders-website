@@ -15,6 +15,13 @@ type Alert = { level: 'error' | 'warn' | 'info'; title: string; detail: string }
 export function buildRelaySyncAlerts(input: {
   mode: 'live' | 'sim';
   botConnected?: boolean;
+  /**
+   * F3 circuit-breaker error from the TradingAgentInstance, written within ~60s
+   * of a real outage. Used to detect the stale-display-cache window where
+   * botConnected still shows true via cached snapshot but the execution path is
+   * already known unreachable upstream.
+   */
+  instanceLastError?: string | null;
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
@@ -28,7 +35,14 @@ export function buildRelaySyncAlerts(input: {
   const deltaBad =
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
 
-  if (input.botConnected === false) {
+  // F3 writes one of these substrings to instance.lastError when an outage
+  // crosses ~60s (see bot-bridge.service.ts circuit-breaker). The display cache
+  // behind botConnected can lag up to 10min, so we treat either signal as
+  // sufficient to surface the offline alert — closes the 1-10min stale window.
+  const f3Outage =
+    typeof input.instanceLastError === 'string' &&
+    /safe mode|Showcase unreachable|Showcase outage/i.test(input.instanceLastError);
+  if (input.botConnected === false || f3Outage) {
     const needsShowcase =
       input.mode === 'live' || (input.mode === 'sim' && Boolean(input.copyRelaySim?.active));
     if (needsShowcase) {

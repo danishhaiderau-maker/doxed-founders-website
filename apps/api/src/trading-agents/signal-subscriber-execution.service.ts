@@ -5020,6 +5020,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (now - prev < 60_000) return;
     this.actionMissEntryThrottle.set(key, now);
 
+    // Bound the in-memory throttle map — same pattern as mirrorDiffEventAt.
+    // Without this sweep, keys accumulate forever (~1.8MB/year worst case at
+    // 50 trades/day across all users).
+    if (this.actionMissEntryThrottle.size > 500) {
+      for (const [k, at] of this.actionMissEntryThrottle) {
+        if (now - at > 60 * 60_000) this.actionMissEntryThrottle.delete(k);
+      }
+    }
+
     this.logger.warn(`[ACTION-MISS] ENTRY ${reason} trade=${tradeId} user=${userId}`);
     if (!cycleId) return;
 

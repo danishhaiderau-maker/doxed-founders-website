@@ -69,6 +69,7 @@ export function AgentRelaySimPanel({
   tradeLifecycleIntegrity,
   relaySimParticipantStats,
   botConnected,
+  instanceLastError,
   onStart,
   onStop,
   onReset,
@@ -91,6 +92,8 @@ export function AgentRelaySimPanel({
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
   relaySimParticipantStats?: RelaySimParticipantStats | null;
   botConnected?: boolean;
+  /** TradingAgentInstance.lastError for the user's hire. */
+  instanceLastError?: string | null;
   onStart?: () => void;
   onStop?: () => void;
   onReset?: () => void;
@@ -122,6 +125,7 @@ export function AgentRelaySimPanel({
   const syncAlerts = buildRelaySyncAlerts({
     mode: 'sim',
     botConnected,
+    instanceLastError,
     copyRelaySim: sim,
     copyRelayReconcile: reconcile,
     copyRelayLimitChain,

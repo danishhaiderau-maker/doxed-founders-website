@@ -68,6 +68,7 @@ export function AgentDeskView({
   relaySimParticipantStats,
   relayFidelity,
   botConnected,
+  instanceLastError,
   userActivity,
   showcaseActivity,
   slug,
@@ -97,6 +98,9 @@ export function AgentDeskView({
   relaySimParticipantStats?: RelaySimParticipantStats | null;
   relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
   botConnected?: boolean;
+  /** TradingAgentInstance.lastError for the user's hire. Used by relay-sync
+   *  alerts to detect F3 circuit-breaker outage during stale-display window. */
+  instanceLastError?: string | null;
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
   slug?: string;
@@ -125,6 +129,7 @@ export function AgentDeskView({
         tradeLifecycleIntegrity={tradeLifecycleIntegrity}
         relaySimParticipantStats={relaySimParticipantStats}
         botConnected={botConnected}
+        instanceLastError={instanceLastError}
         onStart={onStartRelaySim}
         onStop={onStopRelaySim}
         onReset={onResetRelaySim}
