@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ci: debug trigger 2
+ci: remove debug marker
 
 ## Last Activity
 
