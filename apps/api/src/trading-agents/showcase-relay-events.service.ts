@@ -67,7 +67,11 @@ export class ShowcaseRelayEventsService {
       await this.cycles.wakeFromShowcase({ intents: true, closures: true });
     }
 
-    await this.execution.wakeNow();
+    // F7 — Pass the event trigger so the relay can tag the resulting exit
+    // mirror with SHOWCASE_CLOSED_WEBHOOK (fast path) vs SHOWCASE_CLOSED_POLL.
+    // This is purely an audit log distinction — both paths close the copy lot
+    // identically; the tag lets ops measure end-to-end exit lag.
+    await this.execution.wakeNow(event);
 
     this.logger.log(
       `Showcase relay wake ${event} trade=${body.trade_id ?? '?'} intent=${intentCreated ? 'new' : 'none'}`,

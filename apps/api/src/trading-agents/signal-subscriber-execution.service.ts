@@ -36,6 +36,7 @@ import {
   sanitizeLimitPrice,
   getProfitLockFloor,
   buildCopyRelayCapacity,
+  isPaperLaneTradeId,
   type CopyRelayCapacitySnapshot,
   type VirtualLotExitReason,
 } from '@dcf/utils';
@@ -289,6 +290,41 @@ const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
  *  or any other idempotency gate that wrongly skips the normal mirror path). */
 const SHOWCASE_FLAT_OPEN_FAILSAFE_MS = 120_000;
 
+/**
+ * F1/F2/F3 — Showcase-unreachable safe mode (2026-07-07 incident hardening).
+ *
+ * Today's $10.69 loss for @bitbro4crypto came from a 3h59m Cloudflare tunnel
+ * outage: the showcase bot was alive on :7002 but unreachable from the relay,
+ * so every fetchExecutionBotState() returned null. Two fail-open code paths
+ * let real money move during that window:
+ *   (a) placeEntry treated `bot=null` as "ready" and kept submitting limits.
+ *   (b) tryImmediateShowcaseMirrorExit's SHOWCASE_POSITION_ABSENT branch was
+ *       gated on `bot &&` — structurally unable to detect orphans while dark.
+ *
+ * These constants implement a per-instance safe mode: after the showcase has
+ * been unreachable for SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS, the relay refuses
+ * new entries (F1). After SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS, OPEN copy lots
+ * are market-closed with exit_reason SHOWCASE_UNREACHABLE_OPEN_LOT (F2). Both
+ * fire even though `bot === null` — fail-closed for money already on the
+ * table, not just for money we haven't placed yet. F3 surfaces the state to
+ * the user as lastError so the dashboard explains the halt.
+ *
+ * Override via env without a redeploy:
+ *   SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS (default 60000)
+ *   SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS  (default 120000)
+ *   SHOWCASE_UNREACHABLE_SAFE_MODE=0     (kill switch — reverts to legacy fail-open)
+ */
+const SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS = Number(
+  process.env.SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS ?? 60_000,
+);
+const SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS = Number(
+  process.env.SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS ?? 120_000,
+);
+function showcaseUnreachableSafeModeEnabled(): boolean {
+  const v = (process.env.SHOWCASE_UNREACHABLE_SAFE_MODE ?? '').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'off' && v !== 'no';
+}
+
 /** Fix E — throttle for surfacing an expired hire (lastError + warn log). */
 const HIRE_EXPIRY_NOTICE_THROTTLE_MS = 60 * 60_000;
 
@@ -391,6 +427,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** participantId → first ms showcase was flat/closed while copy lot stayed OPEN. */
   private readonly showcaseFlatOpenSince = new Map<string, number>();
 
+  /**
+   * F7 (2026-07-07 incident) — Wake-source tracking for fast-path exit mirroring.
+   *
+   * When the showcase-relay-event webhook fires `POSITION_CLOSED`, it calls
+   * wakeNow() which spawns an immediate tick. That tick's
+   * tryImmediateShowcaseMirrorExit call will fire with a fresh bot fetch and
+   * close the copy lot — typically within ~2 seconds of the showcase closing.
+   *
+   * We stamp `lastShowcaseWakeAt` here so the audit log can distinguish exits
+   * that fired from a fast webhook wake (trigger=SHOWCASE_CLOSED_WEBHOOK) vs
+   * exits that fired from the regular 2s poll (trigger=SHOWCASE_CLOSED_POLL).
+   * Both are correct; the distinction is for ops telemetry — if median exit
+   * lag rises, we want to know whether the wake path or the poll path is the
+   * slow one.
+   */
+  private lastShowcaseWakeAt = 0;
+  private lastShowcaseWakeTrigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | null = null;
+
+  /**
+   * F1/F2/F3 — per-instance showcase-unreachable tracking.
+   *
+   * `showcaseUnreachableSince` is set when a fetch returns null AND the bridge
+   * is enabled (i.e. we *should* be able to reach the bot but can't). It is
+   * cleared on the first successful fetch. The two thresholds
+   * (ENTRY_BLOCK_MS, ORPHAN_KILL_MS) gate F1 (refuse new entries) and F2
+   * (market-close OPEN orphans) respectively. F3 surfaces the state via
+   * lastError on the instance row.
+   *
+   * Keyed by instanceId — independent per hire, so one user's dark tunnel
+   * doesn't trip another's safe mode.
+   */
+  private readonly showcaseUnreachableSince = new Map<string, number>();
+  /** instanceId → last ms we surfaced the safe-mode notice (throttle spam). */
+  private readonly showcaseSafeModeNoticeAt = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly exchanges: ExchangesService,
@@ -435,13 +506,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow() {
+  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED') {
     if (!executionEnabled()) return;
+    if (trigger) {
+      this.lastShowcaseWakeAt = Date.now();
+      this.lastShowcaseWakeTrigger = trigger;
+    }
     if (this.running) {
       this.wakeQueued = true;
       return;
     }
     await this.tick();
+  }
+
+  /**
+   * F7 — Read and clear the most-recent wake trigger. Called from
+   * tryImmediateShowcaseMirrorExit so the audit event can be tagged with
+   * SHOWCASE_CLOSED_WEBHOOK (fast path, <2s typical) or SHOWCASE_CLOSED_POLL
+   * (regular 2s cadence). Returns null when the wake was >10s ago (stale —
+   * treat as poll-driven).
+   */
+  private consumeWakeTrigger(): 'WEBHOOK' | 'POLL' {
+    const ts = this.lastShowcaseWakeAt;
+    const trig = this.lastShowcaseWakeTrigger;
+    this.lastShowcaseWakeAt = 0;
+    this.lastShowcaseWakeTrigger = null;
+    if (ts && trig === 'POSITION_CLOSED' && Date.now() - ts < 10_000) return 'WEBHOOK';
+    return 'POLL';
   }
 
   private async tick() {
@@ -760,6 +851,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       if (participant.status === SignalCycleStatus.OPEN) {
         managedOpenTrade = true;
+        // F2 — Showcase-unreachable orphan kill. If the showcase has been dark
+        // past ORPHAN_KILL_MS this lot is by definition an orphan (the normal
+        // SHOWCASE_POSITION_ABSENT path requires a successful fetch to fire,
+        // which is exactly the case the outage defeats). Force-close at market.
+        // Skip in sim mode — sim lots are the user's own test money and the
+        // showcase is allowed to be dark for sim testing.
+        if (!simActive) {
+          const orphanCheck = this.openLotOrphanedByShowcaseOutage(instance.id);
+          if (orphanCheck.orphan) {
+            const killed = await this.enforceShowcaseOutageOrphanKill(
+              agentId,
+              instance.userId,
+              instance.id,
+              cycle,
+              participant,
+              meta,
+              creds,
+              orphanCheck.elapsedMs,
+            ).catch((err) => {
+              this.logger.warn(
+                `[F2] orphan kill failed ${instance.userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+              );
+              return false;
+            });
+            if (killed) {
+              this.showcaseFlatOpenSince.delete(participant.id);
+              continue;
+            }
+          }
+        }
         const mirrorExited = await this.tryImmediateShowcaseMirrorExit(
           agentId,
           instance.userId,
@@ -871,6 +992,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
     const botStateForCap = await this.fetchExecutionBotState();
+
+    // F1/F2/F3 — Showcase-unreachable safe mode (2026-07-07 incident hardening).
+    // Track per-instance streak of null fetches. Cleared on every successful fetch.
+    // The two helpers below read this streak to gate new entries (F1) and
+    // force-close OPEN orphans (F2). When the streak passes ENTRY_BLOCK_MS we
+    // also surface a user-visible lastError (F3) so the dashboard explains
+    // why live copy has halted.
+    if (!simActive && botStateForCap == null) {
+      const elapsed = this.markShowcaseUnreachable(instance.id);
+      const blocked = elapsed >= SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS;
+      if (blocked && showcaseUnreachableSafeModeEnabled()) {
+        const lastNotice = this.showcaseSafeModeNoticeAt.get(instance.id) ?? 0;
+        if (Date.now() - lastNotice > 5 * 60_000) {
+          this.showcaseSafeModeNoticeAt.set(instance.id, Date.now());
+          const msg = `Showcase unreachable for ${Math.round(elapsed / 1000)}s — live copy in safe mode: no new entries (F1); open lots will be closed past ${Math.round(SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS / 1000)}s (F2).`;
+          this.logger.warn(`[SAFE-MODE] ${instance.userId}: ${msg}`);
+          await this.prisma.tradingAgentInstance
+            .update({ where: { id: instance.id }, data: { lastError: msg } })
+            .catch(() => {});
+        }
+      }
+    } else if (botStateForCap != null) {
+      this.clearShowcaseUnreachable(instance.id);
+    }
     const botMaxRaw = botStateForCap?.max_active_signals;
     const botMax =
       typeof botMaxRaw === 'number'
@@ -2231,6 +2376,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
     if (!intent?.direction || intent.action !== 'ENTER') return false;
+
+    // F1 — Showcase-unreachable safe mode. Refuse new entries while the
+    // showcase has been unreachable past ENTRY_BLOCK_MS. The 2026-07-07
+    // incident showed the relay would otherwise keep trading against a stale
+    // intent while the operator's tunnel was down, producing orphan fills
+    // with no showcase counterpart to mirror the exit. Fail closed for new
+    // money; F2 separately handles OPEN lots past ORPHAN_KILL_MS.
+    if (showcaseUnreachableSafeModeEnabled()) {
+      const block = this.entryBlockedByShowcaseOutage(instance.id);
+      if (block.blocked) {
+        this.logger.warn(
+          `[F1] Entry blocked ${instance.userId} cycle=${cycleId}: showcase unreachable for ${Math.round(block.elapsedMs / 1000)}s (≥ SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS=${SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS}ms)`,
+        );
+        const msg = `Showcase unreachable for ${Math.round(block.elapsedMs / 1000)}s — live copy in safe mode (no new entries). Restoring the tunnel will resume copy automatically.`;
+        await this.prisma.tradingAgentInstance
+          .update({ where: { id: instance.id }, data: { lastError: msg } })
+          .catch(() => {});
+        this.cycleAudit.stage('ENTRY_BLOCKED_SHOWCASE_OUTAGE', {
+          userId: instance.userId,
+          agentId,
+          cycleId,
+          tradeId,
+          detail: msg,
+          meta: {
+            elapsed_ms: block.elapsedMs,
+            threshold_ms: SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS,
+          },
+        });
+        return false;
+      }
+    }
 
     const intentCap = intent.risk?.max_margin_usd;
     const effectiveCap =
@@ -4237,7 +4413,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         closed = true;
         showcaseExitPrice = det.exitPrice;
         showcaseExitReason = det.exitReason;
-        mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
+        // F7 — tag the wake source. Webhook wakes mean the showcase just
+        // pushed POSITION_CLOSED and we should be exiting within ~2s; poll
+        // wakes mean we discovered the closure on the regular 2s tick. Both
+        // are valid; the tag is for ops telemetry.
+        const wakeSource = this.consumeWakeTrigger();
+        mirrorTrigger = mirrorRelinked
+          ? `ORIGIN_SHOWCASE_CLOSED_${wakeSource}`
+          : `SHOWCASE_CLOSED_${wakeSource}`;
       } else if (
         bot &&
         this.trackShowcasePositionAbsent(participant.id, showcaseTradeId, bot)
@@ -4248,10 +4431,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         closed = true;
         showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
         mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
+        this.consumeWakeTrigger();
         this.logger.warn(
           `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId} — market-closing copy lot after ${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh states without an open showcase position`,
         );
+      } else {
+        this.consumeWakeTrigger();
       }
+    } else {
+      this.consumeWakeTrigger();
     }
 
     if (!closed && mirrorRelinked && meta.originCycleId) {
@@ -4625,6 +4813,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const tradeId = pos.trade_id!;
 
+      // F6 — never catch-up paper-lane trades. defense-in-depth: paper-lane
+      // trade_ids should never appear in showcase positions, but if a future
+      // bot change leaks them we refuse here rather than put real money on
+      // a paper trade.
+      if (isPaperLaneTradeId(tradeId)) {
+        this.logger.warn(
+          `[F6] mirror-catchup skipped paper-lane trade=${tradeId} user=${instance.userId}`,
+        );
+        continue;
+      }
+
       const matching = openParticipants.filter(
         (p) => p.cycle?.tradeId && tradeIdsMatch(p.cycle.tradeId, tradeId),
       );
@@ -4870,6 +5069,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     mark: number,
     slipUsd: number,
   ): Promise<boolean> {
+    // F1 — Same safe-mode gate as placeEntry. The catch-up path is also a new
+    // entry — it must respect the showcase-unreachable block. attemptMirrorCatchupEntries
+    // is itself gated on botState != null, but a race between the catchup's
+    // own fetch and the per-instance fetch can leave a window. Belt + suspenders.
+    if (showcaseUnreachableSafeModeEnabled()) {
+      const block = this.entryBlockedByShowcaseOutage(instance.id);
+      if (block.blocked) {
+        this.logger.warn(
+          `[F1] Mirror-catchup entry blocked ${instance.userId} cycle=${cycleId}: showcase unreachable for ${Math.round(block.elapsedMs / 1000)}s`,
+        );
+        return false;
+      }
+    }
     const existingClaim = await this.prisma.signalCycleParticipant.findUnique({
       where: { cycleId_userId: { cycleId, userId: instance.userId } },
     });
@@ -5055,6 +5267,110 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `[MIRROR-CATCHUP] ${instance.userId} cycle=${cycleId} trade=${tradeId} ${intent.direction} qty=${qty.toFixed(5)} @ ${fillPrice.toFixed(2)} slip=$${slipUsd.toFixed(2)} vs showcase ${showcaseEntry.toFixed(2)}`,
     );
     return true;
+  }
+
+  /**
+   * F1/F3 — Mark the showcase as unreachable for this instance and return the
+   * elapsed ms since the first null fetch in this dark streak. Clears on the
+   * next successful fetch via {@link clearShowcaseUnreachable}. Idempotent.
+   */
+  private markShowcaseUnreachable(instanceId: string): number {
+    const now = Date.now();
+    const since = this.showcaseUnreachableSince.get(instanceId) ?? now;
+    if (!this.showcaseUnreachableSince.has(instanceId)) {
+      this.showcaseUnreachableSince.set(instanceId, since);
+    }
+    return now - since;
+  }
+
+  /** F1/F3 — Clear the unreachable streak on a successful fetch. */
+  private clearShowcaseUnreachable(instanceId: string): void {
+    if (this.showcaseUnreachableSince.has(instanceId)) {
+      this.showcaseUnreachableSince.delete(instanceId);
+      this.showcaseSafeModeNoticeAt.delete(instanceId);
+    }
+  }
+
+  /**
+   * F1 — Should this instance refuse new entries right now?
+   * True when the showcase has been unreachable for ≥ ENTRY_BLOCK_MS.
+   * Caller must first invoke markShowcaseUnreachable() with the latest fetch
+   * outcome so the streak is tracked correctly.
+   */
+  private entryBlockedByShowcaseOutage(instanceId: string): { blocked: boolean; elapsedMs: number } {
+    if (!showcaseUnreachableSafeModeEnabled()) return { blocked: false, elapsedMs: 0 };
+    const since = this.showcaseUnreachableSince.get(instanceId);
+    if (!since) return { blocked: false, elapsedMs: 0 };
+    const elapsed = Date.now() - since;
+    return { blocked: elapsed >= SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS, elapsedMs: elapsed };
+  }
+
+  /**
+   * F2 — Should an OPEN copy lot be force-closed right now because the
+   * showcase has been unreachable for ≥ ORPHAN_KILL_MS? This is the orphan
+   * counterpart to {@link enforceShowcaseFlatOpenFailsafe} — that one needs a
+   * successfully fetched flat book to fire; this one fires precisely when the
+   * fetch keeps failing, which is the case the existing failsafe cannot cover.
+   */
+  private openLotOrphanedByShowcaseOutage(instanceId: string): {
+    orphan: boolean;
+    elapsedMs: number;
+  } {
+    if (!showcaseUnreachableSafeModeEnabled()) return { orphan: false, elapsedMs: 0 };
+    const since = this.showcaseUnreachableSince.get(instanceId);
+    if (!since) return { orphan: false, elapsedMs: 0 };
+    const elapsed = Date.now() - since;
+    return { orphan: elapsed >= SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS, elapsedMs: elapsed };
+  }
+
+  /**
+   * F2 — Market-close an OPEN copy lot because the showcase has been
+   * unreachable past the orphan-kill threshold. We do NOT know the
+   * showcase_exit_price here (no fetch succeeded) — that's fine; the
+   * alternative is letting the orphan marinade while real money is on the
+   * line. Reuses {@link executeShowcaseMirrorClose} for idempotency and
+   * accounting. Always surfaces an operator alert + lastError.
+   */
+  private async enforceShowcaseOutageOrphanKill(
+    agentId: string,
+    userId: string,
+    instanceId: string,
+    cycle: {
+      id: string;
+      tradeId?: string | null;
+      showcasePnlUsd?: { toNumber?: () => number } | null;
+      intentEnvelope?: unknown;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    elapsedMs: number,
+  ): Promise<boolean> {
+    const alertMsg = `SHOWCASE OUTAGE ORPHAN KILL: copy OPEN lot for trade=${
+      cycle.tradeId ?? '?'
+    } (participant=${participant.id.slice(0, 8)}…) market-closing — showcase unreachable for ${Math.round(
+      elapsedMs / 1000,
+    )}s (≥ SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS=${SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS}ms). F2 safe-mode.`;
+    this.logger.error(alertMsg);
+    await this.setInstanceLastError(userId, agentId, alertMsg);
+    await this.cycles
+      .recordHireExecutionEvent(userId, agentId, cycle.id, 'SHOWCASE_OUTAGE_ORPHAN_KILL', {
+        venue: 'bitfinex',
+        source: 'hire',
+        participant_id: participant.id,
+        trade_id: cycle.tradeId ?? null,
+        elapsed_ms: elapsedMs,
+        threshold_ms: SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS,
+        instance_id: instanceId,
+      })
+      .catch(() => {});
+
+    return this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
+      showcaseExitReason: 'SHOWCASE_UNREACHABLE_OPEN_LOT',
+      mirrorRelinked: (cycle.tradeId ?? '').startsWith('adopt:'),
+      trigger: 'SHOWCASE_UNREACHABLE_OPEN_LOT',
+      forceMirrorExit: true,
+    });
   }
 
   /**

@@ -1,9 +1,9 @@
-/** Platform-enforced max collateral (margin) per hire/signal trade â€” admin can raise via PlatformSettings. */
+/** Platform-enforced max collateral (margin) per hire/signal trade — admin can raise via PlatformSettings. */
 export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 
 /** Matches showcase bot DEFAULT_RESEARCH_LEVERAGE (100x on Bitfinex derivatives). */
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
-/** Live-copy sizing/stops use canonical showcase leverage (100x). Persisted intent envelopes may still carry legacy `leverage_hint: 20` from pre-c8178f30 API builds — never honor that for execution. */
+/** Live-copy sizing/stops use canonical showcase leverage (100x). Persisted intent envelopes may still carry legacy `leverage_hint: 20` from pre-c8178f30 API builds  never honor that for execution. */
 export function resolveSubscriberLeverage(
   intent?: { risk?: { leverage_hint?: number | null } } | null,
 ): number {
@@ -15,20 +15,20 @@ export function resolveSubscriberLeverage(
 }
 
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS.
- *  2s â€” the relay must mirror showcase signals to user Bitfinex sim/live accounts within ~2s so
+ *  2s — the relay must mirror showcase signals to user Bitfinex sim/live accounts within ~2s so
  *  pending orders don't sit on :7002 without appearing on SIM. The prior 250ms cadence flooded
  *  the Cloudflare tunnel (~250KB/s continuous /api/relay-state fetches) and caused 502 +
  *  "context canceled" flaps that dropped signal cycles; 2s is 8x below that flood threshold.
  *  A showcase signal stays in the bot's last_approve_outcome for 30+ seconds (entry TTL 1800s),
  *  so 2s catches every signal with a wide margin. The bot also pushes a webhook
- *  (ShowcaseRelayEventsService) on each signal â€” this poll is the 2s backstop. */
+ *  (ShowcaseRelayEventsService) on each signal — this poll is the 2s backstop. */
 export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 2000;
 
-/** Default poll interval for bot â†’ signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS.
- *  Same rationale as above â€” 2s backstop for real-time signal mirroring; webhook push is primary. */
+/** Default poll interval for bot ? signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS.
+ *  Same rationale as above — 2s backstop for real-time signal mirroring; webhook push is primary. */
 export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 2000;
 
-/** Minimum allowed poll interval (ms) â€” 100ms for instant showcase relay wake. */
+/** Minimum allowed poll interval (ms) — 100ms for instant showcase relay wake. */
 export const MIN_SUBSCRIBER_POLL_MS = 100;
 
 export function resolveSubscriberMaxMarginUsd(input?: {
@@ -55,7 +55,7 @@ export function resolveSignalCyclePollMs(envValue?: string | number | null): num
   return Number.isFinite(raw) && raw >= MIN_SUBSCRIBER_POLL_MS ? raw : DEFAULT_SIGNAL_CYCLE_POLL_MS;
 }
 
-/** Exchange-neutral signal envelope (ENSE) â€” portable across venues. */
+/** Exchange-neutral signal envelope (ENSE) — portable across venues. */
 export type SignalEntryMode = 'PULLBACK_PCT' | 'EMA_OFFSET_PCT';
 
 export type SignalIntentEnvelope = {
@@ -74,7 +74,7 @@ export type SignalIntentEnvelope = {
     ttl_sec: number;
   };
   risk: {
-    /** Mandatory exchange stop â€” margin % from entry fill (e.g. -18). */
+    /** Mandatory exchange stop — margin % from entry fill (e.g. -18). */
     stop_loss_margin_pct: number;
     take_profit_ladder: Array<{ at_margin_pct: number; close_position_pct: number }>;
     leverage_hint: number;
@@ -99,7 +99,7 @@ export type SignalCycleEventType =
   | 'EXIT'
   | 'EXPIRED'
   // Phase 2 reconcile-adopt audit events (Layer B / NestJS Live Copy).
-  // Persisted to SignalCycleEvent.payload â€” no participant status transition
+  // Persisted to SignalCycleEvent.payload — no participant status transition
   // is attached to these; they exist for operator auditability of stop re-arm
   // and runtime rehydrate actions taken by reconcileAdoptLoop.
   | 'RECONCILE_ADOPT_REARM'
@@ -107,9 +107,9 @@ export type SignalCycleEventType =
   | 'RECONCILE_ADOPT_SKIP'
   | 'RECONCILE_STOP_REARM_REFUSED'
   | 'RECONCILE_STOP_REARM_SKIPPED'
-  // Phase 4 â€” autonomous orphan adoption (S6a pending order + S6b filled
+  // Phase 4 — autonomous orphan adoption (S6a pending order + S6b filled
   // position). Additive only; no participant status transition is attached
-  // to the REFUSED/BUDGET/DISABLED variants â€” they exist for operator
+  // to the REFUSED/BUDGET/DISABLED variants — they exist for operator
   // auditability of the adoption decision. The ORPHAN_ORDER / ORPHAN_POSITION
   // variants are emitted alongside the FILLED / ORDER_PLACED event that
   // materialises the new adopted participant.
@@ -120,9 +120,9 @@ export type SignalCycleEventType =
   | 'RECONCILE_ADOPT_REFUSED_DUPLICATE'
   | 'RECONCILE_ADOPT_BUDGET_EXHAUSTED'
   | 'RECONCILE_ADOPT_DISABLED'
-  // Phase 6 â€” orphan-source fixes. Additive audit events for the fail-loud
+  // Phase 6 — orphan-source fixes. Additive audit events for the fail-loud
   // cancel-on-expiry path. None of these transition the participant to
-  // EXPIRED â€” they exist for operator auditability when a cancel failed and
+  // EXPIRED — they exist for operator auditability when a cancel failed and
   // the order was confirmed still live (participant left PENDING_ENTRY for
   // the next tick to retry), when a cid-matched own-orphan was auto-cancelled
   // by cleanupOrphanCopyOrders, or when an already-EXPIRED participant's
@@ -130,31 +130,37 @@ export type SignalCycleEventType =
   | 'RECONCILE_CANCEL_FAILED'
   | 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN'
   | 'RECONCILE_RECANCEL_EXPIRED_STILL_LIVE'
-  // Phase 0/1 â€” "100% mirror" state convergence. Additive audit events:
+  // Phase 0/1 — "100% mirror" state convergence. Additive audit events:
   // MIRROR_DIFF is the shadow-diff observability snapshot (written only when a
   // divergence between the showcase book and the copy's resting orders /
   // position exists, throttled per participant). DUPLICATE_LIMIT_SKIPPED is
   // recorded when book-state dedupe (MIRROR_CONVERGENCE_ENABLED) expires a
-  // duplicate-lane participant ledger-side WITHOUT placing a real order â€”
+  // duplicate-lane participant ledger-side WITHOUT placing a real order —
   // the mirror owner participant keeps the single real resting limit.
   // Neither transitions the participant on its own (the dedupe path emits a
   // separate EXPIRED event for the status transition).
   | 'MIRROR_DIFF'
   | 'DUPLICATE_LIMIT_SKIPPED'
-  // Phase 3 â€” catch-up market entry when showcase is OPEN but copy missed fill.
+  // Phase 3 — catch-up market entry when showcase is OPEN but copy missed fill.
   | 'MIRROR_CATCHUP_ENTRY'
   // Action-match audit: catch-up could not place an entry (structural skip).
   | 'MIRROR_CATCHUP_SKIPPED'
   | 'ACTION_MISS_ENTRY'
   // Cancel-race / exit fail-safe observability (no status transition on their own).
   | 'STALE_EXIT_SUPERSEDED'
-  | 'MIRROR_EXIT_FAILSAFE_ALERT';
+  | 'MIRROR_EXIT_FAILSAFE_ALERT'
+  // F2 (2026-07-07 incident) — Showcase-unreachable orphan kill. Emitted when
+  // the relay market-closes an OPEN copy lot because the showcase has been
+  // unreachable past SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS. Distinct from
+  // MIRROR_EXIT_FAILSAFE_ALERT (which fires on a successfully-fetched flat
+  // book) — this fires precisely when no fetch is succeeding.
+  | 'SHOWCASE_OUTAGE_ORPHAN_KILL';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
 export const SIGNAL_MIN_CHARGE_USD = 0.1;
 
-/** Shown on mandate, docs, and settlement responses â€” not investment advice. */
+/** Shown on mandate, docs, and settlement responses — not investment advice. */
 export const SIGNAL_LEGAL_DISCLAIMER =
   'Signals are informational only, not investment advice or a solicitation. You execute all trades on your own exchange account and bear full risk. Past showcase performance does not guarantee future results. Success fees apply only to reported profitable closes per the subscriber API contract.';
 

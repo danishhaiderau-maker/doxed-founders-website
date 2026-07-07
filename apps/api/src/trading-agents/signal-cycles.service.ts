@@ -20,6 +20,7 @@ import {
   SIGNAL_LEGAL_DISCLAIMER,
   resolveSignalCyclePollMs,
   pickCanonicalTradeId,
+  isPaperLaneTradeId,
   type SignalCycleEventType,
 } from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
@@ -230,6 +231,19 @@ export class SignalCyclesService implements OnModuleInit {
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
+    // F6 — refuse to create a copy intent for paper-lane trades (a160v2-*, etc).
+    // These are the showcase bot's shadow-sim research lanes — paper P&L only,
+    // never real Bitfinex fills. Mirroring them would put real money on a
+    // trade that has no real showcase counterpart (the exact bug pattern from
+    // the 2026-07-07 incident). Skip silently — research data still flows to
+    // the analyzer.
+    if (isPaperLaneTradeId(intentTradeId)) {
+      this.logger.warn(
+        `Skipping paper-lane trade_id=${intentTradeId} (F6: paper lane never mirrored to live copy)`,
+      );
+      this.lastSeenTradeId = intentTradeId;
+      return false;
+    }
     const showcaseMatch = resolveShowcaseTradeDetails(bot, intentTradeId);
     const canonicalTradeId = pickCanonicalTradeId(
       intentTradeId,
@@ -325,6 +339,13 @@ export class SignalCyclesService implements OnModuleInit {
       let created = 0;
       for (const t of sessionTrades) {
         const tid = String(t.trade_id);
+        // F6 — never backfill paper-lane trades. Same rationale as pollBotForIntents.
+        if (isPaperLaneTradeId(tid)) {
+          this.logger.warn(
+            `Skipping backfill of paper-lane trade_id=${tid} (F6: paper lane never mirrored)`,
+          );
+          continue;
+        }
         const showcaseMatch = resolveShowcaseTradeDetails(bot, tid);
         const canonical = pickCanonicalTradeId(tid, showcaseMatch?.matchedTradeId ?? tid);
         if (existingIds.some((e) => tradeIdsMatch(e, canonical))) continue;

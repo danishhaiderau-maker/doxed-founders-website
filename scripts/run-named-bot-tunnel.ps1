@@ -1,8 +1,16 @@
 # Stable Cloudflare named tunnel -> bot.doxxedcrypto.digital (production).
+# F4 (2026-07-07 incident): default to --protocol http2 because this network
+# blocks outbound UDP/7844 (QUIC) to region2.v2.argotunnel.com — see
+# logs/cloudflared-named.err.log. Without this, the tunnel silently flaps
+# every few hours and the live-copy relay loses its showcase feed.
+# Default port is 7002 — the canonical showcase per config/bot-architecture.lock.json.
+# (:7800 is the legacy local lab — do not point the production tunnel at it.)
 param(
-  [int]$Port = 7800,
+  [int]$Port = 7002,
   [string]$Hostname = "bot.doxxedcrypto.digital",
-  [string]$TunnelName = "doxed-btc-bot"
+  [string]$TunnelName = "doxed-btc-bot",
+  [ValidateSet("auto","http2","quic")]
+  [string]$Protocol = "http2"
 )
 
 $Host.UI.RawUI.WindowTitle = "Doxed Cloudflare Tunnel (stable)"
@@ -32,7 +40,7 @@ if (Test-Path $tokenFile) {
   $prevEap = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    cloudflared tunnel run --token $token
+    cloudflared tunnel run --protocol $Protocol --token $token
   } finally {
     $ErrorActionPreference = $prevEap
     Read-Host "Tunnel stopped - Press Enter to close this window"
@@ -71,7 +79,7 @@ Write-Host ""
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-  cloudflared tunnel run $TunnelName
+  cloudflared tunnel run --protocol $Protocol $TunnelName
 } finally {
   $ErrorActionPreference = $prevEap
   Read-Host "Tunnel stopped - Press Enter to close this window"
