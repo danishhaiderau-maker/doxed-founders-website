@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (19 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (19 recent commits)
 
 ## Last Commit
 
-fix home-bot env decrypt for showcase AI credentials
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
