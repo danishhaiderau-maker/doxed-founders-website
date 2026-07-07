@@ -62,19 +62,17 @@ export class AdminControlService {
     }
 
     // Tunnel AND 10-min relay cache both missed. Before declaring offline,
-    // check the raw bot-pushed snapshot timestamp: the bot pushes snapshot
-    // payloads every few seconds via /api/internal/showcase-snapshot, so a
-    // fresh timestamp proves the bot is alive and pushing even when the
-    // tunnel is momentarily unreachable from Railway. This keeps the dot
-    // green during the brief windows where the dashboard is also relying on
-    // cached state. Cutoff: 5 minutes — generous enough to absorb tunnel
-    // blips, strict enough that a genuinely dead bot still goes red.
-    const settings = await this.prisma.platformSettings.findUnique({
-      where: { id: 'default' },
-      select: { showcaseRelaySnapshotAt: true },
-    });
-    const snapshotAt = settings?.showcaseRelaySnapshotAt;
-    if (snapshotAt && Date.now() - snapshotAt.getTime() < 5 * 60_000) {
+    // check the in-memory last-successful-fetch timestamp on the same
+    // BotBridge instance the dashboard polls every few seconds. If the
+    // dashboard (or any other caller in this NestJS process) pulled live
+    // state from the bot within the last 5 minutes, the bot is by
+    // definition alive and pushing data — the only thing failing right now
+    // is THIS specific tunnel probe, which flaps because Railway's network
+    // to the home Cloudflare tunnel is intermittent (~50% packet loss at
+    // peak). Cutoff: 5 minutes — generous enough to absorb tunnel blips,
+    // strict enough that a genuinely dead bot still goes red quickly.
+    const lastLiveAt = this.botBridge.getLastLiveFetchAt();
+    if (lastLiveAt > 0 && Date.now() - lastLiveAt < 5 * 60_000) {
       return { status: 'online', label: 'Agent online' };
     }
     return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };

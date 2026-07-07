@@ -137,6 +137,16 @@ export class BotBridgeService {
     this.lastFetchAt = 0;
   }
 
+  /** Wall-clock of the most recent successful live-bot state fetch, OR 0 if
+   *  the bridge has never seen the bot. Used by getPublicAgentStatus() as a
+   *  last-resort liveness signal when the tunnel is momentarily unreachable
+   *  from Railway — the dashboard polls the same bot every few seconds via
+   *  the same BotBridge instance, so a fresh timestamp here proves the bot
+   *  is alive even when this specific status probe loses the tunnel race. */
+  getLastLiveFetchAt(): number {
+    return this.lastFetchAt;
+  }
+
   /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
    *  Never the Fly.io stale instance. Falls back to the Railway-pushed relay snapshot
    *  (up to 10m stale) when the tunnel blips. */
