@@ -23,8 +23,8 @@ import { getVaultDir } from './secrets-vault-path.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 loadVaultEnv(root);
 
-function decryptSecret(payload, jwtSecret) {
-  const key = scryptSync(jwtSecret, 'dcf-security-v1', 32);
+function decryptWithSecret(payload, secret) {
+  const key = scryptSync(secret, 'dcf-security-v1', 32);
   const buf = Buffer.from(payload, 'base64');
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
@@ -34,10 +34,25 @@ function decryptSecret(payload, jwtSecret) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
+/** Match apps/api security-crypto.util (credential key + legacy JWT). */
+function decryptShowcaseSecret(payload, vercel) {
+  const cred = vercel.CREDENTIAL_ENCRYPTION_KEY?.trim();
+  const jwt = vercel.JWT_SECRET?.trim();
+  const primary = cred || jwt;
+  if (!primary) throw new Error('Missing CREDENTIAL_ENCRYPTION_KEY or JWT_SECRET');
+  try {
+    return decryptWithSecret(payload, primary);
+  } catch (err) {
+    if (cred && jwt && cred !== jwt) return decryptWithSecret(payload, jwt);
+    throw err;
+  }
+}
+
 const vercel = readDotEnv(join(getVaultDir(), '.env.vercel.check'));
 const jwtSecret = vercel.JWT_SECRET?.trim();
-if (!process.env.DATABASE_URL || !jwtSecret) {
-  console.error('Missing DATABASE_URL or JWT_SECRET in vault');
+const credentialSecret = vercel.CREDENTIAL_ENCRYPTION_KEY?.trim();
+if (!process.env.DATABASE_URL || (!jwtSecret && !credentialSecret)) {
+  console.error('Missing DATABASE_URL or credential secrets in vault');
   process.exit(1);
 }
 
@@ -83,7 +98,7 @@ if (vercel.BOT_CONTROL_SECRET?.trim()) {
   lines.push(`BOT_ADMIN_TOKEN=${adminTok}`);
 }
 
-const ex = JSON.parse(decryptSecret(row.showcaseExchangeCredentialEnc, jwtSecret));
+const ex = JSON.parse(decryptShowcaseSecret(row.showcaseExchangeCredentialEnc, vercel));
 const provider = row.showcaseExchangeProvider ?? 'bitfinex';
 const exVars = exchangeCredentialsToEnvVars(provider, {
   apiKey: ex.apiKey,
@@ -97,7 +112,7 @@ for (const [k, v] of Object.entries(exVars)) {
 
 if (row.showcaseAiCredentialEnc) {
   try {
-    lines.push(`DEEPSEEK_API_KEY=${decryptSecret(row.showcaseAiCredentialEnc, jwtSecret)}`);
+    lines.push(`DEEPSEEK_API_KEY=${decryptShowcaseSecret(row.showcaseAiCredentialEnc, vercel)}`);
   } catch (err) {
     console.warn('Warning: could not decrypt showcase AI credentials; skipping DEEPSEEK_API_KEY:', err?.message ?? err);
   }
