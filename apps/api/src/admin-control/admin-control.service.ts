@@ -50,17 +50,34 @@ export class AdminControlService {
     // fetchPublicShowcaseState(true) already has the full reachability +
     // 10-minute relay-snapshot fallback chain baked in.
     const state = await this.botBridge.fetchPublicShowcaseState(true);
-    if (!state) {
-      return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
-    }
-    if (state.execution_paused) {
-      const reason = state.execution_reason ?? '';
-      if (reason === 'ADMIN_MANUAL') {
-        return { status: 'offline', label: 'Showcase bot stopped by admin' };
+    if (state) {
+      if (state.execution_paused) {
+        const reason = state.execution_reason ?? '';
+        if (reason === 'ADMIN_MANUAL') {
+          return { status: 'offline', label: 'Showcase bot stopped by admin' };
+        }
+        return { status: 'updating', label: 'Agent updating' };
       }
-      return { status: 'updating', label: 'Agent updating' };
+      return { status: 'online', label: 'Agent online' };
     }
-    return { status: 'online', label: 'Agent online' };
+
+    // Tunnel AND 10-min relay cache both missed. Before declaring offline,
+    // check the raw bot-pushed snapshot timestamp: the bot pushes snapshot
+    // payloads every few seconds via /api/internal/showcase-snapshot, so a
+    // fresh timestamp proves the bot is alive and pushing even when the
+    // tunnel is momentarily unreachable from Railway. This keeps the dot
+    // green during the brief windows where the dashboard is also relying on
+    // cached state. Cutoff: 5 minutes — generous enough to absorb tunnel
+    // blips, strict enough that a genuinely dead bot still goes red.
+    const settings = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { showcaseRelaySnapshotAt: true },
+    });
+    const snapshotAt = settings?.showcaseRelaySnapshotAt;
+    if (snapshotAt && Date.now() - snapshotAt.getTime() < 5 * 60_000) {
+      return { status: 'online', label: 'Agent online' };
+    }
+    return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
   }
 
   async getAgentControlOverview() {
