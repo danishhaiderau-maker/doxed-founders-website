@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): start/stop button - validate before flip + wakeNow + refresh UI (F8)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
