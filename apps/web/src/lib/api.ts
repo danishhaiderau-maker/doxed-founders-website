@@ -4002,6 +4002,13 @@ export interface TradingAgentDashboard {
   tradeLifecycleIntegrity?: import('@dcf/utils').TradeLifecycleIntegritySnapshot | null;
   relaySimParticipantStats?: import('@dcf/utils').RelaySimParticipantStats | null;
   relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
+  /**
+   * `TradingAgentInstance.lastError` for the signed-in user's instance, if any.
+   * Used by the relay-sync alert component to detect a real F3 circuit-breaker
+   * outage during the 1–10min stale-display-cache window where botConnected
+   * still shows true. Null when no user instance exists.
+   */
+  userInstanceLastError?: string | null;
 }
 
 export interface TradingAgentActivityEntry {

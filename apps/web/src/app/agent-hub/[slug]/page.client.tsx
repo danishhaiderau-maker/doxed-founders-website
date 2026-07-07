@@ -64,6 +64,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [instanceBusy, setInstanceBusy] = useState(false);
   const [instanceStatus, setInstanceStatus] = useState<string | null>(null);
   const [instanceMode, setInstanceMode] = useState<'copy' | 'live' | null>(null);
+  const [instanceLastError, setInstanceLastError] = useState<string | null>(null);
   const [exchangeProvider, setExchangeProvider] = useState<string | null>(null);
   const [exchangeLabel, setExchangeLabel] = useState<string | null>(null);
   const [exchangeConnected, setExchangeConnected] = useState(false);
@@ -162,6 +163,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setTradeLifecycleIntegrity(dashR.value.tradeLifecycleIntegrity ?? null);
         setRelaySimParticipantStats(dashR.value.relaySimParticipantStats ?? null);
         setRelayFidelity(dashR.value.relayFidelity ?? null);
+        setInstanceLastError(dashR.value.userInstanceLastError ?? null);
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
@@ -448,6 +450,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           executionPaused={executionPaused}
           publicStatus={publicStatus.status}
           instanceStatus={instanceStatus}
+          instanceLastError={instanceLastError}
           instanceMode={instanceMode}
           exchangeProvider={exchangeProvider ?? agent.exchangeProvider}
           exchangeLabel={exchangeLabel ?? agent.exchangeLabel}

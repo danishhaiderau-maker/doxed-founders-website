@@ -1427,6 +1427,10 @@ export class TradingAgentsService implements OnModuleInit {
       kind: 'public' as const,
       viewScope,
       userInstance,
+      // Surface the user's instance lastError so the frontend can detect an
+      // ongoing F3 circuit-breaker outage even while the display cache behind
+      // botConnected still shows true (10-min stale window).
+      userInstanceLastError: userInstanceRow?.lastError ?? null,
       showcaseFlash,
       showcaseAgent,
       showcaseLiveBook,

@@ -540,6 +540,7 @@ export function AgentPublicProfile({
   executionPaused,
   publicStatus,
   instanceStatus,
+  instanceLastError,
   instanceMode,
   exchangeProvider,
   exchangeLabel,
@@ -591,6 +592,8 @@ export function AgentPublicProfile({
   executionPaused?: boolean;
   publicStatus: PublicAgentStatus;
   instanceStatus?: string | null;
+  /** TradingAgentInstance.lastError for the user's hire, surfaced from backend. */
+  instanceLastError?: string | null;
   instanceMode?: 'copy' | 'live' | null;
   exchangeProvider?: string | null;
   exchangeLabel?: string | null;
@@ -804,6 +807,7 @@ export function AgentPublicProfile({
     relaySimParticipantStats,
     relayFidelity,
     botConnected,
+    instanceLastError,
     userActivity: resolvedDesk === 'relay-sim' ? simAct : userAct,
     showcaseActivity: showcaseAct,
     slug,
@@ -972,6 +976,7 @@ export function AgentPublicProfile({
                 copyRelayLimitChain={copyRelayLimitChain}
                 tradeLifecycleIntegrity={tradeLifecycleIntegrity}
                 instanceStatus={instanceStatus}
+                instanceLastError={instanceLastError}
                 botConnected={botConnected}
               />
             ) : null}
