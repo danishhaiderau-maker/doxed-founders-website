@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-node): load pair UI from external assets
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
