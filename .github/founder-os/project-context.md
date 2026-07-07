@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ci: silence founder-os memory-sync noise (saves ~64% of Actions minutes)
+ci: probe - test if Actions budget unblocked
 
 ## Last Activity
 
