@@ -24,6 +24,7 @@ import {
 } from './instance-view.mapper';
 import { emptyCopyRelaySimState, readCopyRelaySimState, isCopyRelaySimActive } from '@dcf/utils';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 @Injectable()
@@ -37,6 +38,7 @@ export class TradingAgentInstancesService {
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
     private readonly relaySim: CopyRelaySimService,
+    private readonly execution: SignalSubscriberExecutionService,
   ) {}
 
   async hireAgent(
@@ -359,6 +361,39 @@ export class TradingAgentInstancesService {
       );
     }
 
+    // F8 (2026-07-07 follow-up) — Validate Start pre-conditions BEFORE flipping
+    // the status to ACTIVE. Previously this endpoint returned 200 without
+    // checking Bitfinex credentials, derivatives funding, or showcase
+    // reachability, then the next tick would silently write `lastError` and
+    // skip — the user saw a green "Relay on" pill with no activity for up to
+    // 20s and concluded the relay was broken.
+    let startValidation: { derivativesUsd?: number; credentialsOk: boolean } | undefined;
+    if (!paused && instance.exchangeProvider !== 'paper') {
+      const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+      if (!creds) {
+        throw new BadRequestException(
+          'Bitfinex API keys missing — re-hire this agent to reconnect your exchange credentials.',
+        );
+      }
+      // Probe the wallet snapshot. This doubles as a credentials-auth check —
+      // a 401 / invalid-key returns null here and we throw a clear error
+      // instead of letting the executor silently skip on the next tick.
+      const snapshot = await this.exchanges.getUserBitfinexWalletSnapshot(userId);
+      if (!snapshot) {
+        throw new BadRequestException(
+          'Bitfinex rejected your API key — re-hire with fresh credentials (Read + Write on Orders + Wallets, no Withdraw).',
+        );
+      }
+      const derivativesUsd = Number(snapshot.derivativesUsd ?? 0);
+      const MIN_DERIVATIVES_USD = 5;
+      if (derivativesUsd < MIN_DERIVATIVES_USD) {
+        throw new BadRequestException(
+          `Move at least $${MIN_DERIVATIVES_USD} USDT to your Bitfinex Derivatives wallet before starting. Current: $${derivativesUsd.toFixed(2)}. (Wallet → Transfer → Exchange/Funding → Derivatives.)`,
+        );
+      }
+      startValidation = { derivativesUsd, credentialsOk: true };
+    }
+
     const status = paused ? TradingAgentInstanceStatus.PAUSED : TradingAgentInstanceStatus.ACTIVE;
     let relayAction: { cancelledOrders?: number } | undefined;
 
@@ -379,6 +414,21 @@ export class TradingAgentInstancesService {
       where: { id: instance.id },
       data: { status, lastError: null },
     });
+
+    // F8 — Wake the executor immediately so the first tick fires within
+    // milliseconds of the user clicking Start, instead of waiting up to 2s
+    // for the next setInterval cadence. Without this, the user perceives
+    // "clicked Start, nothing happened" when in reality the next tick was
+    // just slow to land.
+    if (!paused) {
+      try {
+        await this.execution.wakeNow('USER_RESUME');
+      } catch (err) {
+        this.logger.warn(
+          `wakeNow on resume failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     if (paused) {
       await this.notifications.notifyUser(userId, {
@@ -403,6 +453,7 @@ export class TradingAgentInstancesService {
       ok: true,
       status,
       relay: relayAction,
+      validated: startValidation,
       message: paused
         ? relayAction?.cancelledOrders
           ? `Relay severed — ${relayAction.cancelledOrders} pending order(s) cancelled. No new showcase trades until you Start.`

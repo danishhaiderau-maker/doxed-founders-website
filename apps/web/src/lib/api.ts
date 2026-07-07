@@ -4487,7 +4487,12 @@ export function triggerSyncProtectionBreach(
 }
 
 export function resumeMyAgentInstance(slug: string, token: string) {
-  return apiFetch<{ ok: boolean; status: string; message: string }>(
+  return apiFetch<{
+    ok: boolean;
+    status: string;
+    message: string;
+    validated?: { derivativesUsd?: number; credentialsOk: boolean };
+  }>(
     `/trading-agents/${slug}/instance/resume`,
     { method: 'POST' },
     token,

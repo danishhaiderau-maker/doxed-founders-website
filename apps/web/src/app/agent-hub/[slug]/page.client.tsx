@@ -236,6 +236,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     try {
       await pauseMyAgentInstance(slug, session.accessToken);
       setInstanceStatus('PAUSED');
+      // F8 — refresh dashboard state so lastError / openPositions / cancelledOrders
+      // update immediately instead of waiting up to 20s for the next poll tick.
+      await loadLive();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Pause failed');
     } finally {
@@ -268,8 +271,18 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     }
     setInstanceBusy(true);
     try {
-      await resumeMyAgentInstance(slug, session.accessToken);
+      const res = await resumeMyAgentInstance(slug, session.accessToken);
       setInstanceStatus('ACTIVE');
+      // F8 — refresh dashboard state immediately so the user sees the
+      // backend's actual lastError / derivativesUsd / openPositions right
+      // away. The backend's new start-time validation returns a `validated`
+      // object with derivativesUsd we can surface.
+      await loadLive();
+      if (res?.validated?.derivativesUsd != null) {
+        // Light-touch confirmation toast — the panel will reflect real state via loadLive.
+        // eslint-disable-next-line no-console
+        console.log(`[relay] resume validated — derivatives $${res.validated.derivativesUsd.toFixed(2)}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Resume failed');
     } finally {
