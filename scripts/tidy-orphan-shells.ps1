@@ -12,7 +12,9 @@
 #   - NEVER kills powershell.exe running one of $ESSENTIAL_WATCH_SCRIPTS
 #   - NEVER kills the calling shell or its parent
 #   - NEVER kills Cursor/VSCode processes
-#   - ONLY kills cmd.exe with no commandline (orphan launchers)
+#   - ONLY kills cmd.exe with no commandline (orphan launchers) OR cmd.exe
+#     launched from logs\launchers\ whose launcher .cmd file has been pruned
+#     by F9 (and is older than 30 minutes for race safety)
 #   - ONLY kills powershell.exe with -WindowStyle Hidden AND no essential script
 #
 # Usage:
@@ -89,6 +91,33 @@ function Write-TidyLog([string]$msg) {
   } catch {}
 }
 
+function Test-OrphanLauncherCmd([string]$CommandLine, [datetime]$CreationDate) {
+  # Returns $true if this cmd.exe was launched by a now-pruned launcher file
+  # (i.e. spawned by DCF home-stack launcher machinery from logs\launchers\,
+  # where the referenced .cmd file no longer exists because F9 pruned it).
+  if (-not $CommandLine) { return $false }
+  # Match: cmd /k "...logs\launchers\<name>.cmd" or cmd /c variant
+  if ($CommandLine -notmatch 'logs\\launchers\\[^"]*\.cmd') { return $false }
+  # Extract the launcher path
+  $m = [regex]::Match($CommandLine, '"([^"]*logs\\launchers\\[^"]*\.cmd)"')
+  $launcherPath = if ($m.Success) { $m.Groups[1].Value } else { $null }
+  if (-not $launcherPath) { return $false }
+  if (Test-Path $launcherPath) {
+    # Launcher still exists - not an orphan yet (F9 hasn't pruned it)
+    return $false
+  }
+  # Launcher file is gone. Add 30-minute floor to avoid killing fresh launches
+  # that are still mid-startup.
+  try {
+    $ageMin = [math]::Round(((Get-Date) - $CreationDate).TotalMinutes)
+  } catch {
+    # CreationDate unavailable - can't apply age floor, be safe and skip
+    return $false
+  }
+  if ($ageMin -lt 30) { return $false }
+  return $true
+}
+
 function Test-EssentialPowerShell([int]$ProcessId, [string]$CommandLine) {
   if ($ProcessId -eq $myPid -or $ProcessId -eq $myParentPid) { return $true }
   if (-not $CommandLine) { return $false }
@@ -138,19 +167,25 @@ $stats = [pscustomobject]@{
 }
 
 # ─── 1. cmd.exe orphans ───────────────────────────────────────────────────
-# Only kill cmd.exe with no CommandLine - those are orphan launcher windows.
-# cmd.exe with a CommandLine is doing something (user shell, scheduled task,
-# setup script) - leave it alone.
+# Kill cmd.exe when EITHER:
+#   (a) it has no CommandLine (orphan launcher window), OR
+#   (b) it was launched by a now-pruned launcher file under logs\launchers\
+#       (cmd /k "...logs\launchers\<name>.cmd") - the launcher file is gone
+#       (F9 prunes launchers older than 6h), so the cmd is just sitting at
+#       `pause >nul` doing nothing. We add a 30-minute age floor so we don't
+#       race a launcher that is still mid-startup.
+# All other cmd.exe (user shells, scheduled tasks, setup scripts) are kept.
 $cmdProcesses = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue)
 $stats.CmdTotal = $cmdProcesses.Count
 Write-TidyLog "cmd.exe total: $($stats.CmdTotal)"
 
 foreach ($p in $cmdProcesses) {
   $cl = [string]$p.CommandLine
-  if (-not [string]::IsNullOrWhiteSpace($cl)) {
-    Write-TidyLog "  KEEP cmd.exe PID=$($p.ProcessId) (has commandline)"
+  if (-not [string]::IsNullOrWhiteSpace($cl) -and -not (Test-OrphanLauncherCmd -CommandLine $cl -CreationDate $p.CreationDate)) {
+    Write-TidyLog "  KEEP cmd.exe PID=$($p.ProcessId) (active commandline)"
     continue
   }
+  $reason = if ([string]::IsNullOrWhiteSpace($cl)) { 'no commandline' } else { 'orphan launcher (file pruned)' }
   $result = Stop-ProcessSafe -ProcessId $p.ProcessId -Name 'cmd.exe'
   if ($result -eq 'killed') { $stats.CmdKilled++ }
   elseif ($result -eq 'failed') { $stats.Failed++ }
