@@ -14,6 +14,7 @@ import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
 import { DDOLLAR_ACTION_KEYS } from '../ddollar/ddollar.constants';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
 import { RoutingEngineService } from '../routing-engine/routing-engine.service';
+import { RetryDetectorService } from '../learning-engine/retry-detector.service';
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2 } from './ai-proxy.constants';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
@@ -99,6 +100,7 @@ export class AiProxyRuntimeService {
     private readonly brainProviders: FounderBrainProvidersService,
     private readonly routingEngine: RoutingEngineService,
     private readonly flightRecorder: FlightRecorderService,
+    private readonly retryDetector: RetryDetectorService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -406,6 +408,33 @@ export class AiProxyRuntimeService {
     } catch (err) {
       this.logger.warn(
         `Flight Recorder write failed user=${auth.userId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Learning Engine — retry detection. Fire-and-await: a duplicate request
+    // within 60s with the same prompt hash marks the PREVIOUS decision as
+    // retried=true. Never blocks request serving, never fails the request.
+    try {
+      void this.retryDetector
+        .recordRequest({
+          requestId: route.requestId,
+          promptHash: route.promptHash,
+          userId: auth.userId,
+          chosenModel: route.model,
+          chosenProvider: route.providerKey,
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `Retry detector failed user=${auth.userId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+        );
+    } catch (err) {
+      this.logger.warn(
+        `Retry detector dispatch failed user=${auth.userId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
       );
     }
   }

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AuthModule } from './auth/auth.module';
@@ -63,6 +64,7 @@ import { RoutingEngineModule } from './routing-engine/routing-engine.module';
 import { MemoryEngineModule } from './memory-engine/memory-engine.module';
 import { FounderApplicationsModule } from './founder-applications/founder-applications.module';
 import { ExecutionManagerModule } from './execution-manager/execution-manager.module';
+import { LearningEngineModule } from './learning-engine/learning-engine.module';
 
 @Module({
   imports: [
@@ -131,6 +133,8 @@ import { ExecutionManagerModule } from './execution-manager/execution-manager.mo
     MemoryEngineModule,
     FounderApplicationsModule,
     ExecutionManagerModule,
+    ScheduleModule.forRoot(),
+    LearningEngineModule,
   ],
   providers: [
     {
