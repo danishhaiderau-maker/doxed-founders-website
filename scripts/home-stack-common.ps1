@@ -587,7 +587,8 @@ function Start-VisibleConsole {
   param(
     [string]$ScriptPath,
     [string[]]$ExtraArgs = @(),
-    [string]$Title = "Doxed Home Stack"
+    [string]$Title = "Doxed Home Stack",
+    [switch]$NoPause
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
   $launcherDir = Join-Path $repoRoot "logs\launchers"
@@ -603,19 +604,47 @@ function Start-VisibleConsole {
   $titleSafe = ($Title -replace '"', '')
   $scriptSafe = $ScriptPath
   $repoSafe = $repoRoot
-  @(
+  $launcherLines = @(
     "@echo off",
     "title `"$titleSafe`"",
     "cd /d `"$repoSafe`"",
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptSafe`"$argLine",
-    "if errorlevel 1 echo [ERROR] Script exited with code %errorlevel%",
-    "echo.",
-    "echo --- Press any key to close this window ---",
-    "pause >nul"
-  ) | Set-Content -Path $launcher -Encoding ASCII
+    "if errorlevel 1 echo [ERROR] Script exited with code %errorlevel%"
+  )
+  if (-not $NoPause) {
+    $launcherLines += @(
+      "echo.",
+      "echo --- Press any key to close this window ---",
+      "pause >nul"
+    )
+  }
+  $launcherLines | Set-Content -Path $launcher -Encoding ASCII
+  $cmdMode = if ($NoPause) { "/c" } else { "/k" }
   # Pure cmd.exe window — avoids cmd parsing bugs with :7002 in title and keeps window open.
-  Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "`"$launcher`"") `
+  Start-Process -FilePath "cmd.exe" -ArgumentList @($cmdMode, "`"$launcher`"") `
     -WorkingDirectory $repoRoot -WindowStyle Normal
+}
+
+
+function Start-HomeTunnel {
+  param(
+    [int]$Port = 0,
+    [switch]$Force,
+    [switch]$PreferVisible
+  )
+  if ($Port -le 0) { $Port = $BotPort }
+  $restartScript = Join-Path $scriptDir "restart-home-tunnel.ps1"
+  if (-not (Test-Path $restartScript)) { throw "Missing script: $restartScript" }
+  $doForce = [bool]$Force
+  if ((Use-NamedTunnel) -and -not $PreferVisible) {
+    & $restartScript -Port $Port -Force:$doForce -Hidden | Out-Null
+    return
+  }
+  if ($PreferVisible) {
+    Start-VisibleConsole -ScriptPath $restartScript -ExtraArgs @("-Port", "$Port", "-Force") -Title "Doxed Cloudflare Tunnel" -NoPause
+    return
+  }
+  Start-HiddenPs1 -ScriptPath $restartScript -ExtraArgs @("-Port", "$Port", "-Force", "-Hidden")
 }
 
 function Start-DetachedPs1 {
@@ -651,13 +680,25 @@ function Get-TunnelUrl {
   return $null
 }
 
-function Use-NamedTunnel {
-  $flag = Join-Path $repoRoot ".home-use-named-tunnel"
-  if (-not (Test-Path $flag)) { return $false }
+function Test-NamedTunnelConfigured {
   $configDir = Join-Path $env:USERPROFILE ".cloudflared"
   $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
   $token = Join-Path $configDir "doxed-btc-bot.token"
   return ($null -ne $cred) -or (Test-Path $token)
+}
+
+function Use-NamedTunnel {
+  if (-not (Test-NamedTunnelConfigured)) { return $false }
+  $flag = Join-Path $repoRoot ".home-use-named-tunnel"
+  if (Test-Path $flag) { return $true }
+  $showcaseLock = Join-Path $repoRoot "config\home-showcase.lock.json"
+  if (Test-Path $showcaseLock) {
+    try {
+      $lock = Get-Content $showcaseLock -Raw | ConvertFrom-Json
+      if ($lock.frozen -and -not [bool]$lock.disableTunnel) { return $true }
+    } catch { }
+  }
+  return $false
 }
 
 function Start-AnalyzerDashboard {

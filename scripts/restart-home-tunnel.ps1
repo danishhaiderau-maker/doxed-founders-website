@@ -12,15 +12,11 @@ if ($Port -le 0) {
   $Port = (Get-HomeStackMode).BotPort
 }
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
-$namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
-$configDir = Join-Path $env:USERPROFILE ".cloudflared"
-$cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
-$token = Join-Path $configDir "doxed-btc-bot.token"
-$useNamed = (Test-Path $namedFlag) -and (($null -ne $cred) -or (Test-Path $token))
 $stableUrl = "https://bot.doxxedcrypto.digital"
 
 $BotPortForTunnel = $Port
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPortForTunnel -BridgePort 7810
+$useNamed = Use-NamedTunnel
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 # Skip only when public tunnel actually responds (not just cloudflared process exists).
@@ -47,7 +43,6 @@ if ($useNamed -and -not $Force) {
 # Brief grace window for stack-monitor: public URL may 530 while connector restarts.
 Set-Content -Path (Join-Path $repoRoot ".home-tunnel-restarting") -Value (Get-Date -Format "o") -NoNewline
 
-$argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File")
 if ($useNamed) {
   Set-Content -Path $tunnelUrlFile -Value $stableUrl -NoNewline
   if ($Hidden) {
@@ -58,11 +53,20 @@ if ($useNamed) {
       Write-Host "Hidden tunnel start failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
   }
-  $argList += (Join-Path $scriptDir "run-named-bot-tunnel.ps1"), "-Port", "$Port"
 } else {
   if (Test-Path $tunnelUrlFile) { Remove-Item $tunnelUrlFile -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Seconds 1
-  $argList += (Join-Path $scriptDir "setup-home-bot-tunnel.ps1"), "-Quick", "-Port", "$Port"
+  if ($Hidden) {
+    Start-HiddenPs1 -ScriptPath (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") -ExtraArgs @("-Quick", "-Port", "$Port")
+    exit 0
+  }
 }
 
-Start-Process -FilePath "powershell.exe" -ArgumentList (@("-NoExit") + $argList) -WorkingDirectory $repoRoot -WindowStyle $(if ($Hidden) { "Hidden" } else { "Normal" })
+# Run tunnel in this console (avoids orphan cmd windows stuck on pause).
+$Host.UI.RawUI.WindowTitle = if ($useNamed) { "Doxed Cloudflare Tunnel (stable)" } else { "Doxed Cloudflare Tunnel" }
+if ($useNamed) {
+  & (Join-Path $scriptDir "run-named-bot-tunnel.ps1") -Port $Port
+} else {
+  & (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") -Quick -Port $Port
+}
+exit $LASTEXITCODE

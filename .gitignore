@@ -249,3 +249,4 @@ tmp-*.json
 tmp-*.py
 tmp_*.txt
 tmp_*.py
+.env*

@@ -96,9 +96,12 @@ for (const [k, v] of Object.entries(exVars)) {
 }
 
 if (row.showcaseAiCredentialEnc) {
-  lines.push(`DEEPSEEK_API_KEY=${decryptSecret(row.showcaseAiCredentialEnc, jwtSecret)}`);
+  try {
+    lines.push(`DEEPSEEK_API_KEY=${decryptSecret(row.showcaseAiCredentialEnc, jwtSecret)}`);
+  } catch (err) {
+    console.warn('Warning: could not decrypt showcase AI credentials; skipping DEEPSEEK_API_KEY:', err?.message ?? err);
+  }
 }
-
 const outPath = join(getVaultDir(), 'home-bot.env');
 writeFileSync(outPath, `${lines.join('\n')}\n`, 'utf8');
 
