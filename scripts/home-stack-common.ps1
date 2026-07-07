@@ -706,7 +706,16 @@ function Start-AnalyzerDashboard {
 }
 
 function Start-CloudflaredNamedHidden {
-  param([int]$Port = 7800)
+  # F4 (2026-07-07 incident follow-up) — default --protocol to http2 because
+  # this network blocks UDP/7844 to region2.v2.argotunnel.com, which produces
+  # QUIC retry storms and silent 4h outages. The bridge spawn path here is
+  # the one actually used in production (not run-named-bot-tunnel.ps1) —
+  # closing the gap the Cloudflare tunnel investigator flagged.
+  # Default port is 7002 (canonical showcase per config/bot-architecture.lock.json).
+  param(
+    [int]$Port = 7002,
+    [string]$Protocol = $(if ($env:CLOUDFLARED_PROTOCOL) { $env:CLOUDFLARED_PROTOCOL } else { 'http2' })
+  )
   $configDir = Join-Path $env:USERPROFILE ".cloudflared"
   $tunnelName = "doxed-btc-bot"
   $tokenFile = Join-Path $configDir "$tunnelName.token"
@@ -722,10 +731,14 @@ function Start-CloudflaredNamedHidden {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
 
-  $args = @()
+  # Force --protocol http2 (or whatever $Protocol resolves to). Without this
+  # flag cloudflared defaults to "auto" which tries QUIC first and falls back
+  # only after long retries — exactly the storm that took the relay down for
+  # 3h59m on 2026-07-07. Set CLOUDFLARED_PROTOCOL=auto to revert.
+  $args = @("tunnel", "run", "--protocol", $Protocol)
   if (Test-Path $tokenFile) {
     $token = (Get-Content $tokenFile -Raw).Trim()
-    $args = @("tunnel", "run", "--token", $token)
+    $args += @("--token", $token)
   } else {
     $cred = Get-ChildItem -Path (Join-Path $configDir "$tunnelName*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cred) { throw "Named tunnel not configured" }
@@ -738,13 +751,13 @@ function Start-CloudflaredNamedHidden {
       "    service: http://127.0.0.1:$Port"
       "  - service: http_status:404"
     ) | Set-Content -Path $configPath -Encoding UTF8
-    $args = @("tunnel", "run", $tunnelName)
+    $args += $tunnelName
   }
 
   Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
   foreach ($rotLog in @($outLog, $errLog)) {
     try {
-      if ((Get-Item $rotLog -ErrorAction SilentlyContinue).Length -gt 1048576) {
+      if ((Get-Item $rotLog -ErrorAction SilentlyContinue).Length -gt 1048571) {
         $tail = Get-Content $rotLog -Tail 200 -ErrorAction SilentlyContinue
         if ($tail) { $tail | Set-Content $rotLog -Encoding UTF8 }
       }

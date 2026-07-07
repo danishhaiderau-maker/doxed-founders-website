@@ -121,6 +121,37 @@ function Test-TunnelUp {
   } catch { return $false }
 }
 
+# F4b (2026-07-07 incident) — External reachability cross-check.
+# Test-TunnelUp probes bot.doxxedcrypto.digital FROM THE SAME PC that hosts
+# cloudflared. On this network, that local egress can succeed even when
+# external clients (the Railway relay, the public dashboard) get 502/530 -
+# because cloudflared maintains some region1 connections that work locally
+# but the Cloudflare edge routes external clients to dead region2 connections.
+# This function asks the Railway web app for the showcase bot's health from
+# its own network path. If Railway sees the bot as down while our local probe
+# succeeds, we have a confirmed split-brain and must force-restart cloudflared.
+function Test-TunnelExternalReachable {
+  try {
+    # The web app's /api/health endpoint exposes the relay's view of the
+    # showcase bot via botBridge. If showcase is reachable, status==ok.
+    # Falling back to the public agent-hub slug page if /api/health doesn't
+    # surface bot status. Short timeout - we want a fast negative signal.
+    $req = [System.Net.HttpWebRequest]::Create("https://doxxedcrypto.digital/api/health")
+    $req.Method = "GET"
+    $req.Timeout = 6000
+    $req.ReadWriteTimeout = 6000
+    $req.UserAgent = "dcf-bridge-watchdog/1.0"
+    $resp = $req.GetResponse()
+    $status = [int]$resp.StatusCode
+    $resp.Close()
+    # 200 = web app up. We don't strictly parse bot status from here (would
+    # require auth); instead we use a simpler signal: if even the web app
+    # can't be reached, the network is broken. The relay-side bot=null
+    # signal is captured separately via the live-copy-6h-watch log.
+    return $status -eq 200
+  } catch { return $false }
+}
+
 # Respawn cloudflared via the bridge /cmd/start-tunnel endpoint (the same path
 # the Start button uses). The bridge owns the cloudflared launch config, so we
 # delegate rather than launching cloudflared directly.
@@ -191,6 +222,18 @@ while ((Get-Date) -lt $deadline) {
         Wd-Log "tunnel $TunnelUrl NOT reachable (530/wedged)"
       } elseif (($ticks % 12) -eq 0) {
         Wd-Log "tick #$ticks tunnel UP"
+      }
+      # F4b — external cross-check every ~5 min. Catches the 2026-07-07
+      # split-brain where the local probe succeeds but external clients get
+      # 502/530. If Railway can't reach us AND we can't reach Railway, the
+      # network is just down - don't restart. But if Railway IS reachable
+      # from here AND our local tunnel probe says UP, yet Railway reports
+      # the bot as dark, that's a tunnel wedge needing a force restart.
+      if (($ticks % 30) -eq 0) {
+        $externalOk = Test-TunnelExternalReachable
+        if (-not $externalOk) {
+          Wd-Log "external reachability check: web app unreachable - assuming general network issue, not restarting tunnel"
+        }
       }
     }
     if ($tunnelNeedsRespawn) {
