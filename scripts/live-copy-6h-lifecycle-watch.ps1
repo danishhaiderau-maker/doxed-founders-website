@@ -107,11 +107,11 @@ function Compute-SyncVerdict($probe) {
   $copyNoShow = @($recent | Where-Object { $_.payload -match "COPY_ORDER_NO_SHOWCASE" }).Count
 
   if (-not $showOk) { return "WARN" }
+  if ($showN -eq 0 -and $copyN -eq 0) { return "PASS" }
   if ($missEntry -gt 2 -or $missExit -gt 0 -or $orphanDiv -gt 0) { return "FAIL" }
   if ($showN -gt 0 -and $matched -lt $showN) { return "WARN" }
   if ($copyN -gt $showN -and $orphanDiv -eq 0 -and $copyNoShow -gt 0) { return "WARN" }
   if ($lastErr -match "Insufficient Derivatives margin") { return "WARN" }
-  if ($showN -eq 0 -and $copyN -eq 0) { return "PASS" }
   if ($matched -eq $showN -and $showN -gt 0) { return "PASS" }
   return "WARN"
 }
