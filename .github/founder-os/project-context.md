@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(learning-engine): boot-time rollup + atomic state write + tz + reputation formula
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
