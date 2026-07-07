@@ -219,6 +219,17 @@ services/btc-conservative-agent/research_*.json
 .commit-msg-tmp.txt
 .home-stack-user-stopped
 
+# Local restore / backup snapshots at repo root (never commit — these are
+# local-only checkpoints created by restore scripts; bloat git, slow deploys).
+/_archived_bundled_research_db_*/
+/_pre_restore_backup_*/
+/services/btc-conservative-agent/_pre_genome_restore_*/
+/services/btc-conservative-agent/_restore_staging_*/
+
+# Stray compiled Founder Node main.js at repo root (build artifact — real
+# compiled output lives in apps/founder-node/dist/ which is already ignored).
+/main.js
+
 # Platform walkthrough media (generated locally; do not commit)
 docs/platform-walkthrough-narrated.mp4
 docs/platform-walkthrough-narration.mp3

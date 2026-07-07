@@ -56,6 +56,11 @@ import { LaunchQualificationModule } from './launch-qualification/launch-qualifi
 import { TrustModule } from './trust/trust.module';
 import { ObservatoryModule } from './observatory/observatory.module';
 import { RaiseRoomModule } from './raise-room/raise-room.module';
+import { AiProxyModule } from './ai-proxy/ai-proxy.module';
+import { CapabilityRegistryModule } from './capability-registry/capability-registry.module';
+import { FlightRecorderModule } from './flight-recorder/flight-recorder.module';
+import { RoutingEngineModule } from './routing-engine/routing-engine.module';
+import { MemoryEngineModule } from './memory-engine/memory-engine.module';
 
 @Module({
   imports: [
@@ -117,6 +122,11 @@ import { RaiseRoomModule } from './raise-room/raise-room.module';
     TrustModule,
     ObservatoryModule,
     RaiseRoomModule,
+    AiProxyModule,
+    CapabilityRegistryModule,
+    FlightRecorderModule,
+    RoutingEngineModule,
+    MemoryEngineModule,
   ],
   providers: [
     {

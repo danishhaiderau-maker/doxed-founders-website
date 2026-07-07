@@ -157,3 +157,4 @@ export {
   withFounderOsDispatchAttribution,
 } from './ide-bridge-interface';
 export * from './founder-identity';
+export * from './ai-proxy';
