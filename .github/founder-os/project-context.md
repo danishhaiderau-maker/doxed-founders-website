@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+ci: unblock F8 deploy - refresh Bitfinex policy lock after F1-F7 fail-closed safe mode
 
 ## Last Activity
 
