@@ -2,6 +2,30 @@
 # Replaces tunnel-watchdog for long runs (48h-1 week). Started by Start everything.
 # F4c (2026-07-07 incident) — default BotPort is 7002 (canonical showcase per
 # config/bot-architecture.lock.json), not 7800 (legacy local lab).
+#
+# ====================================================================
+#  UPTIME CONTRACT — read this before editing. See scripts/BOT_UPTIME.md.
+# ====================================================================
+#  This supervisor implements Scenario A of the uptime contract:
+#    - Crash / python.exe dies -> detected here via /api/ping health check
+#      (BotFailThreshold consecutive fails = ~2 min) AND by the
+#      bot-auto-restart.ps1 monitor (sub-second, attached to the PID).
+#
+#  MANUAL STOP CONTRACT (Scenario C):
+#    This supervisor NEVER reads the dashboard API (doxxedcrypto.digital,
+#    Railway, Neon) to decide whether the bot should run. The dashboard
+#    Stop button is a PER-USER PAUSE for the relay - it does not stop the
+#    python.exe process for the showcase bot. The only thing that can
+#    legitimately stop the bot is the bridge Stop button, which writes the
+#    .home-stack-user-stopped flag (Test-HomeStackUserStopped). Every
+#    recovery path below checks that flag and stands down if it is set.
+#
+#  CRASH-LOOP CIRCUIT BREAKER:
+#    If the bot is recovered $MaxBotRestartsInWindow times in $BotRestartWindowMin
+#    (default 5 in 5 min), recovery is HALTED and a Windows toast + log entry
+#    is emitted. This prevents an infinite restart loop on a fatal misconfig
+#    (e.g. bad vault env) from hammering Bitfinex or burning disk.
+# ====================================================================
 param(
   [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9001,
@@ -12,7 +36,10 @@ param(
   [int]$BotCooldownSec = 300,
   [int]$AnalyzerCooldownSec = 600,
   [int]$TunnelCooldownSec = 900,
-  [int]$BridgeCooldownSec = 300
+  [int]$BridgeCooldownSec = 300,
+  # Crash-loop circuit breaker (see UPTIME CONTRACT above).
+  [int]$MaxBotRestartsInWindow = 5,
+  [int]$BotRestartWindowMin = 5
 )
 
 $ErrorActionPreference = "Continue"
@@ -115,6 +142,109 @@ function Restart-BridgeComponent {
   Start-VisibleConsole (Join-Path $scriptDir "home-stack-launcher.ps1") @() -Title "Doxed Home Bridge :$BridgePort"
 }
 
+# Respawn the bot-auto-restart.ps1 monitor if its heartbeat is stale or missing.
+# This is the missing link from the 2026-07-08 audit: the auto-restart monitor
+# was dying silently (transient .NET exception escaped the watch loop before
+# hardening, or the user clicked Stop which exits the monitor cleanly) and
+# nothing was bringing it back. Without it, sub-second crash detection is lost
+# and the bot relies solely on this supervisor's slower /api/ping probe.
+#
+# NEVER call this when the user has stopped the stack (Test-HomeStackUserStopped)
+# - the monitor would just re-launch the bot and undo the user's Stop.
+#
+# PID RESOLUTION (avoid racing a live bot):
+# The .home-bot.pid file can be stale (the previous monitor died before
+# updating it). If we handed a stale PID to a fresh monitor, the monitor would
+# see "bot dead", force-kill whatever is on :7002 (a DIFFERENT, live bot) and
+# launch its own - taking down a healthy bot for ~10s. So we ALWAYS look up
+# the live listener on the bot port first and only fall back to the pid file.
+function Restart-AutoRestartMonitor {
+  param([int]$WatchPid)
+  if (Test-HomeStackUserStopped) {
+    Log "auto-restart monitor respawn skipped - user stopped stack"
+    return
+  }
+  $monitorScript = Join-Path $scriptDir "bot-auto-restart.ps1"
+  if (-not (Test-Path $monitorScript)) {
+    Log "auto-restart monitor script missing - cannot respawn"
+    return
+  }
+  # If $WatchPid is unknown, resolve the live bot PID. Prefer the actual TCP
+  # listener on the bot port (authoritative - that is the bot serving right
+  # now); fall back to .home-bot.pid only if no port listener exists.
+  if ($WatchPid -le 0) {
+    try {
+      $listener = Get-NetTCPConnection -LocalPort $BotPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($listener -and $listener.OwningProcess -gt 0) {
+        $WatchPid = [int]$listener.OwningProcess
+      }
+    } catch { }
+    if ($WatchPid -le 0) {
+      $pidFile = Join-Path $repoRoot ".home-bot.pid"
+      if (Test-Path $pidFile) {
+        try { $WatchPid = [int](Get-Content $pidFile -Raw).Trim() } catch { }
+      }
+    }
+  }
+  if ($WatchPid -le 0) {
+    Log "auto-restart monitor respawn skipped - no live bot PID to watch"
+    return
+  }
+  # Sanity check: confirm the PID is actually alive before handing it to the
+  # monitor. If we hand it a dead PID, the monitor's first iteration will fire
+  # Start-BotHidden which kills whatever holds :7002 - exactly the race we
+  # are trying to avoid.
+  $live = Get-Process -Id $WatchPid -ErrorAction SilentlyContinue
+  if (-not $live) {
+    Log "auto-restart monitor respawn skipped - pid $WatchPid not alive (would race a live bot); will retry next tick"
+    return
+  }
+  # Clear any stale single-instance lock from a previous dead monitor so the
+  # fresh instance's Test-LockHeldByLive check does not exit silently.
+  $lockFile = Join-Path $repoRoot ".home-bot-auto-restart.lock"
+  if (Test-Path $lockFile) {
+    try {
+      $lockPid = [int]((Get-Content $lockFile -Raw).Trim())
+      if ($lockPid -gt 0) {
+        $lockProc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+        if (-not $lockProc) {
+          Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+          Log "auto-restart monitor stale lock (pid=$lockPid dead) - cleared"
+        }
+      }
+    } catch { }
+  }
+  # Build arg list as a single quoted string - repo path has a space ("Final Bots").
+  $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
+  $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -BotPid $WatchPid -Port $BotPort"
+  if (Test-Path $vaultEnv) { $monitorArgString += " -VaultEnv `"$vaultEnv`"" }
+  try {
+    $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
+    if ($mon -and $mon.Id -gt 0) {
+      Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
+      Log "auto-restart monitor respawned pid=$($mon.Id) watching bot=$WatchPid"
+    } else {
+      Log "auto-restart monitor respawn FAILED (Start-Process returned no pid)"
+    }
+  } catch {
+    Log "auto-restart monitor respawn FAILED: $($_.Exception.Message)"
+  }
+}
+
+function Test-AutoRestartMonitorAlive {
+  # Heartbeat is written every ~2 min by the monitor; treat anything older than
+  # 5 min (or missing) as dead. Same rule start-home-bot.ps1 uses.
+  $heartbeatFile = Join-Path $repoRoot ".home-bot-auto-restart.heartbeat"
+  if (-not (Test-Path $heartbeatFile)) { return $false }
+  try {
+    $hbRaw = (Get-Content $heartbeatFile -Raw -ErrorAction SilentlyContinue)
+    if (-not $hbRaw) { return $false }
+    $hbTime = [datetime]::Parse($hbRaw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    $ageMin = ((Get-Date).ToUniversalTime() - $hbTime).TotalMinutes
+    return ($ageMin -ge 0 -and $ageMin -le 5)
+  } catch { return $false }
+}
+
 function Invoke-Recovery {
   param(
     [string]$Name,
@@ -152,6 +282,9 @@ $lastRecover = @{
   tunnel = [datetime]::MinValue
   bridge = [datetime]::MinValue
 }
+# Rolling timestamps of bot recoveries (for the crash-loop circuit breaker).
+$botRestartTimes = [System.Collections.Generic.List[datetime]]::new()
+$botHalted = $false
 
 while ($true) {
   $hygieneTick++
@@ -193,12 +326,33 @@ while ($true) {
     if (Test-HomeStackUserStopped) {
       Log "RECOVER bot skipped - user stopped stack (.home-stack-user-stopped)"
       $fail.bot = 0
-    } else {
-      $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec
+    } elseif ($botHalted) {
+      # Crash-loop circuit breaker tripped earlier in this run - do not attempt
+      # further bot recoveries. The user must clear .home-stack-user-stopped /
+      # restart the supervisor manually after fixing the root cause.
+      Log "RECOVER bot skipped - crash-loop breaker tripped ($MaxBotRestartsInWindow in $BotRestartWindowMin min). Manual intervention required."
       $fail.bot = 0
-      $fail.tunnel = 0
-      Start-Sleep -Seconds 30
-      continue
+    } else {
+      # Crash-loop circuit breaker: prune restarts older than the window, then
+      # check the cap. If exceeded, HALT bot recovery and surface a Windows
+      # toast + log entry so the user knows the bot is not restarting itself.
+      $now = Get-Date
+      for ($i = $botRestartTimes.Count - 1; $i -ge 0; $i--) {
+        if (($now - $botRestartTimes[$i]).TotalMinutes -ge $BotRestartWindowMin) { $botRestartTimes.RemoveAt($i) }
+      }
+      if ($botRestartTimes.Count -ge $MaxBotRestartsInWindow) {
+        $botHalted = $true
+        Log ("RECOVER bot HALTED - crash-loop breaker tripped: $MaxBotRestartsInWindow restarts in $BotRestartWindowMin min. Manual intervention required. Last log: logs\last_crash.json")
+        try { msg * /TIME:120 "Doxed supervisor: bot crash-loop breaker tripped ($MaxBotRestartsInWindow in $BotRestartWindowMin min). Auto-restart HALTED. See logs\.home-stack-supervisor.log" 2>$null } catch { }
+        $fail.bot = 0
+      } else {
+        $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec
+        $botRestartTimes.Add((Get-Date))
+        $fail.bot = 0
+        $fail.tunnel = 0
+        Start-Sleep -Seconds 30
+        continue
+      }
     }
   }
 
@@ -226,6 +380,16 @@ while ($true) {
       Start-Sleep -Seconds 45
       continue
     }
+  }
+
+  # Auto-restart monitor health: respawn it if the heartbeat has gone stale.
+  # This is the gap that left the bot unwatched for hours on 2026-07-08: the
+  # monitor died silently and no one was bringing it back. Skip when the user
+  # has stopped the stack (no point watching a bot the user wants down) and
+  # when the bot itself is down (Restart-BotComponent above re-launches the
+  # monitor via start-home-bot.ps1 -NoWait, so we'd just race it).
+  if ($botOk -and -not (Test-HomeStackUserStopped) -and -not (Test-AutoRestartMonitorAlive)) {
+    Restart-AutoRestartMonitor -WatchPid 0
   }
 
   Start-Sleep -Seconds $IntervalSec
