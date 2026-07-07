@@ -1,39 +1,28 @@
 import { Injectable } from '@nestjs/common';
+import { Capability } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import type {
   AiRuntimeIntent,
   CapabilityRequirement,
-  CapabilityRow,
 } from './capability-registry.types';
 
 /**
  * Capability Registry — kernel service backed by the Prisma `Capability` model.
  * See docs/KERNEL.md §8.
- *
- * KNOWN LIMITATION: `@prisma/client` has not yet been regenerated to include
- * the `Capability` model (the parent agent runs `prisma generate` after this
- * lands). We therefore access `this.prisma.capability` through an `any` cast.
- * The local `CapabilityRow` type mirrors the schema shape so the returned
- * data is structurally compatible. Once the client is regenerated, callers
- * may replace `CapabilityRow` with the generated `Capability` type.
  */
 @Injectable()
 export class CapabilityRegistryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get model(): any {
-    return (this.prisma as any).capability;
-  }
-
-  async findAll(filter?: { onlyActive?: boolean }): Promise<CapabilityRow[]> {
-    return this.model.findMany({
+  async findAll(filter?: { onlyActive?: boolean }): Promise<Capability[]> {
+    return this.prisma.capability.findMany({
       where: filter?.onlyActive ? { isActive: true } : undefined,
       orderBy: [{ provider: 'asc' }, { model: 'asc' }],
     });
   }
 
-  async findByProvider(provider: string): Promise<CapabilityRow[]> {
-    return this.model.findMany({
+  async findByProvider(provider: string): Promise<Capability[]> {
+    return this.prisma.capability.findMany({
       where: { provider },
       orderBy: { model: 'asc' },
     });
@@ -42,8 +31,8 @@ export class CapabilityRegistryService {
   async findByProviderModel(
     provider: string,
     model: string,
-  ): Promise<CapabilityRow | null> {
-    return this.model.findUnique({
+  ): Promise<Capability | null> {
+    return this.prisma.capability.findUnique({
       where: { provider_model: { provider, model } },
     });
   }
@@ -56,14 +45,15 @@ export class CapabilityRegistryService {
   async findBestForIntent(
     intent: AiRuntimeIntent,
     requirements: CapabilityRequirement[] = [],
-  ): Promise<CapabilityRow[]> {
-    const rows = await this.model.findMany({ where: { isActive: true } });
-    const filtered = rows.filter((row: CapabilityRow) =>
+  ): Promise<Capability[]> {
+    const rows = await this.prisma.capability.findMany({
+      where: { isActive: true },
+    });
+    const filtered = rows.filter((row) =>
       this.meetsAllRequirements(row, requirements),
     );
     const sorted = filtered.sort(
-      (a: CapabilityRow, b: CapabilityRow) =>
-        this.intentScore(b, intent) - this.intentScore(a, intent),
+      (a, b) => this.intentScore(b, intent) - this.intentScore(a, intent),
     );
     return sorted;
   }
@@ -80,35 +70,35 @@ export class CapabilityRegistryService {
    *   sampleCount += 1
    */
   async updateReputation(id: string, success: boolean): Promise<void> {
-    const current = await this.model.findUnique({ where: { id } });
+    const current = await this.prisma.capability.findUnique({ where: { id } });
     if (!current) return;
 
     const alpha = 0.05;
     const successRate =
-      (1 - alpha) * (current.successRate as number) + alpha * (success ? 1 : 0);
+      (1 - alpha) * current.successRate + alpha * (success ? 1 : 0);
     const retryRate = success
-      ? (1 - alpha) * (current.retryRate as number)
-      : (1 - alpha) * (current.retryRate as number) + alpha * 1;
+      ? (1 - alpha) * current.retryRate
+      : (1 - alpha) * current.retryRate + alpha * 1;
 
-    await this.model.update({
+    await this.prisma.capability.update({
       where: { id },
       data: {
         successRate,
         retryRate,
-        sampleCount: (current.sampleCount as number) + 1,
+        sampleCount: { increment: 1 },
       },
     });
   }
 
   private meetsAllRequirements(
-    row: CapabilityRow,
+    row: Capability,
     requirements: CapabilityRequirement[],
   ): boolean {
     return requirements.every((req) => this.meetsRequirement(row, req));
   }
 
   private meetsRequirement(
-    row: CapabilityRow,
+    row: Capability,
     req: CapabilityRequirement,
   ): boolean {
     if (req.toolUse && !row.toolUse) return false;
@@ -118,7 +108,7 @@ export class CapabilityRegistryService {
     return true;
   }
 
-  private intentScore(row: CapabilityRow, intent: AiRuntimeIntent): number {
+  private intentScore(row: Capability, intent: AiRuntimeIntent): number {
     switch (intent) {
       case 'code':
         return row.codeScore;

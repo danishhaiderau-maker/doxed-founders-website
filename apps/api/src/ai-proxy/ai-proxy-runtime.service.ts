@@ -1,4 +1,5 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   AI_PROXY_DDOLLAR_COST,
   FOUNDER_OS_AUTO_MODEL,
@@ -11,6 +12,9 @@ import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
 import { DDOLLAR_ACTION_KEYS } from '../ddollar/ddollar.constants';
+import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
+import { RoutingEngineService } from '../routing-engine/routing-engine.service';
+import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2 } from './ai-proxy.constants';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 
@@ -47,14 +51,42 @@ export type ProxyInvokeResult = {
 };
 
 /**
+ * Extended route decision carried alongside the AiProxyRouteDecision so the
+ * post-request hooks (DDollar spend + usage log + Flight Recorder) have
+ * everything they need without re-deriving state.
+ *
+ * `flightRecorderHasDecisionRow` is true when the Routing Engine v2 already
+ * wrote a decision row at route time — in that case the post-request hook
+ * UPDATES that row (latency/cost/tokens) instead of inserting a duplicate.
+ */
+type ResolvedRoute = AiProxyRouteDecision & {
+  requestId: string;
+  promptHash: string;
+  /** Profile that was effective for this request (always 'balanced' today). */
+  profile: string;
+  /** Scored candidates snapshot — empty for the legacy path. */
+  candidates: Array<{ provider: string; model: string; score: number }>;
+  cacheKey?: string | null;
+  cacheLevel: 'hit' | 'partial' | 'miss';
+  /**
+   * True when the Routing Engine v2 already recorded a Flight Recorder row
+   * for this requestId at decision time. The post-request hook then patches
+   * that row with usage data instead of inserting a second row.
+   */
+  flightRecorderHasDecisionRow: boolean;
+};
+
+/**
  * Core AI Proxy runtime. Decides the route (provider + model + tier), invokes
  * the upstream provider (streaming or not), and runs the post-request hooks
- * (DDollar spend + usage log + Flight Recorder entry when v2 is on).
+ * (DDollar spend + usage log + Flight Recorder row).
  *
- * The route decision is delegated to either:
- *   - ModelRouterService (v1, default) — pattern-based intent + provider cfg
- *   - RoutingEngineService (v2, behind USE_ROUTING_ENGINE_V2) — capability
- *     gate + cost-latency scoring, logged to Flight Recorder
+ * Routing path:
+ *   - USE_ROUTING_ENGINE_V2=false (default, production-safe): the legacy
+ *     ModelRouterService picks the provider/model exactly as before. The
+ *     only observable change is that a Flight Recorder row is written.
+ *   - USE_ROUTING_ENGINE_V2=true: the Routing Engine v2 takes over — cache
+ *     lookup → capability gate → intent + cost-latency scoring.
  */
 @Injectable()
 export class AiProxyRuntimeService {
@@ -65,13 +97,15 @@ export class AiProxyRuntimeService {
     private readonly spendingEngine: SpendingEngine,
     private readonly modelRouter: ModelRouterService,
     private readonly brainProviders: FounderBrainProvidersService,
+    private readonly routingEngine: RoutingEngineService,
+    private readonly flightRecorder: FlightRecorderService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
-  decideRoute(
+  async decideRoute(
     auth: ProxyAuth,
     body: ChatCompletionRequestDto,
-  ): AiProxyRouteDecision {
+  ): Promise<ResolvedRoute> {
     const requestedAlias = body.model ?? FOUNDER_OS_AUTO_MODEL;
 
     // Map alias → intent hint. The router does the real classification, but
@@ -88,21 +122,58 @@ export class AiProxyRuntimeService {
     const lastUserMessage = [...(body.messages ?? [])]
       .reverse()
       .find((m) => m.role === 'user');
+    const systemMessage = body.messages?.find((m) => m.role === 'system');
+    const userPrompt = lastUserMessage?.content ?? '';
+    const systemPrompt = systemMessage?.content ?? '';
+    const requestId = randomUUID();
+    const promptHash = this.computePromptHash(systemPrompt, userPrompt);
+    const inferredIntent = this.inferIntent(userPrompt);
+
+    if (USE_ROUTING_ENGINE_V2) {
+      try {
+        const decision = await this.routingEngine.route({
+          userId: auth.userId,
+          intent: inferredIntent,
+          prompt: `${systemPrompt}\n${userPrompt}`,
+          requestId,
+        });
+        const tier = this.tierForIntent(decision.chosenProvider, inferredIntent, forcedIntent);
+        return {
+          requestId,
+          providerKey: decision.chosenProvider,
+          model: decision.chosenModel,
+          tier,
+          intent: inferredIntent,
+          profile: 'balanced',
+          candidates: decision.candidates,
+          cacheKey: decision.cacheKey ?? null,
+          cacheLevel: decision.cacheLevel,
+          promptHash,
+          // Routing Engine v2 writes a Flight Recorder row at decision time
+          // (fire-and-forget). The post-request hook patches it in place.
+          flightRecorderHasDecisionRow: true,
+        };
+      } catch (err) {
+        // If v2 cannot serve (e.g. RoutingInfeasibleError, Capability table
+        // empty), fall back to the legacy router so the request still
+        // completes. Logged at warn so we can spot it in observability.
+        this.logger.warn(
+          `Routing Engine v2 failed (${err instanceof Error ? err.message : String(err)}); falling back to legacy router.`,
+        );
+      }
+    }
+
+    // Legacy path (default, or v2 fallback). Model selection here is
+    // IDENTICAL to pre-Phase-1 wiring so production behavior is unchanged.
     const runtimeRequest = {
       userId: auth.userId,
-      system:
-        body.messages?.find((m) => m.role === 'system')?.content ?? '',
-      userPrompt: lastUserMessage?.content ?? '',
+      system: systemPrompt,
+      userPrompt,
       section: 'copilot' as const,
       founderBrainTask: forcedIntent === 'code' ? ('code' as const) : undefined,
     };
-
     const route = this.modelRouter.route(runtimeRequest);
 
-    // If the founder forced an alias, override the tier but keep the model
-    // selection from the router (so the alias becomes a "preference", not a
-    // hard assignment). This keeps the v1 path simple — v2 will use the
-    // Execution Profile + Capability Registry for the same job.
     const tier: AiProxyTier =
       forcedIntent === 'code'
         ? 'code'
@@ -110,13 +181,20 @@ export class AiProxyRuntimeService {
           ? 'reasoning'
           : route.tier;
 
-    void USE_ROUTING_ENGINE_V2; // v2 wiring lands in Phase 1 step 7
-
     return {
+      requestId,
       providerKey: route.providerKey,
       model: route.model,
       tier,
       intent: route.intent,
+      profile: 'balanced',
+      candidates: [],
+      cacheKey: null,
+      cacheLevel: 'miss',
+      promptHash,
+      // Legacy path: no prior decision row, so the post-request hook
+      // inserts a fresh Flight Recorder entry.
+      flightRecorderHasDecisionRow: false,
     };
   }
 
@@ -124,7 +202,7 @@ export class AiProxyRuntimeService {
   async invoke(
     auth: ProxyAuth,
     body: ChatCompletionRequestDto,
-    route: AiProxyRouteDecision,
+    route: ResolvedRoute,
   ): Promise<ProxyInvokeResult> {
     const apiKey = await this.brainProviders.resolveApiKey(
       route.providerKey as 'glm' | 'deepseek',
@@ -247,14 +325,13 @@ export class AiProxyRuntimeService {
     };
   }
 
-  /** DDollar spend + usage log for a completed non-streaming request. */
+  /** DDollar spend + usage log + Flight Recorder row for a completed non-streaming request. */
   private async afterRequest(
     auth: ProxyAuth,
-    route: AiProxyRouteDecision,
+    route: ResolvedRoute,
     usage: { promptTokens: number; completionTokens: number; latencyMs: number },
   ): Promise<void> {
     const ddollarCost = AI_PROXY_DDOLLAR_COST[route.tier];
-    void usage.latencyMs; // TODO Phase 4 — store latency once RoutingDecision ships
 
     try {
       await this.spendingEngine.spend(auth.userId, ddollarCost, DDOLLAR_ACTION_KEYS.AI_SPEND, {
@@ -285,12 +362,58 @@ export class AiProxyRuntimeService {
         `AiTokenUsageLog write failed user=${auth.userId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+
+    // Flight Recorder — unconditional so the Decision Log starts populating
+    // immediately. Best-effort: never fails the request.
+    try {
+      const costUsd = await this.computeCostUsd(
+        route.providerKey,
+        route.model,
+        usage.promptTokens,
+        usage.completionTokens,
+      );
+      if (route.flightRecorderHasDecisionRow) {
+        // v2 path: the Routing Engine already wrote the decision row at
+        // route time; patch usage onto it rather than inserting a duplicate.
+        await this.flightRecorder.updateUsage(route.requestId, {
+          latencyMs: usage.latencyMs,
+          costUsd,
+          tokenCountPrompt: usage.promptTokens,
+          tokenCountCompletion: usage.completionTokens,
+        });
+      } else {
+        // Legacy path: insert a fresh decision row with the full usage
+        // payload. This is the row that populates the Decision Log when
+        // USE_ROUTING_ENGINE_V2 is off.
+        await this.flightRecorder.record({
+          requestId: route.requestId,
+          userId: auth.userId,
+          workspaceId: null,
+          intent: route.intent,
+          profile: route.profile,
+          candidates: route.candidates,
+          chosenProvider: route.providerKey,
+          chosenModel: route.model,
+          cacheLevel: route.cacheLevel,
+          cacheKey: route.cacheKey ?? null,
+          promptHash: route.promptHash,
+          tokenCountPrompt: usage.promptTokens,
+          tokenCountCompletion: usage.completionTokens,
+          latencyMs: usage.latencyMs,
+          costUsd,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Flight Recorder write failed user=${auth.userId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Same hooks but parses the SSE stream to recover token counts. */
   private async afterStreamingRequest(
     auth: ProxyAuth,
-    route: AiProxyRouteDecision,
+    route: ResolvedRoute,
     stream: ReadableStream<Uint8Array>,
     startedAt: number,
   ): Promise<void> {
@@ -344,9 +467,78 @@ export class AiProxyRuntimeService {
     return Math.ceil(chars / 4);
   }
 
-  private estimateStreamPromptTokens(route: AiProxyRouteDecision): number {
+  private estimateStreamPromptTokens(route: ResolvedRoute): number {
     void route;
     return 0;
+  }
+
+  /**
+   * SHA-256 of the normalized system+user prompt prefix. Matches the
+   * Routing Engine v2 cache key shape (RoutingEngineCache.computeKey) so
+   * future Learning-Engine joins line up.
+   */
+  private computePromptHash(systemPrompt: string, userPrompt: string): string {
+    const normalized = `${systemPrompt}\n${userPrompt}`
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .slice(0, 4096);
+    return createHash('sha256').update(normalized, 'utf8').digest('hex');
+  }
+
+  /**
+   * Lightweight intent classifier used on the legacy path so the Flight
+   * Recorder row has a meaningful `intent`. Mirrors what the Routing Engine
+   * v2's classifier would produce: short prompts → simple_qa, code fences /
+   * backticks → code, everything else → reasoning.
+   */
+  private inferIntent(userPrompt: string): AiRuntimeIntent {
+    if (/```|`/.test(userPrompt)) return 'code';
+    if (userPrompt.length < 200) return 'simple_qa';
+    return 'reasoning';
+  }
+
+  /**
+   * Map the v2-decided provider + intent onto the proxy's tier enum so the
+   * DDollar spend + AiTokenUsageLog still use the existing tier taxonomy.
+   */
+  private tierForIntent(
+    provider: string,
+    intent: AiRuntimeIntent,
+    forcedIntent: string | null,
+  ): AiProxyTier {
+    if (forcedIntent === 'code' || intent === 'code') return 'code';
+    if (forcedIntent === 'reasoning' || intent === 'reasoning') return 'reasoning';
+    if (intent === 'simple_qa') return 'fast';
+    // Default for agent/vision/unknown falls back to whatever the provider
+    // is good at — keep it cheap for glm, reasoning-tier for deepseek.
+    return provider === 'deepseek' ? 'reasoning' : 'fast';
+  }
+
+  /**
+   * Compute the USD cost of a request from token counts and the matching
+   * Capability row. Returns null if the Capability is missing (e.g. v2 not
+   * seeded yet) so the Flight Recorder stores an honest null rather than 0.
+   */
+  private async computeCostUsd(
+    provider: string,
+    model: string,
+    promptTokens: number,
+    completionTokens: number,
+  ): Promise<number | null> {
+    try {
+      const cap = await this.prisma.capability.findUnique({
+        where: { provider_model: { provider, model } },
+        select: { inputCostPer1M: true, outputCostPer1M: true },
+      });
+      if (!cap) return null;
+      return (
+        (promptTokens / 1_000_000) * cap.inputCostPer1M +
+        (completionTokens / 1_000_000) * cap.outputCostPer1M
+      );
+    } catch {
+      return null;
+    }
   }
 
   /** Resolve the founder-friendly display model for /v1/models. */
