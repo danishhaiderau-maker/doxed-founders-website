@@ -44,7 +44,11 @@ $action = New-ScheduledTaskAction `
 
 $trigger = @(
   (New-ScheduledTaskTrigger -AtLogOn),
-  (New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Hours $IntervalHours) -RepetitionDuration ([TimeSpan]::MaxValue))
+  # F9b (2026-07-07) - [TimeSpan]::MaxValue caused Register-ScheduledTask to
+  # fail with "P99999999DT23H59M59S is incorrectly formatted or out of range"
+  # because Windows Task Scheduler's duration field tops out around 9999 days.
+  # Use 3650 days (10 years) instead - effectively "indefinite" but valid.
+  (New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Hours $IntervalHours) -RepetitionDuration (New-TimeSpan -Days 3650))
 )
 
 # Run with highest privilege so it can kill cross-session orphans
