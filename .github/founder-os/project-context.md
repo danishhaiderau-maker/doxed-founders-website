@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(monitor): repair lifecycleTail expression in 6h watch
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
