@@ -8,6 +8,9 @@ import { FounderAiRuntimeModule } from '../founder-ai-runtime/founder-ai-runtime
 import { FounderNodeModule } from '../founder-node/founder-node.module';
 import { FounderNodeGuard } from '../founder-node/founder-node.guard';
 import { AiRoutingModule } from '../ai-routing/ai-routing.module';
+import { CapabilityRegistryModule } from '../capability-registry/capability-registry.module';
+import { FlightRecorderModule } from '../flight-recorder/flight-recorder.module';
+import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
 
 @Module({
   imports: [
@@ -16,6 +19,9 @@ import { AiRoutingModule } from '../ai-routing/ai-routing.module';
     FounderAiRuntimeModule,
     FounderNodeModule,
     DdollarModule,
+    CapabilityRegistryModule,
+    FlightRecorderModule,
+    RoutingEngineModule,
   ],
   controllers: [AiProxyController],
   providers: [AiProxyRuntimeService, AiProxyUsageService, FounderNodeGuard],

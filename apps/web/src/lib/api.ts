@@ -703,6 +703,60 @@ export function fetchPendingApplications(token: string) {
   return apiFetch<PendingApplication[]>('/listing-applications/pending', undefined, token);
 }
 
+// ─── Doxxing founder applications ──────────────────────────────────────
+// Admin review surface for Visitor → Doxxed Builder upgrade applications.
+// See docs/BILLING.md §4 "Verification flow".
+
+export interface PendingFounderApplication {
+  id: string;
+  userId: string;
+  projectName: string;
+  websiteUrl: string | null;
+  twitterHandle: string | null;
+  githubUrl: string | null;
+  videoUrl: string | null;
+  ideaDescription: string;
+  status: string;
+  reviewNotes: string | null;
+  reviewerId: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+    twitterHandle: string | null;
+    platformHandle: string | null;
+  } | null;
+}
+
+export function fetchPendingFounderApplications(token: string) {
+  return apiFetch<PendingFounderApplication[]>(
+    '/founder-applications/pending',
+    undefined,
+    token,
+  );
+}
+
+export function reviewFounderApplication(
+  id: string,
+  status: 'APPROVED' | 'REJECTED',
+  token: string,
+  options?: { reviewNotes?: string },
+) {
+  return apiFetch<PendingFounderApplication>(
+    `/founder-applications/${id}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        status,
+        reviewNotes: options?.reviewNotes,
+      }),
+    },
+    token,
+  );
+}
+
 export interface ReviewListingResult {
   application: { id: string; status: string; projectName?: string };
   published: {

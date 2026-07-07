@@ -1555,6 +1555,11 @@ model FounderApplication {
   lifecycleStage  ProjectLifecycleStage    @default(IDEA)
   status          FounderApplicationStatus @default(SUBMITTED)
   projectId       String?
+  /// Admin-set freeform notes captured during doxxing review.
+  reviewNotes     String?
+  /// Admin user that reviewed the application. Null until reviewed.
+  reviewerId      String?
+  reviewedAt      DateTime?
   createdAt       DateTime                 @default(now())
   updatedAt       DateTime                 @updatedAt
 

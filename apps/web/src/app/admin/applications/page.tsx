@@ -140,6 +140,14 @@ export default function AdminApplicationsPage() {
           No proof = no listing. Approve when DexScreener URL, founder status, and proof link are present.
           Community validation runs for 48 hours — vote results are signals, not blockers.
         </p>
+        <p className="mt-3 text-sm">
+          <Link
+            href="/admin/founder-applications"
+            className="text-[var(--color-accent)] underline hover:text-white"
+          >
+            View doxxing applications →
+          </Link>
+        </p>
 
         {error && <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>}
         {success && (

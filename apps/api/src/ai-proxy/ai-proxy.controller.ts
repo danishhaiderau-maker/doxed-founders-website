@@ -108,7 +108,7 @@ export class AiProxyController {
       nodeId: req.founderNode.nodeId,
     };
 
-    const route = this.runtimeService.decideRoute(auth, body);
+    const route = await this.runtimeService.decideRoute(auth, body);
     const result = await this.runtimeService.invoke(auth, body, route);
 
     if (!result.ok) {

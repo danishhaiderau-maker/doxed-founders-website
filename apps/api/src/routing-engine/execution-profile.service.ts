@@ -11,10 +11,6 @@ const VALID_PROFILES: ExecutionProfile[] = [
 
 /**
  * Workspace-scoped Execution Profile resolver. See docs/KERNEL.md §7.
- *
- * KNOWN LIMITATION: `@prisma/client` has not yet been regenerated to include
- * the `WorkspaceExecutionProfile` model. We access it through `any` casts
- * until the parent agent runs `prisma generate`.
  */
 @Injectable()
 export class ExecutionProfileService {
@@ -22,18 +18,20 @@ export class ExecutionProfileService {
 
   async getProfile(workspaceId?: string | null): Promise<ExecutionProfile> {
     if (!workspaceId) return 'balanced';
-    const row = await (this.prisma as any).workspaceExecutionProfile.findUnique({
+    const row = await this.prisma.workspaceExecutionProfile.findUnique({
       where: { workspaceId },
     });
     if (!row) return 'balanced';
-    return VALID_PROFILES.includes(row.profile) ? row.profile : 'balanced';
+    return VALID_PROFILES.includes(row.profile as ExecutionProfile)
+      ? (row.profile as ExecutionProfile)
+      : 'balanced';
   }
 
   async setProfile(
     workspaceId: string,
     profile: ExecutionProfile,
   ): Promise<void> {
-    await (this.prisma as any).workspaceExecutionProfile.upsert({
+    await this.prisma.workspaceExecutionProfile.upsert({
       where: { workspaceId },
       create: { workspaceId, profile },
       update: { profile },

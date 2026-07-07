@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import { Capability } from '@prisma/client';
 import { CapabilityRegistryService } from '../capability-registry/capability-registry.service';
 import type {
   AiRuntimeIntent,
-  CapabilityRow,
   ExecutionProfile,
 } from '../capability-registry/capability-registry.types';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
@@ -24,9 +24,6 @@ import { PROFILE_WEIGHTS } from './routing-engine.types';
  * Every decision is logged to the Flight Recorder regardless of cache state,
  * so the Learning Engine (Phase 4) can later refine the reputation fields
  * on the Capability rows.
- *
- * This replaces the legacy ModelRouterService v1 once the AI Gateway is
- * rewired to call here (handled by the parent agent / app.module.ts owner).
  */
 @Injectable()
 export class RoutingEngineService {
@@ -125,7 +122,7 @@ export class RoutingEngineService {
    * Each axis produces a 0..1 number; the profile weights combine them.
    */
   private score(
-    c: CapabilityRow,
+    c: Capability,
     profile: ExecutionProfile,
     intent: AiRuntimeIntent,
   ): number {
@@ -142,7 +139,7 @@ export class RoutingEngineService {
     );
   }
 
-  private intentScoreFor(c: CapabilityRow, intent: AiRuntimeIntent): number {
+  private intentScoreFor(c: Capability, intent: AiRuntimeIntent): number {
     switch (intent) {
       case 'code':
         return c.codeScore;
