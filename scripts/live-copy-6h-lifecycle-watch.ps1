@@ -1,6 +1,6 @@
 # 6-hour Live Copy lifecycle watch — single instance, 60-90s jsonl ticks.
 # Reuses: live-copy-trade-monitor.mjs, watch-live-copy-lifecycle.mjs,
-#         stack-health-watch.ps1, tmp-lifecycle-sync-probe.mjs, heal-stuck-copy-participants.mjs
+#         stack-health-watch.ps1, lifecycle-sync-probe.mjs, heal-stuck-copy-participants.mjs
 param(
   [int]$DurationHours = 6,
   [int]$PollSec = 75,
@@ -15,7 +15,7 @@ $hbLog = Join-Path $repo "logs\live-copy-6h-watch-heartbeat.log"
 $reportPath = Join-Path $repo "tmp\lifecycle-6h-report-20260707.md"
 $monLog = Join-Path $repo "logs\live-copy-trade-monitor.log"
 $lcLog = Join-Path $repo "logs\live-copy-lifecycle-watch.log"
-$probeScript = Join-Path $repo "scripts\tmp-lifecycle-sync-probe.mjs"
+$probeScript = Join-Path $repo "scripts\lifecycle-sync-probe.mjs"
 $healScript = Join-Path $repo "scripts\heal-stuck-copy-participants.mjs"
 $INSTANCE_ID = "cmq6cfwv4001jli0dqx5r31ve"
 
@@ -50,8 +50,8 @@ function Get-ProcPid([string]$pattern) {
 }
 
 function Ensure-Node([string]$pattern, [string]$scriptRel, [hashtable]$envMap) {
-  $pid = Get-ProcPid $pattern
-  if ($pid -gt 0) { return $pid }
+  $foundPid = Get-ProcPid $pattern
+  if ($foundPid -gt 0) { return $foundPid }
   WLog "RESTART node $scriptRel"
   foreach ($k in $envMap.Keys) { Set-Item -Path "env:$k" -Value $envMap[$k] }
   $stdout = Join-Path $repo ("logs/" + ($scriptRel -replace '[\\/]', '-') + ".stdout.log")
@@ -66,8 +66,8 @@ function Ensure-Node([string]$pattern, [string]$scriptRel, [hashtable]$envMap) {
 }
 
 function Ensure-StackHealth {
-  $pid = Get-ProcPid "stack-health-watch\.ps1"
-  if ($pid -gt 0) { return $pid }
+  $foundPid = Get-ProcPid "stack-health-watch\.ps1"
+  if ($foundPid -gt 0) { return $foundPid }
   WLog "RESTART stack-health-watch.ps1"
   Start-Process -FilePath "powershell" `
     -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $repo "scripts\stack-health-watch.ps1"), "-Hours", "8" `
