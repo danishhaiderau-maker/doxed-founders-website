@@ -12,6 +12,8 @@ on:
       - 'docs/**'
       - '**/*.md'
       - '**/.cursor/rules/**'
+      # founder-os agent memory-sync noise (1-line tasks.json changes)
+      - '.github/founder-os/**'
   workflow_dispatch:
 
 permissions:

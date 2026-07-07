@@ -3,6 +3,18 @@ name: Bitfinex production gate
 on:
   push:
     branches: [master, main]
+    paths-ignore:
+      # Memory-sync noise from founder-os agent (1-line tasks.json changes)
+      # was burning ~64% of monthly Actions minutes. Skip the gate for these.
+      - '.github/founder-os/**'
+      # Docs and rules don't touch trading code
+      - 'docs/**'
+      - '**/*.md'
+      - '**/.cursor/rules/**'
+      # Bot research artifacts (handled by separate sync workflow)
+      - 'services/btc-conservative-agent/**'
+      - 'services/btc-signal-engine/**'
+      - '.edge-analysis/**'
   pull_request:
 
 jobs:
