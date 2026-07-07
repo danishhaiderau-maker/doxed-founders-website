@@ -85,6 +85,9 @@ function navActive(pathname: string, href: string) {
   if (href === '/mobile') return pathname.startsWith('/downloads');
   if (href === '/founder-node') return pathname.startsWith('/downloads');
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
+  if (href === '/founder-os') {
+    return pathname.startsWith('/founder-os');
+  }
   if (href === '/founder-den') {
     return (
       pathname.startsWith('/founder-den') ||
