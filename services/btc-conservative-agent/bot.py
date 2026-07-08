@@ -5470,7 +5470,7 @@ GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING = True
 GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
-DASHBOARD_AUTO_REFRESH_MS = 60000
+DASHBOARD_AUTO_REFRESH_MS = 180000
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7800")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
@@ -18023,7 +18023,7 @@ HTML = """<!DOCTYPE html>
 </p>
 <p>
     <button type="button" onclick="refresh()">Refresh now</button>
-    <label style="margin-left:12px;"><input type="checkbox" id="autoRefreshToggle"> Auto-refresh every 60s (optional)</label>
+    <label style="margin-left:12px;"><input type="checkbox" id="autoRefreshToggle"> Auto-refresh every 3min (optional)</label>
     <span id="refreshStatus" style="margin-left:8px;color:#8b949e;">Manual refresh by default — click Refresh now or enable auto</span>
 </p>
 
@@ -19931,7 +19931,7 @@ DASHBOARD_JS = """(function () {
           }
         }
       });
-      const AUTO_REFRESH_MS = 60000;
+      const AUTO_REFRESH_MS = 180000;
       let refreshTimer = null;
       function scheduleAutoRefresh() {
         if (refreshTimer) clearInterval(refreshTimer);
