@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-fix(memory-sync): permanently disable 15-min auto-push interval
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
