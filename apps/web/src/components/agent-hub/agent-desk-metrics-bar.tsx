@@ -268,10 +268,28 @@ export function AgentDeskMetricsBar({
         hint: `${sessionHint} · ${formatPercent(userAgent.netReturnPct ?? 0)}`,
       },
       {
-        label: 'Drift vs showcase',
-        value: drift == null ? '—' : `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
-        accent: drift == null ? 'text-zinc-300' : pnlColor(drift),
-        hint: drift == null ? 'Start Live Copy to track' : 'Drift vs showcase · 0 = perfect mirror',
+        // drift = showcase PnL − live PnL. Sign flips the wording; abs value
+        // drives the displayed amount so it's always positive in the message.
+        // > 0.10 → showcase ahead (live is behind); < −0.10 → live ahead;
+        // within ±$0.10 → tracking. See comments above for the equity basis.
+        label:
+          drift == null
+            ? 'Drift vs showcase'
+            : drift > 0.1
+              ? 'Behind showcase'
+              : drift < -0.1
+                ? 'Ahead of showcase'
+                : 'Tracking showcase',
+        value: drift == null ? '—' : formatUsd(Math.abs(drift), 2),
+        accent:
+          drift == null
+            ? 'text-zinc-300'
+            : drift > 0.1
+              ? 'text-amber-400'
+              : drift < -0.1
+                ? 'text-emerald-400'
+                : 'text-zinc-300',
+        hint: drift == null ? 'Start Live Copy to track' : 'vs showcase baseline',
       },
     ];
   } else {
