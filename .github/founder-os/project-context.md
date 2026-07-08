@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): unbreak Nest DI on ShowcaseRelayEventsService
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
