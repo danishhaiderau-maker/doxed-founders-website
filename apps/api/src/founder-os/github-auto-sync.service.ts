@@ -45,9 +45,17 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     if (process.env.DISABLE_GITHUB_AUTO_SYNC === '1') return;
-    this.interval = setInterval(() => {
-      void this.syncAllConnectedRepos();
-    }, BACKGROUND_INTERVAL_MS);
+    // Auto-push disabled 2026-07-08: the recurring setInterval below produced
+    // chore(founder-os): sync memory spam every 15 min whose only material
+    // change was a relative timestamp ("5 minutes ago" -> "10 minutes ago")
+    // in project-context.md. Each commit was correctly CANCELED by
+    // vercel-ignore-build.sh but polluted git history. Manual sync still
+    // works via the memory panel button (POST /founder-os/memory/sync).
+    // If event-driven context snapshots become valuable later (e.g., only
+    // when goal/roadmap actually changes), implement that explicitly in
+    // Phase 5+ Founder Intent Engine — do NOT reintroduce a blind polling
+    // interval.
+    void this.syncAllConnectedRepos();
   }
 
   onModuleDestroy() {
