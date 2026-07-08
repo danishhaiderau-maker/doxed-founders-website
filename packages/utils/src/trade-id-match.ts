@@ -23,13 +23,15 @@ function extractLanePrefix(tradeId: string): string {
  * cross-matching is the exact condition that produces orphans on the wrong
  * side of a mirror, so we reject it explicitly here.
  *
- * Returns true when both have prefixes AND they agree, OR when at least one
- * has no recognizable prefix (legacy compatibility — bare uuids etc).
+ * Returns true only when both have recognizable prefixes AND they agree.
+ * Unknown / bare-uuid inputs fail closed — they no longer fall through to
+ * the fuzzy matchers, which was the legacy-compat escape hatch that let
+ * research-lane trades pair with showcase positions.
  */
 function lanePrefixesCompatible(a: string, b: string): boolean {
   const pa = extractLanePrefix(a);
   const pb = extractLanePrefix(b);
-  if (!pa || !pb) return true; // bare-uuid / unknown — fall through to fuzzy
+  if (!pa || !pb) return false; // bare-uuid / unknown — fail closed (no match)
   return pa === pb;
 }
 
@@ -80,6 +82,38 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
   // Future-proof: any explicit paper-* / sim-* / shadow-* prefix.
   if (lc.startsWith('paper-') || lc.startsWith('sim-') || lc.startsWith('shadow-')) return true;
   return false;
+}
+
+/**
+ * F7 (2026-07-08 real-money hotfix) — Lane prefixes explicitly approved for
+ * live-copy mirroring. Only the CONTINUOUS benchmark lane (and any future
+ * lane explicitly promoted to production mirror status) belongs here.
+ *
+ * Fail-closed: any prefix not in this set is treated as research/paper and
+ * never mirrored to real money. This inverts the legacy {@link isPaperLaneTradeId}
+ * blocklist, which let every new research lane auto-mirror until someone
+ * remembered to add it to the deny list (the exact bug that caused the
+ * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
+ */
+const MIRRORABLE_LANE_PREFIXES = new Set(['cont']);
+
+/**
+ * F7 — Returns true ONLY when the trade_id belongs to an explicitly
+ * allow-listed production mirror lane (currently just `cont-`). Everything
+ * else (research lanes like vc603-/szdc1-/slav1-, paper lanes a160v2-,
+ * bare-uuids, unknown prefixes) returns false.
+ *
+ * Use this as the gating predicate at every live-copy entry path:
+ *   if (!isMirrorableLaneTradeId(tradeId)) { skip; }
+ */
+export function isMirrorableLaneTradeId(
+  tradeId: string | null | undefined,
+): boolean {
+  if (!tradeId) return false;
+  const prefix = extractLanePrefix(tradeId);
+  if (!prefix) return false; // unknown / bare-uuid → fail closed
+  // prefix includes trailing '-' (e.g. 'cont-'); strip it for set lookup
+  return MIRRORABLE_LANE_PREFIXES.has(prefix.replace(/-$/, ''));
 }
 
 export function pickCanonicalTradeId(preferred: string, matched?: string | null): string {

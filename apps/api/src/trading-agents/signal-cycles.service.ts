@@ -20,7 +20,7 @@ import {
   SIGNAL_LEGAL_DISCLAIMER,
   resolveSignalCyclePollMs,
   pickCanonicalTradeId,
-  isPaperLaneTradeId,
+  isMirrorableLaneTradeId,
   type SignalCycleEventType,
 } from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
@@ -231,15 +231,17 @@ export class SignalCyclesService implements OnModuleInit {
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
-    // F6 — refuse to create a copy intent for paper-lane trades (a160v2-*, etc).
-    // These are the showcase bot's shadow-sim research lanes — paper P&L only,
-    // never real Bitfinex fills. Mirroring them would put real money on a
-    // trade that has no real showcase counterpart (the exact bug pattern from
-    // the 2026-07-07 incident). Skip silently — research data still flows to
-    // the analyzer.
-    if (isPaperLaneTradeId(intentTradeId)) {
+    // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only the
+    // CONTINUOUS benchmark lane (`cont-`) may create a live-copy intent. All
+    // research lanes (vc603-, szdc1-, slav1-, a160v2-, scan-, etc.) are skipped
+    // — they have no real Bitfinex counterpart and would put real money on a
+    // trade that exists only in the showcase bot's paper book. Replaces the
+    // legacy F6 blocklist (`isPaperLaneTradeId`) which silently failed-open
+    // for every newly-added research lane. Skip silently — research data
+    // still flows to the analyzer.
+    if (!isMirrorableLaneTradeId(intentTradeId)) {
       this.logger.warn(
-        `Skipping paper-lane trade_id=${intentTradeId} (F6: paper lane never mirrored to live copy)`,
+        `Skipping non-mirrorable lane trade_id=${intentTradeId} (F7: only cont- lane mirrored to live copy)`,
       );
       this.lastSeenTradeId = intentTradeId;
       return false;
@@ -339,10 +341,11 @@ export class SignalCyclesService implements OnModuleInit {
       let created = 0;
       for (const t of sessionTrades) {
         const tid = String(t.trade_id);
-        // F6 — never backfill paper-lane trades. Same rationale as pollBotForIntents.
-        if (isPaperLaneTradeId(tid)) {
+        // F7 — never backfill non-mirrorable lanes (whitelist). Same rationale
+        // as pollBotForIntents: only `cont-` may be mirrored to live copy.
+        if (!isMirrorableLaneTradeId(tid)) {
           this.logger.warn(
-            `Skipping backfill of paper-lane trade_id=${tid} (F6: paper lane never mirrored)`,
+            `Skipping backfill of non-mirrorable lane trade_id=${tid} (F7: only cont- lane mirrored)`,
           );
           continue;
         }
