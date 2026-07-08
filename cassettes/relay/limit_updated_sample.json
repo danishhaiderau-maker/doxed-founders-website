@@ -1,0 +1,23 @@
+{
+  "key": "limit_updated_sample",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "event": "LIMIT_UPDATED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG"
+  },
+  "response": {
+    "event": "LIMIT_UPDATED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG",
+    "exchange": "bitfinex",
+    "limit_price": 62885.0,
+    "prior_limit_price": 62890.0,
+    "client_order_id": "demo-cycle-001-entry",
+    "status": "PENDING_REPLACE",
+    "ts": "2026-07-08T05:54:45Z"
+  }
+}

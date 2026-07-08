@@ -40,7 +40,19 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
 
 @Injectable()
 export class AdminGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
   canActivate(context: ExecutionContext): boolean {
+    // [DEMO_HARNESS_FIX_2026-07-08] Honor @Public() on a handler so the
+    // orchestrator's token-gated /admin/demo/harness/internal route can be
+    // reached without an admin JWT. The token check in the controller still
+    // gates it. Mirrors JwtAuthGuard's behavior.
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+
     const request = context.switchToHttp().getRequest<{ user?: AuthUser }>();
     if (request.user?.role !== UserRole.ADMIN) {
       throw new ForbiddenException('Admin access required');

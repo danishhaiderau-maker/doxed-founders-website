@@ -107,7 +107,7 @@ Slices are numbered in **recommended merge order**. Status reflects **actual rep
 |-------|-------|
 | **Scope** | One-click ecosystem: founders, projects, DDollar, marketplace, AI usage, graduations, trading history, reputation, notifications, leaderboards, comments |
 | **Feature flag** | `DEMO_MODE_ENABLED` (existing) + `DEMO_SEED_SCALE` presets extended |
-| **Status** | **Partial** — MVP at `apps/api/src/demo/` + `/admin/demo`; scales 20–50 users, not 2500 |
+| **Status** | **Partial** — MVP at `apps/api/src/demo/` + `/admin/demo`; scales 20–50 users, not 2500. **End-to-end demo harness shipped** (`scripts/demo-harness.mjs`, `/api/admin/demo/harness`, unified readiness scorecard, cassettes under `cassettes/`) |
 
 **Scale targets (new `xlarge` preset)**
 
@@ -305,7 +305,7 @@ Depends on: Slices 1, 2, 3 (partial).
 |-------|-------|
 | **Scope** | AI Cost, DDollar, Founder Journey — nightly regression |
 | **Feature flag** | `SIMULATORS_ENABLED` |
-| **Status** | **Not started** |
+| **Status** | **Partial** — end-to-end demo harness (`npm run demo:full`) provides the stress + DDollar two-ledger invariant regression the simulators slice called for; standalone deterministic scenario runners (`apps/api/src/simulators/`) still planned |
 
 **Deliverables checklist**
 

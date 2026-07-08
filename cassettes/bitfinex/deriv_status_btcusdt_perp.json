@@ -1,0 +1,32 @@
+{
+  "key": "deriv_status_btcusdt_perp",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "method": "GET",
+    "url": "https://api-pub.bitfinex.com/v2/status/deriv?symbol=tBTCUST"
+  },
+  "response": [
+    "tBTCUST",
+    1751992440000,
+    62892.0,
+    62899.5,
+    62888.0,
+    1823456,
+    1825631,
+    0.000082,
+    0.0125,
+    62890.25,
+    0.50,
+    62888.0,
+    1,
+    "BTCUST7U",
+    1,
+    62950.0,
+    62820.0,
+    null,
+    null,
+    null,
+    0
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "key": "position_closed_sample",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "event": "POSITION_CLOSED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG"
+  },
+  "response": {
+    "event": "POSITION_CLOSED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG",
+    "exchange": "bitfinex",
+    "exit_price": 63020.0,
+    "entry_price": 62885.0,
+    "size_btc": 0.0397,
+    "realized_pnl_usd": 5.36,
+    "realized_pnl_pct": 0.00214,
+    "close_reason": "TAKE_PROFIT",
+    "status": "CLOSED",
+    "ts": "2026-07-08T05:55:30Z"
+  }
+}

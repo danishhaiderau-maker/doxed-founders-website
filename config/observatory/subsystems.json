@@ -64,5 +64,59 @@
     "label": "Founder OS",
     "description": "Integrations and workspace health",
     "probe": "founder-os.integrations"
+  },
+  {
+    "id": "bot",
+    "label": "BTC Conservative Bot",
+    "description": "Conservative-btc agent ping and state (:7002)",
+    "probe": "bot.ping"
+  },
+  {
+    "id": "ai-verdicts",
+    "label": "AI Verdicts",
+    "description": "DeepSeek verdicts logged by the bot this run",
+    "probe": "bot.ai-verdicts"
+  },
+  {
+    "id": "lab-shadow",
+    "label": "LAB Shadow Tiles",
+    "description": "SL_AVOIDANCE_V1 + SIZED_CONTINUOUS_V1 shadow signals",
+    "probe": "bot.lab-shadow"
+  },
+  {
+    "id": "lane-size-patch",
+    "label": "Lane Size Patch",
+    "description": "[LANE_SIZE_MULT_PATCH_2026-07-08] shipped multiplier",
+    "probe": "bot.lane-size-patch"
+  },
+  {
+    "id": "relay-cycles",
+    "label": "Relay Cycles",
+    "description": "APPROVE_PENDING -> ORDER_PLACED -> POSITION_CLOSED round-trip",
+    "probe": "relay.cycle-completes"
+  },
+  {
+    "id": "analyzer",
+    "label": "Analyzer",
+    "description": "reports/report_manifest.json presence",
+    "probe": "analyzer.manifest"
+  },
+  {
+    "id": "genome",
+    "label": "Genome",
+    "description": "decision_genome.jsonl events + research.db",
+    "probe": "genome.events"
+  },
+  {
+    "id": "relay-copy-sim",
+    "label": "Relay Copy Sim",
+    "description": "Bitfinex copy-relay-sim participant mirror",
+    "probe": "relay.copy-sim"
+  },
+  {
+    "id": "demo-scorecard",
+    "label": "Demo Scorecard",
+    "description": "End-to-end demo harness readiness scorecard",
+    "probe": "demo.scorecard"
   }
 ]
