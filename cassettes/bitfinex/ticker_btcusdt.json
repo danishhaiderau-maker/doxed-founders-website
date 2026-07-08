@@ -1,0 +1,23 @@
+{
+  "key": "ticker_btcusdt",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "method": "GET",
+    "url": "https://api-pub.bitfinex.com/v2/ticker/tBTCUSD"
+  },
+  "response": [
+    62894.0,
+    62901.0,
+    62892.0,
+    62888.0,
+    124.5,
+    18234.567,
+    0.000198,
+    0.0315,
+    62910.0,
+    62780.0,
+    63150.0,
+    61420.0
+  ]
+}

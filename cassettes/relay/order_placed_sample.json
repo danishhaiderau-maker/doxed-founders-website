@@ -1,0 +1,24 @@
+{
+  "key": "order_placed_sample",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "event": "ORDER_PLACED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG"
+  },
+  "response": {
+    "event": "ORDER_PLACED",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG",
+    "exchange": "bitfinex",
+    "order_type": "LIMIT",
+    "limit_price": 62890.0,
+    "size_btc": 0.0397,
+    "client_order_id": "demo-cycle-001-entry",
+    "status": "PENDING_NEW",
+    "ts": "2026-07-08T05:54:25Z"
+  }
+}

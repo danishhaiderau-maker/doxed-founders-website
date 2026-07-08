@@ -113,6 +113,98 @@ Example response:
 }
 ```
 
+## End-to-End Demo Harness
+
+One command that exercises every pillar of the platform (Founder OS, Raise
+Room, DDollar, Trust Center, founder journey, BTC conservative bot,
+analyzer, genome, relay, AI verdicts, and optional stress) and emits a
+unified readiness scorecard to `logs/demo/demo-report.{json,md}`.
+
+### Run it
+
+```powershell
+# Required: shared secret so the orchestrator can call the internal route.
+$env:DEMO_HARNESS_TOKEN = "some-secret"
+# Required only if you want relay cassette replay (recommended).
+$env:BOT_CONTROL_SECRET  = "your-bot-control-secret"
+
+# Default: replay mode (no paid API calls), small seed, no stress.
+npm run demo:full
+
+# Include the stress phase (peak RPS, p95 latency, DDollar invariant).
+npm run demo:stress
+
+# Re-record cassettes from the real DeepSeek + Bitfinex + relay (DEMO_CAPTURE=1).
+# Only run this from a trusted shell with the real API keys set.
+npm run demo:capture
+```
+
+Windows one-click launchers exist:
+
+- `scripts\run-demo.cmd` — forwards all args to `node scripts/demo-harness.mjs`.
+- `scripts\run-demo.ps1` — PowerShell equivalent (`.\scripts\run-demo.ps1 --stress`).
+
+### What the orchestrator does
+
+1. Pre-flight: confirms API (`/api/health`) reachable; aborts if
+   `LIVE_TRADING_ENABLED=true` or if `config/bot-architecture.lock.json`
+   has `allowBluntSync=true` (the safety contract).
+2. `POST /api/admin/demo/reset` + `/seed` — clean synthetic ecosystem.
+3. Spawns `python demo_mode.py` under
+   `services/btc-conservative-agent/` (sim mode, :7002) — unless
+   `--skip-bot`.
+4. Waits for `GET /api/ping` on the bot to go green.
+5. Replays the four relay cassettes (`APPROVE_PENDING` →
+   `ORDER_PLACED` → `LIMIT_UPDATED` → `POSITION_CLOSED`) into
+   `/api/trading-agents/conservative-btc/showcase-relay-event`.
+6. Triggers the analyzer (best-effort, 90s timeout).
+7. `POST /api/admin/demo/harness/internal` with the shared secret — runs
+   the unified probe and returns the scorecard. The orchestrator writes
+   `logs/demo/demo-report.{json,md}`.
+
+### Cassette model
+
+Replay by default. The Python bot and the NestJS API share
+`cassettes/<bucket>/<key>.json`. See [cassettes/README.md](../cassettes/README.md)
+for the layout and the stable DeepSeek hash function (mirrored in
+`apps/api/src/demo/cassette-store.ts` and
+`services/btc-conservative-agent/demo_mode.py`).
+
+### Scorecard shape
+
+The unified scorecard is `ReadinessScorecard`
+([readiness-scorecard.types.ts](../apps/api/src/demo/readiness-scorecard.types.ts)):
+
+| Pillar | Weight | Sample checks |
+|--------|-------:|---------------|
+| platform | 0.20 | the 25+ existing smoke checks |
+| bot | 0.18 | ping, state parseable, paper orders, lane-size patch, LAB shadow tiles, tunnel |
+| relay | 0.15 | APPROVE_PENDING / ORDER_PLACED / POSITION_CLOSED received, cycle completes, copy-sim consistent |
+| analyzer | 0.10 | `report_manifest.json` + 3 new v1 reports parse |
+| ai | 0.10 | verdicts emitted, median latency within budget |
+| genome | 0.07 | decision/environment/market JSONL rows + `research.db` |
+| founder | 0.10 | message dispatch + golden DDollar journey |
+| stress | 0.10 | peak RPS, p95 latency, error rate, relay burst, DDollar two-ledger invariant, RSS |
+
+Switches reported: `liveTrading` (must be OFF), `fundingSim`,
+`demoMode`, `cassetteMode`, `laneSizePatch`, `labShadowTiles`,
+`executionPaused`. Synthetic counts reported: `fakeUsers`,
+`fakeProjects`, `fakeFounders`, `fakeRaises`, `fakeAllocations`,
+`fakeTrades`, `fakeAiCalls`, `fakeMessages`, `fakeNotifications`.
+
+Verdict thresholds: **PASS** ≥ 80, **DEGRADED** ≥ 60, else **FAIL**.
+
+### API routes (all under `/api/admin/demo`)
+
+| Method | Path | Guard | Purpose |
+|--------|------|-------|---------|
+| `POST` | `/harness/internal` | `@Public()` + `DEMO_HARNESS_TOKEN` secret | orchestrator entry point |
+| `POST` | `/harness` | admin JWT + `DemoModeGuard` | run harness from admin UI (forwards `body.skipStress`) |
+| `POST` | `/smoke/full` | admin JWT + `DemoModeGuard` | extended smoke, stress skipped |
+| `GET`  | `/smoke/full` | admin JWT + `DemoModeGuard` | same, GET convenience |
+| `POST` | `/stress` | admin JWT + `DemoModeGuard` | standalone stress run |
+| `GET`  | `/harness/quick` | admin JWT | bot ping + last scorecard |
+
 ## Internal tools roadmap (next sprints)
 
 From platform verification framework — **not built in MVP**:

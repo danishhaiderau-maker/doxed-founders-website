@@ -1,0 +1,21 @@
+{
+  "key": "approve_pending_sample",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "event": "APPROVE_PENDING",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG"
+  },
+  "response": {
+    "event": "APPROVE_PENDING",
+    "trade_id": "demo-cycle-001",
+    "symbol": "BTCUSDT",
+    "side": "LONG",
+    "confidence": 0.72,
+    "verdict": "APPROVE_LONG",
+    "notional_usd": 2500,
+    "ts": "2026-07-08T05:54:10Z"
+  }
+}

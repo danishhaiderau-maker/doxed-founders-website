@@ -1,0 +1,24 @@
+{
+  "key": "ohlcv_btcusdt_15m_250",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "method": "GET",
+    "url": "https://api-pub.bitfinex.com/v2/candles/trade:15m:tBTCUSD/hist?limit=250"
+  },
+  "response": {
+    "symbol": "tBTCUSD",
+    "timeframe": "15m",
+    "candles": [
+      [1751991600000, 62780.0, 62910.0, 62750.0, 62892.0, 18234.5],
+      [1751990700000, 62810.0, 62950.0, 62780.0, 62780.0, 16102.3],
+      [1751989800000, 62850.0, 62920.0, 62790.0, 62810.0, 14501.7],
+      [1751988900000, 62900.0, 62930.0, 62820.0, 62850.0, 12855.0],
+      [1751988000000, 63020.0, 63080.0, 62870.0, 62900.0, 19890.2]
+    ],
+    "firstOpen": 62780.0,
+    "lastClose": 62892.0,
+    "count": 250,
+    "note": "Last 5 of 250 candles shown for readability; the runtime reads all 250."
+  }
+}

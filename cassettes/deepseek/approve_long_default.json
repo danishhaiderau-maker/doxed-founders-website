@@ -1,0 +1,34 @@
+{
+  "key": "approve_long_default",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "model": "deepseek-chat",
+    "messages": [
+      { "role": "system", "content": "You are a risk-aware BTC trading analyst. Reply in the documented verdict format." },
+      { "role": "user", "content": "3-factor signal: momentum bullish, funding neutral, order-book bid-heavy. Decide LONG/SHORT/REJECT." }
+    ],
+    "temperature": 0.0
+  },
+  "response": {
+    "id": "demo-cassette-approve-long",
+    "object": "chat.completion",
+    "created": 1751992440,
+    "model": "deepseek-chat",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "VERDICT: APPROVE_LONG\nCONFIDENCE: 0.72\nREASON: momentum positive (EMA50>EMA200 on 15m), funding rate neutral, order book bid-heavy within 0.3%. Lane size mult applies +1.5x. SL_AVOIDANCE_V1 agrees."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 420,
+      "completion_tokens": 80,
+      "total_tokens": 500
+    }
+  }
+}

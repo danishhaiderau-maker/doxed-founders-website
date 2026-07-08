@@ -1,0 +1,28 @@
+{
+  "key": "order_book_btcusdt_top100",
+  "capturedAt": "2026-07-08T05:54:00Z",
+  "mode": "replay",
+  "request": {
+    "method": "GET",
+    "url": "https://api-pub.bitfinex.com/v2/book/tBTCUSD/P0?len=100"
+  },
+  "response": {
+    "bids": [
+      [62892.0, 2.5, 1],
+      [62890.0, 4.2, 1],
+      [62888.0, 8.7, 1],
+      [62887.5, 12.4, 1],
+      [62886.0, 6.1, 1]
+    ],
+    "asks": [
+      [62894.0, 1.8, 1],
+      [62895.0, 3.1, 1],
+      [62896.5, 5.6, 1],
+      [62898.0, 7.2, 1],
+      [62900.0, 9.0, 1]
+    ],
+    "checksum": 218345612,
+    "midPrice": 62893.0,
+    "spreadBps": 3.18
+  }
+}
