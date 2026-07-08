@@ -1144,12 +1144,35 @@ export class TradingAgentsService implements OnModuleInit {
     if (!agentRow) throw new NotFoundException('Agent not found');
 
     let sharedBot: BotApiState | null = null;
+    let showcaseSource: 'LIVE' | 'CACHED' | null = null;
     if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       sharedBot = await this.botBridge.fetchPublicShowcaseState(true);
+      if (sharedBot) {
+        showcaseSource = 'LIVE';
+      } else {
+        // Same Railway-to-tunnel packet-loss resilience pattern that fixed
+        // getPublicAgentStatus (commits a8ff68df..a2005456). When the
+        // canonical Cloudflare tunnel probe loses the race from Railway's
+        // network, the dashboard endpoint previously fell through to
+        // getDashboard() which hardcodes botConnected:false + botSource:
+        // FALLBACK — surfacing a false "Showcase bot offline" alert even
+        // while the bot is up and the relay is mirroring signals.
+        // lastLiveFetchAt is a wall-clock timestamp updated on every
+        // successful live fetch in this same NestJS process (dashboard
+        // polls, executor ticks, relay snapshots). Within 5min => the bot
+        // is alive; surface the stored dashboard with botConnected:true
+        // and botSource:CACHED so the alert stays suppressed. Beyond 5min
+        // it falls through to the FALLBACK path below.
+        const lastLiveAt = this.botBridge.getLastLiveFetchAt();
+        if (lastLiveAt > 0 && Date.now() - lastLiveAt < 5 * 60_000) {
+          sharedBot = await this.botBridge.fetchStateForAdmin(false);
+          showcaseSource = sharedBot ? 'CACHED' : null;
+        }
+      }
     }
 
     const rest =
-      sharedBot && slug === 'conservative-btc'
+      sharedBot && slug === 'conservative-btc' && showcaseSource
         ? {
             agent: serializeAgent(agentRow, {
               liveStats: mapBotStateToAgentStats(sharedBot),
@@ -1158,7 +1181,7 @@ export class TradingAgentsService implements OnModuleInit {
             dashboard: mapBotStateToPublicDashboard(sharedBot),
             updatedAt: new Date().toISOString(),
             botConnected: true,
-            botSource: 'LIVE' as const,
+            botSource: showcaseSource as 'LIVE' | 'CACHED',
             strategyMode: sharedBot.strategy_mode ?? 'RESEARCH',
             executionPaused: sharedBot.execution_paused ?? false,
             executionReason: sharedBot.execution_reason ?? null,
