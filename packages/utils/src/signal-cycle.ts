@@ -154,7 +154,13 @@ export type SignalCycleEventType =
   // unreachable past SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS. Distinct from
   // MIRROR_EXIT_FAILSAFE_ALERT (which fires on a successfully-fetched flat
   // book) — this fires precisely when no fetch is succeeding.
-  | 'SHOWCASE_OUTAGE_ORPHAN_KILL';
+  | 'SHOWCASE_OUTAGE_ORPHAN_KILL'
+  // Dust sweep — hands-free flatten of residual exchange quantity below
+  // MIN_QTY_BTC. Emitted for every dust detection (sweep_enabled reflects the
+  // kill-switch state): when the sweep is enabled the market-order id is
+  // recorded; when disabled it surfaces detection-only for operator review.
+  // No participant status transition — the reconcile loop closes the lot.
+  | 'DUST_SWEEP';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
