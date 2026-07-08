@@ -38,13 +38,15 @@ fi
 
 COMMIT_SHA="$VERCEL_GIT_COMMIT_SHA"
 
-# ─── 2. Read the commit message (best-effort) ────────────────────────────
-# git is available in the Vercel build container. If anything goes
-# wrong reading the message, fall through to the path-based check
-# rather than skipping.
+# ─── 2. Read the commit SUBJECT LINE ONLY (not body) ───────────────────
+# Bug fix 2026-07-08: previously used `--pretty=%B` which returns the full
+# commit message (subject + body). That caused false positives — a commit
+# whose subject was `fix(memory-sync): permanently disable interval` but
+# whose body mentioned "chore(founder-os): sync memory commits" (in
+# explanatory text) was being skipped. %s returns subject only.
 COMMIT_MSG=""
 if [ -n "${VERCEL_GIT_REPO_SLUG:-}" ] || true; then
-  COMMIT_MSG="$(git log -1 --pretty=%B "$COMMIT_SHA" 2>/dev/null || echo "")"
+  COMMIT_MSG="$(git log -1 --pretty=%s "$COMMIT_SHA" 2>/dev/null || echo "")"
 fi
 
 # ─── 3. Skip known memory-sync / bot-state commit subjects ───────────────
