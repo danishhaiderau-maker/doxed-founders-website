@@ -4,6 +4,27 @@ This doc covers env vars that change runtime behavior (not secrets). For secret
 storage see `SECRETS_STORAGE.md`. For deploy infra see `railway-deploy.md` /
 `vercel-deploy.md`.
 
+## `EXCHANGE_DYNAMIC_STOPS_ENABLED`
+
+**Default:** `false` (ships dark — feature OFF)
+**Added:** 2026-07-08 (Option A — see `docs/EXCHANGE_DYNAMIC_STOPS.md`)
+
+When `true`, the live-copy relay keeps the protective stop on Bitfinex synced
+to the current Scenario C ladder rung, even in showcase-mirror-only + exit-
+convergence mode. The showcase bot remains the decision maker for EXIT; this
+only manages the protective stop between entry and that EXIT so unrealized
+profit is actually protected on the exchange.
+
+### Values
+
+| Value | Behavior |
+|---|---|
+| unset / `false` / anything else (default) | OFF — Phase 2 exit convergence (wide disaster stop only, showcase EXIT authoritative). |
+| `true` | ON — relay advances the protective stop through `10→6, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120` as unrealized margin grows. Ships with never-loosen, cancel-then-replace, per-account isolation, restart idempotency, audit log to `logs/exchange-stop-manager.log`, and a 3-strike circuit breaker surfaced on `dashboardState.stopManagerCircuitOpen`. |
+
+Read per call — flip via Railway env without a redeploy. Full details:
+`docs/EXCHANGE_DYNAMIC_STOPS.md`.
+
 ## `RATE_LIMIT_FAIL_OPEN`
 
 **Default:** `false` (fail closed)
