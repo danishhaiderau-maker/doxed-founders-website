@@ -105,6 +105,53 @@ const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
 
+// ─── File logging bootstrap ────────────────────────────────────────────────
+// Founder Node has exited silently several times (no Event Log, no crash dump,
+// no console capture). Redirect console + install unhandledRejection /
+// uncaughtException handlers so the next crash leaves a trail at
+// ~/FounderVault/logs/founder-node.log. Best-effort: if setup fails, continue
+// without logs rather than crash.
+const LOG_DIR = path.join(os.homedir(), 'FounderVault', 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'founder-node.log');
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  const ts = (): string => new Date().toISOString();
+  const writeLine = (level: string, args: unknown[]): void => {
+    try {
+      const line = args
+        .map((a) => (a instanceof Error ? (a.stack ?? a.message) : typeof a === 'string' ? a : JSON.stringify(a)))
+        .join(' ');
+      fs.appendFileSync(LOG_FILE, `[${ts()}] [${level}] ${line}\n`);
+    } catch {
+      /* disk full / locked — ignore */
+    }
+  };
+  console.log = (...args: unknown[]): void => {
+    origLog(...args);
+    writeLine('INFO', args);
+  };
+  console.error = (...args: unknown[]): void => {
+    origErr(...args);
+    writeLine('ERR', args);
+  };
+  console.warn = (...args: unknown[]): void => {
+    origWarn(...args);
+    writeLine('WARN', args);
+  };
+  process.on('unhandledRejection', (reason): void => {
+    writeLine('UNHANDLED-REJECT', [reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)]);
+  });
+  process.on('uncaughtException', (err: Error): void => {
+    writeLine('UNCAUGHT', [err.stack ?? err.message]);
+  });
+  fs.appendFileSync(LOG_FILE, `\n[${ts()}] === Founder Node starting, pid=${process.pid} ===\n`);
+} catch {
+  /* logging setup failed — continue without logs */
+}
+
 configureSharedElectronUserData();
 
 /** Cross-path lock (portable + NSIS) then Electron single-instance. */

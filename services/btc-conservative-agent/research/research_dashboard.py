@@ -2749,7 +2749,7 @@ async function refreshAll() {
   await loadArchives();
 }
 refreshAll();
-setInterval(refreshAll, 60000);
+setInterval(refreshAll, 180000);
 </script></body></html>"""
 
 
