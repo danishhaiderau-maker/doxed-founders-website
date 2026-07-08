@@ -149,6 +149,89 @@ function Test-TunnelLiveCached([string]$Url) {
   return $live
 }
 
+# F4c-429 (2026-07-08 incident) — Smart tunnel reachability check that
+# distinguishes 429 (rate-limited at Cloudflare edge) from real outage.
+#
+# The flap loop: bridge-watchdog and supervisor were both probing
+# https://bot.doxxedcrypto.digital/api/ping every 60s. Combined with the
+# Railway bot-bridge cache poll (every 2-5s) and the user's browser, we
+# blew through Cloudflare's free-tier tunnel rate limit (~1000 req/min,
+# enforced per source IP). 429 then cascaded:
+#   supervisor: 429 -> Test-HttpOk false -> 5 ticks -> RECOVER tunnel
+#   bridge-watchdog: 429 -> Test-TunnelUp false -> /cmd/start-tunnel
+# Each restart cost ~3s downtime and made the rate limit worse (re-registration
+# hits the edge again). Tunnel flapped every 5-10 min for 2+ hours.
+#
+# Fix: 429 means "tunnel is FINE, you're asking too often." Treat it as
+# healthy AND signal the caller to back off via the shared $script:TunnelBackoff
+# state below. Only 5xx / connection errors / timeouts count as "dead."
+function Test-TunnelHttpSmart {
+  param(
+    [string]$Url,
+    [int]$TimeoutSec = 6,
+    [string]$UserAgent = "dcf-tunnel-probe/1.0"
+  )
+  $result = @{ Healthy = $false; RateLimited = $false; StatusCode = 0; Error = $null }
+  if (-not $Url) { $result.Error = "no-url"; return $result }
+  $pingUrl = "$Url".TrimEnd('/') + "/api/ping"
+  try {
+    $req = [System.Net.HttpWebRequest]::Create($pingUrl)
+    $req.Method = "GET"
+    $req.Timeout = ($TimeoutSec * 1000)
+    $req.ReadWriteTimeout = ($TimeoutSec * 1000)
+    $req.UserAgent = $UserAgent
+    $req.KeepAlive = $false
+    $resp = $req.GetResponse()
+    $code = [int]$resp.StatusCode
+    $result.StatusCode = $code
+    $resp.Close()
+    if ($code -ge 200 -and $code -lt 400) {
+      $result.Healthy = $true
+    } elseif ($code -eq 429) {
+      $result.Healthy = $true
+      $result.RateLimited = $true
+    } else {
+      $result.Error = "http-$code"
+    }
+  } catch [System.Net.WebException] {
+    $code = 0
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    $result.StatusCode = $code
+    if ($code -eq 429) {
+      $result.Healthy = $true
+      $result.RateLimited = $true
+    } else {
+      $result.Error = $_.Exception.Status.ToString()
+    }
+  } catch {
+    $result.Error = $_.Exception.Message
+  }
+  return $result
+}
+
+# Shared cross-process backoff state. Both bridge-watchdog.ps1 and
+# home-stack-supervisor.ps1 dot-source this file, so the $script: scope
+# gives each its own copy. That's fine — what we actually want is for a
+# rate-limit signal from the smart probe to (a) suppress the NEXT probe
+# from the same poller for a few minutes, and (b) NOT trigger a RECOVER.
+# Set-TunnelBackoff records "we just saw a 429"; Test-TunnelBackoffActive
+# returns true if we're still inside the cool-down so the caller can skip
+# the network probe entirely (and just trust the last reading).
+$script:TunnelBackoff = @{ until = [datetime]::MinValue; count = 0; lastAt = [datetime]::MinValue }
+function Set-TunnelBackoff {
+  param([int]$Seconds = 180)
+  $now = Get-Date
+  $script:TunnelBackoff.until = $now.AddSeconds($Seconds)
+  $script:TunnelBackoff.count = [int]$script:TunnelBackoff.count + 1
+  $script:TunnelBackoff.lastAt = $now
+}
+function Test-TunnelBackoffActive {
+  return ((Get-Date) -lt $script:TunnelBackoff.until)
+}
+function Get-TunnelBackoffState {
+  return $script:TunnelBackoff
+}
+
 function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
   try {

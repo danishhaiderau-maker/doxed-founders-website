@@ -311,7 +311,16 @@ while ($true) {
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
 
   $botHung = Test-BotHung
-  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfRunning hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) url=$tunnelUrl")
+  # F4c-429 — surface the rate-limit-backoff state on the tick line so we can
+  # see in the log when 429s are being absorbed (instead of causing flaps).
+  $backoff = Get-TunnelBackoffState
+  if (Test-TunnelBackoffActive) {
+    $remaining = ((Get-Date) - $backoff.until).TotalSeconds * -1
+    $backoffTag = "rl-backoff(remaining=$([int]$remaining)s,count=$($backoff.count))"
+  } else {
+    $backoffTag = "rl-ok"
+  }
+  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfRunning hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $backoffTag url=$tunnelUrl")
 
   if ($fail.bridge -ge $FailThreshold) {
     $lastRecover.bridge = Invoke-Recovery "bridge" { Restart-BridgeComponent } $lastRecover.bridge $BridgeCooldownSec
@@ -392,5 +401,10 @@ while ($true) {
     Restart-AutoRestartMonitor -WatchPid 0
   }
 
-  Start-Sleep -Seconds $IntervalSec
+  # F4c-429 — add up to 5s of jitter so the supervisor (60s default tick)
+  # and the bridge-watchdog (10s tick) cannot lockstep on the same phase.
+  # Lockstep was the proximate cause of the 429 cascade: both polled the
+  # public tunnel URL within milliseconds of each other every ~60s.
+  $jitterMs = Get-Random -Minimum 0 -Maximum 5000
+  Start-Sleep -Milliseconds (($IntervalSec * 1000) + $jitterMs)
 }
