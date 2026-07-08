@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-fix(vercel): match subject only, not body, in ignore-build step
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
