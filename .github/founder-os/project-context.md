@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(api): dashboard botConnected uses same resilient path as agent-status
 
 ## Last Activity
 
