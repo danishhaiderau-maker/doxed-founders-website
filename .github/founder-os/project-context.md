@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: reduce dashboard polling to 3min + founder-node crash logging
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
