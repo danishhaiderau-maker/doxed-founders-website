@@ -39,6 +39,7 @@ import {
   SCENARIO_C_LADDER,
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
+  isMirrorableLaneTradeId,
   type CopyRelayCapacitySnapshot,
   type VirtualLotExitReason,
 } from '@dcf/utils';
@@ -512,6 +513,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly showcaseUnreachableSince = new Map<string, number>();
   /** instanceId → last ms we surfaced the safe-mode notice (throttle spam). */
   private readonly showcaseSafeModeNoticeAt = new Map<string, number>();
+  /**
+   * F8 (2026-07-08 hotfix) — per-instance counter of consecutive successful
+   * state fetches since the last null-fetch streak. {@link clearShowcaseUnreachable}
+   * only actually clears the entry block once this reaches the required
+   * threshold, preventing a single lucky ping from re-arming live copy
+   * during a tunnel flap. Reset to 0 on any failed fetch.
+   */
+  private readonly showcaseRecoveryHits = new Map<string, number>();
+  /** F8 — consecutive successful fetches required before clearing safe mode. */
+  private readonly SHOWCASE_RECOVERY_HITS_REQUIRED = 3;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -1047,8 +1058,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
     const botStateForCap = await this.fetchExecutionBotState();
 
-    // F1/F2/F3 — Showcase-unreachable safe mode (2026-07-07 incident hardening).
-    // Track per-instance streak of null fetches. Cleared on every successful fetch.
+    // F1/F2/F3 — Showcase-unreachable safe mode (2026-07-07 incident hardening),
+    // F8 debounced-clear (2026-07-08 hotfix).
+    // Track per-instance streak of null fetches. Cleared only after
+    // SHOWCASE_RECOVERY_HITS_REQUIRED (3) consecutive successful fetches — a
+    // single lucky ping during a tunnel flap no longer re-arms live copy.
     // The two helpers below read this streak to gate new entries (F1) and
     // force-close OPEN orphans (F2). When the streak passes ENTRY_BLOCK_MS we
     // also surface a user-visible lastError (F3) so the dashboard explains
@@ -4941,10 +4955,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const tradeId = pos.trade_id!;
 
-      // F6 — never catch-up paper-lane trades. defense-in-depth: paper-lane
-      // trade_ids should never appear in showcase positions, but if a future
-      // bot change leaks them we refuse here rather than put real money on
-      // a paper trade.
+      // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only
+      // the CONTINUOUS benchmark lane (`cont-`) may ever be mirrored to real
+      // Bitfinex money. This inverts the legacy F6 blocklist, which silently
+      // failed-open for every newly-added research lane (vc603-/szdc1-/slav1-
+      // were auto-mirrored until manually blocklisted, putting real money on
+      // trades that exist only in the showcase bot's paper book). Defense-in-
+      // depth: the F6 paper check below is retained as a belt-and-suspenders
+      // guard in case a future bot change leaks paper trades into a `cont-*`
+      // position (it would be caught by both the lane-prefix check and the
+      // paper-book check).
+      if (!isMirrorableLaneTradeId(tradeId)) {
+        this.logger.warn(
+          `[F7] mirror-catchup skipped non-mirrorable lane trade=${tradeId} user=${instance.userId}`,
+        );
+        continue;
+      }
+      // F6 (defense-in-depth) — even within the cont- allowlist, refuse
+      // explicit paper-lane trade_ids if a future bot change leaks them.
       if (isPaperLaneTradeId(tradeId)) {
         this.logger.warn(
           `[F6] mirror-catchup skipped paper-lane trade=${tradeId} user=${instance.userId}`,
@@ -5417,14 +5445,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!this.showcaseUnreachableSince.has(instanceId)) {
       this.showcaseUnreachableSince.set(instanceId, since);
     }
+    // F8 — a failed fetch resets the recovery counter; the next 3 consecutive
+    // successful fetches must restart from scratch before safe mode clears.
+    this.showcaseRecoveryHits.delete(instanceId);
     return now - since;
   }
 
-  /** F1/F3 — Clear the unreachable streak on a successful fetch. */
+  /**
+   * F1/F3 — Clear the unreachable streak on a successful fetch.
+   *
+   * F8 (2026-07-08 hotfix) — debounced: requires
+   * {@link SHOWCASE_RECOVERY_HITS_REQUIRED} consecutive successful fetches
+   * before actually clearing the entry block. A single lucky ping during a
+   * tunnel flap no longer re-arms live copy. The unreachable-since timestamp
+   * is preserved until the threshold is met so F1/F2 keep gating entries and
+   * orphans throughout the flap.
+   */
   private clearShowcaseUnreachable(instanceId: string): void {
-    if (this.showcaseUnreachableSince.has(instanceId)) {
+    if (!this.showcaseUnreachableSince.has(instanceId)) {
+      // Already healthy — keep the counter clean.
+      this.showcaseRecoveryHits.delete(instanceId);
+      return;
+    }
+    const hits = (this.showcaseRecoveryHits.get(instanceId) ?? 0) + 1;
+    if (hits >= this.SHOWCASE_RECOVERY_HITS_REQUIRED) {
       this.showcaseUnreachableSince.delete(instanceId);
       this.showcaseSafeModeNoticeAt.delete(instanceId);
+      this.showcaseRecoveryHits.delete(instanceId);
+    } else {
+      this.showcaseRecoveryHits.set(instanceId, hits);
     }
   }
 
