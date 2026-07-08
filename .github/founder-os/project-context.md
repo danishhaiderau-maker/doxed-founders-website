@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-node): cloud API bugs - empty sync-jobs body + status 500
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
