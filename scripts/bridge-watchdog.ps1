@@ -108,17 +108,22 @@ function Test-CloudflaredRunning {
 # Tunnel end-to-end reachability (heavier; called less often). Returns true only
 # when the public URL answers 200 - catches the case where cloudflared is alive
 # but the tunnel is wedged (530).
+# F4c-429 (2026-07-08 incident) — also returns true on HTTP 429. The bridge
+# watchdog was treating Cloudflare rate-limit (429) as "tunnel wedged" and
+# firing /cmd/start-tunnel every ~60s, which restarted cloudflared and made
+# the rate limit worse. 429 means the tunnel works; we're asking too often.
 function Test-TunnelUp {
-  try {
-    $req = [System.Net.HttpWebRequest]::Create("$TunnelUrl/api/ping")
-    $req.Method = "GET"
-    $req.Timeout = 8000
-    $req.ReadWriteTimeout = 8000
-    $resp = $req.GetResponse()
-    $ok = ($resp.StatusCode -eq 200)
-    $resp.Close()
-    return $ok
-  } catch { return $false }
+  # Backoff: if the supervisor (or our own last probe) saw a 429 inside the
+  # cool-down window, skip the network call and trust the last reading.
+  if (Test-TunnelBackoffActive) { return $true }
+  $r = Test-TunnelHttpSmart -Url $TunnelUrl -TimeoutSec 8 -UserAgent "dcf-bridge-watchdog/1.0"
+  if ($r.RateLimited) {
+    Wd-Log "tunnel $TunnelUrl returned 429 (rate-limited) - treating as UP, backing off"
+    Set-TunnelBackoff -Seconds 180
+    return $true
+  }
+  if ($r.Healthy) { return $true }
+  return $false
 }
 
 # F4b (2026-07-07 incident) — External reachability cross-check.
@@ -207,29 +212,36 @@ while ((Get-Date) -lt $deadline) {
 
   # Cloudflare tunnel guard - only when the stack expects a tunnel. Catches both
   # a dead cloudflared process (cheap check every poll) and a wedged tunnel that
-  # answers 530 (end-to-end probe every ~60s). Respawn via the bridge so the
-  # launch config stays single-sourced. This is what stops the recurring 530
-  # popups after a bot crash takes cloudflared down.
+  # answers 530 (end-to-end probe). Respawn via the bridge so the launch config
+  # stays single-sourced. This is what stops the recurring 530 popups after a
+  # bot crash takes cloudflared down.
+  #
+  # F4c-429 (2026-07-08 incident) — end-to-end probe cadence dropped from
+  # every ~60s to every ~3 min. Combined with the supervisor's own 60s tick,
+  # the bridge-watchdog polling at 60s as well meant the public URL got
+  # hit ~2x/min just by local watchers; add Railway's bot-bridge cache poll
+  # (2-5s) and the user's browser and we crossed Cloudflare's per-source-IP
+  # rate limit. 429s cascaded into RECOVER cycles that flapped the tunnel
+  # every 5-10 min. Less frequent probing here + 429-as-healthy (in
+  # Test-TunnelUp above) kills the loop.
   if ($TunnelEnabled) {
     $tunnelNeedsRespawn = $false
     if (-not (Test-CloudflaredRunning)) {
       $tunnelNeedsRespawn = $true
       Wd-Log "cloudflared process MISSING"
-    } elseif (($ticks % 6) -eq 0) {
-      # End-to-end probe every ~60s - cloudflared may be alive but tunnel wedged.
+    } elseif (($ticks % 18) -eq 0) {
+      # End-to-end probe every ~3 min - cloudflared may be alive but tunnel wedged.
       if (-not (Test-TunnelUp)) {
         $tunnelNeedsRespawn = $true
         Wd-Log "tunnel $TunnelUrl NOT reachable (530/wedged)"
-      } elseif (($ticks % 12) -eq 0) {
+      } elseif (($ticks % 36) -eq 0) {
         Wd-Log "tick #$ticks tunnel UP"
       }
-      # F4b — external cross-check every ~5 min. Catches the 2026-07-07
+      # F4b — external cross-check every ~9 min (was 5). Catches the 2026-07-07
       # split-brain where the local probe succeeds but external clients get
-      # 502/530. If Railway can't reach us AND we can't reach Railway, the
-      # network is just down - don't restart. But if Railway IS reachable
-      # from here AND our local tunnel probe says UP, yet Railway reports
-      # the bot as dark, that's a tunnel wedge needing a force restart.
-      if (($ticks % 30) -eq 0) {
+      # 502/530. Less frequent now that we know the public URL itself is
+      # rate-limited; every probe of doxxedcrypto.digital also hits Cloudflare.
+      if (($ticks % 54) -eq 0) {
         $externalOk = Test-TunnelExternalReachable
         if (-not $externalOk) {
           Wd-Log "external reachability check: web app unreachable - assuming general network issue, not restarting tunnel"
@@ -252,7 +264,11 @@ while ((Get-Date) -lt $deadline) {
     }
   }
 
-  Start-Sleep -Seconds $PollIntervalSec
+  # F4c-429 — add up to 3s of jitter to the poll sleep so the bridge-watchdog
+  # and supervisor cannot lockstep indefinitely on the same phase. Lockstep
+  # was the proximate cause of the 429 cascade (both polled at top-of-minute).
+  $jitterMs = Get-Random -Minimum 0 -Maximum 3000
+  Start-Sleep -Milliseconds (($PollIntervalSec * 1000) + $jitterMs)
 }
 
 Wd-Log "bridge-watchdog exit pid=$PID (duration reached)"

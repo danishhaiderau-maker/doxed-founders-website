@@ -60,12 +60,29 @@ function Test-BridgeHealthy {
 }
 
 function Test-TunnelPublicHealthy {
+  # F4c-429 (2026-07-08 incident) — Treat HTTP 429 (Cloudflare edge rate
+  # limit) as HEALTHY, not dead. The flap loop: this function returned
+  # false on 429, the supervisor counted fails, and after 5 ticks it
+  # RECOVER'd the tunnel by killing cloudflared. Each kill+restart
+  # hammered the edge harder, deepening the rate limit. 429 means
+  # "tunnel works, you're asking too often" — so we treat it as alive
+  # and signal the shared backoff via Set-TunnelBackoff. Real outages
+  # (5xx, conn refused, timeout) still return false and trigger RECOVER.
   param(
     [string]$Url,
     [int]$TimeoutSec = 5
   )
   if (-not $Url) { return $false }
-  return (Test-HttpOk "$Url/api/ping" $TimeoutSec)
+  # If a previous probe saw 429 within the backoff window, skip the
+  # network call entirely — we'd just get another 429 and burn the limit
+  # further. Trust the prior reading (healthy, rate-limited).
+  if (Test-TunnelBackoffActive) { return $true }
+  $r = Test-TunnelHttpSmart -Url $Url -TimeoutSec $TimeoutSec
+  if ($r.RateLimited) {
+    Set-TunnelBackoff -Seconds 180
+    return $true
+  }
+  return [bool]$r.Healthy
 }
 
 function Test-RailwayApiHealthy {
