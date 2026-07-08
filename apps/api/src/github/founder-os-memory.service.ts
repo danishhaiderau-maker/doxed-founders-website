@@ -20,6 +20,27 @@ import { PrismaService } from '../prisma/prisma.service';
 export class FounderOsMemoryService {
   private readonly logger = new Logger(FounderOsMemoryService.name);
 
+  /**
+   * In-memory cooldown map: userId → epoch ms of last successful sync.
+   *
+   * Why this exists: the sync writes `formatRelativeTime(lastEvent.createdAt)`
+   * strings ("5 minutes ago") into `project-context.md`. Those strings change
+   * every few minutes even when nothing material changed, so a sync running
+   * every 15 minutes produces a stream of `chore(founder-os): sync memory`
+   * commits that don't reflect real product state. Each commit cancels the
+   * in-progress Vercel build, which stuck production 9+ hours behind at one
+   * point.
+   *
+   * The 24h throttle is the server-side source of truth — regardless of who
+   * calls the endpoint (web button, founder node loop, or external script),
+   * at most one commit per founder per day actually lands. If the API
+   * process restarts, the map resets and one extra sync slips through —
+   * that's acceptable. Persisting this to Prisma would require a migration
+   * for one column; not worth it.
+   */
+  private readonly lastSyncAt = new Map<string, number>();
+  private static readonly SYNC_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly github: GitHubApiService,
@@ -42,6 +63,26 @@ export class FounderOsMemoryService {
   }
 
   async syncProjectMemoryToRepo(userId: string, repo?: string | null) {
+    // 24h cooldown — see `lastSyncAt` doc above. Real changes to roadmap /
+    // tasks / goal still land within 24h, which is plenty for an AI coding
+    // agent reading `project-context.md`. The previous every-15-min cadence
+    // was breaking the Vercel pipeline (each commit canceled the prior build).
+    const last = this.lastSyncAt.get(userId);
+    const now = Date.now();
+    if (last && now - last < FounderOsMemoryService.SYNC_COOLDOWN_MS) {
+      const minutesLeft = Math.ceil(
+        (FounderOsMemoryService.SYNC_COOLDOWN_MS - (now - last)) / 60_000,
+      );
+      this.logger.debug(
+        `Skipping memory sync for ${userId} — cooldown (${minutesLeft} min left)`,
+      );
+      return {
+        synced: false as const,
+        reason: 'cooldown' as const,
+        retryAfterMinutes: minutesLeft,
+      };
+    }
+
     const resolved = repo ?? (await this.github.resolveRepo(userId, null, null));
     if (!resolved) return { synced: false as const, reason: 'no_repo' as const };
 
@@ -134,6 +175,11 @@ export class FounderOsMemoryService {
       memoryFiles,
       'chore(founder-os): sync memory (context + roadmap + tasks)',
     );
+    // Record cooldown timestamp regardless of whether files changed — even
+    // an "unchanged" sync counts as a successful poll, so we don't retry
+    // every 15 minutes for 24 hours just because the content happened to
+    // match this time.
+    this.lastSyncAt.set(userId, Date.now());
     if (batch.updated === 0 && batch.skipped === memoryFiles.length) {
       return { synced: true as const, repo: resolved, unchanged: true as const };
     }
