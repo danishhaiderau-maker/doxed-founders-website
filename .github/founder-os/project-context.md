@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+deploy: trigger build of throttle fix (path-based skip bypass)
 
 ## Last Activity
 
