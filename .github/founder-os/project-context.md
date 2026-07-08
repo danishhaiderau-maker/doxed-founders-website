@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-deploy: trigger build of throttle fix (path-based skip bypass)
+hotfix(memory-sync): hard-block endpoint until prod catches up
 
 ## Last Activity
 
