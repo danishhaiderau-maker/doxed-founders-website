@@ -4,6 +4,7 @@ import { SignalCycleStatus } from '@prisma/client';
 import { BotBridgeService } from './bot-bridge.service';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 export type ShowcaseRelayEventType =
   | 'APPROVE_PENDING'
@@ -61,7 +62,7 @@ export class ShowcaseRelayEventsService {
     private readonly botBridge: BotBridgeService,
     private readonly cycles: SignalCyclesService,
     private readonly execution: SignalSubscriberExecutionService,
-    private readonly prisma: import('../prisma/prisma.service').PrismaService,
+    private readonly prisma: PrismaService,
   ) {}
 
   assertAuthorized(secretHeader: string | undefined) {
