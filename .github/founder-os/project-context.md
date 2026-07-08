@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(relay): dynamic Scenario C exchange stops (Option A - safety net)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
