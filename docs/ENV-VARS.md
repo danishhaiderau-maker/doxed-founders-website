@@ -396,6 +396,32 @@ demo smoke results.
 - `apps/api/src/phase15/phase15.constants.ts` — `isObservatoryEnabled()`
 - `apps/api/src/observatory/observatory.service.ts`
 
+## `RELAY_AUTO_DUST_SWEEP`
+
+**Default:** `1` (enabled — ships hands-free)
+**Added:** 2026-07-08 (see `docs/DUST_SWEEP.md`)
+
+When enabled (`1` / unset / any value other than `0`), the live-copy relay
+automatically market-closes any residual Bitfinex position whose quantity is
+below the noise threshold (`MIN_QTY_BTC = 0.00004` BTC). This realizes fully
+hands-free trading: sub-threshold slivers left by partial fills / stop scraps
+are flattened on the next tick instead of sitting on the exchange waiting for
+a manual close.
+
+When disabled (`0`), dust detection still runs every tick and a `DUST_SWEEP`
+audit event is recorded (with `sweep_enabled: false`), but **no** market
+order is placed — the operator must close the dust manually.
+
+### Values
+
+| Value | Behavior |
+|---|---|
+| `1` / unset / anything else (default) | ON — relay places a flatten market order on detecting dust. |
+| `0` | OFF — detection-only. `DUST_SWEEP` audit event recorded, no market order. |
+
+Read per tick — flip via Railway env without a redeploy. Full design, safety
+guards, and audit schema: `docs/DUST_SWEEP.md`.
+
 ## See also
 
 - `docs/FOUNDER-AI-RUNTIME-SPEC.md` — runtime architecture + migration phases

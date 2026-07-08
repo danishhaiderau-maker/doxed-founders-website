@@ -447,6 +447,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private activeTrading: ExecutionTradingClient;
   private readonly positionRuntime = new Map<string, PositionRuntime>();
   private readonly exitingLots = new Set<string>();
+  /**
+   * Dust sweep in-flight dedupe — keyed by `${userId}:${cycleId}`. Prevents
+   * stacking duplicate market-close orders for the same dust lot within a
+   * single tick window (matches the cancelStillLive L2104 defer pattern: a
+   * failed sweep is logged and retried on the next tick, never re-thrown).
+   * Cleared after each sweep attempt (success or failure).
+   */
+  private readonly dustSweepInFlight = new Set<string>();
   private running = false;
   private wakeQueued = false;
   /** Phase 1 — 1s showcase-state memo for the execution path (flag-gated). */
@@ -1912,6 +1920,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }) as unknown as Prisma.InputJsonValue,
       },
     });
+
+    // Dust sweep — aggregate position check. If the merged exchange position is
+    // below MIN_QTY_BTC but non-zero, sweep it via market close so the user
+    // doesn't have to manually flatten a sub-threshold sliver. This catches
+    // dust that the per-participant reconcileManualClose path missed (e.g. all
+    // lots already CLOSED on the ledger but the exchange still shows residual
+    // qty from rounding / partial fills). Per-participant dust is handled in
+    // reconcileManualClose; this is the aggregate backstop. Wrapped in
+    // try/catch — never throws out of the reconcile loop.
+    if (exchangeQty > 0 && exchangeQty < MIN_QTY_BTC) {
+      try {
+        await this.sweepAggregateDust(
+          agentId,
+          instance,
+          participants,
+          creds,
+          position,
+          exchangeQty,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Aggregate dust sweep ${instance.userId}: unexpected error — ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     if (Math.abs(delta) <= MIN_QTY_BTC) return;
 
@@ -6278,6 +6311,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           `Lot qty drift ${userId} cycle=${cycle.id}: ledger lot ${meta.qty.toFixed(5)} > exchange ${exchangeQty.toFixed(5)} — partial external close?`,
         );
       }
+      // Dust sweep — residual exchange qty below MIN_QTY_BTC. Hands-free flatten
+      // so the user doesn't have to manually close sub-threshold slivers left
+      // by partial fills / stop scraps. Returns true only if it placed a
+      // market order; either way we return false here so the reconcile loop
+      // continues and the next tick confirms the flatten (matches the
+      // cancelStillLive L2104 defer-to-next-tick pattern).
+      if (exchangeQty > 0 && exchangeQty < MIN_QTY_BTC) {
+        await this.sweepDustPosition(agentId, userId, cycle, participant, meta, creds);
+      }
       return false;
     }
 
@@ -6328,6 +6370,248 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `Hire reconcile manual close ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`,
     );
     return true;
+  }
+
+  /**
+   * Dust sweep — hands-free flatten of residual exchange qty below MIN_QTY_BTC.
+   *
+   * Called from reconcileManualClose (per-participant, when the exchange
+   * position matches direction but is below threshold) and reconcileLotLedger
+   * (aggregate, when the merged exchange position is dust). Emits a DUST_SWEEP
+   * audit event every time; places a flatten market order only when the
+   * RELAY_AUTO_DUST_SWEEP kill switch is enabled (default on).
+   *
+   * Safety guards mirror the existing money-path patterns:
+   *  - participant must be OPEN or CLOSED (never PENDING_ENTRY)
+   *  - abs amount strictly between 0 and MIN_QTY_BTC
+   *  - cancel any resting stop on the lot first (L6284-6290 pattern)
+   *  - in-flight dedupe via dustSweepInFlight prevents stacking duplicate
+   *    market orders within the same tick window
+   *  - every step wrapped in try/catch; never throws out of the reconcile path
+   *
+   * Returns true only when a sweep market order was placed this call.
+   */
+  private async sweepDustPosition(
+    agentId: string,
+    userId: string,
+    cycle: { id: string },
+    participant: {
+      id: string;
+      status: SignalCycleStatus;
+      fillPrice?: { toNumber?: () => number } | null;
+    },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+  ): Promise<boolean> {
+    const key = `${userId}:${cycle.id}`;
+    if (this.dustSweepInFlight.has(key)) return false;
+
+    const sweepEnabled =
+      (this.config.get<string>('RELAY_AUTO_DUST_SWEEP') ?? '1').trim() !== '0';
+
+    let position: { amount: number; direction?: 'LONG' | 'SHORT' } | null = null;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch (err) {
+      this.logger.warn(
+        `Dust sweep ${userId} cycle=${cycle.id}: position fetch failed — ${err instanceof Error ? err.message : err}`,
+      );
+      await this.recordDustSweepEvent(agentId, userId, cycle.id, {
+        dustQty: 0,
+        marketOrderId: undefined,
+        sweepEnabled,
+        reason: 'position_fetch_failed',
+      });
+      return false;
+    }
+
+    const dustQty = position ? Math.abs(position.amount) : 0;
+    if (dustQty <= 0 || dustQty >= MIN_QTY_BTC) {
+      return false;
+    }
+
+    // PENDING_ENTRY participants have no real exposure to sweep yet.
+    if (
+      participant.status !== SignalCycleStatus.OPEN &&
+      participant.status !== SignalCycleStatus.CLOSED
+    ) {
+      return false;
+    }
+
+    this.dustSweepInFlight.add(key);
+    try {
+      // Cancel any resting stop on the lot first (reconcileManualClose L6284-6290
+      // pattern). Never let a stale protective stop fire mid-sweep and realize
+      // the wrong residual qty.
+      if (meta.stopOrderId) {
+        try {
+          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
+        } catch {
+          /* stop may have filled — safe to proceed, market close is authoritative */
+        }
+      }
+
+      if (!sweepEnabled) {
+        this.logger.warn(
+          `Dust detected ${userId} cycle=${cycle.id}: ${dustQty.toFixed(5)} BTC below MIN_QTY_BTC — sweep disabled (RELAY_AUTO_DUST_SWEEP=0), surfacing audit only`,
+        );
+        await this.recordDustSweepEvent(agentId, userId, cycle.id, {
+          dustQty,
+          marketOrderId: undefined,
+          sweepEnabled: false,
+          reason: 'auto_flatten_below_min_qty',
+        });
+        return false;
+      }
+
+      // Flatten via market close — negate the residual position amount. Reuses
+      // the same submitMarketClose path as closeVirtualLot (L5959) and the sim
+      // orphan heal (L1927). Direction is inferred from the live position sign
+      // so we close the correct way even if meta.direction is stale.
+      const positionDirection: 'LONG' | 'SHORT' =
+        position && position.amount < 0 ? 'SHORT' : (meta.direction ?? 'LONG');
+      let marketOrderId: number | undefined;
+      try {
+        marketOrderId = await this.activeTrading.submitMarketClose(creds, {
+          positionDirection,
+          qty: dustQty,
+        });
+      } catch (err) {
+        // Idempotency: never retry aggressively — log and defer to next tick
+        // (cancelStillLive L2104 pattern). The reconcile loop will re-detect
+        // dust on the next pass and retry.
+        this.logger.warn(
+          `Dust sweep market order failed ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err} — deferring to next tick`,
+        );
+        await this.recordDustSweepEvent(agentId, userId, cycle.id, {
+          dustQty,
+          marketOrderId: undefined,
+          sweepEnabled: true,
+          reason: 'market_order_failed',
+        });
+        return false;
+      }
+
+      this.logger.warn(
+        `Dust sweep ${userId} cycle=${cycle.id}: flattened ${dustQty.toFixed(5)} BTC via market order ${marketOrderId}`,
+      );
+      await this.recordDustSweepEvent(agentId, userId, cycle.id, {
+        dustQty,
+        marketOrderId,
+        sweepEnabled: true,
+        reason: 'auto_flatten_below_min_qty',
+      });
+      return true;
+    } finally {
+      this.dustSweepInFlight.delete(key);
+    }
+  }
+
+  /** Best-effort DUST_SWEEP audit event — never throws. */
+  private async recordDustSweepEvent(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    payload: {
+      dustQty: number;
+      marketOrderId?: number;
+      sweepEnabled: boolean;
+      reason: string;
+    },
+  ): Promise<void> {
+    try {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'DUST_SWEEP', {
+        venue: 'bitfinex',
+        source: 'hire',
+        event: 'DUST_SWEEP',
+        dust_qty: Math.round(payload.dustQty * 1e8) / 1e8,
+        market_order_id: payload.marketOrderId,
+        reason: payload.reason,
+        sweep_enabled: payload.sweepEnabled,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `DUST_SWEEP audit failed ${userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Aggregate dust backstop — called from reconcileLotLedger when the merged
+   * exchange position is dust. If exactly one OPEN participant owns the lot,
+   * delegate to sweepDustPosition (which cancels stops + places market close).
+   * If no OPEN participant claims it (all CLOSED/EXPIRED on ledger), emit a
+   * detection-only DUST_SWEEP event so the operator can decide — synthesizing
+   * a lot from nothing is the reconcileUnattributedExchangeFills path's job.
+   */
+  private async sweepAggregateDust(
+    agentId: string,
+    instance: TradingAgentInstance,
+    participants: Array<{ id: string; status: SignalCycleStatus }>,
+    creds: ExchangeCredentials,
+    position: { amount: number; direction?: 'LONG' | 'SHORT'; symbol?: string } | null,
+    exchangeQty: number,
+  ): Promise<void> {
+    // Only sweep when the instance is ACTIVE — PAUSED is exit-only and a dust
+    // flatten is a new market order, which we don't place on pause.
+    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return;
+
+    const openParticipants = participants.filter(
+      (p) => p.status === SignalCycleStatus.OPEN,
+    );
+
+    if (openParticipants.length === 1) {
+      const p = openParticipants[0];
+      const meta = await this.loadExecutionMeta(p.id).catch(() => ({} as ExecutionPayload));
+      const participantRow = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: p.id },
+        select: { id: true, status: true, fillPrice: true, cycleId: true },
+      });
+      if (!participantRow) return;
+      await this.sweepDustPosition(
+        agentId,
+        instance.userId,
+        { id: participantRow.cycleId },
+        { id: p.id, status: p.status, fillPrice: participantRow.fillPrice },
+        meta,
+        creds,
+      );
+      return;
+    }
+
+    // No single OPEN owner — surface detection only (no synthesized lot).
+    const sweepEnabled =
+      (this.config.get<string>('RELAY_AUTO_DUST_SWEEP') ?? '1').trim() !== '0';
+    this.logger.warn(
+      `Dust detected ${instance.userId}: ${exchangeQty.toFixed(5)} BTC on exchange with ${openParticipants.length} OPEN lots — no single owner, surfacing audit only`,
+    );
+    // Use the first OPEN participant's cycle if available, else the instance's
+    // most recent cycle — DUST_SWEEP is audit-only here so the cycleId is for
+    // operator triage, not status transition.
+    let cycleIdForAudit: string | undefined;
+    if (openParticipants.length > 0) {
+      const row = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: openParticipants[0].id },
+        select: { cycleId: true },
+      });
+      cycleIdForAudit = row?.cycleId;
+    }
+    if (!cycleIdForAudit) {
+      const latest = await this.prisma.signalCycle.findFirst({
+        where: { agentId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      cycleIdForAudit = latest?.id;
+    }
+    if (cycleIdForAudit) {
+      await this.recordDustSweepEvent(agentId, instance.userId, cycleIdForAudit, {
+        dustQty: exchangeQty,
+        marketOrderId: undefined,
+        sweepEnabled,
+        reason: openParticipants.length === 0 ? 'no_open_owner' : 'multiple_open_owners',
+      });
+    }
   }
 
   private async monitorExit(
