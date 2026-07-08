@@ -27,7 +27,13 @@ export async function fetchPendingSyncJob(
     console.warn(`Sync job poll failed (${res.status}): ${text.slice(0, 200)}`);
     return null;
   }
-  const body = (await res.json()) as {
+  // Read raw text first so an empty 200 body (historically returned when no job
+  // was pending) maps cleanly to "no job" instead of throwing on res.json().
+  // After the server-side fix the endpoint returns `{ status: 'idle' }` or the
+  // job object, but this guard also protects against any future regression.
+  const text = await res.text();
+  if (!text.trim()) return null;
+  const body = JSON.parse(text) as {
     id?: string;
     kind?: string;
     payload?: Record<string, unknown>;
