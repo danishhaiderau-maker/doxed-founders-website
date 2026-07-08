@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-fix(memory-sync): run auto-push every 24h instead of every 15min
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
