@@ -204,8 +204,15 @@ export class FounderNodeController {
 
   @UseGuards(FounderNodeGuard)
   @Get('sync-jobs/pending')
-  pendingSyncJob(@Req() req: { founderNode: FounderNodeRequestUser }) {
-    return this.syncJobs.claimPending(req.founderNode.nodeId);
+  async pendingSyncJob(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    // Explicit JSON shape so the response body is always parseable. Returning
+    // null from a NestJS controller serializes as a 200 with an EMPTY body, not
+    // the JSON literal `null`, which made the Founder Node client's res.json()
+    // throw "Unexpected end of JSON input" on every 1.5s poll. `{ status: 'idle' }`
+    // has no `id`, so the client's existing `if (!body?.id || !body.kind)` check
+    // treats it as "no job" — fully backwards-compatible.
+    const job = await this.syncJobs.claimPending(req.founderNode.nodeId);
+    return job ?? { status: 'idle' as const };
   }
 
   @UseGuards(FounderNodeGuard)

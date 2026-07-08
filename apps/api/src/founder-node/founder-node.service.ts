@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
   forwardRef,
@@ -23,6 +24,8 @@ const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class FounderNodeService {
+  private readonly logger = new Logger(FounderNodeService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => FounderCopilotService))
@@ -59,7 +62,10 @@ export class FounderNodeService {
     });
 
     return {
-      nodes: nodes.map((n) => this.toStatusRow(n)),
+      // Map defensively so a single malformed row degrades to a placeholder
+      // instead of 500-ing the whole endpoint. The original error + offending
+      // row are logged so the root cause is visible in Railway logs.
+      nodes: nodes.map((n) => this.toStatusRowSafe(n)),
     };
   }
 
@@ -327,14 +333,15 @@ export class FounderNodeService {
     platform: string | null;
     appVersion: string | null;
   }) {
+    const lastSeenAt = this.toIsoOrNull(n.lastSeenAt);
     const online =
-      n.lastSeenAt != null && Date.now() - n.lastSeenAt.getTime() < ONLINE_WINDOW_MS;
+      lastSeenAt != null && Date.now() - new Date(lastSeenAt).getTime() < ONLINE_WINDOW_MS;
     return {
       id: n.id,
       nodeId: n.nodeId,
       label: n.label,
       status: online ? ('online' as const) : ('offline' as const),
-      lastSeenAt: n.lastSeenAt?.toISOString() ?? null,
+      lastSeenAt,
       ramGb: n.ramGb,
       storageGb: n.storageGb,
       storageFreeGb: n.storageFreeGb,
@@ -342,5 +349,74 @@ export class FounderNodeService {
       platform: n.platform,
       appVersion: n.appVersion,
     };
+  }
+
+  /**
+   * Defensive wrapper around toStatusRow. If a row contains data that makes
+   * mapping throw (e.g. lastSeenAt coming back as something that is not a
+   * valid Date — schema drift, raw string, NaN epoch), we log the full row
+   * and emit a clearly-marked placeholder so the caller still gets a 200 with
+   * the rest of the nodes intact. Without this, a single bad row made
+   * GET /api/founder-node/status return 500 for the entire user.
+   */
+  private toStatusRowSafe(n: {
+    id: string;
+    nodeId: string;
+    label: string;
+    status: string;
+    lastSeenAt: Date | null;
+    ramGb: number | null;
+    storageGb: number | null;
+    storageFreeGb: number | null;
+    vaultHealthy: boolean;
+    platform: string | null;
+    appVersion: string | null;
+  }) {
+    try {
+      return this.toStatusRow(n);
+    } catch (err) {
+      const lastSeenType =
+        n.lastSeenAt === null
+          ? 'null'
+          : n.lastSeenAt instanceof Date
+            ? `Date(isValid=${!Number.isNaN(n.lastSeenAt.getTime())})`
+            : typeof n.lastSeenAt;
+      this.logger.error(
+        `toStatusRow failed for node id=${n.id} nodeId=${n.nodeId} ` +
+          `label=${n.label} lastSeenAt=<${lastSeenType}> ` +
+          `lastSeenAtRaw=${JSON.stringify(n.lastSeenAt)}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return {
+        id: n.id,
+        nodeId: n.nodeId,
+        label: n.label,
+        status: 'offline' as const,
+        lastSeenAt: null,
+        ramGb: n.ramGb,
+        storageGb: n.storageGb,
+        storageFreeGb: n.storageFreeGb,
+        vaultHealthy: n.vaultHealthy,
+        platform: n.platform,
+        appVersion: n.appVersion,
+      };
+    }
+  }
+
+  /**
+   * Coerce a Prisma DateTime column to ISO string or null. Handles the normal
+   * Date case plus the historical failure mode where Neon returned the value
+   * as a string (rare, but it produced the original 500).
+   */
+  private toIsoOrNull(value: Date | string | null | undefined): string | null {
+    if (value == null) return null;
+    if (value instanceof Date) {
+      const ms = value.getTime();
+      if (Number.isNaN(ms)) return null;
+      return new Date(ms).toISOString();
+    }
+    // String fallback — parse defensively.
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
   }
 }
