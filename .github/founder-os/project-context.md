@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-﻿feat(relay): hands-free dust sweep (Option 2) + DUST_SWEEP audit
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
