@@ -12,7 +12,16 @@ import {
 import { FounderCopilotService } from '../events/founder-copilot.service';
 
 const USER_STALE_MS = 5 * 60 * 1000;
-const BACKGROUND_INTERVAL_MS = 15 * 60 * 1000;
+// 24h cadence (was 15min). The 15-min poll produced chore(founder-os):
+// sync memory commits whose only material change was a relative timestamp
+// in project-context.md. While those commits were correctly CANCELED by
+// vercel-ignore-build.sh and didn't actually break the pipeline (the real
+// culprit was Vercel Pro's COMMIT_AUTHOR_REQUIRED block on Cursor-Agent
+// commits), they polluted git history. 24h is enough for an AI coding
+// agent reading project-context.md to have reasonably fresh state.
+// The service-level 24h throttle in FounderOsMemoryService is retained
+// as defense-in-depth.
+const BACKGROUND_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type GitHubSyncResult = {
   synced: boolean;
@@ -45,17 +54,16 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     if (process.env.DISABLE_GITHUB_AUTO_SYNC === '1') return;
-    // Auto-push disabled 2026-07-08: the recurring setInterval below produced
-    // chore(founder-os): sync memory spam every 15 min whose only material
-    // change was a relative timestamp ("5 minutes ago" -> "10 minutes ago")
-    // in project-context.md. Each commit was correctly CANCELED by
-    // vercel-ignore-build.sh but polluted git history. Manual sync still
-    // works via the memory panel button (POST /founder-os/memory/sync).
-    // If event-driven context snapshots become valuable later (e.g., only
-    // when goal/roadmap actually changes), implement that explicitly in
-    // Phase 5+ Founder Intent Engine — do NOT reintroduce a blind polling
-    // interval.
+    // Kick off one immediate poll on boot so a fresh process catches up
+    // without waiting up to 24h for the first interval tick.
     void this.syncAllConnectedRepos();
+    // 24h background poll. See BACKGROUND_INTERVAL_MS doc above for why
+    // this is 24h and not the original 15min. DISABLE_GITHUB_AUTO_SYNC=1
+    // remains as the env kill switch for emergencies.
+    this.interval = setInterval(
+      () => this.syncAllConnectedRepos(),
+      BACKGROUND_INTERVAL_MS,
+    );
   }
 
   onModuleDestroy() {
