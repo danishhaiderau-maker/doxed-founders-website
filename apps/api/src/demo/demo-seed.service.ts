@@ -523,6 +523,21 @@ export class DemoSeedService {
       }
     }
 
+    // [DEMO_SEED_WIRING_2026-07-08] The extended ecosystem seed (ai_usage,
+    // leaderboard, notifications, graduation events, feed comments, paper
+    // trades) and marketplace purchases are required for the harness scorecard
+    // checks to pass. They were defined but never invoked — wire them in.
+    const marketplaceForUsers = demoUsers.map((u) => ({ id: u.id, index: u.index }));
+    created.marketplacePurchasesCreated = await this.seedMarketplacePurchases(marketplaceForUsers);
+
+    const extendedCounts = await this.seedExtendedEcosystem(scale, demoUsers);
+    created.commentsCreated += extendedCounts.commentsCreated;
+    created.aiUsageRowsCreated += extendedCounts.aiUsageRowsCreated;
+    created.notificationsCreated += extendedCounts.notificationsCreated;
+    created.leaderboardEntriesCreated += extendedCounts.leaderboardEntriesCreated;
+    created.paperTradesCreated += extendedCounts.paperTradesCreated;
+    created.graduationEventsCreated += extendedCounts.graduationEventsCreated;
+
     const status = await this.getStatus();
     this.logger.log(`Demo ecosystem seed complete (scale=${scale}, existingUsers=${existingUsers})`);
 

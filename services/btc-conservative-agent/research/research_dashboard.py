@@ -40,7 +40,7 @@ def format_melbourne_dt(value) -> str:
         return str(value)[:19] if value else "—"
 
 
-from flask import Flask, jsonify, render_template_string, send_file, abort, request
+from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
 
 try:
     from combo_pathway_config import (
@@ -2759,12 +2759,17 @@ def index():
         {"id": gid, "label": glabel, "items": [[a, b] for a, b, _ in items]}
         for gid, glabel, items in REPORT_NAV_GROUPS
     ])
-    return render_template_string(
+    html = render_template_string(
         DASHBOARD_HTML,
         nav_groups_json=nav_groups_json,
         benchmark_lane=BENCHMARK_LANE,
         dashboard_version=RESEARCH_DASHBOARD_VERSION,
     )
+    resp = make_response(html)
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 def main():
