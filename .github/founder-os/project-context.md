@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (10 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore: reduce dashboard polling to 3min + founder-node crash logging
 
 ## Last Activity
 
