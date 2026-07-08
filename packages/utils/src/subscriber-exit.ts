@@ -1,14 +1,59 @@
-/** Mirrors live showcase bot TRAIL_LADDER_SCENARIO_C (scenario_c_config.py — frozen 2026-06-20). */
-export const SUBSCRIBER_TRAIL_LADDER: ReadonlyArray<readonly [number, number]> = [
-  [12, 8],
-  [15, 10],
-  [25, 18],
+/**
+ * Scenario C profit-lock ladder — canonical source of truth for the relay.
+ * Mirrors live showcase bot `TRAIL_LADDER_SCENARIO_C`
+ * (services/btc-conservative-agent/scenario_c_config.py — SCENARIO_C_PROFILE_ID
+ * "SCENARIO_C_RUNNER_10_v4", updated 2026-06-25: wider first rung 10→6 to
+ * reduce runner cuts vs the legacy 12→8). Re-synced 2026-07-08: the previous
+ * TS ladder ([12,8],[15,10],[25,18],...) had drifted from the Python source
+ * during the June 20→25 ladder widening.
+ *
+ * Each tuple is `[peak_margin_pct_trigger, protected_margin_pct_floor]`. When
+ * peak unrealized margin % crosses `trigger`, the protective stop advances
+ * so that ~`protected`% of peak margin is locked in.
+ */
+export const SCENARIO_C_LADDER: ReadonlyArray<readonly [number, number]> = [
+  [10, 6],
+  [19, 17],
   [40, 28],
   [60, 45],
   [80, 60],
   [100, 75],
   [150, 120],
 ];
+
+/**
+ * @deprecated Use {@link SCENARIO_C_LADDER} — kept under the legacy name so
+ * existing call sites and persisted event references continue to resolve.
+ */
+export const SUBSCRIBER_TRAIL_LADDER: ReadonlyArray<readonly [number, number]> = SCENARIO_C_LADDER;
+
+/**
+ * Solve the active Scenario C rung for a peak-margin % value.
+ *
+ * Returns the index into {@link SCENARIO_C_LADDER} (0-based) of the highest
+ * rung whose trigger has been reached, or `null` when peak is below the
+ * first trigger (no profit-lock stop placed yet). Pure function so it can be
+ * unit-tested without touching the exchange.
+ *
+ *   solveScenarioCRung(0)    → null
+ *   solveScenarioCRung(9.99) → null
+ *   solveScenarioCRung(10)   → 0
+ *   solveScenarioCRung(15)   → 0  (only crossed first trigger)
+ *   solveScenarioCRung(19)   → 1
+ *   solveScenarioCRung(150)  → 6
+ *   solveScenarioCRung(200)  → 6  (highest)
+ */
+export function solveScenarioCRung(
+  peakMarginPct: number,
+  ladder: ReadonlyArray<readonly [number, number]> = SCENARIO_C_LADDER,
+): number | null {
+  if (!Number.isFinite(peakMarginPct) || peakMarginPct < ladder[0][0]) return null;
+  let rung: number | null = null;
+  for (let i = 0; i < ladder.length; i++) {
+    if (peakMarginPct >= ladder[i][0]) rung = i;
+  }
+  return rung;
+}
 
 export const SUBSCRIBER_PEAK_NEVER_LOSER_MIN_PEAK = 40;
 export const SUBSCRIBER_PEAK_NEVER_LOSER_FLOOR = 10;

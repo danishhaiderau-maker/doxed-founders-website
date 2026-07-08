@@ -35,6 +35,8 @@ import {
   isNearChaseFillZone,
   sanitizeLimitPrice,
   getProfitLockFloor,
+  solveScenarioCRung,
+  SCENARIO_C_LADDER,
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
   type CopyRelayCapacitySnapshot,
@@ -107,6 +109,19 @@ type PositionRuntime = {
   lastChaseAtMs: number;
   lastProfitLockFloor?: number;
   filledRecorded: boolean;
+  /**
+   * Option A — current protective stop order id live on Bitfinex for this
+   * participant. Tracked in participant state so cancel-then-replace always
+   * targets the exact previous order (not whatever meta carried in). Keyed
+   * by participantId (unique per userId+cycleId) → per-account isolation.
+   */
+  currentStopOrderId?: number;
+  /** Last stop price actually placed on the exchange — for never-loosen check. */
+  currentStopPrice?: number;
+  /** Last Scenario C rung index placed (0-based) — for SKIP_SAME audit. */
+  currentRungIdx?: number;
+  /** Consecutive stop-replacement failures — circuit breaker (≥3 → halt). */
+  consecutiveStopFailures?: number;
 };
 
 function executionEnabled(): boolean {
@@ -198,6 +213,34 @@ function mirrorExitConvergenceEnabled(): boolean {
   if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
   return true;
 }
+
+/**
+ * Option A — Exchange-side protective stops (mirror + safety net). SHIPS DARK.
+ *
+ * Default OFF (must be enabled explicitly per account via Railway env). When
+ * "true": the relay un-gates PROFIT_LOCK_TRAIL so the protective stop on
+ * Bitfinex is kept synced to the current Scenario C ladder rung, even in
+ * showcase-mirror-only mode (the showcase bot remains the decision maker for
+ * EXIT, but the exchange stop advances through 10→6, 19→17, 40→28, ... as
+ * unrealized margin grows, so a sudden reverse actually realizes the rung's
+ * protected % instead of the initial wide stop). When unset / not "true":
+ * behavior is unchanged (Phase 2 exit convergence — wide disaster stop only,
+ * showcase EXIT authoritative). Read per call so operators can flip via
+ * Railway env without a redeploy.
+ *
+ * Per-account isolation: state (peak MFE, current rung, current stop order
+ * id) is keyed by participantId, which is unique per (userId, cycleId).
+ * Never-loosen, cancel-then-replace, idempotent on restart, audit-logged,
+ * circuit-broken after 3 consecutive failures.
+ */
+function exchangeDynamicStopsEnabled(): boolean {
+  return (process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED ?? '').trim().toLowerCase() === 'true';
+}
+
+/** Option A circuit breaker — consecutive stop-replacement failures before
+ *  the relay stops attempting replacements for a participant. Reset to 0 on
+ *  any successful replace or on the next FILLED event. */
+const STOP_MANAGER_CIRCUIT_THRESHOLD = 3;
 
 /** Phase 3 — catch-up market entry when showcase is OPEN but copy missed fill. Default ON. */
 function mirrorCatchupEnabled(): boolean {
@@ -1714,6 +1757,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           // piggybacks on an existing per-tick dashboardState write — no extra
           // DB round-trip. A stale lastTickAt means the executor loop is dead.
           lastTickAt: new Date().toISOString(),
+          // Option A — surface the dynamic-stops circuit-breaker state so the
+          // operator sees which participants have tripped it (map of
+          // participantId → lastError). Empty object when feature is off or no
+          // participant has tripped the threshold.
+          stopManagerCircuitOpen:
+            this.stopManagerCircuitOpen.size > 0
+              ? Object.fromEntries(this.stopManagerCircuitOpen)
+              : {},
+          exchangeDynamicStopsEnabled: exchangeDynamicStopsEnabled(),
         }) as unknown as Prisma.InputJsonValue,
       },
     });
@@ -2941,7 +2993,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       peakMarginPct: 0,
       lastChaseAtMs: 0,
       filledRecorded: true,
+      // Option A — fresh FILLED resets the circuit breaker for this participant.
+      consecutiveStopFailures: 0,
     });
+    this.stopManagerCircuitOpen.delete(participantId);
 
     this.cycleAudit.stage('FILLED', {
       userId,
@@ -3831,6 +3886,43 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
           if (liveStop) {
             // Idempotent skip — stop is live and runtime is hydrated.
+            // Option A — when dynamic stops are on, also reconstruct the
+            // Scenario C rung the live stop corresponds to (from peak MFE +
+            // last profit-lock floor in persisted meta) so the trail block
+            // has the right baseline on the next tick and never re-places a
+            // stop that's already at the correct level. Emits a RECONSTRUCTED
+            // audit line; does NOT write to the exchange.
+            if (exchangeDynamicStopsEnabled()) {
+              const rt = this.positionRuntime.get(p.id) ?? this.hydrateRuntime(p.id, meta);
+              const peak = rt.peakMarginPct ?? 0;
+              const rungIdx = solveScenarioCRung(peak, SCENARIO_C_LADDER);
+              if (rt.currentStopOrderId == null) {
+                rt.currentStopOrderId = meta.stopOrderId;
+              }
+              if (rt.currentRungIdx == null && rungIdx != null) {
+                rt.currentRungIdx = rungIdx;
+              }
+              if (rt.consecutiveStopFailures == null) {
+                rt.consecutiveStopFailures = 0;
+              }
+              this.stopManagerCircuitOpen.delete(p.id);
+              this.positionRuntime.set(p.id, rt);
+              this.appendExchangeStopAudit({
+                cycleId,
+                userId,
+                participantId: p.id,
+                side: (meta.direction ?? 'LONG').toUpperCase() as 'LONG' | 'SHORT',
+                entry: meta.fillPrice ?? 0,
+                peakMarginPct: peak,
+                prevRung: null,
+                newRung: rungIdx,
+                oldStop: liveStop.price ?? null,
+                newStop: liveStop.price ?? null,
+                bitfinexOldOrderId: meta.stopOrderId,
+                bitfinexNewOrderId: meta.stopOrderId,
+                action: 'RECONSTRUCTED',
+              });
+            }
             this.logger.log(
               `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=stop_live stopOrderId=${meta.stopOrderId}`,
             );
@@ -5587,6 +5679,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           qty: meta.qty,
       source: 'hire',
     });
+        // Option A — seed tracked stop state so the never-loosen / SKIP_SAME
+        // checks have a baseline on the very first trail tick. Initial rung
+        // is the disaster stop (no Scenario C rung yet).
+        runtime.currentStopOrderId = stopOrderId;
+        runtime.currentStopPrice = stopPrice;
+        runtime.currentRungIdx = undefined;
+        runtime.consecutiveStopFailures = 0;
+        this.stopManagerCircuitOpen.delete(participant.id);
+        this.positionRuntime.set(participant.id, runtime);
         this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${meta.qty}`);
       }
     } else if (meta.stopOrderId && fillPrice > 0) {
@@ -5603,47 +5704,206 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           source: 'hire',
           event: 'STOP_LOSS_EVENT_HEAL',
         });
+        // Option A — seed tracked stop state from the healed entry too.
+        if (runtime.currentStopOrderId == null) {
+          runtime.currentStopOrderId = meta.stopOrderId;
+          runtime.currentStopPrice = stopPrice;
+          runtime.currentRungIdx = undefined;
+          runtime.consecutiveStopFailures = 0;
+          this.positionRuntime.set(participant.id, runtime);
+        }
         this.logger.warn(
           `Healed missing STOP_LOSS_ARMED ${userId} cycle=${cycle.id} stop=${stopPrice.toFixed(2)}`,
         );
+      } else if (runtime.currentStopOrderId == null && meta.stopOrderId) {
+        // Stop already armed on a previous tick but we never seeded tracked
+        // state (e.g. option A flag was off, now on). Adopt without a write.
+        runtime.currentStopOrderId = meta.stopOrderId;
+        runtime.consecutiveStopFailures = 0;
+        this.positionRuntime.set(participant.id, runtime);
       }
     }
 
     const lockFloorTrail = getProfitLockFloor(runtime.peakMarginPct);
+    // Option A — when EXCHANGE_DYNAMIC_STOPS_ENABLED=true, force the trail to
+    // fire even in showcase-mirror-only + exit-convergence mode, so the
+    // protective stop advances through the Scenario C ladder rungs on the
+    // exchange. Showcase bot remains the EXIT decision maker; this only
+    // manages the protective stop between entry and that EXIT.
     const skipProfitLockTrail =
-      !simActive && isShowcaseMirrorOnlyMode() && mirrorExitConvergenceEnabled();
+      !simActive &&
+      isShowcaseMirrorOnlyMode() &&
+      mirrorExitConvergenceEnabled() &&
+      !exchangeDynamicStopsEnabled();
     if (lockFloorTrail != null && fillPrice > 0 && meta.stopOrderId && !skipProfitLockTrail) {
       const trailStop = computeProfitLockStopPrice(fillPrice, meta.direction, lockFloorTrail, leverage);
       const priorFloor = runtime.lastProfitLockFloor ?? 0;
-      if (lockFloorTrail > priorFloor + 0.5) {
-        try {
-          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
-          const newStopId = await this.activeTrading.submitStopOrder(creds, {
-            positionDirection: meta.direction,
-            qty: meta.qty,
-            stopPrice: trailStop,
-            leverage,
+      // Option A — rung index for audit + SKIP_SAME. solveScenarioCRung is the
+      // pure solver over SCENARIO_C_LADDER (0-based, null when below first rung).
+      const newRungIdx = solveScenarioCRung(runtime.peakMarginPct, SCENARIO_C_LADDER);
+      // Tracked previous stop (authoritative — meta.stopOrderId can lag a tick).
+      const prevStopOrderId = runtime.currentStopOrderId ?? meta.stopOrderId;
+      const prevStopPrice = runtime.currentStopPrice;
+      const prevRungIdx = runtime.currentRungIdx ?? null;
+      const failures = runtime.consecutiveStopFailures ?? 0;
+
+      // Circuit breaker — stop attempting replacements for this participant
+      // after STOP_MANAGER_CIRCUIT_THRESHOLD consecutive failures. Reset to 0
+      // on any successful replace or on the next FILLED event.
+      if (exchangeDynamicStopsEnabled() && failures >= STOP_MANAGER_CIRCUIT_THRESHOLD) {
+        this.appendExchangeStopAudit({
+          cycleId: cycle.id,
+          userId,
+          participantId: participant.id,
+          side: meta.direction,
+          entry: fillPrice,
+          peakMarginPct: runtime.peakMarginPct,
+          prevRung: prevRungIdx,
+          newRung: newRungIdx,
+          oldStop: prevStopPrice ?? null,
+          newStop: trailStop,
+          bitfinexOldOrderId: prevStopOrderId ?? null,
+          bitfinexNewOrderId: null,
+          action: 'SKIP_CIRCUIT_OPEN',
+        });
+      } else if (lockFloorTrail > priorFloor + 0.5) {
+        // Option A — SKIP_SAME: same rung already live, no exchange write.
+        // (Only meaningful when dynamic stops are on; legacy path didn't
+        // track rung index so we only short-circuit there.)
+        const sameRung =
+          exchangeDynamicStopsEnabled() &&
+          prevRungIdx != null &&
+          newRungIdx != null &&
+          prevRungIdx === newRungIdx;
+        // Option A — never loosen. For SHORT the stop price must DECREASE to
+        // tighten (trail down). For LONG it must INCREASE. If the new stop
+        // would be wider than the live one, skip with SKIP_LOOSEN. This is
+        // the single most important safety property of the dynamic stops.
+        const wouldLoosen =
+          exchangeDynamicStopsEnabled() &&
+          prevStopPrice != null &&
+          prevStopPrice > 0 &&
+          ((meta.direction === 'SHORT' && trailStop > prevStopPrice + 0.01) ||
+            (meta.direction === 'LONG' && trailStop < prevStopPrice - 0.01));
+
+        if (sameRung) {
+          this.appendExchangeStopAudit({
+            cycleId: cycle.id,
+            userId,
+            participantId: participant.id,
+            side: meta.direction,
+            entry: fillPrice,
+            peakMarginPct: runtime.peakMarginPct,
+            prevRung: prevRungIdx,
+            newRung: newRungIdx,
+            oldStop: prevStopPrice ?? null,
+            newStop: trailStop,
+            bitfinexOldOrderId: prevStopOrderId ?? null,
+            bitfinexNewOrderId: prevStopOrderId ?? null,
+            action: 'SKIP_SAME',
           });
-          runtime.lastProfitLockFloor = lockFloorTrail;
-          this.positionRuntime.set(participant.id, runtime);
-          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
-            venue: 'bitfinex',
-            event: 'PROFIT_LOCK_TRAIL',
-            lock_floor_margin_pct: lockFloorTrail,
-            profitLockFloor: lockFloorTrail,
-            peak_margin_pct: runtime.peakMarginPct,
-            stop_price: trailStop,
-            stopOrderId: newStopId,
-            qty: meta.qty,
-            source: 'hire',
-          });
-    this.logger.log(
-            `Hire trail stop lot ${userId} cycle=${cycle.id} floor=${lockFloorTrail}% stop=${trailStop.toFixed(2)} qty=${meta.qty}`,
-          );
-        } catch (err) {
+        } else if (wouldLoosen) {
           this.logger.warn(
-            `Trail stop update ${userId}: ${err instanceof Error ? err.message : err}`,
+            `SKIP_LOOSEN ${userId} cycle=${cycle.id} side=${meta.direction} new=${trailStop.toFixed(2)} old=${prevStopPrice!.toFixed(2)} — refusing to widen protective stop`,
           );
+          this.appendExchangeStopAudit({
+            cycleId: cycle.id,
+            userId,
+            participantId: participant.id,
+            side: meta.direction,
+            entry: fillPrice,
+            peakMarginPct: runtime.peakMarginPct,
+            prevRung: prevRungIdx,
+            newRung: newRungIdx,
+            oldStop: prevStopPrice ?? null,
+            newStop: trailStop,
+            bitfinexOldOrderId: prevStopOrderId ?? null,
+            bitfinexNewOrderId: null,
+            action: 'SKIP_LOOSEN',
+          });
+        } else {
+          const isInitial = prevStopOrderId == null;
+          try {
+            // Cancel-then-replace (skip the cancel on INITIAL — nothing to remove).
+            if (!isInitial && prevStopOrderId != null) {
+              await this.activeTrading.cancelOrder(creds, prevStopOrderId);
+            }
+            const newStopId = await this.activeTrading.submitStopOrder(creds, {
+              positionDirection: meta.direction,
+              qty: meta.qty,
+              stopPrice: trailStop,
+              leverage,
+            });
+            // Option A — update tracked state (per-account via participantId key).
+            runtime.lastProfitLockFloor = lockFloorTrail;
+            runtime.currentStopOrderId = newStopId;
+            runtime.currentStopPrice = trailStop;
+            runtime.currentRungIdx = newRungIdx ?? undefined;
+            runtime.consecutiveStopFailures = 0;
+            this.stopManagerCircuitOpen.delete(participant.id);
+            this.positionRuntime.set(participant.id, runtime);
+            await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+              venue: 'bitfinex',
+              event: 'PROFIT_LOCK_TRAIL',
+              lock_floor_margin_pct: lockFloorTrail,
+              profitLockFloor: lockFloorTrail,
+              peak_margin_pct: runtime.peakMarginPct,
+              stop_price: trailStop,
+              stopOrderId: newStopId,
+              qty: meta.qty,
+              source: 'hire',
+            });
+            this.appendExchangeStopAudit({
+              cycleId: cycle.id,
+              userId,
+              participantId: participant.id,
+              side: meta.direction,
+              entry: fillPrice,
+              peakMarginPct: runtime.peakMarginPct,
+              prevRung: prevRungIdx,
+              newRung: newRungIdx,
+              oldStop: prevStopPrice ?? null,
+              newStop: trailStop,
+              bitfinexOldOrderId: prevStopOrderId ?? null,
+              bitfinexNewOrderId: newStopId,
+              action: isInitial ? 'INITIAL' : 'REPLACE',
+            });
+            this.logger.log(
+              `Hire trail stop lot ${userId} cycle=${cycle.id} floor=${lockFloorTrail}% stop=${trailStop.toFixed(2)} qty=${meta.qty} action=${isInitial ? 'INITIAL' : 'REPLACE'}`,
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // Option A — circuit breaker increment. When this participant has
+            // now failed STOP_MANAGER_CIRCUIT_THRESHOLD times in a row, open
+            // the circuit (surface on dashboard) and stop retrying until the
+            // next FILLED resets the counter.
+            const newFailures = failures + 1;
+            runtime.consecutiveStopFailures = newFailures;
+            this.positionRuntime.set(participant.id, runtime);
+            if (newFailures >= STOP_MANAGER_CIRCUIT_THRESHOLD) {
+              this.stopManagerCircuitOpen.set(participant.id, msg);
+              this.appendExchangeStopAudit({
+                cycleId: cycle.id,
+                userId,
+                participantId: participant.id,
+                side: meta.direction,
+                entry: fillPrice,
+                peakMarginPct: runtime.peakMarginPct,
+                prevRung: prevRungIdx,
+                newRung: newRungIdx,
+                oldStop: prevStopPrice ?? null,
+                newStop: trailStop,
+                bitfinexOldOrderId: prevStopOrderId ?? null,
+                bitfinexNewOrderId: null,
+                action: 'CIRCUIT_OPEN',
+                error: msg,
+              });
+              this.logger.error(
+                `STOP_MANAGER_CIRCUIT_OPEN ${userId} cycle=${cycle.id} participant=${participant.id} — ${newFailures} consecutive failures, lastError=${msg}`,
+              );
+            }
+            this.logger.warn(`Trail stop update ${userId}: ${msg}`);
+          }
         }
       }
     }
@@ -5678,9 +5938,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const closeQty = Math.min(meta.qty, Math.abs(positionAmount));
 
     try {
-      if (meta.stopOrderId) {
+      // Option A — cancel BOTH the persisted meta.stopOrderId AND any tracked
+      // currentStopOrderId before market-closing. With dynamic stops on, the
+      // tracked id is the authoritative live stop (meta.stopOrderId can lag by
+      // a tick). Showcase EXIT is authoritative — never let a stale protective
+      // stop fire mid-close and realize the wrong rung.
+      const runtimeTrack = this.positionRuntime.get(participantId);
+      const trackedStopId = runtimeTrack?.currentStopOrderId;
+      const stopIdsToCancel = new Set<number>();
+      if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
+      if (trackedStopId) stopIdsToCancel.add(trackedStopId);
+      for (const stopId of stopIdsToCancel) {
         try {
-          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
+          await this.activeTrading.cancelOrder(creds, stopId);
         } catch {
           /* may have fired */
         }
@@ -5760,6 +6030,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.showcaseVanishedMisses.delete(participantId);
       this.showcasePositionAbsentMisses.delete(participantId);
       this.showcaseFlatOpenSince.delete(participantId);
+      // Option A — clear dynamic-stops circuit state on full exit.
+      this.stopManagerCircuitOpen.delete(participantId);
     }
   }
 
@@ -6336,8 +6608,94 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       lastChaseAtMs: meta.lastChaseAtMs ?? 0,
       lastProfitLockFloor: meta.profitLockFloor,
       filledRecorded: true,
+      // Option A — seed tracked stop from persisted meta so cancel-then-replace
+      // has the right previous order id on the very first tick after FILLED.
+      currentStopOrderId: meta.stopOrderId,
+      currentStopPrice: undefined,
+      currentRungIdx: undefined,
+      consecutiveStopFailures: 0,
     };
   }
+
+  /**
+   * Option A — structured audit log for every protective-stop adjustment. One
+   * JSON line per action, appended to logs/exchange-stop-manager.log. Fires
+   * for INITIAL / REPLACE / SKIP_LOOSEN / SKIP_SAME / RECONSTRUCTED so the
+   * full decision trail (not only successful writes) is reconstructable.
+   * Best-effort: append errors are surfaced via logger.warn but never throw.
+   */
+  private appendExchangeStopAudit(entry: {
+    cycleId: string;
+    userId: string;
+    participantId: string;
+    side: 'LONG' | 'SHORT';
+    entry: number;
+    peakMarginPct: number;
+    prevRung: number | null;
+    newRung: number | null;
+    oldStop: number | null;
+    newStop: number | null;
+    bitfinexOldOrderId: number | null;
+    bitfinexNewOrderId: number | null;
+    action:
+      | 'INITIAL'
+      | 'REPLACE'
+      | 'SKIP_LOOSEN'
+      | 'SKIP_SAME'
+      | 'SKIP_CIRCUIT_OPEN'
+      | 'RECONSTRUCTED'
+      | 'CIRCUIT_OPEN';
+    error?: string;
+  }): void {
+    try {
+      // Lazy require so the unit-test path (and any non-Node main) doesn't pay
+      // the cost unless the dynamic-stops feature is actually in use.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs') as typeof import('fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('path') as typeof import('path');
+      const logDir = path.resolve(process.cwd(), 'logs');
+      try {
+        fs.mkdirSync(logDir, { recursive: true });
+      } catch {
+        /* may already exist or be unwritable — best-effort */
+      }
+      const line =
+        JSON.stringify({
+          tag: '[SCENARIO_C]',
+          cycle: entry.cycleId,
+          user: entry.userId,
+          participant: entry.participantId,
+          side: entry.side,
+          entry: entry.entry,
+          peak_margin_pct: Math.round(entry.peakMarginPct * 100) / 100,
+          prev_rung: entry.prevRung,
+          new_rung: entry.newRung,
+          old_stop: entry.oldStop,
+          new_stop: entry.newStop,
+          bitfinex_old_order_id: entry.bitfinexOldOrderId,
+          bitfinex_new_order_id: entry.bitfinexNewOrderId,
+          action: entry.action,
+          error: entry.error,
+          ts: new Date().toISOString(),
+        }) + '\n';
+      fs.appendFileSync(path.resolve(logDir, 'exchange-stop-manager.log'), line, {
+        flag: 'a',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `exchange-stop-manager audit write failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Option A — circuit breaker state, surfaced on the instance dashboard via
+   * `dashboardState.stopManagerCircuitOpen` (a map of participantId → last
+   * error). Keyed by participantId → per-account isolation. Reset by the
+   * FILLED handler (consecutiveStopFailures = 0 + delete from this map).
+   */
+  private readonly stopManagerCircuitOpen = new Map<string, string>();
 
   private async hasParticipantExited(participantId: string): Promise<boolean> {
     const participant = await this.prisma.signalCycleParticipant.findUnique({
