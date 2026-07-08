@@ -141,12 +141,7 @@ export class FounderOsController {
 
   @Post('memory/sync')
   syncMemory(@CurrentUser() user: AuthUser) {
-    // TEMPORARY hard block — unblocks Vercel pipeline. Re-enable in 24h.
-    // The service-level 24h cooldown in FounderOsMemoryService throttles
-    // things long-term, but until that code reaches production, the
-    // currently-deployed API keeps pushing every ~15 min and cancels every
-    // build. Return success-without-pushing so the caller doesn't error.
-    return { synced: false, reason: 'pipeline_protected', retryAfterMinutes: 1440 };
+    return this.founderOs.syncProjectMemory(user.id);
   }
 
   @Post('integrations/connect')
