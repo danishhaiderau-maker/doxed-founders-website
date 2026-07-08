@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-hotfix(memory-sync): hard-block endpoint until prod catches up
+fix(memory-sync): permanently disable 15-min auto-push interval
 
 ## Last Activity
 
