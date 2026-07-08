@@ -1,3 +1,4 @@
+// deploy-trigger: 2026-07-08 memory-sync throttle rollout
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
