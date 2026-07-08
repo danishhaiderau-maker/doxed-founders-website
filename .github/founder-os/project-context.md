@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-fix(home-stack+dashboard): autostart guard, CSV orderId export, drift label
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
