@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (10 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(api): dashboard botConnected uses same resilient path as agent-status
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
