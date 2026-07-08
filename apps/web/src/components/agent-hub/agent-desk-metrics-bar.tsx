@@ -268,7 +268,7 @@ export function AgentDeskMetricsBar({
         hint: `${sessionHint} · ${formatPercent(userAgent.netReturnPct ?? 0)}`,
       },
       {
-        label: 'Showcase P&L (ref)',
+        label: 'Drift vs showcase',
         value: drift == null ? '—' : `${drift >= 0 ? '+' : ''}${formatUsd(drift, 2)}`,
         accent: drift == null ? 'text-zinc-300' : pnlColor(drift),
         hint: drift == null ? 'Start Live Copy to track' : 'Drift vs showcase · 0 = perfect mirror',
