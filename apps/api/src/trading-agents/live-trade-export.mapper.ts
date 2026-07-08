@@ -106,9 +106,11 @@ function mapEvent(payload: unknown, eventType: string, createdAt: Date): LiveTra
     bitfinexOrderId:
       p.bitfinex_order_id != null
         ? String(p.bitfinex_order_id)
-        : p.order_id != null
-          ? String(p.order_id)
-          : null,
+        : p.bitfinexOrderId != null
+          ? String(p.bitfinexOrderId)
+          : p.order_id != null
+            ? String(p.order_id)
+            : null,
     detail: typeof p.event === 'string' ? p.event : null,
   };
 }
