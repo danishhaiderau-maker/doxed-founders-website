@@ -66,9 +66,13 @@ env.DEMO_MODE_ENABLED = 'true';
 env.LIVE_TRADING_ENABLED = 'False';
 env.FUNDING_SIMULATION_ENABLED = 'True';
 env.DEMO_CASSETTE_MODE = CAPTURE ? 'capture' : 'replay';
-env.DEMO_RUN_STARTED_MS = String(Date.now());
+// Backdate slightly so relay events written during this run are always
+// included by API since-filters even with clock skew / probe latency.
+env.DEMO_RUN_STARTED_MS = String(Date.now() - 5_000);
 env.DEMO_BOT_CWD = env.DEMO_BOT_CWD || BOT_DIR;
 env.DEMO_REPORT_DIR = env.DEMO_REPORT_DIR || LOG_DIR;
+// Default skip public tunnel for local harness runs (tunnel often 429/502).
+if (env.DEMO_SKIP_TUNNEL == null || env.DEMO_SKIP_TUNNEL === '') env.DEMO_SKIP_TUNNEL = '1';
 if (!env.DEMO_BOT_URL) env.DEMO_BOT_URL = 'http://127.0.0.1:7002';
 if (!env.DEMO_API_URL) env.DEMO_API_URL = 'http://127.0.0.1:4000';
 if (!env.DEMO_SEED_SCALE) env.DEMO_SEED_SCALE = 'small';
@@ -206,9 +210,30 @@ async function resetAndSeed() {
 }
 
 async function ensureBotRunning() {
+  // Attach only if the existing bot is already in a safe demo-paused state.
+  // Otherwise kill/replace with demo_mode.py so EXECUTION_PAUSED=True takes effect.
   try {
-    const res = await fetch(`${BOT_URL}/api/ping`, { signal: AbortSignal.timeout(3000) });
-    if (res.ok) { console.log(`[demo-harness] bot already running at ${BOT_URL} — attaching`); return null; }
+    const ping = await fetch(`${BOT_URL}/api/ping`, { signal: AbortSignal.timeout(3000) });
+    if (ping.ok) {
+      let pausedSafe = false;
+      try {
+        const st = await fetch(`${BOT_URL}/api/state`, {
+          signal: AbortSignal.timeout(8000),
+          headers: { Accept: 'application/json' },
+        });
+        if (st.ok) {
+          const data = await st.json();
+          pausedSafe = data?.execution_paused === true || data?.execution_paused === 'SIMULATION_ONLY';
+        }
+      } catch {}
+      if (pausedSafe && env.DEMO_FORCE_BOT_RESTART !== '1') {
+        console.log(`[demo-harness] bot already running at ${BOT_URL} (paused) — attaching`);
+        return null;
+      }
+      console.log(`[demo-harness] bot on ${BOT_URL} is not demo-paused — restarting via demo_mode.py`);
+      await killBotOnPort(7002);
+      await sleep(2000);
+    }
   } catch {}
   const botLog = join(LOG_DIR, 'bot.log');
   const logStream = (await import('node:fs')).createWriteStream(botLog, { flags: 'w' });
@@ -221,12 +246,46 @@ async function ensureBotRunning() {
   return child;
 }
 
+async function killBotOnPort(port) {
+  // Best-effort Windows/Unix kill of whatever owns the bot port, plus known
+  // showcase entrypoints (btc_conservative_agent.py / bot.py / demo_mode.py)
+  // that a supervisor may respawn onto :7002.
+  try {
+    const { execSync } = await import('node:child_process');
+    if (process.platform === 'win32') {
+      try {
+        execSync(
+          `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='python.exe'\\" | Where-Object { $_.CommandLine -match 'btc_conservative_agent|demo_mode\\.py|services\\\\btc-conservative-agent\\\\bot\\.py' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
+          { stdio: 'ignore' },
+        );
+      } catch {}
+      try {
+        const out = execSync(`netstat -ano | findstr ":${port}"`, { encoding: 'utf8' });
+        const pids = new Set();
+        for (const line of out.split(/\r?\n/)) {
+          if (!/LISTENING/.test(line)) continue;
+          const m = line.trim().match(/(\d+)\s*$/);
+          if (m) pids.add(m[1]);
+        }
+        for (const pid of pids) {
+          try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch {}
+        }
+      } catch {}
+    } else {
+      try { execSync(`fuser -k ${port}/tcp`, { stdio: 'ignore' }); } catch {}
+    }
+  } catch {}
+}
+
 async function replayRelayCassettes() {
   const relaySecret = env.BOT_CONTROL_SECRET || '';
   if (!relaySecret) {
     console.log('[demo-harness] BOT_CONTROL_SECRET not set — skipping relay replay (set it to enable)');
     return;
   }
+  // Same trade_id across the cassette sequence so the API builds one complete
+  // signal cycle (APPROVE_PENDING -> ORDER_PLACED -> POSITION_CLOSED).
+  const cycleTradeId = `demo-cycle-${env.DEMO_RUN_STARTED_MS || Date.now()}`;
   const events = ['approve_pending_sample', 'order_placed_sample', 'limit_updated_sample', 'position_closed_sample'];
   let pushed = 0;
   for (const key of events) {
@@ -234,8 +293,7 @@ async function replayRelayCassettes() {
     if (!existsSync(cassettePath)) { console.log(`[demo-harness] relay cassette ${key} missing — skipping`); continue; }
     const cassette = JSON.parse(readFileSync(cassettePath, 'utf8'));
     const payload = cassette.response;
-    const tradeId = `demo-${env.DEMO_RUN_STARTED_MS}-${key}`;
-    payload.trade_id = tradeId;
+    payload.trade_id = cycleTradeId;
     payload.ts = new Date().toISOString();
     try {
       const res = await fetch(`${API_URL}/api/trading-agents/conservative-btc/showcase-relay-event`, {
@@ -245,12 +303,12 @@ async function replayRelayCassettes() {
         signal: AbortSignal.timeout(15_000),
       });
       const body = await safeJson(res).catch(() => null);
-      if (res.ok) { pushed += 1; console.log(`[demo-harness] relay ${payload.event} trade=${tradeId.slice(0, 24)} -> ok=${body?.ok ?? true}`); }
+      if (res.ok) { pushed += 1; console.log(`[demo-harness] relay ${payload.event} trade=${cycleTradeId.slice(0, 28)} -> ok=${body?.ok ?? true}`); }
       else { console.log(`[demo-harness] relay ${payload.event} -> HTTP ${res.status} ${JSON.stringify(body).slice(0, 200)}`); }
     } catch (err) { console.log(`[demo-harness] relay ${payload.event} failed: ${err?.message ?? err}`); }
     await sleep(800);
   }
-  console.log(`[demo-harness] relay cassette replay: ${pushed}/${events.length} events pushed`);
+  console.log(`[demo-harness] relay cassette replay: ${pushed}/${events.length} events pushed (cycle=${cycleTradeId})`);
 }
 
 async function triggerAnalyzer() {
@@ -267,7 +325,14 @@ async function triggerAnalyzer() {
 
 async function runHarnessProbe() {
   const url = new URL(`${API_URL}/api/admin/demo/harness/internal`);
-  const body = { token: HARNESS_TOKEN, skipStress: !WANT_STRESS };
+  const body = {
+    token: HARNESS_TOKEN,
+    skipStress: !WANT_STRESS,
+    // Align API-side since-filters + artifact paths with this orchestrator run.
+    demoRunStartedMs: Number(env.DEMO_RUN_STARTED_MS || Date.now()),
+    demoSkipTunnel: String(env.DEMO_SKIP_TUNNEL || '1') === '1',
+    demoBotCwd: env.DEMO_BOT_CWD || BOT_DIR,
+  };
   if (WANT_STRESS) {
     body.stressRps = Number(env.DEMO_STRESS_RPS ?? 20);
     body.stressDurationS = Number(env.DEMO_STRESS_DURATION_S ?? 10);
@@ -315,7 +380,19 @@ function printScorecardSummary(scorecard, durationS) {
 }
 
 function jsonHeaders() {
-  return { 'Content-Type': 'application/json', ...(HARNESS_TOKEN ? { 'x-demo-harness-token': HARNESS_TOKEN } : {}) };
+  // Seed/reset/smoke routes sit behind global JwtAuthGuard + AdminGuard.
+  // Prefer ADMIN_SYNC_JWT (ops admin token) or DEMO_ADMIN_JWT when present.
+  // Read from process.env at call time (not the frozen module copy) and strip BOM.
+  const raw = (process.env.ADMIN_SYNC_JWT || process.env.DEMO_ADMIN_JWT || env.ADMIN_SYNC_JWT || env.DEMO_ADMIN_JWT || '');
+  const adminJwt = String(raw).replace(/^\uFEFF/, '').replace(/\s+/g, '').trim();
+  if (!adminJwt) {
+    console.log('[demo-harness] WARN: no ADMIN_SYNC_JWT/DEMO_ADMIN_JWT — seed/reset will 401');
+  }
+  return {
+    'Content-Type': 'application/json',
+    ...(HARNESS_TOKEN ? { 'x-demo-harness-token': HARNESS_TOKEN } : {}),
+    ...(adminJwt ? { Authorization: `Bearer ${adminJwt}` } : {}),
+  };
 }
 async function safeJson(res) { try { return await res.json(); } catch { return null; } }
 async function safeText(res) { try { return await res.text(); } catch { return ''; } }

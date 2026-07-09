@@ -3341,6 +3341,18 @@ def set_execution_paused(reason: str):
     global last_console_update
     with state_lock:
         if reason == "":
+            # [DEMO_PAUSE_2026-07-08] Keep SIMULATION_ONLY sticky while
+            # EXECUTION_PAUSED=True (demo_mode.py). Soft recovery paths must
+            # not clear the demo/sim pause gate.
+            if (
+                str(os.environ.get("EXECUTION_PAUSED", "")).strip().lower() == "true"
+                and state.get("execution_reason") == "SIMULATION_ONLY"
+            ):
+                logger.info(
+                    "[RECOVERY] ignored clear — EXECUTION_PAUSED=True keeps SIMULATION_ONLY "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+                return
             state["execution_paused"] = False
             state["execution_reason"] = ""
             state["_pause_priority"] = 0
@@ -5932,7 +5944,17 @@ state = {
     "reconcile_adopt_log": [],       # ring buffer (last 50) of {ts, oid, action, reason}
 }
 shutdown_event = threading.Event()
-PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
+PAUSE_PRIORITIES = {
+    "STALE_DATA_HARD_STOP": 50,
+    "THREAD_CRASH": 1,
+    "QUEUE_OVERFLOW": 60,
+    "": 0,
+    "CSV_FAILURE": 100,
+    "PRELOAD_FAILED": 100,
+    "ADMIN_MANUAL": 200,
+    # Sticky demo/sim pause — above soft recovery clears, below admin manual.
+    "SIMULATION_ONLY": 150,
+}
 
 def get_edge_threshold():
     with state_lock:
@@ -16532,7 +16554,9 @@ def _emergency_api_guard():
     ip = _client_ip()
 
     # General per-IP rate limit on every /api/* hit (read + write).
-    if path.startswith("/api/"):
+    # Local operator (127.0.0.1 / ::1) is exempt — demo harness + dashboard
+    # polls would otherwise trip the 60/min cap and fail bot_ping/state checks.
+    if path.startswith("/api/") and not _is_local_operator(ip):
         if not _rate_check(_API_RATE_LOG, ip, _API_RATE_WINDOW_S, _API_RATE_MAX_PER_IP):
             resp = jsonify({"error": "rate limit exceeded", "retry_after_s": _API_RATE_WINDOW_S})
             resp.status_code = 429
