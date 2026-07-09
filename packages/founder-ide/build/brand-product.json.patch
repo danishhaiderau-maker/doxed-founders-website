@@ -1,0 +1,66 @@
+# jq filter: merge Founder IDE branding into product.json.
+#
+# Usage (inside prepare-founder-ide.sh, after VSCodium's prepare_vscode.sh):
+#   jq --from-file brand-product.json.patch product.json > product.json.founder \
+#     && mv product.json.founder product.json
+#
+# This filter MERGES our overrides into the existing product.json. Any key
+# we set wins; any key we don't touch is inherited from VSCodium/VS Code.
+#
+# The GUIDs below are FRESH (generated 2026-07-10) and do NOT collide with
+# VSCodium or VS Code — so all three install side-by-side. Do not reuse
+# VSCodium's GUIDs. If you regenerate them, update assets/product.json.template
+# and installer/founder-stack.iss too.
+
+# Names
+.nameShort = "Founder IDE"
+| .nameLong = "Founder IDE"
+| .applicationName = "Founder IDE"
+| .dataFolderName = ".founder-ide"
+| .win32MutexName = "founderidemutex"
+| .win32DirName = "Founder IDE"
+| .win32RegValueName = "Founder IDE"
+| .win32AppUserModelId = "digital.doxxedcrypto.FounderIDE"
+| .win32ShellNameShort = "Founder IDE"
+| .urlProtocol = "founder-ide"
+| .tunnelApplicationName = "founder-ide-tunnel"
+
+# Fresh Windows GUIDs (side-by-side with VS Code / VSCodium)
+| .win32AppId = "{39F6C958-6DA1-4BAE-82D5-F0952FE270BD}"
+| .win32x64UserAppId = "{436F5001-DD46-4F41-8D93-89EF9716CC07}"
+
+# Open VSX marketplace (strip Microsoft marketplace URLs)
+| .extensionsGallery = {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item",
+    "resourceUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+    "extensionUrlTemplate": "https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest"
+  }
+| .linkProtectionTrustedDomains = [
+    "https://open-vsx.org",
+    "https://doxxedcrypto.digital",
+    "https://github.com",
+    "https://githubusercontent.com"
+  ]
+
+# Brand URLs
+| .documentationUrl = "https://doxxedcrypto.digital/docs/founder-ide"
+| .keyboardShortcutsUrl = "https://doxxedcrypto.digital/docs/founder-ide/shortcuts"
+| .introductoryVideosUrl = "https://doxxedcrypto.digital/docs/founder-ide/videos"
+| .tipsAndTricksUrl = "https://doxxedcrypto.digital/docs/founder-ide/tips"
+| .licenseUrl = "https://github.com/danishhaiderau-maker/doxedcryptofounder/blob/master/LICENSE"
+
+# Built-in Founder OS chat extension (shipped inside the IDE, no Open VSX fetch)
+# `FOUNDER_IDE_EXTENSION_VSIX` is exported by prepare-founder-ide.sh and points
+# at the .vsix produced by `npm run package` in packages/founder-ide-extension/.
+| .builtInExtensions = (
+    (.builtInExtensions // [])
+    + [
+      {
+        "name": "founder-ide-extension",
+        "publisher": "doxxedcrypto",
+        "version": env.FOUNDER_IDE_EXTENSION_VERSION // "0.0.1",
+        "vsix": env.FOUNDER_IDE_EXTENSION_VSIX // "founder-ide-extension.vsix"
+      }
+    ]
+  )
