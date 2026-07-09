@@ -117,9 +117,24 @@ export class DemoController {
   @Post('harness/internal')
   runHarnessInternal(
     @Query('token') token: string | undefined,
-    @Body() body?: { token?: string; stressRps?: number; stressDurationS?: number; skipStress?: boolean },
+    @Body()
+    body?: {
+      token?: string;
+      stressRps?: number;
+      stressDurationS?: number;
+      skipStress?: boolean;
+      demoRunStartedMs?: number;
+      demoSkipTunnel?: boolean;
+      demoBotCwd?: string;
+    },
   ): Promise<ReadinessScorecard> {
     assertHarnessToken(token ?? body?.token);
+    // Orchestrator-owned env that the API process may not have inherited.
+    if (body?.demoRunStartedMs != null && Number.isFinite(body.demoRunStartedMs)) {
+      process.env.DEMO_RUN_STARTED_MS = String(body.demoRunStartedMs);
+    }
+    if (body?.demoSkipTunnel === true) process.env.DEMO_SKIP_TUNNEL = '1';
+    if (body?.demoBotCwd?.trim()) process.env.DEMO_BOT_CWD = body.demoBotCwd.trim();
     return this.harness.runFull({
       stressRps: body?.stressRps,
       stressDurationS: body?.stressDurationS,

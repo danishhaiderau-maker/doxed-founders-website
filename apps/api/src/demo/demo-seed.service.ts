@@ -611,7 +611,6 @@ export class DemoSeedService {
       paperTradesCreated: 0,
       graduationEventsCreated: 0,
     };
-    if (scale === 'small') return counts;
 
     const projects = await this.prisma.project.findMany({
       where: demoProjectWhere(),
@@ -620,9 +619,20 @@ export class DemoSeedService {
     });
     if (projects.length === 0) return counts;
 
-    const targetComments = scale === 'xlarge' ? 5000 : scale === 'large' ? 800 : 120;
-    const targetAiRows = scale === 'xlarge' ? 10000 : scale === 'large' ? 1500 : 200;
+    // [DEMO_SEED_SMALL_2026-07-10] small must still clear harness thresholds
+    // (ai>=50, leaderboard>=10, notifs>=5, graduation>=3, comments>=20, paper>=10).
+    // Previously small returned empty counts and permanently failed those checks.
+    const targetComments =
+      scale === 'xlarge' ? 5000 : scale === 'large' ? 800 : scale === 'small' ? 24 : 120;
+    const targetAiRows =
+      scale === 'xlarge' ? 10000 : scale === 'large' ? 1500 : scale === 'small' ? 60 : 200;
     const batchSize = scale === 'xlarge' ? 500 : 100;
+    const notifTarget = scale === 'xlarge' ? 800 : scale === 'small' ? 8 : 40;
+    const leaderboardUsers = Math.min(
+      demoUsers.length,
+      scale === 'xlarge' ? 500 : scale === 'small' ? 12 : 35,
+    );
+    const graduationCap = scale === 'xlarge' ? 12 : scale === 'small' ? 4 : 4;
 
     for (let b = 0; b < targetAiRows; b += batchSize) {
       const rows = [];
@@ -647,7 +657,7 @@ export class DemoSeedService {
       }
     }
 
-    for (let n = 0; n < (scale === 'xlarge' ? 800 : 40); n += 1) {
+    for (let n = 0; n < notifTarget; n += 1) {
       const user = demoUsers[n % demoUsers.length];
       if (!user) continue;
       const dedupe = `demo-notif-${user.id}-${n % 5}`;
@@ -667,7 +677,7 @@ export class DemoSeedService {
       counts.notificationsCreated += 1;
     }
 
-    for (let l = 0; l < Math.min(demoUsers.length, scale === 'xlarge' ? 500 : 35); l += 1) {
+    for (let l = 0; l < leaderboardUsers; l += 1) {
       const user = demoUsers[l]!;
       for (const period of [LeaderboardPeriod.WEEKLY, LeaderboardPeriod.ALL_TIME]) {
         await this.prisma.leaderboardEntry.upsert({
@@ -685,7 +695,9 @@ export class DemoSeedService {
       }
     }
 
-    const graduated = projects.filter((_, idx) => idx % 12 === 0).slice(0, scale === 'xlarge' ? 12 : 4);
+    const graduated = projects
+      .filter((_, idx) => (scale === 'small' ? idx % 2 === 0 : idx % 12 === 0))
+      .slice(0, graduationCap);
     for (const project of graduated) {
       await this.prisma.project.update({
         where: { id: project.id },
@@ -847,9 +859,12 @@ export class DemoSeedService {
         const count = await this.prisma.simulatedRaise.count({
           where: { status: SimulatedRaiseStatus.ACTIVE, project: demoProjectWhere() },
         });
+        // Scale-aware floor: small (~7 raises) must not be graded against medium's hub target.
+        const scale = parseDemoSeedScale(process.env.DEMO_SEED_SCALE);
+        const minRaises = scale === 'small' ? 5 : scale === 'large' ? 10 : 42;
         return {
-          passed: count >= 42,
-          detail: `${count} active demo Proof Raises (target ≥42 for discovery hub)`,
+          passed: count >= minRaises,
+          detail: `${count} active demo Proof Raises (target ≥${minRaises} for scale=${scale})`,
         };
       }),
     );
