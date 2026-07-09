@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bot): honor EXECUTION_PAUSED=True env for demo/sim startup
 
 ## Last Activity
 
