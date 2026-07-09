@@ -26,6 +26,7 @@ import {
   type GatewayMessage,
   callGateway,
 } from './gateway-client';
+import { buildSystemPrompt } from './memory';
 
 type ChatInformation = vscode.LanguageModelChatInformation;
 
@@ -98,9 +99,11 @@ export class FounderOsChatProvider
   private readonly events: FounderOsChatProviderEvents;
   private readonly requestTimeoutMs: number;
   private readonly founderOsMetadata: boolean;
+  private readonly creds: FounderOsCredentials;
 
   constructor(creds: FounderOsCredentials, events: FounderOsChatProviderEvents = {}) {
     this.events = events;
+    this.creds = creds;
     const cfg = vscode.workspace.getConfiguration('founderOs');
     this.requestTimeoutMs = cfg.get<number>('requestTimeoutMs') ?? 120_000;
     // Metadata pre-line is opt-in. Server may not emit it yet; that's fine —
@@ -135,12 +138,33 @@ export class FounderOsChatProvider
     // Convert VS Code messages → OpenAI-compatible messages. VS Code always
     // sends a System message first when the Chat participant defines one; we
     // pass it through unchanged so Memory Engine / system prompt injection
-    // (Phase 3) can later prepend to it.
+    // (Phase 4) can prepend to it.
     const gatewayMessages: GatewayMessage[] = messages.map((m) => ({
       role: roleToString(m.role),
       content: messageContentToText(m.content),
       name: m.name,
     }));
+
+    // Memory Engine injection (design report §8.3). Fetch project + founder
+    // memory for the current workspace and prepend it as a system message.
+    // Best-effort: never breaks chat if the endpoint is missing or slow.
+    try {
+      const memory = await buildSystemPrompt(this.creds, token);
+      if (memory.hasMemory && memory.text.length > 0) {
+        // If the first message is already a system message, merge so we don't
+        // send two system blocks (some providers dislike that).
+        if (gatewayMessages.length > 0 && gatewayMessages[0].role === 'system') {
+          gatewayMessages[0] = {
+            ...gatewayMessages[0],
+            content: `${memory.text}\n\n${gatewayMessages[0].content ?? ''}`,
+          };
+        } else {
+          gatewayMessages.unshift({ role: 'system', content: memory.text });
+        }
+      }
+    } catch {
+      // Memory fetch must never block the chat.
+    }
 
     let ok = false;
     let errorMessage: string | undefined;

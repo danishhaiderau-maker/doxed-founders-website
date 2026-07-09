@@ -2,7 +2,7 @@
   "name": "founder-ide-extension",
   "displayName": "Founder OS Chat",
   "description": "Registers the Founder OS AI Gateway as a first-class VS Code chat model provider. Streams tokens from your own routing layer into the built-in Chat view. Works in Cursor, VSCodium, stock VS Code, and Windsurf.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -41,6 +41,99 @@
         ]
       }
     ],
+    "languageModelTools": [
+      {
+        "name": "founder.editFile",
+        "displayName": "Edit File",
+        "modelDescription": "Edit a file in the workspace by replacing oldText with newText. Use absolute paths. Set createIfMissing=true to create the file if it does not exist. The change is applied via vscode.workspace.applyEdit and is reviewable in the editor.",
+        "userDescription": "Edit or create a workspace file (Founder OS)",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "editFile",
+        "icon": "$(edit)",
+        "tags": ["founder-os", "file-edit"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "Absolute or workspace-relative path of the file to edit."
+            },
+            "oldText": {
+              "type": "string",
+              "description": "The exact text to replace. Empty string means append to end of file."
+            },
+            "newText": {
+              "type": "string",
+              "description": "The new text to insert in place of oldText."
+            },
+            "createIfMissing": {
+              "type": "boolean",
+              "description": "If true, create the file when it does not exist.",
+              "default": false
+            }
+          },
+          "required": ["filePath", "oldText", "newText"]
+        }
+      },
+      {
+        "name": "founder.runCommand",
+        "displayName": "Run Command",
+        "modelDescription": "Run a shell command in a VS Code terminal and return its combined stdout+stderr output. The command runs in the workspace root by default. Use for build, test, lint, and inspection commands. Confirm with the user before destructive commands.",
+        "userDescription": "Run a terminal command and capture output (Founder OS)",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "runCommand",
+        "icon": "$(terminal)",
+        "tags": ["founder-os", "terminal"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The shell command to execute."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Optional working directory (absolute or workspace-relative). Defaults to the workspace root."
+            },
+            "timeoutMs": {
+              "type": "number",
+              "description": "Max milliseconds to wait for completion. Default 30000, max 300000.",
+              "default": 30000
+            }
+          },
+          "required": ["command"]
+        }
+      },
+      {
+        "name": "founder.readWorkspace",
+        "displayName": "Read Workspace",
+        "modelDescription": "Walk the current workspace file tree and return a compact summary (respecting common ignore patterns like node_modules and .git). Optionally include the full contents of a small set of files via readFiles. Use this to ground yourself in the repo structure before editing.",
+        "userDescription": "Read the workspace file tree (Founder OS)",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "readWorkspace",
+        "icon": "$(folder-opened)",
+        "tags": ["founder-os", "workspace"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "subdir": {
+              "type": "string",
+              "description": "Optional workspace-relative sub-directory to walk. Defaults to the workspace root."
+            },
+            "readFiles": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional list of workspace-relative files whose full contents to include (max 10)."
+            },
+            "maxTreeEntries": {
+              "type": "number",
+              "description": "Max file-tree entries to return. Default 400, max 5000.",
+              "default": 400
+            }
+          }
+        }
+      }
+    ],
     "commands": [
       {
         "command": "founderOs.manage",
@@ -53,6 +146,18 @@
       {
         "command": "founderOs.selectModel",
         "title": "Founder OS: Select model alias"
+      },
+      {
+        "command": "founderOs.selectProfile",
+        "title": "Founder OS: Select execution profile"
+      },
+      {
+        "command": "founderOs.showCostBreakdown",
+        "title": "Founder OS: Show DDollar cost breakdown"
+      },
+      {
+        "command": "founderOs.resetCost",
+        "title": "Founder OS: Reset DDollar session counter"
       },
       {
         "command": "founderOs.openVaultConfig",
