@@ -22,6 +22,7 @@ import {
 } from './ai-proxy-runtime.service';
 import { AiProxyUsageService } from './ai-proxy-usage.service';
 import { ChatCompletionRequestDto } from './dto/ai-proxy.dto';
+import { AI_PROXY_DDOLLAR_COST } from '@dcf/utils';
 import type { Response, Request } from 'express';
 import { Readable } from 'node:stream';
 
@@ -134,6 +135,25 @@ export class AiProxyController {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+
+    // Optional non-standard metadata pre-line for the Founder IDE extension.
+    // Emitted before the upstream SSE chunks so the extension's status bar can
+    // show the route + per-request DDollar cost. Standard OpenAI clients ignore
+    // this line (they only parse `choices[0].delta`). See
+    // docs/FOUNDER-IDE-FORK-PLAN.md §5.3 / §8.2.
+    if (body.founder_os_metadata) {
+      const ddollarCost = AI_PROXY_DDOLLAR_COST[result.tier] ?? 0;
+      const metaLine = `data: ${JSON.stringify({
+        founderOs: {
+          requestId: route.requestId,
+          tier: result.tier,
+          provider: result.provider,
+          model: result.model,
+          ddollarCost,
+        },
+      })}\n\n`;
+      res.write(metaLine);
+    }
 
     const nodeStream = Readable.fromWeb(result.body as unknown as Parameters<typeof Readable.fromWeb>[0]);
     nodeStream.pipe(res);
