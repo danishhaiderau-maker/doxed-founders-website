@@ -24533,6 +24533,13 @@ def main():
             state["ohlcv_ready"] = True
     if LIVE_TRADING_ENABLED:
         set_execution_paused("SIMULATION_ONLY")
+    # [DEMO_PAUSE_2026-07-08] Honor EXECUTION_PAUSED=True env so demo_mode.py
+    # can force the bot into a safe paused state on startup. Without this,
+    # a LIVE_TRADING_ENABLED=False bot starts unpaused (the original gate only
+    # paused when live trading was enabled). Demo / sim runs set
+    # EXECUTION_PAUSED=True via demo_mode.py configure_demo_env().
+    if str(os.environ.get("EXECUTION_PAUSED", "")).strip().lower() == "true":
+        set_execution_paused("SIMULATION_ONLY")
     load_positions()
     rebuild_state_from_snapshots()
     reconcile_stale_signals()
