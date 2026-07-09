@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(ai-proxy): emit founderOs SSE metadata pre-line for Founder IDE extension
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
