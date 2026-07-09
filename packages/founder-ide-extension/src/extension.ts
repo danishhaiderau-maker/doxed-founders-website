@@ -3,9 +3,11 @@
  *
  * On activation:
  *   1. Resolve credentials (settings → `~/FounderVault/node-config.json`).
- *   2. If found, register the `LanguageModelChatProvider` + chat participant.
- *   3. If missing, show a "not paired" notification + status bar.
- *   4. Always wire commands and a status bar item so the user can re-pair
+ *   2. Register the `LanguageModelChatProvider` + agentic tools + chat participant.
+ *   3. Wire the execution-profile selector (status bar + QuickPick).
+ *   4. Wire the DDollar cost tracker (status bar + breakdown).
+ *   5. If creds missing, show a "not paired" notification + status bar.
+ *   6. Always wire commands and a status bar item so the user can re-pair
  *      without reloading.
  */
 import * as vscode from 'vscode';
@@ -20,26 +22,59 @@ import {
 } from './credentials';
 import { FounderOsChatProvider } from './chat-provider';
 import { FOUNDER_OS_MODELS, FOUNDER_OS_VENDOR } from './models';
+import { editFileTool } from './tools/edit-file';
+import { runCommandTool } from './tools/run-command';
+import { readWorkspaceTool } from './tools/read-workspace';
+import { ProfileManager } from './profile-manager';
+import { CostTracker } from './cost-tracker';
+import { registerFounderOsChatParticipant } from './chat-participant';
 
-let statusBar: vscode.StatusBarItem | undefined;
+let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredProvider: vscode.Disposable | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
+let profileManager: ProfileManager | undefined;
+let costTracker: CostTracker | undefined;
 let currentCreds: FounderOsCredentials | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
-  statusBar = vscode.window.createStatusBarItem(
+  // Status bar (connection state) ----------------------------------------------------
+  connectionStatusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100,
   );
-  statusBar.command = 'founderOs.manage';
-  context.subscriptions.push(statusBar);
+  connectionStatusBar.command = 'founderOs.manage';
+  context.subscriptions.push(connectionStatusBar);
 
-  // Commands -----------------------------------------------------------------
+  // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
+  profileManager = new ProfileManager(context);
+  costTracker = new CostTracker();
+  context.subscriptions.push(profileManager, costTracker);
+  profileManager.show();
+  costTracker.show();
+
+  // Agentic tools (registered once; available to any chat participant / model) ------
+  context.subscriptions.push(
+    vscode.lm.registerTool('founder.editFile', editFileTool),
+    vscode.lm.registerTool('founder.runCommand', runCommandTool),
+    vscode.lm.registerTool('founder.readWorkspace', readWorkspaceTool),
+  );
+
+  // Commands -------------------------------------------------------------------------
   context.subscriptions.push(
     vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)),
     vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)),
     vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig),
     vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias),
+    vscode.commands.registerCommand('founderOs.selectProfile', () =>
+      profileManager?.selectProfile(),
+    ),
+    vscode.commands.registerCommand('founderOs.showCostBreakdown', () =>
+      costTracker?.showBreakdown(),
+    ),
+    vscode.commands.registerCommand('founderOs.resetCost', () => {
+      costTracker?.reset();
+      void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
+    }),
   );
 
   // First-pass registration (synchronous so the model picker populates fast).
@@ -62,10 +97,12 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   registeredProvider?.dispose();
   registeredParticipant?.dispose();
-  statusBar?.dispose();
+  connectionStatusBar?.dispose();
+  profileManager?.dispose();
+  costTracker?.dispose();
 }
 
-/** Register the chat provider if we have creds; otherwise show "not paired". */
+/** Register the chat provider + participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context: vscode.ExtensionContext): void {
   const creds = resolveCredentials();
   if (!creds) {
@@ -97,24 +134,25 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
 
   const provider = new FounderOsChatProvider(creds, {
     onRequestStart: (modelId) => {
-      statusBar!.text = `$(sync~spin) Founder OS: ${modelId}`;
-      statusBar!.tooltip = 'Streaming response from Founder OS gateway…';
+      connectionStatusBar!.text = `$(sync~spin) Founder OS: ${modelId}`;
+      connectionStatusBar!.tooltip = 'Streaming response from Founder OS gateway…';
     },
     onMetadata: (meta) => {
       const tier = meta.tier ?? '?';
       const cost = typeof meta.ddollarCost === 'number' ? `${meta.ddollarCost} D$` : '';
       const provider2 = meta.provider ?? '';
       const model = meta.model ?? '';
-      statusBar!.text = `$(sparkle) Founder OS: ${tier}${cost ? ` · ${cost}` : ''}`;
-      statusBar!.tooltip = `Last route — tier: ${tier}, provider: ${provider2}, model: ${model}, cost: ${cost || 'n/a'}`;
+      connectionStatusBar!.text = `$(sparkle) Founder OS: ${tier}${cost ? ` · ${cost}` : ''}`;
+      connectionStatusBar!.tooltip = `Last route — tier: ${tier}, provider: ${provider2}, model: ${model}, cost: ${cost || 'n/a'}`;
+      costTracker?.record(meta);
     },
     onRequestEnd: (_modelId, ok, errorMessage) => {
       if (ok) {
-        statusBar!.text = '$(check) Founder OS: Connected';
-        statusBar!.tooltip = `Founder OS gateway connected. Creds source: ${creds.source}.`;
+        connectionStatusBar!.text = '$(check) Founder OS: Connected';
+        connectionStatusBar!.tooltip = `Founder OS gateway connected. Creds source: ${creds.source}.`;
       } else if (errorMessage) {
-        statusBar!.text = '$(error) Founder OS: Error';
-        statusBar!.tooltip = `Last request failed: ${errorMessage}`;
+        connectionStatusBar!.text = '$(error) Founder OS: Error';
+        connectionStatusBar!.tooltip = `Last request failed: ${errorMessage}`;
       }
     },
   });
@@ -125,51 +163,32 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(registeredProvider);
 
-  // Chat participant — provides a "@Founder OS" handle in the chat input.
-  // The actual model routing is owned by the LanguageModelChatProvider above
-  // (the user selects "Founder OS <alias>" from the model dropdown). The
-  // participant's job here is onboarding + a tiny nudge toward the picker.
-  try {
-    const participant = vscode.chat.createChatParticipant(
-      'founder-os.chat',
-      async (
-        _request: vscode.ChatRequest,
-        _context: vscode.ChatContext,
-        stream: vscode.ChatResponseStream,
-        _token: vscode.CancellationToken,
-      ): Promise<void> => {
-        stream.markdown(
-          'Founder OS is connected. Pick a model from the dropdown above ' +
-            '(`founder-os-auto`, `-code`, `-reasoning`, or `-fast`) and send your ' +
-            'message — it will stream from your Founder OS gateway.',
-        );
-      },
-    );
-    participant.iconPath = new vscode.ThemeIcon('sparkle');
-    registeredParticipant = participant;
-    context.subscriptions.push(registeredParticipant);
-  } catch {
-    // createChatParticipant can throw if another extension already claimed
-    // the id. Non-fatal — the provider still works via the model picker.
-  }
+  // Enhanced chat participant — drives a real vscode.lm round-trip with
+  // Memory Engine injection + tool use. Falls back to onboarding only if the
+  // participant id is already claimed by another extension.
+  registeredParticipant = registerFounderOsChatParticipant(context, {
+    creds,
+    profileManager: profileManager!,
+    costTracker: costTracker!,
+  });
 
   currentCreds = creds;
   setStatusConnected(creds);
 }
 
 function setStatusConnected(creds: FounderOsCredentials): void {
-  if (!statusBar) return;
-  statusBar.text = '$(check) Founder OS: Connected';
-  statusBar.tooltip = `Connected to ${creds.apiBaseUrl} (creds: ${creds.source}). Click to manage.`;
-  statusBar.show();
+  if (!connectionStatusBar) return;
+  connectionStatusBar.text = '$(check) Founder OS: Connected';
+  connectionStatusBar.tooltip = `Connected to ${creds.apiBaseUrl} (creds: ${creds.source}). Click to manage.`;
+  connectionStatusBar.show();
 }
 
 function setStatusNotPaired(): void {
-  if (!statusBar) return;
-  statusBar.text = '$(warning) Founder OS: Not Paired';
-  statusBar.tooltip =
+  if (!connectionStatusBar) return;
+  connectionStatusBar.text = '$(warning) Founder OS: Not Paired';
+  connectionStatusBar.tooltip =
     'Founder Node credentials not found. Pair Founder Node, or set founderOs.apiBaseUrl / nodeId / nodeToken.';
-  statusBar.show();
+  connectionStatusBar.show();
 }
 
 let pairPromptShownThisSession = false;
@@ -214,6 +233,18 @@ async function manageConnection(context: vscode.ExtensionContext): Promise<void>
       label: 'Select model alias',
       description: 'change the default Founder OS model',
       action: () => selectModelAlias(),
+    },
+    {
+      label: 'Select execution profile…',
+      description: 'Turbo / Balanced / Architect / Autonomous',
+      action: () => profileManager?.selectProfile(),
+    },
+    {
+      label: 'Reset DDollar session counter',
+      description: 'clear the session spend display',
+      action: () => {
+        costTracker?.reset();
+      },
     },
   ];
   const picked = await vscode.window.showQuickPick(items, {
