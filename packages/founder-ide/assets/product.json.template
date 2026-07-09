@@ -1,0 +1,42 @@
+{
+  "//": "Founder IDE product.json overrides. Applied on top of VSCodium's product.json by build/prepare-founder-ide.sh via jq (see build/brand-product.json.patch). Values here are MERGED — any key not listed is inherited from VSCodium/VS Code. Generated 2026-07-10.",
+  "nameShort": "Founder IDE",
+  "nameLong": "Founder IDE",
+  "applicationName": "Founder IDE",
+  "dataFolderName": ".founder-ide",
+  "win32MutexName": "founderidemutex",
+  "win32DirName": "Founder IDE",
+  "win32RegValueName": "Founder IDE",
+  "win32AppUserModelId": "digital.doxxedcrypto.FounderIDE",
+  "win32ShellNameShort": "Founder IDE",
+  "win32AppId": "{39F6C958-6DA1-4BAE-82D5-F0952FE270BD}",
+  "win32x64UserAppId": "{436F5001-DD46-4F41-8D93-89EF9716CC07}",
+  "urlProtocol": "founder-ide",
+  "tunnelApplicationName": "founder-ide-tunnel",
+  "extensionsGallery": {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item",
+    "resourceUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+    "extensionUrlTemplate": "https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest"
+  },
+  "linkProtectionTrustedDomains": [
+    "https://open-vsx.org",
+    "https://doxxedcrypto.digital",
+    "https://github.com",
+    "https://githubusercontent.com"
+  ],
+  "documentationUrl": "https://doxxedcrypto.digital/docs/founder-ide",
+  "keyboardShortcutsUrl": "https://doxxedcrypto.digital/docs/founder-ide/shortcuts",
+  "introductoryVideosUrl": "https://doxxedcrypto.digital/docs/founder-ide/videos",
+  "tipsAndTricksUrl": "https://doxxedcrypto.digital/docs/founder-ide/tips",
+  "licenseUrl": "https://github.com/danishhaiderau-maker/doxedcryptofounder/blob/master/LICENSE",
+  "builtInExtensions": [
+    {
+      "name": "founder-ide-extension",
+      "publisher": "doxxedcrypto",
+      "version": "0.0.1",
+      "//vsix": "Path is resolved by prepare-founder-ide.sh relative to the build root. The .vsix is produced by `npm run package` in packages/founder-ide-extension/.",
+      "vsix": "founder-ide-extension.vsix"
+    }
+  ]
+}
