@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(bot): honor EXECUTION_PAUSED=True env for demo/sim startup
+feat(ai-proxy): emit founderOs SSE metadata pre-line for Founder IDE extension
 
 ## Last Activity
 
