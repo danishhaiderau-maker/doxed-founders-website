@@ -2,9 +2,9 @@ import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { DownloadsHub } from '@/components/downloads-hub';
 
 export const metadata = {
-  title: 'Downloads — Founder OS Mobile & Founder Node Desktop',
+  title: 'Downloads — Founder Stack, Founder IDE & Founder Node',
   description:
-    'Install Founder OS on Android and iOS, download Founder Node for Windows, macOS, or Linux. All installables in one place.',
+    'Install Founder Stack (Founder IDE + Founder Node bundled), or download Founder Node standalone for Windows, macOS, or Linux. Mobile apps too — all installables in one place.',
 };
 
 export default function DownloadsPage() {

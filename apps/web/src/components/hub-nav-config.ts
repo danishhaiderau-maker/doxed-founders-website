@@ -18,6 +18,7 @@ const HUB_PREFIXES = [
   '/settings/builder',
   '/settings/integrations',
   '/downloads',
+  '/phone',
   '/raise-room',
   '/list-your-project',
   '/notifications',
@@ -58,6 +59,7 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/portfolio')) return 'Portfolio';
   if (pathname.startsWith('/founder-os')) return 'Founder OS';
   if (pathname.startsWith('/founder-den')) return 'Founder Den';
+  if (pathname.startsWith('/phone')) return 'Phone Remote';
   if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations'))
     return 'Integrations';
   if (pathname.startsWith('/downloads')) return 'Downloads';
@@ -140,7 +142,8 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     items: [
       { href: '/founder-os', label: 'Founder OS', icon: '⚡', auth: true },
       { href: '/founder-den', label: 'Founder Den', icon: '🛠', auth: true },
-      { href: '/downloads#founder-node', label: 'Founder Node', icon: '🖥' },
+      { href: '/downloads#founder-node', label: 'Founder Stack', icon: '🖥' },
+      { href: '/phone', label: 'Phone Remote', icon: '📱', auth: true },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
       { href: '/list-your-project', label: 'List Project', icon: '📋' },
       { href: '/downloads', label: 'Downloads', icon: '⬇️' },

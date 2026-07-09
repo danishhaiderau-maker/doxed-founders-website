@@ -98,9 +98,10 @@ export function FounderNodeHubPanel({
 
       {showDownloads ? (
         <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
-          <p className="text-sm font-semibold text-emerald-100">Download Founder Node</p>
+          <p className="text-sm font-semibold text-emerald-100">Download Founder Stack</p>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Windows installer with auto-update — {FOUNDER_NODE_MIN_VERSION_LABEL} recommended.{' '}
+            One installer — Founder IDE + Founder Node. The bundled Stack is coming soon; Founder Node standalone is
+            available today ({FOUNDER_NODE_MIN_VERSION_LABEL}).{' '}
             <a href="/downloads#founder-node" className="text-cyan-400 underline hover:text-cyan-300">
               All downloads hub →
             </a>

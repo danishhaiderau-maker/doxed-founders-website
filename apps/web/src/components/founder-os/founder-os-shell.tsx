@@ -352,7 +352,8 @@ function LaunchTokenCard({ tier }: { tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN' }) {
 
 function QuickLinksGrid() {
   const links = [
-    { href: '/raise-room', label: 'Raise Room', desc: 'Discover founders · pledge DDollar', accent: 'text-emerald-300' },
+    { href: '/phone', label: 'Phone Remote', desc: 'Control your IDE from your phone', accent: 'text-emerald-300' },
+    { href: '/raise-room', label: 'Raise Room', desc: 'Discover founders · pledge DDollar', accent: 'text-amber-300' },
     { href: '/founder-den', label: 'Founder Den', desc: 'Personal build dashboard', accent: 'text-violet-300' },
     { href: '/settings/ai-usage', label: 'AI Usage', desc: 'Proxy stats · connect Cursor', accent: 'text-amber-300' },
     { href: '/founder-os/decisions', label: 'Decision Log', desc: 'Routing decisions · cache hits', accent: 'text-sky-300' },

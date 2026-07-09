@@ -29,6 +29,9 @@ export default function FounderOsPage() {
           <Link href="/founder-os/decisions" className="text-violet-400 hover:underline">
             Decision Log →
           </Link>
+          <Link href="/phone" className="text-emerald-400 hover:underline">
+            Phone Remote →
+          </Link>
           <Link href="/settings/ai-usage" className="text-zinc-500 hover:text-white">
             AI Usage →
           </Link>

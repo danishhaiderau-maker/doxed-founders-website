@@ -42,7 +42,7 @@ export function DownloadsHub() {
             href="#founder-node"
             className="rounded-full border border-cyan-500/30 bg-cyan-950/20 px-3 py-1.5 font-semibold text-cyan-200 hover:border-cyan-400/50"
           >
-            Founder Node Desktop
+            Founder Stack &amp; Founder Node
           </a>
         </nav>
       </section>
@@ -119,11 +119,14 @@ export function DownloadsHub() {
 
       <section id="founder-node" className="scroll-mt-24 space-y-8 border-t border-zinc-800/80 pt-12">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">Desktop vault</p>
-          <h2 className="mt-2 text-2xl font-bold tracking-tight">Founder Node for Windows, macOS &amp; Linux</h2>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">Desktop vault + IDE</p>
+          <h2 className="mt-2 text-2xl font-bold tracking-tight">Founder Stack — IDE + Node, or Founder Node standalone</h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            Tray app for encrypted vault sync, Cursor IDE bridge, and local Ollama — your files stay on your PC. Pair
-            once with the same Founder OS account you use in the browser or mobile app.
+            <strong className="text-emerald-200">Founder Stack</strong> is the upcoming bundled installer — Founder IDE
+            (a VSCodium-based editor with Founder OS AI built in) plus the Founder Node tray app in one download. While
+            the Stack is being built, you can install <strong className="text-cyan-200">Founder Node</strong> standalone
+            today: the tray app for encrypted vault sync, Cursor IDE bridge, and local Ollama. Your files stay on your
+            PC. Pair once with the same Founder OS account you use in the browser or mobile app.
           </p>
           <p className="mt-2 text-sm text-zinc-500">
             Current release: <strong className="text-zinc-300">v{FOUNDER_NODE_MIN_VERSION}</strong> ·{' '}

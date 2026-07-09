@@ -24,7 +24,7 @@ export function PlatformSetupGuideContent() {
         <li>
           <p className="font-medium text-violet-200">2. Founder Node + vault (optional, recommended)</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Download Founder Node, choose <strong>Founder Vault</strong> storage, generate a pairing code{' '}
+            Download Founder Stack (Founder IDE + Founder Node in one install — or grab Founder Node standalone), choose <strong>Founder Vault</strong> storage, generate a pairing code{' '}
             <em>only until paired</em>. After success the code disappears — pairing is permanent until you
             disconnect. Full notes, roadmap, and private context stay encrypted on your PC; we only receive
             tiny metadata snapshots (goal, progress, task counts).

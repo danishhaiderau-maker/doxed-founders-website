@@ -1451,8 +1451,10 @@ export function MinimalDevWorkspace({
                 <a
                   href={FOUNDER_NODE_DOWNLOAD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
+                  data-coming-soon='true'
+                  title='Founder Stack installer coming soon — includes Founder IDE + Founder Node.'
                 >
-                  Download Founder Node v{FOUNDER_NODE_MIN_VERSION} — setup hub
+                  Download Founder Stack — v{FOUNDER_NODE_MIN_VERSION}
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}
