@@ -1,0 +1,102 @@
+{
+  "name": "founder-ide-extension",
+  "displayName": "Founder OS Chat",
+  "description": "Registers the Founder OS AI Gateway as a first-class VS Code chat model provider. Streams tokens from your own routing layer into the built-in Chat view. Works in Cursor, VSCodium, stock VS Code, and Windsurf.",
+  "version": "0.0.1",
+  "publisher": "doxxedcrypto",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/danishhaiderau-maker/doxedcryptofounder.git",
+    "directory": "packages/founder-ide-extension"
+  },
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": ["Chat", "AI", "Machine Learning", "Other"],
+  "keywords": ["ai", "chat", "founder-os", "openai-compatible", "llm"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "founder-os",
+        "displayName": "Founder OS",
+        "managementCommand": "founderOs.manage"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "founder-os.chat",
+        "name": "Founder OS",
+        "description": "Chat with the Founder OS AI Gateway (routed via your node)",
+        "isDefault": true,
+        "commands": [
+          {
+            "name": "code",
+            "description": "Optimize for coding (founder-os-code / Turbo profile)"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "founderOs.manage",
+        "title": "Founder OS: Manage connection"
+      },
+      {
+        "command": "founderOs.pair",
+        "title": "Founder OS: Pair with Founder Node"
+      },
+      {
+        "command": "founderOs.selectModel",
+        "title": "Founder OS: Select model alias"
+      },
+      {
+        "command": "founderOs.openVaultConfig",
+        "title": "Founder OS: Open node-config.json"
+      }
+    ],
+    "configuration": {
+      "title": "Founder OS",
+      "properties": {
+        "founderOs.apiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional override for the Founder OS API base URL. If empty, the extension reads `apiBaseUrl` from `~/FounderVault/node-config.json`."
+        },
+        "founderOs.nodeId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional override for the Founder Node ID. If empty, the extension reads `nodeId` from `~/FounderVault/node-config.json`."
+        },
+        "founderOs.nodeToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional override for the Founder Node token. If empty, the extension reads `nodeToken` from `~/FounderVault/node-config.json`."
+        },
+        "founderOs.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "markdownDescription": "Per-request timeout in milliseconds for gateway calls (including streaming)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "typecheck": "tsc -p ./ --noEmit",
+    "package": "vsce package --no-yarn --no-dependencies",
+    "lint": "echo 'no lint configured'"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.104.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.8.3"
+  }
+}
