@@ -60,4 +60,15 @@ export class ChatCompletionRequestDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  /**
+   * Non-standard, opt-in. When true, the streaming response emits a leading
+   * `data: {"founderOs":{requestId,tier,provider,model,ddollarCost}}\n\n` line
+   * before the OpenAI SSE chunks so the Founder IDE extension's status bar can
+   * show the route + cost. Ignored by standard OpenAI clients. See
+   * docs/FOUNDER-IDE-FORK-PLAN.md §5.3 / §8.2.
+   */
+  @IsOptional()
+  @IsBoolean()
+  founder_os_metadata?: boolean;
 }
