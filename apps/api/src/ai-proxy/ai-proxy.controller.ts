@@ -108,7 +108,56 @@ export class AiProxyController {
       userId: req.founderNode.userId,
       nodeId: req.founderNode.nodeId,
     };
+    return this.streamChat(res, auth, body);
+  }
 
+  /**
+   * JWT-authenticated chat completions for the Founder OS Phone Remote UI.
+   *
+   * The desktop IDE path (`/v1/chat/completions` above) authenticates with a
+   * Founder Node bearer (`fos_{nodeId}:{nodeToken}`) via FounderNodeGuard.
+   * The phone browser cannot present a node token — it only has the founder's
+   * NextAuth session JWT. This endpoint mirrors the desktop flow but resolves
+   * the user from the JWT via OptionalJwtAuthGuard, then runs the exact same
+   * decideRoute → invoke → SSE metadata pipeline using the user's id as the
+   * auth context (with a synthetic `nodeId: 'phone'` so usage logs are
+   * attributable). See docs/FOUNDER-IDE-FORK-PLAN.md §8 and the Phone Remote
+   * design (apps/web/src/app/phone).
+   */
+  @UseGuards(OptionalJwtAuthGuard)
+  @Post('chat/phone-completions')
+  async chatPhoneCompletions(
+    @Req() req: AuthedRequest,
+    @Body() body: ChatCompletionRequestDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<unknown> {
+    const userId = req.user?.id ?? req.user?.sub ?? req.user?.userId;
+    if (!userId) {
+      throw new HttpException(
+        { error: { message: 'Authentication required' } },
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+    const auth: ProxyAuth = { userId, nodeId: 'phone' };
+    // The phone UI always wants the founderOs metadata line (tier / model /
+    // DDollar cost) so it can render route transparency per turn.
+    const bodyWithMeta: ChatCompletionRequestDto = {
+      ...body,
+      founder_os_metadata: body.founder_os_metadata ?? true,
+    };
+    return this.streamChat(res, auth, bodyWithMeta);
+  }
+
+  /**
+   * Shared decideRoute → invoke → SSE pipeline used by both the Founder Node
+   * (desktop IDE) and JWT (phone remote) chat endpoints. Emits the optional
+   * `founderOs` metadata pre-line before piping the upstream stream through.
+   */
+  private async streamChat(
+    res: Response,
+    auth: ProxyAuth,
+    body: ChatCompletionRequestDto,
+  ): Promise<unknown> {
     const route = await this.runtimeService.decideRoute(auth, body);
     const result = await this.runtimeService.invoke(auth, body, route);
 
@@ -136,10 +185,10 @@ export class AiProxyController {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // Optional non-standard metadata pre-line for the Founder IDE extension.
-    // Emitted before the upstream SSE chunks so the extension's status bar can
-    // show the route + per-request DDollar cost. Standard OpenAI clients ignore
-    // this line (they only parse `choices[0].delta`). See
+    // Optional non-standard metadata pre-line for the Founder IDE extension
+    // and the Phone Remote UI. Emitted before the upstream SSE chunks so the
+    // client can show the route + per-request DDollar cost. Standard OpenAI
+    // clients ignore this line (they only parse `choices[0].delta`). See
     // docs/FOUNDER-IDE-FORK-PLAN.md §5.3 / §8.2.
     if (body.founder_os_metadata) {
       const ddollarCost = AI_PROXY_DDOLLAR_COST[result.tier] ?? 0;

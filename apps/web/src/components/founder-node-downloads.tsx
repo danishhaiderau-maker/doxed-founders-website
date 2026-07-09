@@ -6,6 +6,16 @@ import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
 
+/**
+ * The bundled "Founder Stack" installer (Founder IDE + Founder Node in one
+ * download) is not shipped yet. Download CTAs point here with a
+ * `data-coming-soon` flag so the UI can render a tooltip while the real
+ * installer is being built. See docs/FOUNDER-IDE-FORK-PLAN.md §6.3.
+ */
+export const FOUNDER_STACK_RELEASES_URL = `https://github.com/${REPO}/releases`;
+export const FOUNDER_STACK_TOOLTIP =
+  'Founder Stack installer coming soon — includes Founder IDE + Founder Node in one install.';
+
 type ReleaseAsset = {
   name: string;
   browser_download_url: string;
@@ -110,26 +120,66 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
   const versionLabel = releaseVersion ?? FOUNDER_NODE_MIN_VERSION;
   const primary =
     os === 'windows'
-      ? { label: 'Download for Windows', href: winUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+      ? { label: 'Download Founder Stack — Windows', href: winUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
       : os === 'mac'
-        ? { label: 'Download for macOS', href: macUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+        ? { label: 'Download Founder Stack — macOS', href: macUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
         : os === 'linux'
-          ? { label: 'Download for Linux (Ubuntu)', href: linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+          ? { label: 'Download Founder Stack — Linux', href: linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
           : null;
 
   return (
     <div id={sectionId} className="scroll-mt-24 space-y-4">
+      {/* Founder Stack — the upcoming bundled installer (Founder IDE + Founder Node). */}
+      <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-emerald-100">Founder Stack</p>
+            <p className="mt-0.5 text-xs text-zinc-400">
+              Founder IDE + Founder Node in one install — the full desktop kit for building with Founder OS AI.
+            </p>
+          </div>
+          <a
+            href={FOUNDER_STACK_RELEASES_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-coming-soon="true"
+            title={FOUNDER_STACK_TOOLTIP}
+            className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400"
+          >
+            Download Founder Stack
+            <span className="rounded-full bg-black/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider">
+              Soon
+            </span>
+          </a>
+        </div>
+      </div>
+
+      {/* Founder Stack primary (auto-detected OS) — coming soon, points at releases placeholder. */}
       {primary && (
         <a
-          href={primary.href}
+          href={FOUNDER_STACK_RELEASES_URL}
           target="_blank"
           rel="noopener noreferrer"
+          data-coming-soon="true"
+          title={FOUNDER_STACK_TOOLTIP}
           className="inline-flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-cyan-600 px-5 py-3 text-sm font-semibold text-white hover:bg-cyan-500 sm:w-auto"
         >
           {primary.label} — v{versionLabel}
+          <span className="rounded-full bg-black/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider">
+            Soon
+          </span>
         </a>
       )}
 
+      <p className="text-[11px] font-medium text-zinc-500">
+        Founder Stack bundles the new Founder IDE (VSCodium-based editor with Founder OS AI built in) together with the Founder Node tray app — one download, one install.
+      </p>
+
+      <div className="pt-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
+          Founder Node standalone (available today)
+        </p>
+      </div>
       <div className="flex flex-wrap gap-3">
         <a
           href={winUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
