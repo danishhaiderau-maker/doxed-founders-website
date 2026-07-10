@@ -103,6 +103,9 @@ except ImportError:
             return False
         if u == "CONTINUOUS":
             return True
+        # v11.4 combo research tiles (LAB / Pathway Lab)
+        if u in ("SL_AVOIDANCE_V1", "SIZED_CONTINUOUS_V1") or u.startswith("SL_") or u.startswith("SIZED_"):
+            return True
         return u.startswith("A160") or u.startswith("AI") or "AI" in u
 
 # ---------------------------------------------------------------------------
@@ -446,6 +449,117 @@ def _bundle_paths():
     return paths
 
 
+
+def _opportunity_lane_stats() -> dict:
+    """Approve / order / spawn counts from lane_opportunity_capture.jsonl + signal_snapshot."""
+    out: dict[str, dict] = {}
+    snap_path = None
+    for base in (DATA_ROOT, ROOT):
+        cand = base / "signal_snapshot.jsonl"
+        if cand.is_file():
+            snap_path = cand
+            break
+    if snap_path is not None:
+        try:
+            with snap_path.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    lane = str(row.get("research_lane") or row.get("lane") or "").strip()
+                    if not lane:
+                        continue
+                    bucket = out.setdefault(lane, {
+                        "approves": 0, "orders_submitted": 0, "spawn_lab": 0, "would_block": 0,
+                    })
+                    ai = row.get("ai") if isinstance(row.get("ai"), dict) else {}
+                    approved = (
+                        str(row.get("decision") or row.get("ai_decision") or "").upper() == "APPROVE"
+                        or bool(row.get("approved"))
+                        or bool(ai.get("approved"))
+                        or str(ai.get("decision") or "").upper() == "APPROVE"
+                        or row.get("approve_ts") is not None
+                    )
+                    if approved:
+                        bucket["approves"] += 1
+        except Exception:
+            pass
+    opp_path = None
+    for base in (DATA_ROOT, ROOT):
+        cand = base / "lane_opportunity_capture.jsonl"
+        if cand.is_file():
+            opp_path = cand
+            break
+    if opp_path is not None:
+        try:
+            with opp_path.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    lane = str(row.get("lane") or row.get("research_lane") or "").strip()
+                    if not lane:
+                        continue
+                    bucket = out.setdefault(lane, {
+                        "approves": 0, "orders_submitted": 0, "spawn_lab": 0, "would_block": 0,
+                    })
+                    ev = str(row.get("event") or "").upper()
+                    if ev == "APPROVE":
+                        bucket["approves"] = max(bucket["approves"], 0)  # keep snap count; bump below
+                        bucket["_opp_approves"] = int(bucket.get("_opp_approves") or 0) + 1
+                    elif ev == "ORDER_SUBMITTED":
+                        bucket["orders_submitted"] += 1
+                    elif ev == "SPAWN_LAB":
+                        bucket["spawn_lab"] += 1
+                    elif ev == "WOULD_BLOCK":
+                        bucket["would_block"] += 1
+        except Exception:
+            pass
+    # Prefer max(snapshot, opportunity APPROVE) per lane
+    for lane, bucket in out.items():
+        opp_a = int(bucket.pop("_opp_approves", 0) or 0)
+        if opp_a > int(bucket.get("approves") or 0):
+            bucket["approves"] = opp_a
+    # decisions_3factor.csv fallback
+    dec_path = None
+    for base in (DATA_ROOT, ROOT):
+        cand = base / "decisions_3factor.csv"
+        if cand.is_file():
+            dec_path = cand
+            break
+    if dec_path is not None:
+        try:
+            import csv
+            with dec_path.open(encoding="utf-8", errors="replace", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    reason = str(row.get("reason") or row.get("decision") or "").upper()
+                    if reason != "APPROVE":
+                        continue
+                    lane = str(row.get("research_lane") or row.get("lane") or "").strip()
+                    if not lane:
+                        continue
+                    bucket = out.setdefault(lane, {
+                        "approves": 0, "orders_submitted": 0, "spawn_lab": 0, "would_block": 0,
+                    })
+                    bucket["_dec_approves"] = int(bucket.get("_dec_approves") or 0) + 1
+            for lane, bucket in out.items():
+                dec_a = int(bucket.pop("_dec_approves", 0) or 0)
+                if dec_a > int(bucket.get("approves") or 0):
+                    bucket["approves"] = dec_a
+        except Exception:
+            pass
+    return out
+
+
 def _lane_rows():
     bench = _read_json("benchmark_vs_lanes_report.json")
     all_data_bench_path = ROOT / ALL_DATA_REPORTS_DIR / "benchmark_vs_lanes_report.json"
@@ -472,6 +586,9 @@ def _lane_rows():
                 lanes[lane_key] = cur
     ledger_file = _read_json("lane_pnl_ledger.json")
     ledger = ledger_file.get("lanes") or {}
+    lab_ledger_file = _read_json("lane_lab_pnl_ledger.json")
+    lab_ledger = lab_ledger_file.get("lanes") or {}
+    opp_stats = _opportunity_lane_stats()
     lane_def = _read_report("lane_definition_report.json")
     benchmark_lane = str(bench.get("benchmark_lane") or COMPARISON_BENCHMARK_LANE or BENCHMARK_LANE)
     bench_metrics = lanes.get(benchmark_lane) or {}
@@ -486,6 +603,8 @@ def _lane_rows():
     all_keys = set(ALL_PATHWAY_LANES)
     all_keys.update(lanes.keys())
     all_keys.update(ledger.keys())
+    all_keys.update(lab_ledger.keys())
+    all_keys.update(opp_stats.keys())
     for row in lane_def.get("lanes") or []:
         if isinstance(row, dict) and row.get("lane"):
             all_keys.add(str(row["lane"]))
@@ -514,14 +633,31 @@ def _lane_rows():
                     "net_pnl_real": ad.get("net_pnl_real"),
                     "ev_usd": ad.get("per_approve_ev"),
                 }
+        lab = lab_ledger.get(lane) or {}
+        opp = opp_stats.get(lane) or {}
         fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or ld.get("sample_size") or 0)
+        if not fills and lab.get("closes"):
+            fills = int(lab.get("closes") or 0)
         approves = int(m.get("approves") or ld.get("approves") or 0)
+        opp_appr = int(opp.get("approves") or 0)
+        orders_submitted = int(opp.get("orders_submitted") or 0)
+        spawn_lab = int(opp.get("spawn_lab") or 0)
+        if opp_appr > approves:
+            approves = opp_appr
+        if not approves and orders_submitted:
+            approves = orders_submitted
+        if not approves and spawn_lab:
+            approves = spawn_lab
+        if not approves and fills:
+            approves = fills
         shadow_filled = int(m.get("shadow_filled") or 0)
         shadow_pnl = float(m.get("net_pnl_shadow_blocked") or 0)
         shadow_fill_pct = float(m.get("shadow_fill_pct") or 0)
         costly_blocks = float(m.get("costly_blocks_usd") or 0)
         good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
         pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or ld.get("pnl_usd") or 0)
+        if abs(pnl) < 1e-9 and lab.get("net_pnl_usd") is not None and fills:
+            pnl = float(lab.get("net_pnl_usd") or 0)
         ev = float(m.get("per_approve_ev") or ld.get("ev_per_approve") or 0)
         at_fills = int(all_time.get("real_fills") or ld.get("all_time_fills") or 0)
         at_pnl = float(all_time.get("net_pnl_real") or ld.get("all_time_pnl_usd") or 0)
@@ -533,6 +669,7 @@ def _lane_rows():
         has_any_data = (
             fills or approves or pnl or at_fills or at_pnl
             or shadow_filled or abs(shadow_pnl) > 0.01
+            or orders_submitted or spawn_lab
         )
         if lane in ALL_PATHWAY_LANES:
             pass  # always show full catalog
@@ -556,17 +693,27 @@ def _lane_rows():
             status = "UNDERPERFORMING"
         else:
             status = "NEUTRAL"
+        coord_note = m.get("coordinator_note") or ""
+        if not coord_note and (orders_submitted or spawn_lab) and not fills:
+            bits = []
+            if orders_submitted:
+                bits.append(f"{orders_submitted} orders")
+            if spawn_lab:
+                bits.append(f"{spawn_lab} spawn_lab")
+            coord_note = "Opportunity: " + ", ".join(bits) + " (no closed fills)"
         rows.append({
             "lane": lane,
             "trades": fills,
             "v2_checker_pass_sims": int(m.get("v2_checker_pass_sims") or 0),
             "v2_reject_counterfactual_sims": int(m.get("v2_reject_counterfactual_sims") or 0),
             "v2_metrics_note": m.get("v2_metrics_note") or "",
-            "coordinator_note": m.get("coordinator_note") or "",
+            "coordinator_note": coord_note,
             "coordinator_rejects": int(m.get("coordinator_rejects") or (m.get("ai_scan_coordinator") or {}).get("rejects") or 0),
             "coordinator_skipped": int(m.get("coordinator_skipped") or (m.get("ai_scan_coordinator") or {}).get("skipped") or 0),
             "coordinator_timeouts": int(m.get("coordinator_timeouts") or (m.get("ai_scan_coordinator") or {}).get("timeouts") or 0),
             "approves": approves,
+            "orders_submitted": orders_submitted,
+            "spawn_lab": spawn_lab,
             "shadow_filled": shadow_filled,
             "shadow_fill_pct": round(shadow_fill_pct, 1),
             "shadow_pnl": round(shadow_pnl, 2),
@@ -2214,7 +2361,8 @@ async function loadLanes() {
     const chk = row.v2_checker_pass_sims || 0;
     const rej = row.v2_reject_counterfactual_sims || 0;
     const isScan = row.lane === 'AI_SCAN';
-    const paper = isScan ? 0 : row.trades;
+    const ordN = row.orders_submitted || 0;
+    const paper = isScan ? 0 : ((row.trades || 0) === 0 && ordN ? `0/${ordN}ord` : row.trades);
     const apprCell = isScan ? `${row.approves ?? 0} appr` : (row.approves ?? 0);
     const rejCell = isScan ? `R:${row.coordinator_rejects||0} S:${row.coordinator_skipped||0} T:${row.coordinator_timeouts||0}` : (rej || '\u2014');
     return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
@@ -2516,6 +2664,7 @@ async function loadRetirement() {
 
 async function loadRegimeConf() {
   const r = await fetch('/api/report/regime_confidence_matrix.json');
+  if (!r.ok) return;
   const d = await r.json();
   const known = (c) => {
     const reg = String(c.regime || '').toUpperCase();
@@ -2720,33 +2869,16 @@ async function loadGptAuditNote() {
 }
 
 async function refreshAll() {
-  await loadStatus();
-  await loadSummary();
-  await loadFindings();
-  await loadLanes();
-  await loadRetirement();
-  await loadLaneDefs();
-  await loadRegime();
-  await loadRegimeConf();
-  await loadChase();
-  await loadChaseThreshold();
-  await loadChaseDelay();
-  await loadChaseIso();
-  await loadCombos();
-  await loadSpreadPerf();
-  await loadExitCombos();
-  await loadExitReasonLeak();
-  await loadLadderSim();
-  await loadPathwayAudit();
-  await loadLeakage();
-  await loadHorizon();
-  await loadFeatures();
-  await loadAI();
-  await loadTypeB();
-  await loadGenome();
-  await loadGptAuditNote();
-  await loadExplorer();
-  await loadArchives();
+  const steps = [
+    loadStatus, loadSummary, loadFindings, loadLanes, loadRetirement, loadLaneDefs,
+    loadRegime, loadRegimeConf, loadChase, loadChaseThreshold, loadChaseDelay, loadChaseIso,
+    loadCombos, loadSpreadPerf, loadExitCombos, loadExitReasonLeak, loadLadderSim,
+    loadPathwayAudit, loadLeakage, loadHorizon, loadFeatures, loadAI, loadTypeB,
+    loadGenome, loadGptAuditNote, loadExplorer, loadArchives,
+  ];
+  for (const step of steps) {
+    try { await step(); } catch (e) { console.warn('refreshAll step failed', step.name || step, e); }
+  }
 }
 refreshAll();
 setInterval(refreshAll, 180000);
