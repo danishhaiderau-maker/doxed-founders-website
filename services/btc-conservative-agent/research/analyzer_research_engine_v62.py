@@ -334,10 +334,12 @@ try:
     ACTIVE_PATHWAY_LANES = tuple(COMBO_EXECUTION_LANES) + tuple(EXPERIMENTAL_EXECUTION_LANES)
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
-except ImportError:
-    EXPECTED_BOT_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
+except ImportError as _pathway_import_err:
+    import sys as _sys
+    print(f"[ANALYZER] pathway import fallback: {_pathway_import_err!r}", file=_sys.stderr)
+    EXPECTED_BOT_VERSION = "v11.4-sl-avoidance-plus-sizing-v1"
     EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.2-ai-chase-bands-desk-2026-06-23"
+    ANALYZER_SYNC_ID = "v11.4-sl-avoidance-plus-sizing-v1"
     RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
     SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
     TRAIL_LADDER_SCENARIO_C = [
@@ -900,10 +902,11 @@ def _file_time_span(path: str, ts_cols=(), json_ts_key="ts"):
 
 
 def load_research_session() -> dict:
-    if not os.path.isfile(RESEARCH_SESSION_FILE):
+    path = _agent_data_path(RESEARCH_SESSION_FILE)
+    if not os.path.isfile(path):
         return {}
     try:
-        with open(RESEARCH_SESSION_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -1866,6 +1869,7 @@ def _safe_replay_sweep(name, fn, *args, **kwargs):
 
 
 def _load_jsonl_by_trade_id(path):
+    path = _agent_data_path(path)
     rows = {}
     if not os.path.exists(path):
         return rows
@@ -1886,6 +1890,7 @@ def _load_jsonl_by_trade_id(path):
 
 def _load_jsonl_rows(path):
     """Load all rows from a JSONL research dataset."""
+    path = _agent_data_path(path)
     rows = []
     if not os.path.exists(path):
         return rows
@@ -7915,6 +7920,31 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                         float(pd.to_numeric(lane_sl.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
                     )
                     approves_n = max(approves_n, sim_n)
+
+        # LAB / OFF-tile breadcrumbs: opportunity capture + lab PnL ledger when no closed fills.
+        if approves_n == 0 or real_fills == 0:
+            opp_rows = _load_jsonl_rows(LANE_OPPORTUNITY_CAPTURE_FILE)
+            lane_opp = [
+                r for r in opp_rows
+                if str(r.get("lane") or r.get("research_lane") or "").upper() == str(lane).upper()
+            ]
+            if lane_opp:
+                opp_appr = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "APPROVE")
+                opp_orders = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "ORDER_SUBMITTED")
+                opp_spawn = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "SPAWN_LAB")
+                approves_n = max(approves_n, opp_appr, opp_orders, opp_spawn)
+            lab_path = _agent_data_path("lane_lab_pnl_ledger.json")
+            if real_fills == 0 and os.path.isfile(lab_path):
+                try:
+                    with open(lab_path, encoding="utf-8") as _lf:
+                        _lab = (json.load(_lf) or {}).get("lanes") or {}
+                    _lab_row = _lab.get(lane) or {}
+                    _lab_closes = int(_lab_row.get("closes") or 0)
+                    if _lab_closes:
+                        real_fills = _lab_closes
+                        net_pnl_real = round(float(_lab_row.get("net_pnl_usd") or 0), 2)
+                except Exception:
+                    pass
 
         shadow_filled = 0
         net_pnl_shadow_blocked = 0.0

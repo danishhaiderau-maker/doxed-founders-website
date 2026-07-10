@@ -64,6 +64,7 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     any_combo_execution_enabled,
     combo_entry_mode,
+    combo_lane_match_detail,
     combo_lane_matches,
     combo_toggle_defaults,
     is_ai_scan_lane,
@@ -76,6 +77,9 @@ from combo_pathway_config import (
     is_shadow_only_lane,
     get_lane_ladder_override,
     is_virtual_chase_entry_lane,
+    resolve_lane_size_multiplier,
+    SIZE_MULT_MAX,
+    SIZE_MULT_MIN,
 )
 from a160_v2_research import (
     V2_AI_DECISION_LOG_FILE,
@@ -2753,6 +2757,49 @@ def get_lane_lab_pnl_ledger(lane: str = None) -> dict:
     if lane:
         return dict(ledger.get(_normalize_lane_key(lane), {}))
     return ledger
+
+
+def load_lane_pnl_ledgers_from_disk():
+    """Restore live + LAB PnL ledgers from disk so Pathway Lab tiles survive restarts."""
+    for path_name, state_key, label in (
+        (LANE_PNL_LEDGER_FILE, "lane_pnl_ledger", "LANE_PNL"),
+        (LANE_LAB_PNL_LEDGER_FILE, "lane_lab_pnl_ledger", "LANE_LAB_PNL"),
+    ):
+        try:
+            if not os.path.isfile(path_name):
+                continue
+            with open(path_name, encoding="utf-8") as f:
+                payload = json.load(f) or {}
+            lanes = payload.get("lanes") or {}
+            if not isinstance(lanes, dict):
+                continue
+            with state_lock:
+                state[state_key] = copy.deepcopy(lanes)
+            logger.info(
+                f"[{label}] restored {len(lanes)} lane(s) from {path_name} [PIPELINE ENFORCEMENT]"
+            )
+        except Exception as e:
+            logger.warning(f"[{label}] disk restore failed path={path_name}: {e}")
+
+
+def count_open_lab_shadows() -> dict:
+    """In-flight LAB (OFF-combo) shadow buffers — shown on tiles before TTL finalize."""
+    out = {}
+    with replay_lock:
+        items = list(replay_buffers.items())
+    for tid, buf in items:
+        if buf.get("closed"):
+            continue
+        if str(buf.get("collection_mode") or "") != "LAB":
+            continue
+        lane = _normalize_lane_key(buf.get("research_lane") or "")
+        if not lane:
+            continue
+        bucket = out.setdefault(lane, {"open": 0, "filled": 0})
+        bucket["open"] += 1
+        if buf.get("virtual_entry"):
+            bucket["filled"] += 1
+    return out
 
 
 def _ai_context_fingerprint(ctx: dict) -> str:
@@ -5597,6 +5644,10 @@ AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
 SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
 REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
+# OFF-tile LAB shadows keep receiving ticks (last_update never idles). Finalize on
+# wall-clock age so Pathway Lab tiles get closes without waiting for idle TTL.
+# Default 30m (was 5m) so Scenario C ladder can complete instead of MARK_TO_MARKET.
+LAB_REPLAY_TTL_SEC = int(os.getenv("LAB_REPLAY_TTL_SEC", str(30 * 60)))
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(30 * 60)))
 # Phase 3 reconcile-adopt: re-adopted pending limits get a MORE CONSERVATIVE chase
@@ -10321,6 +10372,56 @@ def _golden_stack_pass_for_spawn(final_direction, ctx, ai, features, edge_score,
     return not blocked, reason
 
 
+def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict:
+    """Ensure ADX / session / structure fields exist for combo extra_filters + sizing.
+
+    AI_SCAN feature snapshots often omit ADX/session; pull from live market_context /
+    research session bucket so SL_AVOIDANCE and SIZED_CONTINUOUS can diverge.
+    """
+    out = dict(features or {})
+    ctx = ctx or {}
+    mc = (
+        out.get("market_context")
+        or ctx.get("market_context")
+        or state.get("market_context")
+        or {}
+    )
+    if mc and "market_context" not in out:
+        out["market_context"] = mc
+    ts_mc = (mc.get("trend_strength") or {}) if isinstance(mc, dict) else {}
+    adx = (
+        out.get("adx_at_entry")
+        or out.get("adx")
+        or out.get("mom_adx")
+        or ts_mc.get("adx")
+    )
+    if adx is not None:
+        out.setdefault("adx", adx)
+        out.setdefault("adx_at_entry", adx)
+    ms = (mc.get("market_structure") or {}) if isinstance(mc, dict) else {}
+    struct = (
+        out.get("structure_bias_at_entry")
+        or out.get("structure_bias")
+        or out.get("mtf_structure")
+        or ms.get("structure_bias")
+    )
+    if struct:
+        out.setdefault("structure_bias", struct)
+        out.setdefault("structure_bias_at_entry", struct)
+    if not out.get("session_bucket"):
+        out["session_bucket"] = _research_session_bucket()
+    out.setdefault("ts_utc", utc_iso())
+    return out
+
+
+def _lane_sized_margin_usdt(lane: str, features: dict = None) -> tuple:
+    """Apply per-lane session size_multipliers on top of FIXED_MARGIN_USDT."""
+    size_mult = float(resolve_lane_size_multiplier(lane, features or {}))
+    margin = round(float(FIXED_MARGIN_USDT) * size_mult, 4)
+    margin = max(float(FIXED_MARGIN_USDT) * SIZE_MULT_MIN, min(margin, float(FIXED_MARGIN_USDT) * SIZE_MULT_MAX))
+    return margin, size_mult
+
+
 def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_reason: str):
     if ai.get("decision") != "APPROVE":
         return
@@ -10328,6 +10429,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         return
     if not guard_retired_lane_execution(target_lane, "spawn_combo_lane", (ctx or {}).get("trade_id")):
         return
+    enriched = _enrich_combo_lane_features(features, ctx)
     if not is_research_lane_enabled(target_lane):
         logger.info(f"[{target_lane}] spawn LAB mode - lane OFF [PIPELINE ENFORCEMENT]")
         log_lane_opportunity_event(
@@ -10335,7 +10437,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
             block_reason="LANE_TOGGLE_OFF_LAB",
         )
-        _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane)
+        _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane, enriched)
         return
     spawn_ctx = copy.deepcopy(ctx)
     spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
@@ -10351,14 +10453,14 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "edge_score": round(float(edge_score), 1),
         "price": nz(state.get("price")),
         "timestamp": utc_iso(),
-        "features": features or {},
+        "features": enriched,
         "skip_ai": True,
         "pre_ai": copy.deepcopy(ai),
         "pre_ctx": spawn_ctx,
     })
 
 
-def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str):
+def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str, features: dict = None):
     """LAB mode for an OFF combo tile — run the FULL strategy pipeline in telemetry/simulation:
     virtual chase fill + Scenario C exit ladder (thesis stop / early-fail / SL / TP / profit-lock),
     WITHOUT placing any real exchange order. Reuses the shadow-collecting replay engine
@@ -10396,14 +10498,21 @@ def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str):
             f"— aborting LAB shadow to avoid real orders [PIPELINE ENFORCEMENT]"
         )
         return
+    enriched = _enrich_combo_lane_features(features, ctx)
+    margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
+    # Instant virtual fill (pullback_pct=0): OFF-tile LAB must accumulate closes into
+    # lane_lab_pnl_ledger. A non-zero pullback often never fills within LAB_REPLAY_TTL,
+    # so tiles stay at Trades=0 forever despite SPAWN_LAB.
     start_replay_buffer(
         study_id,
         price,
         lane=f"shadow_collect_{target_lane}",  # reuse prefix so finalize_shadow_lane_collecting handles TTL
         direction=direction,
         leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-        margin_usdt=float(FIXED_MARGIN_USDT),
-        pullback_pct=float(state.get("pullback_threshold", 0.001)),
+        margin_usdt=float(margin_usdt),
+        pullback_pct=0.0,
+        virtual_entry=price,
+        virtual_fill_t=0.0,
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
         exit_config=exit_cfg,
         ai_win_prob=(ai or {}).get("win_prob"),
@@ -10411,10 +10520,13 @@ def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str):
         research_lane=target_lane,
         source_trade_id=(ctx or {}).get("trade_id"),
         collection_mode="LAB",
+        size_mult=size_mult,
+        session_bucket=enriched.get("session_bucket"),
     )
     append_replay_tick(study_id, price, None)
     logger.info(
         f"[{target_lane}] LAB shadow study_id={study_id} dir={direction} edge={float(edge_score):.1f} "
+        f"margin=${margin_usdt:.2f} size_mult={size_mult:.2f} session={enriched.get('session_bucket')} "
         f"— simulating full pipeline (virtual fill + Scenario C exit), no real orders [PIPELINE ENFORCEMENT]"
     )
 
@@ -10437,21 +10549,35 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         elif ai_direction == "SHORT":
             final_direction = "LONG"
     spread = int(compute_directional_spread(final_direction, ai))
+    enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
         # Guard: V2 must not spawn from AI_SCAN (own prompt + own decision only).
         if is_independent_ai_lane(lane):
             continue
-        if not combo_lane_matches(lane, ai, final_direction, spread):
+        detail = combo_lane_match_detail(
+            lane, ai, final_direction, spread, features=enriched,
+        )
+        if not detail.get("passes"):
+            br = detail.get("block_reason") or "COMBO_FILTER"
+            log_lane_opportunity_event(
+                lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
+                (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+                block_reason=br,
+            )
+            logger.info(
+                f"[{lane}] combo filter blocked spawn reason={br} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
             continue
         _spawn_combo_lane(
-            ctx, ai, edge_score, features, lane,
+            ctx, ai, edge_score, enriched, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
     spawn_experimental_lanes_from_ai_scan(
-        ctx, ai, edge_score, features, source_lane, final_direction, spread,
+        ctx, ai, edge_score, enriched, source_lane, final_direction, spread,
     )
     spawn_shadow_collecting_lanes_from_ai_scan(
-        ctx, ai, edge_score, features, source_lane, final_direction, spread,
+        ctx, ai, edge_score, enriched, source_lane, final_direction, spread,
     )
 
 
@@ -10676,6 +10802,9 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "executed": False,
         "direction": buf.get("direction"),
         "exit_config": buf.get("exit_config"),
+        "margin_usdt": buf.get("margin_usdt"),
+        "size_mult": buf.get("size_mult"),
+        "session_bucket": buf.get("session_bucket"),
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         **outcome,
@@ -14152,10 +14281,23 @@ def process_signal(event: dict):
                             spawn_dir = "SHORT"
                         elif spawn_dir == "SHORT":
                             spawn_dir = "LONG"
-                    if not combo_lane_matches(research_lane, ai, spawn_dir):
+                    spawn_feats = _enrich_combo_lane_features(
+                        signal.get("features") or features, ctx,
+                    )
+                    signal["features"] = spawn_feats
+                    match = combo_lane_match_detail(
+                        research_lane, ai, spawn_dir, features=spawn_feats,
+                    )
+                    if not match.get("passes"):
+                        br = match.get("block_reason") or "COMBO_FILTER"
                         logger.info(
                             f"[{research_lane}] spawn fingerprint mismatch — skip "
-                            f"[PIPELINE ENFORCEMENT]"
+                            f"reason={br} [PIPELINE ENFORCEMENT]"
+                        )
+                        log_lane_opportunity_event(
+                            research_lane, "SPAWN_FILTERED", trade_id,
+                            spawn_dir, ai.get("win_prob"), edge_score,
+                            block_reason=br,
                         )
                         _set_lane_pipeline_stage(research_lane, "IDLE")
                         state["last_pipeline_stage"] = "IDLE"
@@ -14718,6 +14860,23 @@ def process_signal(event: dict):
                     update_debug_state_always(margin_reason, {"edge": edge_score, "spread": compute_directional_spread(final_direction, ai)})
                     state["last_pipeline_stage"] = "IDLE"
                     return
+            # Per-lane session sizing (SIZED_CONTINUOUS_V1) — applied after flat/risk margin.
+            if is_combo_execution_lane(research_lane):
+                sized_feats = _enrich_combo_lane_features(
+                    signal.get("features") or features,
+                    signal.get("context", {}) or ctx,
+                )
+                signal["features"] = sized_feats
+                lane_margin, lane_size_mult = _lane_sized_margin_usdt(research_lane, sized_feats)
+                if abs(lane_size_mult - 1.0) > 1e-9:
+                    margin_usdt = lane_margin
+                    signal["lane_size_mult"] = lane_size_mult
+                    signal["session_bucket"] = sized_feats.get("session_bucket")
+                    logger.info(
+                        f"[LANE_SIZE] lane={research_lane} size_mult={lane_size_mult:.2f} "
+                        f"margin=${margin_usdt:.2f} session={sized_feats.get('session_bucket')} "
+                        f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
+                    )
             spread = compute_directional_spread(final_direction, ai)
             signal["margin_usdt"] = margin_usdt
             signal["conviction_spread"] = spread
@@ -15374,6 +15533,15 @@ def state_monitor_loop():
                         lane in ("shadow", "shadow_deferred", "soft_reject", "golden_stack_reject")
                         and buf.get("block_reason")
                     )
+                    # LAB / shadow_collect buffers keep receiving price ticks, so
+                    # last_update never goes idle. Expire them on wall-clock age from
+                    # start_ts so OFF-tile LAB shadows actually finalize into the ledger.
+                    is_lab_or_collect = (
+                        str(buf.get("collection_mode") or "") == "LAB"
+                        or str(lane or "").startswith("shadow_collect_")
+                        or buf.get("research_lane") in SHADOW_COLLECTING_LANES
+                        or buf.get("research_lane") in COMBO_EXECUTION_LANES
+                    )
                     if len(buf.get("ticks", [])) >= 2000:
                         expired_ids.append(tid)
                     elif lane == "reversal_study" and age_from_start > REVERSAL_STUDY_TTL_SEC:
@@ -15383,14 +15551,16 @@ def state_monitor_loop():
                     elif buf.get("post_exit"):
                         if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
                             expired_ids.append(tid)
+                    elif is_lab_or_collect and age_from_start > LAB_REPLAY_TTL_SEC:
+                        expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
                     sorted_ids = sorted(replay_buffers, key=lambda k: replay_buffers[k].get("start_ts", 0))
                     excess = len(replay_buffers) - MAX_REPLAY_BUFFERS
                     for tid in sorted_ids[:excess]:
-                        dump_replay(tid)
-                        replay_buffers.pop(tid, None)
+                        if tid not in expired_ids:
+                            expired_ids.append(tid)
             for tid in expired_ids:
                 with replay_lock:
                     buf = replay_buffers.get(tid)
@@ -15408,20 +15578,17 @@ def state_monitor_loop():
                     or str(lane or "").startswith("shadow_v2_")
                 ):
                     finalize_a160_v2_shadow_outcome(tid, buf_copy)
-                elif buf.get("research_lane") in SHADOW_COLLECTING_LANES or str(lane or "").startswith("shadow_collect_"):
+                elif (
+                    buf.get("research_lane") in SHADOW_COLLECTING_LANES
+                    or buf.get("research_lane") in COMBO_EXECUTION_LANES
+                    or str(lane or "").startswith("shadow_collect_")
+                    or str(buf.get("collection_mode") or "") == "LAB"
+                ):
                     finalize_shadow_lane_collecting(tid, buf_copy)
                 elif lane not in ("executed", "shadow_blocked"):
                     finalize_shadow_research(tid, block_reason)
                 else:
                     close_replay_buffer(tid)
-            with replay_lock:
-                oldest_id = None
-                if len(replay_buffers) > MAX_REPLAY_BUFFERS:
-                    oldest_id = min(replay_buffers, key=lambda k: replay_buffers[k].get("start_ts", 0))
-                    dump_replay(oldest_id)
-                    replay_buffers.pop(oldest_id, None)
-            if oldest_id:
-                dump_replay(oldest_id)
             service_post_exit_replays()
             pipeline_state_sync()
             process_pending_orders()
@@ -17493,6 +17660,7 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_wins = int(m.get("lab_wins") or 0)
     lab_win_rate = float(m.get("lab_win_rate") or 0.0)
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
+    lab_open = int(m.get("lab_open_shadows") or 0)
     win_rate = float(m.get("win_rate_pct") or 0.0)
     shadow_sim = bool(m.get("shadow_sim_mode"))
     checker_pass_sims = int(m.get("checker_pass_sims") or 0)
@@ -17500,10 +17668,15 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     reject_sims = int(m.get("reject_counterfactual_sims") or 0)
     reject_pnl = float(m.get("reject_counterfactual_pnl") or 0)
     paper_fills = int(m.get("paper_fills") if m.get("paper_fills") is not None else (fills if not shadow_sim else 0))
-    lab_line = (
-        f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
-        if lab_closes else "LAB sim · collecting…"
-    )
+    if lab_closes:
+        lab_line = (
+            f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
+        )
+    elif lab_open:
+        lab_line = f"LAB sim · {lab_open} open shadow(s) · collecting…"
+    else:
+        lab_line = "LAB sim · collecting…"
+
     if shadow_sim and (checker_pass_sims or reject_sims):
         summary_line = (
             f"shadow sim · n={approves} approves · {checker_pass_sims} chk pass · ${checker_pass_pnl:.2f} · "
@@ -17536,13 +17709,15 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "reject_counterfactual_pnl": round(reject_pnl, 2),
         "paper_fills": paper_fills,
         # LAB (OFF-combo) simulated metrics — surfaced on the tile when OFF; never mixed into real.
-        "lab_mode": bool(m.get("lab_mode")),
+        "lab_mode": bool(m.get("lab_mode") or lab_closes or lab_open),
         "lab_closes": lab_closes,
         "lab_net_pnl": round(lab_pnl, 2),
         "lab_wins": lab_wins,
         "lab_losses": int(m.get("lab_losses") or 0),
         "lab_win_rate": lab_win_rate,
         "lab_per_close_ev": lab_ev,
+        "lab_open_shadows": lab_open,
+        "lab_open_filled": int(m.get("lab_open_filled") or 0),
         "lab_summary_line": lab_line,
     }
 
@@ -17651,21 +17826,46 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     # Fold live LAB (OFF-combo) simulated ledger into the per-lane metrics so the dashboard
     # reflects simulated PnL in real time. Kept under lab_* keys; never merged into real_*.
     live_lab_ledger = get_lane_lab_pnl_ledger()
-    for lane, lb in live_lab_ledger.items():
+    open_lab = count_open_lab_shadows()
+    lab_lanes = set(live_lab_ledger.keys()) | set(open_lab.keys())
+    for lane in lab_lanes:
+        lb = live_lab_ledger.get(lane) or {}
         lab_closes = int(lb.get("closes") or 0)
         lab_pnl = float(lb.get("net_pnl_usd") or 0)
-        if lab_closes or lab_pnl:
-            prev = disk_metrics.get(lane) or {}
-            lab_wins = int(lb.get("wins") or 0)
+        open_info = open_lab.get(lane) or {}
+        open_n = int(open_info.get("open") or 0)
+        if not (lab_closes or lab_pnl or open_n):
+            continue
+        prev = disk_metrics.get(lane) or {}
+        lab_wins = int(lb.get("wins") or 0)
+        disk_metrics[lane] = {
+            **prev,
+            "lab_mode": True,
+            "lab_closes": lab_closes,
+            "lab_net_pnl": round(lab_pnl, 2),
+            "lab_wins": lab_wins,
+            "lab_losses": int(lb.get("losses") or 0),
+            "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
+            "lab_per_close_ev": round(lab_pnl / lab_closes, 2) if lab_closes else 0.0,
+            "lab_open_shadows": open_n,
+            "lab_open_filled": int(open_info.get("filled") or 0),
+        }
+    # Ensure every Pathway Lab tile has session_stats (zeros / LAB collecting) so OFF
+    # tiles never render blank Trades/PnL/EV fields.
+    for spec in static_payload.get("lanes") or []:
+        lane = spec.get("lane")
+        if lane and lane not in disk_metrics:
             disk_metrics[lane] = {
-                **prev,
-                "lab_mode": True,
-                "lab_closes": lab_closes,
-                "lab_net_pnl": round(lab_pnl, 2),
-                "lab_wins": lab_wins,
-                "lab_losses": int(lb.get("losses") or 0),
-                "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
-                "lab_per_close_ev": round(lab_pnl / lab_closes, 2) if lab_closes else 0.0,
+                "approves": 0,
+                "real_fills": 0,
+                "approve_to_fill_pct": 0.0,
+                "shadow_fill_pct": 0.0,
+                "net_pnl_real": 0.0,
+                "per_approve_ev": 0.0,
+                "lab_mode": False,
+                "lab_closes": 0,
+                "lab_net_pnl": 0.0,
+                "lab_open_shadows": 0,
             }
     merged = []
     for spec in static_payload.get("lanes") or []:
@@ -17694,12 +17894,26 @@ def get_pathway_lane_specs_cached() -> dict:
     file_payload = {}
     mtime = None
     ledger_mtime = None
+    lab_ledger_mtime = None
     v2_mtime = None
+    open_lab_sig = ()
     if os.path.isfile(LANE_PNL_LEDGER_FILE):
         try:
             ledger_mtime = os.path.getmtime(LANE_PNL_LEDGER_FILE)
         except Exception:
             pass
+    if os.path.isfile(LANE_LAB_PNL_LEDGER_FILE):
+        try:
+            lab_ledger_mtime = os.path.getmtime(LANE_LAB_PNL_LEDGER_FILE)
+        except Exception:
+            pass
+    try:
+        open_lab = count_open_lab_shadows()
+        open_lab_sig = tuple(
+            sorted((k, int(v.get("open") or 0), int(v.get("filled") or 0)) for k, v in open_lab.items())
+        )
+    except Exception:
+        open_lab_sig = ()
     for v2_path in (V2_SHADOW_OUTCOME_FILE, V2_CHECKER_LOG_FILE):
         if os.path.isfile(v2_path):
             try:
@@ -17713,12 +17927,16 @@ def get_pathway_lane_specs_cached() -> dict:
             cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
             cached_ver = (_cached_pathway_lane_specs or {}).get("_cached_static_version")
             cached_ledger = (_cached_pathway_lane_specs or {}).get("_cached_ledger_mtime")
+            cached_lab_ledger = (_cached_pathway_lane_specs or {}).get("_cached_lab_ledger_mtime")
             cached_v2 = (_cached_pathway_lane_specs or {}).get("_cached_v2_mtime")
+            cached_open_lab = (_cached_pathway_lane_specs or {}).get("_cached_open_lab_sig")
             if (
                 cached_at == mtime
                 and cached_ver == EXECUTION_FIX_VERSION
                 and cached_ledger == ledger_mtime
+                and cached_lab_ledger == lab_ledger_mtime
                 and cached_v2 == v2_mtime
+                and cached_open_lab == open_lab_sig
                 and _cached_pathway_lane_specs.get("lanes")
             ):
                 return _cached_pathway_lane_specs
@@ -17731,7 +17949,9 @@ def get_pathway_lane_specs_cached() -> dict:
     if mtime is not None:
         merged["_cached_mtime"] = mtime
     merged["_cached_ledger_mtime"] = ledger_mtime
+    merged["_cached_lab_ledger_mtime"] = lab_ledger_mtime
     merged["_cached_v2_mtime"] = v2_mtime
+    merged["_cached_open_lab_sig"] = open_lab_sig
     _cached_pathway_lane_specs = merged
     return merged
 
@@ -18928,10 +19148,9 @@ DASHBOARD_JS = """(function () {
           };
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
           const pnlCol = pnl >= 0 ? '#3fb950' : '#f85149';
-          // LAB (OFF-combo) simulated metrics — shown alongside real stats so the user can
-          // pre-flight a strategy/ladder without real orders. Sim PnL is colour-coded the
-          // same as real PnL but prefixed "LAB" so it is never confused with live money.
-          const labOn = !on && !spec.is_independent_ai && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned && stats.lab_mode;
+          // LAB (OFF-combo): primary Trades/PnL/EV show LAB ledger / open shadows.
+          const labEligible = !on && !spec.is_independent_ai && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned;
+          const labOn = labEligible && (stats.lab_mode || (stats.lab_closes > 0) || (stats.lab_open_shadows > 0));
           const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
           const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
           const v2ChkPnl = stats.checker_pass_pnl != null ? stats.checker_pass_pnl : (stats.net_pnl_real != null ? stats.net_pnl_real : 0);
@@ -18942,6 +19161,12 @@ DASHBOARD_JS = """(function () {
           const v2PaperFills = stats.paper_fills != null ? stats.paper_fills : 0;
           const labPnl = stats.lab_net_pnl != null ? stats.lab_net_pnl : 0;
           const labPnlCol = labPnl >= 0 ? '#3fb950' : '#f85149';
+          const labCloses = stats.lab_closes != null ? stats.lab_closes : 0;
+          const labOpen = stats.lab_open_shadows != null ? stats.lab_open_shadows : 0;
+          const labEv = stats.lab_per_close_ev != null ? stats.lab_per_close_ev : 0;
+          const labPrimaryTrades = labCloses > 0 ? labCloses : (labOpen > 0 ? ('⏳' + labOpen) : 0);
+          const labPrimaryPnl = labCloses > 0 ? ('$' + Number(labPnl).toFixed(2)) : (labOpen > 0 ? 'collecting' : '$0.00');
+          const labPrimaryEv = labCloses > 0 ? ('$' + Number(labEv).toFixed(2)) : (labOpen > 0 ? '—' : '$0.00');
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + (v2Shadow
@@ -18949,11 +19174,13 @@ DASHBOARD_JS = """(function () {
                 + statRow('Chk PnL', '$' + Number(v2ChkPnl).toFixed(2), v2ChkPnlCol)
                 + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%')
                 + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
-              : statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
-                + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-                + statRow(v2Shadow && stats.win_rate_pct ? 'Win%' : 'EV/appr', v2Shadow && stats.win_rate_pct
-                  ? Number(stats.win_rate_pct || 0).toFixed(0) + '%'
-                  : '$' + Number(stats.per_approve_ev || 0).toFixed(2)))
+              : labOn
+                ? statRow('Trades', labPrimaryTrades, '#58a6ff')
+                  + statRow('PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
+                  + statRow('EV/appr', labPrimaryEv, '#58a6ff')
+                : statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
+                  + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
+                  + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2)))
             + '</div>'
             + (v2Shadow ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow('Paper fills', v2PaperFills, '#58a6ff')
@@ -18962,10 +19189,10 @@ DASHBOARD_JS = """(function () {
               + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
               + '</div>') : '')
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
-              + statRow('LAB sim', '🧪 ' + (stats.lab_closes != null ? stats.lab_closes : 0), '#58a6ff')
+              + statRow('LAB sim', '🧪 ' + labCloses + (labOpen ? (' · ' + labOpen + ' open') : ''), '#58a6ff')
               + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
               + statRow('LAB win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
-              + statRow('LAB EV/close', '$' + Number(stats.lab_per_close_ev || 0).toFixed(2), '#58a6ff')
+              + statRow('LAB EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
               + '</div>') : '');
           const chips = (spec.filter_chips || []).map(function (c) {
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
@@ -21228,6 +21455,8 @@ def _build_api_state_snapshot():
         snapshot["research_isolation_mode"] = research_isolation_enabled()
         snapshot["lane_opportunity_counters"] = copy.deepcopy(snapshot.get("lane_opportunity_counters") or {})
         snapshot["lane_pnl_ledger"] = get_lane_pnl_ledger()
+        snapshot["lane_lab_pnl_ledger"] = get_lane_lab_pnl_ledger()
+        snapshot["lab_open_shadows"] = count_open_lab_shadows()
         snapshot["retired_lane_archive"] = get_retired_lane_archive_rows()
         snapshot["lane_position_counts"] = lane_position_counts
         snapshot["research_execution_mode"] = (
@@ -23260,6 +23489,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "research_lane": meta.get("research_lane"),
             "source_trade_id": meta.get("source_trade_id"),
             "collection_mode": meta.get("collection_mode"),
+            "size_mult": meta.get("size_mult"),
+            "session_bucket": meta.get("session_bucket"),
             "v2_min_fill_age_sec": meta.get("v2_min_fill_age_sec"),
             "v2_chase_target_min": meta.get("v2_chase_target_min"),
             "v2_chase_target_max": meta.get("v2_chase_target_max"),
@@ -24458,6 +24689,7 @@ def main():
     load_persistent_config()
     _apply_env_live_gating()
     reset_transient_runtime_state()
+    load_lane_pnl_ledgers_from_disk()
     update_logger_level()
     validate_startup()
     startup_hard_fix_ai_threshold()
@@ -24751,8 +24983,36 @@ def main():
                 save_positions()
                 save_persistent_config()
                 with replay_lock:
-                    for tid in list(replay_buffers.keys()):
+                    shutdown_ids = list(replay_buffers.keys())
+                for tid in shutdown_ids:
+                    with replay_lock:
+                        buf = replay_buffers.get(tid)
+                        if not buf:
+                            continue
+                        lane = buf.get("lane")
+                        buf_copy = {**buf, "ticks": list(buf.get("ticks", []))}
+                    try:
+                        if (
+                            str(buf_copy.get("collection_mode") or "") == "LAB"
+                            or buf_copy.get("research_lane") in SHADOW_COLLECTING_LANES
+                            or buf_copy.get("research_lane") in COMBO_EXECUTION_LANES
+                            or str(lane or "").startswith("shadow_collect_")
+                        ):
+                            finalize_shadow_lane_collecting(tid, buf_copy)
+                        elif (
+                            buf_copy.get("research_lane") == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2
+                            or str(lane or "").startswith("shadow_v2_")
+                        ):
+                            finalize_a160_v2_shadow_outcome(tid, buf_copy)
+                        else:
+                            dump_replay(tid)
+                            with replay_lock:
+                                replay_buffers.pop(tid, None)
+                    except Exception as e:
+                        logger.error(f"[SHUTDOWN] replay finalize failed tid={tid}: {e}")
                         dump_replay(tid)
+                        with replay_lock:
+                            replay_buffers.pop(tid, None)
                 break
         except Exception as e:
             logger.critical(f"[FATAL] Restarting after crash: {e}")
