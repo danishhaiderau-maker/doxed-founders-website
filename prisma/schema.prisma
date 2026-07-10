@@ -407,6 +407,16 @@ enum TopUpPaymentAsset {
   SOL
 }
 
+/// Lifecycle of a Founder Idea Validator check. The check is async (LLM +
+/// browser research), so the status is the polling signal for the frontend.
+/// See docs/FOUNDER-IDEA-VALIDATOR.md §3.
+enum IdeaCheckStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -465,6 +475,7 @@ model User {
   pointLedger              PointLedger[]
   marketplaceLedger        MarketplaceLedgerEntry[]
   treasuryLedger           FounderTreasuryLedgerEntry[]
+  ideaChecks               IdeaCheck[]
   following                UserFollow[]                 @relation("UserFollowing")
   followers                UserFollow[]                 @relation("UserFollowers")
   engagementLotteryWins    EngagementLotteryWinner[]
@@ -2994,4 +3005,59 @@ model WorkspaceExecutionProfile {
   overrides   Json? // optional per-workspace weight overrides
   updatedAt   DateTime @updatedAt
   createdAt   DateTime @default(now())
+}
+
+/// Competitive landscape check for a founder's idea. Created on-demand
+/// (founder clicks "validate"), on doxxing-application submit (async), or
+/// on project creation (opt-in). Append-only — re-runs make new rows so
+/// we can track how the landscape shifts over time. Phase 6 feature,
+/// see docs/FOUNDER-IDEA-VALIDATOR.md.
+///
+/// The result payload is stored as JSON columns (not related models) because
+/// the shape is fluid and we never query into them relationally — avoids a
+/// schema migration every time the synthesis output gains a field.
+model IdeaCheck {
+  id              String          @id @default(cuid())
+  userId          String
+  /// Set when the check is tied to a project (on-demand / new-project flow).
+  projectId       String?
+  /// Set when the check was auto-triggered by a doxxing application.
+  applicationId   String?
+  /// Raw idea text the founder submitted for validation.
+  ideaText        String          @db.Text
+  /// Lifecycle: PENDING (created) → RUNNING (research in flight) →
+  /// COMPLETED (result ready) | FAILED (error).
+  status          IdeaCheckStatus @default(PENDING)
+  /// Search queries generated from ideaText (keyword extraction step).
+  searchQueries   Json?
+  /// Full competitive-landscape payload: verdict, summary, competitors,
+  /// openSourceReuse, differentiation. Shape per §5.2 of the design doc.
+  resultJson      Json?
+  /// 0-100 score of how differentiated the idea is vs the field.
+  /// Mirrors the synthesis model's differentiation assessment.
+  differentiationScore Int?
+  /// Denormalised list of similar projects (subset of resultJson.competitors)
+  /// so the daily pop-up / list views don't need to parse the full payload.
+  similarProjectsJson  Json?
+  /// Denormalised list of suggested reusable OSS components
+  /// (subset of resultJson.openSourceReuse).
+  suggestedOssJson     Json?
+  /// Error message captured when status = FAILED.
+  errorMessage    String? @db.Text
+  /// Soft-dismissed by the founder — stays in history but hidden from the UI.
+  dismissed       Boolean         @default(false)
+  /// True once the founder has viewed the result (drives the daily pop-up:
+  /// only surface unviewed completed checks).
+  viewed          Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  completedAt     DateTime?
+  updatedAt       DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([applicationId])
+  @@index([status])
+  @@index([createdAt])
 }
