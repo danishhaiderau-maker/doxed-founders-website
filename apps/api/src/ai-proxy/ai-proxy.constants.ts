@@ -36,3 +36,15 @@ export const MAX_PROMPT_TOKENS_SOFT_CAP = 64_000;
  */
 export const USE_ROUTING_ENGINE_V2 =
   process.env.USE_ROUTING_ENGINE_V2 === 'true';
+
+/**
+ * Feature flag — when true, intent classification uses the Phase 5b hybrid
+ * classifier (heuristic pre-filter + GLM 4 Flash fallback + context signals).
+ * When false, the old length/code-fence regex `inferIntent()` runs instead.
+ *
+ * Overridable at runtime via env so we can roll back instantly if the new
+ * classifier misbehaves in production without a redeploy. Default ON because
+ * the classifier degrades safely to the legacy heuristic on any model error.
+ */
+export const USE_SMART_INTENT_CLASSIFIER =
+  process.env.USE_SMART_INTENT_CLASSIFIER !== 'false';
