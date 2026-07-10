@@ -487,18 +487,8 @@ def _apply_extra_filters(lane: str, ai: dict, final_direction: str, spread: int,
         try:
             import json
             import os
-            resolved = fp_path
-            if not os.path.isabs(resolved):
-                # Resolve relative to this module / agent cwd so LAB filters work
-                # regardless of process working directory.
-                candidates = [
-                    resolved,
-                    os.path.join(os.path.dirname(__file__), resolved),
-                    os.path.join(os.getcwd(), resolved),
-                ]
-                resolved = next((p for p in candidates if os.path.exists(p)), resolved)
-            if os.path.exists(resolved):
-                with open(resolved, "r", encoding="utf-8") as f:
+            if os.path.exists(fp_path):
+                with open(fp_path, "r", encoding="utf-8") as f:
                     fp_report = json.load(f)
                 rules = ((fp_report.get("fingerprint_spec") or {}).get("rules")) or []
                 if rules:
