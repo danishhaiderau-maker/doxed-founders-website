@@ -41,6 +41,12 @@ export class ReadinessScorecardService {
     ai: CheckResult[];
     founder: CheckResult[];
     stress: CheckResult[];
+    aiProxy: CheckResult[];
+    routingEngine: CheckResult[];
+    memoryEngine: CheckResult[];
+    learningEngine: CheckResult[];
+    doxxing: CheckResult[];
+    ideaValidator: CheckResult[];
     switches: SwitchStates;
     numbers: FakeCounts;
     startedAt: number;
@@ -54,16 +60,31 @@ export class ReadinessScorecardService {
       ai: pillarFromChecks(params.ai, this.extractAiNumbers(params.ai)),
       founder: pillarFromChecks(params.founder),
       stress: pillarFromChecks(params.stress, this.extractStressNumbers(params.stress)),
+      aiProxy: pillarFromChecks(params.aiProxy, this.extractAiProxyNumbers(params.aiProxy)),
+      routingEngine: pillarFromChecks(params.routingEngine),
+      memoryEngine: pillarFromChecks(params.memoryEngine),
+      learningEngine: pillarFromChecks(params.learningEngine),
+      doxxing: pillarFromChecks(params.doxxing),
+      ideaValidator: pillarFromChecks(params.ideaValidator),
     };
+    // Weights — sum to 1.0. The six new kernel pillars share ~0.3 of the
+    // score; the original pillars were rebalanced down proportionally so a
+    // passing score still means the same overall readiness.
     const weights: Record<keyof typeof pillars, number> = {
-      platform: 0.2,
-      bot: 0.18,
-      analyzer: 0.1,
-      genome: 0.07,
-      relay: 0.15,
-      ai: 0.1,
-      founder: 0.1,
-      stress: 0.1,
+      platform: 0.14,
+      bot: 0.12,
+      analyzer: 0.07,
+      genome: 0.05,
+      relay: 0.1,
+      ai: 0.07,
+      founder: 0.07,
+      stress: 0.08,
+      aiProxy: 0.08,
+      routingEngine: 0.06,
+      memoryEngine: 0.04,
+      learningEngine: 0.05,
+      doxxing: 0.05,
+      ideaValidator: 0.02,
     };
     const readinessScore = Math.round(
       (Object.entries(pillars) as [keyof typeof pillars, PillarView][]).reduce(
@@ -138,6 +159,16 @@ export class ReadinessScorecardService {
       if (c.name === 'stress_p95_latency') out.p95LatencyMs = c.detail;
       if (c.name === 'stress_error_count') out.errors = c.detail;
       if (c.name === 'stress_ddollar_invariant') out.ddollarInvariantHeld = c.passed;
+    }
+    return out;
+  }
+
+  private extractAiProxyNumbers(checks: CheckResult[]): Record<string, number | string | boolean | null> {
+    const out: Record<string, number | string | boolean | null> = {};
+    for (const c of checks) {
+      if (c.name === 'ai_proxy_models_catalog' && c.passed) out.modelsCatalog = true;
+      if (c.name === 'ai_proxy_flight_recorder_row' && c.passed) out.flightRecorderWritable = true;
+      if (c.name === 'ai_proxy_intent_classifier' && c.passed) out.intentClassifier = true;
     }
     return out;
   }

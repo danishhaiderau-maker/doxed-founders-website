@@ -7,12 +7,19 @@ import { FounderOsModule } from '../founder-os/founder-os.module';
 import { LaunchQualificationModule } from '../launch-qualification/launch-qualification.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { TradingAgentsModule } from '../trading-agents/trading-agents.module';
+import { AiProxyModule } from '../ai-proxy/ai-proxy.module';
+import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
+import { MemoryEngineModule } from '../memory-engine/memory-engine.module';
+import { LearningEngineModule } from '../learning-engine/learning-engine.module';
+import { IdeaValidatorModule } from '../idea-validator/idea-validator.module';
+import { PrismaModule } from '../prisma/prisma.module';
 import { DemoController } from './demo.controller';
 import { DemoModeGuard } from './demo-mode.guard';
 import { DemoSeedService } from './demo-seed.service';
 import { BusinessJourneyService } from './business-journey.service';
 import { ExtendedSmokeService } from './extended-smoke.service';
 import { DemoStressService } from './demo-stress.service';
+import { KernelPillarsService } from './kernel-pillars.service';
 import { ReadinessScorecardService } from './readiness-scorecard.service';
 import { DemoHarnessService } from './demo-harness.service';
 
@@ -26,6 +33,12 @@ import { DemoHarnessService } from './demo-harness.service';
     AirdropModule,
     LaunchQualificationModule,
     TradingAgentsModule,
+    AiProxyModule,
+    RoutingEngineModule,
+    MemoryEngineModule,
+    LearningEngineModule,
+    IdeaValidatorModule,
+    PrismaModule,
   ],
   controllers: [DemoController],
   providers: [
@@ -34,6 +47,7 @@ import { DemoHarnessService } from './demo-harness.service';
     BusinessJourneyService,
     ExtendedSmokeService,
     DemoStressService,
+    KernelPillarsService,
     ReadinessScorecardService,
     DemoHarnessService,
   ],

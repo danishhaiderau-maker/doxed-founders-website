@@ -6,8 +6,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DemoSeedService } from './demo-seed.service';
 import { ExtendedSmokeService } from './extended-smoke.service';
 import { DemoStressService } from './demo-stress.service';
+import { KernelPillarsService } from './kernel-pillars.service';
 import { ReadinessScorecardService } from './readiness-scorecard.service';
-import type { FakeCounts, ReadinessScorecard, SwitchStates } from './readiness-scorecard.types';
+import type { CheckResult, FakeCounts, ReadinessScorecard, SwitchStates } from './readiness-scorecard.types';
 
 /**
  * Top-level demo harness facade. Runs every pillar in the right order and
@@ -26,6 +27,7 @@ export class DemoHarnessService {
     private readonly seed: DemoSeedService,
     private readonly extended: ExtendedSmokeService,
     private readonly stress: DemoStressService,
+    private readonly kernel: KernelPillarsService,
     private readonly scorecard: ReadinessScorecardService,
   ) {}
 
@@ -83,6 +85,43 @@ export class DemoHarnessService {
       stress = [{ name: 'stress_skipped', passed: true, detail: 'skipStress=true' }];
     }
 
+    // 3b. Six new kernel pillars (AI Proxy, Routing, Memory, Learning,
+    // Doxxing, Idea Validator). Each runs independently and is
+    // crash-isolated so one broken pillar can't take down the rest.
+    const [
+      aiProxy,
+      routingEngine,
+      memoryEngine,
+      learningEngine,
+      doxxing,
+      ideaValidator,
+    ] = await Promise.all([
+      this.kernel.runAiProxyChecks().catch((err: unknown) => {
+        this.logger.warn(`AI Proxy pillar crashed: ${msg(err)}`);
+        return [{ name: 'ai_proxy_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runRoutingEngineChecks().catch((err: unknown) => {
+        this.logger.warn(`Routing Engine pillar crashed: ${msg(err)}`);
+        return [{ name: 'routing_engine_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runMemoryEngineChecks().catch((err: unknown) => {
+        this.logger.warn(`Memory Engine pillar crashed: ${msg(err)}`);
+        return [{ name: 'memory_engine_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runLearningEngineChecks().catch((err: unknown) => {
+        this.logger.warn(`Learning Engine pillar crashed: ${msg(err)}`);
+        return [{ name: 'learning_engine_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runDoxxingChecks().catch((err: unknown) => {
+        this.logger.warn(`Doxxing pillar crashed: ${msg(err)}`);
+        return [{ name: 'doxxing_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runIdeaValidatorChecks().catch((err: unknown) => {
+        this.logger.warn(`Idea Validator pillar crashed: ${msg(err)}`);
+        return [{ name: 'idea_validator_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+    ]);
+
     // 4. Switches + fake counts.
     const switches = await this.collectSwitches();
     const numbers = await this.collectFakeCounts();
@@ -97,6 +136,12 @@ export class DemoHarnessService {
       genome,
       founder,
       stress,
+      aiProxy,
+      routingEngine,
+      memoryEngine,
+      learningEngine,
+      doxxing,
+      ideaValidator,
       switches,
       numbers,
       startedAt,
