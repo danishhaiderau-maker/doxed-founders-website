@@ -58,9 +58,7 @@ Start-Sleep -Seconds 2
 if (-not (Test-BridgeUp)) {
   Log "Starting bridge on :$bridgePort ..."
   $launcher = Join-Path $scriptDir "home-stack-launcher.ps1"
-  Start-Process -FilePath "powershell.exe" -ArgumentList @(
-    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher
-  ) -WorkingDirectory $repoRoot -WindowStyle Normal
+  Start-Process -FilePath "powershell.exe" -ArgumentList ("-NoExit -NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $launcher) -WorkingDirectory $repoRoot -WindowStyle Normal
   $deadline = (Get-Date).AddSeconds(40)
   while ((Get-Date) -lt $deadline) {
     if (Test-BridgeUp) { break }
@@ -71,9 +69,7 @@ if (-not (Test-BridgeUp)) {
   & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Home Bridge :$bridgePort" 2>$null | Out-Null
   Start-Sleep -Seconds 2
   $launcher = Join-Path $scriptDir "home-stack-launcher.ps1"
-  Start-Process -FilePath "powershell.exe" -ArgumentList @(
-    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher
-  ) -WorkingDirectory $repoRoot -WindowStyle Normal
+  Start-Process -FilePath "powershell.exe" -ArgumentList ("-NoExit -NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $launcher) -WorkingDirectory $repoRoot -WindowStyle Normal
   $deadline = (Get-Date).AddSeconds(40)
   while ((Get-Date) -lt $deadline) {
     if (Test-BridgeUp) { break }
