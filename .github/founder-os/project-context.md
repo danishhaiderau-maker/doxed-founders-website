@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(scripts): add npm run ensure:combo-pathway-pin alias
 
 ## Last Activity
 
