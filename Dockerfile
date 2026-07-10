@@ -2,24 +2,27 @@ FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
 # Marker step — confirms the image pulls and a basic RUN executes. If the build
-# fails before/at this point, the problem is image pull or build env, not our code.
+# fails before/at this point, the problem is image pull / build env, not our code.
 RUN node --version && npm --version
 
-# Copy lockfile + root manifests first for layer cache.
+# Copy lockfile + root manifests + the prune helper first for layer cache.
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
+COPY scripts/docker-prune-workspaces.mjs ./scripts/docker-prune-workspaces.mjs
 
 # This image only contains apps/api, but the root package.json declares
 # workspaces ["apps/*","packages/*"], so npm would look for apps/web,
-# apps/founder-node, apps/mobile-android (not copied) and fail. Rewrite the
-# workspaces list in BOTH package.json and the lockfile root entry (npm checks
-# they agree) so only apps/api + packages/* are seen.
-RUN node -e "const fs=require('fs');const ws=['apps/api','packages/*'];for(const f of ['./package.json','./package-lock.json']){const j=JSON.parse(fs.readFileSync(f,'utf8'));if(f.endsWith('-lock.json')){j.packages[''].workspaces=ws;}else{j.workspaces=ws;}fs.writeFileSync(f,JSON.stringify(j,null,2));}" \
-  && node -e "console.log('workspaces:',JSON.stringify(require('./package.json').workspaces))"
+# apps/founder-node, apps/mobile-android (not copied) and fail. The helper
+# rewrites the workspaces list in package.json + the lockfile root entry AND
+# deletes the orphaned lockfile keys (the absent apps/* targets plus the
+# dangling node_modules/@dcf/{web,founder-node,mobile-android} link entries that
+# point at them) so npm install doesn't abort with EMISSINGTARGET.
+RUN node scripts/docker-prune-workspaces.mjs
 
-# Install with npm install (not ci). The lockfile is generated on Windows, so
-# strict `npm ci` aborts on Linux due to platform-specific optional-dep drift
-# (@img/sharp-*, utf-8-validate). npm install regenerates in-place for linux.
-# bcrypt@6 + sharp@0.34 ship prebuilt linux-x64 binaries, so no toolchain needed.
+# Install with npm install (not ci). The committed lockfile is generated on
+# Windows, so strict `npm ci` aborts on Linux due to platform-specific optional
+# dependency drift (@img/sharp-*, utf-8-validate). npm install regenerates the
+# lockfile in-place for the linux target. bcrypt@6 + sharp@0.34 ship prebuilt
+# linux-x64 binaries, so no native toolchain is needed.
 RUN npm install --no-audit --no-fund
 
 # Copy source for the API + package deps + prisma + launcher.
