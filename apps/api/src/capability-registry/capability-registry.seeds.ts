@@ -135,4 +135,27 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     largeContext: true,
     largeContextWindow: 200000,
   },
+  {
+    // Phase 6 — the first non-LLM capability in the registry. Backs the
+    // Browser Use research hand (browser-research.adapter.ts). Not routed
+    // to by the intent+cost scoring (it's an Execution Engine adapter,
+    // not a chat model); it's here so the Flight Recorder rows it emits
+    // (chosenProvider: 'local-playwright') join cleanly to a Capability,
+    // and so per-check cost can be attributed. See KERNEL.md §8.
+    provider: 'local-playwright',
+    model: 'chromium-headless',
+    displayName: 'Local Playwright (Chromium headless)',
+    inputCostPer1M: 0,
+    outputCostPer1M: 0,
+    latencyP50Ms: 4000,
+    codeScore: 0.0,
+    reasoningScore: 0.0,
+    simpleQaScore: 0.0,
+    agentScore: 0.9,
+    visionScore: 0.0,
+    toolUse: false,
+    jsonMode: false,
+    largeContext: false,
+    largeContextWindow: null,
+  },
 ];

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { apiUrl } from '@/lib/api-base';
+import { IdeaValidatorPanel } from '@/components/idea-validator/idea-validator-panel';
+import { IdeaPopUp } from '@/components/idea-validator/idea-pop-up';
 
 type DashboardData = {
   founder?: {
@@ -65,9 +67,23 @@ export function FounderOsShell({ accessToken }: Props) {
 
       <CtaCards tier={tier} accessToken={accessToken} />
 
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+            Idea Validator · Phase 6
+          </h2>
+          <span className="rounded bg-violet-950/40 px-2 py-0.5 text-[10px] uppercase text-violet-300">
+            Browser Use LAM
+          </span>
+        </div>
+        <IdeaValidatorPanel accessToken={accessToken} />
+      </section>
+
       <QuickLinksGrid />
 
       <RecentActivityStrip dashboard={dashboard} />
+
+      <IdeaPopUp accessToken={accessToken} />
     </div>
   );
 }

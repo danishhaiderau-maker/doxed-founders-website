@@ -66,6 +66,7 @@ import { MemoryEngineModule } from './memory-engine/memory-engine.module';
 import { FounderApplicationsModule } from './founder-applications/founder-applications.module';
 import { ExecutionManagerModule } from './execution-manager/execution-manager.module';
 import { LearningEngineModule } from './learning-engine/learning-engine.module';
+import { IdeaValidatorModule } from './idea-validator/idea-validator.module';
 
 @Module({
   imports: [
@@ -136,6 +137,7 @@ import { LearningEngineModule } from './learning-engine/learning-engine.module';
     ExecutionManagerModule,
     ScheduleModule.forRoot(),
     LearningEngineModule,
+    IdeaValidatorModule,
   ],
   providers: [
     {
