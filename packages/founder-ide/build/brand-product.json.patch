@@ -59,8 +59,8 @@
       {
         "name": "founder-ide-extension",
         "publisher": "doxxedcrypto",
-        "version": env.FOUNDER_IDE_EXTENSION_VERSION // "0.0.1",
-        "vsix": env.FOUNDER_IDE_EXTENSION_VSIX // "founder-ide-extension.vsix"
+        "version": "0.1.0",
+        "vsix": "founder-ide-extension.vsix"
       }
     ]
   )
