@@ -1,22 +1,28 @@
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
-# Marker step — confirms the image pulls and a basic RUN executes. If the build
-# fails before/at this point, the problem is image pull / build env, not our code.
+# Marker step — confirms the image pulls and a basic RUN executes.
 RUN node --version && npm --version
 
 # Copy lockfile + root manifests + the prune helper first for layer cache.
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
 COPY scripts/docker-prune-workspaces.mjs ./scripts/docker-prune-workspaces.mjs
 
-# This image only contains apps/api, but the root package.json declares
-# workspaces ["apps/*","packages/*"], so npm would look for apps/web,
-# apps/founder-node, apps/mobile-android (not copied) and fail. The helper
-# rewrites the workspaces list in package.json + the lockfile root entry AND
-# deletes the orphaned lockfile keys (the absent apps/* targets plus the
-# dangling node_modules/@dcf/{web,founder-node,mobile-android} link entries that
-# point at them) so npm install doesn't abort with EMISSINGTARGET.
+# Prune the workspaces list so npm only sees apps/api + packages/* (the absent
+# apps/web, apps/founder-node, apps/mobile-android would otherwise abort install).
 RUN node scripts/docker-prune-workspaces.mjs
+
+# Copy EVERY workspace's package.json BEFORE install so npm can resolve the
+# inter-workspace symlinks (packages/founder-vault depends on packages/utils,
+# apps/api depends on packages/*). Without these manifests present at install
+# time, npm workspaces leaves the symlinks dangling and `tsc` in founder-vault
+# fails with "Cannot find module '@dcf/utils'" on a fresh Linux image.
+COPY packages/utils/package.json ./packages/utils/package.json
+COPY packages/founder-vault/package.json ./packages/founder-vault/package.json
+COPY packages/types/package.json ./packages/types/package.json
+COPY packages/config/package.json ./packages/config/package.json
+COPY packages/ui/package.json ./packages/ui/package.json
+COPY apps/api/package.json ./apps/api/package.json
 
 # Install with npm install (not ci). The committed lockfile is generated on
 # Windows, so strict `npm ci` aborts on Linux due to platform-specific optional
@@ -25,7 +31,8 @@ RUN node scripts/docker-prune-workspaces.mjs
 # linux-x64 binaries, so no native toolchain is needed.
 RUN npm install --no-audit --no-fund
 
-# Copy source for the API + package deps + prisma + launcher.
+# NOW copy the actual source. The node_modules symlinks already point at the
+# right workspace dirs; source fills them in.
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
