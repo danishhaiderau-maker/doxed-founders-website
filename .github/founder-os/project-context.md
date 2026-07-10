@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(scripts): add npm run ensure:combo-pathway-pin alias
+chore(ops): add scripts/fetch-railway-logs.mjs (WebSocket log fetcher)
 
 ## Last Activity
 
