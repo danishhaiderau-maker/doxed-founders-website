@@ -1,6 +1,13 @@
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
+# OpenSSL is required by Prisma's query engine at runtime. node:20-bookworm-slim
+# ships libssl-3 but Prisma's engine probes for openssl-1.1.x by default and
+# warns/fails. Install openssl explicitly so the probe succeeds.
+RUN apt-get update -y \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 # Marker step — confirms the image pulls and a basic RUN executes.
 RUN node --version && npm --version
 
@@ -46,6 +53,12 @@ RUN node -e "console.log('build ok; dist/main exists:', require('fs').existsSync
 # --- runtime stage (slim) ----------------------------------------------------
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
+
+# Prisma needs openssl in the runtime stage too (it's a fresh slim image, not
+# the build stage's image with openssl already installed).
+RUN apt-get update -y \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 ENV PRISMA_DB_PUSH=true

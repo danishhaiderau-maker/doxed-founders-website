@@ -1,11 +1,15 @@
 [build]
-builder = "RAILPACK"
-buildCommand = "npm ci && npm run build:utils && npx prisma generate --schema=prisma/schema.prisma && npm run build --workspace=@dcf/api"
+# Use the Dockerfile (root /Dockerfile) for reproducible API-only images.
+# The Dockerfile handles workspace pruning, cross-platform lock drift (npm ci
+# fails on Linux when the lockfile was generated on Windows), OpenSSL for
+# Prisma, and the manifest-before-install ordering that npm workspaces needs.
+builder = "DOCKERFILE"
 watchPatterns = [
   "apps/api/**",
   "packages/**",
   "prisma/**",
   "scripts/start-api-prod.mjs",
+  "Dockerfile",
   "railway.toml",
   "tsconfig.base.json",
   "package.json",
