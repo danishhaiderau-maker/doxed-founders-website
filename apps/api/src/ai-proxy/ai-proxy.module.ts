@@ -28,6 +28,6 @@ import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
   ],
   controllers: [AiProxyController],
   providers: [AiProxyRuntimeService, AiProxyUsageService, IntentClassifierService, FounderNodeGuard],
-  exports: [AiProxyRuntimeService, AiProxyUsageService],
+  exports: [AiProxyRuntimeService, AiProxyUsageService, IntentClassifierService],
 })
 export class AiProxyModule {}
