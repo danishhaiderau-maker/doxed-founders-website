@@ -388,7 +388,32 @@ Things I could not fully resolve from the code and do not want to guess on, give
 
 ---
 
-## 8. TL;DR for the user
+## 8. Decisions (resolved 2026-07-11 — owner override in auto mode)
+
+The owner reviewed §7 and authorized proceeding with the safe defaults the plan already recommended. These are now binding, not questions:
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Secret rotation boundary for `SHOWCASE_WEBHOOK_SECRET` | **Distinct** from `BOT_CONTROL_SECRET`. Two vars, two rotation cycles. A leaked relay secret cannot drive the control API. |
+| 2 | Intent-mirror scope: `INTENT` only, or also `PENDING_ENTRY`? | **`INTENT` only.** Re-entering on `PENDING_ENTRY` would risk duplicate orders on top of an already-resting hire limit. The existing chase/catchup logic owns `PENDING_ENTRY`. |
+| 3 | Margin sizing on intent-mirror entries | **Platform cap (`subscriberMaxMarginUsd`) always wins.** Mirror is clamped, never exceeds the platform ceiling, regardless of the showcase's `FIXED_MARGIN_USDT`. This matches `evaluateEntryEligibility`'s existing behavior. |
+| 4 | Limit price source when the showcase is paper | **Use the webhook payload's `signal_price` ± `pullback_pct`.** Matches `buildIntentEnvelope`'s `offset_pct` logic. Do NOT fall back to the hire's local mark — that would diverge from the showcase's actual signal. |
+| 5 | Is the showcase running pure-paper in production right now? | **Assume yes for implementation.** The code defaults are `strategy_mode=RESEARCH`, `live_armed=False`. The intent_source tag makes the code safe either way. The owner will confirm production state before the live-hire test (§5.5); until then, the paper-mode integration test (§5.3) is the gate. |
+| 6 | Does the relay live entirely in this repo? | **Yes — confirmed.** `apps/api/src/trading-agents/signal-subscriber-execution.service.ts` is the hire-side executor, deployed in the platform API. No separate relay service. Fully scoped within this monorepo. |
+
+**Rollout order is locked:**
+1. Ship API-side first (`verifySignature`, `maybeEnterFromIntent`, kill switch, dry-run flag). Deploy.
+2. Set `SHOWCASE_WEBHOOK_SECRET` on both bot and API via `admin-control/showcase-runtime.service.ts`.
+3. Run paper-mode integration test (§5.3) with `INTENT_MIRROR_DRY_RUN=1`. Verify `INTENT_MIRROR_ENTER_DRY` events flow end-to-end, no real orders.
+4. Owner confirms production showcase state.
+5. Run sim-mode relay test (§5.4) with a test Bitfinex account. Verify one real capped order.
+6. Owner greenlights. Unset `INTENT_MIRROR_DRY_RUN`. Live hires with paper showcase now mirror correctly.
+
+The kill switch (`INTENT_MIRROR_KILL_SWITCH`) and dry-run flag (`INTENT_MIRROR_DRY_RUN`) are permanent operational tools — they stay in the code forever, not just for rollout.
+
+---
+
+## 9. TL;DR for the user
 
 - **Current state:** showcase runs paper, fills paper positions, fires webhooks; relay only mirrors *executed showcase fills*, so when the showcase is paper-only the hire dashboard lights up "active" but no order lands on the hire's Bitfinex.
 - **Key invariants already in code:** F7 `cont-` whitelist, F5 lane isolation, F8 Start validation, hire-must-be-ACTIVE, credentials-must-decrypt, margin/slot gates. **The showcase's `live_armed` is correctly absent from the hire-side consent chain.**
