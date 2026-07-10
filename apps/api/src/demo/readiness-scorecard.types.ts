@@ -53,6 +53,12 @@ export type ReadinessScorecard = {
     ai: PillarReport;
     founder: PillarReport;
     stress: PillarReport;
+    aiProxy: PillarReport;
+    routingEngine: PillarReport;
+    memoryEngine: PillarReport;
+    learningEngine: PillarReport;
+    doxxing: PillarReport;
+    ideaValidator: PillarReport;
   };
   switches: SwitchStates;
   numbers: FakeCounts;
