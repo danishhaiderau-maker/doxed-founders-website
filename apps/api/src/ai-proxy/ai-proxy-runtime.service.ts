@@ -16,7 +16,8 @@ import { FlightRecorderService } from '../flight-recorder/flight-recorder.servic
 import { RoutingEngineService } from '../routing-engine/routing-engine.service';
 import { RetryDetectorService } from '../learning-engine/retry-detector.service';
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
-import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2 } from './ai-proxy.constants';
+import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
+import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 
 /**
@@ -101,6 +102,7 @@ export class AiProxyRuntimeService {
     private readonly routingEngine: RoutingEngineService,
     private readonly flightRecorder: FlightRecorderService,
     private readonly retryDetector: RetryDetectorService,
+    private readonly intentClassifier: IntentClassifierService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -129,7 +131,7 @@ export class AiProxyRuntimeService {
     const systemPrompt = systemMessage?.content ?? '';
     const requestId = randomUUID();
     const promptHash = this.computePromptHash(systemPrompt, userPrompt);
-    const inferredIntent = this.inferIntent(userPrompt);
+    const inferredIntent = await this.resolveIntent(userPrompt);
 
     if (USE_ROUTING_ENGINE_V2) {
       try {
@@ -525,6 +527,29 @@ export class AiProxyRuntimeService {
     if (/```|`/.test(userPrompt)) return 'code';
     if (userPrompt.length < 200) return 'simple_qa';
     return 'reasoning';
+  }
+
+  /**
+   * Phase 5b intent dispatcher. When USE_SMART_INTENT_CLASSIFIER is on (the
+   * default), delegates to the hybrid classifier (heuristic pre-filter →
+   * GLM 4 Flash → context signals). When off, or if the classifier throws,
+   * falls back to the legacy length/code-fence heuristic so routing never
+   * breaks. Returns an AiRuntimeIntent so the Routing Engine v2 and Flight
+   * Recorder rows keep their existing type.
+   */
+  private async resolveIntent(userPrompt: string): Promise<AiRuntimeIntent> {
+    if (!USE_SMART_INTENT_CLASSIFIER) {
+      return this.inferIntent(userPrompt);
+    }
+    try {
+      const classified = await this.intentClassifier.classify(userPrompt);
+      return routerIntentToRuntimeIntent(classified.intent);
+    } catch (err) {
+      this.logger.warn(
+        `Smart intent classifier failed (${err instanceof Error ? err.message : String(err)}); falling back to regex.`,
+      );
+      return this.inferIntent(userPrompt);
+    }
   }
 
   /**
