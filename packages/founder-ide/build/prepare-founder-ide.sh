@@ -72,7 +72,7 @@ sed -i \
 # and VSCodium get separate Add/Remove Programs entries. VSCodium sets
 # `AppId={{...}}` — we rewrite that line wholesale.
 if grep -q '^AppId=' "${CODE_ISS}"; then
-  sed -i 's|^AppId=.*|AppId={2557F919-8736-40CC-A9A6-D9AC45C21CBF}|' "${CODE_ISS}"
+  sed -i 's|^AppId=.*|AppId={{2557F919-8736-40CC-A9A6-D9AC45C21CBF}|' "${CODE_ISS}"
 else
   echo "[prepare] WARN: no AppId= line in code.iss — Inno Setup AppId left as VSCodium's. Check manually." >&2
 fi
