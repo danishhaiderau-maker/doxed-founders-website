@@ -28,6 +28,8 @@
     "build:api": "npm run build:utils && npx prisma generate --schema prisma/schema.prisma && npm run build --workspace=@dcf/api",
     "start:api:prod": "node scripts/start-api-prod.mjs",
     "verify:prod": "powershell -ExecutionPolicy Bypass -File scripts/verify-prod-ready.ps1",
+    "verify:deploy": "node scripts/verify-stack-deployed.mjs",
+    "watch:deploy-health": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/watch-deploy-health.ps1",
     "smoke:test": "node scripts/smoke-test.mjs",
     "demo:full": "node scripts/demo-harness.mjs",
     "demo:stress": "node scripts/demo-harness.mjs --stress",
