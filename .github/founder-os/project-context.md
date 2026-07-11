@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-ide): package VS Code extension .vsix for Founder IDE
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
