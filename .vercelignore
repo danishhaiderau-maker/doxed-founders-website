@@ -22,6 +22,32 @@ services/btc-conservative-agent/research/genome/genome_analysis_report.json
 apps/founder-node/release/
 apps/founder-node/build/
 
+# Founder IDE upstream — git submodule, huge, not needed for web deploy
+packages/founder-ide/upstream/void/out-build/
+packages/founder-ide/upstream/void/out/
+packages/founder-ide/
+
+# API / founder-node — not needed for web deploy
+apps/api/
+apps/founder-node/
+
+# Root-level analysis artifacts and temp files
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!turbo.json
+!vercel.json
+*.csv
+*.jsonl
+*.db
+
+# Docs (not needed for build)
+docs/
+
+# Scripts (not needed for build)
+scripts/
+
 # Local / debug artifacts
 .tools/
 apps/mobile-android/
