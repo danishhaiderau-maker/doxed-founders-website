@@ -1,9 +1,8 @@
-# Python bots / research (not used by Next.js deploy — keeps upload under Vercel 10mb limit)
+# Python bots / research (not used by Next.js deploy)
 services/btc-conservative-agent/
 services/btc-signal-engine/
 
-# Local-only research snapshots — HARD RULE: never upload to Vercel.
-# 5k+ files of local analytics artifacts with zero value in any cloud deploy.
+# Local-only research snapshots
 .edge-analysis/
 .agent-check*.json
 .dash-check.json
@@ -16,37 +15,41 @@ services/btc-conservative-agent/**/*.csv
 services/btc-conservative-agent/**/*.db
 services/btc-conservative-agent/**/__pycache__/
 services/btc-conservative-agent/bot_runtime.log*
-services/btc-conservative-agent/research/genome/genome_analysis_report.json
 
-# Founder Node desktop builds (not part of web deploy)
+# Founder Node desktop builds
 apps/founder-node/release/
 apps/founder-node/build/
 
-# Founder IDE upstream — git submodule, huge, not needed for web deploy
-packages/founder-ide/upstream/void/out-build/
-packages/founder-ide/upstream/void/out/
+# Founder IDE upstream — git submodule, huge
 packages/founder-ide/
+packages/skycode-fork/
 
 # API / founder-node — not needed for web deploy
 apps/api/
 apps/founder-node/
 
-# Root-level analysis artifacts and temp files
-*.json
-!package.json
-!package-lock.json
-!tsconfig.json
-!turbo.json
-!vercel.json
-*.csv
-*.jsonl
-*.db
+# Root-level analysis artifacts (JSON/CSV/DB dumps)
+/*_report.json
+/*_summary.json
+/*_audit.json
+/*_validation.json
+/*_sync.json
+/*_integrity.json
+/*_session.json
+/*_study.jsonl
+/*_drift_report.json
+/*_analysis.json
+/*_specs.json
+/*.csv
+/*.jsonl
+/*.db
 
-# Docs (not needed for build)
+# Scripts — only keep vercel-ignore-build.sh
+scripts/*
+!scripts/vercel-ignore-build.sh
+
+# Docs
 docs/
-
-# Scripts (not needed for build)
-scripts/
 
 # Local / debug artifacts
 .tools/
