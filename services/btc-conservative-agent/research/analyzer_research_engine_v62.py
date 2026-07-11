@@ -297,6 +297,15 @@ SIGNAL_PERSIST_FILE = "signal_persist.log"
 NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
+
+# Ensure parent directory is on sys.path so combo_pathway_config / pathway_lane_roster
+# import correctly when analyzer runs from research/ subdirectory.
+import os as _os, sys as _sys
+_AD_ = _os.path.abspath(_os.path.dirname(__file__))
+_PARENT_ = _os.path.dirname(_AD_)
+if _PARENT_ not in _sys.path:
+    _sys.path.insert(0, _PARENT_)
+
 # Single source: combo_pathway_config (bot + dashboard import the same contract).
 try:
     from combo_pathway_config import (
@@ -319,18 +328,14 @@ try:
         RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     )
     from scenario_c_config import SCENARIO_C_LADDER_LABEL, TRAIL_LADDER_SCENARIO_C
-    from legacy_pathway_config import (
-        PATHWAY_STATUS_SHADOW_COLLECTING,
-        SHADOW_COLLECTING_LANES,
-    )
-    from experimental_pathway_config import (
-        EXPERIMENTAL_EXECUTION_LANES,
-        EXPERIMENTAL_LANE_LABELS,
-        RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
-        RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
-        RESEARCH_LANE_RECOVERY_MONSTER_V1,
-        RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-    )
+    PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
+    SHADOW_COLLECTING_LANES = ()
+    EXPERIMENTAL_EXECUTION_LANES = ()
+    EXPERIMENTAL_LANE_LABELS = {}
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA = "AI_DISAGREEMENT_ALPHA"
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY = "AI_DISAGREEMENT_REPLAY"
+    RESEARCH_LANE_RECOVERY_MONSTER_V1 = "RECOVERY_MONSTER_V1"
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1 = "TYPE_B_PREDICTOR_V1"
     ACTIVE_PATHWAY_LANES = tuple(COMBO_EXECUTION_LANES) + tuple(EXPERIMENTAL_EXECUTION_LANES)
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
@@ -378,24 +383,11 @@ except ImportError as _pathway_import_err:
         "AI_DISAGREEMENT_REPLAY",
     )
     _COMBO_LANE_LABELS = {}
-    ANALYZER_COMPARE_LANES = ACTIVE_PATHWAY_LANES + (
+    ANALYZER_COMPARE_LANES = (
         "CONTINUOUS",
-        "COMBO_65_SP5_DIRECT",
-        "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1",
-        "TYPE_B_PREDICTOR_V1",
-        "AI_DISAGREEMENT_ALPHA",
-        "EXTREME_EDGE",
-        "EDGE_PLUS_STACK",
+        "TYPE_B_HUNTER_V1",
+        "SR_MICRO_TILE_V1",
         "AI_SCAN",
-        "HIGH_EDGE_RUNNER",
-        "SHADOW_RUNNER",
-        "EDGE_ALPHA_4",
-        "TYPE_B_HUNTER",
-        "SHORT_BEAR_ALPHA",
-        "AI_60_65_ALPHA",
-        "URGENT_CHASE_ALPHA",
-        "CHASE_3PLUS_ALPHA",
     )
     RETIRED_PATHWAY_LANES = frozenset({
         "EXTREME_EDGE", "EDGE_PLUS_STACK",
