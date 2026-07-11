@@ -1,8 +1,8 @@
 """
-Quality pathway roster — genome architecture v1 (2026-06-23).
+Quality pathway roster — v11.5-continuous-clean (2026-07-11).
 
-Live tiles: COMBO_604 research candidate + CONTINUOUS benchmark only.
-Everything else → legacy metadata / analyzer compare scope.
+Only tile: CONTINUOUS benchmark. All research lanes retired — none outperformed.
+Historical CSV data preserved for all legacy lane names.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from combo_pathway_config import (
     RESEARCH_LANE_SL_AVOIDANCE_V1,
     RESEARCH_LANE_SIZED_CONTINUOUS_V1,
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
@@ -30,25 +29,23 @@ RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
 RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
-# Default analyzer/dashboard views — live research stack only (historical CSV preserved).
+# [CLEAN 2026-07-11] CONTINUOUS only — all research tiles retired.
 DASHBOARD_PRIMARY_LANES = (
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     RESEARCH_LANE_AI_SCAN,
 )
 
 LIVE_PATHWAY_TILE_ORDER = (
-    RESEARCH_CANDIDATE_LANE,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     COMPARISON_BENCHMARK_LANE,
 )
 
 DASHBOARD_PATHWAY_LANES = LIVE_PATHWAY_TILE_ORDER
 
 RETIRED_PATHWAY_LANES = frozenset({
+    RESEARCH_LANE_SL_AVOIDANCE_V1,
+    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     RESEARCH_LANE_EXTREME_EDGE,
     RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
@@ -63,22 +60,21 @@ RETIRED_PATHWAY_LANES = frozenset({
 
 DATA_RETIRED_PATHWAY_LANES = frozenset(SHADOW_COLLECTING_LANES)
 
-PATHWAY_SHADOW_COLLECTING_ENABLED = True
+PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "genome-architecture-v1-2026-06-23"
+ROSTER_PHASE = "v11.5-continuous-clean-2026-07-11"
 ROSTER_NOTES = (
-    "Live: AI60_SP3 Virtual Chase + A160 V2 independent paper + CONTINUOUS benchmark. "
-    "V2 uses own prompt/AI clock/trade IDs — CONTINUOUS unaffected. "
-    "Retired from live orders: COMBO_65, experimental tiles, direct combos. "
-    "Shadow collecting ON for legacy lanes (virtual sim, no orders)."
+    "CONTINUOUS benchmark only. All research tiles retired 2026-07-11 — "
+    "none outperformed benchmark. SL_AVOIDANCE_V1: 47% WR, -$2.03. "
+    "SIZED_CONTINUOUS_V1: 31% WR, -$81.08. Shadow collecting OFF."
 )
 
 ANALYZER_COMPARE_LANES = (
+    COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_SL_AVOIDANCE_V1,
     RESEARCH_LANE_SIZED_CONTINUOUS_V1,
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
-    COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
@@ -94,7 +90,7 @@ ANALYZER_COMPARE_LANES = (
 
 
 def is_ai_focused_lane(lane: str) -> bool:
-    """Primary dashboard filter: CONTINUOUS + AI60 + A160 V2 (+ AI_SCAN).
+    """Primary dashboard filter: CONTINUOUS + AI_SCAN only.
 
     Legacy COMBO/EDGE/CHASE/shadow-collecting lanes stay in CSV and full reports;
     default UI hides them (?all=1 to expand).

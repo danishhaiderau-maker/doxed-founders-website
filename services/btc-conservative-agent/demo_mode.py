@@ -6,6 +6,11 @@ Single source of truth for demo-mode bot configuration. Used by the
 end-to-end demo harness (`scripts/demo-harness.mjs`) to start the bot
 on :7002 in a safe simulation state.
 
+v11.6 — 3-lane research stack:
+  - CONTINUOUS (benchmark, T+0s AI cadence)
+  - TYPE_B_HUNTER_V1 (research candidate, T+60s AI cadence, shadow)
+  - SR_MICRO_TILE_V1 (research candidate, T+120s AI cadence, shadow)
+
 It:
   - Forces LIVE_TRADING_ENABLED=False (refuses to launch if the outer
     shell already set it to True — that would indicate a misconfigured
@@ -61,8 +66,13 @@ def configure_demo_env() -> None:
     os.environ["DEMO_CASSETTE_MODE"] = "capture" if capture else "replay"
 
     os.environ.setdefault("DASHBOARD_PORT", "7002")
-    os.environ.setdefault("LAB_SHADOW_SL_AVOIDANCE_V1", "1")
-    os.environ.setdefault("LAB_SHADOW_SIZED_CONTINUOUS_V1", "1")
+    # v11.6 dual research candidates — shadow collecting TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1
+    os.environ.setdefault("LAB_SHADOW_TYPE_B_HUNTER_V1", "1")
+    os.environ.setdefault("LAB_SHADOW_SR_MICRO_TILE_V1", "1")
+    # Toggle defaults — both research candidates start OFF (shadow only), CONTINUOUS ON
+    os.environ.setdefault("RESEARCH_LANE_TYPE_B_ENABLED", "0")
+    os.environ.setdefault("RESEARCH_LANE_SR_MICRO_ENABLED", "0")
+    os.environ.setdefault("CONTINUOUS_AI_RESEARCH_ENABLED", "1")
 
 
 def cassette_lookup(model: str, temperature: float, prompt_prefix: str):

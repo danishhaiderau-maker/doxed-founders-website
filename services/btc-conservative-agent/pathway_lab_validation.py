@@ -176,6 +176,7 @@ def audit_type_b_not_in_execution() -> dict:
     matches_research_candidate = combo_lane_matches(
         RESEARCH_CANDIDATE_LANE, sample_ai, "SHORT", sample_spread
     )
+    candidate_independent = is_independent_ai_lane(str(RESEARCH_CANDIDATE_LANE or ""))
     checks = [
         {
             "check": "combo_lane_matches source has no TYPE_B/TYPE_A gates",
@@ -188,9 +189,12 @@ def audit_type_b_not_in_execution() -> dict:
             "detail": "matcher inspects win_prob and directional spread buckets",
         },
         {
-            "check": "sample APPROVE AI60-65 spread4 matches RESEARCH_CANDIDATE lane",
-            "passed": matches_research_candidate,
-            "detail": f"{RESEARCH_CANDIDATE_LANE} match={matches_research_candidate}",
+            "check": "RESEARCH_CANDIDATE lane recognized (combo or independent AI)",
+            "passed": matches_research_candidate or candidate_independent,
+            "detail": (
+                f"{RESEARCH_CANDIDATE_LANE} match={matches_research_candidate}"
+                f" independent_ai={candidate_independent}"
+            ),
         },
     ]
     payload = {

@@ -2,42 +2,47 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-SL_AVOIDANCE_V1: research candidate (data-grounded filter: ADX<30, no OVERLAP,
-  signal_age>=180s, SL fingerprint). Inherits AI_SCAN decision. Same Scenario C exits.
-SIZED_CONTINUOUS_V1: research candidate (same entries as CONTINUOUS; session-based
-  margin sizing only: LONDON/NY=1.5x, ASIA/OVERLAP=0.5x).
+TYPE_B_HUNTER_V1: research candidate — pre-entry TYPE_B prediction (independent AI, shadow).
+SR_MICRO_TILE_V1: research candidate — micro S/R mean-reversion (independent AI, shadow).
+
+Retired 2026-07-11:
+  SL_AVOIDANCE_V1 — 47% WR LAB, -$2.03, EV -$0.14/close (UNDERPERFORMING)
+  SIZED_CONTINUOUS_V1 — 31% WR LAB, -$81.08, EV -$0.84/close (UNDERPERFORMING)
 
 Retired 2026-07-08:
   AI60_SP3_VIRTUAL_CHASE — TIES vs CONTINUOUS (no edge). CSV preserved.
   A160_CONTEXT_CHASE_EXIT_V2 — 0 approves in shadow. CSV preserved.
 
-Earlier retired: COMBO_604_SP4_CHASE_3PLUS — historical data preserved, no new orders.
+Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data preserved.
 """
 from __future__ import annotations
 
+# [CLEAN 2026-07-11] Housekeeping — only CONTINUOUS + 2 new research candidates remain.
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
+# New research candidates 2026-07-11 — independent AI, shadow collecting, toggle to promote
+RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
+RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
+
+# Legacy constants — preserved for CSV/historical data references. No live execution.
 RESEARCH_LANE_COMBO_65_SP5_CHASE = "COMBO_65_SP5_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_65_SP5_DIRECT = "COMBO_65_SP5_DIRECT"
 RESEARCH_LANE_COMBO_604_SP4_CHASE = "COMBO_604_SP4_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_604_SP4_DIRECT = "COMBO_604_SP4_DIRECT"
 RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE = "AI60_SP3_VIRTUAL_CHASE"
 RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 = "A160_CONTEXT_CHASE_EXIT_V2"
-# [ADD_2026-07-08] Data-grounded research candidate (filter-only A/B vs CONTINUOUS).
 RESEARCH_LANE_SL_AVOIDANCE_V1 = "SL_AVOIDANCE_V1"
-# [ADD_2026-07-08 Phase 2] Position-sizing tile — same entries as CONTINUOUS.
 RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 
-# Live order generation — research candidates (+ CONTINUOUS benchmark toggle)
-# AI60 / A160 V2 retired 2026-07-08. Active tiles: SL_AVOIDANCE_V1 + SIZED_CONTINUOUS_V1.
+# Active execution lanes (CONTINUOUS benchmark + 2 shadow research candidates)
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
 )
 
 COMBO_LANE_SPECS = {
@@ -165,147 +170,111 @@ COMBO_LANE_SPECS = {
         ),
     },
     # =====================================================================
-    # [ADD_2026-07-08] SL_AVOIDANCE_V1 — filter-only A/B vs CONTINUOUS.
-    # Final filter set (revised): ADX<30 + no OVERLAP + signal_age>=180s +
-    # SL fingerprint match_max=1. No ladder override (inherits CONTINUOUS).
+    # NEW RESEARCH CANDIDATES 2026-07-11
+    # TYPE_B_HUNTER_V1 — independent AI + pre-entry composite scoring
+    # SR_MICRO_TILE_V1 — independent AI + micro S/R mean-reversion
+    # Both start as SHADOW_COLLECTING — toggle ON to promote to live orders.
+    # =====================================================================
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: {
+        "label": "Type B Hunter V1 — pre-entry TYPE_B prediction",
+        "subtitle": (
+            "RESEARCH_CANDIDATE · SHADOW ONLY · toggle ON = live orders · "
+            "composite scoring (delta+volume+adx+conf) · independent AI at T+60s"
+        ),
+        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V1",
+        "ai_min": 55,
+        "ai_max": 101,
+        "spread_min": 2,
+        "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False,
+        "is_research_candidate": True,
+        "is_independent_ai": True,
+        "id_prefix": "tbhv1",
+        "module": "type_b_hunter_v1.py",
+        "ai_cadence_offset_sec": 60,
+        "promotion_criteria": (
+            "ALL required: ≥150 shadow closes · positive EV · beats CONTINUOUS "
+            "(95% CI) · P(TYPE_B) ≥ 40% · WR ≥ 75%"
+        ),
+        "kill_criteria": (
+            "ANY after ≥75 closes: negative EV · P(TYPE_B) < 35% · WR < 65% · "
+            "filter selectivity > 40%"
+        ),
+        "hypothesis": (
+            "TYPE_B trades (MFE≥15%) are identifiable pre-entry via order-flow "
+            "delta (+67% vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
+            "ema_slope, structure)."
+        ),
+    },
+    RESEARCH_LANE_SR_MICRO_TILE_V1: {
+        "label": "S/R Micro Tile V1 — micro S/R mean-reversion",
+        "subtitle": (
+            "RESEARCH_CANDIDATE · SHADOW ONLY · toggle ON = live orders · "
+            "LONG@support + SHORT@resistance · midpoint avoidance · volatility suspend"
+        ),
+        "combo_key": "SR_MICRO_TILE++MEAN_REVERSION_V1",
+        "ai_min": 55,
+        "ai_max": 101,
+        "spread_min": 2,
+        "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False,
+        "is_research_candidate": True,
+        "is_independent_ai": True,
+        "id_prefix": "srmv1",
+        "module": "sr_micro_tile_v1.py",
+        "ai_cadence_offset_sec": 120,
+        "extra_filters": {"adx_max": 40},
+        "promotion_criteria": (
+            "ALL required: ≥150 shadow closes · positive EV · beats CONTINUOUS "
+            "(95% CI) · WR ≥ 65% · stable across at least 2 regime types"
+        ),
+        "kill_criteria": (
+            "ANY after ≥75 closes: negative EV · WR < 55% · >30% trades hit "
+            "midpoint avoidance · >20% trades suspended by volatility guard"
+        ),
+        "hypothesis": (
+            "85-90% of market time is range-bound. Mean-reversion at micro S/R "
+            "with midpoint avoidance captures crab movement income while volatility "
+            "guard prevents trending losses."
+        ),
+    },
+    # =====================================================================
+    # [RETIRED 2026-07-11] SL_AVOIDANCE_V1 — UNDERPERFORMING (LAB: 47% WR, -$2.03)
+    # [RETIRED 2026-07-11] SIZED_CONTINUOUS_V1 — UNDERPERFORMING (LAB: 31% WR, -$81.08)
+    # Specs preserved for CSV/historical data analysis.
     # =====================================================================
     RESEARCH_LANE_SL_AVOIDANCE_V1: {
-        "label": "SL Avoidance V1 - ADX<30 + no OVERLAP",
-        "subtitle": (
-            "RESEARCH_CANDIDATE (LAB shadow) - data-grounded via filter_and_sizing_search.py. "
-            "OVERLAP session (UTC 13-15) has 55% WR / -$54 PnL (worst). ADX 30+ has -$0.66 EV. "
-            "Combined filter: keeps 63% of trades, lifts PnL $100->$175 (+74%) in backtest. "
-            "WR 70%->79%. Starts OFF - LAB shadow mode."
-        ),
+        "label": "SL Avoidance V1 (RETIRED)",
+        "subtitle": "RETIRED 2026-07-11 — LAB: 47% WR, -$2.03, EV -$0.14/close",
         "combo_key": "SL_AVOIDANCE++DATA_GROUNDED_V1",
-        "ai_min": 60,
-        "ai_max": 100,
-        "spread_min": 3,
-        "spread_max": 99,
-        "entry_mode": "VIRTUAL_CHASE",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": True,
-        "id_prefix": "slav1",
-        # No ladder override — inherits TRAIL_LADDER_SCENARIO_C (CONTINUOUS exits).
-        "extra_filters": {
-            "adx_max": 30,
-            "session_blacklist": ["OVERLAP"],
-            "signal_age_min_sec": 180,
-            "sl_fingerprint_match_max": 1,
-            "sl_fingerprint_report_path": "reports/stop_loss_fingerprint_report.json",
-        },
-        "promotion_criteria": (
-            "ALL required: >=150 completed trades - positive EV - beats CONTINUOUS over "
-            "same window (95% bootstrap CI excludes benchmark mean) - reduced stop-loss "
-            "rate vs CONTINUOUS - stable across sessions and ADX regimes"
-        ),
-        "kill_criteria": (
-            "ANY after >=75 trades: negative EV - TIES or LOSES vs CONTINUOUS on "
-            "statistical_significance_report - stop-loss rate not reduced - WR falls "
-            "below 60% - filter is too aggressive (rejects >70% of CONTINUOUS signals)"
-        ),
-        "research_question": (
-            "Does filtering out the historical stop-loss fingerprint at entry improve "
-            "EV/approval vs CONTINUOUS, without sacrificing winners?"
-        ),
-        "hypothesis": (
-            "STOP_LOSS leakage is concentrated in ADX 30+ and OVERLAP session. Excluding "
-            "these conditions plus a fingerprint match threshold will recover leakage "
-            "while keeping most PROFIT_LOCK_LADDER winners."
-        ),
-        "data_grounding": {
-            "source_dataset": "trade_outcome.jsonl / trades_3factor.csv 2026-07-01 to 2026-07-07 (283 trades)",
-            "analysis_reports": [
-                "reports/stop_loss_fingerprint_report.json",
-                "reports/session_edge_report.json",
-                "reports/filter_and_sizing_search.json",
-            ],
-            "expected_filter_selectivity": "rejects ~30-40% of CONTINUOUS signals",
-            "expected_ev_uplift": "+$0.30 to +$0.60 per trade vs CONTINUOUS",
-        },
+        "is_legacy": True,
     },
-    # ========================================================================
-    # [ADD_2026-07-08 Phase 2] SIZED_CONTINUOUS_V1 — position-sizing tile
-    # Same entry criteria as CONTINUOUS (no filter). Only margin changes by session.
-    # ========================================================================
     RESEARCH_LANE_SIZED_CONTINUOUS_V1: {
-        "label": "SIZED_CONTINUOUS V1 - session-based position sizing",
-        "subtitle": (
-            "RESEARCH_CANDIDATE (LAB shadow) - Phase 2 position-sizing tile. "
-            "Same entries as CONTINUOUS (no filter); only margin changes by session. "
-            "LONDON/NEW_YORK=1.5x, ASIA/OVERLAP=0.5x. "
-            "Backtest: +$184.82 vs +$100.86 baseline (+83% PnL uplift, no trades rejected). "
-            "Biggest unrealized lever in the system. Default OFF - LAB shadow mode."
-        ),
+        "label": "SIZED_CONTINUOUS V1 (RETIRED)",
+        "subtitle": "RETIRED 2026-07-11 — LAB: 31% WR, -$81.08, EV -$0.84/close",
         "combo_key": "SIZED_CONTINUOUS++SESSION_SIZE_V1",
-        "ai_min": 60,
-        "ai_max": 100,
-        "spread_min": 3,
-        "spread_max": 99,
-        "entry_mode": "VIRTUAL_CHASE",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": True,
-        "id_prefix": "szdc1",
-        "size_multipliers": {
-            "session_bucket": {
-                "LONDON": 1.5,
-                "NEW_YORK": 1.5,
-                "ASIA": 0.5,
-                "OVERLAP": 0.5,
-                "default": 1.0,
-            },
-        },
-        "promotion_criteria": (
-            "ALL required: >=100 completed trades - positive EV - beats CONTINUOUS on "
-            "total PnL (95% bootstrap CI excludes benchmark mean) - WR unchanged vs "
-            "CONTINUOUS (sizing shouldn't affect win/loss, only magnitude)"
-        ),
-        "kill_criteria": (
-            "ANY after >=75 trades: total PnL < CONTINUOUS - WR materially different "
-            "(indicates sizing is changing entry decisions, not just magnitude) - "
-            "OVERLAP trades losing more than -1.5x CONTINUOUS's OVERLAP losses"
-        ),
-        "research_question": (
-            "Does session-based position sizing (no rejection) beat CONTINUOUS on total "
-            "PnL while preserving WR? I.e. is sizing a cleaner lever than filtering?"
-        ),
-        "hypothesis": (
-            "Session WR varies from 55% (OVERLAP) to 88% (LONDON). Rather than rejecting "
-            "low-WR signals, reducing their size 3x while boosting high-WR signals 1.5x "
-            "captures the session edge without sacrificing trade volume. Backtest "
-            "suggests +83% PnL uplift vs baseline."
-        ),
-        "data_grounding": {
-            "source_dataset": "trade_outcome.jsonl 2026-07-01 to 2026-07-07 (283 trades)",
-            "analysis_report": "reports/filter_and_sizing_search.json",
-            "best_scheme": "LONDON/NY=1.5x, ASIA/OVERLAP=0.5x",
-            "backtest_pnl_usd": 184.82,
-            "backtest_baseline_pnl_usd": 100.86,
-            "backtest_uplift_pct": 83.2,
-            "backtest_trade_count": 283,
-            "backtest_trade_count_note": "ALL 283 trades taken (none rejected)",
-        },
+        "is_legacy": True,
     },
 }
 
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-CONTINUOUS_PROXY_LANES = COMBO_EXECUTION_LANES
-PRIMARY_PRODUCTION_LANE = None
+CONTINUOUS_PROXY_LANES = ()
+PRIMARY_PRODUCTION_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
-PRIMARY_PRODUCTION_ROLE = "RESEARCH_CANDIDATE"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_SL_AVOIDANCE_V1
+PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v11.4-sl-avoidance-plus-sizing-v1"
+RESEARCH_STACK_VERSION = "v11.6-dual-research-candidates"
 RESEARCH_STACK_FEATURES = (
-    "SL_AVOIDANCE_V1 (data-grounded filter: ADX<30, no OVERLAP session, signal_age>=180s) "
-    "+ SIZED_CONTINUOUS_V1 (session-based position sizing: LONDON/NY=1.5x, ASIA/OVERLAP=0.5x) "
-    "- AI60_SP3 + A160 V2 retired 2026-07-08 - Trading Genome v1 - Event bus + research.db "
-    "- Relay snapshot push"
+    "CONTINUOUS benchmark + 2 research candidates (TYPE_B_HUNTER_V1, SR_MICRO_TILE_V1) "
+    "— all legacy lanes retired 2026-07-11 — "
+    "Trading Genome v1 — Event bus + research.db — "
+    "3-lane AI cadence (T+0, T+60, T+120)"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -314,33 +283,27 @@ EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
 COMBO_CHASE_DELAY_LANES = COMBO_TILE_DISPLAY_ORDER
-COMBO_CHASE_ISOLATION_PAIRS = (
-    (RESEARCH_LANE_COMBO_604_SP4_DIRECT, RESEARCH_LANE_COMBO_604_SP4_CHASE),
-)
-ACTIVE_CHASE_ISOLATION_PAIRS = (
-    (COMPARISON_BENCHMARK_LANE, RESEARCH_LANE_SL_AVOIDANCE_V1),
-    (COMPARISON_BENCHMARK_LANE, RESEARCH_LANE_SIZED_CONTINUOUS_V1),
-)
-ACTIVE_CHASE_ISOLATION_LANES = (
-    COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
-)
-COMBO_CHASE_DIRECT_REFERENCE = RESEARCH_LANE_COMBO_604_SP4_DIRECT
+COMBO_CHASE_ISOLATION_PAIRS = ()
+ACTIVE_CHASE_ISOLATION_PAIRS = ()
+ACTIVE_CHASE_ISOLATION_LANES = (COMPARISON_BENCHMARK_LANE,)
+COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter V1"
+COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1"
 
-_COMBO_TOGGLE_DEFAULTS = {lane: True for lane in COMBO_EXECUTION_LANES}
+_COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
+# Both new research candidates start OFF (shadow collecting)
 _COMBO_TOGGLE_DEFAULTS.update({
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
+    RESEARCH_LANE_SR_MICRO_TILE_V1: False,
     RESEARCH_LANE_COMBO_65_SP5_CHASE: False,
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_CHASE: False,
-    # Retired research candidates — no new orders.
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: False,
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: False,
-    # LAB shadow defaults OFF — toggle ON only after LAB confirmation.
     RESEARCH_LANE_SL_AVOIDANCE_V1: False,
     RESEARCH_LANE_SIZED_CONTINUOUS_V1: False,
 })
@@ -349,7 +312,9 @@ _COMBO_TOGGLE_DEFAULTS.update({
 def is_independent_ai_lane(lane: str) -> bool:
     """Lanes with their own DeepSeek prompt — never inherit AI_SCAN / CONTINUOUS decisions."""
     lane_u = str(lane or "").upper()
-    if lane_u == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
+    if lane_u in (RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+                  RESEARCH_LANE_TYPE_B_HUNTER_V1,
+                  RESEARCH_LANE_SR_MICRO_TILE_V1):
         return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return bool(spec.get("is_independent_ai"))
