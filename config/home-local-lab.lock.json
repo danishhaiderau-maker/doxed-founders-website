@@ -2,7 +2,7 @@
   "frozen": true,
   "purpose": "Local research lab (source of truth) — Final Bots folder, no tunnel",
   "mode": "local-lab",
-  "botPort": 7800,
+  "botPort": 7002,
   "analyzerPort": 9001,
   "labRootRelative": "..",
   "botEntry": "15minu_bot.py",

@@ -1,7 +1,7 @@
 # Shared helpers for home-stack-launcher.ps1 and home-stack-start-all.ps1
 param(
   [int]$BridgePort = 7810,
-  [int]$BotPort = 7800,
+  [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9001
 )
 
@@ -462,7 +462,7 @@ function Test-HomeScriptRunning([string]$ScriptName) {
 function Close-HomeStackWindows {
   $closed = @()
   $windowTitles = @(
-    "Doxed Bot :7800",
+    "Doxed Bot :7002",
     "Doxed Analyzer",
     "Doxed Analyzer (once)",
     "Doxed Cloudflare Tunnel",
@@ -509,7 +509,7 @@ function Clear-TunnelUrlFile {
 function Close-HomeStackWindowTitles {
   $closed = @()
   $windowTitles = @(
-    "Doxed Bot :7800",
+    "Doxed Bot :7002",
     "Doxed Analyzer",
     "Doxed Analyzer (once)",
     "Doxed Cloudflare Tunnel",
@@ -593,15 +593,15 @@ function Stop-LocalLabFast {
   if (Test-Path $stopScript) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript 2>$null | Out-Null
   } else {
-    Stop-ListenPortFast 7800 | Out-Null
+    Stop-ListenPortFast 7002 | Out-Null
     Stop-ListenPortFast 9500 | Out-Null
     Stop-PythonMatching "15minu_bot.py" | Out-Null
   }
-  return @{ stopped = $true; ports = @(7800, 9500) }
+  return @{ stopped = $true; ports = @(7002, 9500) }
 }
 
 function Stop-AllHomeStackFast {
-  # Legacy: stop global showcase ports only (does not touch local lab :7800/:9500).
+  # Legacy: stop global showcase ports only (does not touch local lab :7002/:9500).
   return Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort
 }
 

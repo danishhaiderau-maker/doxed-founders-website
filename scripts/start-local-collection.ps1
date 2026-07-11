@@ -16,7 +16,7 @@ Write-Host "  Analyzer: http://127.0.0.1:$($LocalCollection.AnalyzerPort)/"
 Write-Host "  Data:     $($LocalCollection.DataDir)"
 Write-Host ""
 
-foreach ($prodPort in @(7800, 9001)) {
+foreach ($prodPort in @(7002, 9001)) {
   try {
     $c = New-Object System.Net.Sockets.TcpClient
     $async = $c.ConnectAsync("127.0.0.1", $prodPort)

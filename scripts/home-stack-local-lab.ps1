@@ -1,4 +1,4 @@
-# Start/stop the Final Bots local lab (:7800 / :9001) — separate from global showcase.
+# Start/stop the Final Bots local lab (:7002 / :9001) — separate from global showcase.
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("start", "stop", "status")]
@@ -26,9 +26,9 @@ function Test-LabPort([int]$P) {
 
 function Get-LabStatus {
   return @{
-    botPort = 7800
+    botPort = 7002
     analyzerPort = 9001
-    botOnline = Test-LabPort 7800
+    botOnline = Test-LabPort 7002
     analyzerOnline = Test-LabPort 9001
     labRoot = $labRoot
   }
@@ -46,13 +46,13 @@ switch ($Action) {
       "-NoProfile", "-ExecutionPolicy", "Bypass",
       "-File", $startScript
     ) -WorkingDirectory $labRoot -WindowStyle Normal
-    @{ ok = $true; message = "Local lab start queued (:7800 bot + :9001 analyzer)." }
+    @{ ok = $true; message = "Local lab start queued (:7002 bot + :9001 analyzer)." }
   }
   "stop" {
     if (-not (Test-Path $stopScript)) {
       throw "Missing $stopScript"
     }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript
-    @{ ok = $true; message = "Local lab stopped (:7800 / :9001)." }
+    @{ ok = $true; message = "Local lab stopped (:7002 / :9001)." }
   }
 }

@@ -1,10 +1,10 @@
 {
   "frozen": true,
   "purpose": "Local data collection only — separate from doxxedcrypto production stack",
-  "botPort": 7800,
+  "botPort": 7002,
   "analyzerPort": 9001,
   "dataDirRelative": "services/btc-conservative-agent/local-collection-data",
-  "doNotUsePorts": [7800, 9001, 7810],
+  "doNotUsePorts": [7002, 9001, 7810],
   "doNotCopyFrom": "Bybit-15m-research-bot",
   "disableRelayWebhook": true,
   "disableTunnel": true,

@@ -69,7 +69,7 @@ switch ($Action) {
     Stop-PythonMatching "btc_conservative_agent" | Out-Null
     Stop-PythonMatching "bot.py" | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq $botTitle" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7800" 2>$null | Out-Null
+    & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7002" 2>$null | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Bot :7002" 2>$null | Out-Null
     Start-Sleep -Seconds 1
     Stop-ListenPortFast $BotPort | Out-Null

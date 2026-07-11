@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 2-way shadow watch: local bot :7800 vs Bitfinex relay sim liveBook + fidelity.
+ * 2-way shadow watch: local bot :7002 vs Bitfinex relay sim liveBook + fidelity.
  * Usage: node scripts/watch-relay-shadow.mjs --hours=2 --interval=90
  */
 import fs from 'fs';

@@ -28,7 +28,7 @@ const ACCOUNT_ID = (process.env.CLOUDFLARE_ACCOUNT_ID || '242582298202462d751981
 const ZONE_ID = (process.env.CLOUDFLARE_ZONE_ID || 'e5b41e1d9809507e75ecd826d8d66bef').trim();
 const TUNNEL_NAME = (process.env.CLOUDFLARE_TUNNEL_NAME || 'doxed-btc-bot').trim();
 const HOSTNAME = (process.env.CLOUDFLARE_TUNNEL_HOSTNAME || 'bot.doxxedcrypto.digital').trim();
-const BOT_PORT = Number(process.env.HOME_BOT_PORT || readShowcaseBotPort() || 7800);
+const BOT_PORT = Number(process.env.HOME_BOT_PORT || readShowcaseBotPort() || 7002);
 
 function readShowcaseBotPort() {
   try {

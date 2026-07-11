@@ -17,7 +17,7 @@ Set-Content -Path $flagFile -Value "bot=$BotPort analyzer=$AnalyzerPort" -NoNewl
 $messages = [System.Collections.Generic.List[string]]::new()
 
 # Local collection is isolated — release production ports so :7002/:9500 can bind reliably.
-foreach ($prodPort in @(7800, 9001)) {
+foreach ($prodPort in @(7002, 9001)) {
   if (Test-PortOpen $prodPort) {
     Stop-ListenPortFast $prodPort | Out-Null
     $messages.Add("Released production :$prodPort for local collection")

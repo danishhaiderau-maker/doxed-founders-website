@@ -63,8 +63,8 @@ if (!src.includes('not state.get("manual_admin_pause")')) {
 
 if (!src.includes('os.getenv("PORT"')) {
   src = src.replace(
-    'DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))',
-    'DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800"))',
+    'DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7002"))',
+    'DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7002"))',
   );
   changed = true;
 }

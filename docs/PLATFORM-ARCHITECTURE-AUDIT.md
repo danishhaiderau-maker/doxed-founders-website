@@ -422,7 +422,7 @@ flowchart TB
 | API | Railway | API subdomain (configured via env) |
 | Database | Neon | No public URL |
 | Showcase bot | Home PC `:7002` via Cloudflare tunnel | https://bot.doxxedcrypto.digital |
-| Local lab bot (dev only) | User machine `:7800` | None (not public) |
+| Local lab bot (dev only) | User machine `:7002` | None (not public) |
 
 **Sync ops (no bot code sync):** `npm run sync:production`, `npm run sync:all`, `npm run wire:home-bot` — infrastructure and URL wiring only.
 
@@ -974,7 +974,7 @@ Policy file: `config/bot-architecture.lock.json` (version 1, effective 2026-06-2
 |--|-------------------|----------------------------|
 | **Purpose** | Research / experimentation on developer machine | Public showcase at bot.doxxedcrypto.digital |
 | **Source** | External lab script on user desktop (not monorepo canonical) | `services/btc-conservative-agent/bot.py` |
-| **Port** | `:7800` | `:7002` |
+| **Port** | `:7002` | `:7002` |
 | **Public URL** | None | https://bot.doxxedcrypto.digital |
 | **Architecture** | Diverged — different imports and validation paths | Monorepo-maintained |
 
@@ -1146,7 +1146,7 @@ After reading this document (and optional code export), answer the following:
 
 ### Bot architecture
 
-22. Is blunt sync blocked between lab bot (:7800) and showcase bot (:7002)?
+22. Is blunt sync blocked between lab bot (:7002) and showcase bot (:7002)?
 23. Are bot credentials stored only via encrypted admin path, not in git?
 
 ### Mobile & desktop

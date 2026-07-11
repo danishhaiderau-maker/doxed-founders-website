@@ -1,6 +1,6 @@
 # One-shot permanent tunnel: login (if needed) -> create -> DNS -> Windows service -> wire production.
 param(
-  [int]$Port = 7800,
+  [int]$Port = 7002,
   [string]$Hostname = "bot.doxxedcrypto.digital",
   [string]$TunnelName = "doxed-btc-bot",
   [switch]$SkipWire,

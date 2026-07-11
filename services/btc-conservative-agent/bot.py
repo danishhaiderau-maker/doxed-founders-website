@@ -63,6 +63,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
     any_combo_execution_enabled,
     combo_entry_mode,
     combo_lane_match_detail,
@@ -5525,7 +5527,7 @@ GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 180000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7800")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
@@ -11377,6 +11379,137 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
     close_replay_buffer(study_id)
 
 
+# ── v11.6 Independent Research Tile AI Dispatch ──────────────────────────
+# TYPE_B_HUNTER_V1 at T+60s offset, SR_MICRO_TILE_V1 at T+120s offset.
+# Each tile calls evaluate_signal_with_ai with its own custom prompt.
+# Shadow-only (no live orders) while tile toggle is OFF.
+
+# Shared cooldown state for independent research AI ticks.
+_research_tile_cooldown_until = {}  # {lane: timestamp_until}
+
+
+def maybe_tick_type_b_hunter_v1_research():
+    """TYPE_B_HUNTER_V1 phase-shifted AI tick -- T+60s from CONTINUOUS.
+
+    Independent DeepSeek call with TYPE_B-specific prompt.
+    Shadow-only when tile toggle OFF (default); paper orders when ON.
+    """
+    lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(lane):
+        return
+    # Cooldown: 120s between ticks per tile
+    now = time.time()
+    if now < _research_tile_cooldown_until.get(lane, 0):
+        return
+    if _lane_pipeline_running(lane):
+        return
+    if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
+        return
+    _research_tile_cooldown_until[lane] = now + 120
+    try:
+        if not is_buffer_ready():
+            return
+        features = build_full_feature_snapshot()
+        if features is None:
+            return
+        edge_score = compute_edge_score(features)
+        buffers = {
+            "ret_1m": ret_1m_buffer,
+            "ret_5m": ret_5m_buffer,
+            "velocity": velocity_buffer,
+            "volume": volume_buffer,
+            "avg_volume": get_aggregated(volume_buffer),
+            "delta": delta_buffer,
+            "delta_change": delta_change_buffer,
+            "imbalance": imbalance_buffer,
+            "range": candle_range_buffer,
+            "wick_ratio": wick_ratio_buffer,
+            "body_ratio": body_ratio_buffer,
+        }
+        ctx = build_pure_ai_context(state, buffers)
+        if not ctx:
+            logger.info(f"[{lane}_AI] CTX_FAIL -- skip tick")
+            return
+        ctx["trade_id"] = f"tbhscan-{uuid.uuid4().hex[:12]}"
+        tile_on = is_research_lane_enabled(lane)
+        shadow_only = not tile_on
+        logger.info(
+            f"[{lane}_AI] independent tick offset=60s edge={edge_score:.1f} "
+            f"tile_on={tile_on} shadow={shadow_only}"
+        )
+        evaluate_signal_with_ai(
+            ctx,
+            research_lane=lane,
+            shadow_only=shadow_only,
+            trigger_reason="PERIODIC_RESEARCH_AI",
+        )
+    except Exception as e:
+        logger.error(f"[{lane}_AI] tick crash: {e}")
+
+
+def maybe_tick_sr_micro_tile_v1_research():
+    """SR_MICRO_TILE_V1 phase-shifted AI tick -- T+120s from CONTINUOUS.
+
+    Independent DeepSeek call with S/R mean-reversion prompt.
+    Shadow-only when tile toggle OFF (default); paper orders when ON.
+    """
+    lane = RESEARCH_LANE_SR_MICRO_TILE_V1
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(lane):
+        return
+    # Cooldown: 120s between ticks per tile
+    now = time.time()
+    if now < _research_tile_cooldown_until.get(lane, 0):
+        return
+    if _lane_pipeline_running(lane):
+        return
+    if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
+        return
+    _research_tile_cooldown_until[lane] = now + 120
+    try:
+        if not is_buffer_ready():
+            return
+        features = build_full_feature_snapshot()
+        if features is None:
+            return
+        edge_score = compute_edge_score(features)
+        buffers = {
+            "ret_1m": ret_1m_buffer,
+            "ret_5m": ret_5m_buffer,
+            "velocity": velocity_buffer,
+            "volume": volume_buffer,
+            "avg_volume": get_aggregated(volume_buffer),
+            "delta": delta_buffer,
+            "delta_change": delta_change_buffer,
+            "imbalance": imbalance_buffer,
+            "range": candle_range_buffer,
+            "wick_ratio": wick_ratio_buffer,
+            "body_ratio": body_ratio_buffer,
+        }
+        ctx = build_pure_ai_context(state, buffers)
+        if not ctx:
+            logger.info(f"[{lane}_AI] CTX_FAIL -- skip tick")
+            return
+        ctx["trade_id"] = f"srmscan-{uuid.uuid4().hex[:12]}"
+        tile_on = is_research_lane_enabled(lane)
+        shadow_only = not tile_on
+        logger.info(
+            f"[{lane}_AI] independent tick offset=120s edge={edge_score:.1f} "
+            f"tile_on={tile_on} shadow={shadow_only}"
+        )
+        evaluate_signal_with_ai(
+            ctx,
+            research_lane=lane,
+            shadow_only=shadow_only,
+            trigger_reason="PERIODIC_RESEARCH_AI",
+        )
+    except Exception as e:
+        logger.error(f"[{lane}_AI] tick crash: {e}")
+
+
 def maybe_tick_a160_v2_research():
     """Phase-shifted V2 AI tick — independent of AI_SCAN / CONTINUOUS order path.
 
@@ -11516,7 +11649,13 @@ def evaluate_signal_with_ai(
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
-        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        # Custom prompt per research lane (v11.6 independent tiles)
+        if research_lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            prompt = TYPE_B_HUNTER_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        elif research_lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
+            prompt = SR_MICRO_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        else:
+            prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
         if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
@@ -11574,7 +11713,7 @@ def evaluate_signal_with_ai(
         ai_result["_tranche_logged"] = True
         tranche_event = "AI_SHADOW" if shadow_only else "AI_DECISION"
         log_ai_tranche_outcome(ai_result, event=tranche_event)
-        if not shadow_only:
+        if not shadow_only or research_lane in (RESEARCH_LANE_TYPE_B_HUNTER_V1, RESEARCH_LANE_SR_MICRO_TILE_V1):
             _append_ai_history_row(ai_result)
             _sync_ai_dashboard_debug(ai_result)
             _emit_genome_ai_events(ai_result)
@@ -11649,7 +11788,7 @@ def evaluate_signal_with_ai(
             {"detail": (ai_result.get("error_detail") or "")[:200], "lane": research_lane, "shadow": shadow_only},
             force=True,
         )
-        if not shadow_only:
+        if not shadow_only or research_lane in (RESEARCH_LANE_TYPE_B_HUNTER_V1, RESEARCH_LANE_SR_MICRO_TILE_V1):
             _append_ai_history_row(ai_result)
             with state_lock:
                 state["pipeline_outcome"] = "AI_CRASH"
@@ -15723,6 +15862,10 @@ def state_monitor_loop():
             # V2 phase-shifted AI (last_ai_call_ts + 90s, own ~180s cooldown).
             # Never shares AI_SCAN call or CONTINUOUS last_ai_call_ts.
             maybe_tick_a160_v2_research()
+            # v11.6 Research tiles: TYPE_B_HUNTER_V1 (T+60s) + SR_MICRO_TILE_V1 (T+120s)
+            # Independent AI calls with custom prompts. Shadow-only when tile OFF.
+            maybe_tick_type_b_hunter_v1_research()
+            maybe_tick_sr_micro_tile_v1_research()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -16543,6 +16686,123 @@ def close_position(pos: dict, exit_reason: str):
     candidate_signal["active"] = False
     clear_pending_trade()
     pipeline_state_sync()
+
+# ── Custom independent-AI prompts for research tiles ─────────────────────
+# Each tile gets its own DeepSeek prompt tuned to its specific strategy.
+# These replace AI_PROMPT_TEMPLATE when research_lane matches.
+
+TYPE_B_HUNTER_PROMPT_TEMPLATE = """
+You are a TYPE_B trade prediction engine for BTC perpetual trades.
+TYPE_B trades are defined as setups that achieve >=15% MFE (maximum favorable excursion).
+Your job is to predict whether the current setup will reach TYPE_B status.
+
+Given the following market data:
+
+{context}
+
+=== TYPE_B IDENTIFICATION RULES ===
+
+Key predictors of TYPE_B outcomes (from historical data):
+1. Order-flow delta (+67% higher for TYPE_B vs TYPE_A). Delta >= 18 = bullish.
+2. Volume ratio (TYPE_B mean=1.12 vs TYPE_A mean=0.76). Ratio >= 0.90 = strong.
+3. AI confidence >= 65 = P(TYPE_B) 48.3%, WR 86.2%.
+4. ADX 20-40 range = P(TYPE_B) 35-36% range.
+5. Spread 3-4 = P(TYPE_B) 36.3%, WR 69.2%.
+6. EMA slope UP = P(TYPE_B) 34.3%.
+
+=== DECISION RULES ===
+
+APPROVE (confidence >= 65) ONLY when:
+- Delta >= 18 OR volume_ratio >= 0.90 (at least one Tier-1 factor)
+- ADX between 20-40 (not flat, not extreme)
+- Direction aligns with EMA slope and trend health
+- Not mid-session chop (check regime)
+
+SOFT_REJECT (confidence 55-64):
+- Some factors align but not enough conviction
+
+REJECT:
+- Delta < 10 and volume_ratio < 0.7
+- ADX < 20 (flat market)
+- Conflicting signals
+
+Respond ONLY with a JSON object in this format:
+
+{{
+  "direction": "LONG / SHORT / NO_TRADE",
+  "confidence": 0-100,
+  "long_score": 0-100,
+  "short_score": 0-100,
+  "bull_score": 0-10,
+  "bear_score": 0-10,
+  "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
+  "reason": "Brief one-line explanation",
+  "type_b_score": 0.0-5.0,
+  "type_b_factors": ["delta", "volume_ratio", ...]
+}}
+
+Direction: LONG / SHORT / NO_TRADE
+Win probability: 0-100
+Long score: 0-100
+Short score: 0-100
+Bull score: 0-10
+Bear score: 0-10
+Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT
+Reason: ...
+"""
+
+SR_MICRO_PROMPT_TEMPLATE = """
+You are a micro support/resistance mean-reversion engine for BTC perpetual trades.
+Your strategy: place LONG at micro support, SHORT at micro resistance.
+Avoid the midpoint between S & R. Suspend during trending/volatile markets.
+
+Given the following market data:
+
+{context}
+
+=== S/R MEAN-REVERSION RULES ===
+
+CRITICAL RULES:
+1. ADX > 40 = TRENDING MARKET -> REJECT (do not mean-revert against strong trends)
+2. Volatility percentile > 80 -> REJECT (suspended)
+3. Midpoint between S and R = NO ENTRY ZONE -> REJECT
+4. Must identify clear micro support AND micro resistance levels
+
+ENTRY CONDITIONS:
+- LONG: price near micro_support with ADX < 40
+- SHORT: price near micro_resistance with ADX < 40
+- Both LONG and SHORT can be placed simultaneously (symmetric mean-reversion)
+
+SCORING:
+- Distance to S/R < 10% of range: STRONG_APPROVE
+- Distance to S/R < 20%: APPROVE
+- Distance to S/R < 30%: SOFT_APPROVE
+- Distance > 30% or midpoint zone: REJECT
+
+Respond ONLY with a JSON object in this format:
+
+{{
+  "direction": "LONG / SHORT / NO_TRADE",
+  "confidence": 0-100,
+  "long_score": 0-100,
+  "short_score": 0-100,
+  "bull_score": 0-10,
+  "bear_score": 0-10,
+  "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
+  "reason": "Brief one-line explanation",
+  "sr_location": "AT_SUPPORT / AT_RESISTANCE / MIDPOINT / FAR",
+  "adx_state": "TRENDING / NEUTRAL / RANGEBOUND"
+}}
+
+Direction: LONG / SHORT / NO_TRADE
+Win probability: 0-100
+Long score: 0-100
+Short score: 0-100
+Bull score: 0-10
+Bear score: 0-10
+Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT
+Reason: ...
+"""
 
 AI_PROMPT_TEMPLATE = """
 You are a probabilistic trading decision engine for short-duration (10-40 min) BTC perpetual trades.
@@ -18180,7 +18440,7 @@ COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 _sim_processed_trade_ids: set = set()
 POLICY_FILE = "policy.json"
 def get_config_file() -> str:
-    """Port-scoped dashboard config so :7002 showcase and :7800 lab do not overwrite each other."""
+    """Port-scoped dashboard config — hardwired to :7002."""
     explicit = (os.getenv("BOT_CONFIG_FILE") or "").strip()
     if explicit:
         return explicit

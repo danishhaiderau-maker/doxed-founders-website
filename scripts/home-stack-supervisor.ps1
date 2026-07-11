@@ -1,7 +1,7 @@
 # 24/7 home stack supervisor - HTTP health checks + auto-recovery with cooldowns.
 # Replaces tunnel-watchdog for long runs (48h-1 week). Started by Start everything.
 # F4c (2026-07-07 incident) — default BotPort is 7002 (canonical showcase per
-# config/bot-architecture.lock.json), not 7800 (legacy local lab).
+# config/bot-architecture.lock.json), not 7002 (legacy local lab).
 #
 # ====================================================================
 #  UPTIME CONTRACT — read this before editing. See scripts/BOT_UPTIME.md.

@@ -12,7 +12,7 @@ Read `config/bot-architecture.lock.json` before any bot sync or deploy that touc
 | | Local lab (legacy) | Global showcase (canonical) |
 |--|-------------------|----------------------------|
 | Source | `C:/Users/user/Desktop/Final Bots/bybit_bot.py` | `services/btc-conservative-agent/bot.py` |
-| Port | `:7800` | `:7002` |
+| Port | `:7002` | `:7002` |
 | Public | none | `https://bot.doxxedcrypto.digital` |
 
 They **diverged architecturally**. Blunt sync overwrites monorepo fixes (e.g. `pathway_lab_validation.py` imports).

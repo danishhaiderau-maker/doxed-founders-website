@@ -10,7 +10,7 @@ while ((Get-Date) -lt $end) {
   $localOk = $false
   $pubOk = $false
   try {
-    $lr = curl.exe -s -m 4 "http://127.0.0.1:7800/api/ping" 2>&1
+    $lr = curl.exe -s -m 4 "http://127.0.0.1:7002/api/ping" 2>&1
     $localOk = "$lr" -match '"ok"\s*:\s*true'
   } catch { }
   try {
