@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-fix(platform): close audit gaps for pillars, publish mirror, and branding
+fix(utils): make founder-economics Merkle tree browser-safe
 
 ## Last Activity
 
