@@ -11471,6 +11471,8 @@ def maybe_tick_type_b_hunter_v1_research():
         return
     if _lane_pipeline_running(RESEARCH_LANE_SR_MICRO_TILE_V1):
         return
+    if now < _lane_last_ts.get('TYPE_B_HUNTER_V1', 0) + 120:
+        return
     _lane_last_ts[lane] = now
     try:
         if not is_buffer_ready():
@@ -11532,6 +11534,8 @@ def maybe_tick_sr_micro_tile_v1_research():
     if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
         return
     if _lane_pipeline_running(RESEARCH_LANE_TYPE_B_HUNTER_V1):
+        return
+    if now < _lane_last_ts.get('SR_MICRO_TILE_V1', 0) + 120:
         return
     _lane_last_ts[lane] = now
     try:
@@ -15916,7 +15920,7 @@ def state_monitor_loop():
             if time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL:
                 now = time.time()
                 prev_lane_ts = _lane_last_ts.get('SR_MICRO_TILE_V1', _lane_last_ts.get('TYPE_B_HUNTER_V1', 0))
-                if now >= prev_lane_ts + 60:
+                if now >= prev_lane_ts + 60 and now >= _lane_last_ts.get('CONTINUOUS', 0) + 120:
                     logger.info("[PERIODIC PIPELINE] forcing detect_event_light for analyzer data [PIPELINE ENFORCEMENT]")
                     event = detect_event_light()
                     if event and event.get("event_trigger"):
