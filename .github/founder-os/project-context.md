@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-Regenerate package-lock.json, fix Vercel deploy config
+Fix Vercel build: add @types/node to packages/utils devDependencies
 
 ## Last Activity
 
