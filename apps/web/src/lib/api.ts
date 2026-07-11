@@ -3908,11 +3908,11 @@ export type FounderBrainProviderKeyStatus = {
 
 export type FounderBrainProvidersSettings = {
   twoModelRoutingEnabled: boolean;
-  fastProvider: 'deepseek' | 'glm';
-  codingProvider: 'deepseek' | 'glm';
+  deepseekFastModel: string;
+  deepseekCodingModel: string;
+  glmFastModel: string;
+  glmCodingModel: string;
   defaultMode: 'automatic' | 'fast' | 'balanced' | 'deep';
-  fastModel: string;
-  codingModel: string;
   keys: {
     deepseek: FounderBrainProviderKeyStatus;
     glm: FounderBrainProviderKeyStatus;
@@ -3941,7 +3941,7 @@ export function updateFounderBrainProviders(
   body: Partial<
     Pick<
       FounderBrainProvidersSettings,
-      'twoModelRoutingEnabled' | 'fastProvider' | 'codingProvider' | 'defaultMode' | 'fastModel' | 'codingModel'
+      'twoModelRoutingEnabled' | 'deepseekFastModel' | 'deepseekCodingModel' | 'glmFastModel' | 'glmCodingModel' | 'defaultMode'
     >
   >,
 ) {

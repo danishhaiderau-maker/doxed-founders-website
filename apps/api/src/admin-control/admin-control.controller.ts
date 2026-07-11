@@ -10,7 +10,6 @@ import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { BuilderScoreService } from '../founder-os/builder-score.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
-import type { FounderBrainProviderSlug } from '../founder-ai-runtime/founder-brain-providers.types';
 import { parseFounderBrainMode } from '@dcf/utils';
 
 @SkipThrottle()
@@ -192,11 +191,11 @@ export class AdminControlController {
     @Body()
     body: Partial<{
       twoModelRoutingEnabled: boolean;
-      fastProvider: FounderBrainProviderSlug;
-      codingProvider: FounderBrainProviderSlug;
+      deepseekFastModel: string;
+      deepseekCodingModel: string;
+      glmFastModel: string;
+      glmCodingModel: string;
       defaultMode: string;
-      fastModel: string;
-      codingModel: string;
     }>,
   ) {
     const { defaultMode, ...rest } = body;
