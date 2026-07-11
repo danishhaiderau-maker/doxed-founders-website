@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-Fix Vercel build: add @types/node to packages/utils devDependencies
+fix(platform): close audit gaps for pillars, publish mirror, and branding
 
 ## Last Activity
 
