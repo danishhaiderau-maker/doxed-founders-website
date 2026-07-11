@@ -226,7 +226,9 @@ export class AiProxyRuntimeService {
       model: route.model,
       messages: body.messages.map((m: ChatCompletionMessageDto) => ({
         role: m.role,
-        content: m.content,
+        content: body.fim
+          ? this.buildFimPrompt(body.fim.prefix, body.fim.suffix)
+          : m.content,
       })),
       stream: body.stream ?? false,
       ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
@@ -593,6 +595,23 @@ export class AiProxyRuntimeService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Build a Fill-In-the-Middle prompt for DeepSeek.
+   *
+   * DeepSeek's FIM format uses special tokens:
+   *   <|fim▁begin|>prefix<|fim▁hole|>suffix<|fim▁end|>
+   *
+   * The model is expected to generate the completion that fills the gap
+   * between prefix and suffix. The stop token <|fim▁end|> is included
+   * in the request stop list to prevent the model from generating beyond
+   * the completion.
+   */
+  private buildFimPrompt(prefix: string, suffix: string): string {
+    // DeepSeek FIM format: <|fim▁begin|>PREFIX<|fim▁hole|>SUFFIX<|fim▁end|>
+    // The ▁ is U+2581 (LOWER ONE EIGHTH BLOCK)
+    return `<|fim\u2581begin|>${prefix}<|fim\u2581hole|>${suffix}<|fim\u2581end|>`;
   }
 
   /** Resolve the founder-friendly display model for /v1/models. */

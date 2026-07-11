@@ -21,7 +21,10 @@ import {
   type ProxyAuth,
 } from './ai-proxy-runtime.service';
 import { AiProxyUsageService } from './ai-proxy-usage.service';
-import { ChatCompletionRequestDto } from './dto/ai-proxy.dto';
+import {
+  ChatCompletionRequestDto,
+  FimCompletionRequestDto,
+} from './dto/ai-proxy.dto';
 import { AI_PROXY_DDOLLAR_COST } from '@dcf/utils';
 import type { Response, Request } from 'express';
 import { Readable } from 'node:stream';
@@ -146,6 +149,46 @@ export class AiProxyController {
       founder_os_metadata: body.founder_os_metadata ?? true,
     };
     return this.streamChat(res, auth, bodyWithMeta);
+  }
+
+  /**
+   * Fill-In-the-Middle (FIM) endpoint for code autocomplete.
+   *
+   * Accepts prefix + suffix and routes to the founder-os-fast alias
+   * with FIM context. Streams completion tokens back as SSE.
+   *
+   * POST /v1/fim/completions
+   * Body: { prefix: string, suffix: string, stop: string[], max_tokens?: number }
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('fim/completions')
+  async fimCompletions(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: FimCompletionRequestDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<unknown> {
+    const auth: ProxyAuth = {
+      userId: req.founderNode.userId,
+      nodeId: req.founderNode.nodeId,
+    };
+
+    // Wrap FIM body as a ChatCompletionRequestDto with FIM context embedded
+    const chatBody: ChatCompletionRequestDto = {
+      model: body.model ?? 'founder-os-fast',
+      messages: [
+        {
+          role: 'user',
+          content: `<fim_prefix>${body.prefix}<fim_suffix>${body.suffix}<fim_middle>`,
+        },
+      ],
+      stream: true,
+      max_tokens: body.max_tokens ?? 256,
+      temperature: body.temperature ?? 0,
+      stop: body.stop ?? ['<|fim▁end|>', '<fim_prefix>', '<fim_suffix>'],
+      fim: { prefix: body.prefix, suffix: body.suffix, stop: body.stop },
+    };
+
+    return this.streamChat(res, auth, chatBody);
   }
 
   /**
