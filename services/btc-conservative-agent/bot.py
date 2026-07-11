@@ -11660,8 +11660,22 @@ def evaluate_signal_with_ai(
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
-        text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
-        log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+        if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
+            from demo_mode import cassette_lookup, cassette_record
+            cassette_resp = cassette_lookup("deepseek-chat", temperature, prompt[:256])
+            if cassette_resp:
+                response_data = cassette_resp.get("response", cassette_resp.get("body", {}))
+                text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if not text:
+                    text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+                latency_ms = 5
+                log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+            else:
+                text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+                log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+        else:
+            text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+            log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         parsed = parse_ai_response_fields(text)
         direction = parsed["direction"]
