@@ -1,38 +1,30 @@
 """
-Quality pathway roster — v11.5-continuous-clean (2026-07-11).
+Quality pathway roster -- v11.6-dual-research-candidates (2026-07-11).
 
-Only tile: CONTINUOUS benchmark. All research lanes retired — none outperformed.
-Historical CSV data preserved for all legacy lane names.
+3-lane research stack:
+  - CONTINUOUS (benchmark, T+0s AI, live orders)
+  - TYPE_B_HUNTER_V1 (research candidate, T+60s AI, shadow)
+  - SR_MICRO_TILE_V1 (research candidate, T+120s AI, shadow)
+  + AI_SCAN (internal scanner, no orders)
+
+All legacy lanes (SL_AVOIDANCE, SIZED_CONTINUOUS, COMBO variants, shadow collecting,
+experimental) retired 2026-07-11 -- none outperformed CONTINUOUS.
+Historical CSV data preserved; lane definitions purged from codebase.
 """
 from __future__ import annotations
 
 from combo_pathway_config import (
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
-    RESEARCH_LANE_COMBO_604_SP4_CHASE,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
-    RESEARCH_LANE_COMBO_65_SP5_CHASE,
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
 )
-from experimental_pathway_config import (
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
-    RESEARCH_LANE_RECOVERY_MONSTER_V1,
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-)
-from legacy_pathway_config import SHADOW_COLLECTING_LANES
 
-RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
-RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
-# [CLEAN 2026-07-11] CONTINUOUS only — all research tiles retired.
 DASHBOARD_PRIMARY_LANES = (
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
 )
 
 LIVE_PATHWAY_TILE_ORDER = (
@@ -41,59 +33,32 @@ LIVE_PATHWAY_TILE_ORDER = (
 
 DASHBOARD_PATHWAY_LANES = LIVE_PATHWAY_TILE_ORDER
 
-RETIRED_PATHWAY_LANES = frozenset({
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
-    RESEARCH_LANE_COMBO_65_SP5_CHASE,
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
-    RESEARCH_LANE_COMBO_604_SP4_CHASE,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
-    RESEARCH_LANE_RECOVERY_MONSTER_V1,
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
-})
+RETIRED_PATHWAY_LANES = frozenset()
 
-DATA_RETIRED_PATHWAY_LANES = frozenset(SHADOW_COLLECTING_LANES)
+DATA_RETIRED_PATHWAY_LANES = frozenset()
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v11.5-continuous-clean-2026-07-11"
+ROSTER_PHASE = "v11.6-dual-research-candidates"
 ROSTER_NOTES = (
-    "CONTINUOUS benchmark only. All research tiles retired 2026-07-11 — "
-    "none outperformed benchmark. SL_AVOIDANCE_V1: 47% WR, -$2.03. "
-    "SIZED_CONTINUOUS_V1: 31% WR, -$81.08. Shadow collecting OFF."
+    "3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1). "
+    "All legacy lanes permanently retired 2026-07-11. "
+    "Each tile has independent AI prompt and staggered cadence (T+0/60/120s)."
 )
 
 ANALYZER_COMPARE_LANES = (
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
-    RESEARCH_LANE_COMBO_604_SP4_CHASE,
-    RESEARCH_LANE_COMBO_65_SP5_CHASE,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
-    RESEARCH_LANE_RECOVERY_MONSTER_V1,
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_AI_SCAN,
-) + tuple(SHADOW_COLLECTING_LANES)
+)
 
 
 def is_ai_focused_lane(lane: str) -> bool:
-    """Primary dashboard filter: CONTINUOUS + AI_SCAN only.
+    """Primary dashboard filter: 3-lane research stack only.
 
-    Legacy COMBO/EDGE/CHASE/shadow-collecting lanes stay in CSV and full reports;
-    default UI hides them (?all=1 to expand).
+    Legacy COMBO/EDGE/CHASE/shadow lanes permanently retired.
+    Historical CSV data preserved for reference only.
     """
     u = str(lane or "").upper().strip()
     return u in DASHBOARD_PRIMARY_LANES
