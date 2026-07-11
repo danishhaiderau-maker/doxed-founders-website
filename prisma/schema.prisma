@@ -446,12 +446,11 @@ enum PublishJobStatus {
 /**
  * Phase 8 — Raise Room → Token Launch flow.
  * See docs/RAISE_ROOM_LAUNCH_FLOW.md.
- *
  * PLEDGING   = community DDollar pledges accruing toward the 100K threshold.
  * WINDOW_OPEN = threshold met, founder released the token, 15-day commitment window live.
  * LIVE        = window closed, allocations finalized, DEX swaps enabled.
  * CLOSED      = launch retired (graduated or abandoned). Pledgers were refunded if it
- *               never reached LIVE within the 90-day refund window.
+ * never reached LIVE within the 90-day refund window.
  */
 enum TokenLaunchStatus {
   PLEDGING
@@ -577,6 +576,11 @@ model User {
   referrals                User[]                       @relation("UserReferrals")
   tokenPledges             TokenPledge[]
   dexSwaps                 DexSwap[]
+  /// Founder Economics (Phase 8) — DDollar grants, epoch claims, knowledge, proof.
+  ddollarGrants            DDollarGrant[]
+  epochClaims              EpochClaim[]
+  knowledgeNodes           KnowledgeNode[]
+  proofOfSuccessRecords    ProofOfSuccess[]
 
   @@index([email])
   @@index([role])
@@ -741,7 +745,7 @@ model Project {
   launchQualificationAt              DateTime?
   /// Phase 7 — where this project primarily runs. Default HYBRID (build
   /// privately, publish to public on demand). See docs/DEPLOYMENT-MODES-UX.md.
-  deploymentMode                     DeploymentMode       @default(HYBRID)
+  deploymentMode                     DeploymentMode        @default(HYBRID)
   regulatoryClass                    RegulatoryClass       @default(PENDING)
   regulatoryClassifiedAt             DateTime?
   regulatoryQuestionnaireCompletedAt DateTime?
@@ -3074,22 +3078,22 @@ model WorkspaceExecutionProfile {
 /// the shape is fluid and we never query into them relationally — avoids a
 /// schema migration every time the synthesis output gains a field.
 model IdeaCheck {
-  id              String          @id @default(cuid())
-  userId          String
+  id                   String          @id @default(cuid())
+  userId               String
   /// Set when the check is tied to a project (on-demand / new-project flow).
-  projectId       String?
+  projectId            String?
   /// Set when the check was auto-triggered by a doxxing application.
-  applicationId   String?
+  applicationId        String?
   /// Raw idea text the founder submitted for validation.
-  ideaText        String          @db.Text
+  ideaText             String          @db.Text
   /// Lifecycle: PENDING (created) → RUNNING (research in flight) →
   /// COMPLETED (result ready) | FAILED (error).
-  status          IdeaCheckStatus @default(PENDING)
+  status               IdeaCheckStatus @default(PENDING)
   /// Search queries generated from ideaText (keyword extraction step).
-  searchQueries   Json?
+  searchQueries        Json?
   /// Full competitive-landscape payload: verdict, summary, competitors,
   /// openSourceReuse, differentiation. Shape per §5.2 of the design doc.
-  resultJson      Json?
+  resultJson           Json?
   /// 0-100 score of how differentiated the idea is vs the field.
   /// Mirrors the synthesis model's differentiation assessment.
   differentiationScore Int?
@@ -3100,15 +3104,15 @@ model IdeaCheck {
   /// (subset of resultJson.openSourceReuse).
   suggestedOssJson     Json?
   /// Error message captured when status = FAILED.
-  errorMessage    String? @db.Text
+  errorMessage         String?         @db.Text
   /// Soft-dismissed by the founder — stays in history but hidden from the UI.
-  dismissed       Boolean         @default(false)
+  dismissed            Boolean         @default(false)
   /// True once the founder has viewed the result (drives the daily pop-up:
   /// only surface unviewed completed checks).
-  viewed          Boolean         @default(false)
-  createdAt       DateTime        @default(now())
-  completedAt     DateTime?
-  updatedAt       DateTime        @updatedAt
+  viewed               Boolean         @default(false)
+  createdAt            DateTime        @default(now())
+  completedAt          DateTime?
+  updatedAt            DateTime        @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -3125,30 +3129,30 @@ model IdeaCheck {
 // founder first sets a mode or opens the mode panel. See
 // docs/DEPLOYMENT-MODES-UX.md §4 for the concrete field meanings per mode.
 model ProjectDeploymentConfig {
-  id          String   @id @default(cuid())
-  projectId   String   @unique
+  id              String    @id @default(cuid())
+  projectId       String    @unique
   /// forgejo | github — where the canonical git remote lives.
-  gitBackend  String   @default("forgejo")
+  gitBackend      String    @default("forgejo")
   /// Clone/push URL for the canonical remote. Null until the repo is initialized.
-  gitUrl      String?
+  gitUrl          String?
   /// sqlite | postgresql — Prisma provider used by this project's runtime.
-  dbProvider  String   @default("sqlite")
+  dbProvider      String    @default("sqlite")
   /// Connection string. SQLite = file:./.../dev.db; Postgres = postgresql://...
   /// Stored as @db.Text because Neon URIs are long. Treated as a secret at
   /// rest (encrypted in a later phase; for now scoped to the project owner).
-  dbUrl       String?  @db.Text
+  dbUrl           String?   @db.Text
   /// vercel | tunnel-on-demand | custom — how the project is hosted.
-  hostingType String   @default("tunnel-on-demand")
+  hostingType     String    @default("tunnel-on-demand")
   /// Public HTTPS URL. Null in pure Private mode until the founder clicks Share.
-  hostingUrl  String?
+  hostingUrl      String?
   /// tailscale | public-url — how the phone remote reaches the runtime.
-  phoneRoute  String   @default("tailscale")
+  phoneRoute      String    @default("tailscale")
   /// Always founder-os-cloud — the AI Gateway is the moat and never moves.
-  aiGateway   String   @default("founder-os-cloud")
+  aiGateway       String    @default("founder-os-cloud")
   /// JSON publish plan applied when the founder clicks Publish in Hybrid mode.
   /// Shape: { targetGithubRepo, targetNeonProject, targetVercelProject, targetDomain }.
   /// Null in pure Private mode. See docs/DEPLOYMENT-MODES-UX.md §4 (Hybrid wiring).
-  publishPlan Json?
+  publishPlan     Json?
   /// Whether the local Founder Node has reported Forgejo online for this project.
   /// Surfaced in the "What's running right now" panel.
   forgejoOnline   Boolean?  @default(false)
@@ -3160,8 +3164,8 @@ model ProjectDeploymentConfig {
   tailscaleReady  Boolean?  @default(false)
   /// Last status refresh from Founder Node (heartbeat-style).
   runtimeStatusAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -3172,23 +3176,23 @@ model ProjectDeploymentConfig {
 /// cloud. The frontend polls the latest job for live 4-step progress.
 /// See docs/DEPLOYMENT-MODES-UX.md §5.
 model DeploymentPublishJob {
-  id          String          @id @default(cuid())
-  projectId   String
+  id           String           @id @default(cuid())
+  projectId    String
   /// Snapshot of the publish plan that was applied (so historic runs are stable
   /// even if the founder later edits the plan on the config row).
   planSnapshot Json
-  status      PublishJobStatus @default(PENDING)
+  status       PublishJobStatus @default(PENDING)
   /// 1 = git mirror, 2 = DB migrate, 3 = Vercel deploy, 4 = health verify.
-  currentStep Int             @default(0)
+  currentStep  Int              @default(0)
   /// Per-step status + detail payload: [{ step, status, detail, startedAt, finishedAt }]
-  steps       Json            @default("[]")
+  steps        Json             @default("[]")
   /// Final hosting URL once step 4 passes (for COMPLETED jobs).
-  liveUrl     String?
-  errorMessage String?        @db.Text
-  startedAt   DateTime?
-  completedAt DateTime?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  liveUrl      String?
+  errorMessage String?          @db.Text
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -3235,41 +3239,40 @@ model DebugSquasherRun {
  * A token launch for a project. One row per project per launch (a founder can
  * only have one ACTIVE launch at a time — re-launches require the previous
  * row to be CLOSED). The flow is:
- *
- *   PLEDGING → (100K threshold met + founder clicks Release) → WINDOW_OPEN
- *           → (15-day window expires) → LIVE → (graduation/abandon) → CLOSED
+ * PLEDGING → (100K threshold met + founder clicks Release) → WINDOW_OPEN
+ * → (15-day window expires) → LIVE → (graduation/abandon) → CLOSED
  */
 model TokenLaunch {
-  id                  String            @id @default(cuid())
-  projectId           String            @unique
+  id                 String            @id @default(cuid())
+  projectId          String            @unique
   /// When the founder released the token (moved PLEDGING → WINDOW_OPEN).
-  launchDate          DateTime?
+  launchDate         DateTime?
   /// Solana devnet mint address of the SPL token. Null until mint succeeds.
-  solanaMint          String?           @db.Text
+  solanaMint         String?           @db.Text
   /// Total token supply (whole units). Default 1B per the spec's open question #2.
-  supply              BigInt            @default(1000000000)
+  supply             BigInt            @default(1000000000)
   /// Fixed launch price in USD (the DEX stub swaps at this price for now).
-  initialPrice        Decimal           @default(0.0001) @db.Decimal(24, 12)
+  initialPrice       Decimal           @default(0.0001) @db.Decimal(24, 12)
   /// True once community pledges crossed the 100K DDollar threshold.
-  pledgeThresholdMet  Boolean           @default(false)
-  status              TokenLaunchStatus @default(PLEDGING)
+  pledgeThresholdMet Boolean           @default(false)
+  status             TokenLaunchStatus @default(PLEDGING)
   /// 5% of supply reserved for pledgers (pro-rata). Stored on the row so a
   /// founder can tune it before release without a migration.
-  pledgePoolPercent   Int               @default(5)
+  pledgePoolPercent  Int               @default(5)
   /// When the 15-day commitment window closes. Null until WINDOW_OPEN.
-  windowClosesAt      DateTime?
+  windowClosesAt     DateTime?
   /// When the launch was finalized (moved to LIVE). Null until LIVE.
-  finalizedAt         DateTime?
+  finalizedAt        DateTime?
   /// Soft close — graduation or abandoned. Null until CLOSED.
-  closedAt            DateTime?
+  closedAt           DateTime?
   /// Reason the launch closed ("graduated" | "abandoned" | "refunded").
-  closeReason         String?
-  createdAt           DateTime          @default(now())
-  updatedAt           DateTime          @updatedAt
+  closeReason        String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  pledges  TokenPledge[]
-  swaps    DexSwap[]
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pledges TokenPledge[]
+  swaps   DexSwap[]
 
   @@index([status])
   @@index([pledgeThresholdMet])
@@ -3326,4 +3329,296 @@ model DexSwap {
 
   @@index([launchId, createdAt(sort: Desc)])
   @@index([userId])
+}
+
+// ─── Kernel §3 — Memory Engine stores ───────────────────────────────────────
+// Four stores (docs/KERNEL.md §3): Conversation (per-session chat), Project
+// (per-repo operational intelligence), Founder (per-user cross-project),
+// Workspace (ephemeral current state). The MemoryEngineService routes get/set/
+// query/forget to the right table based on the `store` argument.
+
+/// Per-session chat history. scope = sessionId. Append-only-ish; the conversation
+/// store is written by the AI Gateway after each turn and read by the context
+/// builder to reconstruct short-term memory.
+model ConversationMemory {
+  id        String   @id @default(cuid())
+  /// sessionId — the scope for the conversation store.
+  sessionId String
+  userId    String?
+  role      String
+  content   String   @db.Text
+  tokens    Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([userId])
+}
+
+/// Per-repo operational intelligence. scope = projectId. Keyed knowledge
+/// (e.g. "stack", "deploy.command", "last-error") with a confidence score and
+/// provenance so the Learning Engine can later weigh entries.
+model ProjectMemory {
+  id         String   @id @default(cuid())
+  projectId  String
+  key        String
+  value      Json
+  /// Where this memory came from: 'ai' | 'user' | 'tool' | 'system'.
+  source     String   @default("system")
+  confidence Float    @default(0.5)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@index([projectId, updatedAt(sort: Desc)])
+}
+
+/// Per-user cross-project preferences and durable founder memory. scope = userId.
+/// Keys are arbitrary; values are JSON. Used by the context builder to inject
+/// founder-level preferences (tone, tooling, risk tolerance) into AI calls.
+model FounderMemory {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String
+  value     Json
+  source    String   @default("system")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key])
+  @@index([userId])
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+/// Ephemeral workspace-shared state. scope = workspaceId. Rows expire after
+/// `expiresAt` and are swept lazily on read. Used for "what's open right now",
+/// in-flight cursor positions, shared scratch state.
+model WorkspaceMemory {
+  id          String    @id @default(cuid())
+  workspaceId String
+  key         String
+  value       Json
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+  @@index([expiresAt])
+}
+
+// ─── Phase 9 — LAM persistence ──────────────────────────────────────────────
+// Replaces the in-memory Map<taskId, LamTask> in LamOrchestratorService so
+// task state survives restarts and the controller can read history from Prisma.
+// Status is stored as a plain String (PLANNING/RUNNING/SYNTHESIZING/COMPLETED/
+// FAILED) to match the DebugSquasherRun pattern and avoid enum-migration churn.
+
+model LamTask {
+  id           String    @id @default(cuid())
+  userId       String
+  goal         String    @db.Text
+  /// PLANNING | RUNNING | SYNTHESIZING | COMPLETED | FAILED
+  status       String    @default("PLANNING")
+  /// The plan the AI Gateway produced: [{ index, description, adapter, payload }]
+  planJson     Json?
+  /// Per-step results: [{ index, status, summary, artifacts, error, startedAt, completedAt }]
+  resultJson   Json?
+  /// Free-text final answer the synthesizer produced.
+  result       String?   @db.Text
+  /// Total wall-clock duration in ms; set on terminal states.
+  elapsedMs    Int?
+  /// Estimated cost in DDollar (rough: ~1 per step).
+  costDdollar  Int?
+  errorMessage String?   @db.Text
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  completedAt  DateTime?
+
+  steps LamStep[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+model LamStep {
+  id         String   @id @default(cuid())
+  taskId     String
+  /// 1-indexed position in the plan.
+  stepIndex  Int
+  /// Human-readable description of what this step does.
+  action     String   @db.Text
+  /// 'browser' | 'computer-use'
+  adapter    String
+  /// Adapter-specific payload (BrowserStepPayload / ComputerUseStepPayload).
+  inputJson  Json?
+  /// Adapter output: { summary, artifacts }
+  outputJson Json?
+  /// 'pending' | 'running' | 'success' | 'failed' | 'skipped'
+  status     String   @default("pending")
+  /// Error message on failure.
+  error      String?  @db.Text
+  /// Wall-clock duration of this step in ms.
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  task LamTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, stepIndex])
+}
+
+// ─── Founder Economics (Phase 8) ─────────────────────────────────────────────
+//
+// On-chain simple, off-chain swappable. These models back the automated
+// epoch-based vesting and distribution system. See:
+//   - services/founder-economics/contracts/        (Solidity design artifacts)
+//   - packages/utils/src/founder-economics/        (TypeScript models + scoring)
+//   - apps/api/src/founder-economics/              (NestJS services + settlement job)
+
+enum EpochStatus {
+  OPEN
+  SETTLING
+  PUBLISHED
+  CLOSED
+}
+
+/// An epoch in the vesting + distribution schedule. Each epoch releases a
+/// fixed number of tokens from the (off-chain-referenced) VestingVault and
+/// distributes them according to the active DistributionModel's Merkle root.
+model Epoch {
+  id                       String      @id @default(cuid())
+  epochNumber              Int         @unique
+  startTime                DateTime
+  endTime                  DateTime
+  /// Tokens released from the VestingVault for this epoch (raw integer).
+  tokensReleased           Int         @default(0)
+  /// Merkle root published on-chain by the settlement job (hex 0x…). Null until PUBLISHED.
+  merkleRoot               String?
+  /// IPFS CID or URL pointing to the proof data (per-founder leaf + proof path). Null until PUBLISHED.
+  proofDataUri             String?
+  status                   EpochStatus @default(OPEN)
+  /// Version of the DistributionModel that produced `merkleRoot` (e.g. "v1-pro-rata").
+  distributionModelVersion String?
+  /// On-chain tx hash of the publishRoot call. Null until published on-chain.
+  publishTxHash            String?
+  publishedAt              DateTime?
+  createdAt                DateTime    @default(now())
+  updatedAt                DateTime    @updatedAt
+
+  claims EpochClaim[]
+
+  @@index([status])
+  @@index([epochNumber])
+}
+
+/// A founder's claim of their epoch allocation. One row per (epoch, user).
+/// `claimedAt` is null until the founder submits a valid Merkle proof on-chain.
+model EpochClaim {
+  id            String    @id @default(cuid())
+  epochId       String
+  userId        String
+  /// Founder's wallet address (the leaf key used on-chain).
+  walletAddress String
+  /// Whole tokens allocated for this founder in this epoch.
+  amount        Int       @default(0)
+  /// True once the founder has claimed on-chain via EpochDistributor.claim().
+  claimed       Boolean   @default(false)
+  claimedAt     DateTime?
+  /// On-chain tx hash of the claim transaction. Null until claimed.
+  claimTxHash   String?
+  /// Merkle proof path (serialised JSON array of sibling hashes) for the founder's leaf.
+  merkleProof   Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  epoch Epoch @relation(fields: [epochId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([epochId, userId])
+  @@index([epochId])
+  @@index([userId])
+  @@index([walletAddress])
+}
+
+/// A DDollar grant for an Economic activity (see DDollarActivityType in utils).
+/// Integrates with the existing DDollar ledger — grants also write a
+/// `FounderTreasuryLedgerEntry` row and bump `User.reputationPoints`.
+model DDollarGrant {
+  id           String   @id @default(cuid())
+  userId       String
+  /// One of DDollarActivityType (BUILD_POST_LINKED_TO_COMMIT, PRODUCT_LAUNCH_VIA_RAISE_ROOM, ...).
+  activityType String
+  /// External id of the activity (build post id, raise room project id, commit sha, ...).
+  activityId   String
+  /// DDollar granted — positive for economic activity, negative for penalties.
+  amount       Int
+  /// Optional proof type backing the grant (ProofType) — null for non-proof grants.
+  proofType    String?
+  /// Optional proof payload (serialised JSON) for audit.
+  proofData    Json?
+  /// Reversal marker — true if this grant was reverted by a governance action.
+  reverted     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([activityType, activityId, userId])
+  @@index([userId, createdAt])
+  @@index([activityType])
+}
+
+/// A knowledge node contributed by a founder. Parent links form the lineage
+/// tree — when a founder reuses another founder's knowledge, the new node
+/// points at the original via `parentNodeId` and the parent's contributor
+/// earns a KNOWLEDGE_REUSED_IMPACT DDollar grant.
+model KnowledgeNode {
+  id            String   @id @default(cuid())
+  founderId     String
+  /// One of KnowledgeType (PLAYBOOK, RESEARCH_NOTE, PATTERN, FOUNDER_MEMORY_NODE, POST_MORTEM).
+  knowledgeType String
+  content       String   @db.Text
+  /// Parent node id when this node is a reuse of another; null for an original contribution.
+  parentNodeId  String?
+  /// Compound impact score — increments on each downstream reuse.
+  impactScore   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user     User            @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  parent   KnowledgeNode?  @relation("KnowledgeLineage", fields: [parentNodeId], references: [id], onDelete: SetNull)
+  children KnowledgeNode[] @relation("KnowledgeLineage")
+
+  @@index([founderId])
+  @@index([parentNodeId])
+  @@index([knowledgeType])
+}
+
+/// A verified real-world milestone (Stripe ARR, GitHub stars, Vercel deploys,
+/// App Store downloads, ...). Backs the COMPANY_MILESTONE_VERIFIED and
+/// PRODUCT_LAUNCH_VIA_RAISE_ROOM DDollar grants. Multiplier feeds back into
+/// the reputation multiplier via `verifiedMilestoneCount`.
+model ProofOfSuccess {
+  id             String   @id @default(cuid())
+  userId         String
+  /// One of ProofType (STRIPE_ARR, GITHUB_REPO_STARS, VERCEL_DEPLOYMENTS, ...).
+  proofType      String
+  /// External id (Stripe account, GitHub repo slug, Vercel project id, ...).
+  externalId     String
+  /// Verified raw metric extracted from the external API.
+  verifiedMetric Int      @default(0)
+  metricLabel    String   @default("")
+  /// Multiplier applied to the base DDollar grant for this milestone (1.0 = base).
+  multiplier     Float    @default(1.0)
+  /// Raw verified data blob (serialised API response) — for audit.
+  verifiedData   Json?
+  /// True if the proof has been re-verified after the initial verification.
+  reverified     Boolean  @default(false)
+  verifiedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([proofType, externalId, userId])
+  @@index([userId])
+  @@index([proofType])
 }
