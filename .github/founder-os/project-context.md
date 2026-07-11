@@ -12,7 +12,7 @@ Product & platform (23 recent commits)
 
 ## Last Commit
 
-feat(ai-proxy): add FIM endpoint for autocomplete completions
+Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
 
 ## Last Activity
 
