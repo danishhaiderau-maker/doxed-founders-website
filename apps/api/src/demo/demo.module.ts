@@ -13,6 +13,10 @@ import { MemoryEngineModule } from '../memory-engine/memory-engine.module';
 import { LearningEngineModule } from '../learning-engine/learning-engine.module';
 import { IdeaValidatorModule } from '../idea-validator/idea-validator.module';
 import { LamModule } from '../lam/lam.module';
+import { DeploymentModesModule } from '../deployment-modes/deployment-modes.module';
+import { RaiseRoomModule } from '../raise-room/raise-room.module';
+import { TokenLaunchModule } from '../token-launch/token-launch.module';
+import { FounderEconomicsModule } from '../founder-economics/founder-economics.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { DemoController } from './demo.controller';
 import { DemoModeGuard } from './demo-mode.guard';
@@ -40,6 +44,10 @@ import { DemoHarnessService } from './demo-harness.service';
     LearningEngineModule,
     IdeaValidatorModule,
     LamModule,
+    DeploymentModesModule,
+    RaiseRoomModule,
+    TokenLaunchModule,
+    FounderEconomicsModule,
     PrismaModule,
   ],
   controllers: [DemoController],

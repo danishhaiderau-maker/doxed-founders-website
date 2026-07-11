@@ -71,6 +71,7 @@ import { DebugSquasherModule } from './debug-squasher/debug-squasher.module';
 import { TokenLaunchModule } from './token-launch/token-launch.module';
 import { LamModule } from './lam/lam.module';
 import { DeploymentModesModule } from './deployment-modes/deployment-modes.module';
+import { FounderEconomicsModule } from './founder-economics/founder-economics.module';
 
 @Module({
   imports: [
@@ -146,6 +147,7 @@ import { DeploymentModesModule } from './deployment-modes/deployment-modes.modul
     DeploymentModesModule,
     TokenLaunchModule,
     DebugSquasherModule,
+    FounderEconomicsModule,
   ],
   providers: [
     {

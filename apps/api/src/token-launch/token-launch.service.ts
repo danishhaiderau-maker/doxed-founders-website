@@ -5,7 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { TokenLaunchStatus } from '@prisma/client';
+import { DDOLLAR_ACTIVITY_SPECS } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { DdollarEngineService } from '../founder-economics/ddollar-engine.service';
 import { SolanaMintService } from './solana-mint.service';
 
 /**
@@ -44,6 +46,7 @@ export class TokenLaunchService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly solanaMint: SolanaMintService,
+    private readonly ddollarEngine: DdollarEngineService,
   ) {}
 
   // ─── Read paths ──────────────────────────────────────────────────────────
@@ -465,7 +468,13 @@ export class TokenLaunchService {
    * Finalize one launch — compute allocations + move to LIVE.
    * Public so the cron and an admin endpoint can call it.
    */
-  async finalizeLaunch(launch: { id: string; supply: bigint; pledgePoolPercent: number; pledges: { id: string; userId: string; amount: number }[] }): Promise<void> {
+  async finalizeLaunch(launch: {
+    id: string;
+    projectId?: string;
+    supply: bigint;
+    pledgePoolPercent: number;
+    pledges: { id: string; userId: string; amount: number }[];
+  }): Promise<void> {
     const totalPledged = launch.pledges.reduce((s, p) => s + p.amount, 0);
     const poolTokens =
       (Number(launch.supply) * launch.pledgePoolPercent) / 100;
@@ -479,6 +488,7 @@ export class TokenLaunchService {
           finalizedAt: new Date(),
         },
       });
+      await this.grantProductLaunchDdollar(launch.id, launch.projectId);
       return;
     }
 
@@ -499,6 +509,63 @@ export class TokenLaunchService {
         },
       });
     });
+    await this.grantProductLaunchDdollar(launch.id, launch.projectId);
+  }
+
+  /**
+   * Award PRODUCT_LAUNCH_VIA_RAISE_ROOM when a launch goes LIVE.
+   * Best-effort — grant failures must not roll back finalization.
+   */
+  private async grantProductLaunchDdollar(launchId: string, projectId?: string): Promise<void> {
+    try {
+      let resolvedProjectId = projectId;
+      if (!resolvedProjectId) {
+        const row = await this.prisma.tokenLaunch.findUnique({
+          where: { id: launchId },
+          select: { projectId: true },
+        });
+        resolvedProjectId = row?.projectId;
+      }
+      if (!resolvedProjectId) return;
+
+      const project = await this.prisma.project.findUnique({
+        where: { id: resolvedProjectId },
+        select: {
+          id: true,
+          name: true,
+          founder: { select: { userId: true } },
+        },
+      });
+      const userId = project?.founder?.userId;
+      if (!userId) {
+        this.logger.warn(
+          `PRODUCT_LAUNCH grant skipped — launch=${launchId} project=${resolvedProjectId} has no founder.userId`,
+        );
+        return;
+      }
+
+      const amount = DDOLLAR_ACTIVITY_SPECS.PRODUCT_LAUNCH_VIA_RAISE_ROOM.min;
+      await this.ddollarEngine.grant(
+        userId,
+        'PRODUCT_LAUNCH_VIA_RAISE_ROOM',
+        launchId,
+        amount,
+        {
+          proofType: 'TOKEN_LAUNCH_LIVE',
+          proofData: {
+            launchId,
+            projectId: resolvedProjectId,
+            projectName: project?.name,
+            status: 'LIVE',
+          },
+          label: `Product launched via Raise Room: ${project?.name ?? resolvedProjectId}`,
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `PRODUCT_LAUNCH DDollar grant failed for launch=${launchId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /**

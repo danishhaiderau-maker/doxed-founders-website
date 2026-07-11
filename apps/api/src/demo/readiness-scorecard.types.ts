@@ -60,6 +60,10 @@ export type ReadinessScorecard = {
     doxxing: PillarReport;
     ideaValidator: PillarReport;
     lam: PillarReport;
+    deploymentModes: PillarReport;
+    raiseRoom: PillarReport;
+    debugSquasher: PillarReport;
+    founderEconomics: PillarReport;
   };
   switches: SwitchStates;
   numbers: FakeCounts;

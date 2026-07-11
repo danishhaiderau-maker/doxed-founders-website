@@ -85,9 +85,9 @@ export class DemoHarnessService {
       stress = [{ name: 'stress_skipped', passed: true, detail: 'skipStress=true' }];
     }
 
-    // 3b. Six new kernel pillars (AI Proxy, Routing, Memory, Learning,
-    // Doxxing, Idea Validator). Each runs independently and is
-    // crash-isolated so one broken pillar can't take down the rest.
+    // 3b. Kernel pillars (AI Proxy, Routing, Memory, Learning, Doxxing,
+    // Idea Validator, LAM, Deployment Modes, Raise Room, Debug Squasher,
+    // Founder Economics). Each runs independently and is crash-isolated.
     const [
       aiProxy,
       routingEngine,
@@ -96,6 +96,10 @@ export class DemoHarnessService {
       doxxing,
       ideaValidator,
       lam,
+      deploymentModes,
+      raiseRoom,
+      debugSquasher,
+      founderEconomics,
     ] = await Promise.all([
       this.kernel.runAiProxyChecks().catch((err: unknown) => {
         this.logger.warn(`AI Proxy pillar crashed: ${msg(err)}`);
@@ -125,6 +129,22 @@ export class DemoHarnessService {
         this.logger.warn(`LAM pillar crashed: ${msg(err)}`);
         return [{ name: 'lam_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
       }),
+      this.kernel.runDeploymentModesChecks().catch((err: unknown) => {
+        this.logger.warn(`Deployment Modes pillar crashed: ${msg(err)}`);
+        return [{ name: 'deployment_modes_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runRaiseRoomChecks().catch((err: unknown) => {
+        this.logger.warn(`Raise Room pillar crashed: ${msg(err)}`);
+        return [{ name: 'raise_room_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runDebugSquasherChecks().catch((err: unknown) => {
+        this.logger.warn(`Debug Squasher pillar crashed: ${msg(err)}`);
+        return [{ name: 'debug_squasher_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
+      this.kernel.runFounderEconomicsChecks().catch((err: unknown) => {
+        this.logger.warn(`Founder Economics pillar crashed: ${msg(err)}`);
+        return [{ name: 'founder_economics_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
     ]);
 
     // 4. Switches + fake counts.
@@ -148,6 +168,10 @@ export class DemoHarnessService {
       doxxing,
       ideaValidator,
       lam,
+      deploymentModes,
+      raiseRoom,
+      debugSquasher,
+      founderEconomics,
       switches,
       numbers,
       startedAt,

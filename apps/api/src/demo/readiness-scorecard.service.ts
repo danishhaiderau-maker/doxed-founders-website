@@ -48,6 +48,10 @@ export class ReadinessScorecardService {
     doxxing: CheckResult[];
     ideaValidator: CheckResult[];
     lam: CheckResult[];
+    deploymentModes: CheckResult[];
+    raiseRoom: CheckResult[];
+    debugSquasher: CheckResult[];
+    founderEconomics: CheckResult[];
     switches: SwitchStates;
     numbers: FakeCounts;
     startedAt: number;
@@ -68,27 +72,33 @@ export class ReadinessScorecardService {
       doxxing: pillarFromChecks(params.doxxing),
       ideaValidator: pillarFromChecks(params.ideaValidator),
       lam: pillarFromChecks(params.lam),
+      deploymentModes: pillarFromChecks(params.deploymentModes, this.extractDeploymentModesNumbers(params.deploymentModes)),
+      raiseRoom: pillarFromChecks(params.raiseRoom, this.extractRaiseRoomNumbers(params.raiseRoom)),
+      debugSquasher: pillarFromChecks(params.debugSquasher, this.extractDebugSquasherNumbers(params.debugSquasher)),
+      founderEconomics: pillarFromChecks(params.founderEconomics, this.extractFounderEconomicsNumbers(params.founderEconomics)),
     };
-    // Weights — sum to 1.0. The six new kernel pillars share ~0.3 of the
-    // score; the original pillars were rebalanced down proportionally so a
-    // passing score still means the same overall readiness. The LAM pillar
-    // (Phase 9) takes 0.02, shaved off ideaValidator + routingEngine.
+    // Weights — sum to 1.0. Founder Economics takes 0.02, shaved from
+    // platform + raiseRoom so the overall readiness bar stays comparable.
     const weights: Record<keyof typeof pillars, number> = {
-      platform: 0.14,
-      bot: 0.12,
+      platform: 0.11,
+      bot: 0.1,
       analyzer: 0.07,
       genome: 0.05,
-      relay: 0.1,
-      ai: 0.07,
-      founder: 0.07,
-      stress: 0.08,
-      aiProxy: 0.08,
+      relay: 0.08,
+      ai: 0.06,
+      founder: 0.06,
+      stress: 0.07,
+      aiProxy: 0.07,
       routingEngine: 0.05,
       memoryEngine: 0.04,
       learningEngine: 0.05,
       doxxing: 0.05,
       ideaValidator: 0.01,
       lam: 0.02,
+      deploymentModes: 0.03,
+      raiseRoom: 0.03,
+      debugSquasher: 0.03,
+      founderEconomics: 0.02,
     };
     const readinessScore = Math.round(
       (Object.entries(pillars) as [keyof typeof pillars, PillarView][]).reduce(
@@ -173,6 +183,49 @@ export class ReadinessScorecardService {
       if (c.name === 'ai_proxy_models_catalog' && c.passed) out.modelsCatalog = true;
       if (c.name === 'ai_proxy_flight_recorder_row' && c.passed) out.flightRecorderWritable = true;
       if (c.name === 'ai_proxy_intent_classifier' && c.passed) out.intentClassifier = true;
+    }
+    return out;
+  }
+
+  private extractDeploymentModesNumbers(checks: CheckResult[]): Record<string, number | string | boolean | null> {
+    const out: Record<string, number | string | boolean | null> = {};
+    for (const c of checks) {
+      if (c.name === 'deployment_modes_config_seed' && c.passed) out.configSeed = true;
+      if (c.name === 'deployment_modes_mode_flip' && c.passed) out.modeFlip = true;
+      if (c.name === 'deployment_modes_publish_plan' && c.passed) out.publishPlan = true;
+      if (c.name === 'deployment_modes_publish_flow' && c.passed) out.publishFlow = true;
+    }
+    return out;
+  }
+
+  private extractRaiseRoomNumbers(checks: CheckResult[]): Record<string, number | string | boolean | null> {
+    const out: Record<string, number | string | boolean | null> = {};
+    for (const c of checks) {
+      if (c.name === 'raise_room_dashboard' && c.passed) out.dashboard = true;
+      if (c.name === 'raise_room_projects_filter' && c.passed) out.projectsFilter = true;
+      if (c.name === 'token_launch_eligibility' && c.passed) out.tokenEligibility = true;
+      if (c.name === 'token_launch_status' && c.passed) out.tokenStatus = true;
+    }
+    return out;
+  }
+
+  private extractDebugSquasherNumbers(checks: CheckResult[]): Record<string, number | string | boolean | null> {
+    const out: Record<string, number | string | boolean | null> = {};
+    for (const c of checks) {
+      if (c.name === 'debug_squasher_history_queryable' && c.passed) out.historyQueryable = true;
+      if (c.name === 'debug_squasher_consent_flow' && c.passed) out.consentFlow = true;
+      if (c.name === 'debug_squasher_feature_flag' && c.passed) out.featureFlag = true;
+    }
+    return out;
+  }
+
+  private extractFounderEconomicsNumbers(checks: CheckResult[]): Record<string, number | string | boolean | null> {
+    const out: Record<string, number | string | boolean | null> = {};
+    for (const c of checks) {
+      if (c.name === 'founder_economics_gdp' && c.passed) out.gdp = true;
+      if (c.name === 'founder_economics_epoch_tables' && c.passed) out.epochTables = true;
+      if (c.name === 'founder_economics_ddollar_grant' && c.passed) out.ddollarGrant = true;
+      if (c.name === 'founder_economics_knowledge' && c.passed) out.knowledge = true;
     }
     return out;
   }

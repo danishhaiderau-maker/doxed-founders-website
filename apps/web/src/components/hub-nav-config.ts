@@ -21,6 +21,7 @@ const HUB_PREFIXES = [
   '/phone',
   '/raise-room',
   '/list-your-project',
+  '/founder-economics',
   '/notifications',
   '/reputation',
   '/predict',
@@ -64,6 +65,7 @@ export function hubPageTitle(pathname: string): string {
     return 'Integrations';
   if (pathname.startsWith('/downloads')) return 'Downloads';
   if (pathname.startsWith('/raise-room')) return 'Raise Room';
+  if (pathname.startsWith('/founder-economics')) return 'Founder Economics';
   if (pathname.startsWith('/list-your-project')) return 'List Project';
   if (pathname.startsWith('/notifications')) return 'Notifications';
   if (pathname.startsWith('/reputation')) return 'Reputation';
@@ -145,6 +147,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/downloads#founder-node', label: 'Founder Stack', icon: '🖥' },
       { href: '/phone', label: 'Phone Remote', icon: '📱', auth: true },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
+      { href: '/founder-economics', label: 'Founder Economics', icon: '🪙' },
       { href: '/list-your-project', label: 'List Project', icon: '📋' },
       { href: '/downloads', label: 'Downloads', icon: '⬇️' },
       { href: '/downloads#mobile', label: 'Android app', icon: '📱' },

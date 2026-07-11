@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
+import { FounderEconomicsModule } from '../founder-economics/founder-economics.module';
 import { TokenLaunchController } from './token-launch.controller';
 import { TokenLaunchService } from './token-launch.service';
 import { TokenLaunchCron } from './token-launch.cron';
@@ -14,12 +15,12 @@ import { DexStubService } from './dex-stub.service';
  *   - Founder release (auth) — Solana devnet mint + 15-day window
  *   - Community commitment (auth) — DDollar escrow toward the 100K threshold
  *   - DEX stub swaps (auth) — 0.1% fee accrues to PlatformTreasury
+ *   - On LIVE finalization → PRODUCT_LAUNCH_VIA_RAISE_ROOM DDollar grant
  *
- * Depends only on PrismaModule + the in-module Solana/Dex services. No
- * application-code imports (kernel boundary respected).
+ * Imports FounderEconomicsModule for the LIVE→DDollar grant path only.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, FounderEconomicsModule],
   controllers: [TokenLaunchController],
   providers: [
     TokenLaunchService,
