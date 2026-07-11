@@ -87,6 +87,7 @@ export interface LamStepResult {
 export type LamTaskStatus =
   | 'PLANNING'
   | 'RUNNING'
+  | 'SYNTHESIZING'
   | 'COMPLETED'
   | 'FAILED';
 
