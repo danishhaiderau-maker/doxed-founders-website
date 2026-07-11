@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(ops): add scripts/fetch-railway-logs.mjs (WebSocket log fetcher)
+feat(founder-os): Phase 6.5-9 implementation — Debug Squasher, Deployment Modes, Token Launch, LAM
 
 ## Last Activity
 
