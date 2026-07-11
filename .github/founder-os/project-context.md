@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-BTC bot: batched token usage reporter with retry + exponential backoff
+Regenerate package-lock.json, fix Vercel deploy config
 
 ## Last Activity
 
