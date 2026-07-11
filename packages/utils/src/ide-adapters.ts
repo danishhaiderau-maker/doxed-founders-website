@@ -7,6 +7,7 @@
  */
 
 export type IdeAdapterId =
+  | 'founder_ide'
   | 'cursor'
   | 'openhands'
   | 'claude_code'
@@ -29,6 +30,14 @@ export interface IdeAdapter {
 }
 
 export const IDE_ADAPTERS: IdeAdapter[] = [
+  {
+    id: 'founder_ide',
+    label: 'Founder IDE',
+    available: true,
+    supportsResume: true,
+    supportsDispatch: true,
+    supportsEventStream: true,
+  },
   {
     id: 'cursor',
     label: 'Cursor',
