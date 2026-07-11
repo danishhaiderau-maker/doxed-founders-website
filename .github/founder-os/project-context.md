@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (22 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(bot): wire demo-mode DeepSeek cassettes into AI call path
+BTC bot: batched token usage reporter with retry + exponential backoff
 
 ## Last Activity
 
