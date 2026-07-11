@@ -70,8 +70,6 @@ export function FounderCloudPanel({ accessToken, showImport }: Props) {
         <Link
           href="/downloads#founder-node"
           className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-300 hover:text-white"
-          data-coming-soon="true"
-          title="Founder Stack installer coming soon — includes Founder IDE + Founder Node."
         >
           Download Founder Stack
         </Link>
