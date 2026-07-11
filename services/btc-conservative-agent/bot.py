@@ -18374,8 +18374,6 @@ HTML = """<!DOCTYPE html>
 
 <div id="dashboardToggles" style="margin:12px 0;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;">
     <strong style="color:#58a6ff;">Quick toggles</strong>
-    <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
-    <button id="bitfinexLiveDashBtn" onclick="toggleBitfinexLive()" style="border-color:#f8514966;color:#f85149;font-weight:700;">Bitfinex LIVE: <span id="bitfinexLiveDashLabel">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
@@ -18388,7 +18386,7 @@ HTML = """<!DOCTYPE html>
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Production</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">9 tiles · each independent · beat CONTINUOUS on EV/appr · PRIMARY_PRODUCTION = Tile 2 (AI65+ Spread5+ Chase 3+)</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
@@ -18414,7 +18412,7 @@ HTML = """<!DOCTYPE html>
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
 <h3>Ultimate execution control</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim + Bitfinex LIVE). Lane/AI decisions are still logged for analyzer.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
 <label>AI win % bands to execute (hard-wired gate — tick any combination):</label>
 <div id="aiBandControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;">
@@ -18810,8 +18808,7 @@ DASHBOARD_JS = """(function () {
         '<div><strong>AI bands:</strong> ' + bands + '</div>' +
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
-        '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>' +
-        '<div><strong>Bitfinex LIVE:</strong> ' + (gates.bitfinex_live_enabled ? 'ARMED' : 'OFF') + ' (local sim still runs when relay on)</div>';
+        '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>';
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -19087,19 +19084,6 @@ DASHBOARD_JS = """(function () {
       await post('/api/set_edge_threshold', {value: parseFloat(normalized)});
       syncEdgeThresholdSelect(normalized);
       syncEdgeRangePreset('custom');
-      refresh();
-    }
-    async function toggleLive() {
-      const cur = document.getElementById('liveArmBtn').innerText.includes('OFF');
-      await post('/api/live_arm', {armed: cur});
-      refresh();
-    }
-    async function toggleBitfinexLive() {
-      const btn = document.getElementById('bitfinexLiveDashLabel');
-      const turningOn = btn && btn.innerText.includes('OFF');
-      if (turningOn && !confirm('Enable REAL Bitfinex orders? Research sim continues in parallel. Confirm API keys and margin.')) return;
-      const res = await post('/api/bitfinex_live', {enabled: turningOn});
-      if (res && res.error) alert(res.error);
       refresh();
     }
     async function toggleEarlyFail() {
@@ -19790,14 +19774,6 @@ DASHBOARD_JS = """(function () {
           if (d.reasons && d.reasons.length) whyHtml += (d.reasons||[]).map(r=>`<li>${r}</li>`).join('');
           why.innerHTML = whyHtml || 'No rejection reason this candle';
         }
-        safeText('liveArmBtn', `${d.live_armed ? 'ON' : 'OFF'}`);
-        const bxLive = document.getElementById('bitfinexLiveDashLabel');
-        const bxBtn = document.getElementById('bitfinexLiveDashBtn');
-        if (bxLive) bxLive.innerText = d.bitfinex_live_enabled ? 'ON' : 'OFF';
-        if (bxBtn) {
-          bxBtn.style.backgroundColor = d.bitfinex_live_enabled ? '#7f1d1d' : '';
-          bxBtn.style.color = d.bitfinex_live_enabled ? '#fecaca' : '#f85149';
-        }
         const earlyBtn = document.getElementById('earlyFailBtn');
         if (earlyBtn) {
           earlyBtn.innerText = `Early Fail ${d.early_fail_enabled ? 'ON' : 'OFF'}`;
@@ -20313,8 +20289,6 @@ DASHBOARD_JS = """(function () {
       reconcileRecentExecutionGatesFromBrowser().finally(function () { refresh(); });
     });
     window.refresh = refresh;
-    window.toggleLive = toggleLive;
-    window.toggleBitfinexLive = toggleBitfinexLive;
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
     window.toggleDebug = toggleDebug;
