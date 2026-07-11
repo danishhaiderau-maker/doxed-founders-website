@@ -85,7 +85,7 @@ export class LamController {
    */
   @Get('task/:id')
   async getTask(@Param('id') id: string, @CurrentUser() user: AuthUser): Promise<LamTask> {
-    const task = this.orchestrator.getTask(user.id, id);
+    const task = await this.orchestrator.getTask(user.id, id);
     if (!task) throw new NotFoundException(`LAM task ${id} not found`);
     return task;
   }

@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { AiProxyRuntimeService, type ProxyAuth } from '../ai-proxy/ai-proxy-runtime.service';
 import { FOUNDER_OS_AUTO_MODEL } from '../ai-proxy/ai-proxy.constants';
 import type { ChatCompletionRequestDto } from '../ai-proxy/dto/ai-proxy.dto';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { BrowserAdapter } from './browser.adapter';
 import { ComputerUseAdapter } from './computer-use.adapter';
 import type {
@@ -13,6 +15,8 @@ import type {
   LamStepResult,
   LamTask,
 } from './lam.types';
+
+const json = <T>(value: T): Prisma.InputJsonValue => value as unknown as Prisma.InputJsonValue;
 
 /**
  * LamOrchestratorService — the "hands" to the AI Gateway's "brain."
@@ -35,15 +39,13 @@ import type {
  * logged to the Flight Recorder so the full action trace is
  * reconstructable — this is the training data for the Learning Engine.
  *
- * Task state is held in-memory (Map<taskId, LamTask>). Phase 9 ships
- * the slice; a later phase can persist to a Prisma table if the UI
- * needs cross-restart history. The controller exposes the same shape
- * either way.
+ * Task + step state is persisted to Prisma (LamTask / LamStep) so it
+ * survives restarts and the controller can read history from the DB.
+ * The controller exposes the same LamTask shape either way.
  */
 @Injectable()
 export class LamOrchestratorService {
   private readonly logger = new Logger(LamOrchestratorService.name);
-  private readonly tasks = new Map<string, LamTask>();
   private static readonly MAX_STEPS = 12;
   private static readonly MAX_TASK_MS = 180_000;
 
@@ -52,110 +54,206 @@ export class LamOrchestratorService {
     private readonly flightRecorder: FlightRecorderService,
     private readonly browser: BrowserAdapter,
     private readonly computerUse: ComputerUseAdapter,
+    private readonly prisma: PrismaService,
   ) {}
 
   /**
-   * Submit a natural-language task. Returns the taskId immediately;
-   * the actual planning + execution runs async so the caller can poll
-   * GET /api/lam/task/:id for progress.
+   * Submit a natural-language task. Persists a LamTask row in PLANNING state
+   * and returns the mapped task immediately; the actual planning + execution
+   * runs async so the caller can poll GET /api/lam/task/:id for progress.
    */
   async submitTask(auth: ProxyAuth, goal: string): Promise<LamTask> {
-    const now = new Date().toISOString();
-    const task: LamTask = {
-      id: randomUUID(),
-      userId: auth.userId,
-      goal,
-      status: 'PLANNING',
-      steps: [],
-      results: [],
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.tasks.set(task.id, task);
+    const row = await this.prisma.lamTask.create({
+      data: {
+        id: randomUUID(),
+        userId: auth.userId,
+        goal,
+        status: 'PLANNING',
+        planJson: json([]),
+        resultJson: json([]),
+      },
+    });
 
     // Fire-and-forget the async run. Errors land on the task record as
     // status FAILED so the client always sees a terminal state.
-    void this.runTask(auth, task).catch((err) => {
-      this.logger.error(`LAM task ${task.id} crashed: ${err instanceof Error ? err.message : String(err)}`);
-      task.status = 'FAILED';
-      task.error = err instanceof Error ? err.message : String(err);
-      task.updatedAt = new Date().toISOString();
+    void this.runTask(auth, row.id, goal).catch((err) => {
+      this.logger.error(
+        `LAM task ${row.id} crashed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      void this.prisma.lamTask
+        .update({
+          where: { id: row.id },
+          data: {
+            status: 'FAILED',
+            errorMessage: err instanceof Error ? err.message : String(err),
+            completedAt: new Date(),
+          },
+        })
+        .catch(() => {});
     });
 
-    return task;
+    return this.rowToTask(row, []);
   }
 
   /** Fetch a task by id, scoped to the caller's user id. */
-  getTask(userId: string, taskId: string): LamTask | null {
-    const t = this.tasks.get(taskId);
-    if (!t || t.userId !== userId) return null;
-    return t;
+  async getTask(userId: string, taskId: string): Promise<LamTask | null> {
+    const row = await this.prisma.lamTask.findUnique({
+      where: { id: taskId },
+      include: { steps: { orderBy: { stepIndex: 'asc' } } },
+    });
+    if (!row || row.userId !== userId) return null;
+    return this.rowToTask(row, row.steps);
   }
 
   /** Recent tasks for the history list (most recent first). */
-  listTasks(userId: string, limit = 20): LamTask[] {
-    return Array.from(this.tasks.values())
-      .filter((t) => t.userId === userId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit);
+  async listTasks(userId: string, limit = 20): Promise<LamTask[]> {
+    const rows = await this.prisma.lamTask.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: Math.max(1, Math.min(limit, 100)),
+    });
+    return rows.map((r) => this.rowToTask(r, []));
   }
 
   // -------------------------------------------------------------------------
   // Planning + execution
   // -------------------------------------------------------------------------
 
-  private async runTask(auth: ProxyAuth, task: LamTask): Promise<void> {
+  private async runTask(auth: ProxyAuth, taskId: string, goal: string): Promise<void> {
     const startedAt = Date.now();
 
     // 1. PLAN
-    const plan = await this.planGoal(auth, task.goal);
-    task.steps = plan.steps.slice(0, LamOrchestratorService.MAX_STEPS).map((s, i) => ({
+    const plan = await this.planGoal(auth, goal);
+    const steps = plan.steps.slice(0, LamOrchestratorService.MAX_STEPS).map((s, i) => ({
       index: i + 1,
       description: s.description,
       adapter: s.adapter,
       payload: s.payload,
     }));
-    task.status = 'RUNNING';
-    task.updatedAt = new Date().toISOString();
-    await this.logLamDecision(auth, 'plan', `planned ${task.steps.length} steps for goal`, task.goal);
+
+    // Persist the plan + flip to RUNNING, and seed LamStep rows.
+    await this.prisma.lamTask.update({
+      where: { id: taskId },
+      data: { status: 'RUNNING', planJson: json(steps) },
+    });
+    await this.prisma.lamStep.createMany({
+      data: steps.map((s) => ({
+        taskId,
+        stepIndex: s.index,
+        action: s.description,
+        adapter: s.adapter,
+        inputJson: json(s.payload ?? {}),
+        status: 'pending',
+      })),
+    });
+    await this.logLamDecision(auth, 'plan', `planned ${steps.length} steps for goal`, goal);
 
     // 2. EXECUTE
     const deadline = startedAt + LamOrchestratorService.MAX_TASK_MS;
-    for (const step of task.steps) {
+    const results: LamStepResult[] = [];
+    for (const step of steps) {
       if (Date.now() > deadline) {
-        task.results.push({
+        results.push({
           index: step.index,
           status: 'skipped',
           summary: 'skipped — task deadline exceeded',
           startedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
         });
-        break;
+        await this.updateStepRow(taskId, step.index, 'skipped', undefined, undefined, 0);
+        continue;
       }
       const result = await this.executeStep(auth, step);
-      task.results.push(result);
-      task.updatedAt = new Date().toISOString();
+      results.push(result);
+      await this.prisma.lamTask.update({
+        where: { id: taskId },
+        data: { resultJson: json(results) },
+      });
+      await this.updateStepRow(
+        taskId,
+        step.index,
+        result.status,
+        { summary: result.summary, artifacts: result.artifacts },
+        result.error,
+        Date.now() - new Date(result.startedAt).getTime(),
+      );
     }
 
     // 3. SYNTHESIZE
-    const successes = task.results.filter((r) => r.status === 'success').length;
-    const majorityOk = successes >= Math.ceil(task.steps.length / 2);
-    if (task.steps.length === 0 || !majorityOk) {
-      task.status = 'FAILED';
-      task.error = `only ${successes}/${task.steps.length} steps succeeded`;
+    const successes = results.filter((r) => r.status === 'success').length;
+    const majorityOk = successes >= Math.ceil(steps.length / 2);
+    let status: 'COMPLETED' | 'FAILED';
+    let resultText: string;
+    let errorMessage: string | null = null;
+
+    if (steps.length === 0 || !majorityOk) {
+      status = 'FAILED';
+      errorMessage = `only ${successes}/${steps.length} steps succeeded`;
+      resultText = errorMessage;
     } else {
       try {
-        task.result = await this.synthesize(auth, task);
-        task.status = 'COMPLETED';
+        // Load the in-progress task for synthesis (needs goal + results).
+        const task = this.synthTask(goal, steps, results);
+        resultText = await this.synthesize(auth, task);
+        status = 'COMPLETED';
       } catch (err) {
-        // Synthesis failing is non-fatal — we still have the step results.
-        task.result = `Steps completed (${successes}/${task.steps.length} succeeded) but synthesis failed: ${err instanceof Error ? err.message : String(err)}`;
-        task.status = 'COMPLETED';
+        resultText = `Steps completed (${successes}/${steps.length} succeeded) but synthesis failed: ${err instanceof Error ? err.message : String(err)}`;
+        status = 'COMPLETED';
       }
     }
-    task.elapsedMs = Date.now() - startedAt;
-    task.costDdollar = task.steps.length; // rough: ~1 DDollar per step (DDollar is metered by the AI Gateway per model call)
-    task.updatedAt = new Date().toISOString();
+
+    await this.prisma.lamTask.update({
+      where: { id: taskId },
+      data: {
+        status,
+        result: resultText,
+        errorMessage,
+        resultJson: json(results),
+        elapsedMs: Date.now() - startedAt,
+        costDdollar: steps.length,
+        completedAt: new Date(),
+      },
+    });
+  }
+
+  /** Build a minimal LamTask shape for the synthesizer (in-memory only). */
+  private synthTask(goal: string, steps: LamStep[], results: LamStepResult[]): LamTask {
+    return {
+      id: 'synthesis',
+      userId: '',
+      goal,
+      status: 'SYNTHESIZING',
+      steps,
+      results,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Update a LamStep row with the outcome of executing it. */
+  private async updateStepRow(
+    taskId: string,
+    stepIndex: number,
+    status: string,
+    output: { summary: string; artifacts?: string[] } | undefined,
+    error: string | undefined,
+    durationMs: number,
+  ): Promise<void> {
+    try {
+      await this.prisma.lamStep.updateMany({
+        where: { taskId, stepIndex },
+        data: {
+          status,
+          outputJson: output ? json(output) : Prisma.JsonNull,
+          error: error ?? null,
+          durationMs,
+        },
+      });
+    } catch (err) {
+      this.logger.debug(
+        `LamStep update failed for task=${taskId} step=${stepIndex}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -395,5 +493,99 @@ export class LamOrchestratorService {
           : 'Premium tier not enabled (COMPUTER_USE_ENABLED != true). Doxxed Builders only.',
       },
     ];
+  }
+
+  // -------------------------------------------------------------------------
+  // Prisma → interface mapping
+  // -------------------------------------------------------------------------
+
+  /** Map a LamTask Prisma row (with optional steps) to the LamTask interface. */
+  private rowToTask(
+    row: {
+      id: string;
+      userId: string;
+      goal: string;
+      status: string;
+      planJson: Prisma.JsonValue;
+      resultJson: Prisma.JsonValue;
+      result: string | null;
+      elapsedMs: number | null;
+      costDdollar: number | null;
+      errorMessage: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      completedAt: Date | null;
+    },
+    stepRows: Array<{
+      stepIndex: number;
+      action: string;
+      adapter: string;
+      inputJson: Prisma.JsonValue;
+      status: string;
+    }>,
+  ): LamTask {
+    const steps: LamStep[] = Array.isArray(row.planJson)
+      ? (row.planJson as unknown[]).map((raw, i) => {
+          const s = (raw ?? {}) as { index?: number; description?: string; adapter?: string; payload?: unknown };
+          return {
+            index: s.index ?? i + 1,
+            description: s.description ?? stepRows[i]?.action ?? '',
+            adapter: (s.adapter === 'computer-use' ? 'computer-use' : 'browser') as LamAdapterId,
+            payload: s.payload ?? stepRows[i]?.inputJson ?? {},
+          };
+        })
+      : stepRows.map((r) => ({
+          index: r.stepIndex,
+          description: r.action,
+          adapter: (r.adapter === 'computer-use' ? 'computer-use' : 'browser') as LamAdapterId,
+          payload: r.inputJson ?? {},
+        }));
+
+    const results: LamStepResult[] = Array.isArray(row.resultJson)
+      ? (row.resultJson as unknown[]).map((raw, i) => {
+          const r = (raw ?? {}) as {
+            index?: number;
+            status?: string;
+            summary?: string;
+            artifacts?: string[];
+            error?: string;
+            startedAt?: string;
+            completedAt?: string;
+          };
+          return {
+            index: r.index ?? i + 1,
+            status: (r.status === 'success' || r.status === 'failed' || r.status === 'skipped'
+              ? r.status
+              : 'skipped') as LamStepResult['status'],
+            summary: r.summary ?? '',
+            artifacts: r.artifacts,
+            error: r.error,
+            startedAt: r.startedAt ?? row.createdAt.toISOString(),
+            completedAt: r.completedAt ?? row.updatedAt.toISOString(),
+          };
+        })
+      : [];
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      goal: row.goal,
+      status: this.normalizeStatus(row.status),
+      steps,
+      results,
+      result: row.result ?? undefined,
+      elapsedMs: row.elapsedMs ?? undefined,
+      costDdollar: row.costDdollar ?? undefined,
+      error: row.errorMessage ?? undefined,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  private normalizeStatus(s: string): LamTask['status'] {
+    if (s === 'RUNNING' || s === 'PLANNING' || s === 'SYNTHESIZING' || s === 'COMPLETED' || s === 'FAILED') {
+      return s;
+    }
+    return 'PLANNING';
   }
 }
