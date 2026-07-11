@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-os): Phase 6.5-9 implementation — Debug Squasher, Deployment Modes, Token Launch, LAM
+chore(founder-ide): package VS Code extension .vsix for Founder IDE
 
 ## Last Activity
 
