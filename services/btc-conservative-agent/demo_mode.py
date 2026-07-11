@@ -73,6 +73,8 @@ def configure_demo_env() -> None:
     os.environ.setdefault("RESEARCH_LANE_TYPE_B_ENABLED", "0")
     os.environ.setdefault("RESEARCH_LANE_SR_MICRO_ENABLED", "0")
     os.environ.setdefault("CONTINUOUS_AI_RESEARCH_ENABLED", "1")
+    # Legacy V2 research (A160 lane) — RETIRED 2026-07-11
+    os.environ.setdefault("V2_RESEARCH_AI_ENABLED", "0")
 
 
 def cassette_lookup(model: str, temperature: float, prompt_prefix: str):

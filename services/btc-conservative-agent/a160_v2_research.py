@@ -40,7 +40,7 @@ V2_MIN_SIGNAL_AGE_SEC = 180
 
 # Phase-shifted AI: main AI_SCAN ~every 180s; V2 fires ≥90s after last_ai_call_ts,
 # then every ~180s on its own clock. No hourly budget — only anti-spam separation.
-V2_RESEARCH_AI_ENABLED_DEFAULT = "1"
+V2_RESEARCH_AI_ENABLED_DEFAULT = "0"  # RETIRED 2026-07-11 — A160 lane removed, V2 prompt file purged
 V2_AI_OFFSET_FROM_MAIN_SEC = int(os.getenv("V2_AI_OFFSET_FROM_MAIN_SEC", "90"))
 V2_RESEARCH_AI_COOLDOWN_SEC = int(os.getenv("V2_RESEARCH_AI_COOLDOWN_SEC", "180"))
 
