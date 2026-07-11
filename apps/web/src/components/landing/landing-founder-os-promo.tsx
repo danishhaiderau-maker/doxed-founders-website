@@ -7,12 +7,30 @@ import { fetchPublicFounderPromo } from '@/lib/api';
 type Promo = { enabled: boolean; message: string | null; windowDays?: number };
 
 const WHY_BULLETS = [
-  { icon: '💻', text: 'Your PC does the heavy lifting.' },
-  { icon: '🧠', text: 'Local AI with Ollama by default.' },
-  { icon: '☁️', text: 'Cloud AI is optional, not required.' },
-  { icon: '🔑', text: 'Bring your own API keys.' },
-  { icon: '💰', text: 'Control your AI costs from day one.' },
-  { icon: '🚀', text: 'Go from idea to prototype without infrastructure overhead.' },
+  {
+    icon: '🤖',
+    text: 'Platform-funded AI tokens — we cover inference so you build.',
+  },
+  {
+    icon: '🚀',
+    text: '1 year to ship your token — use the free tier, apply for full access when ready.',
+  },
+  {
+    icon: '🎥',
+    text: 'Priority access for founders who submit a video walkthrough + active GitHub.',
+  },
+  {
+    icon: '🔑',
+    text: 'Bring your own API keys — or use platform credits. Your choice.',
+  },
+  {
+    icon: '🛡️',
+    text: 'Only doxxed founders — show your face, earn real trust.',
+  },
+  {
+    icon: '💻',
+    text: 'Your PC does the heavy lifting — cloud AI is optional glue.',
+  },
 ];
 
 const PATHS = [
@@ -60,9 +78,10 @@ export function LandingFounderOsPromo() {
           Stop paying for cloud AI before you know your idea is worth building.
         </p>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-          Founder OS lets you brainstorm, research, plan, prototype, and experiment using your own
-          hardware first. Connect local models with Ollama, bring your own AI providers when you need
-          them, and only spend on cloud inference where it actually adds value.
+          Platform-funded AI tokens let you build without burning your own API keys. Bring your idea,
+          prototype fast with local compute, and use our cloud inference credits when you need them.
+          Only doxxed founders get full access — show your face, ship in public, and earn priority.
+          You have one year to launch your token once verified.
         </p>
       </div>
 
