@@ -6075,6 +6075,77 @@ def _estimate_token_count(text) -> int:
     return max(1, len(str(text)) // 4)
 
 
+# Batched token usage reporter — accumulates entries and flushes periodically
+# with retries, avoiding per-call HTTP overhead and silent drop on transient
+# failures. Flushes happen on batch-size threshold OR time interval (60s).
+_inference_usage_buffer = []
+_inference_usage_lock = threading.Lock()
+_inference_usage_last_flush = time.time()
+_INFERENCE_USAGE_BATCH_MAX = 20
+_INFERENCE_USAGE_FLUSH_INTERVAL_SEC = 60
+_INFERENCE_USAGE_RETRY_MAX = 3
+_INFERENCE_USAGE_RETRY_BASE_DELAY = 1.0
+_inference_usage_flusher_started = False
+
+
+def _ensure_usage_flusher():
+    """Start a periodic flush thread if not already running."""
+    global _inference_usage_flusher_started
+    if _inference_usage_flusher_started:
+        return
+    _inference_usage_flusher_started = True
+    def _flusher_loop():
+        while True:
+            time.sleep(_INFERENCE_USAGE_FLUSH_INTERVAL_SEC)
+            _flush_inference_usage()
+    threading.Thread(target=_flusher_loop, daemon=True).start()
+
+
+def _flush_inference_usage():
+    """POST accumulated entries to the platform API with retries."""
+    global _inference_usage_buffer, _inference_usage_last_flush
+    with _inference_usage_lock:
+        if not _inference_usage_buffer:
+            return
+        entries = list(_inference_usage_buffer)
+        _inference_usage_buffer.clear()
+        _inference_usage_last_flush = time.time()
+
+    url = SHOWCASE_INFERENCE_USAGE_URL
+    if not url:
+        return
+    secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+    payload = {"entries": entries}
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if secret:
+        headers["X-Bot-Control-Secret"] = secret
+
+    for attempt in range(1, _INFERENCE_USAGE_RETRY_MAX + 1):
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=5.0)
+            if res.status_code < 500:
+                return
+            delay = _INFERENCE_USAGE_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"[INFERENCE USAGE] flush attempt {attempt}/{_INFERENCE_USAGE_RETRY_MAX} "
+                f"got {res.status_code}, retrying in {delay:.1f}s"
+            )
+        except Exception as exc:
+            delay = _INFERENCE_USAGE_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"[INFERENCE USAGE] flush attempt {attempt}/{_INFERENCE_USAGE_RETRY_MAX} "
+                f"failed: {exc}, retrying in {delay:.1f}s"
+            )
+        if attempt < _INFERENCE_USAGE_RETRY_MAX:
+            time.sleep(delay)
+
+    # All retries exhausted — drop silently (avoid jam on dead API), already warned above.
+    logger.warning(
+        f"[INFERENCE USAGE] all {_INFERENCE_USAGE_RETRY_MAX} flush attempts failed, "
+        f"dropped {len(entries)} entries"
+    )
+
+
 def _report_showcase_inference_usage(
     prompt_tokens: int,
     completion_tokens: int,
@@ -6082,34 +6153,25 @@ def _report_showcase_inference_usage(
     source: str = "showcase_bot",
     model: str = "deepseek-chat",
 ) -> None:
-    """Fire-and-forget push of DeepSeek token counts to platform adoption chart."""
+    """Enqueue DeepSeek token counts for batched push to the platform adoption chart."""
     url = SHOWCASE_INFERENCE_USAGE_URL
     if not url or (prompt_tokens <= 0 and completion_tokens <= 0):
         return
-    secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
-    payload = {
-        "entries": [
-            {
-                "promptTokens": int(prompt_tokens),
-                "completionTokens": int(completion_tokens),
-                "provider": "deepseek",
-                "model": model,
-                "source": source,
-                "billingSource": "platform_showcase",
-            }
-        ]
+    entry = {
+        "promptTokens": int(prompt_tokens),
+        "completionTokens": int(completion_tokens),
+        "provider": "deepseek",
+        "model": model,
+        "source": source,
+        "billingSource": "platform_showcase",
     }
+    _ensure_usage_flusher()
+    with _inference_usage_lock:
+        _inference_usage_buffer.append(entry)
 
-    def _post():
-        try:
-            headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            if secret:
-                headers["X-Bot-Control-Secret"] = secret
-            requests.post(url, json=payload, headers=headers, timeout=3.0)
-        except Exception as exc:
-            logger.debug(f"[INFERENCE USAGE] report failed: {exc}")
-
-    threading.Thread(target=_post, daemon=True).start()
+    # Flush immediately if batch is full, otherwise rely on periodic flush timer.
+    if len(_inference_usage_buffer) >= _INFERENCE_USAGE_BATCH_MAX:
+        threading.Thread(target=_flush_inference_usage, daemon=True).start()
 
 
 def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
@@ -11384,8 +11446,8 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
 # Each tile calls evaluate_signal_with_ai with its own custom prompt.
 # Shadow-only (no live orders) while tile toggle is OFF.
 
-# Shared cooldown state for independent research AI ticks.
-_research_tile_cooldown_until = {}  # {lane: timestamp_until}
+# Shared chain timestamp — enforces ≥60s gap between ANY two research ticks.
+_research_tile_chain_ts = time.time() - 120  # bootstrap — allow first tick immediately
 
 
 def maybe_tick_type_b_hunter_v1_research():
@@ -11395,19 +11457,21 @@ def maybe_tick_type_b_hunter_v1_research():
     Shadow-only when tile toggle OFF (default); paper orders when ON.
     """
     lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
+    global _research_tile_chain_ts
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
         return
-    # Cooldown: 120s between ticks per tile
     now = time.time()
-    if now < _research_tile_cooldown_until.get(lane, 0):
+    if now < _research_tile_chain_ts + 60:
         return
     if _lane_pipeline_running(lane):
         return
     if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
         return
-    _research_tile_cooldown_until[lane] = now + 120
+    if _lane_pipeline_running(RESEARCH_LANE_SR_MICRO_TILE_V1):
+        return
+    _research_tile_chain_ts = now
     try:
         if not is_buffer_ready():
             return
@@ -11436,7 +11500,7 @@ def maybe_tick_type_b_hunter_v1_research():
         tile_on = is_research_lane_enabled(lane)
         shadow_only = not tile_on
         logger.info(
-            f"[{lane}_AI] independent tick offset=60s edge={edge_score:.1f} "
+            f"[{lane}_AI] independent tick gap=60s+ edge={edge_score:.1f} "
             f"tile_on={tile_on} shadow={shadow_only}"
         )
         evaluate_signal_with_ai(
@@ -11456,19 +11520,21 @@ def maybe_tick_sr_micro_tile_v1_research():
     Shadow-only when tile toggle OFF (default); paper orders when ON.
     """
     lane = RESEARCH_LANE_SR_MICRO_TILE_V1
+    global _research_tile_chain_ts
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
         return
-    # Cooldown: 120s between ticks per tile
     now = time.time()
-    if now < _research_tile_cooldown_until.get(lane, 0):
+    if now < _research_tile_chain_ts + 60:
         return
     if _lane_pipeline_running(lane):
         return
     if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
         return
-    _research_tile_cooldown_until[lane] = now + 120
+    if _lane_pipeline_running(RESEARCH_LANE_TYPE_B_HUNTER_V1):
+        return
+    _research_tile_chain_ts = now
     try:
         if not is_buffer_ready():
             return
@@ -11497,7 +11563,7 @@ def maybe_tick_sr_micro_tile_v1_research():
         tile_on = is_research_lane_enabled(lane)
         shadow_only = not tile_on
         logger.info(
-            f"[{lane}_AI] independent tick offset=120s edge={edge_score:.1f} "
+            f"[{lane}_AI] independent tick gap=60s+ edge={edge_score:.1f} "
             f"tile_on={tile_on} shadow={shadow_only}"
         )
         evaluate_signal_with_ai(
@@ -15849,28 +15915,32 @@ def state_monitor_loop():
             process_positions()
             pipeline_heartbeat()
             if time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL:
-                logger.info("[PERIODIC PIPELINE] forcing detect_event_light for analyzer data [PIPELINE ENFORCEMENT]")
-                event = detect_event_light()
-                if event and event.get("event_trigger"):
-                    process_signal(event)
-                elif (
-                    _sole_ai_research_mode()
-                    and any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
-                    and ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN) == 0
-                ):
-                    features = build_full_feature_snapshot()
-                    if features:
-                        edge_score = compute_edge_score(features)
-                        if round(edge_score, 1) >= 0.0:
-                            process_signal({
-                                "event_trigger": True,
-                                "research_lane": RESEARCH_LANE_AI_SCAN,
-                                "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
-                                "edge_score": round(edge_score, 1),
-                                "price": nz(state.get("price")),
-                                "timestamp": utc_iso(),
-                                "features": features,
-                            })
+                now = time.time()
+                if now >= _research_tile_chain_ts + 60:
+                    logger.info("[PERIODIC PIPELINE] forcing detect_event_light for analyzer data [PIPELINE ENFORCEMENT]")
+                    event = detect_event_light()
+                    if event and event.get("event_trigger"):
+                        process_signal(event)
+                        _research_tile_chain_ts = time.time()
+                    elif (
+                        _sole_ai_research_mode()
+                        and any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
+                        and ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN) == 0
+                    ):
+                        features = build_full_feature_snapshot()
+                        if features:
+                            edge_score = compute_edge_score(features)
+                            if round(edge_score, 1) >= 0.0:
+                                process_signal({
+                                    "event_trigger": True,
+                                    "research_lane": RESEARCH_LANE_AI_SCAN,
+                                    "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
+                                    "edge_score": round(edge_score, 1),
+                                    "price": nz(state.get("price")),
+                                    "timestamp": utc_iso(),
+                                    "features": features,
+                                })
+                                _research_tile_chain_ts = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
             # V2 phase-shifted AI (last_ai_call_ts + 90s, own ~180s cooldown).
