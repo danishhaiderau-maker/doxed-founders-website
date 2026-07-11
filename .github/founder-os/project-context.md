@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (23 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (23 recent commits)
 
 ## Last Commit
 
-Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
+feat(bot): wire demo-mode DeepSeek cassettes into AI call path
 
 ## Last Activity
 
