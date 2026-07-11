@@ -18766,25 +18766,15 @@ DASHBOARD_JS = """(function () {
       const m = model || lane || '-';
       const colors = {
         'CONTINUOUS': '#58a6ff',
-        'HIGH_EDGE_RUNNER': '#3fb950',
-        'EXTREME_EDGE': '#f97316',
-        'EDGE_ACCELERATION': '#a78bfa',
-        'EDGE_PLUS_STACK': '#d4a72c',
-        'SHADOW_RUNNER': '#6e7681',
-        'EDGE_ALPHA_4': '#2ea043',
-        'TYPE_B_HUNTER': '#bc8cff',
-        'PROFIT_GATES': '#bc8cff'
+        'TYPE_B_HUNTER_V1': '#bc8cff',
+        'SR_MICRO_TILE_V1': '#3fb950',
+        'AI_SCAN': '#6e7681',
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
-        'HIGH_EDGE_RUNNER': 'High Edge Runner',
-        'EXTREME_EDGE': 'Extreme Edge',
-        'EDGE_ACCELERATION': 'Edge Accel',
-        'EDGE_PLUS_STACK': 'Edge+Stack',
-        'SHADOW_RUNNER': 'Shadow Runner',
-        'EDGE_ALPHA_4': 'Edge Alpha 4',
-        'TYPE_B_HUNTER': 'Type B Hunter',
-        'PROFIT_GATES': 'Profit Gates'
+        'TYPE_B_HUNTER_V1': 'Type B Hunter V1',
+        'SR_MICRO_TILE_V1': 'S/R Micro Tile V1',
+        'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
       const short = labels[lane] || m;

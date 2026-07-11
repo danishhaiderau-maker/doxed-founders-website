@@ -46,140 +46,17 @@ COMBO_TILE_DISPLAY_ORDER = (
 )
 
 COMBO_LANE_SPECS = {
-    RESEARCH_LANE_COMBO_65_SP5_CHASE: {
-        "label": "AI65+ · Spread5+ · Chase 3+",
-        "subtitle": "LEGACY · retired from live execution 2026-06-23",
-        "combo_key": "AI65++SPREAD5++TYPE_B+CHASE_3PLUS_ALPHA",
-        "ai_min": 65,
-        "ai_max": 101,
-        "spread_min": 5,
-        "spread_max": 99,
-        "entry_mode": "CHASE_3PLUS",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": False,
-        "is_legacy": True,
-        "id_prefix": "c65c",
-    },
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT: {
-        "label": "AI65+ · Spread5+ · Continuous",
-        "subtitle": "LEGACY · retired",
-        "combo_key": "AI65++SPREAD5++TYPE_B+CONTINUOUS",
-        "ai_min": 65,
-        "ai_max": 101,
-        "spread_min": 5,
-        "spread_max": 99,
-        "entry_mode": "IMMEDIATE",
-        "is_benchmark": False,
-        "is_legacy": True,
-        "id_prefix": "c65d",
-    },
-    RESEARCH_LANE_COMBO_604_SP4_CHASE: {
-        "label": "AI60-65 · Spread4 · Chase 3+",
-        "subtitle": "RETIRED 2026-06-26 · historical research only — replaced by Virtual Chase tile",
-        "combo_key": "AI60-65+SPREAD4+TYPE_B+CHASE_3PLUS_ALPHA",
-        "ai_min": 60,
-        "ai_max": 65,
-        "spread_min": 4,
-        "spread_max": 4,
-        "entry_mode": "CHASE_3PLUS",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": False,
-        "is_legacy": True,
-        "id_prefix": "c604c",
-    },
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT: {
-        "label": "AI60-65 · Spread4 · Continuous",
-        "subtitle": "LEGACY · retired",
-        "combo_key": "AI60-65+SPREAD4+TYPE_B+CONTINUOUS",
-        "ai_min": 60,
-        "ai_max": 65,
-        "spread_min": 4,
-        "spread_max": 4,
-        "entry_mode": "IMMEDIATE",
-        "is_benchmark": False,
-        "is_legacy": True,
-        "id_prefix": "c604d",
-    },
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: {
-        "label": "AI60+ · Spread ≥3 · Virtual Chase",
-        "subtitle": (
-            "RETIRED 2026-07-08 · statistical_significance_report shows TIES vs CONTINUOUS "
-            "over 71 trades (no edge); replaced by SL_AVOIDANCE_V1"
-        ),
-        "combo_key": "AI60++SPREAD3++VIRTUAL_CHASE",
-        "ai_min": 60,
-        "ai_max": 100,
-        "spread_min": 3,
-        "spread_max": 99,
-        "entry_mode": "VIRTUAL_CHASE",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": False,
-        "is_legacy": True,
-        "id_prefix": "vc603",
-        "ladder": [(30, 20), (40, 30), (50, 40), (60, 50)],
-        "ladder_label": "30→20, 40→30, 50→40, 60→50",
-        "ladder_profile_id": "SCENARIO_C_PROFILE_30_v1",
-        "promotion_criteria": (
-            "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS "
-            "over same period · stable DNA Quality · positive across multiple market regimes"
-        ),
-        "kill_criteria": (
-            "ANY after ≥50 trades: negative EV · DNA Quality deterioration · "
-            "failure to outperform CONTINUOUS"
-        ),
-    },
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: {
-        "label": "A160 · Context Chase Exit V2",
-        "subtitle": (
-            "RETIRED 2026-07-08 · 0 approves / 0 trades after extended shadow period; "
-            "no evidence collected. Replaced by SL_AVOIDANCE_V1."
-        ),
-        "combo_key": "A160++CONTEXT_CHASE_EXIT_V2",
-        "ai_min": 60,
-        "ai_max": 100,
-        "spread_min": 3,
-        "spread_max": 99,
-        "entry_mode": "VIRTUAL_CHASE",
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": False,
-        "is_independent_ai": True,
-        "is_legacy": True,
-        "id_prefix": "a160v2",
-        "ladder": [(30, 20), (40, 30), (50, 40), (60, 50)],
-        "ladder_label": "30→20, 40→30, 50→40, 60→50",
-        "ladder_profile_id": "SCENARIO_C_PROFILE_30_v1",
-        "promotion_criteria": (
-            "ALL required: ≥100 completed trades · positive EV/appr · beats CONTINUOUS "
-            "and AI60_SP3_VIRTUAL_CHASE over same window · context-veto loss reduction · "
-            "stable across regimes"
-        ),
-        "kill_criteria": (
-            "ANY after ≥50 trades: negative EV · fails to beat CONTINUOUS "
-            "or AI60_SP3 on EV/appr · parse failure rate elevated · context veto ineffective"
-        ),
-        "research_question": (
-            "Does A160 V2 beat CONTINUOUS and AI60_SP3 on EV/appr (same window)?"
-        ),
-        "hypothesis": (
-            "Independent V2 prompt + context veto + chase 3–5 / age≥180s + Scenario C "
-            "improves EV vs AI60_SP3 and CONTINUOUS on independent paper fills."
-        ),
-    },
     # =====================================================================
-    # NEW RESEARCH CANDIDATES 2026-07-11
-    # TYPE_B_HUNTER_V1 — independent AI + pre-entry composite scoring
-    # SR_MICRO_TILE_V1 — independent AI + micro S/R mean-reversion
-    # Both start as SHADOW_COLLECTING — toggle ON to promote to live orders.
+    # v11.6-dual-research-candidates -- 3-lane research stack
+    # TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1 (research candidates)
+    # SL_AVOIDANCE_V1 + SIZED_CONTINUOUS_V1 (retired, stub only for CSV compat)
+    # All other legacy lanes purged 2026-07-11.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter V1 — pre-entry TYPE_B prediction",
+        "label": "Type B Hunter V1 -- pre-entry TYPE_B prediction",
         "subtitle": (
-            "RESEARCH_CANDIDATE · SHADOW ONLY · toggle ON = live orders · "
-            "composite scoring (delta+volume+adx+conf) · independent AI at T+60s"
+            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live orders "
+            "composite scoring (delta+volume+adx+conf) independent AI at T+60s"
         ),
         "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V1",
         "ai_min": 55,
@@ -194,24 +71,24 @@ COMBO_LANE_SPECS = {
         "module": "type_b_hunter_v1.py",
         "ai_cadence_offset_sec": 60,
         "promotion_criteria": (
-            "ALL required: ≥150 shadow closes · positive EV · beats CONTINUOUS "
-            "(95% CI) · P(TYPE_B) ≥ 40% · WR ≥ 75%"
+            "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
+            "(95pct CI) P(TYPE_B) >= 40pct WR >= 75pct"
         ),
         "kill_criteria": (
-            "ANY after ≥75 closes: negative EV · P(TYPE_B) < 35% · WR < 65% · "
-            "filter selectivity > 40%"
+            "ANY after >=75 closes: negative EV P(TYPE_B) < 35pct WR < 65pct "
+            "filter selectivity > 40pct"
         ),
         "hypothesis": (
-            "TYPE_B trades (MFE≥15%) are identifiable pre-entry via order-flow "
-            "delta (+67% vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
+            "TYPE_B trades (MFE>=15pct) are identifiable pre-entry via order-flow "
+            "delta (+67pct vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
             "ema_slope, structure)."
         ),
     },
     RESEARCH_LANE_SR_MICRO_TILE_V1: {
-        "label": "S/R Micro Tile V1 — micro S/R mean-reversion",
+        "label": "S/R Micro Tile V1 -- micro S/R mean-reversion",
         "subtitle": (
-            "RESEARCH_CANDIDATE · SHADOW ONLY · toggle ON = live orders · "
-            "LONG@support + SHORT@resistance · midpoint avoidance · volatility suspend"
+            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live orders "
+            "LONG@support + SHORT@resistance midpoint avoidance volatility suspend"
         ),
         "combo_key": "SR_MICRO_TILE++MEAN_REVERSION_V1",
         "ai_min": 55,
@@ -227,38 +104,33 @@ COMBO_LANE_SPECS = {
         "ai_cadence_offset_sec": 120,
         "extra_filters": {"adx_max": 40},
         "promotion_criteria": (
-            "ALL required: ≥150 shadow closes · positive EV · beats CONTINUOUS "
-            "(95% CI) · WR ≥ 65% · stable across at least 2 regime types"
+            "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
+            "(95pct CI) WR >= 65pct stable across at least 2 regime types"
         ),
         "kill_criteria": (
-            "ANY after ≥75 closes: negative EV · WR < 55% · >30% trades hit "
-            "midpoint avoidance · >20% trades suspended by volatility guard"
+            "ANY after >=75 closes: negative EV WR < 55pct >30pct trades hit "
+            "midpoint avoidance >20pct trades suspended by volatility guard"
         ),
         "hypothesis": (
-            "85-90% of market time is range-bound. Mean-reversion at micro S/R "
+            "85-90pct of market time is range-bound. Mean-reversion at micro S/R "
             "with midpoint avoidance captures crab movement income while volatility "
             "guard prevents trending losses."
         ),
     },
-    # =====================================================================
-    # [RETIRED 2026-07-11] SL_AVOIDANCE_V1 — UNDERPERFORMING (LAB: 47% WR, -$2.03)
-    # [RETIRED 2026-07-11] SIZED_CONTINUOUS_V1 — UNDERPERFORMING (LAB: 31% WR, -$81.08)
-    # Specs preserved for CSV/historical data analysis.
-    # =====================================================================
+    # [RETIRED 2026-07-11] Stub entries for CSV/historical data compatibility only
     RESEARCH_LANE_SL_AVOIDANCE_V1: {
         "label": "SL Avoidance V1 (RETIRED)",
-        "subtitle": "RETIRED 2026-07-11 — LAB: 47% WR, -$2.03, EV -$0.14/close",
+        "subtitle": "RETIRED 2026-07-11 -- LAB: 47pct WR, -$2.03, EV -$0.14/close",
         "combo_key": "SL_AVOIDANCE++DATA_GROUNDED_V1",
         "is_legacy": True,
     },
     RESEARCH_LANE_SIZED_CONTINUOUS_V1: {
         "label": "SIZED_CONTINUOUS V1 (RETIRED)",
-        "subtitle": "RETIRED 2026-07-11 — LAB: 31% WR, -$81.08, EV -$0.84/close",
+        "subtitle": "RETIRED 2026-07-11 -- LAB: 31pct WR, -$81.08, EV -$0.84/close",
         "combo_key": "SIZED_CONTINUOUS++SESSION_SIZE_V1",
         "is_legacy": True,
     },
 }
-
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
 CONTINUOUS_PROXY_LANES = ()
 PRIMARY_PRODUCTION_LANE = COMPARISON_BENCHMARK_LANE
@@ -298,22 +170,16 @@ _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
 _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
     RESEARCH_LANE_SR_MICRO_TILE_V1: False,
-    RESEARCH_LANE_COMBO_65_SP5_CHASE: False,
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
-    RESEARCH_LANE_COMBO_604_SP4_CHASE: False,
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: False,
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: False,
-    RESEARCH_LANE_SL_AVOIDANCE_V1: False,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1: False,
 })
+# Legacy lanes (retired 2026-07-11) — permanently OFF
+for _legacy in (RESEARCH_LANE_SL_AVOIDANCE_V1, RESEARCH_LANE_SIZED_CONTINUOUS_V1):
+    _COMBO_TOGGLE_DEFAULTS[_legacy] = False
 
 
 def is_independent_ai_lane(lane: str) -> bool:
     """Lanes with their own DeepSeek prompt — never inherit AI_SCAN / CONTINUOUS decisions."""
     lane_u = str(lane or "").upper()
-    if lane_u in (RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
-                  RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    if lane_u in (RESEARCH_LANE_TYPE_B_HUNTER_V1,
                   RESEARCH_LANE_SR_MICRO_TILE_V1):
         return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
@@ -568,10 +434,8 @@ def combo_lane_match_detail(lane: str, ai: dict, final_direction: str, spread: i
 
 
 def is_shadow_only_lane(lane: str) -> bool:
-    """Shadow/research telemetry lanes — never order-capable by construction."""
+    """Shadow/research telemetry lanes -- never order-capable by construction."""
     lane_u = str(lane or "").upper()
-    if lane_u == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
-        return False
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return bool(spec.get("is_shadow_only"))
 
@@ -692,16 +556,5 @@ def any_combo_execution_enabled(enabled_map: dict = None, continuous_enabled: bo
                 merged[lane] = bool(val)
     if any(merged.values()):
         return True
-    try:
-        from experimental_pathway_config import experimental_toggle_defaults
-
-        exp = experimental_toggle_defaults()
-        if enabled_map:
-            for lane, val in enabled_map.items():
-                if lane in exp:
-                    exp[lane] = bool(val)
-        if any(exp.values()):
-            return True
-    except ImportError:
-        pass
+    # experimental_pathway_config purged 2026-07-11 — no experimental lanes remain
     return bool(continuous_enabled)
