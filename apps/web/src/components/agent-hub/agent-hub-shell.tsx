@@ -18,7 +18,7 @@ const NAV = [
   { href: '/account', label: 'Portfolio', auth: true },
   { href: '/ddollar', label: 'DDollar' },
   { href: '/trust-center', label: 'Trust Center' },
-  { href: '/settings/builder', label: 'Founder Node', auth: true },
+  { href: '/settings/builder', label: 'Founder Stack', auth: true },
   { href: '/account?tab=security', label: 'Settings', auth: true },
 ] as const;
 

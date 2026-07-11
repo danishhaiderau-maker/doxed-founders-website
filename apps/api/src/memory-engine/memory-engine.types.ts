@@ -1,8 +1,9 @@
 /**
  * Memory Engine — types for the kernel's four memory stores.
- * See docs/KERNEL.md §3 (service #3) and the Phase 1 scope note in §10.
+ * See docs/KERNEL.md §3 (service #3).
  *
- * Phase 1 ships the interface; real backends land in Phases 2-4.
+ * Stores are Prisma-backed (ConversationMemory / ProjectMemory /
+ * FounderMemory / WorkspaceMemory).
  */
 
 export type MemoryStore = 'conversation' | 'project' | 'founder' | 'workspace';

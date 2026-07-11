@@ -17,7 +17,7 @@ export function DownloadsHub() {
         <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Install hub</p>
         <h1 className="mt-2 text-3xl font-bold tracking-tight">All downloads</h1>
         <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-          Everything you install lives here — mobile apps, desktop Founder Node, and pairing steps. Connect AI
+          Everything you install lives here — mobile apps, desktop Founder Stack, and pairing steps. Connect AI
           brains and deployment stack separately in{' '}
           <Link href="/settings/builder?tab=ai" className="font-semibold text-violet-300 underline hover:text-violet-200">
             AI Providers
@@ -123,7 +123,7 @@ export function DownloadsHub() {
           <h2 className="mt-2 text-2xl font-bold tracking-tight">Founder Stack — IDE + Node, or Founder Node standalone</h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
             <strong className="text-emerald-200">Founder Stack</strong> is the upcoming bundled installer — Founder IDE
-            (a VSCodium-based editor with Founder OS AI built in) plus the Founder Node tray app in one download. While
+            (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) plus the Founder Node tray app in one download. While
             the Stack is being built, you can install <strong className="text-cyan-200">Founder Node</strong> standalone
             today: the tray app for encrypted vault sync, Cursor IDE bridge, and local Ollama. Your files stay on your
             PC. Pair once with the same Founder OS account you use in the browser or mobile app.
@@ -155,7 +155,7 @@ export function DownloadsHub() {
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Pairing (about 2 minutes)</p>
           <h3 className="mt-2 text-xl font-bold">Connect desktop to Founder OS</h3>
           <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-zinc-400">
-            <li>Install Founder Node from the buttons above (Windows auto-updates from the tray menu).</li>
+            <li>Install Founder Stack (or Founder Node standalone) from the buttons above (Windows auto-updates from the tray menu).</li>
             <li>
               In{' '}
               <Link href="/settings/builder?tab=downloads" className="text-violet-300 underline">

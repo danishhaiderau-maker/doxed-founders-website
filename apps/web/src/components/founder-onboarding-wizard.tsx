@@ -42,7 +42,7 @@ type Props = {
 
 const WIZARD_STEPS = [
   { id: 'ide', label: 'Choose IDE' },
-  { id: 'pair', label: 'Pair Founder Node' },
+  { id: 'pair', label: 'Pair Founder Stack' },
   { id: 'sync', label: 'Synchronize Desktop' },
   { id: 'brain', label: 'Choose Brain' },
   { id: 'community', label: 'Community' },
@@ -341,10 +341,12 @@ export function FounderOnboardingWizard({
                   </ul>
                   <div className="mt-2 rounded-md border border-zinc-700/50 bg-black/20 px-3 py-2">
                     <p>
-                      <span className="font-semibold text-violet-300">Cursor is recommended</span> because
-                      it&apos;s fully tested and battle-ready. OpenHands and Claude Code are also available.
-                      Windsurf and VS Code are in the pipeline — being tested now. You can start with Cursor today
-                      and switch later without losing your work.
+                      <span className="font-semibold text-violet-300">Founder IDE is recommended</span> — it ships
+                      inside the Founder Stack download with built-in AI chat, routing, and memory injection through
+                      the Founder OS AI Gateway. Cursor is also fully tested and battle-ready (use it if you have a
+                      paid Cursor subscription). OpenHands and Claude Code are available too. Windsurf and VS Code are
+                      in the pipeline — being tested now. You can start with Founder IDE today and switch later
+                      without losing your work.
                     </p>
                   </div>
                 </div>
@@ -357,7 +359,7 @@ export function FounderOnboardingWizard({
                   key={ide.id}
                   ide={ide}
                   selected={selectedIde === ide.id}
-                  recommended={ide.id === 'cursor'}
+                  recommended={ide.id === 'founder_ide'}
                   disabled={!ide.available}
                   onSelect={() => chooseIde(ide.id)}
                 />
@@ -381,12 +383,12 @@ export function FounderOnboardingWizard({
           </section>
         )}
 
-        {/* STEP 2 — Pair Founder Node */}
+        {/* STEP 2 — Pair Founder Stack */}
         {currentStepId === 'pair' && (
           <section>
-            <h3 className="font-semibold text-white">Step 2 — Pair Founder Node</h3>
+            <h3 className="font-semibold text-white">Step 2 — Pair Founder Stack</h3>
             <p className="mt-1 text-sm text-zinc-500">
-              Founder Node securely pairs your desktop with Founder OS. No Remote Desktop. No VPN.
+              Founder Stack securely pairs your desktop with Founder OS. No Remote Desktop. No VPN.
               Just secure synchronization.
             </p>
 
@@ -395,7 +397,7 @@ export function FounderOnboardingWizard({
             </div>
 
             <ol className="mt-4 list-inside list-decimal space-y-1 text-xs text-zinc-400">
-              <li>Install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL}</li>
+              <li>Install Founder Stack (or Founder Node standalone) {FOUNDER_NODE_MIN_VERSION_LABEL}</li>
               <li>Generate a pairing code below</li>
               <li>Paste it in the Founder Node tray menu on your desktop</li>
               <li>Done — your desktop is paired</li>

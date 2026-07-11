@@ -1,16 +1,16 @@
--- Phase 8 — Raise Room → Token Launch flow.
+-- Phase 8 - Raise Room - Token Launch flow.
 -- See docs/RAISE_ROOM_LAUNCH_FLOW.md.
 --
 -- Three new tables back the flagship revenue flow:
---   TokenLaunch  — one row per project launch (pledging → window → live → closed)
---   TokenPledge  — community DDollar pledges (escrowed, refunded if launch never goes live)
---   DexSwap      — DEX swap ledger (0.1% fee accrues to PlatformTreasury)
+--   TokenLaunch  - one row per project launch (pledging -> window -> live -> closed)
+--   TokenPledge  - community DDollar pledges (escrowed, refunded if launch never goes live)
+--   DexSwap      - DEX swap ledger (0.1% fee accrues to PlatformTreasury)
 --
--- Idempotent (CREATE TYPE IF NOT EXISTS / CREATE TABLE IF NOT EXISTS) so it
--- is safe to apply on databases that already had the tables created via
--- `prisma db push` during development.
+-- Idempotent (CREATE TYPE IF NOT EXISTS / CREATE TABLE IF NOT EXISTS / DO-block
+-- constraint adds) so it is safe to apply on databases that already had the
+-- tables created via `prisma db push` during development.
 
--- Enum: PLEDGING → WINDOW_OPEN → LIVE → CLOSED
+-- Enum: PLEDGING -> WINDOW_OPEN -> LIVE -> CLOSED
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'TokenLaunchStatus') THEN
@@ -43,10 +43,15 @@ CREATE INDEX IF NOT EXISTS "TokenLaunch_status_idx" ON "TokenLaunch"("status");
 CREATE INDEX IF NOT EXISTS "TokenLaunch_pledgeThresholdMet_idx" ON "TokenLaunch"("pledgeThresholdMet");
 CREATE INDEX IF NOT EXISTS "TokenLaunch_windowClosesAt_idx" ON "TokenLaunch"("windowClosesAt");
 
-ALTER TABLE "TokenLaunch"
-    ADD CONSTRAINT IF NOT EXISTS "TokenLaunch_projectId_fkey"
-    FOREIGN KEY ("projectId") REFERENCES "Project"("id")
-    ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'TokenLaunch_projectId_fkey') THEN
+        ALTER TABLE "TokenLaunch"
+            ADD CONSTRAINT "TokenLaunch_projectId_fkey"
+            FOREIGN KEY ("projectId") REFERENCES "Project"("id")
+            ON DELETE CASCADE ON UPDATE CASCADE;
+    END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS "TokenPledge" (
     "id"              TEXT             NOT NULL,
@@ -66,15 +71,25 @@ CREATE INDEX IF NOT EXISTS "TokenPledge_launchId_idx" ON "TokenPledge"("launchId
 CREATE INDEX IF NOT EXISTS "TokenPledge_userId_idx" ON "TokenPledge"("userId");
 CREATE INDEX IF NOT EXISTS "TokenPledge_amount_idx" ON "TokenPledge"("amount" DESC);
 
-ALTER TABLE "TokenPledge"
-    ADD CONSTRAINT IF NOT EXISTS "TokenPledge_launchId_fkey"
-    FOREIGN KEY ("launchId") REFERENCES "TokenLaunch"("id")
-    ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'TokenPledge_launchId_fkey') THEN
+        ALTER TABLE "TokenPledge"
+            ADD CONSTRAINT "TokenPledge_launchId_fkey"
+            FOREIGN KEY ("launchId") REFERENCES "TokenLaunch"("id")
+            ON DELETE CASCADE ON UPDATE CASCADE;
+    END IF;
+END$$;
 
-ALTER TABLE "TokenPledge"
-    ADD CONSTRAINT IF NOT EXISTS "TokenPledge_userId_fkey"
-    FOREIGN KEY ("userId") REFERENCES "User"("id")
-    ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'TokenPledge_userId_fkey') THEN
+        ALTER TABLE "TokenPledge"
+            ADD CONSTRAINT "TokenPledge_userId_fkey"
+            FOREIGN KEY ("userId") REFERENCES "User"("id")
+            ON DELETE CASCADE ON UPDATE CASCADE;
+    END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS "DexSwap" (
     "id"           TEXT             NOT NULL,
@@ -91,12 +106,22 @@ CREATE TABLE IF NOT EXISTS "DexSwap" (
 CREATE INDEX IF NOT EXISTS "DexSwap_launchId_createdAt_idx" ON "DexSwap"("launchId", "createdAt" DESC);
 CREATE INDEX IF NOT EXISTS "DexSwap_userId_idx" ON "DexSwap"("userId");
 
-ALTER TABLE "DexSwap"
-    ADD CONSTRAINT IF NOT EXISTS "DexSwap_launchId_fkey"
-    FOREIGN KEY ("launchId") REFERENCES "TokenLaunch"("id")
-    ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'DexSwap_launchId_fkey') THEN
+        ALTER TABLE "DexSwap"
+            ADD CONSTRAINT "DexSwap_launchId_fkey"
+            FOREIGN KEY ("launchId") REFERENCES "TokenLaunch"("id")
+            ON DELETE CASCADE ON UPDATE CASCADE;
+    END IF;
+END$$;
 
-ALTER TABLE "DexSwap"
-    ADD CONSTRAINT IF NOT EXISTS "DexSwap_userId_fkey"
-    FOREIGN KEY ("userId") REFERENCES "User"("id")
-    ON DELETE SET NULL ON UPDATE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'DexSwap_userId_fkey') THEN
+        ALTER TABLE "DexSwap"
+            ADD CONSTRAINT "DexSwap_userId_fkey"
+            FOREIGN KEY ("userId") REFERENCES "User"("id")
+            ON DELETE SET NULL ON UPDATE CASCADE;
+    END IF;
+END$$;

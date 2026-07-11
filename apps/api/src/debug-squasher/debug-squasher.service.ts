@@ -69,6 +69,11 @@ const PILLAR_KEYS = [
   'learningEngine',
   'doxxing',
   'ideaValidator',
+  'lam',
+  'deploymentModes',
+  'raiseRoom',
+  'debugSquasher',
+  'founderEconomics',
 ] as const;
 
 /**

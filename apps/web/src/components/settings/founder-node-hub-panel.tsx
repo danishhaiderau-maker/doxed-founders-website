@@ -76,7 +76,7 @@ export function FounderNodeHubPanel({
       {/* Hero + status */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">Founder Node</h2>
+          <h2 className="text-xl font-semibold text-white">Founder Stack</h2>
           <p className="mt-1 max-w-2xl text-sm text-zinc-400">
             Download, pair once, connect your AI brain — vault stays on your machine.
           </p>

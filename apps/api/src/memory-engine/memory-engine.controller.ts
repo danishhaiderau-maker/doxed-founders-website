@@ -21,11 +21,9 @@ import { MemoryEngineService } from './memory-engine.service';
  * memory into the system prompt before each chat request. Auth is via the
  * Founder Node bearer token (same as `/api/v1/chat/completions`).
  *
- * The Memory Engine store backends are stubbed in Phase 1 (see
- * `memory-engine.service.ts`). This endpoint is wired now so the extension's
- * plumbing is in place — when the real backends land in Phases 2-4, the
- * extension automatically benefits without any client changes. Until then it
- * returns empty arrays gracefully so chat never breaks.
+ * Backed by Prisma memory stores (conversation / project / founder / workspace)
+ * in `memory-engine.service.ts`. Empty scopes return empty arrays so chat
+ * never breaks when a founder has not written memory yet.
  */
 @Public()
 @Controller('memory')
