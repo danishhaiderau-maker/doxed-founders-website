@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-fix(utils): make founder-economics Merkle tree browser-safe
+fix(utils): add founder_ide to IdeAdapterId for onboarding
 
 ## Last Activity
 
