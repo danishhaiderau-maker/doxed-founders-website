@@ -11446,8 +11446,9 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
 # Each tile calls evaluate_signal_with_ai with its own custom prompt.
 # Shadow-only (no live orders) while tile toggle is OFF.
 
-# Shared chain timestamp — enforces ≥60s gap between ANY two research ticks.
-_research_tile_chain_ts = time.time() - 120  # bootstrap — allow first tick immediately
+# Per-lane last tick timestamps — chain ordering: CONTINUOUS → TYPE_B → SR_MICRO → CONTINUOUS ...
+# Each lane gates on the PREVIOUS lane + 60s to ensure ordered 3-lane cascade.
+_lane_last_ts = {}  # {'CONTINUOUS': ts, 'TYPE_B_HUNTER_V1': ts, 'SR_MICRO_TILE_V1': ts}
 
 
 def maybe_tick_type_b_hunter_v1_research():
@@ -11457,13 +11458,12 @@ def maybe_tick_type_b_hunter_v1_research():
     Shadow-only when tile toggle OFF (default); paper orders when ON.
     """
     lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
-    global _research_tile_chain_ts
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
         return
     now = time.time()
-    if now < _research_tile_chain_ts + 60:
+    if now < _lane_last_ts.get('CONTINUOUS', 0) + 60:
         return
     if _lane_pipeline_running(lane):
         return
@@ -11471,7 +11471,7 @@ def maybe_tick_type_b_hunter_v1_research():
         return
     if _lane_pipeline_running(RESEARCH_LANE_SR_MICRO_TILE_V1):
         return
-    _research_tile_chain_ts = now
+    _lane_last_ts[lane] = now
     try:
         if not is_buffer_ready():
             return
@@ -11520,13 +11520,12 @@ def maybe_tick_sr_micro_tile_v1_research():
     Shadow-only when tile toggle OFF (default); paper orders when ON.
     """
     lane = RESEARCH_LANE_SR_MICRO_TILE_V1
-    global _research_tile_chain_ts
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
         return
     now = time.time()
-    if now < _research_tile_chain_ts + 60:
+    if now < _lane_last_ts.get('TYPE_B_HUNTER_V1', 0) + 60:
         return
     if _lane_pipeline_running(lane):
         return
@@ -11534,7 +11533,7 @@ def maybe_tick_sr_micro_tile_v1_research():
         return
     if _lane_pipeline_running(RESEARCH_LANE_TYPE_B_HUNTER_V1):
         return
-    _research_tile_chain_ts = now
+    _lane_last_ts[lane] = now
     try:
         if not is_buffer_ready():
             return
@@ -15916,12 +15915,13 @@ def state_monitor_loop():
             pipeline_heartbeat()
             if time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL:
                 now = time.time()
-                if now >= _research_tile_chain_ts + 60:
+                prev_lane_ts = _lane_last_ts.get('SR_MICRO_TILE_V1', _lane_last_ts.get('TYPE_B_HUNTER_V1', 0))
+                if now >= prev_lane_ts + 60:
                     logger.info("[PERIODIC PIPELINE] forcing detect_event_light for analyzer data [PIPELINE ENFORCEMENT]")
                     event = detect_event_light()
                     if event and event.get("event_trigger"):
                         process_signal(event)
-                        _research_tile_chain_ts = time.time()
+                        _lane_last_ts['CONTINUOUS'] = time.time()
                     elif (
                         _sole_ai_research_mode()
                         and any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
@@ -15940,7 +15940,7 @@ def state_monitor_loop():
                                     "timestamp": utc_iso(),
                                     "features": features,
                                 })
-                                _research_tile_chain_ts = time.time()
+                                _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
             # V2 phase-shifted AI (last_ai_call_ts + 90s, own ~180s cooldown).
