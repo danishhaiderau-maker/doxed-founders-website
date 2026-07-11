@@ -32,6 +32,7 @@ import websocket
 import signal
 import ssl
 import hashlib
+import hmac
 from queue import Queue, Empty, Full
 from collections import deque
 import numpy as np
@@ -6144,7 +6145,107 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
     threading.Thread(target=_post, daemon=True).start()
 
 
-def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None):
+def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
+    """Intent-Mirror webhook (plan §3 Part A) — push a signed, intent-aware
+    `dcf-showcase-intent-v1` payload to the platform API so the relay can copy
+    an approved `cont-` signal to ACTIVE hires WITHOUT requiring the showcase
+    to place a real Bitfinex order first.
+
+    CRITICAL (plan §6): this function does NOT gate on `live_armed`. Paper
+    approvals are explicitly copyable — that is the entire point of the
+    intent-mirror feature. `intent_source` tags the payload as "paper" when
+    the showcase is not armed so the relay's audit trail is explicit.
+
+    HMAC-SHA256 signs the canonical JSON with SHOWCASE_WEBHOOK_SECRET (distinct
+    from BOT_CONTROL_SECRET). Fire-and-forget daemon thread — matches the
+    existing _push_showcase_relay_event pattern. No-op when the secret or URL
+    is unset (don't crash the bot on misconfig). The ~2s pollBotForIntents
+    backstop remains; this webhook is a latency optimization, not the only path.
+    """
+    url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    if not url or not secret:
+        return
+
+    sig = signal or {}
+    ai_dict = ai or {}
+    with state_lock:
+        live_armed = bool(state.get("live_armed"))
+        strategy_mode = str(state.get("strategy_mode") or "RESEARCH").upper()
+        leverage = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+        pullback_threshold = float(state.get("pullback_threshold", 0.001))
+
+    # N2 — paper/live provenance. Default showcase is RESEARCH + live_armed=False = paper.
+    intent_source = "live" if live_armed else "paper"
+    trade_id = sig.get("trade_id") or ai_dict.get("trade_id")
+    if not trade_id:
+        return
+
+    direction = (ai_dict.get("direction") or sig.get("final_direction") or "").upper()
+    signal_price = float(
+        sig.get("signal_price")
+        or ai_dict.get("signal_price")
+        or state.get("price")
+        or 0
+    )
+    margin_usdt = float(sig.get("margin_usdt") or FIXED_MARGIN_USDT)
+    win_prob = ai_dict.get("win_prob") if isinstance(ai_dict.get("win_prob"), (int, float)) else None
+    edge_score = sig.get("edge_score_at_entry")
+    eff_thr = sig.get("effective_threshold_at_entry")
+    research_lane = str(sig.get("research_lane") or "CONTINUOUS").upper()
+
+    payload = {
+        "schema": "dcf-showcase-intent-v1",
+        "event": event,
+        "trade_id": trade_id,
+        "ts": utc_iso(),
+        "intent_source": intent_source,
+        "direction": direction or None,
+        "signal_price": signal_price if signal_price > 0 else None,
+        "margin_usdt": margin_usdt,
+        "leverage": leverage,
+        "win_prob": win_prob,
+        "edge_score": edge_score if isinstance(edge_score, (int, float)) else None,
+        "effective_threshold": eff_thr if isinstance(eff_thr, (int, float)) else None,
+        "research_lane": research_lane,
+        "pullback_pct": pullback_threshold,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "strategy_mode": strategy_mode,
+    }
+
+    try:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    except Exception as exc:
+        logger.debug(f"[INTENT WEBHOOK] sign failed trade={trade_id}: {exc}")
+        return
+
+    def _post():
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Showcase-Signature": f"sha256={signature}",
+            }
+            # Legacy bearer secret stays (G13) for backward compat during rollout.
+            legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+            if legacy_secret:
+                headers["X-Bot-Control-Secret"] = legacy_secret
+            requests.post(url, data=body, headers=headers, timeout=2.5)
+            _relay_push_state["seq"] += 1
+            _relay_push_state["last_ts"] = time.time()
+            _relay_push_state["last_event"] = f"INTENT_{event}"
+            _relay_push_state["last_ok"] = True
+        except Exception as exc:
+            _relay_push_state["last_ts"] = time.time()
+            _relay_push_state["last_event"] = f"INTENT_{event}"
+            _relay_push_state["last_ok"] = False
+            logger.debug(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None, signal: dict = None):
     with state_lock:
         state["last_approve_outcome"] = {
             "status": status,
@@ -6158,8 +6259,14 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
         }
     if status == "PENDING" and trade_id:
         _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+        # Intent-Mirror (plan §4 bot checklist item 8) — also fire the signed
+        # v1 intent webhook so the relay can copy this approved `cont-` signal
+        # to ACTIVE hires even when the showcase is paper-only. Legacy call
+        # above stays for backward compat during rollout.
+        emit_signal_webhook("APPROVE_PENDING", signal, ai)
     elif status == "EXECUTED" and trade_id:
         _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        emit_signal_webhook("ORDER_PLACED", signal, ai)
         _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
@@ -14508,7 +14615,7 @@ def process_signal(event: dict):
             enforce_log(signal, "AI", extra=f"{ai.get('decision')}", skip_stage="AI")
             log_ai(signal, ai)
             if relay_publishes_approve_outcome(research_lane):
-                record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai)
+                record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai, signal)
             full_pipeline_trace("[PIPELINE]", f"AI_{ai.get('decision')}", trade_id)
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "AI"
@@ -15059,7 +15166,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
             if relay_publishes_approve_outcome(research_lane):
-                record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
+                record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai, signal)
             if signal.get("status") in ("FILLED", "OPEN"):
                 final_status = signal.get("status")
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_5M:
