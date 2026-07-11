@@ -248,15 +248,9 @@ RESEARCH_LANE_LABELS = {
     **COMBO_LANE_LABELS,
     **EXPERIMENTAL_LANE_LABELS,
 }
-RESEARCH_SPAWN_LANES = (
-    RESEARCH_LANE_HIGH_EDGE_RUNNER,
-    RESEARCH_LANE_EDGE_ALPHA_4,
-    RESEARCH_LANE_TYPE_B_HUNTER,
-    RESEARCH_LANE_SHORT_BEAR_ALPHA,
-    RESEARCH_LANE_AI_60_65_ALPHA,
-    RESEARCH_LANE_URGENT_CHASE_ALPHA,
-    RESEARCH_LANE_CHASE_3PLUS_ALPHA,
-)
+RESEARCH_SPAWN_LANES = ()
+# [v11.6] All legacy spawn lanes retired. TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1
+# are independent-AI lanes that use their own DeepSeek calls, not AI_SCAN spawn.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     **combo_toggle_defaults(),
     **experimental_toggle_defaults(),
