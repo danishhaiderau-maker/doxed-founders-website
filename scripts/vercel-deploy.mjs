@@ -97,12 +97,6 @@ const body = {
     ref: GITHUB_REF,
     sha,
   },
-  projectSettings: {
-    framework: 'nextjs',
-    buildCommand: 'cd ../.. && npm run build:utils && npm run build --workspace=@dcf/web',
-    installCommand: 'cd ../.. && npm ci',
-    outputDirectory: '.next',
-  },
 };
 
 const r = await api('POST', '/v13/deployments?skipAutoDetectionConfirmation=1', body);
