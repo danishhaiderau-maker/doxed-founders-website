@@ -95,6 +95,7 @@ export class DemoHarnessService {
       learningEngine,
       doxxing,
       ideaValidator,
+      lam,
     ] = await Promise.all([
       this.kernel.runAiProxyChecks().catch((err: unknown) => {
         this.logger.warn(`AI Proxy pillar crashed: ${msg(err)}`);
@@ -120,6 +121,10 @@ export class DemoHarnessService {
         this.logger.warn(`Idea Validator pillar crashed: ${msg(err)}`);
         return [{ name: 'idea_validator_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
       }),
+      this.kernel.runLamChecks().catch((err: unknown) => {
+        this.logger.warn(`LAM pillar crashed: ${msg(err)}`);
+        return [{ name: 'lam_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
     ]);
 
     // 4. Switches + fake counts.
@@ -142,6 +147,7 @@ export class DemoHarnessService {
       learningEngine,
       doxxing,
       ideaValidator,
+      lam,
       switches,
       numbers,
       startedAt,

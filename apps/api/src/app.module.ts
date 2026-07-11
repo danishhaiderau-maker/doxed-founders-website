@@ -67,6 +67,10 @@ import { FounderApplicationsModule } from './founder-applications/founder-applic
 import { ExecutionManagerModule } from './execution-manager/execution-manager.module';
 import { LearningEngineModule } from './learning-engine/learning-engine.module';
 import { IdeaValidatorModule } from './idea-validator/idea-validator.module';
+import { DebugSquasherModule } from './debug-squasher/debug-squasher.module';
+import { TokenLaunchModule } from './token-launch/token-launch.module';
+import { LamModule } from './lam/lam.module';
+import { DeploymentModesModule } from './deployment-modes/deployment-modes.module';
 
 @Module({
   imports: [
@@ -138,6 +142,10 @@ import { IdeaValidatorModule } from './idea-validator/idea-validator.module';
     ScheduleModule.forRoot(),
     LearningEngineModule,
     IdeaValidatorModule,
+    LamModule,
+    DeploymentModesModule,
+    TokenLaunchModule,
+    DebugSquasherModule,
   ],
   providers: [
     {

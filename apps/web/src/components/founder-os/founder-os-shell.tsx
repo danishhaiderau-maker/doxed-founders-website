@@ -5,6 +5,9 @@ import Link from 'next/link';
 import { apiUrl } from '@/lib/api-base';
 import { IdeaValidatorPanel } from '@/components/idea-validator/idea-validator-panel';
 import { IdeaPopUp } from '@/components/idea-validator/idea-pop-up';
+import { LamTaskSubmitter } from '@/components/lam/lam-task-submitter';
+import { ConsentPopup } from '@/components/debug-squasher/consent-popup';
+import { DailyReportCard } from '@/components/debug-squasher/daily-report-card';
 
 type DashboardData = {
   founder?: {
@@ -70,6 +73,18 @@ export function FounderOsShell({ accessToken }: Props) {
       <section>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+            Debug Squasher · Phase 6.5
+          </h2>
+          <span className="rounded bg-emerald-950/40 px-2 py-0.5 text-[10px] uppercase text-emerald-300">
+            Health Check
+          </span>
+        </div>
+        <DailyReportCard />
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
             Idea Validator · Phase 6
           </h2>
           <span className="rounded bg-violet-950/40 px-2 py-0.5 text-[10px] uppercase text-violet-300">
@@ -79,11 +94,25 @@ export function FounderOsShell({ accessToken }: Props) {
         <IdeaValidatorPanel accessToken={accessToken} />
       </section>
 
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
+            Actions · Phase 9
+          </h2>
+          <span className="rounded bg-violet-950/40 px-2 py-0.5 text-[10px] uppercase text-violet-300">
+            Large Action Model
+          </span>
+        </div>
+        <LamTaskSubmitter accessToken={accessToken} />
+      </section>
+
       <QuickLinksGrid />
 
       <RecentActivityStrip dashboard={dashboard} />
 
       <IdeaPopUp accessToken={accessToken} />
+
+      <ConsentPopup />
     </div>
   );
 }

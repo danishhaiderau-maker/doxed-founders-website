@@ -59,6 +59,7 @@ export type ReadinessScorecard = {
     learningEngine: PillarReport;
     doxxing: PillarReport;
     ideaValidator: PillarReport;
+    lam: PillarReport;
   };
   switches: SwitchStates;
   numbers: FakeCounts;

@@ -95,6 +95,7 @@ import {
   resolveFounderCloudRepo,
   runFounderLocalAsync,
 } from './founder-cloud';
+import { startDeploymentRuntimeStatusServer } from './deployment-mode-status';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
@@ -172,6 +173,8 @@ const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
 let syncCycleInFlight = false;
 let sessionSyncInFlight = false;
+/** Phase 7 — Private-mode runtime-status HTTP server handle. */
+let deploymentStatusServer: { close: () => void } | null = null;
 let lastCachedHeartbeat: FounderNodeHeartbeatExt | null = null;
 let lastSyncOkAt: Date | null = null;
 let lastSyncError: string | null = null;
@@ -807,6 +810,13 @@ app.whenReady().then(() => {
   startAutoUpdateChecks();
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 
+  // Phase 7 — start the Private-mode runtime-status endpoint on 127.0.0.1.
+  // Best-effort: if the port is busy (dev server already on :7002) it logs a
+  // warning and continues; the cloud API degrades to "unknown" for the panel.
+  if (!deploymentStatusServer) {
+    deploymentStatusServer = startDeploymentRuntimeStatusServer(vaultRoot);
+  }
+
   powerMonitor.on('resume', () => {
     syncPausedUntil = 0;
     runSyncCycle(vaultRoot).catch(console.error);
@@ -911,6 +921,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBackgroundLoops(loops);
+  deploymentStatusServer?.close();
+  deploymentStatusServer = null;
   tray?.destroy();
   tray = null;
   releaseGlobalInstanceLock();

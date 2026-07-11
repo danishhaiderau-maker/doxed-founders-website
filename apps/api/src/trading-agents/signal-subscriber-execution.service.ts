@@ -276,6 +276,38 @@ function mirrorCatchupBudgetPerDay(): number | null {
   return Math.floor(raw);
 }
 
+/**
+ * N3 (intent-mirror) — Ops panic button. When set (any truthy value), the
+ * intent-mirror entry path is disabled and the relay reverts to fill-only
+ * mirroring. Default unset = feature ON. Kill switch stays in the code
+ * forever — it is a permanent operational tool.
+ */
+function intentMirrorKillSwitchActive(): boolean {
+  const v = (process.env.INTENT_MIRROR_KILL_SWITCH ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+}
+
+/**
+ * N4 (intent-mirror) — Dry-run mode. When set (any truthy value), the
+ * intent-mirror entry path logs the would-be order and records an
+ * `INTENT_MIRROR_ENTER_DRY` audit event WITHOUT calling submitLimitOrder.
+ * Default unset = real orders (after the rollout is signed off).
+ *
+ * For the initial commit we DEFAULT THIS TO ON so no real intent-mirror
+ * order can flow until the owner explicitly flips it off after running the
+ * paper-mode integration test (plan §5.3). Override with
+ * `INTENT_MIRROR_DRY_RUN=0` to enable live intent-mirror orders.
+ */
+function intentMirrorDryRunActive(): boolean {
+  const v = (process.env.INTENT_MIRROR_DRY_RUN ?? '').trim().toLowerCase();
+  // Explicit opt-out → real orders.
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  // Any other non-empty value (1/true/on/yes) → dry-run.
+  if (v !== '') return true;
+  // Default: dry-run ON until the owner flips it off after §5.3 passes.
+  return true;
+}
+
 const TERMINAL_PARTICIPANT_STATUSES = new Set<SignalCycleStatus>([
   SignalCycleStatus.CLOSED,
   SignalCycleStatus.EXPIRED,
@@ -1275,6 +1307,44 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       where: { id: instance.id },
       data: { lastError: null },
     });
+      }
+    }
+
+    // Part B (intent-mirror) — when the legacy fill-based path placed nothing
+    // this tick AND the instance is ACTIVE (not sim, not PAUSED exit-only),
+    // try to enter directly from an approved `cont-` INTENT cycle. This is the
+    // core fix for "dashboard active, Bitfinex flat" when the showcase runs
+    // paper-only. The kill switch (N3) and dry-run flag (N4) are honored
+    // inside maybeEnterFromIntent. The new path ADDS guards (N6 lane
+    // whitelist, G5 paper block, G11/G12 eligibility+cap); it does not relax
+    // any existing guard.
+    if (
+      entriesThisTick === 0 &&
+      !simActive &&
+      instance.status === TradingAgentInstanceStatus.ACTIVE
+    ) {
+      try {
+        const intentEntries = await this.maybeEnterFromIntent(
+          agentId,
+          instance,
+          creds,
+          cycles,
+          lotSummary,
+          managedOrderIds,
+          marginCap,
+          maxConcurrent,
+          venue,
+        );
+        if (intentEntries > 0) {
+          await this.prisma.tradingAgentInstance.update({
+            where: { id: instance.id },
+            data: { lastError: null },
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `[INTENT-MIRROR] ${instance.userId}: ${err instanceof Error ? err.message : err}`,
+        );
       }
     }
   }
@@ -5432,6 +5502,262 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `[MIRROR-CATCHUP] ${instance.userId} cycle=${cycleId} trade=${tradeId} ${intent.direction} qty=${qty.toFixed(5)} @ ${fillPrice.toFixed(2)} slip=$${slipUsd.toFixed(2)} vs showcase ${showcaseEntry.toFixed(2)}`,
     );
     return true;
+  }
+
+  /**
+   * Part B (intent-mirror) — Place a hire's copy order directly from an
+   * approved `cont-` INTENT cycle, WITHOUT requiring the showcase to have a
+   * real resting limit or open position. This is the core fix for the
+   * "dashboard says active, Bitfinex stays flat" bug (plan §1.2): when the
+   * showcase runs paper-only, its fills never persist in `botState.positions`
+   * long enough for the legacy fill-mirror path to copy. The intent itself
+   * — the approved `cont-` signal — is the copyable event.
+   *
+   * Guards (ALL must pass; this path ADDS guards, never relaxes G1–G14):
+   *   - N3: INTENT_MIRROR_KILL_SWITCH env (panic button — reverts to fill-only).
+   *   - Only INTENT cycles (decision §8 #2) — NOT PENDING_ENTRY (duplicate risk).
+   *   - N6: re-affirm isMirrorableLaneTradeId (cont- only) — fail-closed.
+   *   - G5: isPaperLaneTradeId belt-and-suspenders block.
+   *   - F1: showcase-unreachable safe mode (delegated to placeEntry via the
+   *     eligibility + venue guard).
+   *   - G11: evaluateEntryEligibility (margin, slots, foreign orders, direction).
+   *   - G12: subscriberMaxMarginUsd cap (platform ceiling always wins, §8 #3).
+   *   - N4: INTENT_MIRROR_DRY_RUN — logs + audit row, no submitLimitOrder.
+   *   - N5: SignalCycleEvent "INTENT_MIRROR_ENTER" / "INTENT_MIRROR_ENTER_DRY".
+   *
+   * Limit price source (decision §8 #4): the webhook payload's signal_price
+   * ± pullback_pct (forwarded in the cycle's intentEnvelope). Falls back to
+   * the mark only if the payload lacked signal_price — never to a stale bot
+   * limit, which would diverge from the showcase's actual signal.
+   *
+   * Returns the number of entries placed (0 or 1 per call; at most one intent
+   * per tick per instance to preserve the atomic-claim contract).
+   */
+  private async maybeEnterFromIntent(
+    agentId: string,
+    instance: TradingAgentInstance,
+    creds: ExchangeCredentials,
+    cycles: Array<{
+      id: string;
+      tradeId: string;
+      intentEnvelope: unknown;
+      status: SignalCycleStatus;
+      expiresAt: Date | null;
+      createdAt: Date;
+    }>,
+    lotSummary: VirtualLotSummary,
+    managedOrderIds: Set<number>,
+    marginCap: number,
+    maxConcurrent: number,
+    venue: string,
+  ): Promise<number> {
+    // N3 — panic button.
+    if (intentMirrorKillSwitchActive()) return 0;
+
+    // §8 #2 — only INTENT cycles. PENDING_ENTRY means a hire limit is already
+    // resting; re-entering risks a duplicate order on top of it.
+    const intentCycles = cycles
+      .filter((c) => c.status === SignalCycleStatus.INTENT)
+      .filter((c) => !c.expiresAt || c.expiresAt.getTime() > Date.now())
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+
+    for (const cycle of intentCycles) {
+      const tid = cycle.tradeId;
+      // N6 / G4 — re-affirm the cont- allowlist. The webhook cannot bypass it.
+      if (!isMirrorableLaneTradeId(tid)) {
+        this.logger.warn(
+          `[INTENT-MIRROR] skip non-mirrorable lane trade=${tid} user=${instance.userId}`,
+        );
+        continue;
+      }
+      // G5 — belt-and-suspenders paper-lane block.
+      if (isPaperLaneTradeId(tid)) {
+        this.logger.warn(
+          `[INTENT-MIRROR] skip paper-lane trade=${tid} user=${instance.userId}`,
+        );
+        continue;
+      }
+
+      // Already has a participant for this cycle? (fills, prior intent, etc.)
+      const existing = await this.prisma.signalCycleParticipant.findUnique({
+        where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
+      });
+      if (existing) {
+        // Stale INTENT claim (>120s, crashed replica) — reclaim, else skip.
+        if (
+          existing.status === SignalCycleStatus.INTENT &&
+          existing.createdAt.getTime() < Date.now() - 120_000
+        ) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: existing.id } })
+            .catch(() => {});
+          this.logger.log(
+            `[INTENT-MIRROR] reclaimed stale INTENT claim ${instance.userId} cycle=${cycle.id}`,
+          );
+        } else {
+          continue;
+        }
+      }
+
+      const intent = cycle.intentEnvelope as SignalIntentEnvelope & {
+        intent_source?: 'paper' | 'live';
+        entry?: { signal_price?: number; pullback_pct?: number };
+        margin_usdt?: number;
+      };
+      if (!intent?.direction || intent.action !== 'ENTER') continue;
+
+      // G11 — margin / slots / foreign orders / direction gate.
+      const eligibility = await this.evaluateEntryEligibility(
+        creds,
+        {
+          open: lotSummary.open,
+          pending: lotSummary.pending,
+          direction: lotSummary.direction,
+        },
+        managedOrderIds,
+        marginCap,
+        maxConcurrent,
+        intent.direction,
+        instance,
+      );
+      if (!eligibility.canEnter) {
+        this.logger.log(
+          `[INTENT-MIRROR] eligibility blocked trade=${tid} user=${instance.userId}: ${eligibility.reason}`,
+        );
+        continue;
+      }
+
+      // Decision §8 #4 — limit price from the webhook's signal_price ± pullback.
+      // Fall back to the live mark ONLY if the envelope lacks signal_price.
+      const sigPriceRaw = intent.entry?.signal_price;
+      const pullbackPctRaw = intent.entry?.pullback_pct;
+      const sigPrice = typeof sigPriceRaw === 'number' && Number.isFinite(sigPriceRaw) && sigPriceRaw > 0
+        ? sigPriceRaw
+        : null;
+      const pullback = typeof pullbackPctRaw === 'number' && Number.isFinite(pullbackPctRaw)
+        ? Math.max(0, Math.min(0.05, pullbackPctRaw))
+        : 0.001;
+
+      let limitPrice: number;
+      if (sigPrice != null) {
+        limitPrice =
+          intent.direction === 'LONG'
+            ? sigPrice * (1 - pullback)
+            : intent.direction === 'SHORT'
+              ? sigPrice * (1 + pullback)
+              : sigPrice;
+      } else {
+        // No signal_price in payload — use live mark (best-effort; rare since
+        // emit_signal_webhook always forwards signal_price).
+        const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+        if (!mark || mark <= 0) continue;
+        limitPrice = mark;
+      }
+      const sanitized = sanitizeLimitPrice(limitPrice, limitPrice, intent.direction);
+      if (sanitized == null) {
+        this.logger.warn(
+          `[INTENT-MIRROR] rejected absurd limit ${limitPrice.toFixed(2)} trade=${tid} user=${instance.userId}`,
+        );
+        continue;
+      }
+      limitPrice = sanitized;
+
+      // §8 #3 — platform cap always wins. marginCap (subscriberMaxMarginUsd)
+      // is the ceiling; the envelope's margin_usdt is informational only.
+      const leverage = resolveSubscriberLeverage(intent);
+      const qty = computeQty(marginCap, leverage, limitPrice, MIN_QTY_BTC);
+
+      // N4 — dry-run mode. Log the would-be order + audit row, no exchange call.
+      if (intentMirrorDryRunActive()) {
+        const dryPayload = {
+          venue,
+          source: 'hire',
+          trade_id: tid,
+          direction: intent.direction,
+          limit_price: Math.round(limitPrice * 100) / 100,
+          qty,
+          margin_usd: marginCap,
+          leverage,
+          intent_source: intent.intent_source ?? 'unknown',
+          cycle_id: cycle.id,
+          signal_price: sigPrice ?? null,
+          pullback_pct: pullback,
+          reason: 'INTENT_MIRROR_DRY_RUN',
+        };
+        this.logger.log(
+          `[INTENT-MIRROR][DRY-RUN] would place user=${instance.userId} cycle=${cycle.id} trade=${tid} ${intent.direction} qty=${qty.toFixed(5)} @ ${limitPrice.toFixed(2)} margin=$${marginCap.toFixed(2)} lev=${leverage}x intent_source=${intent.intent_source ?? 'unknown'}`,
+        );
+        try {
+          await this.prisma.signalCycleEvent.create({
+            data: {
+              cycleId: cycle.id,
+              eventType: 'INTENT_MIRROR_ENTER_DRY',
+              payload: dryPayload as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            },
+          });
+        } catch (err) {
+          this.logger.warn(
+            `[INTENT-MIRROR] DRY audit persist failed trade=${tid}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+        // Do not place a real order. Continue scanning remaining INTENT cycles.
+        return 0;
+      }
+
+      // Live path — re-use placeEntry so the C5 atomic-claim, F1 safe-mode,
+      // price-sanity, ORDER_PLACED audit, and applyLimitChase wiring all run
+      // identically to the legacy entry path. placeEntry reads the cycle's
+      // intentEnvelope for offset_pct; our envelope already carries signal_price
+      // + pullback_pct so the legacy offset path is overridden by the bot limit
+      // anchor resolution inside placeEntry when the showcase book has a price.
+      // We additionally emit the N5 audit tag here so the event stream
+      // distinguishes mirror-from-intent from mirror-from-showcase-fill.
+      const placed = await this.placeEntry(
+        agentId,
+        instance,
+        cycle.id,
+        cycle.intentEnvelope,
+        creds,
+        marginCap,
+        tid,
+        venue,
+      ).catch((err) => {
+        this.logger.warn(
+          `[INTENT-MIRROR] placeEntry failed trade=${tid} user=${instance.userId}: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      });
+      if (placed) {
+        // N5 — audit trail tag distinguishing this entry as intent-mirror.
+        try {
+          await this.prisma.signalCycleEvent.create({
+            data: {
+              cycleId: cycle.id,
+              eventType: 'INTENT_MIRROR_ENTER',
+              payload: {
+                venue,
+                source: 'hire',
+                trade_id: tid,
+                direction: intent.direction,
+                limit_price: Math.round(limitPrice * 100) / 100,
+                margin_usd: marginCap,
+                leverage,
+                intent_source: intent.intent_source ?? 'unknown',
+                signal_price: sigPrice ?? null,
+                pullback_pct: pullback,
+              } as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            },
+          });
+        } catch (err) {
+          this.logger.warn(
+            `[INTENT-MIRROR] ENTER audit persist failed trade=${tid}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+        return 1;
+      }
+      return 0;
+    }
+    return 0;
   }
 
   /**

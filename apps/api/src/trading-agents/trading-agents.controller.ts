@@ -1,5 +1,5 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
-import type { Response } from 'express';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { TradingAgentKind } from '@prisma/client';
 import { AuthUser } from '../auth/auth.types';
@@ -153,10 +153,18 @@ export class TradingAgentsController {
   showcaseRelayEvent(
     @Param('slug') slug: string,
     @Headers('x-bot-control-secret') secret: string | undefined,
+    @Headers('x-showcase-signature') signature: string | undefined,
+    @Req() req: Request,
     @Body() body: ShowcaseRelayEventBody,
   ) {
     this.showcaseRelay.assertAuthorized(secret);
-    return this.showcaseRelay.ingest(slug, body);
+    // N1 (intent-mirror) — forward the raw body + signature so ingest() can
+    // HMAC-verify the payload before any state mutation. rawBody is populated
+    // by Nest's rawBody: true middleware (see main.ts).
+    return this.showcaseRelay.ingest(slug, body, {
+      rawBody: (req as unknown as { rawBody?: Buffer }).rawBody,
+      signatureHeader: signature,
+    });
   }
 
   @UseGuards(AdminGuard)

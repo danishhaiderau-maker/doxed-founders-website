@@ -47,6 +47,7 @@ export class ReadinessScorecardService {
     learningEngine: CheckResult[];
     doxxing: CheckResult[];
     ideaValidator: CheckResult[];
+    lam: CheckResult[];
     switches: SwitchStates;
     numbers: FakeCounts;
     startedAt: number;
@@ -66,10 +67,12 @@ export class ReadinessScorecardService {
       learningEngine: pillarFromChecks(params.learningEngine),
       doxxing: pillarFromChecks(params.doxxing),
       ideaValidator: pillarFromChecks(params.ideaValidator),
+      lam: pillarFromChecks(params.lam),
     };
     // Weights — sum to 1.0. The six new kernel pillars share ~0.3 of the
     // score; the original pillars were rebalanced down proportionally so a
-    // passing score still means the same overall readiness.
+    // passing score still means the same overall readiness. The LAM pillar
+    // (Phase 9) takes 0.02, shaved off ideaValidator + routingEngine.
     const weights: Record<keyof typeof pillars, number> = {
       platform: 0.14,
       bot: 0.12,
@@ -80,11 +83,12 @@ export class ReadinessScorecardService {
       founder: 0.07,
       stress: 0.08,
       aiProxy: 0.08,
-      routingEngine: 0.06,
+      routingEngine: 0.05,
       memoryEngine: 0.04,
       learningEngine: 0.05,
       doxxing: 0.05,
-      ideaValidator: 0.02,
+      ideaValidator: 0.01,
+      lam: 0.02,
     };
     const readinessScore = Math.round(
       (Object.entries(pillars) as [keyof typeof pillars, PillarView][]).reduce(

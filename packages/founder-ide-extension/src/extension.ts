@@ -28,12 +28,14 @@ import { readWorkspaceTool } from './tools/read-workspace';
 import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
 import { registerFounderOsChatParticipant } from './chat-participant';
+import { createDebugSquasherStatus } from './debug-squasher-status';
 
 let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredProvider: vscode.Disposable | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
 let costTracker: CostTracker | undefined;
+let debugSquasherDisposable: vscode.Disposable | undefined;
 let currentCreds: FounderOsCredentials | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -100,6 +102,7 @@ export function deactivate(): void {
   connectionStatusBar?.dispose();
   profileManager?.dispose();
   costTracker?.dispose();
+  debugSquasherDisposable?.dispose();
 }
 
 /** Register the chat provider + participant if we have creds; otherwise show "not paired". */
@@ -110,6 +113,8 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     registeredProvider = undefined;
     registeredParticipant?.dispose();
     registeredParticipant = undefined;
+    debugSquasherDisposable?.dispose();
+    debugSquasherDisposable = undefined;
     currentCreds = null;
     setStatusNotPaired();
     void showPairPrompt(context);
@@ -131,6 +136,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
   // Credentials changed — re-register.
   registeredProvider?.dispose();
   registeredParticipant?.dispose();
+  debugSquasherDisposable?.dispose();
 
   const provider = new FounderOsChatProvider(creds, {
     onRequestStart: (modelId) => {
@@ -171,6 +177,12 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     profileManager: profileManager!,
     costTracker: costTracker!,
   });
+
+  // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
+  debugSquasherDisposable = createDebugSquasherStatus(context, () =>
+    resolveCredentials(),
+  );
+  context.subscriptions.push(debugSquasherDisposable);
 
   currentCreds = creds;
   setStatusConnected(creds);
