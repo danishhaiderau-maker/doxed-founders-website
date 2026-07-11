@@ -159,3 +159,4 @@ export {
 export * from './founder-identity';
 export * from './ai-proxy';
 export * from './deployment-modes';
+export * from './founder-economics';
