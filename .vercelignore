@@ -16,17 +16,19 @@ services/btc-conservative-agent/**/*.db
 services/btc-conservative-agent/**/__pycache__/
 services/btc-conservative-agent/bot_runtime.log*
 
-# Founder Node desktop builds
-apps/founder-node/release/
-apps/founder-node/build/
-
 # Founder IDE upstream — git submodule, huge
 packages/founder-ide/
 packages/skycode-fork/
 
-# API / founder-node — not needed for web deploy
-apps/api/
-apps/founder-node/
+# API / founder-node source — not needed for web deploy
+# BUT keep package.json + tsconfig so npm workspaces resolve correctly
+apps/api/src/
+apps/api/nest-cli.json
+apps/api/.env*
+apps/founder-node/src/
+apps/founder-node/release/
+apps/founder-node/build/
+apps/founder-node/.env*
 
 # Root-level analysis artifacts (JSON/CSV/DB dumps)
 /*_report.json
