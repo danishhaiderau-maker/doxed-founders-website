@@ -15,6 +15,12 @@ const REASONING_PATTERN =
 const SIMPLE_PATTERN =
   /\b(what is|how do i|status|hello|thanks|yes|no|list|show me)\b/i;
 
+type FastLane = {
+  providerKey: string;
+  model: string;
+};
+type FallbackLane = FastLane;
+
 @Injectable()
 export class ModelRouterService {
   constructor(private readonly brainProviders: FounderBrainProvidersService) {}
@@ -37,75 +43,92 @@ export class ModelRouterService {
   route(request: AiRuntimeRequest): ModelRoute {
     const intent = this.classifyIntent(request);
     const cfg = this.brainProviders.getSyncConfig();
-    const fastModel = cfg.fastModel;
-    const codingModel = cfg.codingModel;
-    const fastProvider = cfg.fastProvider;
-    const codingProvider = cfg.codingProvider;
-    const twoModel = cfg.twoModelRoutingEnabled;
 
-    let route: ModelRoute;
+    let fast: FastLane;
+    let fallback: FallbackLane;
+    let tier: ModelRoute['tier'];
 
     switch (intent) {
       case 'code':
-        route = {
-          intent,
-          providerKey: twoModel ? codingProvider : 'glm',
-          model: codingModel,
-          tier: 'code',
-        };
+        fast = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
+        tier = 'code';
         break;
       case 'reasoning':
-        route = {
-          intent,
-          providerKey: twoModel ? codingProvider : 'deepseek',
-          model: twoModel && codingProvider === 'glm' ? codingModel : fastModel,
-          tier: 'reasoning',
-        };
+        fast = { providerKey: 'glm', model: cfg.glmCodingModel };
+        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        tier = 'reasoning';
         break;
       case 'summarize':
-        route = {
-          intent,
-          providerKey: twoModel ? fastProvider : 'glm',
-          model: fastModel,
-          tier: 'fast',
-        };
-        break;
       case 'social_draft':
       case 'simple_qa':
-        route = {
-          intent,
-          providerKey: twoModel ? fastProvider : 'deepseek',
-          model: fastModel,
-          tier: 'fast',
-        };
+        fast = { providerKey: 'deepseek', model: cfg.deepseekFastModel };
+        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
+        tier = 'fast';
         break;
       default:
-        route = this.defaultRouteForSection(request.section, intent, twoModel, fastProvider, fastModel);
-        break;
+        return this.defaultRoute(intent, request.section, cfg);
     }
 
-    return this.brainProviders.resolveRouteProviders(route);
+    return this.brainProviders.resolveRouteProviders({
+      intent,
+      providerKey: fast.providerKey,
+      model: fast.model,
+      tier,
+    });
   }
 
-  private defaultRouteForSection(
-    section: AiRuntimeSection,
+  getFallbackRoute(request: AiRuntimeRequest): ModelRoute {
+    const intent = this.classifyIntent(request);
+    const cfg = this.brainProviders.getSyncConfig();
+
+    let fallback: FallbackLane;
+    let tier: ModelRoute['tier'];
+
+    switch (intent) {
+      case 'code':
+        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
+        tier = 'code';
+        break;
+      case 'reasoning':
+        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        tier = 'reasoning';
+        break;
+      case 'summarize':
+      case 'social_draft':
+      case 'simple_qa':
+        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
+        tier = 'fast';
+        break;
+      default:
+        return this.defaultRoute(intent, request.section, cfg);
+    }
+
+    return {
+      intent,
+      providerKey: fallback.providerKey,
+      model: fallback.model,
+      tier,
+    };
+  }
+
+  private defaultRoute(
     intent: AiRuntimeIntent,
-    twoModel: boolean,
-    fastProvider: string,
-    fastModel: string,
+    section: AiRuntimeSection,
+    cfg: { deepseekFastModel: string; glmFastModel: string },
   ): ModelRoute {
     if (section === 'wall_summarizer') {
       return {
         intent,
-        providerKey: twoModel ? fastProvider : 'glm',
-        model: fastModel,
+        providerKey: 'glm',
+        model: cfg.glmFastModel,
         tier: 'fast',
       };
     }
     return {
       intent,
-      providerKey: twoModel ? fastProvider : 'deepseek',
-      model: fastModel,
+      providerKey: 'deepseek',
+      model: cfg.deepseekFastModel,
       tier: 'fast',
     };
   }

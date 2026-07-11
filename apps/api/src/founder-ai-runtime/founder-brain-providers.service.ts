@@ -3,7 +3,7 @@ import { parseFounderBrainMode, type FounderBrainMode } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { AiRoutingService } from '../ai-routing/ai-routing.service';
-import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
+import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 import type { ModelRoute } from './founder-ai-runtime.types';
 import {
   DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG,
@@ -75,11 +75,11 @@ export class FounderBrainProvidersService implements OnModuleInit {
     userId: string,
     patch: Partial<{
       twoModelRoutingEnabled: boolean;
-      fastProvider: FounderBrainProviderSlug;
-      codingProvider: FounderBrainProviderSlug;
+      deepseekFastModel: string;
+      deepseekCodingModel: string;
+      glmFastModel: string;
+      glmCodingModel: string;
       defaultMode: FounderBrainMode;
-      fastModel: string;
-      codingModel: string;
     }>,
   ): Promise<FounderBrainProvidersAdminView> {
     const current = (await this.getAdminView()) as FounderBrainProvidersConfig;
@@ -88,26 +88,20 @@ export class FounderBrainProvidersService implements OnModuleInit {
     if (patch.twoModelRoutingEnabled !== undefined) {
       next.twoModelRoutingEnabled = patch.twoModelRoutingEnabled;
     }
-    if (patch.fastProvider !== undefined) {
-      if (!FOUNDER_BRAIN_PROVIDER_ALLOWLIST.includes(patch.fastProvider)) {
-        throw new BadRequestException('Invalid fastProvider');
-      }
-      next.fastProvider = patch.fastProvider;
+    if (patch.deepseekFastModel !== undefined) {
+      next.deepseekFastModel = patch.deepseekFastModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.deepseekFastModel;
     }
-    if (patch.codingProvider !== undefined) {
-      if (!FOUNDER_BRAIN_PROVIDER_ALLOWLIST.includes(patch.codingProvider)) {
-        throw new BadRequestException('Invalid codingProvider');
-      }
-      next.codingProvider = patch.codingProvider;
+    if (patch.deepseekCodingModel !== undefined) {
+      next.deepseekCodingModel = patch.deepseekCodingModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.deepseekCodingModel;
+    }
+    if (patch.glmFastModel !== undefined) {
+      next.glmFastModel = patch.glmFastModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.glmFastModel;
+    }
+    if (patch.glmCodingModel !== undefined) {
+      next.glmCodingModel = patch.glmCodingModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.glmCodingModel;
     }
     if (patch.defaultMode !== undefined) {
       next.defaultMode = patch.defaultMode;
-    }
-    if (patch.fastModel !== undefined) {
-      next.fastModel = patch.fastModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.fastModel;
-    }
-    if (patch.codingModel !== undefined) {
-      next.codingModel = patch.codingModel.trim() || DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG.codingModel;
     }
 
     await this.prisma.platformSettings.upsert({
@@ -183,7 +177,7 @@ export class FounderBrainProvidersService implements OnModuleInit {
           method: 'POST',
           headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: this.cachedConfig.fastModel,
+            model: this.cachedConfig.deepseekFastModel,
             messages: [{ role: 'user', content: 'ping' }],
             max_tokens: 8,
           }),
@@ -251,20 +245,20 @@ export class FounderBrainProvidersService implements OnModuleInit {
     if (typeof obj.twoModelRoutingEnabled === 'boolean') {
       base.twoModelRoutingEnabled = obj.twoModelRoutingEnabled;
     }
-    if (obj.fastProvider === 'deepseek' || obj.fastProvider === 'glm') {
-      base.fastProvider = obj.fastProvider;
+    if (typeof obj.deepseekFastModel === 'string' && obj.deepseekFastModel.trim()) {
+      base.deepseekFastModel = obj.deepseekFastModel.trim();
     }
-    if (obj.codingProvider === 'deepseek' || obj.codingProvider === 'glm') {
-      base.codingProvider = obj.codingProvider;
+    if (typeof obj.deepseekCodingModel === 'string' && obj.deepseekCodingModel.trim()) {
+      base.deepseekCodingModel = obj.deepseekCodingModel.trim();
+    }
+    if (typeof obj.glmFastModel === 'string' && obj.glmFastModel.trim()) {
+      base.glmFastModel = obj.glmFastModel.trim();
+    }
+    if (typeof obj.glmCodingModel === 'string' && obj.glmCodingModel.trim()) {
+      base.glmCodingModel = obj.glmCodingModel.trim();
     }
     if (typeof obj.defaultMode === 'string') {
       base.defaultMode = parseFounderBrainMode(obj.defaultMode);
-    }
-    if (typeof obj.fastModel === 'string' && obj.fastModel.trim()) {
-      base.fastModel = obj.fastModel.trim();
-    }
-    if (typeof obj.codingModel === 'string' && obj.codingModel.trim()) {
-      base.codingModel = obj.codingModel.trim();
     }
     return base;
   }

@@ -19,8 +19,8 @@ type Props = {
 };
 
 const PROVIDER_LABELS: Record<'deepseek' | 'glm', string> = {
-  deepseek: 'DeepSeek (fast tier)',
-  glm: 'GLM z.ai (coding tier)',
+  deepseek: 'DeepSeek',
+  glm: 'GLM z.ai',
 };
 
 function KeyStatusRow({
@@ -47,7 +47,7 @@ function KeyStatusRow({
   );
 }
 
-/** Admin panel for Founder Brain two-model routing (DeepSeek fast + GLM coding). */
+/** Admin panel for Founder Brain 4-model routing (DeepSeek Flash/Pro + GLM Flash/5.2). */
 export function AdminFounderBrainProvidersPanel({ token }: Props) {
   const [settings, setSettings] = useState<FounderBrainProvidersSettings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -119,8 +119,9 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       <div>
         <h3 className="text-lg font-semibold text-white">Founder Brain Providers</h3>
         <p className="mt-1 text-sm text-zinc-400">
-          Two-model routing: fast tier (DeepSeek) for Q&A and social drafts; coding tier (GLM z.ai)
-          for implementation. Keys stay in env / encrypted columns — this panel toggles policy only.
+          4-model routing: fast tier (DeepSeek Flash / GLM Flash) for Q&A and social drafts;
+          coding tier (DeepSeek Pro / GLM 5.2) for implementation and reasoning.
+          Keys stay in env / encrypted columns — this panel toggles policy only.
         </p>
         <p className="mt-1 text-[11px] text-zinc-500">
           GLM base: <code className="text-zinc-300">{settings.glmApiBase}</code>
@@ -147,53 +148,45 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
 
       <div className="grid gap-4 md:grid-cols-2">
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">Fast provider</p>
-          <select
-            value={settings.fastProvider}
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek Fast Model</p>
+          <input
+            value={settings.deepseekFastModel}
             disabled={busy != null}
-            onChange={(e) =>
-              void save({ fastProvider: e.target.value as 'deepseek' | 'glm' })
-            }
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
-          >
-            <option value="deepseek">DeepSeek</option>
-            <option value="glm">GLM</option>
-          </select>
+            onChange={(e) => setSettings({ ...settings, deepseekFastModel: e.target.value })}
+            onBlur={() => void save({ deepseekFastModel: settings.deepseekFastModel })}
+            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
+          />
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">Coding provider</p>
-          <select
-            value={settings.codingProvider}
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek Coding Model</p>
+          <input
+            value={settings.deepseekCodingModel}
             disabled={busy != null}
-            onChange={(e) =>
-              void save({ codingProvider: e.target.value as 'deepseek' | 'glm' })
-            }
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
-          >
-            <option value="glm">GLM</option>
-            <option value="deepseek">DeepSeek</option>
-          </select>
+            onChange={(e) => setSettings({ ...settings, deepseekCodingModel: e.target.value })}
+            onBlur={() => void save({ deepseekCodingModel: settings.deepseekCodingModel })}
+            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
+          />
         </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">Fast model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Fast Model</p>
           <input
-            value={settings.fastModel}
+            value={settings.glmFastModel}
             disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, fastModel: e.target.value })}
-            onBlur={() => void save({ fastModel: settings.fastModel })}
+            onChange={(e) => setSettings({ ...settings, glmFastModel: e.target.value })}
+            onBlur={() => void save({ glmFastModel: settings.glmFastModel })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
           />
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">Coding model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Coding Model</p>
           <input
-            value={settings.codingModel}
+            value={settings.glmCodingModel}
             disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, codingModel: e.target.value })}
-            onBlur={() => void save({ codingModel: settings.codingModel })}
+            onChange={(e) => setSettings({ ...settings, glmCodingModel: e.target.value })}
+            onBlur={() => void save({ glmCodingModel: settings.glmCodingModel })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
           />
         </div>

@@ -7,11 +7,11 @@ export const FOUNDER_BRAIN_PROVIDER_ALLOWLIST: FounderBrainProviderSlug[] = ['de
 
 export type FounderBrainProvidersConfig = {
   twoModelRoutingEnabled: boolean;
-  fastProvider: FounderBrainProviderSlug;
-  codingProvider: FounderBrainProviderSlug;
+  deepseekFastModel: string;
+  deepseekCodingModel: string;
+  glmFastModel: string;
+  glmCodingModel: string;
   defaultMode: FounderBrainMode;
-  fastModel: string;
-  codingModel: string;
 };
 
 export type FounderBrainProviderKeyStatus = {
@@ -37,18 +37,13 @@ function envBool(name: string): boolean {
   return process.env[name]?.trim().toLowerCase() === 'true';
 }
 
-function envProvider(name: string, fallback: FounderBrainProviderSlug): FounderBrainProviderSlug {
-  const raw = process.env[name]?.trim().toLowerCase();
-  return raw === 'glm' || raw === 'deepseek' ? raw : fallback;
-}
-
 export const DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG: FounderBrainProvidersConfig = {
   twoModelRoutingEnabled: envBool('FOUNDER_BRAIN_TWO_MODEL_ROUTING'),
-  fastProvider: envProvider('FOUNDER_BRAIN_FAST_PROVIDER', 'deepseek'),
-  codingProvider: envProvider('FOUNDER_BRAIN_CODING_PROVIDER', 'glm'),
+  deepseekFastModel: process.env.DEEPSEEK_FAST_MODEL?.trim() || 'deepseek-chat',
+  deepseekCodingModel: process.env.DEEPSEEK_CODING_MODEL?.trim() || 'deepseek-reasoner',
+  glmFastModel: process.env.GLM_FAST_MODEL?.trim() || 'glm-4-flash',
+  glmCodingModel: process.env.GLM_CODING_MODEL?.trim() || 'glm-5.2',
   defaultMode: 'automatic',
-  fastModel: process.env.AI_RUNTIME_FAST_MODEL?.trim() || 'deepseek-chat',
-  codingModel: process.env.AI_RUNTIME_CODE_MODEL?.trim() || 'glm-5.2',
 };
 
 export type ResolvedModelRoute = ModelRoute;
