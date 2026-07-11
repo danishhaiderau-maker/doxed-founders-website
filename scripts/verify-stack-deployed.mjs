@@ -319,7 +319,9 @@ async function checkVercel(token, target) {
       return r;
     }
     const j = await res.json();
-    const deps = (j.deployments ?? []).filter((d) => d.target === 'production');
+    const deps = (j.deployments ?? []).filter(
+      (d) => d.target === 'production' && d.readyState !== 'CANCELED' && d.readyState !== 'SKIPPED'
+    );
     latestProd = deps[0] ?? null;
   } catch (e) {
     r.status = YELLOW;
