@@ -6,7 +6,7 @@ param(
   [switch]$NoAnalyzer,
   [switch]$NoTunnel,
   [switch]$AnalyzerOnce,
-  [int]$Port = 7800
+  [int]$Port = 7002
 )
 
 $ErrorActionPreference = "Stop"

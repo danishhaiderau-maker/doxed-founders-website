@@ -28,7 +28,7 @@ function Test-Port([int]$P) {
 Log "watch started interval=${IntervalSec}s duration=${DurationMin}m"
 
 while ((Get-Date) -lt $deadline) {
-  $ports = @(7810, 7002, 9500, 7800, 9001)
+  $ports = @(7810, 7002, 9500, 9001)
   $portParts = @()
   foreach ($p in $ports) {
     $portParts += ":$p=" + $(if (Test-Port $p) { "UP" } else { "DOWN" })

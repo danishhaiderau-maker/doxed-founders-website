@@ -190,7 +190,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Invoke-HomeCommandBackground "start-all-local"
       return @{
         ok = $true
-        message = "Local lab start queued (:7800 bot + :9500 analyzer in Final Bots folder)."
+        message = "Local lab start queued (:7002 bot + :9500 analyzer in Final Bots folder)."
       }
     }
     "start-all-global" {
@@ -348,7 +348,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         message = @(
           "Stop everything window opened."
           "Stopping :$BotPort bot, :$AnalyzerPort analyzer, tunnel."
-          "Bridge :7810 stays running. Local lab :7800/:9500 untouched."
+          "Bridge :7810 stays running. Local lab :7002/:9500 untouched."
         ) -join "`n"
       }
     }
@@ -363,7 +363,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Invoke-HomeCommandBackground "stop-all-local"
       return @{
         ok = $true
-        message = "Local lab stop queued (:7800 + :9500 only). Global showcase untouched."
+        message = "Local lab stop queued (:7002 + :9500 only). Global showcase untouched."
       }
     }
     "reset-home-stack" {

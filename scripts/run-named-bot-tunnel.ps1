@@ -4,7 +4,7 @@
 # logs/cloudflared-named.err.log. Without this, the tunnel silently flaps
 # every few hours and the live-copy relay loses its showcase feed.
 # Default port is 7002 — the canonical showcase per config/bot-architecture.lock.json.
-# (:7800 is the legacy local lab — do not point the production tunnel at it.)
+# (:7002 is the canonical showcase — hardwired.)
 param(
   [int]$Port = 7002,
   [string]$Hostname = "bot.doxxedcrypto.digital",

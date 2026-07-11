@@ -14,7 +14,7 @@
       "id": "local-lab",
       "label": "Desktop Final Bots lab",
       "path": "C:/Users/user/Desktop/Final Bots/bybit_bot.py",
-      "port": 7800,
+      "port": 7002,
       "script": "scripts/sync-local-btc-bot.mjs"
     },
     {
@@ -39,5 +39,5 @@
     "cliFlag": "--force",
     "note": "Human-only escape hatch. Agents must ask the user before using this."
   },
-  "agentInstruction": "STOP before any blunt bot sync. The local lab (:7800 / Final Bots/bybit_bot.py) and the global showcase (:7002 / services/btc-conservative-agent/) follow different architectures. Do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
+  "agentInstruction": "STOP before any blunt bot sync. The local lab and the global showcase (:7002 / services/btc-conservative-agent/) follow different architectures. Do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
 }

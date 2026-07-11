@@ -17,7 +17,7 @@
 - **Do NOT run** `sync:btc-research-bot`, `sync-local-btc-bot.mjs`, or any `sync:*bot*` script.
 - **Do NOT** mirror `bybit_bot.py` into this repo. Edit the showcase bot **in place** under `services/btc-conservative-agent/`.
 - Safe scripts: `sync:production` / `sync:all`, `wire:home-bot`, `RECOVER-GLOBAL-STACK.cmd`, `start-home-bot.ps1`.
-- The showcase bot on `:7002` / `https://bot.doxxedcrypto.digital` is **canonical**. The local lab `bybit_bot.py` on `:7800` is a **different architecture** that diverged. Blunt sync clobbers monorepo-only fixes.
+- The showcase bot on `:7002` / `https://bot.doxxedcrypto.digital` is **canonical**. The local lab `bybit_bot.py` on `:7002` is a **different architecture** that diverged. Blunt sync clobbers monorepo-only fixes.
 
 This plan's bot-side change is a **single new fire-and-forget function + one call site** inside `bot.py`. It does not touch sync.
 

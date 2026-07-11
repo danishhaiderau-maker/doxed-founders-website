@@ -1,4 +1,4 @@
-# Resolves home stack ports: production showcase (7002/9001) vs legacy local collection (7800/9500).
+# Resolves home stack ports: production showcase (7002/9001) vs legacy local collection (7002/9500).
 param(
   [string]$RepoRoot = ""
 )
@@ -57,11 +57,11 @@ function Get-HomeStackMode {
 
   return @{
     Mode          = "production"
-    BotPort       = 7800
+    BotPort       = 7002
     AnalyzerPort  = 9001
     TunnelEnabled = $true
     RelayEnabled  = $true
     DataDir       = Join-Path $Root "services\btc-conservative-agent"
-    Label         = "Production mirror (legacy :7800/:9001)"
+    Label         = "Production mirror (:7002/:9001)"
   }
 }

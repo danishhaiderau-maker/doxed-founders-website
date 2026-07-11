@@ -47,7 +47,7 @@ function ensureCloudflaredRunning() {
   console.log('OK  cloudflared started');
 }
 
-async function waitBotLocal(port = 7800) {
+async function waitBotLocal(port = 7002) {
   for (let i = 0; i < 12; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/api/ping`, { signal: AbortSignal.timeout(5000) });
@@ -93,7 +93,7 @@ async function main() {
   ensureCloudflaredRunning();
 
   console.log('\n--- 4/7 Local bot health ---');
-  let botPort = 7800;
+  let botPort = 7002;
   try {
     const lockPath = path.join(repoRoot, 'config', 'home-showcase.lock.json');
     if (fs.existsSync(lockPath)) {

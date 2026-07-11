@@ -15,7 +15,7 @@ Stop paying for **btc-conservative-agent** on Railway. Run **one bot** at home; 
 ```text
 Home PC (16 GB)          Cloud
 ───────────────          ─────
-bybit_bot.py :7800  →    Vercel (site)
+bybit_bot.py :7002  →    Vercel (site)
 Cloudflare Tunnel   →    Neon (DB)
 relay webhooks      →    Railway (NestJS API only)
 ```
@@ -27,7 +27,7 @@ relay webhooks      →    Railway (NestJS API only)
 ```powershell
 # Terminal 1 — bot (research repo or monorepo)
 npm run print:home-bot-env          # from dev machine first; copy vault/home-bot.env to home PC
-# load home-bot.env, start your bot on port 7800
+# load home-bot.env, start your bot on port 7002
 
 # Terminal 2 — temporary public URL
 powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1 -Quick
@@ -39,7 +39,7 @@ Copy the `https://….trycloudflare.com` URL.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1
-# Creates bot.doxxedcrypto.digital → localhost:7800
+# Creates bot.doxxedcrypto.digital → localhost:7002
 ```
 
 ## Step 2 — From repo machine (wire cloud)

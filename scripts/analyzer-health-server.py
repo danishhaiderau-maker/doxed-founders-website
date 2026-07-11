@@ -14,7 +14,7 @@ from pathlib import Path
 
 PORT = int(os.environ.get("ANALYZER_HEALTH_PORT", "9001"))
 BIND_HOST = os.environ.get("ANALYZER_BIND_HOST", "0.0.0.0")
-BOT_DASHBOARD = os.environ.get("HOME_BOT_DASHBOARD", "http://127.0.0.1:7800").rstrip("/")
+BOT_DASHBOARD = os.environ.get("HOME_BOT_DASHBOARD", "http://127.0.0.1:7002").rstrip("/")
 AGENT_DIR = Path(os.environ.get("BTC_AGENT_DIR", "")).resolve() if os.environ.get("BTC_AGENT_DIR") else None
 if AGENT_DIR is None or not AGENT_DIR.is_dir():
     repo_root = Path(__file__).resolve().parent.parent
@@ -51,7 +51,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <body>
   <header>
     <h1>Doxed BTC Research Analyzer</h1>
-    <div class="sub">Local dashboard · polls bot <a id="bot-link" href="#">:7800</a> · research loop logs in PowerShell window</div>
+    <div class="sub">Local dashboard · polls bot <a id="bot-link" href="#">:7002</a> · research loop logs in PowerShell window</div>
   </header>
   <main>
     <div class="grid" id="stats"></div>
@@ -81,7 +81,7 @@ HTML_PAGE = """<!DOCTYPE html>
         const sc = kpis.ai_shadow_scorecard || {};
         document.getElementById('stats').innerHTML = `
           <div class="card"><h2>Bot</h2><div class="val">${pill(data.bot_online, 'ONLINE', 'OFFLINE')}</div>
-            <div class="muted">${bot.price != null ? 'BTC $' + Number(bot.price).toLocaleString() : 'Start bot on :7800'}</div></div>
+            <div class="muted">${bot.price != null ? 'BTC $' + Number(bot.price).toLocaleString() : 'Start bot on :7002'}</div></div>
           <div class="card"><h2>Balance</h2><div class="val">${fmtUsd(bot.account_balance ?? bot.equity)}</div>
             <div class="muted">Session PnL ${fmtUsd(bot.daily_pnl_usd)}</div></div>
           <div class="card"><h2>Execution</h2><div class="val ${bot.execution_paused ? 'warn' : 'ok'}">${bot.execution_paused ? 'PAUSED' : 'ACTIVE'}</div>

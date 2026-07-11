@@ -5471,7 +5471,7 @@ GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7800")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
@@ -17775,7 +17775,7 @@ COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 _sim_processed_trade_ids: set = set()
 POLICY_FILE = "policy.json"
 def get_config_file() -> str:
-    """Port-scoped dashboard config so :7002 showcase and :7800 lab do not overwrite each other."""
+    """Port-scoped dashboard config — hardwired to :7002."""
     explicit = (os.getenv("BOT_CONFIG_FILE") or "").strip()
     if explicit:
         return explicit

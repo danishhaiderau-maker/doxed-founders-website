@@ -1,6 +1,6 @@
 # Visible control panel — stays open while bot / analyzer / tunnel run.
 param(
-  [int]$BotPort = 7800,
+  [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9001
 )
 

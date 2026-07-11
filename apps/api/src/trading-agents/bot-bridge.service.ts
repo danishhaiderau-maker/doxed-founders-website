@@ -98,7 +98,7 @@ export class BotBridgeService {
       this.logger.warn(`Bot URL DB lookup failed: ${msg}`);
     }
     const envUrl = this.getBotUrl();
-    if (envUrl && /127\.0\.0\.1|:7800\b|localhost/i.test(envUrl)) {
+    if (envUrl && /127\.0\.0\.1|:7002\b|localhost/i.test(envUrl)) {
       this.logger.warn(
         `Ignoring local env bot URL (${envUrl}) — wire showcase to ${this.DEFAULT_CF_URL}`,
       );

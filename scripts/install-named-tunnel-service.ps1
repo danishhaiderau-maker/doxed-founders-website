@@ -1,7 +1,7 @@
 # One-time: install cloudflared as a Windows service for stable bot.doxxedcrypto.digital
 # Requires prior: cloudflared tunnel login + tunnel create doxed-btc-bot + route dns
 param(
-  [int]$Port = 7800,
+  [int]$Port = 7002,
   [string]$Hostname = "bot.doxxedcrypto.digital",
   [string]$TunnelName = "doxed-btc-bot"
 )

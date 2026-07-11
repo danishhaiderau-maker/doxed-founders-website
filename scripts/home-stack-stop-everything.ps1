@@ -24,7 +24,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 Write-Host ""
 Write-Host "=== Stopping global showcase (all terminals) ===" -ForegroundColor Yellow
 Write-Host "Bot :$BotPort | Analyzer :$AnalyzerPort | tunnel | supervisor | bridge | hidden helpers"
-Write-Host "Local lab :7800/:9500 untouched."
+Write-Host "Local lab :7002/:9500 untouched."
 Write-Host ""
 
 # Protect this stop process + its parent so we do not suicide.

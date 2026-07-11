@@ -1,6 +1,6 @@
 # Legacy alias — long-run recovery is handled by home-stack-supervisor.ps1
 param(
-  [int]$BotPort = 7800,
+  [int]$BotPort = 7002,
   [int]$IntervalSec = 120,
   [int]$RestartCooldownSec = 900,
   [string]$BridgeUrl = "http://127.0.0.1:7810"

@@ -144,7 +144,7 @@ export function AgentRelaySimPanel({
           <h2 className="mt-1 text-lg font-bold text-white">Bitfinex API relay test</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
             Real Bitfinex API orders, tightly capped — 1 position at a time · $20 margin · 100x
-            leverage. Showcase signals come from global bot :7002 (not local lab :7800).
+            leverage. Showcase signals come from global bot :7002.
           </p>
         </div>
         {signedIn ? (

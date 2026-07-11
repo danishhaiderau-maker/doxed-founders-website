@@ -2,7 +2,7 @@
 title Local Collection (bot :7002 / analyzer :9500)
 cd /d "%~dp0"
 echo.
-echo Local data collection ONLY - separate from doxxedcrypto production (:7800/:9001)
+echo Local data collection ONLY - separate from doxxedcrypto production (:7002/:9001)
 echo Ports frozen in config\local-collection.lock.json
 echo Data folder: services\btc-conservative-agent\local-collection-data
 echo.

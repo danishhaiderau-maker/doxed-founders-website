@@ -16,7 +16,7 @@
       "id": "layer-b",
       "name": "Layer B — NestJS Live Copy relay (signal-subscriber-execution.service.ts)",
       "location": "apps/api/src/trading-agents/signal-subscriber-execution.service.ts",
-      "runtime": "node :7800 (Live Copy subscriber), reads bot bridge :7810",
+      "runtime": "node :7002 (Live Copy subscriber), reads bot bridge :7810",
       "ownership": "subscriber-side reconciliation. Phase 1 + Phase 2 live here."
     }
   },

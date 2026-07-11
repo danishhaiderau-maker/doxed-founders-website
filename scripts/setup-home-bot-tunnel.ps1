@@ -1,14 +1,14 @@
-# Cloudflare Tunnel — expose home BTC bot (default localhost:7800) as HTTPS.
+# Cloudflare Tunnel — expose home BTC bot (default localhost:7002) as HTTPS.
 # Run on the machine that hosts the research bot (10.0.0.102 or this PC).
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1 -Quick
-#   powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1 -Port 7800
+#   powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1 -Port 7002
 
 param(
   [switch]$Quick,
-  [int]$Port = 7800,
+  [int]$Port = 7002,
   [string]$Hostname = "bot.doxxedcrypto.digital",
   [string]$TunnelName = "doxed-btc-bot"
 )

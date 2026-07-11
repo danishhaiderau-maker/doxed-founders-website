@@ -11,7 +11,7 @@ curl -sS -m 120 "http://127.0.0.1:7810/cmd/start-all"
 echo.
 echo.
 echo Windows opened:
-echo   - Doxed Bot :7800
+echo   - Doxed Bot :7002
 echo   - Doxed Analyzer :9001
 echo   - Doxed Cloudflare Tunnel
 echo   - Doxed Stack Control Panel

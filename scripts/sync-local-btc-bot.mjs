@@ -2,7 +2,7 @@
 /**
  * OPTIONAL: copy local Final Bots lab → global showcase agent dir.
  *
- * Global showcase (:7002) and local lab (:7800) are architecturally diverging.
+ * Global showcase (:7002) and local lab (:7002) are architecturally diverging.
  * Do NOT run this routinely — only with explicit --force when you intend to promote
  * specific files from the local lab.
  *
@@ -33,7 +33,7 @@ const force =
 
 if (!force) {
   console.error(
-    'Refusing blunt local→global sync. Global showcase bot is maintained separately from local lab (:7800).',
+    'Refusing blunt local→global sync. Global showcase bot is maintained separately from local lab (:7002).',
   );
   console.error('See config/bot-architecture.lock.json and .cursor/rules/no-blunt-bot-sync.mdc');
   console.error('Human override: BOT_SYNC_FORCE=1 node scripts/sync-local-btc-bot.mjs --force');

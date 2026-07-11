@@ -43,7 +43,7 @@ DEPLOYMENT TOPOLOGY
 Users → Vercel (Next.js) → Railway API → Neon Postgres
 Founder Node desktop ↔ API (pairing, encrypted vault relay)
 Showcase bot Python on operator home PC port 7002 → Cloudflare tunnel → bot.doxxedcrypto.digital
-Separate local lab bot on port 7800 (dev/research only, NOT public, different architecture)
+Separate local lab bot on port 7002 (dev/research only, NOT public, different architecture)
 API connects to external LLM/Cursor/GitHub/Stripe/Solana as configured
 
 PUBLIC ROUTES (major)
@@ -126,7 +126,7 @@ Agent Hub: hire isolated instance (2000 DDollar fee); ERC-8004/SAID registration
 BOT ARCHITECTURE LOCK (critical)
 --------------------------------
 TWO DIFFERENT BOTS — do not blunt-sync:
-  Local lab: external research script, port 7800, not public, diverged architecture
+  Local lab: external research script, port 7002, not public, diverged architecture
   Global showcase: services/btc-conservative-agent/, port 7002, bot.doxxedcrypto.digital
 allowBluntSync: false. Edit monorepo bot in place. Blocked scripts: sync-local-btc-bot, sync-btc-research-bot.
 Safe ops (no bot code sync): sync:production, sync:all, wire:home-bot, start-home-bot.
@@ -199,7 +199,7 @@ After reading this bundle, assess:
 6. Founder Node vault — API cannot decrypt relay blob
 7. Showcase bot admin-only control; public endpoints sanitized
 8. SimulatedRaise vs real securities — UX/copy clarity
-9. Blunt sync blocked between :7800 lab and :7002 showcase
+9. Blunt sync blocked between :7002 lab and :7002 showcase
 10. Greenfield (Jupiter, on-chain raise) vs shipped features clearly separated
 
 Report format: Severity | Location (file+route) | Issue | Recommendation | False positive note
