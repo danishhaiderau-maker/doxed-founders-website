@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-Research Dashboard v1.5 — read-only viewer for analyzer outputs.
-
-Runs independently from the trading bot. Never touches execution.
-Default: http://0.0.0.0:9500  →  global showcase analyzer (see config/home-showcase.lock.json)
-
-  python research_dashboard.py
-  RESEARCH_DASHBOARD_PORT=9001 RESEARCH_DASHBOARD_BIND_HOST=0.0.0.0 python research_dashboard.py
-"""
 from __future__ import annotations
+import os as _os, sys as _sys
+_AD_ = _os.path.abspath(_os.path.dirname(__file__))
+_PARENT_ = _os.path.dirname(_AD_)
+if _PARENT_ not in _sys.path:
+    _sys.path.insert(0, _PARENT_)
+
 
 import io
 import json
@@ -1308,7 +1304,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Default: AI lanes + CONTINUOUS benchmark (toggle Show all lanes for legacy COMBO/EDGE/CHASE)"
+            else "Default: 3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1) -- toggle Show all lanes for historical"
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })
