@@ -280,7 +280,7 @@ export class AiProxyRuntimeService {
     // background hooks fire after the response completes.
     if (body.stream && upstream.body) {
       const [a, b] = upstream.body.tee();
-      void this.afterStreamingRequest(auth, route, b, started);
+      void this.afterStreamingRequest(auth, route, b, started, promptTokensEstimate);
       return {
         ok: true,
         status: 200,
@@ -449,6 +449,7 @@ export class AiProxyRuntimeService {
     route: ResolvedRoute,
     stream: ReadableStream<Uint8Array>,
     startedAt: number,
+    promptTokensEstimate?: number,
   ): Promise<void> {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -488,7 +489,7 @@ export class AiProxyRuntimeService {
     }
 
     await this.afterRequest(auth, route, {
-      promptTokens: promptTokens || this.estimateStreamPromptTokens(route),
+      promptTokens: promptTokens || promptTokensEstimate || 0,
       completionTokens,
       latencyMs: Date.now() - startedAt,
     });
@@ -498,11 +499,6 @@ export class AiProxyRuntimeService {
   private estimateTokens(messages: { role: string; content: string }[]): number {
     const chars = messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
     return Math.ceil(chars / 4);
-  }
-
-  private estimateStreamPromptTokens(route: ResolvedRoute): number {
-    void route;
-    return 0;
   }
 
   /**
