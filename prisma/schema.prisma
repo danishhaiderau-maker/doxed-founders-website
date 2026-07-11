@@ -417,6 +417,49 @@ enum IdeaCheckStatus {
   FAILED
 }
 
+/**
+ * Phase 7 — Deployment Modes. Where a project primarily runs.
+ * PRIVATE  = laptop (Founder Node + Forgejo + SQLite + tunnel)
+ * PUBLIC   = cloud (GitHub + Vercel + Neon)
+ * HYBRID   = private now, publish-to-public on demand (recommended default)
+ * See docs/DEPLOYMENT-MODES-UX.md §1.
+ */
+enum DeploymentMode {
+  PRIVATE
+  PUBLIC
+  HYBRID
+}
+
+/**
+ * Publish flow step lifecycle for the 4-step Hybrid → Public promotion.
+ * See docs/DEPLOYMENT-MODES-UX.md §5. A DeploymentPublishJob row is created
+ * when the founder clicks Publish; the frontend polls it for live progress.
+ */
+enum PublishJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/**
+ * Phase 8 — Raise Room → Token Launch flow.
+ * See docs/RAISE_ROOM_LAUNCH_FLOW.md.
+ *
+ * PLEDGING   = community DDollar pledges accruing toward the 100K threshold.
+ * WINDOW_OPEN = threshold met, founder released the token, 15-day commitment window live.
+ * LIVE        = window closed, allocations finalized, DEX swaps enabled.
+ * CLOSED      = launch retired (graduated or abandoned). Pledgers were refunded if it
+ *               never reached LIVE within the 90-day refund window.
+ */
+enum TokenLaunchStatus {
+  PLEDGING
+  WINDOW_OPEN
+  LIVE
+  CLOSED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -446,6 +489,11 @@ model User {
   /// When builderScore/builderTier were last recomputed. Null = never.
   scoreRefreshedAt           DateTime?
   notificationPrefs          Json?
+  /// Debug Squasher opt-in consent state — one of 'unset' | 'accepted' | 'declined' | 'later'.
+  /// Drives whether the daily health-check cron runs and whether the IDE
+  /// keeps showing the consent pop-up. See apps/api/src/debug-squasher/.
+  debugSquasherConsent       String?          @default("unset")
+  debugSquasherConsentAt     DateTime?
   createdAt                  DateTime         @default(now())
   updatedAt                  DateTime         @updatedAt
 
@@ -527,6 +575,8 @@ model User {
   wallReadCursors          ProjectWallReadCursor[]
   referredBy               User?                        @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
   referrals                User[]                       @relation("UserReferrals")
+  tokenPledges             TokenPledge[]
+  dexSwaps                 DexSwap[]
 
   @@index([email])
   @@index([role])
@@ -689,6 +739,9 @@ model Project {
   launchQualificationTier            String?
   launchQualificationMeta            Json?
   launchQualificationAt              DateTime?
+  /// Phase 7 — where this project primarily runs. Default HYBRID (build
+  /// privately, publish to public on demand). See docs/DEPLOYMENT-MODES-UX.md.
+  deploymentMode                     DeploymentMode       @default(HYBRID)
   regulatoryClass                    RegulatoryClass       @default(PENDING)
   regulatoryClassifiedAt             DateTime?
   regulatoryQuestionnaireCompletedAt DateTime?
@@ -744,6 +797,9 @@ model Project {
   wallSummary             ProjectWallSummary?
   wallReadCursors         ProjectWallReadCursor[]
   regulatoryQuestionnaire RegulatoryQuestionnaire?
+  deploymentConfig        ProjectDeploymentConfig?
+  publishJobs             DeploymentPublishJob[]
+  tokenLaunches           TokenLaunch[]
 
   @@index([slug])
   @@index([launchStage])
@@ -757,6 +813,7 @@ model Project {
   @@index([approved])
   @@index([source])
   @@index([trackingActive])
+  @@index([deploymentMode])
 }
 
 model RegulatoryQuestionnaire {
@@ -3060,4 +3117,213 @@ model IdeaCheck {
   @@index([applicationId])
   @@index([status])
   @@index([createdAt])
+}
+
+// ─── Phase 7 — Deployment Modes ───────────────────────────────────────────────
+// Per-project runtime config that derives from the chosen DeploymentMode.
+// One row per project (1:1). Created lazily by DeploymentModesService when a
+// founder first sets a mode or opens the mode panel. See
+// docs/DEPLOYMENT-MODES-UX.md §4 for the concrete field meanings per mode.
+model ProjectDeploymentConfig {
+  id          String   @id @default(cuid())
+  projectId   String   @unique
+  /// forgejo | github — where the canonical git remote lives.
+  gitBackend  String   @default("forgejo")
+  /// Clone/push URL for the canonical remote. Null until the repo is initialized.
+  gitUrl      String?
+  /// sqlite | postgresql — Prisma provider used by this project's runtime.
+  dbProvider  String   @default("sqlite")
+  /// Connection string. SQLite = file:./.../dev.db; Postgres = postgresql://...
+  /// Stored as @db.Text because Neon URIs are long. Treated as a secret at
+  /// rest (encrypted in a later phase; for now scoped to the project owner).
+  dbUrl       String?  @db.Text
+  /// vercel | tunnel-on-demand | custom — how the project is hosted.
+  hostingType String   @default("tunnel-on-demand")
+  /// Public HTTPS URL. Null in pure Private mode until the founder clicks Share.
+  hostingUrl  String?
+  /// tailscale | public-url — how the phone remote reaches the runtime.
+  phoneRoute  String   @default("tailscale")
+  /// Always founder-os-cloud — the AI Gateway is the moat and never moves.
+  aiGateway   String   @default("founder-os-cloud")
+  /// JSON publish plan applied when the founder clicks Publish in Hybrid mode.
+  /// Shape: { targetGithubRepo, targetNeonProject, targetVercelProject, targetDomain }.
+  /// Null in pure Private mode. See docs/DEPLOYMENT-MODES-UX.md §4 (Hybrid wiring).
+  publishPlan Json?
+  /// Whether the local Founder Node has reported Forgejo online for this project.
+  /// Surfaced in the "What's running right now" panel.
+  forgejoOnline   Boolean?  @default(false)
+  /// Whether a SQLite file exists at the project's local path (Founder Node reports).
+  sqlitePresent   Boolean?  @default(false)
+  /// Whether the cloudflared tunnel is currently up for this project.
+  tunnelActive    Boolean?  @default(false)
+  /// Whether Tailscale mesh reachability is available.
+  tailscaleReady  Boolean?  @default(false)
+  /// Last status refresh from Founder Node (heartbeat-style).
+  runtimeStatusAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+/// Publish flow job — created when a Hybrid project is published to public
+/// cloud. The frontend polls the latest job for live 4-step progress.
+/// See docs/DEPLOYMENT-MODES-UX.md §5.
+model DeploymentPublishJob {
+  id          String          @id @default(cuid())
+  projectId   String
+  /// Snapshot of the publish plan that was applied (so historic runs are stable
+  /// even if the founder later edits the plan on the config row).
+  planSnapshot Json
+  status      PublishJobStatus @default(PENDING)
+  /// 1 = git mirror, 2 = DB migrate, 3 = Vercel deploy, 4 = health verify.
+  currentStep Int             @default(0)
+  /// Per-step status + detail payload: [{ step, status, detail, startedAt, finishedAt }]
+  steps       Json            @default("[]")
+  /// Final hosting URL once step 4 passes (for COMPLETED jobs).
+  liveUrl     String?
+  errorMessage String?        @db.Text
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+/// Debug Squasher run — one row per harness invocation (cron or manual).
+/// Stores the readiness verdict for the platform, plus per-failure AI
+/// diagnoses and suggested fixes. See apps/api/src/debug-squasher/.
+model DebugSquasherRun {
+  id               String   @id @default(cuid())
+  /// Which pillar this row represents. 'overall' for the summary row;
+  /// otherwise a pillar key from ReadinessScorecard.pillars (platform, bot,
+  /// ai, relay, analyzer, genome, founder, stress, aiProxy, routingEngine,
+  /// memoryEngine, learningEngine, doxxing, ideaValidator).
+  pillar           String
+  /// 'pass' | 'fail' | 'degraded' | 'skipped' | 'error'.
+  status           String
+  /// Short human-readable summary (e.g. "3/5 checks passed").
+  summary          String   @db.Text
+  /// AI diagnosis text (root-cause explanation). Null for passing rows.
+  diagnosis        String?  @db.Text
+  /// JSON array of suggested fixes: [{ title, fix, severity, files }].
+  suggestedFixJson Json?
+  /// Wall-clock duration of this run in milliseconds.
+  runDurationMs    Int      @default(0)
+  /// 'cron' | 'manual' | 'startup'.
+  triggeredBy      String   @default("manual")
+  createdAt        DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([pillar, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+// ─── Phase 8 — Raise Room → Token Launch ─────────────────────────────────────
+// See docs/RAISE_ROOM_LAUNCH_FLOW.md. The flagship revenue flow: founders
+// accumulate 100K DDollar in community pledges, then release an SPL token on
+// Solana devnet with a 5% pledge pool and a 15-day commitment window. The
+// platform earns a 0.1% fee on every DEX swap (accrued to PlatformTreasury).
+
+/**
+ * A token launch for a project. One row per project per launch (a founder can
+ * only have one ACTIVE launch at a time — re-launches require the previous
+ * row to be CLOSED). The flow is:
+ *
+ *   PLEDGING → (100K threshold met + founder clicks Release) → WINDOW_OPEN
+ *           → (15-day window expires) → LIVE → (graduation/abandon) → CLOSED
+ */
+model TokenLaunch {
+  id                  String            @id @default(cuid())
+  projectId           String            @unique
+  /// When the founder released the token (moved PLEDGING → WINDOW_OPEN).
+  launchDate          DateTime?
+  /// Solana devnet mint address of the SPL token. Null until mint succeeds.
+  solanaMint          String?           @db.Text
+  /// Total token supply (whole units). Default 1B per the spec's open question #2.
+  supply              BigInt            @default(1000000000)
+  /// Fixed launch price in USD (the DEX stub swaps at this price for now).
+  initialPrice        Decimal           @default(0.0001) @db.Decimal(24, 12)
+  /// True once community pledges crossed the 100K DDollar threshold.
+  pledgeThresholdMet  Boolean           @default(false)
+  status              TokenLaunchStatus @default(PLEDGING)
+  /// 5% of supply reserved for pledgers (pro-rata). Stored on the row so a
+  /// founder can tune it before release without a migration.
+  pledgePoolPercent   Int               @default(5)
+  /// When the 15-day commitment window closes. Null until WINDOW_OPEN.
+  windowClosesAt      DateTime?
+  /// When the launch was finalized (moved to LIVE). Null until LIVE.
+  finalizedAt         DateTime?
+  /// Soft close — graduation or abandoned. Null until CLOSED.
+  closedAt            DateTime?
+  /// Reason the launch closed ("graduated" | "abandoned" | "refunded").
+  closeReason         String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pledges  TokenPledge[]
+  swaps    DexSwap[]
+
+  @@index([status])
+  @@index([pledgeThresholdMet])
+  @@index([windowClosesAt])
+}
+
+/**
+ * A community DDollar pledge toward a project's 100K threshold. Created while
+ * the launch is in PLEDGING status. Pledged DDollar is escrowed (spent via
+ * SpendingEngine when the pledge is made) and refunded if the launch closes
+ * without going LIVE. When the launch moves to LIVE, `allocatedTokens` is
+ * filled in pro-rata and the pledge is non-refundable.
+ */
+model TokenPledge {
+  id              String   @id @default(cuid())
+  launchId        String
+  userId          String
+  /// DDollar amount pledged (escrowed at pledge time).
+  amount          Int      @default(0)
+  /// Whole tokens allocated to this pledger at finalization (5% pool, pro-rata).
+  /// Null until the launch is finalized (status = LIVE).
+  allocatedTokens Decimal? @db.Decimal(24, 6)
+  /// True once DDollar was refunded (launch CLOSED without going LIVE).
+  refunded        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  launch TokenLaunch @relation(fields: [launchId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([launchId, userId])
+  @@index([launchId])
+  @@index([userId])
+  @@index([amount(sort: Desc)])
+}
+
+/**
+ * A DEX swap against a launched token. The DEX is stubbed (fixed-price swap
+ * at launch.initialPrice for now); this row records every swap so the
+ * platform treasury accrual and per-user activity are auditable.
+ */
+model DexSwap {
+  id           String   @id @default(cuid())
+  launchId     String
+  userId       String?
+  inputAmount  Decimal  @db.Decimal(24, 6)
+  outputAmount Decimal  @db.Decimal(24, 6)
+  /// USD value of the 0.1% platform fee for this swap.
+  feeUsd       Decimal  @default(0) @db.Decimal(16, 6)
+  createdAt    DateTime @default(now())
+
+  launch TokenLaunch @relation(fields: [launchId], references: [id], onDelete: Cascade)
+  user   User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([launchId, createdAt(sort: Desc)])
+  @@index([userId])
 }

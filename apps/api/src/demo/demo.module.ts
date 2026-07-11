@@ -12,6 +12,7 @@ import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
 import { MemoryEngineModule } from '../memory-engine/memory-engine.module';
 import { LearningEngineModule } from '../learning-engine/learning-engine.module';
 import { IdeaValidatorModule } from '../idea-validator/idea-validator.module';
+import { LamModule } from '../lam/lam.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { DemoController } from './demo.controller';
 import { DemoModeGuard } from './demo-mode.guard';
@@ -38,6 +39,7 @@ import { DemoHarnessService } from './demo-harness.service';
     MemoryEngineModule,
     LearningEngineModule,
     IdeaValidatorModule,
+    LamModule,
     PrismaModule,
   ],
   controllers: [DemoController],

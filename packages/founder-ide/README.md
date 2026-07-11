@@ -1,87 +1,85 @@
-# Founder IDE — VSCodium downstream build orchestration
+# Founder IDE — Void fork build orchestration (Phase 5)
 
-This directory does **not** contain a clone of VSCodium (that would be ~50 GB).
-It contains the **branding patches, build scripts, and bundled installer** that
-turn a VSCodium checkout into "Founder IDE" and compose it with Founder Node
-into a single "Founder Stack" Windows installer.
+This directory contains the **branding patches, AI rewire, build scripts, and
+bundled installer** that turn a [Void](https://github.com/voideditor/void)
+checkout into **Founder IDE** and compose it with Founder Node into a single
+"Founder Stack" Windows installer.
 
-> Design source: [`docs/FOUNDER-IDE-FORK-PLAN.md`](../../docs/FOUNDER-IDE-FORK-PLAN.md)
-> — read §1 (VSCodium fork process), §6 (build + installer + bundling), §7
-> (strip/keep/add) before changing anything here.
+> **Foundation:** Void (a VS Code fork with full AI UX) — replaces the
+> VSCodium-based build from 0.8.0.
+> **Design source:** [`docs/FOUNDER-IDE-VOID-FORK-PLAN.md`](../../docs/FOUNDER-IDE-VOID-FORK-PLAN.md)
+
+## Why Void instead of VSCodium
+
+Void already ships the AI-native UX we'd otherwise build from scratch:
+inline edit (Ctrl+K), autocomplete (FIM), diff review, and a chat sidebar.
+Forking Void changes the project from "build the AI UX on top of a rebranded
+editor" to **"rewire an existing AI UX to talk to our Gateway"** — smaller,
+faster, better outcome.
 
 ## Layout
 
 ```
 packages/founder-ide/
-├── README.md                      # this file
-├── RELEASES.md                    # release process + download URLs
+├── README.md                              # this file
+├── RELEASES.md                            # release process + 0.9.0 notes
 ├── build/
-│   ├── build-founder-ide.sh       # main build (Git Bash) — wraps VSCodium's dev/build.sh
-│   ├── build-founder-ide.ps1      # PowerShell wrapper
-│   ├── prepare-founder-ide.sh     # branding patches (jq + sed) run after prepare_vscode.sh
-│   └── brand-product.json.patch   # jq filter for product.json branding
+│   ├── build-founder-ide-void.sh          # main build — wraps void-builder
+│   ├── prepare-founder-ide-void.sh        # branding: Void -> Founder IDE
+│   ├── rewire-llm-to-gateway.sh           # THE REWIRE — AI -> our Gateway
+│   ├── sendFounderOs.ts                   # Gateway client (ports gateway-client.ts)
+│   ├── build-founder-ide.sh               # legacy VSCodium build (kept for reference)
+│   └── prepare-founder-ide.sh             # legacy VSCodium branding
 ├── assets/
-│   ├── README.md                  # where to place icons, splash, etc.
-│   └── product.json.template      # our product.json overrides
+│   └── product.json.template              # our GUIDs / name / data dir
 ├── installer/
-│   ├── founder-stack.iss          # Inno Setup script for the BUNDLED installer
-│   └── build-stack-installer.ps1  # orchestrates: ext .vsix → Founder IDE → Founder Node → bundle
+│   ├── founder-stack.iss                  # Inno Setup — bundles IDE + Node
+│   └── build-stack-installer.ps1          # orchestrator
 └── config/
-    └── build-env.sh               # branding env vars (APP_NAME, BINARY_NAME, ORG_NAME, ...)
+    └── build-env.sh                       # branding env vars
 ```
 
-## How a build works (high level)
+## The rewire (the important part)
 
-1. You start with a checkout of our VSCodium downstream
-   (`github.com/doxxedcrypto/founder-ide`) — a clone of VSCodium's build-script
-   repo, on a pinned tag, with this directory's patches layered on top.
-2. `config/build-env.sh` exports the Founder IDE branding env vars that
-   VSCodium's `dev/build.sh` reads (`APP_NAME`, `BINARY_NAME`, `ORG_NAME`,
-   `ASSETS_REPOSITORY`, `VSCODE_QUALITY`).
-3. `build/prepare-founder-ide.sh` runs **after** VSCodium's `prepare_vscode.sh`
-   and rewrites `product.json` (via `jq` using
-   `build/brand-product.json.patch`) and `build/win32/code.iss` (via `sed`) to
-   our branding, fresh GUIDs, Open VSX gallery, and built-in Founder OS chat
-   extension.
-4. `build/build-founder-ide.sh` invokes VSCodium's `dev/build.sh` (Git Bash).
-   Output lands in `VSCode/.../win32-x64/`:
-   - `Founder-IDE-Setup-x64.exe` (NSIS user installer)
-   - `Founder-IDE-x64-portable.zip` (portable)
-5. `installer/build-stack-installer.ps1` orchestrates the full Founder Stack:
-   builds the chat extension `.vsix`, builds Founder IDE, builds Founder Node,
-   then composes both via `installer/founder-stack.iss` (Inno Setup / `iscc`)
-   into `Founder-Stack-Setup-<v>.exe`.
+Void's AI all flows through one chokepoint:
+`src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts`.
+`rewire-llm-to-gateway.sh` patches that file to call our Gateway
+(`sendFounderOs.ts`) before the per-provider dispatch, and map each feature to
+a Gateway model alias:
 
-## Prerequisites (Windows, one-time)
+| Void feature | Gateway alias |
+|--|--|
+| Autocomplete (FIM) | `founder-os-fast` |
+| Edit / Ctrl+K | `founder-os-code` |
+| Chat (normal) | `founder-os-auto` |
+| Chat (agent) | `founder-os-reasoning` |
 
-```powershell
-winget install --id Git.Git -e            # Git Bash + sed/grep/find
-winget install --id Python.Python.3.11 -e
-winget install --id jqlang.jq -e
-winget install --id 7zip.7zip -e
-winget install --id JRSoftware.InnoSetup -e
-# Node: match VSCodium's .nvmrc via nvm-windows
-# Rustup (some native modules): https://rustup.rs
-```
+When a Founder Node is paired (`~/FounderVault/node-config.json`), every AI
+request flows through the Gateway. When unpaired, it falls through to Void's
+own dispatch (editor stays usable).
 
-Disk: ~50 GB free. Clean build time: ~45–90 min. See §6.4 of the design report.
+## How a build works
 
-## What is NOT done here
+1. `void-builder` clones `voideditor/void` into `vscode/` and applies Void's
+   patches (product.json -> "Void", code.iss sed, etc.).
+2. `prepare-founder-ide-void.sh` layers "Founder IDE" on top — fresh GUIDs,
+   Open VSX, our URLs, our icon.
+3. `rewire-llm-to-gateway.sh` drops in `sendFounderOs.ts` and patches
+   `sendLLMMessage.ts`.
+4. `gulp vscode-win32-x64-user-setup` compiles -> `Founder-IDE-Setup-x64.exe`.
+5. `installer/founder-stack.iss` bundles it with Founder Node.
 
-- We do **not** clone VSCodium in this repo. That's a build-time step on a
-  machine with the disk + toolchain. See `RELEASES.md` for the manual steps.
-- We do **not** commit the VSCodium source. The patches in this directory are
-  additive and run against a pinned VSCodium tag at build time.
+## Prerequisites (Windows)
 
-## Side-by-side with VS Code / VSCodium
+Node 24, Python 3.11, jq, 7-Zip, Inno Setup, Rustup, Git Bash — all installed.
+~140 GB free disk. Clean build: 60-90 min.
 
-The `win32AppId` and `win32x64UserAppId` GUIDs in
-`assets/product.json.template` are **fresh** (generated 2026-07-10) and do not
-collide with VSCodium or VS Code. Founder IDE installs alongside both.
+## Side-by-side install
+
+Fresh GUIDs (`win32AppId` `{39F6C958-6DA1-4BAE-82D5-F0952FE270BD}`,
+`win32x64UserAppId` `{436F5001-DD46-4F41-8D93-89EF9716CC07}`) — Founder IDE
+installs alongside VS Code, VSCodium, Void, and the old Founder IDE 0.8.0.
 
 ## License
 
-MIT. VSCodium is MIT; Microsoft's `vscode` source is MIT; Founder Node is the
-user's. The bundled installer preserves VSCodium's `LICENSE.txt` in the install
-dir. We default to **Open VSX** (not the Microsoft marketplace) to stay clear
-of Microsoft's marketplace Terms of Use — see §3.3 / §7 of the design report.
+Apache 2.0 (Void upstream) + MIT (Founder OS additions). Open VSX marketplace.

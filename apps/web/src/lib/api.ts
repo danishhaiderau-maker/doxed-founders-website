@@ -2723,6 +2723,168 @@ export function fetchRaiseRoomProjects(filter: RaiseRoomFilter = 'trending', lim
   }>(`/raise-room/projects?${qs.toString()}`);
 }
 
+// ─── Phase 8 — Token Launch ─────────────────────────────────────────────────
+// See docs/RAISE_ROOM_LAUNCH_FLOW.md. The flagship revenue flow: founders
+// accumulate 100K DDollar in community pledges, then release an SPL token on
+// Solana devnet with a 5% pledge pool and a 15-day commitment window.
+
+export interface TokenLaunchEligibility {
+  projectId: string;
+  launchId: string;
+  status: 'PLEDGING' | 'WINDOW_OPEN' | 'LIVE' | 'CLOSED';
+  pledged: number;
+  threshold: number;
+  needed: number;
+  thresholdMet: boolean;
+  checklist: {
+    founderDoxxed: boolean;
+    hasBuildPost: boolean;
+    projectComplete: boolean;
+    twitterHandle: boolean;
+  };
+  checklistComplete: boolean;
+  eligible: boolean;
+  pledgePoolPercent: number;
+}
+
+export interface TokenLaunchPledgeRow {
+  rank: number;
+  userId: string;
+  userName: string | null;
+  userHandle: string | null;
+  amount: number;
+  sharePct: number;
+  projectedTokens: number;
+  allocatedTokens: number | null;
+}
+
+export interface TokenLaunchPledgeLeaderboard {
+  projectId: string;
+  launchId: string;
+  pledgePoolPercent: number;
+  totalPoolTokens: number;
+  totalPledged: number;
+  leaderboard: TokenLaunchPledgeRow[];
+}
+
+export interface TokenLaunchStatusResponse {
+  launchId: string;
+  projectId: string;
+  project: {
+    id: string;
+    slug: string;
+    name: string;
+    ticker: string;
+    summary: string | null;
+    logoUrl: string | null;
+  };
+  status: 'PLEDGING' | 'WINDOW_OPEN' | 'LIVE' | 'CLOSED';
+  pledged: number;
+  threshold: number;
+  pledgeThresholdMet: boolean;
+  pledgePoolPercent: number;
+  supply: number;
+  initialPrice: number;
+  solanaMint: string | null;
+  solanaExplorerUrl: string | null;
+  launchDate: string | null;
+  windowClosesAt: string | null;
+  daysRemaining: number | null;
+  finalizedAt: string | null;
+  closedAt: string | null;
+  closeReason: string | null;
+  totalPledgers: number;
+  totalSwaps: number;
+  totalAllocatedTokens: number;
+  pledges: {
+    id: string;
+    userId: string;
+    userName: string | null;
+    userHandle: string | null;
+    amount: number;
+    allocatedTokens: number | null;
+    refunded: boolean;
+    createdAt: string;
+  }[];
+}
+
+export interface DexPriceResponse {
+  launchId: string;
+  priceUsd: number;
+  feeBps: number;
+  live: boolean;
+}
+
+export interface DexSwapResponse {
+  swapId: string;
+  inputAmount: number;
+  outputAmount: number;
+  feeUsd: number;
+  priceUsd: number;
+}
+
+export function fetchTokenLaunchEligibility(projectId: string) {
+  return apiFetch<TokenLaunchEligibility>(
+    `/token-launch/${projectId}/eligibility`,
+  );
+}
+
+export function fetchTokenLaunchPledges(projectId: string, limit = 25) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<TokenLaunchPledgeLeaderboard>(
+    `/token-launch/${projectId}/pledges?${qs.toString()}`,
+  );
+}
+
+export function fetchTokenLaunchStatus(launchId: string) {
+  return apiFetch<TokenLaunchStatusResponse>(
+    `/token-launch/launch/${launchId}`,
+  );
+}
+
+export function fetchDexPrice(launchId: string) {
+  return apiFetch<DexPriceResponse>(`/token-launch/launch/${launchId}/price`);
+}
+
+export function initiateTokenLaunch(projectId: string, token: string) {
+  return apiFetch<{
+    launchId: string;
+    projectId: string;
+    status: string;
+    solanaMint: string | null;
+    solanaExplorerUrl: string;
+    launchDate: string;
+    windowClosesAt: string;
+  }>(`/token-launch/${projectId}/initiate`, { method: 'POST' }, token);
+}
+
+export function commitToTokenLaunch(
+  launchId: string,
+  amount: number,
+  token: string,
+) {
+  return apiFetch<{
+    launchId: string;
+    userId: string;
+    pledged: number;
+    totalPledged: number;
+    threshold: number;
+    thresholdMet: boolean;
+  }>(
+    `/token-launch/launch/${launchId}/commit`,
+    { method: 'POST', body: JSON.stringify({ amount }) },
+    token,
+  );
+}
+
+export function swapOnDex(launchId: string, inputAmount: number, token: string) {
+  return apiFetch<DexSwapResponse>(
+    `/token-launch/launch/${launchId}/swap`,
+    { method: 'POST', body: JSON.stringify({ inputAmount }) },
+    token,
+  );
+}
+
 export function createBuildPost(
   data: { headline: string; body: string; projectId?: string; dayNumber?: number; githubUrl?: string },
   token: string,
@@ -6452,6 +6614,94 @@ export function updateConnectedWorkspaceSession(
   return apiFetch<WorkspaceSessionData>(
     `/connected-workspace/${workspaceId}/session`,
     { method: 'PUT', body: JSON.stringify(patch) },
+    token,
+  );
+}
+
+// ─── Phase 7 — Deployment Modes ──────────────────────────────────────────────
+// Mirrors apps/api/src/deployment-modes/. See docs/DEPLOYMENT-MODES-UX.md.
+
+export interface DeploymentModeState {
+  mode: 'PRIVATE' | 'PUBLIC' | 'HYBRID';
+  config: {
+    id: string;
+    projectId: string;
+    gitBackend: string;
+    gitUrl: string | null;
+    dbProvider: string;
+    dbUrl: string | null;
+    hostingType: string;
+    hostingUrl: string | null;
+    phoneRoute: string;
+    aiGateway: string;
+    publishPlan: {
+      targetGithubRepo: string;
+      targetNeonProject: string;
+      targetVercelProject: string;
+      targetDomain: string;
+    } | null;
+    forgejoOnline: boolean | null;
+    sqlitePresent: boolean | null;
+    tunnelActive: boolean | null;
+    tailscaleReady: boolean | null;
+    runtimeStatusAt: string | null;
+  } | null;
+  latestPublishJob: {
+    id: string;
+    status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    currentStep: number;
+    liveUrl: string | null;
+    errorMessage: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    steps: Array<{
+      step: number;
+      key: string;
+      label: string;
+      status: 'pending' | 'running' | 'complete' | 'failed';
+      detail: string | null;
+      startedAt: string | null;
+      finishedAt: string | null;
+    }>;
+  } | null;
+}
+
+export function fetchDeploymentMode(slug: string, token?: string) {
+  return apiFetch<DeploymentModeState>(
+    `/projects/${slug}/deployment-mode`,
+    undefined,
+    token,
+  );
+}
+
+export function patchDeploymentMode(
+  slug: string,
+  patch: {
+    mode?: 'PRIVATE' | 'PUBLIC' | 'HYBRID';
+    publishPlan?: Record<string, unknown> | null;
+  },
+  token: string,
+) {
+  return apiFetch<DeploymentModeState>(
+    `/projects/${slug}/deployment-mode`,
+    { method: 'PATCH', body: JSON.stringify(patch) },
+    token,
+  );
+}
+
+export function publishDeployment(
+  slug: string,
+  body: {
+    targetGithubRepo?: string;
+    targetNeonProject?: string;
+    targetVercelProject?: string;
+    targetDomain?: string;
+  },
+  token: string,
+) {
+  return apiFetch<DeploymentModeState['latestPublishJob']>(
+    `/projects/${slug}/deployment-mode/publish`,
+    { method: 'POST', body: JSON.stringify(body) },
     token,
   );
 }

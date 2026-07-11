@@ -24,7 +24,9 @@ import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ComplianceTimeline, type ComplianceTimelineData } from '@/components/compliance-timeline';
 import { LaunchQualificationBadge } from '@/components/launch-qualification-badge';
-import { fetchComplianceTimeline, fetchLaunchQualification } from '@/lib/api';
+import { DeploymentModeBadge } from '@/components/deployment-modes/mode-badge';
+import { DeploymentModePanel } from '@/components/deployment-modes/mode-panel';
+import { fetchComplianceTimeline, fetchDeploymentMode, fetchLaunchQualification, type DeploymentModeState } from '@/lib/api';
 
 const TABS = ['Overview', 'Scout Markets', 'Community', 'Raise Room', 'Build log', 'Trade'] as const;
 
@@ -43,16 +45,20 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
   const [replyBody, setReplyBody] = useState('');
   const [complianceTimeline, setComplianceTimeline] = useState<ComplianceTimelineData | null>(null);
   const [launchScore, setLaunchScore] = useState<number | null>(null);
+  const [deploymentMode, setDeploymentMode] = useState<DeploymentModeState | null>(null);
+  const [modePanelOpen, setModePanelOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setRoom(await fetchProjectRoom(slug, session?.accessToken));
-      const [timeline, lq] = await Promise.all([
+      const [timeline, lq, dm] = await Promise.all([
         fetchComplianceTimeline(slug).catch(() => null),
         fetchLaunchQualification(slug).catch(() => null),
+        fetchDeploymentMode(slug, session?.accessToken).catch(() => null),
       ]);
       setComplianceTimeline(timeline);
       setLaunchScore(lq?.score ?? null);
+      setDeploymentMode(dm);
     } catch {
       setRoom(null);
     }
@@ -147,6 +153,24 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
       )}
 
       {!isPaperTrack && <ProjectLifecycleBar currentStage={room.lifecycleStage} />}
+
+      {!isPaperTrack && deploymentMode && (
+        <div className="flex items-center gap-2">
+          <DeploymentModeBadge
+            mode={deploymentMode.mode}
+            published={deploymentMode.latestPublishJob?.status === 'COMPLETED'}
+            onClick={() => setModePanelOpen(true)}
+          />
+        </div>
+      )}
+
+      {!isPaperTrack && deploymentMode && (
+        <DeploymentModePanel
+          slug={slug}
+          open={modePanelOpen}
+          onClose={() => setModePanelOpen(false)}
+        />
+      )}
 
       {!isPaperTrack && (
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
