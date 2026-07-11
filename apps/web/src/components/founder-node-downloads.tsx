@@ -7,9 +7,10 @@ const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
 
 /**
- * Founder Stack installer download — bundles Founder IDE (Void-forked editor
- * with Cursor-like inline AI, autocomplete, and diff review) + Founder Node
- * tray app in one download from GitHub Releases.
+ * Founder Stack installer download — bundles Founder IDE (a VS Code-based
+ * editor with built-in AI chat, routing, and memory injection through the
+ * Founder OS AI Gateway) + Founder Node tray app in one download from GitHub
+ * Releases.
  */
 export const FOUNDER_STACK_RELEASES_URL = `https://github.com/${REPO}/releases`;
 
@@ -135,7 +136,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
               Founder IDE + Founder Node in one install — the full desktop kit for building with Founder OS AI.
             </p>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Founder Stack bundles Founder IDE (Void-forked editor with Cursor-like inline AI, autocomplete, and diff review) + Founder Node tray app.
+              Founder Stack bundles Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) + Founder Node tray app — one download, one install.
             </p>
           </div>
           <a
@@ -162,7 +163,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
       )}
 
       <p className="text-[11px] font-medium text-zinc-500">
-        Founder Stack bundles the new Founder IDE (Void-forked editor with Cursor-like inline AI, autocomplete, and diff review) together with the Founder Node tray app — one download, one install.
+        Founder Stack bundles the new Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) together with the Founder Node tray app — one download, one install.
       </p>
 
       <div className="pt-2">

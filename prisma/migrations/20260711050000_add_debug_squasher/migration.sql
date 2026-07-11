@@ -1,13 +1,14 @@
 -- Add Debug Squasher tables (Phase 6.5).
 -- Applies the same changes that were pushed via `prisma db push` so the
 -- migration history records the schema transition cleanly.
+-- Idempotent so it is safe on databases that already had these via db push.
 
 -- User consent fields for the daily debug-squasher opt-in pop-up.
-ALTER TABLE "User" ADD COLUMN "debugSquasherConsent" TEXT NOT NULL DEFAULT 'unset';
-ALTER TABLE "User" ADD COLUMN "debugSquasherConsentAt" TIMESTAMP(3);
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "debugSquasherConsent" TEXT NOT NULL DEFAULT 'unset';
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "debugSquasherConsentAt" TIMESTAMP(3);
 
 -- One row per debug-squasher harness run (overall + per-pillar).
-CREATE TABLE "DebugSquasherRun" (
+CREATE TABLE IF NOT EXISTS "DebugSquasherRun" (
     "id"               TEXT            NOT NULL,
     "pillar"           TEXT            NOT NULL,
     "status"           TEXT            NOT NULL,
@@ -21,6 +22,6 @@ CREATE TABLE "DebugSquasherRun" (
     CONSTRAINT "DebugSquasherRun_pkey" PRIMARY KEY ("id")
 );
 
-CREATE INDEX "DebugSquasherRun_createdAt_idx" ON "DebugSquasherRun"("createdAt" DESC);
-CREATE INDEX "DebugSquasherRun_pillar_createdAt_idx" ON "DebugSquasherRun"("pillar", "createdAt" DESC);
-CREATE INDEX "DebugSquasherRun_status_idx" ON "DebugSquasherRun"("status");
+CREATE INDEX IF NOT EXISTS "DebugSquasherRun_createdAt_idx" ON "DebugSquasherRun"("createdAt" DESC);
+CREATE INDEX IF NOT EXISTS "DebugSquasherRun_pillar_createdAt_idx" ON "DebugSquasherRun"("pillar", "createdAt" DESC);
+CREATE INDEX IF NOT EXISTS "DebugSquasherRun_status_idx" ON "DebugSquasherRun"("status");

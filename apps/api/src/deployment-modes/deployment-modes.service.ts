@@ -196,15 +196,14 @@ export class DeploymentModesService {
     };
   }
 
-  // ─── Publish flow (stub) ─────────────────────────────────────────────────
+  // ─── Publish flow ────────────────────────────────────────────────────────
 
   /**
    * Kick off the 4-step Hybrid → Public publish flow (spec §5).
    *
-   * For now this creates a DeploymentPublishJob in RUNNING state and runs the
-   * steps as fast no-ops that record progress. Real GitHub/Vercel/Neon wiring
-   * lands in slice 7.3 + a follow-up; the structure + ledger is in place so
-   * the frontend publish-progress UI has something to poll.
+   * Creates a DeploymentPublishJob in RUNNING state and executes real steps
+   * via `runPublishSteps` (GitHub create+mirror → Neon migrate → Vercel hook →
+   * health poll). Missing credentials surface as FAILED with a clear message.
    */
   async startPublish(projectId: string): Promise<PublishResult> {
     const project = await this.prisma.project.findUnique({
@@ -333,7 +332,7 @@ export class DeploymentModesService {
    * Real publish step runner (spec §5). Executes the 4-step Hybrid → Public
    * publish flow against live APIs:
    *
-   *   1. Git mirror   — create the GitHub repo via the REST API.
+   *   1. Git mirror   — create the GitHub repo + best-effort content push.
    *   2. DB migrate   — run `prisma migrate deploy` against the Neon DB URL.
    *   3. Vercel deploy — POST to the Vercel deploy hook.
    *   4. Health verify — poll the deployed URL until it responds 200.
@@ -412,7 +411,18 @@ export class DeploymentModesService {
         return;
       }
       const ghDetail = await this.createGithubRepo(githubToken, owner, repoName);
-      await markCompleted(1, ghDetail);
+      const mirrorDetail = await this.mirrorGithubRepoContents(
+        githubToken,
+        owner,
+        repoName,
+        plan,
+        projectId,
+      ).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Git mirror best-effort failed for ${owner}/${repoName}: ${message}`);
+        return `mirror skipped: ${message.slice(0, 160)}`;
+      });
+      await markCompleted(1, `${ghDetail}; ${mirrorDetail}`);
 
       // ── Step 2: DB migrate to Neon ────────────────────────────────────────
       await markRunning(2);
@@ -520,6 +530,89 @@ export class DeploymentModesService {
     }
     const repo = (await res.json()) as { html_url?: string; clone_url?: string };
     return `Created GitHub repo ${owner}/${repoName} — ${repo.html_url ?? repo.clone_url ?? ''}`.trim();
+  }
+
+  /**
+   * Best-effort content mirror after repo create. Tries in order:
+   *   1. `git push` from PUBLISH_SOURCE_DIR (or cwd) when that git remote can
+   *      authenticate with GITHUB_TOKEN.
+   *   2. GitHub Contents API seed of a Founder OS publish manifest README.
+   *
+   * Never throws past the caller — createGithubRepo already succeeded; mirror
+   * failure is recorded in the step detail only.
+   */
+  private async mirrorGithubRepoContents(
+    token: string,
+    owner: string,
+    repoName: string,
+    plan: PublishPlan,
+    projectId: string,
+  ): Promise<string> {
+    const sourceDir = process.env.PUBLISH_SOURCE_DIR?.trim() || process.cwd();
+    const remoteUrl = `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`;
+
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        'git',
+        ['push', '--force', remoteUrl, 'HEAD:refs/heads/main'],
+        {
+          cwd: sourceDir,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          maxBuffer: 4 * 1024 * 1024,
+          shell: process.platform === 'win32',
+          timeout: 120_000,
+        },
+      );
+      const out = (stdout + stderr).trim().slice(-200);
+      return `git push OK from ${sourceDir}${out ? ` — ${out}` : ''}`;
+    } catch (pushErr) {
+      this.logger.warn(
+        `git push mirror failed (${owner}/${repoName}): ${pushErr instanceof Error ? pushErr.message : pushErr}`,
+      );
+    }
+
+    // Fallback: seed a publish manifest via the Contents API so the repo is
+    // not an empty auto_init shell.
+    const markdown = [
+      `# ${plan.targetGithubRepo}`,
+      '',
+      'Published by Founder OS Deployment Modes.',
+      '',
+      `- Project id: \`${projectId}\``,
+      `- Neon: \`${plan.targetNeonProject}\``,
+      `- Vercel: \`${plan.targetVercelProject}\``,
+      `- Domain: \`${plan.targetDomain}\``,
+      `- Mirrored at: ${new Date().toISOString()}`,
+      '',
+      'Set `PUBLISH_SOURCE_DIR` to a git checkout to push real source on the next publish.',
+      '',
+    ].join('\n');
+    const content = Buffer.from(markdown, 'utf8').toString('base64');
+    const putRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/contents/FOUNDER_OS_PUBLISH.md`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: 'chore: Founder OS publish manifest',
+          content,
+          branch: 'main',
+        }),
+      },
+    );
+    if (putRes.status === 422 || putRes.status === 409) {
+      return 'Contents API seed skipped (file may already exist); git push unavailable';
+    }
+    if (!putRes.ok) {
+      const body = await putRes.text();
+      return `Contents API seed failed (${putRes.status}): ${body.slice(0, 120)}`;
+    }
+    return `Seeded FOUNDER_OS_PUBLISH.md via Contents API (git push unavailable from ${sourceDir})`;
   }
 
   /**

@@ -357,7 +357,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           <section className="rounded-2xl border border-emerald-500/25 bg-emerald-950/10 p-6">
             <h2 className="text-lg font-semibold text-white">Install apps</h2>
             <p className="mt-1 max-w-2xl text-sm text-zinc-500">
-              APK, iOS, and Founder Node installers live on the public downloads hub — not mixed with API keys or
+              APK, iOS, and Founder Stack installers live on the public downloads hub — not mixed with API keys or
               deploy tokens.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
@@ -377,7 +377,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                 href="/downloads#founder-node"
                 className="rounded-lg border border-cyan-500/30 px-4 py-2 text-sm text-cyan-200 hover:border-cyan-400/50"
               >
-                Founder Node section
+                Founder Stack section
               </Link>
             </div>
           </section>
