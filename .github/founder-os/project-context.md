@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (22 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (22 recent commits)
 
 ## Last Commit
 
-fix(utils): add founder_ide to IdeAdapterId for onboarding
+Raise Founder OS phases 1–9: routing v2 default, IDE connect, intent skeleton.
 
 ## Last Activity
 
