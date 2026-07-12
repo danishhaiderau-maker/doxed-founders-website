@@ -105,7 +105,7 @@ export function normalizeApiBaseUrl(url: string): string {
 
 /**
  * Copy vault credentials into `founderOs.*` (+ OpenAI-compat) User settings so
- * pairing survives vault moves and Skycode/OpenAI providers can reuse the same
+ * pairing survives vault moves and OpenAI-compatible providers can reuse the same
  * Node bearer without a pairing-code prompt. Best-effort.
  */
 export async function syncVaultIntoSettings(): Promise<FounderOsCredentials | null> {
@@ -125,7 +125,7 @@ export async function syncVaultIntoSettings(): Promise<FounderOsCredentials | nu
     // Settings write can fail in restricted / remote hosts — vault still works.
   }
 
-  // Best-effort OpenAI-compat keys for Skycode / other providers in Founder IDE.
+  // Best-effort OpenAI-compat keys for the Founder OS gateway in Founder IDE.
   try {
     const root = vscode.workspace.getConfiguration();
     await root.update('openAICompatible.apiUrl', openaiBase, vscode.ConfigurationTarget.Global);
