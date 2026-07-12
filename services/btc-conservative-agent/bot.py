@@ -215,6 +215,8 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_SR_MICRO_TILE_V1: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -11451,11 +11453,101 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
 _lane_last_ts = {}  # {'CONTINUOUS': ts, 'TYPE_B_HUNTER_V1': ts, 'SR_MICRO_TILE_V1': ts}
 
 
+def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: float) -> tuple:
+    """Optional TYPE_B composite filter. Returns (ok, block_reason)."""
+    try:
+        from type_b_hunter_v1 import should_enter_type_b
+    except Exception:
+        return True, None
+    feat = dict(features or {})
+    if "edge_score" not in feat:
+        feat["edge_score"] = edge_score
+    try:
+        ai_prob = int(float((ai or {}).get("win_prob") or 0))
+    except (TypeError, ValueError):
+        ai_prob = 0
+    # Enrich spread from AI conviction when features lack it
+    if not feat.get("spread") and not feat.get("conviction_spread"):
+        try:
+            direction = str((ai or {}).get("direction") or "LONG").upper()
+            feat["spread"] = int(compute_directional_spread(direction, ai or {}))
+        except Exception:
+            pass
+    ok, detail = should_enter_type_b(ai_prob, feat)
+    if ok:
+        return True, None
+    return False, (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+
+
+def _apply_sr_micro_tile_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
+    """Optional S/R micro entry filter. Returns (ok, block_reason)."""
+    try:
+        from sr_micro_tile_v1 import should_enter_sr
+    except Exception:
+        return True, None
+    feat = dict(features or {})
+    if "edge_score" not in feat:
+        feat["edge_score"] = edge_score
+    if "price" not in feat:
+        feat["price"] = nz(state.get("price"))
+    # Feature snapshot lacks micro S/R — pull from AI context upgrade when present
+    ctx = ctx or {}
+    for key in ("micro_support", "micro_resistance", "nearest_support_price", "nearest_resistance_price",
+                "adx", "volatility_percentile", "vol_pct", "structure_bias", "structure_bias_at_entry"):
+        if feat.get(key) is None and ctx.get(key) is not None:
+            feat[key] = ctx.get(key)
+    try:
+        ai_prob = int(float((ai or {}).get("win_prob") or 0))
+    except (TypeError, ValueError):
+        ai_prob = 0
+    side = str((ai or {}).get("direction") or "LONG").upper()
+    if side not in ("LONG", "SHORT"):
+        return False, "NO_DIRECTION"
+    ok, detail = should_enter_sr(side, feat, ai_prob)
+    if ok:
+        return True, None
+    return False, (detail or {}).get("block_reason") or "SR_MICRO_FILTER"
+
+
+def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str, trigger_reason: str):
+    """Feed independent-AI V1 APPROVEs into LAB shadow (OFF) or process_signal (ON).
+
+    Mirrors V2 tick post-AI routing and combo `_spawn_combo_lane` LAB/ON split.
+    """
+    if not ai or not ai_decision_should_execute(ai):
+        logger.info(
+            f"[{lane}_AI] soft-reject — not executable "
+            f"decision={((ai or {}).get('decision'))} tier={((ai or {}).get('execution_tier'))} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        log_lane_opportunity_event(
+            lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason="AI_NOT_EXECUTABLE",
+        )
+        return
+    if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+        ok, br = _apply_type_b_hunter_v1_entry_filter(ai, features, edge_score)
+    elif lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
+        ok, br = _apply_sr_micro_tile_v1_entry_filter(ai, features, edge_score, ctx=ctx)
+    else:
+        ok, br = True, None
+    if not ok:
+        log_lane_opportunity_event(
+            lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason=br,
+        )
+        logger.info(f"[{lane}_AI] entry filter blocked spawn reason={br} [PIPELINE ENFORCEMENT]")
+        return
+    _spawn_combo_lane(ctx, ai, edge_score, features, lane, trigger_reason)
+
+
 def maybe_tick_type_b_hunter_v1_research():
     """TYPE_B_HUNTER_V1 phase-shifted AI tick -- T+60s from CONTINUOUS.
 
     Independent DeepSeek call with TYPE_B-specific prompt.
-    Shadow-only when tile toggle OFF (default); paper orders when ON.
+    Tile OFF → LAB shadow (`_spawn_lab_combo_shadow`); tile ON → `process_signal`.
     """
     lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
     if not is_research_data_collection():
@@ -11505,11 +11597,14 @@ def maybe_tick_type_b_hunter_v1_research():
             f"[{lane}_AI] independent tick gap=60s+ edge={edge_score:.1f} "
             f"tile_on={tile_on} shadow={shadow_only}"
         )
-        evaluate_signal_with_ai(
+        ai = evaluate_signal_with_ai(
             ctx,
             research_lane=lane,
             shadow_only=shadow_only,
             trigger_reason="PERIODIC_RESEARCH_AI",
+        )
+        _spawn_independent_v1_lane_after_ai(
+            ctx, ai, edge_score, features, lane, "TYPE_B_HUNTER_V1_INDEPENDENT_AI",
         )
     except Exception as e:
         logger.error(f"[{lane}_AI] tick crash: {e}")
@@ -11519,7 +11614,7 @@ def maybe_tick_sr_micro_tile_v1_research():
     """SR_MICRO_TILE_V1 phase-shifted AI tick -- T+120s from CONTINUOUS.
 
     Independent DeepSeek call with S/R mean-reversion prompt.
-    Shadow-only when tile toggle OFF (default); paper orders when ON.
+    Tile OFF → LAB shadow (`_spawn_lab_combo_shadow`); tile ON → `process_signal`.
     """
     lane = RESEARCH_LANE_SR_MICRO_TILE_V1
     if not is_research_data_collection():
@@ -11569,11 +11664,14 @@ def maybe_tick_sr_micro_tile_v1_research():
             f"[{lane}_AI] independent tick gap=60s+ edge={edge_score:.1f} "
             f"tile_on={tile_on} shadow={shadow_only}"
         )
-        evaluate_signal_with_ai(
+        ai = evaluate_signal_with_ai(
             ctx,
             research_lane=lane,
             shadow_only=shadow_only,
             trigger_reason="PERIODIC_RESEARCH_AI",
+        )
+        _spawn_independent_v1_lane_after_ai(
+            ctx, ai, edge_score, features, lane, "SR_MICRO_TILE_V1_INDEPENDENT_AI",
         )
     except Exception as e:
         logger.error(f"[{lane}_AI] tick crash: {e}")
@@ -17310,6 +17408,7 @@ def _pathway_validation_artifact_paths() -> list:
         "type_b_execution_audit.json",
         "ai_scan_independence_report.json",
         "ai_scan_role_validation.json",
+        "independent_v1_post_ai_spawn_validation.json",
         "bot_analyzer_sync.json",
         "repo_version_sync.json",
         "exit_reports_validation.json",
@@ -19572,7 +19671,9 @@ DASHBOARD_JS = """(function () {
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
           const pnlCol = pnl >= 0 ? '#3fb950' : '#f85149';
           // LAB (OFF-combo): primary Trades/PnL/EV show LAB ledger / open shadows.
-          const labEligible = !on && !spec.is_independent_ai && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned;
+          // Independent AI V1 tiles (TYPE_B / SR_MICRO) use combo LAB shadow when OFF — same as other combo tiles.
+          // V2 keeps its own checker/shadow metrics UI (not LAB ledger).
+          const labEligible = !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned;
           const labOn = labEligible && (stats.lab_mode || (stats.lab_closes > 0) || (stats.lab_open_shadows > 0));
           const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
           const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
@@ -19685,9 +19786,11 @@ DASHBOARD_JS = """(function () {
               if (!parts.length) return '';
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
-            + (spec.is_independent_ai
+            + (spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2'
               ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — V2 uses own prompt, trade IDs, and AI clock</div>'
-              : '')
+              : (spec.is_independent_ai
+                ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — independent AI prompt + staggered cadence; OFF = LAB shadow</div>'
+                : ''))
             + (function () {
               const prom = spec.promotion_criteria;
               const kill = spec.kill_criteria;

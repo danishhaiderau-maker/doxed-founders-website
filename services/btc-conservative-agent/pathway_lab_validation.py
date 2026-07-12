@@ -21,6 +21,8 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
     any_combo_execution_enabled,
     combo_lane_matches,
     is_ai_scan_lane,
@@ -42,6 +44,7 @@ TILE_INDEPENDENCE_REPORT_FILE = "tile_independence_report.json"
 TYPE_B_EXECUTION_AUDIT_FILE = "type_b_execution_audit.json"
 AI_SCAN_INDEPENDENCE_REPORT_FILE = "ai_scan_independence_report.json"
 AI_SCAN_ROLE_VALIDATION_FILE = "ai_scan_role_validation.json"
+INDEPENDENT_V1_POST_AI_SPAWN_FILE = "independent_v1_post_ai_spawn_validation.json"
 LANE_MEMORY_VALIDATION_FILE = "lane_memory_validation.json"
 LANE_MEMORY_VIOLATION_FILE = "lane_memory_violation.json"
 RUNTIME_PATHWAY_INTEGRITY_FILE = "runtime_pathway_integrity.json"
@@ -864,6 +867,109 @@ def verify_repo_version_sync() -> dict:
     return payload
 
 
+
+def run_independent_v1_post_ai_spawn_validation() -> dict:
+    """
+    Prove independent AI V1 research tiles wire post-AI into LAB/process_signal.
+
+    Catches the class of bug where maybe_tick_* calls evaluate_signal_with_ai but
+    never calls _spawn_independent_v1_lane_after_ai / _spawn_lab_combo_shadow /
+    process_signal — so AI ticks run while Lane Lab opportunity capture stays at 0.
+    """
+    tick_fns = {
+        RESEARCH_LANE_TYPE_B_HUNTER_V1: "maybe_tick_type_b_hunter_v1_research",
+        RESEARCH_LANE_SR_MICRO_TILE_V1: "maybe_tick_sr_micro_tile_v1_research",
+    }
+    helper_name = "_spawn_independent_v1_lane_after_ai"
+    checks = []
+    sources: dict[str, str] = {}
+
+    try:
+        import bot
+    except Exception as exc:
+        bot = None
+        import_err = str(exc)
+    else:
+        import_err = None
+
+    for lane, fn_name in tick_fns.items():
+        src = ""
+        if bot is not None:
+            try:
+                src = inspect.getsource(getattr(bot, fn_name))
+            except Exception as exc:
+                src = f"inspect_error:{exc}"
+        sources[fn_name] = src
+
+        has_ai = "evaluate_signal_with_ai" in src
+        has_spawn = helper_name in src
+        checks.append(
+            {
+                "check": f"{fn_name} calls evaluate_signal_with_ai",
+                "passed": has_ai and not src.startswith("inspect_error"),
+                "detail": f"lane={lane} has_ai={has_ai}",
+            }
+        )
+        checks.append(
+            {
+                "check": f"{fn_name} calls {helper_name} after AI",
+                "passed": has_ai and has_spawn,
+                "detail": (
+                    f"lane={lane} has_spawn_helper={has_spawn} "
+                    "(AI-only ticks without spawn leave Lane Lab at 0)"
+                ),
+            }
+        )
+
+    helper_src = ""
+    if bot is not None:
+        try:
+            helper_src = inspect.getsource(getattr(bot, helper_name))
+        except Exception as exc:
+            helper_src = f"inspect_error:{exc}"
+    sources[helper_name] = helper_src
+
+    helper_ok = (
+        "_spawn_combo_lane" in helper_src
+        and ("SPAWN_SKIPPED" in helper_src or "log_lane_opportunity_event" in helper_src)
+    )
+    checks.append(
+        {
+            "check": f"{helper_name} routes into _spawn_combo_lane / opportunity log",
+            "passed": helper_ok and not str(helper_src).startswith("inspect_error"),
+            "detail": (
+                f"calls_spawn_combo_lane={'_spawn_combo_lane' in helper_src} "
+                f"logs_opportunity={'log_lane_opportunity_event' in helper_src}"
+            ),
+        }
+    )
+
+    if import_err:
+        checks.append(
+            {
+                "check": "bot module importable for source inspection",
+                "passed": False,
+                "detail": f"import_error:{import_err}",
+            }
+        )
+
+    passed = all(c["passed"] for c in checks)
+    payload = {
+        "schema": "independent_v1_post_ai_spawn_validation_v1",
+        "generated_at": _utc_now(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "verdict": "PASS" if passed else "FAIL",
+        "lanes": list(tick_fns.keys()),
+        "checks": checks,
+        "policy": (
+            "Independent AI V1 tiles must call _spawn_independent_v1_lane_after_ai "
+            "after evaluate_signal_with_ai so LAB shadow / process_signal can run"
+        ),
+    }
+    _write_json(INDEPENDENT_V1_POST_AI_SPAWN_FILE, payload)
+    return payload
+
+
 def run_startup_pathway_validation(
     retired_status: dict = None,
     live_armed: bool = False,
@@ -877,13 +983,14 @@ def run_startup_pathway_validation(
     tiles = run_tile_independence_self_test(retired_status=retired_status)
     ai_scan = run_ai_scan_independence_self_test(retired_status=retired_status)
     ai_scan_role = run_ai_scan_role_validation()
+    v1_post_ai = run_independent_v1_post_ai_spawn_validation()
     sync = verify_repo_version_sync()
     ok = all(
         r.get("verdict") in ("PASS", "READY")
-        for r in (type_b, tiles, ai_scan, ai_scan_role, sync, sync_ready)
+        for r in (type_b, tiles, ai_scan, ai_scan_role, v1_post_ai, sync, sync_ready)
     )
     summary = {
-        "schema": "pathway_startup_validation_v3",
+        "schema": "pathway_startup_validation_v4",
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "strict_validation": strict,
@@ -893,6 +1000,7 @@ def run_startup_pathway_validation(
         "tile_independence": tiles["verdict"],
         "ai_scan_independence": ai_scan["verdict"],
         "ai_scan_role": ai_scan_role["verdict"],
+        "independent_v1_post_ai_spawn": v1_post_ai["verdict"],
         "version_sync": sync["verdict"],
         "artifacts": [
             "bot_analyzer_sync.json",
@@ -900,6 +1008,7 @@ def run_startup_pathway_validation(
             TILE_INDEPENDENCE_REPORT_FILE,
             AI_SCAN_INDEPENDENCE_REPORT_FILE,
             AI_SCAN_ROLE_VALIDATION_FILE,
+            INDEPENDENT_V1_POST_AI_SPAWN_FILE,
             "repo_version_sync.json",
         ],
     }
@@ -907,6 +1016,7 @@ def run_startup_pathway_validation(
         raise SystemExit(
             f"Pathway Lab startup validation FAILED — "
             f"type_b={type_b['verdict']} tiles={tiles['verdict']} "
-            f"ai_scan={ai_scan['verdict']} ai_scan_role={ai_scan_role['verdict']} sync={sync['verdict']}"
+            f"ai_scan={ai_scan['verdict']} ai_scan_role={ai_scan_role['verdict']} "
+            f"v1_post_ai={v1_post_ai['verdict']} sync={sync['verdict']}"
         )
     return summary
