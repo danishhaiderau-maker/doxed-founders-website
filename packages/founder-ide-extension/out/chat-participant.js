@@ -36,30 +36,26 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.findModelAlias = void 0;
 exports.registerFounderOsChatParticipant = registerFounderOsChatParticipant;
 /**
- * Enhanced `@Founder OS` chat participant.
+ * `@Founder OS` chat participant — VS Code 1.93+ stable ChatParticipant API.
  *
- * Phase 1's participant was onboarding-only (just told the user to pick a model).
- * Phase 4 makes it actually drive a `vscode.lm` round-trip: when the user types
- * `@Founder OS <message>`, we select the founder-os model for the active
- * execution profile, build a Memory-Engine-injected system prompt, and stream
- * the response into the chat via the ChatResponseStream.
+ * On VS Code 1.104+ this extension also registers a `LanguageModelChatProvider`
+ * so Founder OS models appear in the built-in model picker. That provider API
+ * does not exist in VS Code 1.93.1, so on older builds the participant is the
+ * primary surface: it streams responses straight from the Founder OS gateway
+ * into the Chat view via `stream.markdown()`, using the OpenAI-compatible SSE
+ * client in `gateway-client.ts`.
  *
- * Tool use: the participant passes the registered `founder.*` tools to the
- * model. When the model emits a `LanguageModelToolCallPart`, we invoke the tool
- * via `vscode.lm.invokeTool`, append the result, and re-request — implementing
- * the agent loop described in design report §8.4.
+ * The handler is intentionally tolerant: if `vscode.lm.selectChatModels` returns
+ * Founder OS models (newer VS Code), it forwards through the model API; otherwise
+ * it falls back to a direct gateway call. Either way the user sees streamed text
+ * in the Chat box.
  */
 const vscode = __importStar(require("vscode"));
 const models_1 = require("./models");
 Object.defineProperty(exports, "findModelAlias", { enumerable: true, get: function () { return models_1.findModelAlias; } });
 const memory_1 = require("./memory");
-/** Tool names registered by the extension that we expose to the model. */
-const FOUNDER_TOOL_NAMES = [
-    'founder.editFile',
-    'founder.runCommand',
-    'founder.readWorkspace',
-];
-const MAX_TOOL_ROUNDS = 6;
+const credentials_1 = require("./credentials");
+const gateway_client_1 = require("./gateway-client");
 function registerFounderOsChatParticipant(context, deps) {
     let participant;
     try {
@@ -74,101 +70,75 @@ function registerFounderOsChatParticipant(context, deps) {
     return participant;
 }
 async function handleParticipantRequest(request, _context, stream, deps, token) {
-    const profile = deps.profileManager.profile;
-    const desiredAlias = deps.profileManager.alias;
-    // Resolve a founder-os LanguageModelChat. Prefer the profile's alias; fall
-    // back to any founder-os model if the alias isn't selectable (e.g. older API).
-    const models = await vscode.lm.selectChatModels({ vendor: models_1.FOUNDER_OS_VENDOR });
-    if (!models || models.length === 0) {
-        stream.markdown('Founder OS is not connected. Pair Founder Node (or set `founderOs.*` settings) and reload, then try again.');
+    const prompt = request.prompt ?? '';
+    if (prompt.trim().length === 0) {
+        stream.markdown('Type a message and I’ll route it through your Founder OS gateway.');
         return;
     }
-    let model = models.find((m) => m.id === desiredAlias.id) ?? models[0];
-    // Honour the `/code` slash command if present — force the coding alias.
+    // Resolve the alias for the active execution profile (or `/code` slash cmd).
+    const desiredAlias = deps.profileManager.alias;
+    let alias = desiredAlias ?? models_1.FOUNDER_OS_MODELS[0];
     if (request.command === 'code') {
-        const codeModel = models.find((m) => m.id === 'founder-os-code');
+        const codeModel = (0, models_1.findModelAlias)('founder-os-code');
         if (codeModel)
-            model = codeModel;
+            alias = codeModel;
     }
     // Build the system prompt with Memory Engine context.
-    const memory = await (0, memory_1.buildSystemPrompt)(deps.creds, token);
-    const systemMessage = vscode.LanguageModelChatMessage.User(memory.hasMemory && memory.text.length > 0
-        ? `${memory.text}\n\nYou are Founder OS, the founder's AI pair-programmer. Be concise and direct.`
-        : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Be concise and direct.');
-    const userMessage = vscode.LanguageModelChatMessage.User(request.prompt);
-    // Gather tool references for the registered founder.* tools.
-    const availableTools = vscode.lm.tools.filter((t) => FOUNDER_TOOL_NAMES.includes(t.name));
-    const toolRefs = availableTools.map((info) => ({
-        name: info.name,
-        description: info.description,
-        inputSchema: info.inputSchema,
-    }));
-    const requestOptions = {
-        justification: 'Answering a Founder OS chat request via the founder\'s own gateway.',
-        tools: toolRefs,
-        toolMode: vscode.LanguageModelChatToolMode.Auto,
-    };
-    const messages = [systemMessage, userMessage];
-    let rounds = 0;
-    while (rounds < MAX_TOOL_ROUNDS) {
-        rounds++;
-        let response;
-        try {
-            response = await model.sendRequest(messages, requestOptions, token);
-        }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            stream.markdown(`\n\n_Founder OS request failed: ${msg}_`);
-            return;
-        }
-        // Consume the stream, forwarding text to the chat and collecting tool calls.
-        const toolCalls = [];
-        try {
-            for await (const chunk of response.stream) {
-                if (chunk instanceof vscode.LanguageModelTextPart) {
-                    stream.markdown(chunk.value);
-                }
-                else if (chunk instanceof vscode.LanguageModelToolCallPart) {
-                    toolCalls.push(chunk);
-                }
-            }
-        }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            stream.markdown(`\n\n_Founder OS stream error: ${msg}_`);
-            return;
-        }
-        if (toolCalls.length === 0) {
-            return; // pure text response — done.
-        }
-        // Record the assistant's tool calls, then invoke each tool and append the
-        // results as a user message (per the VS Code Chat API contract).
-        const assistantTurn = vscode.LanguageModelChatMessage.Assistant(toolCalls);
-        messages.push(assistantTurn);
-        const resultParts = [];
-        for (const call of toolCalls) {
-            try {
-                const result = await vscode.lm.invokeTool(call.name, {
-                    toolInvocationToken: request.toolInvocationToken,
-                    input: call.input,
-                }, token);
-                // Surface a short note in the chat so the founder sees what happened.
-                const firstText = result.content
-                    .find((c) => c instanceof vscode.LanguageModelTextPart);
-                stream.markdown(`\n\n_Tool \`${call.name}\` ran: ${(firstText?.value ?? '(ok)').slice(0, 200)}_\n\n`);
-                resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, result.content));
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                stream.markdown(`\n\n_Tool \`${call.name}\` failed: ${msg}_\n\n`);
-                resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, [
-                    new vscode.LanguageModelTextPart(`Tool error: ${msg}`),
-                ]));
-            }
-        }
-        messages.push(vscode.LanguageModelChatMessage.User(resultParts));
-        // Loop again so the model can react to the tool results.
+    let memoryText = '';
+    try {
+        const memory = await (0, memory_1.buildSystemPrompt)(deps.creds, token);
+        if (memory.hasMemory && memory.text.length > 0)
+            memoryText = memory.text;
     }
-    stream.markdown(`\n\n_Founder OS: reached the ${MAX_TOOL_ROUNDS}-round tool-use limit for this turn._`);
+    catch {
+        /* memory must never block chat */
+    }
+    const systemContent = memoryText.length > 0
+        ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Be concise and direct.`
+        : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Be concise and direct.';
+    const gatewayMessages = [
+        { role: 'system', content: systemContent },
+        { role: 'user', content: prompt },
+    ];
+    const client = {
+        baseUrl: (0, credentials_1.proxyBaseUrl)(deps.creds.apiBaseUrl),
+        bearer: (0, credentials_1.bearerFromCredentials)(deps.creds),
+    };
+    const cfg = vscode.workspace.getConfiguration('founderOs');
+    const timeoutMs = cfg.get('requestTimeoutMs') ?? 120_000;
+    let ok = false;
+    let errorMessage;
+    try {
+        await (0, gateway_client_1.callGateway)(client, {
+            model: alias.id,
+            messages: gatewayMessages,
+            executionProfile: alias.executionProfile,
+            founderOsMetadata: true,
+            timeoutMs,
+        }, {
+            onToken: (delta) => {
+                if (token.isCancellationRequested)
+                    return;
+                stream.markdown(delta);
+            },
+            onMetadata: (meta) => {
+                deps.costTracker?.record(meta);
+            },
+            onError: (_status, body) => {
+                errorMessage = body.slice(0, 300);
+            },
+        }, token);
+        ok = !token.isCancellationRequested;
+    }
+    catch (err) {
+        errorMessage = err instanceof Error ? err.message : String(err);
+        if (!token.isCancellationRequested) {
+            stream.markdown(`\n\n_Founder OS gateway error: ${errorMessage}_`);
+        }
+        return;
+    }
+    if (!ok && errorMessage) {
+        stream.markdown(`\n\n_Founder OS request failed: ${errorMessage}_`);
+    }
 }
 //# sourceMappingURL=chat-participant.js.map

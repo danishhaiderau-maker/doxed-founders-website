@@ -342,7 +342,7 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
         )}
       </div>
 
-      {currentMode === 'FOUNDER_NODE' && (
+      {currentMode === 'FOUNDER_NODE' ? (
         <>
           <div className="mt-4 rounded-lg border border-zinc-700 bg-black/20 p-3 text-[10px] text-zinc-400">
             <p className="font-medium text-zinc-300">Vault files on your machine</p>
@@ -352,8 +352,24 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
             </p>
             <p className="mt-1">Edit locally — Founder Node syncs encrypted snapshots every ~60s.</p>
           </div>
-          <FounderNodePairingPanel accessToken={accessToken} active={currentMode === 'FOUNDER_NODE'} />
+          <FounderNodePairingPanel accessToken={accessToken} active />
         </>
+      ) : (
+        <div className="mt-4 rounded-lg border border-amber-500/35 bg-amber-950/20 p-4">
+          <p className="text-sm font-semibold text-amber-100">Pairing code is under Founder Vault</p>
+          <p className="mt-1 text-xs text-amber-100/75">
+            Select <strong className="text-amber-50">Founder Vault (Founder Node)</strong> above to generate a
+            desktop pairing code and see node online status. Downloads alone do not show the code.
+          </p>
+          <button
+            type="button"
+            disabled={!!busy}
+            onClick={() => void saveMode('FOUNDER_NODE')}
+            className="mt-3 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {busy === 'mode' ? 'Switching…' : 'Switch to Founder Vault & show pairing'}
+          </button>
+        </div>
       )}
 
       <MobileVaultPanel accessToken={accessToken} />

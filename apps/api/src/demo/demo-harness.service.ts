@@ -100,6 +100,7 @@ export class DemoHarnessService {
       raiseRoom,
       debugSquasher,
       founderEconomics,
+      intentEngine,
     ] = await Promise.all([
       this.kernel.runAiProxyChecks().catch((err: unknown) => {
         this.logger.warn(`AI Proxy pillar crashed: ${msg(err)}`);
@@ -145,6 +146,10 @@ export class DemoHarnessService {
         this.logger.warn(`Founder Economics pillar crashed: ${msg(err)}`);
         return [{ name: 'founder_economics_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
       }),
+      this.kernel.runIntentEngineChecks().catch((err: unknown) => {
+        this.logger.warn(`Intent Engine pillar crashed: ${msg(err)}`);
+        return [{ name: 'intent_engine_pillar', passed: false, detail: `crashed: ${msg(err)}` }] as CheckResult[];
+      }),
     ]);
 
     // 4. Switches + fake counts.
@@ -172,6 +177,7 @@ export class DemoHarnessService {
       raiseRoom,
       debugSquasher,
       founderEconomics,
+      intentEngine,
       switches,
       numbers,
       startedAt,

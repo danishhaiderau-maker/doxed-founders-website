@@ -15,6 +15,13 @@ export type ClaimableEpoch = {
   claimWindowOpen: boolean;
 };
 
+/**
+ * Claim UI for Founder Economics MVP.
+ *
+ * Production path (counsel-gated): wallet signs EpochDistributor.claim on-chain.
+ * MVP path: API returns a Merkle proof stub; Connect wallet CTA is always visible
+ * so founders know the real claim surface even when no epochs are ready.
+ */
 export function ClaimTokens({
   claimable,
   signedIn,
@@ -27,6 +34,14 @@ export function ClaimTokens({
   const [busy, setBusy] = useState<string | null>(null);
   const [proof, setProof] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [walletHint, setWalletHint] = useState<string | null>(null);
+
+  function onConnectWallet() {
+    setWalletHint(
+      'Wallet connect ships with the production EpochDistributor deploy (counsel-gated). ' +
+        'Until then, sign in below to fetch off-chain Merkle proofs for test epochs.',
+    );
+  }
 
   if (!signedIn) {
     return (
@@ -36,7 +51,18 @@ export function ClaimTokens({
           <Link href="/login?callbackUrl=/founder-economics" className="text-emerald-400 hover:underline">
             Sign in
           </Link>{' '}
-          to claim your epoch token allocation.
+          to see claimable epochs, then connect a wallet for on-chain claims when production contracts go live.
+        </p>
+        <button
+          type="button"
+          onClick={onConnectWallet}
+          className="mt-4 rounded-md border border-violet-500/40 bg-violet-950/30 px-3 py-1.5 text-xs font-medium text-violet-100 hover:border-violet-400"
+        >
+          Connect wallet
+        </button>
+        {walletHint && <p className="mt-2 text-[11px] text-zinc-500">{walletHint}</p>}
+        <p className="mt-3 text-[11px] text-zinc-600">
+          MVP = off-chain DDollar + Merkle proofs. Production = audited Solidity + live claim window.
         </p>
       </section>
     );
@@ -70,17 +96,32 @@ export function ClaimTokens({
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-400">Claim epoch tokens</h3>
-        <span className="text-xs text-zinc-500">{formatDdollarCompact(total)} claimable</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-500">{formatDdollarCompact(total)} claimable</span>
+          <button
+            type="button"
+            onClick={onConnectWallet}
+            className="rounded-md border border-violet-500/40 bg-violet-950/30 px-3 py-1 text-xs font-medium text-violet-100 hover:border-violet-400"
+          >
+            Connect wallet
+          </button>
+        </div>
       </div>
+
+      {walletHint && (
+        <p className="mt-2 rounded-md border border-zinc-800 bg-black/30 px-3 py-2 text-[11px] text-zinc-400">
+          {walletHint}
+        </p>
+      )}
 
       {loading && claimable.length === 0 ? (
         <p className="mt-3 text-sm text-zinc-500">Loading…</p>
       ) : claimable.length === 0 ? (
         <p className="mt-3 text-sm text-zinc-500">
-          No claimable allocations yet. Epochs settle on a schedule; your share
-          will appear here once a Merkle root is published.
+          No claimable allocations yet. Epochs settle on a schedule; your share will appear here once a Merkle
+          root is published. Connect wallet stays available for the production claim path.
         </p>
       ) : (
         <ul className="mt-3 space-y-2">
@@ -100,7 +141,7 @@ export function ClaimTokens({
                 onClick={() => void claim(c)}
                 className="rounded-md border border-emerald-500/40 bg-emerald-950/30 px-3 py-1 text-xs text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
               >
-                {busy === c.epochId ? 'Preparing…' : 'Claim'}
+                {busy === c.epochId ? 'Preparing…' : 'Get Merkle proof (MVP)'}
               </button>
             </li>
           ))}
@@ -116,8 +157,9 @@ export function ClaimTokens({
       )}
 
       <p className="mt-3 text-[11px] text-zinc-600">
-        Your wallet calls <code className="text-zinc-400">EpochDistributor.claim(epoch, account, amount, proof)</code>{' '}
-        on-chain with the proof returned here.
+        Production: your wallet calls{' '}
+        <code className="text-zinc-400">EpochDistributor.claim(epoch, account, amount, proof)</code> on-chain.
+        MVP returns the proof only — no fake deploy.
       </p>
     </section>
   );

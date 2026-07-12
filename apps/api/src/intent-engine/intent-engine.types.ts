@@ -1,9 +1,9 @@
 /**
- * Founder Intent Engine — thin Phase 5 skeleton (docs/KERNEL.md §3 #10).
+ * Founder Intent Engine — Phase 5 skeleton thickening toward Execution Graph.
  *
- * Goal → Task steps via AI Gateway, logged to Flight Recorder. This is NOT
- * the full Execution Graph yet — it ships a usable decompose path so Phase 5
- * is not vapor while the heavier graph planner lands.
+ * Goal → Task steps via AI Gateway, logged to Flight Recorder.
+ * Optional: execute the first *safe* step via Execution Manager
+ * (read-only filesystem listing only — never shell/write/git/browser).
  */
 export type IntentStep = {
   id: string;
@@ -14,6 +14,15 @@ export type IntentStep = {
   order: number;
 };
 
+export type IntentStepExecution = {
+  stepId: string;
+  attempted: boolean;
+  status: 'success' | 'failed' | 'skipped' | 'unsafe';
+  detail: string;
+  stdout?: string;
+  stderr?: string;
+};
+
 export type IntentDecomposition = {
   goalId: string;
   goal: string;
@@ -22,6 +31,8 @@ export type IntentDecomposition = {
   model?: string;
   requestId: string;
   createdAt: string;
+  /** Present when executeFirstStep was requested. */
+  firstStepExecution?: IntentStepExecution;
 };
 
 export type DecomposeGoalInput = {
@@ -29,4 +40,12 @@ export type DecomposeGoalInput = {
   goal: string;
   projectId?: string | null;
   maxSteps?: number;
+  /**
+   * When true, attempt a safe first-step execution via Execution Manager.
+   * Only filesystem readWorkspace / file-read of allowlisted paths run;
+   * shell, writes, git, and browser are skipped as unsafe.
+   */
+  executeFirstStep?: boolean;
+  /** Working directory for a safe filesystem first step (defaults to cwd). */
+  cwd?: string;
 };

@@ -46,7 +46,13 @@ export function FounderNodeInstallGuide() {
         </li>
         <li>
           Tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code. The pairing
-          window can close — keep the tray app running.
+          window can close — keep the tray app running. Pairing writes{' '}
+          <code className="text-zinc-400">~/FounderVault/node-config.json</code>.
+        </li>
+        <li>
+          Open <strong className="text-white">Founder IDE</strong> — it auto-loads the vault token and routes{' '}
+          <strong className="text-white">@Founder OS</strong> chat through the AI Gateway (no GitHub/Google/Apple
+          login inside the IDE). Or use tray <strong className="text-white">Connect Founder IDE</strong>.
         </li>
         <li>
           Complete <strong className="text-white">Sync, index & search</strong> —{' '}
