@@ -6,7 +6,7 @@
 
 export type LamAdapterId = 'browser' | 'computer-use';
 
-export type LamTaskStatus = 'PLANNING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type LamTaskStatus = 'PLANNING' | 'RUNNING' | 'AWAITING_CONFIRMATION' | 'COMPLETED' | 'FAILED';
 
 export interface LamStep {
   index: number;
@@ -36,6 +36,7 @@ export interface LamTask {
   elapsedMs?: number;
   costDdollar?: number;
   error?: string;
+  confirmationStepIndex?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -50,6 +51,7 @@ export interface LamAdapterStatus {
 export const STATUS_META: Record<LamTaskStatus, { label: string; color: string }> = {
   PLANNING: { label: 'Planning', color: 'text-amber-300' },
   RUNNING: { label: 'Running', color: 'text-sky-300' },
+  AWAITING_CONFIRMATION: { label: 'Needs confirmation', color: 'text-amber-300' },
   COMPLETED: { label: 'Completed', color: 'text-emerald-300' },
   FAILED: { label: 'Failed', color: 'text-rose-300' },
 };

@@ -24,7 +24,7 @@ the production gates in this document remain open.
 | Phase | Status | Audit result and remaining gate |
 | --- | --- | --- |
 | 1. Kernel / Memory | Partial | Checkout restored; Learning Engine watermark is now Prisma-backed. Apply migrations and run a real multi-instance recovery test. |
-| 2. Founder OS | Partial | Founder OS no longer advertises a Solana launch/DEX or a fake Phase-7 waitlist. Its activity strip now reports actual connected integrations, but a full workspace/deployment/health activity feed still needs end-to-end data. |
+| 2. Founder OS | Implemented, deployment-gated | Founder OS no longer advertises a Solana launch/DEX or a fake Phase-7 waitlist. The dashboard now returns the real founder tier/DDollar balance and reports actual build sessions, update work, bounties, and verified integrations. Staging browser smoke tests still need a live account and connected infrastructure. |
 | 3. Founder IDE | Blocked | The misleading shell/filesystem fallback was removed: the IDE target now reports offline until verified IPC exists. A real Void fork, signed installer, updater, rollback path and live IPC protocol are not present in this repository. |
 | 4. Learning Engine | Implemented, deployment-gated | Durable `LearningEngineState`, migration and existing scheduled rollup are in place. Migration application and operational outcome tests remain required. |
 | 5. Routing | Partial | Capability and Flight Recorder code exists, but a distributed-cache/fallback/outcome test has not been demonstrated against staging. |
@@ -32,7 +32,7 @@ the production gates in this document remain open.
 | 6.5 Debug Squasher | Partial | Existing consent and scheduled surfaces remain; this audit did not demonstrate real repository checks or a production consent/cron run. |
 | 7. Deployment modes | Blocked for promotion | Vercel read access is confirmed, but Railway authentication is invalid and no isolated Neon/staging validation has run. No Vercel or Railway deployment was made. |
 | 8. Founder Economics | Testnet hardening implemented; production blocked | Exact-unit Merkle allocation, one verified Robinhood EVM testnet wallet, immutable snapshots, IPFS pin requirement, receipt/state verification, governance model registry, seven-day challenge/veto, 365-day expiry return, reconciliation and the locked fixture are implemented and locally tested. Contract deployment, five-minute testnet harness, independent security review and counsel gate remain mandatory. |
-| 9. LAM | Partial | Prisma persistence and tier checks exist. Cross-restart execution/resume, retries and explicit confirmation policies are still incomplete. |
+| 9. LAM | Implemented, deployment-gated | The queue now persists leases/retries, reclaims stale workers, resumes the original plan without replanning, and pauses browser-write/desktop-control steps for per-step founder confirmation. A real Computer Use provider and restart test against staging remain required. |
 
 ## Locked Founder Economics fixture
 

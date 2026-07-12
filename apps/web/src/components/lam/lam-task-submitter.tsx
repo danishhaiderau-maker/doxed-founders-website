@@ -55,7 +55,7 @@ export function LamTaskSubmitter({ accessToken }: Props) {
           if (!res.ok) return;
           const t = (await res.json()) as LamTask;
           setActiveTask(t);
-          if (t.status === 'COMPLETED' || t.status === 'FAILED') {
+          if (t.status === 'COMPLETED' || t.status === 'FAILED' || t.status === 'AWAITING_CONFIRMATION') {
             stopPolling();
           }
         } catch {
@@ -97,6 +97,26 @@ export function LamTaskSubmitter({ accessToken }: Props) {
   const isLoading =
     !!activeTask &&
     (activeTask.status === 'PLANNING' || activeTask.status === 'RUNNING');
+
+  const confirmNextStep = useCallback(async () => {
+    if (!activeTask) return;
+    setError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/lam/task/${activeTask.id}/confirm`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(body.message ?? `${res.status} ${res.statusText}`);
+      }
+      const task = (await res.json()) as LamTask;
+      setActiveTask(task);
+      pollTask(task.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [accessToken, activeTask, pollTask]);
 
   return (
     <div className="space-y-5">
@@ -157,7 +177,7 @@ export function LamTaskSubmitter({ accessToken }: Props) {
         )}
       </div>
 
-      {activeTask && <TaskProgressView task={activeTask} />}
+      {activeTask && <TaskProgressView task={activeTask} onConfirm={confirmNextStep} />}
 
       {!isLoading && (
         <LamTaskHistory
@@ -175,7 +195,7 @@ export function LamTaskSubmitter({ accessToken }: Props) {
  * then each step's result as it completes, then the final synthesized
  * answer. This is the "action trace" surface.
  */
-function TaskProgressView({ task }: { task: LamTask }) {
+function TaskProgressView({ task, onConfirm }: { task: LamTask; onConfirm: () => void }) {
   const meta = STATUS_META[task.status] ?? STATUS_META.RUNNING;
   return (
     <div className="space-y-4">
@@ -257,6 +277,21 @@ function TaskProgressView({ task }: { task: LamTask }) {
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400 align-middle" />{' '}
             Asking the AI Gateway to plan the steps…
           </p>
+        )}
+
+        {task.status === 'AWAITING_CONFIRMATION' && (
+          <div className="mt-4 rounded-lg border border-amber-700/40 bg-amber-950/20 p-3">
+            <p className="text-xs text-amber-100">
+              Step {task.confirmationStepIndex ?? 'next'} could interact with an external site or desktop. Review the plan, then confirm to continue.
+            </p>
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="mt-3 rounded-md bg-amber-400 px-3 py-1.5 text-xs font-semibold text-black hover:bg-amber-300"
+            >
+              Confirm next step
+            </button>
+          </div>
         )}
 
         {task.result && (task.status === 'COMPLETED' || task.status === 'FAILED') && (

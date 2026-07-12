@@ -111,7 +111,8 @@ export class FounderOsService {
   }
 
   async getDashboard(userId: string) {
-    const founder = await this.prisma.founder.findUnique({
+    const [founder, user] = await Promise.all([
+      this.prisma.founder.findUnique({
       where: { userId },
       include: {
         projects: {
@@ -125,7 +126,18 @@ export class FounderOsService {
           },
         },
       },
-    });
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          reputationPoints: true,
+          contributorLevel: true,
+          builderTier: true,
+          lifetimeContributionEarned: true,
+        },
+      }),
+    ]);
 
     const connectedApps = await this.getConnectedApps(userId, founder);
     const pendingSuggestions = founder
@@ -154,6 +166,24 @@ export class FounderOsService {
       : [];
 
     return {
+      founder: founder
+        ? {
+            id: founder.id,
+            tier: user?.builderTier ?? null,
+            contributorLevel: user?.contributorLevel ?? 0,
+            reputationPoints: user?.reputationPoints ?? 0,
+            lifetimeContributionEarned: user?.lifetimeContributionEarned ?? 0,
+          }
+        : null,
+      user: user
+        ? {
+            id: user.id,
+            reputationPoints: user.reputationPoints,
+            contributorLevel: user.contributorLevel,
+            tier: user.builderTier,
+            lifetimeContributionEarned: user.lifetimeContributionEarned,
+          }
+        : null,
       founderCredits: founder?.founderCredits ?? 0,
       communityRewardPool: founder?.projects[0]?.communityRewardPool ?? 0,
       primaryProject: founder?.projects[0] ?? null,

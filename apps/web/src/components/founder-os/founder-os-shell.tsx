@@ -13,15 +13,19 @@ type DashboardData = {
   founder?: {
     id: string;
     tier?: string;
-    contributorLevel?: string;
+    contributorLevel?: number;
     reputationPoints?: number;
     lifetimeContributionEarned?: number;
   } | null;
   user?: {
     reputationPoints?: number;
-    contributorLevel?: string;
+    contributorLevel?: number;
+    tier?: string;
   };
-  connectedApps?: Array<{ provider: string; label: string; connectedAt?: string | null }>;
+  connectedApps?: Array<{ provider: string; label: string; connected: boolean; connectedAt?: string | null }>;
+  pendingSuggestions?: Array<{ id: string; headline: string; createdAt: string }>;
+  openBounties?: Array<{ id: string; title: string }>;
+  recentBuildSessions?: Array<{ id: string; title: string; createdAt: string }>;
 };
 
 type Props = { accessToken: string };
@@ -45,7 +49,7 @@ export function FounderOsShell({ accessToken }: Props) {
           data.founder?.reputationPoints ?? data.user?.reputationPoints ?? 0;
         setDdollar(points);
         const level =
-          data.founder?.tier ?? data.user?.contributorLevel ?? 'PARASITE';
+          data.founder?.tier ?? data.user?.tier ?? 'PARASITE';
         const normalized = String(level).toUpperCase();
         setTier(
           normalized === 'VERIFIED_BUILDER' || normalized === 'DOXXED'
@@ -378,18 +382,29 @@ function QuickLinksGrid() {
 }
 
 function RecentActivityStrip({ dashboard }: { dashboard: DashboardData | null }) {
-  const connectedApps = dashboard?.connectedApps ?? [];
+  const connectedApps = (dashboard?.connectedApps ?? []).filter((app) => app.connected);
+  const buildSessions = dashboard?.recentBuildSessions ?? [];
+  const suggestions = dashboard?.pendingSuggestions ?? [];
+  const bounties = dashboard?.openBounties ?? [];
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-5">
       <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
         Recent activity
       </h3>
       {dashboard ? (
-        <p className="mt-3 text-xs text-zinc-500">
-          {connectedApps.length > 0
-            ? `${connectedApps.length} connected integration${connectedApps.length === 1 ? '' : 's'} recorded: ${connectedApps.map((app) => app.label).join(', ')}.`
-            : 'No connected integrations are recorded for this account yet.'}
-        </p>
+        <div className="mt-3 space-y-1 text-xs text-zinc-500">
+          <p>
+            {buildSessions.length > 0
+              ? `Latest build: ${buildSessions[0]!.title} (${new Date(buildSessions[0]!.createdAt).toLocaleString()}).`
+              : 'No recent build sessions are recorded yet.'}
+          </p>
+          <p>
+            {connectedApps.length > 0
+              ? `${connectedApps.length} connected integration${connectedApps.length === 1 ? '' : 's'}: ${connectedApps.map((app) => app.label).join(', ')}.`
+              : 'No connected integrations are recorded for this account yet.'}
+          </p>
+          <p>{suggestions.length} pending update{suggestions.length === 1 ? '' : 's'} · {bounties.length} open bount{bounties.length === 1 ? 'y' : 'ies'}.</p>
+        </div>
       ) : (
         <p className="mt-3 text-xs text-zinc-500">
           Activity status is unavailable until the dashboard connection succeeds.

@@ -3436,7 +3436,7 @@ model LamTask {
   id           String    @id @default(cuid())
   userId       String
   goal         String    @db.Text
-  /// PLANNING | RUNNING | SYNTHESIZING | COMPLETED | FAILED
+  /// PLANNING | RUNNING | AWAITING_CONFIRMATION | SYNTHESIZING | COMPLETED | FAILED
   status       String    @default("PLANNING")
   /// The plan the AI Gateway produced: [{ index, description, adapter, payload }]
   planJson     Json?
@@ -3449,6 +3449,14 @@ model LamTask {
   /// Estimated cost in DDollar (rough: ~1 per step).
   costDdollar  Int?
   errorMessage String?   @db.Text
+  /// Durable worker retry state. A stopped API can safely resume claimed work.
+  attemptCount Int       @default(0)
+  nextAttemptAt DateTime?
+  executionClaimedAt DateTime?
+  /// A browser write or computer-control step pauses here until the founder confirms it.
+  confirmationStepIndex Int?
+  confirmedStepIndex    Int?
+  confirmedAt           DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   completedAt  DateTime?
@@ -3457,6 +3465,7 @@ model LamTask {
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([status])
+  @@index([status, nextAttemptAt])
 }
 
 model LamStep {

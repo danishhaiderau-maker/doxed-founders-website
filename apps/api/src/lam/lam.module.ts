@@ -3,6 +3,7 @@ import { LamController } from './lam.controller';
 import { LamOrchestratorService } from './lam-orchestrator.service';
 import { BrowserAdapter } from './browser.adapter';
 import { ComputerUseAdapter } from './computer-use.adapter';
+import { LamScheduler } from './lam.scheduler';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AiProxyModule } from '../ai-proxy/ai-proxy.module';
 import { FlightRecorderModule } from '../flight-recorder/flight-recorder.module';
@@ -27,7 +28,7 @@ import { FlightRecorderModule } from '../flight-recorder/flight-recorder.module'
 @Module({
   imports: [PrismaModule, AiProxyModule, FlightRecorderModule],
   controllers: [LamController],
-  providers: [LamOrchestratorService, BrowserAdapter, ComputerUseAdapter],
+  providers: [LamOrchestratorService, LamScheduler, BrowserAdapter, ComputerUseAdapter],
   exports: [LamOrchestratorService, BrowserAdapter, ComputerUseAdapter],
 })
 export class LamModule {}

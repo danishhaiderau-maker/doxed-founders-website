@@ -91,6 +91,18 @@ export class LamController {
   }
 
   /**
+   * Explicit consent gate for the next browser-write or desktop-control step.
+   * Read-only research never requires this endpoint.
+   */
+  @Post('task/:id/confirm')
+  @HttpCode(202)
+  async confirmTask(@Param('id') id: string, @CurrentUser() user: AuthUser): Promise<LamTask> {
+    const task = await this.orchestrator.confirmTask(user.id, id);
+    if (!task) throw new NotFoundException(`LAM task ${id} is not awaiting your confirmation`);
+    return task;
+  }
+
+  /**
    * GET /api/lam/tasks — recent tasks for the history list.
    */
   @Get('tasks')

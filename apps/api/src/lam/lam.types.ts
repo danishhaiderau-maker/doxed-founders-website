@@ -87,6 +87,7 @@ export interface LamStepResult {
 export type LamTaskStatus =
   | 'PLANNING'
   | 'RUNNING'
+  | 'AWAITING_CONFIRMATION'
   | 'SYNTHESIZING'
   | 'COMPLETED'
   | 'FAILED';
@@ -112,6 +113,8 @@ export interface LamTask {
   costDdollar?: number;
   /** Error message on FAILED. */
   error?: string;
+  /** Next externally-effecting step that needs the founder's confirmation. */
+  confirmationStepIndex?: number;
   createdAt: string;
   updatedAt: string;
 }
