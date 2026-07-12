@@ -30,7 +30,7 @@ type BuilderSettingsPanelProps = {
 type SettingsTabId = 'downloads' | 'ai' | 'infra' | 'security';
 
 const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
-  { id: 'downloads', label: 'Downloads & pairing' },
+  { id: 'downloads', label: 'Founder Stack' },
   { id: 'ai', label: 'AI Providers' },
   { id: 'infra', label: 'Infrastructure' },
   { id: 'security', label: 'Security' },

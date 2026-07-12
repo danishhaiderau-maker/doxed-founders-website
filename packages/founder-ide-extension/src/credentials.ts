@@ -7,7 +7,7 @@
  *
  * The bearer token format is `fos_{nodeId}:{nodeToken}` — exactly what the
  * API's `FounderNodeGuard` accepts, and what `connect-ide.ts` writes into
- * Cursor's settings.json. See `apps/founder-node/src/connect-ide.ts`.
+ * Cursor / Founder IDE settings.json. See `apps/founder-node/src/connect-ide.ts`.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -36,7 +36,7 @@ export function nodeConfigPath(): string {
   return path.join(os.homedir(), 'FounderVault', 'node-config.json');
 }
 
-function readVaultConfig(): NodeConfigFile | null {
+export function readVaultConfig(): NodeConfigFile | null {
   const file = nodeConfigPath();
   try {
     if (!fs.existsSync(file)) return null;
@@ -71,7 +71,8 @@ export function resolveCredentials(): FounderOsCredentials | null {
 
   const vault = readVaultConfig();
 
-  const apiBaseUrl = nonEmpty(settingsUrl) ? settingsUrl! : vault?.apiBaseUrl ?? '';
+  const rawUrl = nonEmpty(settingsUrl) ? settingsUrl! : vault?.apiBaseUrl ?? '';
+  const apiBaseUrl = rawUrl ? normalizeApiBaseUrl(rawUrl) : '';
   const nodeId = nonEmpty(settingsNodeId) ? settingsNodeId! : vault?.nodeId ?? '';
   const nodeToken = nonEmpty(settingsNodeToken) ? settingsNodeToken! : vault?.nodeToken ?? '';
 
@@ -82,6 +83,63 @@ export function resolveCredentials(): FounderOsCredentials | null {
   const source: FounderOsCredentials['source'] = usedSettings && usedVault ? 'mixed' : usedSettings ? 'settings' : 'vault';
 
   return { apiBaseUrl, nodeId, nodeToken, source };
+}
+
+/**
+ * Normalize vault / marketing host to the API host used by the gateway.
+ * `https://doxxedcrypto.digital` → `https://api.doxxedcrypto.digital`
+ */
+export function normalizeApiBaseUrl(url: string): string {
+  const trimmed = url.replace(/\/$/, '');
+  try {
+    const u = new URL(trimmed);
+    if (u.hostname === 'doxxedcrypto.digital' || u.hostname === 'www.doxxedcrypto.digital') {
+      u.hostname = 'api.doxxedcrypto.digital';
+      return u.origin;
+    }
+  } catch {
+    // fall through
+  }
+  return trimmed;
+}
+
+/**
+ * Copy vault credentials into `founderOs.*` (+ OpenAI-compat) User settings so
+ * pairing survives vault moves and Skycode/OpenAI providers can reuse the same
+ * Node bearer without a pairing-code prompt. Best-effort.
+ */
+export async function syncVaultIntoSettings(): Promise<FounderOsCredentials | null> {
+  const vault = readVaultConfig();
+  if (!vault) return null;
+
+  const apiBaseUrl = normalizeApiBaseUrl(vault.apiBaseUrl);
+  const bearer = `fos_${vault.nodeId}:${vault.nodeToken}`;
+  const openaiBase = `${apiBaseUrl}/v1`;
+
+  const cfg = vscode.workspace.getConfiguration('founderOs');
+  try {
+    await cfg.update('apiBaseUrl', apiBaseUrl, vscode.ConfigurationTarget.Global);
+    await cfg.update('nodeId', vault.nodeId, vscode.ConfigurationTarget.Global);
+    await cfg.update('nodeToken', vault.nodeToken, vscode.ConfigurationTarget.Global);
+  } catch {
+    // Settings write can fail in restricted / remote hosts — vault still works.
+  }
+
+  // Best-effort OpenAI-compat keys for Skycode / other providers in Founder IDE.
+  try {
+    const root = vscode.workspace.getConfiguration();
+    await root.update('openAICompatible.apiUrl', openaiBase, vscode.ConfigurationTarget.Global);
+    await root.update('openAICompatible.apiKey', bearer, vscode.ConfigurationTarget.Global);
+  } catch {
+    // optional
+  }
+
+  return {
+    apiBaseUrl,
+    nodeId: vault.nodeId,
+    nodeToken: vault.nodeToken,
+    source: 'settings',
+  };
 }
 
 /** Builds the OpenAI-compat proxy base URL: `{apiBaseUrl}/api/v1`. */

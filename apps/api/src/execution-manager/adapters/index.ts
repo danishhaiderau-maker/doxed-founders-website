@@ -9,5 +9,6 @@
  */
 
 export { CursorAdapter } from './cursor.adapter';
+export { FounderIdeAdapter } from './founder-ide.adapter';
 export { FilesystemAdapter } from './filesystem.adapter';
 export { LocalShellAdapter } from './local-shell.adapter';

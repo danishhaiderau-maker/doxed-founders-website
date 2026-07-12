@@ -45,8 +45,6 @@ export class MemoryEngineController {
     const userId = req.founderNode.userId;
     const pid = (projectId ?? '').trim() || undefined;
 
-    // Project memory is scoped to the workspace; founder memory is scoped to
-    // the user. Both are best-effort — stubbed backend returns [] today.
     const projectMemory = pid
       ? await this.memory.query({ store: 'project', scope: pid, limit: 30 })
       : [];
@@ -56,11 +54,26 @@ export class MemoryEngineController {
       limit: 30,
     });
 
+    // Compact hint the IDE extension can prepend when it doesn't want to
+    // re-format the full arrays itself.
+    const hintLines: string[] = [];
+    for (const e of founderMemory.slice(0, 12)) {
+      hintLines.push(`- ${e.key}: ${typeof e.value === 'string' ? e.value : JSON.stringify(e.value)}`);
+    }
+    for (const e of projectMemory.slice(0, 12)) {
+      hintLines.push(`- [${pid}] ${e.key}: ${typeof e.value === 'string' ? e.value : JSON.stringify(e.value)}`);
+    }
+    const systemPromptHint =
+      hintLines.length > 0
+        ? `# Founder OS memory\n${hintLines.join('\n')}`
+        : undefined;
+
     return {
       projectId: pid,
       userId,
       projectMemory,
       founderMemory,
+      systemPromptHint,
     };
   }
 }

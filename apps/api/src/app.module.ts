@@ -72,6 +72,7 @@ import { TokenLaunchModule } from './token-launch/token-launch.module';
 import { LamModule } from './lam/lam.module';
 import { DeploymentModesModule } from './deployment-modes/deployment-modes.module';
 import { FounderEconomicsModule } from './founder-economics/founder-economics.module';
+import { IntentEngineModule } from './intent-engine/intent-engine.module';
 
 @Module({
   imports: [
@@ -148,6 +149,7 @@ import { FounderEconomicsModule } from './founder-economics/founder-economics.mo
     TokenLaunchModule,
     DebugSquasherModule,
     FounderEconomicsModule,
+    IntentEngineModule,
   ],
   providers: [
     {

@@ -1,5 +1,10 @@
 import { Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
-import { CursorAdapter, FilesystemAdapter, LocalShellAdapter } from './adapters';
+import {
+  CursorAdapter,
+  FilesystemAdapter,
+  FounderIdeAdapter,
+  LocalShellAdapter,
+} from './adapters';
 import { ExecutionManagerController } from './execution-manager.controller';
 import { ExecutionManagerService } from './execution-manager.service';
 import type { ExecutionAdapter } from './execution-manager.types';
@@ -16,10 +21,11 @@ class Bootstrapper {
     private readonly localShell: LocalShellAdapter,
     private readonly filesystem: FilesystemAdapter,
     private readonly cursor: CursorAdapter,
+    private readonly founderIde: FounderIdeAdapter,
   ) {}
 
   getAdapters(): ExecutionAdapter[] {
-    return [this.localShell, this.filesystem, this.cursor];
+    return [this.localShell, this.filesystem, this.cursor, this.founderIde];
   }
 }
 
@@ -27,9 +33,9 @@ class Bootstrapper {
  * Execution Manager module — kernel service #4.
  *
  * Wires the service + the read-only controller, then on init registers
- * the adapters Phase 3 ships with (terminal, filesystem, cursor stub).
- * Later phases add more adapters here without touching the service —
- * the registry is the seam.
+ * the adapters Phase 3 ships with (terminal, filesystem, cursor + Founder IDE
+ * with local-shell fallback). Later phases add more adapters here without
+ * touching the service — the registry is the seam.
  *
  * No Prisma / no application-code imports: this module is stateless.
  * Decision logging goes through Flight Recorder (a separate kernel
@@ -41,9 +47,12 @@ class Bootstrapper {
     ExecutionManagerService,
     // Adapters are injectable so Nest manages their lifecycle. The
     // bootstrapper below pulls them out of the DI container to register.
+    // LocalShell + Filesystem must be constructed before Cursor / FounderIde
+    // so those adapters can inject them as local delegates.
     LocalShellAdapter,
     FilesystemAdapter,
     CursorAdapter,
+    FounderIdeAdapter,
     Bootstrapper,
   ],
   exports: [ExecutionManagerService],

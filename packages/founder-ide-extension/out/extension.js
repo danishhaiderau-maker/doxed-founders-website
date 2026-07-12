@@ -79,15 +79,40 @@ function activate(context) {
     context.subscriptions.push(profileManager, costTracker);
     profileManager.show();
     costTracker.show();
-    // Agentic tools (registered once; available to any chat participant / model) ------
-    context.subscriptions.push(vscode.lm.registerTool('founder.editFile', edit_file_1.editFileTool), vscode.lm.registerTool('founder.runCommand', run_command_1.runCommandTool), vscode.lm.registerTool('founder.readWorkspace', read_workspace_1.readWorkspaceTool));
+    // Agentic tools (registered once; available to any chat participant / model).
+    // `vscode.lm.registerTool` only exists on VS Code 1.96+ (proposed `lmTools`
+    // API, later stable). Guard so activation does not crash on 1.93.1, where the
+    // chat participant (stable API) is the primary surface. Even where the
+    // function exists, registration fails if the `languageModelTools` contribution
+    // point isn't processed (proposed-gated on 1.93.1), so we swallow that case.
+    if (typeof vscode.lm.registerTool === 'function') {
+        const tools = [
+            ['founder.editFile', edit_file_1.editFileTool],
+            ['founder.runCommand', run_command_1.runCommandTool],
+            ['founder.readWorkspace', read_workspace_1.readWorkspaceTool],
+        ];
+        for (const [name, tool] of tools) {
+            try {
+                context.subscriptions.push(vscode.lm.registerTool(name, tool));
+            }
+            catch {
+                // Tool contribution point not processed on this VS Code build — skip.
+            }
+        }
+    }
     // Commands -------------------------------------------------------------------------
-    context.subscriptions.push(vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)), vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)), vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig), vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias), vscode.commands.registerCommand('founderOs.selectProfile', () => profileManager?.selectProfile()), vscode.commands.registerCommand('founderOs.showCostBreakdown', () => costTracker?.showBreakdown()), vscode.commands.registerCommand('founderOs.resetCost', () => {
+    context.subscriptions.push(vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)), vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)), vscode.commands.registerCommand('founderOs.connectFounderOs', () => connectFounderOsAccount(context)), vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig), vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias), vscode.commands.registerCommand('founderOs.selectProfile', () => profileManager?.selectProfile()), vscode.commands.registerCommand('founderOs.showCostBreakdown', () => costTracker?.showBreakdown()), vscode.commands.registerCommand('founderOs.resetCost', () => {
         costTracker?.reset();
         void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
     }));
     // First-pass registration (synchronous so the model picker populates fast).
     registerOrNotify(context);
+    // Auto-load ~/FounderVault/node-config.json into founderOs.* settings so
+    // pairing isn't manual every session. Fire-and-forget; re-registers after.
+    void (0, credentials_1.syncVaultIntoSettings)().then((synced) => {
+        if (synced)
+            registerOrNotify(context);
+    });
     // Re-resolve when relevant settings change.
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('founderOs')) {
@@ -96,7 +121,9 @@ function activate(context) {
     }));
     // Re-resolve when the vault file appears / changes (pairing completed while
     // the editor is open). We watch the FounderVault directory if it exists.
-    watchVaultFile(context, () => registerOrNotify(context));
+    watchVaultFile(context, () => {
+        void (0, credentials_1.syncVaultIntoSettings)().then(() => registerOrNotify(context));
+    });
 }
 function deactivate() {
     registeredProvider?.dispose();
@@ -159,8 +186,17 @@ function registerOrNotify(context) {
             }
         },
     });
-    registeredProvider = vscode.lm.registerLanguageModelChatProvider(models_1.FOUNDER_OS_VENDOR, provider);
-    context.subscriptions.push(registeredProvider);
+    // `vscode.lm.registerLanguageModelChatProvider` only exists on VS Code 1.96+
+    // (the `LanguageModelChatProvider` API). On 1.93.1 this function is absent, so
+    // we skip provider registration and rely on the chat participant (stable API)
+    // which streams directly from the gateway. Guarding here keeps activation alive.
+    if (typeof vscode.lm.registerLanguageModelChatProvider === 'function') {
+        registeredProvider = vscode.lm.registerLanguageModelChatProvider(models_1.FOUNDER_OS_VENDOR, provider);
+        context.subscriptions.push(registeredProvider);
+    }
+    else {
+        registeredProvider = undefined;
+    }
     // Enhanced chat participant — drives a real vscode.lm round-trip with
     // Memory Engine injection + tool use. Falls back to onboarding only if the
     // participant id is already claimed by another extension.
@@ -206,8 +242,13 @@ async function showPairPrompt(context) {
 async function manageConnection(context) {
     const items = [
         {
-            label: 'Pair with Founder Node…',
-            description: (0, credentials_1.vaultFileExists)() ? 'vault file present' : 'vault file missing',
+            label: 'Connect Founder OS (Twitter)…',
+            description: 'open doxxedcrypto.digital login — identity syncs via Founder Node',
+            action: () => connectFounderOsAccount(context),
+        },
+        {
+            label: 'Load Founder Node from vault…',
+            description: (0, credentials_1.vaultFileExists)() ? 'vault file present — no pairing code needed' : 'vault file missing',
             action: () => pairWithFounderNode(context),
         },
         {
@@ -244,22 +285,81 @@ async function manageConnection(context) {
     if (picked)
         await picked.action();
 }
+/**
+ * Twitter / Founder OS identity lives on doxxedcrypto.digital.
+ * Once the account is linked to Founder Node (heartbeat), the IDE reads
+ * ~/FounderVault/node-config.json — no Skycode GitHub/Google/Apple and no
+ * manual pairing-code paste in the IDE.
+ */
+async function connectFounderOsAccount(context) {
+    const hasVault = (0, credentials_1.vaultFileExists)();
+    const choice = await vscode.window.showInformationMessage(hasVault
+        ? 'Founder Node vault is already on this machine. Sign in with Twitter on Founder OS only if you need to manage your cloud account. AI in this IDE uses the Node token — not Skycode cloud login.'
+        : 'Sign in to Founder OS with Twitter, then open Founder Node on this PC so it can write ~/FounderVault/node-config.json. After that, Founder IDE loads credentials automatically (no pairing code in the IDE).', 'Open Twitter login', 'Open Builder settings', hasVault ? 'Reload vault now' : 'Cancel');
+    if (choice === 'Open Twitter login') {
+        void vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/login?callbackUrl=/settings/builder'));
+    }
+    else if (choice === 'Open Builder settings') {
+        void vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'));
+    }
+    else if (choice === 'Reload vault now') {
+        const synced = await (0, credentials_1.syncVaultIntoSettings)();
+        registerOrNotify(context);
+        void vscode.window.showInformationMessage(synced
+            ? `Vault loaded — node ${synced.nodeId} @ ${synced.apiBaseUrl}`
+            : 'Vault file missing or invalid.');
+    }
+}
 async function pairWithFounderNode(context) {
     const file = (0, credentials_1.nodeConfigPath)();
+    // Prefer vault auto-load — Founder Node writes this on pair / Connect IDE.
     if ((0, credentials_1.vaultFileExists)()) {
-        const open = await vscode.window.showInformationMessage(`Founder Node config already exists at:\n${file}\n\nOpen it, or reload the window to re-detect?`, 'Open file', 'Reload window', 'Cancel');
-        if (open === 'Open file')
-            await openVaultConfig();
-        else if (open === 'Reload window')
-            void vscode.commands.executeCommand('workbench.action.reloadWindow');
-        return;
+        const synced = await (0, credentials_1.syncVaultIntoSettings)();
+        if (synced) {
+            registerOrNotify(context);
+            const open = await vscode.window.showInformationMessage(`Loaded Founder Node credentials from:\n${file}\n\napiBaseUrl=${synced.apiBaseUrl}\nnodeId=${synced.nodeId}`, 'Reload window', 'Open file', 'OK');
+            if (open === 'Open file')
+                await openVaultConfig();
+            else if (open === 'Reload window')
+                void vscode.commands.executeCommand('workbench.action.reloadWindow');
+            return;
+        }
     }
-    const choice = await vscode.window.showInformationMessage('Founder OS chat needs a paired Founder Node.\n\nOpen Founder Node on this machine and click "Connect IDE / Pair". This writes ~/FounderVault/node-config.json, which the extension reads automatically.', 'Open Founder OS docs', 'Set credentials manually', 'Cancel');
-    if (choice === 'Set credentials manually') {
+    // Optional: paste a Twitter-auth session JWT + API base for cloud-only pairing
+    // when Founder Node isn't installed yet (thin slice — nodeId/token still preferred).
+    const choice = await vscode.window.showInformationMessage('Founder OS chat needs a paired Founder Node.\n\nOpen Founder Node on this machine and click "Connect IDE / Pair". This writes ~/FounderVault/node-config.json, which the extension loads automatically.', 'Open Founder OS settings', 'Paste API + node credentials', 'Open docs', 'Cancel');
+    if (choice === 'Open Founder OS settings') {
         void vscode.commands.executeCommand('workbench.action.openSettings', 'founderOs');
     }
-    else if (choice === 'Open Founder OS docs') {
-        void vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/docs/founder-node'));
+    else if (choice === 'Paste API + node credentials') {
+        const apiBaseUrl = await vscode.window.showInputBox({
+            prompt: 'Founder OS API base URL',
+            value: 'https://doxxedcrypto.digital',
+            placeHolder: 'https://doxxedcrypto.digital',
+        });
+        if (!apiBaseUrl)
+            return;
+        const nodeId = await vscode.window.showInputBox({
+            prompt: 'Founder Node ID (from Settings → Founder Stack after pairing)',
+            placeHolder: 'fn_…',
+        });
+        if (!nodeId)
+            return;
+        const nodeToken = await vscode.window.showInputBox({
+            prompt: 'Founder Node token (shown once at pair time, or from node-config.json)',
+            password: true,
+        });
+        if (!nodeToken)
+            return;
+        const cfg = vscode.workspace.getConfiguration('founderOs');
+        await cfg.update('apiBaseUrl', apiBaseUrl.replace(/\/$/, ''), vscode.ConfigurationTarget.Global);
+        await cfg.update('nodeId', nodeId.trim(), vscode.ConfigurationTarget.Global);
+        await cfg.update('nodeToken', nodeToken.trim(), vscode.ConfigurationTarget.Global);
+        registerOrNotify(context);
+        void vscode.window.showInformationMessage('Founder OS credentials saved to User settings.');
+    }
+    else if (choice === 'Open docs') {
+        void vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/downloads#founder-node'));
     }
 }
 async function openVaultConfig() {

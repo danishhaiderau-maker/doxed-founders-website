@@ -61,11 +61,68 @@ export class FounderNodeService {
       orderBy: { lastSeenAt: 'desc' },
     });
 
+    const [bridges, workspaces, sessions] = await Promise.all([
+      this.desktopBridge.listForUser(userId).catch(() => []),
+      this.desktopBridge.listWorkspaces(userId).catch(() => []),
+      this.desktopBridge.listSessions(userId).catch(() => []),
+    ]);
+
+    const now = Date.now();
+    const providers = new Set<string>();
+    for (const w of workspaces) {
+      const p = (w.ideProvider ?? 'cursor').toLowerCase();
+      providers.add(p === 'vscode' || p === 'founder-ide' || p === 'founderide' ? 'founder-ide' : p);
+    }
+    for (const s of sessions) {
+      const p = (s.ideProvider ?? 'cursor').toLowerCase();
+      providers.add(p === 'vscode' || p === 'founder-ide' || p === 'founderide' ? 'founder-ide' : p);
+    }
+    // Heartbeat bridge present ⇒ at least one desktop IDE path is live.
+    const bridgeFresh = bridges.some(
+      (b) => now - new Date(b.updatedAt).getTime() < ONLINE_WINDOW_MS,
+    );
+    if (bridgeFresh && providers.size === 0) {
+      providers.add('cursor');
+    }
+
+    const connectedIdes = Array.from(providers).map((id) => ({
+      id,
+      label:
+        id === 'founder-ide'
+          ? 'Founder IDE'
+          : id === 'cursor'
+            ? 'Cursor'
+            : id === 'claude-code'
+              ? 'Claude Code'
+              : id === 'openhands'
+                ? 'OpenHands'
+                : id,
+      connected: true,
+    }));
+
+    // Always surface Founder IDE as a known target (connected when reported).
+    if (!connectedIdes.some((c) => c.id === 'founder-ide')) {
+      connectedIdes.push({
+        id: 'founder-ide',
+        label: 'Founder IDE',
+        connected: false,
+      });
+    }
+    if (!connectedIdes.some((c) => c.id === 'cursor')) {
+      connectedIdes.push({
+        id: 'cursor',
+        label: 'Cursor',
+        connected: bridgeFresh,
+      });
+    }
+
     return {
       // Map defensively so a single malformed row degrades to a placeholder
       // instead of 500-ing the whole endpoint. The original error + offending
       // row are logged so the root cause is visible in Railway logs.
       nodes: nodes.map((n) => this.toStatusRowSafe(n)),
+      connectedIdes,
+      bridgeOnline: bridgeFresh,
     };
   }
 

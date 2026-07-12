@@ -26,17 +26,24 @@ export const COMPUTER_USE_TIER_MESSAGE =
 /**
  * ComputerUseAdapter — vision-based desktop control (premium tier).
  *
- * This is the Claude Computer Use path. The interface is implemented
- * (screenshot / mouseMove / click / type / key) so the orchestrator
- * can plan against it, but the actual Claude API call is a premium-tier
- * stub gated behind the COMPUTER_USE_ENABLED flag (default off). The
- * owner plugs in the real Claude API key later; until then, every
- * method throws a clear "premium tier not enabled" error.
+ * ## Adapter contract (stable)
+ * Methods the orchestrator may call when COMPUTER_USE_ENABLED=true:
+ *   - screenshot() → { path }
+ *   - mouseMove(x, y) → { ok, x, y }
+ *   - click(x?, y?) → { ok }
+ *   - type(text) → { ok, typed }
+ *   - key(combo) → { ok, combo }
+ *   - runStep(payload) — central switch used by LamOrchestrator
+ *   - isEnabled() — feature-flag probe for GET /api/lam/adapters
  *
- * Why a stub and not an omission: the adapter needs to exist, register
- * itself, and appear in GET /api/lam/adapters so the frontend can show
- * the "Computer Use (locked)" state. Throwing on invocation keeps the
- * surface honest — nothing silently no-ops.
+ * ## Feature flag
+ * COMPUTER_USE_ENABLED must be exactly `"true"` (default off). When off,
+ * every capability method throws with COMPUTER_USE_TIER_MESSAGE so the UI
+ * can show a locked premium state without silent no-ops.
+ *
+ * ## Transport
+ * Real Anthropic Claude Computer Use API is TODO — the contract is wired
+ * so a follow-up can drop in the client without touching the orchestrator.
  *
  * Tier gate (defense in depth):
  *   1. lam.controller checks req.user.builderTier === VERIFIED_BUILDER
@@ -52,6 +59,23 @@ export class ComputerUseAdapter implements ExecutionAdapter {
   private connected = true;
 
   constructor(private readonly config: ConfigService) {}
+
+  /** Human-readable contract descriptor for /api/lam/adapters clients. */
+  describeContract(): {
+    id: 'computer-use';
+    gated: true;
+    flag: 'COMPUTER_USE_ENABLED';
+    enabled: boolean;
+    methods: string[];
+  } {
+    return {
+      id: 'computer-use',
+      gated: true,
+      flag: 'COMPUTER_USE_ENABLED',
+      enabled: this.isEnabled(),
+      methods: ['screenshot', 'mouseMove', 'click', 'type', 'key', 'runStep'],
+    };
+  }
 
   async connect(): Promise<void> {
     this.connected = true;

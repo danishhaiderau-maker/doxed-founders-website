@@ -1,22 +1,26 @@
 /**
- * Connect-Cursor — writes Founder OS AI proxy credentials into the IDE config.
+ * Connect-IDE — writes Founder OS AI proxy credentials into IDE configs.
  *
- * One click in Founder Node's UI calls the `connect-cursor` IPC handler,
- * which writes Founder OS's proxy URL + bearer token into Cursor's
- * User-level `settings.json`. After a Cursor reload, every chat / agent
- * request goes through Founder OS instead of Cursor's own gateway.
+ * One click in Founder Node's UI calls the `connect-cursor` /
+ * `connect-founder-ide` IPC handlers, which write Founder OS's proxy URL +
+ * bearer token into the target IDE's User-level `settings.json`. After a
+ * reload, every chat / agent request goes through Founder OS.
  *
  * Also supports Claude Code, Continue.dev, and OpenHands via shell-profile
  * env vars (`OPENAI_BASE_URL` + `OPENAI_API_KEY`).
  *
  * Storage layout (Windows):
- *   %APPDATA%/Cursor/User/settings.json
+ *   Cursor:      %APPDATA%/Cursor/User/settings.json
+ *   Founder IDE: %LOCALAPPDATA%/FounderIDE/User/settings.json
+ *                (also .founder-ide under the install / home)
  *
  * macOS:
- *   ~/Library/Application Support/Cursor/User/settings.json
+ *   Cursor:      ~/Library/Application Support/Cursor/User/settings.json
+ *   Founder IDE: ~/Library/Application Support/FounderIDE/User/settings.json
  *
  * Linux:
- *   ~/.config/Cursor/User/settings.json
+ *   Cursor:      ~/.config/Cursor/User/settings.json
+ *   Founder IDE: ~/.config/FounderIDE/User/settings.json
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -54,6 +58,53 @@ function getCursorUserDir(): string | null {
   return path.join(xdg, 'Cursor', 'User');
 }
 
+/**
+ * Candidate Founder IDE User directories, in preference order.
+ * Windows Void/FounderIDE forks commonly use LOCALAPPDATA; we also probe
+ * APPDATA and a home `.founder-ide` folder for portable installs.
+ */
+export function getFounderIdeUserDirs(): string[] {
+  const home = os.homedir();
+  const dirs: string[] = [];
+  const platform = process.platform;
+
+  if (platform === 'win32') {
+    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    dirs.push(
+      path.join(local, 'FounderIDE', 'User'),
+      path.join(roaming, 'FounderIDE', 'User'),
+      path.join(local, 'Founder IDE', 'User'),
+      path.join(home, '.founder-ide', 'User'),
+    );
+  } else if (platform === 'darwin') {
+    dirs.push(
+      path.join(home, 'Library', 'Application Support', 'FounderIDE', 'User'),
+      path.join(home, 'Library', 'Application Support', 'Founder IDE', 'User'),
+      path.join(home, '.founder-ide', 'User'),
+    );
+  } else {
+    const xdg = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    dirs.push(
+      path.join(xdg, 'FounderIDE', 'User'),
+      path.join(xdg, 'Founder IDE', 'User'),
+      path.join(home, '.founder-ide', 'User'),
+    );
+  }
+  return dirs;
+}
+
+/** Prefer an existing Founder IDE User dir; otherwise create the primary path. */
+export function resolveFounderIdeUserDir(): string {
+  const candidates = getFounderIdeUserDirs();
+  for (const dir of candidates) {
+    if (fs.existsSync(dir) || fs.existsSync(path.dirname(dir))) {
+      return dir;
+    }
+  }
+  return candidates[0];
+}
+
 function safeReadJson<T>(file: string): T | null {
   try {
     if (!fs.existsSync(file)) return null;
@@ -82,6 +133,27 @@ function safeWriteJsonWithBackup(file: string, data: unknown): string | null {
   }
 }
 
+function mergeFounderOsSettings(
+  existing: Record<string, unknown>,
+  config: FounderNodeConfig,
+  extras: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const proxyBase = proxyBaseUrl(config.apiBaseUrl);
+  const bearer = bearerFromConfig(config);
+  return {
+    ...existing,
+    'openai.apiBase': proxyBase,
+    'openai.apiKey': bearer,
+    'founder-os.connected': true,
+    'founder-os.nodeId': config.nodeId,
+    // Extension settings — auto-load so pairing isn't manual every time.
+    'founderOs.apiBaseUrl': config.apiBaseUrl.replace(/\/$/, ''),
+    'founderOs.nodeId': config.nodeId,
+    'founderOs.nodeToken': config.nodeToken,
+    ...extras,
+  };
+}
+
 /** Writes the Founder OS proxy URL + bearer into Cursor's settings.json. */
 export function connectCursor(config: FounderNodeConfig): ConnectResult {
   const userDir = getCursorUserDir();
@@ -89,27 +161,14 @@ export function connectCursor(config: FounderNodeConfig): ConnectResult {
     return { ok: false, error: `Unsupported platform: ${process.platform}` };
   }
   const settingsFile = path.join(userDir, 'settings.json');
-  const proxyBase = proxyBaseUrl(config.apiBaseUrl);
-  const bearer = bearerFromConfig(config);
-
   type CursorSettings = Record<string, unknown>;
   const existing = safeReadJson<CursorSettings>(settingsFile) ?? {};
 
-  // Founder OS keys we own — overwrite them on every connect so a re-pair
-  // updates the bearer. Leave everything else alone.
-  const next: CursorSettings = {
-    ...existing,
-    // OpenAI-compat settings — what Cursor's "Custom Model" mode reads.
-    'openai.apiBase': proxyBase,
-    'openai.apiKey': bearer,
-    // Cursor's own routing knobs — forces the custom model into the loop.
+  const next = mergeFounderOsSettings(existing, config, {
     'cursor.generalModel': FOUNDER_OS_MODEL,
     'cursor.largeModel': FOUNDER_OS_MODEL,
     'cursor.smallModel': FOUNDER_OS_MODEL,
-    // Telemetry hint so users can see Founder OS is active in the status bar.
-    'founder-os.connected': true,
-    'founder-os.nodeId': config.nodeId,
-  };
+  });
 
   try {
     const backupPath = safeWriteJsonWithBackup(settingsFile, next);
@@ -126,6 +185,58 @@ export function connectCursor(config: FounderNodeConfig): ConnectResult {
       target: settingsFile,
     };
   }
+}
+
+/**
+ * Writes Founder OS credentials into Founder IDE User settings.json and
+ * mirrors apiBaseUrl / nodeId / nodeToken into `founderOs.*` so the
+ * founder-ide-extension picks them up without reading the vault every time.
+ */
+export function connectFounderIde(config: FounderNodeConfig): ConnectResult {
+  const userDir = resolveFounderIdeUserDir();
+  const settingsFile = path.join(userDir, 'settings.json');
+  const existing = safeReadJson<Record<string, unknown>>(settingsFile) ?? {};
+  const next = mergeFounderOsSettings(existing, config);
+
+  try {
+    const backupPath = safeWriteJsonWithBackup(settingsFile, next);
+    return {
+      ok: true,
+      target: settingsFile,
+      backupPath,
+      reloaded: false,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      target: settingsFile,
+    };
+  }
+}
+
+/**
+ * Connect both Founder IDE (preferred) and Cursor. Returns the Founder IDE
+ * result as primary; Cursor failures are non-fatal when Founder IDE succeeds.
+ */
+export function connectAllIdes(config: FounderNodeConfig): ConnectResult & {
+  cursor?: ConnectResult;
+  founderIde?: ConnectResult;
+} {
+  const founderIde = connectFounderIde(config);
+  const cursor = connectCursor(config);
+  if (founderIde.ok) {
+    return { ...founderIde, founderIde, cursor };
+  }
+  if (cursor.ok) {
+    return { ...cursor, founderIde, cursor };
+  }
+  return {
+    ok: false,
+    error: `Founder IDE: ${founderIde.error ?? 'failed'}; Cursor: ${cursor.error ?? 'failed'}`,
+    founderIde,
+    cursor,
+  };
 }
 
 /** Writes OPENAI_BASE_URL + OPENAI_API_KEY into the founder's shell profile
@@ -198,6 +309,21 @@ export function connectShellEnv(config: FounderNodeConfig): ConnectResult {
   };
 }
 
+function stripFounderOsKeys(existing: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...existing };
+  delete next['openai.apiBase'];
+  delete next['openai.apiKey'];
+  delete next['cursor.generalModel'];
+  delete next['cursor.largeModel'];
+  delete next['cursor.smallModel'];
+  delete next['founder-os.connected'];
+  delete next['founder-os.nodeId'];
+  delete next['founderOs.apiBaseUrl'];
+  delete next['founderOs.nodeId'];
+  delete next['founderOs.nodeToken'];
+  return next;
+}
+
 /** Removes Founder OS keys from Cursor's settings.json — undoes connectCursor. */
 export function disconnectCursor(config: FounderNodeConfig): ConnectResult {
   const userDir = getCursorUserDir();
@@ -207,18 +333,25 @@ export function disconnectCursor(config: FounderNodeConfig): ConnectResult {
   const existing = safeReadJson<Record<string, unknown>>(settingsFile);
   if (!existing) return { ok: true, target: settingsFile, backupPath: null, reloaded: false };
 
-  const next: Record<string, unknown> = { ...existing };
-  delete next['openai.apiBase'];
-  delete next['openai.apiKey'];
-  delete next['cursor.generalModel'];
-  delete next['cursor.largeModel'];
-  delete next['cursor.smallModel'];
-  delete next['founder-os.connected'];
-  delete next['founder-os.nodeId'];
+  void config;
+  try {
+    const backupPath = safeWriteJsonWithBackup(settingsFile, stripFounderOsKeys(existing));
+    return { ok: true, target: settingsFile, backupPath, reloaded: false };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), target: settingsFile };
+  }
+}
+
+/** Removes Founder OS keys from Founder IDE settings.json. */
+export function disconnectFounderIde(config: FounderNodeConfig): ConnectResult {
+  const userDir = resolveFounderIdeUserDir();
+  const settingsFile = path.join(userDir, 'settings.json');
+  const existing = safeReadJson<Record<string, unknown>>(settingsFile);
+  if (!existing) return { ok: true, target: settingsFile, backupPath: null, reloaded: false };
 
   void config;
   try {
-    const backupPath = safeWriteJsonWithBackup(settingsFile, next);
+    const backupPath = safeWriteJsonWithBackup(settingsFile, stripFounderOsKeys(existing));
     return { ok: true, target: settingsFile, backupPath, reloaded: false };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err), target: settingsFile };
