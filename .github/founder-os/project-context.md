@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Raise Founder OS phases 1–9: routing v2 default, IDE connect, intent skeleton.
+Ship remaining product-usable Founder Stack and Economics MVP work.
 
 ## Last Activity
 
