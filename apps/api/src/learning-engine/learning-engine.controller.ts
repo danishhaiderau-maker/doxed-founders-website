@@ -27,14 +27,14 @@ export class LearningEngineController {
    * that the scheduler is firing.
    */
   @Get('status')
-  status(): {
+  async status(): Promise<{
     lastRollupAt: string | null;
     lastProcessedCount: number;
     lastUpdatedCount: number;
     trackedPromptHashes: number;
-  } {
+  }> {
     return {
-      ...this.learningEngine.getStatus(),
+      ...(await this.learningEngine.getStatus()),
       trackedPromptHashes: this.retryDetector.trackedPromptHashes,
     };
   }

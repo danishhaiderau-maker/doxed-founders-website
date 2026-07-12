@@ -330,7 +330,7 @@ export class KernelPillarsService {
       const result = await this.learningEngine.rollup();
       const ok = typeof result.processed === 'number' && typeof result.updated === 'number';
       // Verify the status endpoint reflects the rollup.
-      const status = this.learningEngine.getStatus();
+      const status = await this.learningEngine.getStatus();
       return ok && status.lastRollupAt !== null
         ? pass(`rollup produced snapshot — processed=${result.processed} updated=${result.updated} lastRollupAt=${status.lastRollupAt}`)
         : fail(`rollup returned malformed result or null lastRollupAt — processed=${result.processed} updated=${result.updated} lastRollupAt=${status.lastRollupAt}`);

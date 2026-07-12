@@ -1,199 +1,199 @@
 /**
- * Settlement publishers — on-chain Merkle root + IPFS proof data.
+ * Production-safe settlement publishers.
  *
- * Real paths are env-gated. Without credentials we persist a clearly-marked
- * offline receipt so demos and local settle still work. With credentials we
- * call the configured RPC / IPFS HTTP API.
- *
- * Env:
- *   FOUNDER_ECONOMICS_RPC_URL              — JSON-RPC endpoint (optional)
- *   FOUNDER_ECONOMICS_DISTRIBUTOR_ADDRESS  — EpochDistributor contract (optional)
- *   FOUNDER_ECONOMICS_PUBLISH_PRIVATE_KEY  — keeper key for publishRoot (optional)
- *   FOUNDER_ECONOMICS_IPFS_API_URL         — e.g. https://ipfs.infura.io:5001 (optional)
- *   FOUNDER_ECONOMICS_IPFS_AUTH            — Basic auth header value (optional)
+ * A root is never marked published from an offline receipt, a static signed
+ * transaction, or an unpinned payload. The only supported operational path is
+ * Robinhood EVM testnet (46630) -> pin immutable proof data -> keeper proposes
+ * the exact root -> receipt and contract state are verified.
  */
+
+import {
+  Contract,
+  Interface,
+  JsonRpcProvider,
+  Wallet,
+  type Log,
+  type LogDescription,
+  getAddress,
+  keccak256,
+  toUtf8Bytes,
+} from 'ethers';
+
+export const ROBINHOOD_EVM_TESTNET_CHAIN_ID = 46_630;
+
+const DISTRIBUTOR_ABI = [
+  'function proposeRoot(uint256 epoch, bytes32 root, uint256 totalAllocated, bytes32 modelCodeHash, bytes32 proofDataHash)',
+  'function epochs(uint256 epoch) view returns (uint256 funded, uint256 totalClaimed, bytes32 root, bytes32 modelCodeHash, bytes32 proofDataHash, uint64 proposedAt, uint64 finalizedAt, uint8 status)',
+  'event RootProposed(uint256 indexed epoch, bytes32 root, bytes32 modelCodeHash, bytes32 proofDataHash)',
+];
+
+export type RootProposal = {
+  epochNumber: number;
+  root: string;
+  totalAllocatedRaw: bigint;
+  modelCodeHash: string;
+  proofDataHash: string;
+};
 
 export type MerklePublishResult = {
   txHash: string;
-  mode: 'on-chain' | 'offline-receipt';
+  blockNumber: number;
+  challengeEndsAt: Date;
+  mode: 'on-chain';
   detail: string;
 };
 
 export type ProofDataPublishResult = {
   uri: string;
-  mode: 'ipfs' | 'offline-receipt';
+  contentHash: string;
+  mode: 'ipfs';
   detail: string;
 };
 
 export interface MerkleRootPublisher {
-  publish(epochNumber: number, root: string, totalTokens: number): Promise<MerklePublishResult>;
+  propose(input: RootProposal): Promise<MerklePublishResult>;
 }
 
 export interface ProofDataPublisher {
   publish(epochNumber: number, payload: unknown): Promise<ProofDataPublishResult>;
 }
 
-/** Persist a deterministic offline receipt when chain credentials are absent. */
-export class OfflineMerkleRootPublisher implements MerkleRootPublisher {
-  async publish(epochNumber: number, root: string, _totalTokens: number): Promise<MerklePublishResult> {
-    const short = root.replace(/^0x/i, '').slice(0, 40);
-    return {
-      txHash: `offline-0x${short || Buffer.from(String(epochNumber)).toString('hex').padStart(40, '0')}`,
-      mode: 'offline-receipt',
-      detail:
-        'No FOUNDER_ECONOMICS_RPC_URL + FOUNDER_ECONOMICS_DISTRIBUTOR_ADDRESS + FOUNDER_ECONOMICS_PUBLISH_PRIVATE_KEY — stored offline receipt. Wire those env vars to call EpochDistributor.publishRoot.',
-    };
+function requiredEnvironment(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required for a testnet epoch settlement`);
+  return value;
+}
+
+/** Canonical JSON so the IPFS payload hash is reproducible during an audit. */
+export function stableJson(value: unknown): string {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return JSON.stringify(value);
   }
+  if (typeof value === 'bigint') return JSON.stringify(value.toString());
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Settlement payload contains a non-finite number');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(',')}}`;
+  }
+  throw new Error(`Unsupported settlement payload value: ${typeof value}`);
+}
+
+export function hashProofPayload(payload: unknown): string {
+  return keccak256(toUtf8Bytes(stableJson(payload)));
 }
 
 /**
- * Best-effort JSON-RPC eth_sendRawTransaction path.
- * Requires a pre-signed raw tx via FOUNDER_ECONOMICS_SIGNED_PUBLISH_TX, or
- * falls back to eth_call simulation + offline receipt when only RPC+address
- * are set (Solidity ABI encoding of publishRoot needs a wallet SDK).
+ * Posts a keeper-signed `proposeRoot` transaction and verifies both its log and
+ * the distributor's stored state. A transaction hash by itself is not proof of
+ * a valid root proposal.
  */
-export class EnvGatedOnChainMerklePublisher implements MerkleRootPublisher {
-  private readonly offline = new OfflineMerkleRootPublisher();
+export class RobinhoodTestnetMerklePublisher implements MerkleRootPublisher {
+  async propose(input: RootProposal): Promise<MerklePublishResult> {
+    if (!Number.isSafeInteger(input.epochNumber) || input.epochNumber <= 0) {
+      throw new Error('Epoch number must be a positive safe integer');
+    }
+    if (input.totalAllocatedRaw <= 0n) throw new Error('Root allocation must be positive');
 
-  async publish(epochNumber: number, root: string, totalTokens: number): Promise<MerklePublishResult> {
-    const rpcUrl = process.env.FOUNDER_ECONOMICS_RPC_URL?.trim();
-    const distributor = process.env.FOUNDER_ECONOMICS_DISTRIBUTOR_ADDRESS?.trim();
-    const signedTx = process.env.FOUNDER_ECONOMICS_SIGNED_PUBLISH_TX?.trim();
-    const privateKey = process.env.FOUNDER_ECONOMICS_PUBLISH_PRIVATE_KEY?.trim();
-
-    if (!rpcUrl || !distributor) {
-      return this.offline.publish(epochNumber, root, totalTokens);
+    const rpcUrl = requiredEnvironment('FOUNDER_ECONOMICS_RPC_URL');
+    const distributorAddress = getAddress(requiredEnvironment('FOUNDER_ECONOMICS_DISTRIBUTOR_ADDRESS'));
+    const privateKey = requiredEnvironment('FOUNDER_ECONOMICS_PUBLISH_PRIVATE_KEY');
+    const provider = new JsonRpcProvider(rpcUrl);
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== ROBINHOOD_EVM_TESTNET_CHAIN_ID) {
+      throw new Error(
+        `Refusing settlement on chain ${network.chainId}; Robinhood EVM testnet ${ROBINHOOD_EVM_TESTNET_CHAIN_ID} is required`,
+      );
     }
 
-    // Preferred: operator supplies a pre-signed publishRoot tx for this epoch.
-    if (signedTx) {
-      try {
-        const res = await fetch(rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'eth_sendRawTransaction',
-            params: [signedTx.startsWith('0x') ? signedTx : `0x${signedTx}`],
-          }),
-          signal: AbortSignal.timeout(30_000),
-        });
-        const body = (await res.json()) as { result?: string; error?: { message?: string } };
-        if (body.result) {
-          return {
-            txHash: body.result,
-            mode: 'on-chain',
-            detail: `Published via eth_sendRawTransaction to ${distributor}`,
-          };
+    const signer = new Wallet(privateKey, provider);
+    const distributor = new Contract(distributorAddress, DISTRIBUTOR_ABI, signer);
+    const tx = await distributor.proposeRoot(
+      BigInt(input.epochNumber),
+      input.root,
+      input.totalAllocatedRaw,
+      input.modelCodeHash,
+      input.proofDataHash,
+    );
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status !== 1) {
+      throw new Error(`Root proposal transaction failed for epoch ${input.epochNumber}`);
+    }
+
+    const eventInterface = new Interface(DISTRIBUTOR_ABI);
+    const event = receipt.logs
+      .map((log: Log): LogDescription | null => {
+        try {
+          return eventInterface.parseLog(log);
+        } catch {
+          return null;
         }
-        return {
-          ...(await this.offline.publish(epochNumber, root, totalTokens)),
-          detail: `RPC rejected signed tx: ${body.error?.message ?? 'unknown'} — offline receipt stored`,
-        };
-      } catch (err) {
-        return {
-          ...(await this.offline.publish(epochNumber, root, totalTokens)),
-          detail: `RPC publish failed: ${err instanceof Error ? err.message : String(err)} — offline receipt stored`,
-        };
-      }
+      })
+      .find((log: LogDescription | null) => log?.name === 'RootProposed');
+    if (!event
+      || BigInt(event.args.epoch) !== BigInt(input.epochNumber)
+      || String(event.args.root).toLowerCase() !== input.root.toLowerCase()
+      || String(event.args.modelCodeHash).toLowerCase() !== input.modelCodeHash.toLowerCase()
+      || String(event.args.proofDataHash).toLowerCase() !== input.proofDataHash.toLowerCase()) {
+      throw new Error(`RootProposed event verification failed for epoch ${input.epochNumber}`);
     }
 
-    // RPC + distributor present but no signed tx / wallet SDK — verify the
-    // node is reachable, then store an offline receipt with the intended root.
-    try {
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const body = (await res.json()) as { result?: string };
-      const block = body.result ?? 'unknown';
-      const receipt = await this.offline.publish(epochNumber, root, totalTokens);
-      return {
-        ...receipt,
-        detail:
-          `RPC reachable (block=${block}) at ${distributor}; privateKey=${privateKey ? 'set' : 'unset'}. ` +
-          `Provide FOUNDER_ECONOMICS_SIGNED_PUBLISH_TX (or a Solidity toolchain keeper) to submit publishRoot(${epochNumber}, ${root.slice(0, 18)}…). Offline receipt stored.`,
-      };
-    } catch (err) {
-      return {
-        ...(await this.offline.publish(epochNumber, root, totalTokens)),
-        detail: `RPC unreachable: ${err instanceof Error ? err.message : String(err)} — offline receipt stored`,
-      };
+    const stored = await distributor.epochs(BigInt(input.epochNumber));
+    if (BigInt(stored.funded) !== input.totalAllocatedRaw
+      || String(stored.root).toLowerCase() !== input.root.toLowerCase()
+      || String(stored.modelCodeHash).toLowerCase() !== input.modelCodeHash.toLowerCase()
+      || String(stored.proofDataHash).toLowerCase() !== input.proofDataHash.toLowerCase()
+      || Number(stored.status) !== 2) {
+      throw new Error(`Distributor state verification failed for epoch ${input.epochNumber}`);
     }
-  }
-}
 
-export class OfflineProofDataPublisher implements ProofDataPublisher {
-  async publish(epochNumber: number, payload: unknown): Promise<ProofDataPublishResult> {
-    const hash = Buffer.from(JSON.stringify(payload)).toString('hex').slice(0, 32);
     return {
-      uri: `offline://epoch-${epochNumber}-${hash || Date.now()}`,
-      mode: 'offline-receipt',
-      detail:
-        'No FOUNDER_ECONOMICS_IPFS_API_URL — stored offline proof URI. Set IPFS API URL (+ optional FOUNDER_ECONOMICS_IPFS_AUTH) to pin settlement JSON.',
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      challengeEndsAt: new Date(Number(stored.proposedAt) * 1000 + 7 * 24 * 60 * 60 * 1000),
+      mode: 'on-chain',
+      detail: `Verified RootProposed on Robinhood EVM testnet for epoch ${input.epochNumber}`,
     };
   }
 }
 
-/** POST /api/v0/add against a Kubo/Infura-compatible IPFS HTTP API when configured. */
-export class EnvGatedIpfsProofPublisher implements ProofDataPublisher {
-  private readonly offline = new OfflineProofDataPublisher();
-
+/** Pins the exact canonical proof payload and returns the content keccak hash. */
+export class RequiredIpfsProofPublisher implements ProofDataPublisher {
   async publish(epochNumber: number, payload: unknown): Promise<ProofDataPublishResult> {
-    const apiUrl = process.env.FOUNDER_ECONOMICS_IPFS_API_URL?.trim();
-    if (!apiUrl) {
-      return this.offline.publish(epochNumber, payload);
+    const apiUrl = requiredEnvironment('FOUNDER_ECONOMICS_IPFS_API_URL');
+    const content = stableJson({ epochNumber, payload });
+    const contentHash = keccak256(toUtf8Bytes(content));
+    const form = new FormData();
+    form.append('file', new Blob([content], { type: 'application/json' }), `epoch-${epochNumber}.json`);
+
+    const headers: Record<string, string> = {};
+    const auth = process.env.FOUNDER_ECONOMICS_IPFS_AUTH?.trim();
+    if (auth) headers.Authorization = auth;
+    const endpoint = `${apiUrl.replace(/\/$/, '')}/api/v0/add?pin=true`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      throw new Error(`IPFS pin failed (${response.status}): ${(await response.text()).slice(0, 240)}`);
     }
-
-    try {
-      const body = JSON.stringify({
-        epochNumber,
-        publishedAt: new Date().toISOString(),
-        payload,
-      });
-      const form = new FormData();
-      form.append('file', new Blob([body], { type: 'application/json' }), `epoch-${epochNumber}.json`);
-
-      const headers: Record<string, string> = {};
-      const auth = process.env.FOUNDER_ECONOMICS_IPFS_AUTH?.trim();
-      if (auth) headers.Authorization = auth;
-
-      const endpoint = apiUrl.replace(/\/$/, '') + '/api/v0/add?pin=true';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: form,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        return {
-          ...(await this.offline.publish(epochNumber, payload)),
-          detail: `IPFS add failed (${res.status}): ${text.slice(0, 120)} — offline receipt stored`,
-        };
-      }
-      const json = (await res.json()) as { Hash?: string; cid?: string };
-      const cid = json.Hash ?? json.cid;
-      if (!cid) {
-        return {
-          ...(await this.offline.publish(epochNumber, payload)),
-          detail: 'IPFS add returned no CID — offline receipt stored',
-        };
-      }
-      return {
-        uri: `ipfs://${cid}`,
-        mode: 'ipfs',
-        detail: `Pinned settlement proof to IPFS (${cid})`,
-      };
-    } catch (err) {
-      return {
-        ...(await this.offline.publish(epochNumber, payload)),
-        detail: `IPFS publish failed: ${err instanceof Error ? err.message : String(err)} — offline receipt stored`,
-      };
-    }
+    const json = (await response.json()) as { Hash?: string; cid?: string };
+    const cid = json.Hash ?? json.cid;
+    if (!cid) throw new Error('IPFS pin response did not include a CID');
+    return {
+      uri: `ipfs://${cid}`,
+      contentHash,
+      mode: 'ipfs',
+      detail: `Pinned immutable settlement proof to IPFS (${cid})`,
+    };
   }
 }
 
@@ -202,7 +202,7 @@ export function createDefaultPublishers(): {
   proofData: ProofDataPublisher;
 } {
   return {
-    merkle: new EnvGatedOnChainMerklePublisher(),
-    proofData: new EnvGatedIpfsProofPublisher(),
+    merkle: new RobinhoodTestnetMerklePublisher(),
+    proofData: new RequiredIpfsProofPublisher(),
   };
 }

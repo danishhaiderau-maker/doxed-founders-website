@@ -13,7 +13,7 @@
  * and so governance can audit what produced a given root.
  */
 
-import type { MerkleTree } from '../merkle-tree';
+import { TOKEN_UNIT, type MerkleLeaf, type MerkleTree } from '../merkle-tree';
 
 /** Epoch metadata available to every DistributionModel. */
 export interface Epoch {
@@ -72,13 +72,52 @@ export interface DistributionModel {
 }
 
 /**
- * Helper — normalize raw integer DDollar to a whole-token amount for an epoch.
- * Rounds down to whole tokens (no fractional claims on-chain).
+ * Deterministically allocate every raw token unit in an epoch.  We deliberately
+ * work in `uint256` units rather than JavaScript numbers so the sum of the
+ * Merkle leaves is always exactly equal to the amount funded on-chain.
+ *
+ * Scores are normalised to 1e9 precision before the bigint calculation. This
+ * makes decimal reputation multipliers reproducible across jobs. Any division
+ * dust is assigned one raw unit at a time in stable address order.
  */
-export function tokensForFounder(
-  shareRatio: number,
-  tokensReleased: number,
-): number {
-  if (tokensReleased <= 0 || shareRatio <= 0) return 0;
-  return Math.floor(shareRatio * tokensReleased);
+export function allocateTokenUnits(
+  totalWholeTokens: number,
+  scoredFounders: Array<{ walletAddress: string; score: number }>,
+): MerkleLeaf[] {
+  if (!Number.isSafeInteger(totalWholeTokens) || totalWholeTokens <= 0) {
+    throw new Error('Epoch token release must be a positive safe whole-token integer');
+  }
+
+  const scoreToFixedUnits = (score: number): bigint => {
+    if (!Number.isFinite(score) || score <= 0 || score >= 1e21) return 0n;
+    // Avoid `BigInt(Math.round(score * SCORE_SCALE))`: the intermediate can
+    // exceed Number's safe range for legitimate high-DDollar founders.
+    return BigInt(score.toFixed(9).replace('.', ''));
+  };
+  const candidates = scoredFounders
+    .map((founder) => ({
+      walletAddress: founder.walletAddress,
+      score: scoreToFixedUnits(founder.score),
+    }))
+    .filter((founder) => founder.walletAddress && founder.score > 0n)
+    .sort((a, b) => a.walletAddress.toLowerCase().localeCompare(b.walletAddress.toLowerCase()));
+
+  if (candidates.length === 0) {
+    throw new Error('Cannot allocate an epoch without eligible claimant wallets');
+  }
+
+  const totalScore = candidates.reduce((sum, founder) => sum + founder.score, 0n);
+  if (totalScore === 0n) throw new Error('Epoch claimant scores must be positive');
+
+  const totalUnits = BigInt(totalWholeTokens) * TOKEN_UNIT;
+  const leaves = candidates.map((founder) => ({
+    walletAddress: founder.walletAddress,
+    amount: (totalUnits * founder.score) / totalScore,
+  }));
+  let remainder = totalUnits - leaves.reduce((sum, leaf) => sum + leaf.amount, 0n);
+  for (let index = 0; remainder > 0n; index = (index + 1) % leaves.length) {
+    leaves[index]!.amount += 1n;
+    remainder -= 1n;
+  }
+  return leaves;
 }

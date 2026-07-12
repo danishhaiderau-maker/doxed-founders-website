@@ -57,6 +57,10 @@ const CHAIN_MAP: Record<string, ChainSlug> = {
 
 export const CHAIN_SLUG_TO_DEX: Record<ChainSlug, string> = {
   SOLANA: 'solana',
+  // Robinhood's EVM testnet has no DexScreener listing surface. An empty
+  // mapping intentionally makes the service reject DEX lookups rather than
+  // presenting an invented or mainnet market as live.
+  ROBINHOOD_EVM_TESTNET: '',
   ETHEREUM: 'ethereum',
   POLYGON: 'polygon',
   ARBITRUM: 'arbitrum',

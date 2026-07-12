@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type {
   CommandResult,
   EditOutcome,
@@ -7,16 +7,15 @@ import type {
   RunCommandOpts,
   WorkspaceNode,
 } from '../execution-manager.types';
-import { FilesystemAdapter } from './filesystem.adapter';
-import { LocalShellAdapter } from './local-shell.adapter';
 
 /**
  * FounderIdeAdapter — the `vscode` execution target (Founder IDE is a
- * VS Code fork). Same local-shell / filesystem path as CursorAdapter until
- * Founder Node IPC can dispatch into a live IDE session.
+ * IDE target. The API process deliberately does not impersonate an IDE by
+ * falling back to its own shell or filesystem. Founder Node / the IDE bridge
+ * must report a verified IPC session before this target can execute work.
  *
- * Registered so `/api/execution-manager/health` lists Founder IDE / VS Code
- * as a first-class connected target alongside terminal + filesystem.
+ * Until that bridge exists, health truthfully reports this adapter offline and
+ * every execution request receives a precise unavailable result.
  */
 @Injectable()
 export class FounderIdeAdapter implements ExecutionAdapter {
@@ -24,18 +23,9 @@ export class FounderIdeAdapter implements ExecutionAdapter {
   private readonly logger = new Logger(FounderIdeAdapter.name);
   private connected = false;
 
-  constructor(
-    @Optional() private readonly shell?: LocalShellAdapter,
-    @Optional() private readonly filesystem?: FilesystemAdapter,
-  ) {}
-
   async connect(): Promise<void> {
-    this.connected = Boolean(this.shell || this.filesystem);
-    if (this.connected) {
-      this.logger.log(
-        'FounderIdeAdapter using local shell/filesystem path (IDE IPC pending).',
-      );
-    }
+    this.connected = false;
+    this.logger.warn('Founder IDE IPC is not available; target remains offline.');
   }
 
   async disconnect(): Promise<void> {
@@ -47,28 +37,25 @@ export class FounderIdeAdapter implements ExecutionAdapter {
   }
 
   async readWorkspace(path?: string): Promise<WorkspaceNode[]> {
-    if (this.filesystem) return this.filesystem.readWorkspace(path);
-    if (this.shell) return this.shell.readWorkspace(path);
+    void path;
     return [];
   }
 
   async applyEdits(edits: FileEdit[]): Promise<EditOutcome[]> {
-    if (this.filesystem) return this.filesystem.applyEdits(edits);
-    if (this.shell) return this.shell.applyEdits(edits);
     return edits.map((e) => ({
       path: e.path,
       ok: false,
-      error: 'FounderIdeAdapter has no filesystem delegate',
+      error: 'Founder IDE is offline: no verified IPC bridge is connected',
     }));
   }
 
   async runCommand(command: string, opts?: RunCommandOpts): Promise<CommandResult> {
-    if (this.shell) return this.shell.runCommand(command, opts);
+    void opts;
     return {
       command,
-      exitCode: 126,
+      exitCode: 69,
       stdout: '',
-      stderr: 'FounderIdeAdapter has no shell delegate',
+      stderr: 'Founder IDE is offline: no verified IPC bridge is connected',
       durationMs: 0,
     };
   }

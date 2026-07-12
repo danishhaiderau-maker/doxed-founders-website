@@ -43,6 +43,8 @@ export class IdeaValidatorService {
 
   /** Idempotency window: reuse a check with the same idea hash < this old. */
   private static readonly IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+  private static readonly MAX_ATTEMPTS = 3;
+  private static readonly STALE_WORK_MS = 15 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -95,11 +97,11 @@ export class IdeaValidatorService {
       },
     });
 
-    // Fire-and-forget the research; the row status is the polling signal.
-    void this.runResearch(auth, row.id, params.ideaText).catch((err) => {
-      this.logger.error(
-        `idea check ${row.id} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    // Prompt the durable worker now for a responsive UI. The scheduled worker
+    // owns recovery after a restart, so this is an optimisation rather than a
+    // correctness requirement.
+    void this.processPending(1).catch((err) => {
+      this.logger.warn(`idea queue kick failed: ${err instanceof Error ? err.message : String(err)}`);
     });
 
     return row;
@@ -168,6 +170,47 @@ export class IdeaValidatorService {
     return rows.map((r) => r.userId);
   }
 
+  /**
+   * Claim and process queued checks. The conditional update is the lock: two
+   * API replicas may discover the same row, but only one transitions it to
+   * RUNNING. Stale RUNNING rows are returned to PENDING before claiming.
+   */
+  async processPending(limit = 5): Promise<{ processed: number }> {
+    const now = new Date();
+    const staleBefore = new Date(now.getTime() - IdeaValidatorService.STALE_WORK_MS);
+    await this.prisma.ideaCheck.updateMany({
+      where: { status: IdeaCheckStatus.RUNNING, processingStartedAt: { lt: staleBefore } },
+      data: { status: IdeaCheckStatus.PENDING, processingStartedAt: null },
+    });
+
+    const queued = await this.prisma.ideaCheck.findMany({
+      where: {
+        status: IdeaCheckStatus.PENDING,
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+        attemptCount: { lt: IdeaValidatorService.MAX_ATTEMPTS },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: Math.max(1, Math.min(limit, 20)),
+    });
+
+    let processed = 0;
+    for (const row of queued) {
+      const claim = await this.prisma.ideaCheck.updateMany({
+        where: { id: row.id, status: IdeaCheckStatus.PENDING },
+        data: {
+          status: IdeaCheckStatus.RUNNING,
+          processingStartedAt: new Date(),
+          nextAttemptAt: null,
+          attemptCount: { increment: 1 },
+        },
+      });
+      if (claim.count !== 1) continue;
+      processed += 1;
+      await this.runResearch({ userId: row.userId, nodeId: 'idea-validator-worker' }, row.id, row.ideaText);
+    }
+    return { processed };
+  }
+
   // -- The research flow ------------------------------------------------
 
   /**
@@ -213,14 +256,28 @@ export class IdeaValidatorService {
           similarProjectsJson: report.competitors as unknown as never,
           suggestedOssJson: report.openSourceReuse as unknown as never,
           completedAt: new Date(),
+          processingStartedAt: null,
+          nextAttemptAt: null,
         },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`idea check ${rowId} failed during research: ${message}`);
+      const current = await this.prisma.ideaCheck.findUnique({
+        where: { id: rowId },
+        select: { attemptCount: true },
+      });
+      const attempts = current?.attemptCount ?? IdeaValidatorService.MAX_ATTEMPTS;
+      const retry = attempts < IdeaValidatorService.MAX_ATTEMPTS;
+      const retryDelayMs = Math.pow(2, Math.max(0, attempts - 1)) * 60_000;
       await this.prisma.ideaCheck.update({
         where: { id: rowId },
-        data: { status: IdeaCheckStatus.FAILED, errorMessage: message.slice(0, 4000) },
+        data: {
+          status: retry ? IdeaCheckStatus.PENDING : IdeaCheckStatus.FAILED,
+          errorMessage: message.slice(0, 4000),
+          processingStartedAt: null,
+          nextAttemptAt: retry ? new Date(Date.now() + retryDelayMs) : null,
+        },
       });
     }
   }

@@ -1,6 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { CapabilityRegistryService } from '../capability-registry/capability-registry.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { RoutingDecisionRow } from './learning-engine.types';
@@ -17,17 +15,15 @@ import type { RoutingDecisionRow } from './learning-engine.types';
  * Phase 4 (this) learns GLOBALLY across all founders. Phase 4.5 will add
  * per-founder personalization; intentionally out of scope here.
  *
- * State: last-rollup timestamp is persisted to a single JSON file under
- * `logs/learning-engine-state.json`. One row of state does not justify a
- * Prisma table + migration — a file matches how the trading bot persists
- * its own runtime state and is trivially inspectable by hand.
+ * State: the singleton LearningEngineState row stores the watermark. A local
+ * file is not safe on Railway's ephemeral filesystem or when more than one
+ * API instance is running.
  */
 @Injectable()
 export class LearningEngineService {
   private readonly logger = new Logger(LearningEngineService.name);
 
-  static readonly STATE_FILE =
-    'logs/learning-engine-state.json' as const;
+  private static readonly STATE_ID = 'global';
 
   /** Treat outcome as a success unless we saw a retry or a heavy edit. */
   static isSuccess(row: {
@@ -59,7 +55,7 @@ export class LearningEngineService {
    */
   async rollup(): Promise<{ processed: number; updated: number }> {
     const startedAt = new Date();
-    const state = this.readState();
+    const state = await this.readState();
     const since = state.lastRollupAt ?? new Date(0);
 
     // -- Input step ----------------------------------------------------------
@@ -78,7 +74,7 @@ export class LearningEngineService {
       );
       // Still bump the timestamp so we don't re-scan the same empty window
       // every 6 hours forever.
-      this.writeState({ lastRollupAt: startedAt, processed: 0, updated: 0 });
+      await this.writeState({ lastRollupAt: startedAt, processed: 0, updated: 0 });
       return { processed: 0, updated: 0 };
     }
 
@@ -124,7 +120,7 @@ export class LearningEngineService {
       updated += 1;
     }
 
-    this.writeState({
+    await this.writeState({
       lastRollupAt: startedAt,
       processed: rows.length,
       updated,
@@ -138,12 +134,12 @@ export class LearningEngineService {
   }
 
   /** Surface last-run metadata for the admin status endpoint. */
-  getStatus(): {
+  async getStatus(): Promise<{
     lastRollupAt: string | null;
     lastProcessedCount: number;
     lastUpdatedCount: number;
-  } {
-    const s = this.readState();
+  }> {
+    const s = await this.readState();
     return {
       lastRollupAt: s.lastRollupAt ? s.lastRollupAt.toISOString() : null,
       lastProcessedCount: s.processed ?? 0,
@@ -151,26 +147,16 @@ export class LearningEngineService {
     };
   }
 
-  // --- State file -----------------------------------------------------------
-  // Plain JSON, sync I/O — the rollup runs once every 6h, file is tiny,
-  // and sync read avoids races between the scheduler and any admin probe.
-
-  private readState(): LearningEngineState {
+  private async readState(): Promise<LearningEngineState> {
     try {
-      if (!existsSync(LearningEngineService.STATE_FILE)) {
-        return {};
-      }
-      const raw = readFileSync(
-        LearningEngineService.STATE_FILE,
-        'utf8',
-      ) as string;
-      const parsed = JSON.parse(raw) as Partial<LearningEngineStateJson>;
+      const row = await this.prisma.learningEngineState.findUnique({
+        where: { id: LearningEngineService.STATE_ID },
+      });
+      if (!row) return {};
       return {
-        lastRollupAt: parsed.lastRollupAt
-          ? new Date(parsed.lastRollupAt)
-          : undefined,
-        processed: typeof parsed.processed === 'number' ? parsed.processed : undefined,
-        updated: typeof parsed.updated === 'number' ? parsed.updated : undefined,
+        lastRollupAt: row.lastRollupAt ?? undefined,
+        processed: row.lastProcessedCount,
+        updated: row.lastUpdatedCount,
       };
     } catch (err) {
       this.logger.warn(
@@ -182,23 +168,22 @@ export class LearningEngineService {
     }
   }
 
-  private writeState(next: Required<LearningEngineState>): void {
+  private async writeState(next: Required<LearningEngineState>): Promise<void> {
     try {
-      const dir = dirname(LearningEngineService.STATE_FILE);
-      mkdirSync(dir, { recursive: true });
-      const payload: LearningEngineStateJson = {
-        lastRollupAt: next.lastRollupAt.toISOString(),
-        processed: next.processed,
-        updated: next.updated,
-      };
-      // Atomic write: write to a sibling temp file, then rename. A crash
-      // mid-write leaves either the temp file orphaned or the old state
-      // intact — never a half-written JSON. `renameSync` is atomic for
-      // same-volume renames (tmp is next to STATE_FILE, so always same vol),
-      // which holds on Windows (NTFS), Linux, and macOS.
-      const tmp = `${LearningEngineService.STATE_FILE}.tmp`;
-      writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
-      renameSync(tmp, LearningEngineService.STATE_FILE);
+      await this.prisma.learningEngineState.upsert({
+        where: { id: LearningEngineService.STATE_ID },
+        create: {
+          id: LearningEngineService.STATE_ID,
+          lastRollupAt: next.lastRollupAt,
+          lastProcessedCount: next.processed,
+          lastUpdatedCount: next.updated,
+        },
+        update: {
+          lastRollupAt: next.lastRollupAt,
+          lastProcessedCount: next.processed,
+          lastUpdatedCount: next.updated,
+        },
+      });
     } catch (err) {
       // The rollup itself still succeeded — we just can't persist the new
       // watermark. Next run will reprocess the same window, which is safe.
@@ -215,10 +200,4 @@ type LearningEngineState = {
   lastRollupAt?: Date;
   processed?: number;
   updated?: number;
-};
-
-type LearningEngineStateJson = {
-  lastRollupAt: string;
-  processed: number;
-  updated: number;
 };

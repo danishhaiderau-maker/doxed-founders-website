@@ -65,4 +65,19 @@ export class IdeaValidatorDailyCron {
   async heartbeat(): Promise<void> {
     this.logger.debug('idea-validator cron heartbeat');
   }
+
+  /** Durable queue worker. Queued checks are picked up after API restarts and
+   * transient provider/browser failures are retried by the service. */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async processQueue(): Promise<void> {
+    if (!ideaValidatorEnabled(this.config)) return;
+    try {
+      const { processed } = await this.ideaValidator.processPending();
+      if (processed > 0) this.logger.log(`idea-validator worker processed ${processed} check(s)`);
+    } catch (err) {
+      this.logger.warn(
+        `idea-validator worker failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }

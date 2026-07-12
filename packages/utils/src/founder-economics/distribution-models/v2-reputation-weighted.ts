@@ -20,7 +20,7 @@ import type {
   DDollarSnapshot,
   FounderShare,
 } from './base-distribution-model';
-import { tokensForFounder } from './base-distribution-model';
+import { allocateTokenUnits } from './base-distribution-model';
 import { buildMerkleTree } from '../merkle-tree';
 
 export class V2ReputationWeightedDistributionModel implements DistributionModel {
@@ -47,15 +47,10 @@ export class V2ReputationWeightedDistributionModel implements DistributionModel 
         weighted: V2ReputationWeightedDistributionModel.weightedDdollar(f),
       }));
 
-    const totalWeighted = weighted.reduce((sum, w) => sum + w.weighted, 0);
-
-    const leaves = weighted
-      .map((w) => {
-        const ratio = totalWeighted > 0 ? w.weighted / totalWeighted : 0;
-        const amount = tokensForFounder(ratio, epoch.tokensReleased);
-        return { walletAddress: w.founder.walletAddress, amount };
-      })
-      .filter((leaf) => leaf.amount > 0);
+    const leaves = allocateTokenUnits(epoch.tokensReleased, weighted.map((w) => ({
+      walletAddress: w.founder.walletAddress,
+      score: w.weighted,
+    })));
 
     return buildMerkleTree(leaves);
   }

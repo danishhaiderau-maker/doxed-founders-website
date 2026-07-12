@@ -153,8 +153,8 @@ function StatusBar({
       </div>
       <div className="h-10 w-px bg-zinc-800" />
       <div className="flex-1 text-xs text-zinc-500">
-        DoxxedCrypto = trust layer. Verify once → unlock unlimited AI + launch
-        rights.
+        DoxxedCrypto is the trust layer. Verification unlocks founder features;
+        token, liquidity, and DEX actions remain disabled outside the audited testnet path.
       </div>
     </div>
   );
@@ -174,7 +174,7 @@ function CtaCards({
       ) : (
         <AlreadyDoxxedCard />
       )}
-      <LaunchTokenCard tier={tier} />
+      <EconomicsSafetyCard />
     </div>
   );
 }
@@ -243,8 +243,8 @@ function GetDoxxedCard({ accessToken }: { accessToken: string }) {
     <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-5">
       <h3 className="text-base font-bold text-emerald-200">Get Doxxed</h3>
       <p className="mt-1 text-xs text-zinc-400">
-        Verify once → unlock unlimited AI, DDollar earning, and project launch
-        rights. No KYC. Just a 60-second video.
+        Verify once → unlock unlimited AI and DDollar earning. No KYC. Just a
+        60-second video.
       </p>
 
       <div className="mt-4 space-y-3">
@@ -310,8 +310,7 @@ function AlreadyDoxxedCard() {
         ✅ Doxxed Builder
       </h3>
       <p className="mt-1 text-xs text-zinc-400">
-        You have unlimited AI, full DDollar earning, and launch rights. Keep
-        building in public.
+        You have unlimited AI and full DDollar earning. Keep building in public.
       </p>
       <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
         <Link
@@ -331,66 +330,20 @@ function AlreadyDoxxedCard() {
   );
 }
 
-function LaunchTokenCard({ tier }: { tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN' }) {
-  const [waitlistEmail, setWaitlistEmail] = useState('');
-  const [joined, setJoined] = useState(false);
-
-  const canLaunch = tier === 'DOXXED';
-
+function EconomicsSafetyCard() {
   return (
     <div className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5">
       <h3 className="text-base font-bold text-violet-200">
-        I&apos;m Ready — Launch My Token
+        Founder Economics · Testnet Only
       </h3>
       <p className="mt-1 text-xs text-zinc-400">
-        Spin up a token on Solana, open a 15-day Raise Room commitment window,
-        and trade on the integrated DEX. Revenue share for DDollar pledgers.
+        The 1B-token vesting and distribution system is restricted to Robinhood
+        EVM testnet while its contract, data, and governance checks are verified.
       </p>
-
-      {!canLaunch && (
-        <p className="mt-3 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-200">
-          {tier === 'VISITOR'
-            ? '🔒 Get Doxxed first to unlock launch rights.'
-            : 'Token launch unlocks at Phase 7. Join the waitlist for early access.'}
-        </p>
-      )}
-
-      {canLaunch ? (
-        <button
-          type="button"
-          disabled
-          className="mt-4 w-full cursor-not-allowed rounded-lg border border-violet-700/50 bg-violet-900/30 px-4 py-2 text-sm font-semibold text-violet-300"
-          title="Phase 7+ — not yet enabled"
-        >
-          Launching soon (Phase 7)
-        </button>
-      ) : (
-        <div className="mt-4">
-          {!joined ? (
-            <div className="flex gap-2">
-              <input
-                type="email"
-                value={waitlistEmail}
-                onChange={(e) => setWaitlistEmail(e.target.value)}
-                placeholder="founder@your-startup.com"
-                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-xs text-zinc-200"
-              />
-              <button
-                type="button"
-                onClick={() => setJoined(true)}
-                disabled={!waitlistEmail.includes('@')}
-                className="rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
-              >
-                Join waitlist
-              </button>
-            </div>
-          ) : (
-            <p className="rounded-lg border border-violet-700 bg-violet-900/30 p-3 text-xs text-violet-200">
-              You&apos;re on the list. We&apos;ll email you when Phase 7 opens.
-            </p>
-          )}
-        </div>
-      )}
+      <p className="mt-3 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-200">
+        No mainnet token, liquidity-pool, or DEX action is available here. Those
+        require a passing simulation, independent security review, and counsel gate.
+      </p>
     </div>
   );
 }
@@ -425,16 +378,23 @@ function QuickLinksGrid() {
 }
 
 function RecentActivityStrip({ dashboard }: { dashboard: DashboardData | null }) {
-  void dashboard;
+  const connectedApps = dashboard?.connectedApps ?? [];
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-5">
       <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
         Recent activity
       </h3>
-      <p className="mt-3 text-xs text-zinc-500">
-        No recent activity yet. Once the Learning Engine (Phase 4) is live,
-        routing improvements and project events will stream here.
-      </p>
+      {dashboard ? (
+        <p className="mt-3 text-xs text-zinc-500">
+          {connectedApps.length > 0
+            ? `${connectedApps.length} connected integration${connectedApps.length === 1 ? '' : 's'} recorded: ${connectedApps.map((app) => app.label).join(', ')}.`
+            : 'No connected integrations are recorded for this account yet.'}
+        </p>
+      ) : (
+        <p className="mt-3 text-xs text-zinc-500">
+          Activity status is unavailable until the dashboard connection succeeds.
+        </p>
+      )}
     </div>
   );
 }

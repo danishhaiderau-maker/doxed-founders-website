@@ -1,11 +1,13 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Get,
   Logger,
   Param,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import {
@@ -17,6 +19,7 @@ import {
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
+import { AdminGuard } from '../auth/guards';
 import { DdollarEngineService } from './ddollar-engine.service';
 import { EpochSettlementService } from './epoch-settlement.service';
 import { FounderGdpService } from './founder-gdp.service';
@@ -109,11 +112,15 @@ export class FounderEconomicsController {
       if (!row) {
         return { found: false, message: 'No claimable allocation for this epoch.' };
       }
+      if (body.walletAddress.toLowerCase() !== row.walletAddress.toLowerCase()) {
+        throw new BadRequestException('Claim wallet does not match this founder\'s verified EVM wallet.');
+      }
       return {
         found: true,
         epochId: body.epochId,
         epochNumber: row.epochNumber,
         amount: row.amount,
+        amountRaw: row.amountRaw,
         walletAddress: row.walletAddress,
         merkleRoot: row.merkleRoot,
         merkleProof: row.merkleProof,
@@ -180,9 +187,31 @@ export class FounderEconomicsController {
     );
   }
 
-  /** Authenticated — manually trigger epoch settlement (admin/dev only). */
+  /**
+   * Admin-only worker kick. It can only settle a real, testnet-funded epoch;
+   * it does not permit operators to choose a model, amount, or recipient.
+   */
   @Post('settle')
+  @UseGuards(AdminGuard)
   settle() {
     return this.settlement.settleCurrentEpoch();
+  }
+
+  /**
+   * Mirror a model already approved in the on-chain ModelRegistry. This API
+   * cannot approve a code hash; the settlement worker verifies the registry
+   * before every proposal as well.
+   */
+  @Post('models/sync-governance-approval')
+  @UseGuards(AdminGuard)
+  syncGovernanceModelApproval(
+    @Body() body: {
+      version: string;
+      codeHash: string;
+      activationEpoch: number;
+      governanceTxHash?: string;
+    },
+  ) {
+    return this.settlement.syncGovernanceModelApproval(body);
   }
 }

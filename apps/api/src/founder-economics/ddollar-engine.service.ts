@@ -174,7 +174,11 @@ export class DdollarEngineService {
         builderScore: true,
         createdAt: true,
         emailVerified: true,
-        walletConnections: { select: { address: true, chain: true }, take: 1 },
+        walletConnections: {
+          where: { chain: 'ROBINHOOD_EVM_TESTNET' },
+          select: { address: true, chain: true, verifiedAt: true },
+          take: 1,
+        },
       },
     });
     const verifiedMilestoneCounts = await this.prisma.proofOfSuccess.groupBy({
@@ -190,6 +194,9 @@ export class DdollarEngineService {
       epochNumber,
       snapshotAt: new Date().toISOString(),
       founders: users.map((u) => {
+        // A claimant has exactly one verified Robinhood EVM testnet wallet.
+        // Users with another-chain wallets remain in the snapshot for audit but
+        // cannot receive an EVM Merkle leaf.
         const walletAddress = u.walletConnections[0]?.address ?? '';
         const accountAgeDays = Math.max(
           0,

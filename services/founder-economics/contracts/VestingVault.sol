@@ -1,93 +1,113 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/**
- * VestingVault — non-upgradeable, immutable 90-day epoch release schedule.
- *
- * Architectural rule (Founder Economics MVP):
- *   - The schedule is set at deploy and CANNOT be changed.
- *   - releaseEpoch() is PERMISSIONLESS — anyone can call it once the epoch
- *     has ended. This removes admin key risk: there is no admin.
- *   - Each release pushes a fixed 20,000,000 tokens into the EpochDistributor.
- *   - The vault has no idea who gets the tokens — that is determined off-chain
- *     by the active DistributionModel and published as a Merkle root.
- *
- * Why this matters:
- *   The on-chain layer is intentionally dumb and immutable. All upgradeable
- *   distribution logic (v1 pro-rata → v2 reputation-weighted → ...) lives
- *   off-chain and only publishes a Merkle root per epoch. Swapping the model
- *   requires zero contract changes.
- *
- * DESIGN ARTIFACT — does not need to compile without Foundry/Hardhat.
- */
-
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./IEpochDistributor.sol";
 
+/**
+ * Immutable DCF 10-year schedule.
+ *
+ * Supply fixture (18-decimal token units):
+ * - 200M: initial DCF liquidity, funded outside this vault.
+ * - 800M: this vault.
+ * - 509,414,048: 40 decaying community epochs.
+ * - 130,585,952: team multisig, released quarterly with each epoch.
+ * - 160M plus returned expired claims: Champions terminal epoch at year ten.
+ *
+ * The final community release normalises harmless integer rounding so the
+ * declared allocation is exact. Governance cannot alter any amount, date, or
+ * recipient after deployment.
+ */
 contract VestingVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    /// Immutable token released by this vault.
+    uint256 public constant UNIT = 1e18;
+    uint256 public constant VAULT_ALLOCATION = 800_000_000 * UNIT;
+    uint256 public constant COMMUNITY_ALLOCATION = 509_414_048 * UNIT;
+    uint256 public constant TEAM_ALLOCATION = 130_585_952 * UNIT;
+    uint256 public constant CHAMPIONS_MINIMUM = 160_000_000 * UNIT;
+    uint256 public constant EPOCH_COUNT = 40;
+    uint256 public constant TERMINAL_EPOCH = 41;
+    uint256 public constant EPOCH_SECONDS = 90 days;
+    uint256 public constant TERMINAL_DELAY = 3650 days;
+    uint256 public constant COMMUNITY_EMISSION_BPS = 250;
+
     IERC20 public immutable token;
-    /// Immutable distributor that receives each epoch's release.
-    address public immutable distributor;
-    /// Tokens released per epoch (e.g. 20_000_000 * 1e18).
-    uint256 public immutable releasePerEpoch;
-    /// Seconds per epoch — 90 days = 7_776_000 in production.
-    uint256 public immutable epochSeconds;
-    /// Block time the vault was deployed (epoch 0 start).
+    IEpochDistributor public immutable distributor;
+    address public immutable teamTreasury;
     uint256 public immutable startTimestamp;
+    uint256 public immutable terminalTimestamp;
 
-    /// Number of epochs released so far. Starts at 0.
     uint256 public releasedEpochs;
-    /// Total tokens transferred out across all releases.
-    uint256 public totalReleased;
+    uint256 public communityReleased;
+    uint256 public teamReleased;
+    uint256 public emissionReference = VAULT_ALLOCATION;
+    bool public championsReleased;
 
-    event EpochReleased(uint256 indexed epoch, uint256 amount, address caller);
-    event ScheduleFrozen(uint256 releasePerEpoch, uint256 epochSeconds, uint256 startTimestamp);
+    event EpochReleased(uint256 indexed epoch, uint256 communityAmount, uint256 teamAmount);
+    event ChampionsReleased(uint256 indexed epoch, uint256 amount);
 
-    constructor(
-        address token_,
-        address distributor_,
-        uint256 releasePerEpoch_,
-        uint256 epochSeconds_
-    ) {
+    constructor(address token_, address distributor_, address teamTreasury_) {
+        require(token_ != address(0), "VestingVault: zero token");
+        require(distributor_ != address(0), "VestingVault: zero distributor");
+        require(teamTreasury_ != address(0), "VestingVault: zero team treasury");
         token = IERC20(token_);
-        distributor = distributor_;
-        releasePerEpoch = releasePerEpoch_;
-        epochSeconds = epochSeconds_;
+        distributor = IEpochDistributor(distributor_);
+        teamTreasury = teamTreasury_;
         startTimestamp = block.timestamp;
-        emit ScheduleFrozen(releasePerEpoch_, epochSeconds_, startTimestamp);
+        terminalTimestamp = block.timestamp + TERMINAL_DELAY;
+    }
+
+    /** Permissionless quarterly release. No administrator can skip or alter it. */
+    function releaseEpoch() external nonReentrant {
+        uint256 epoch = releasedEpochs + 1;
+        require(epoch <= EPOCH_COUNT, "VestingVault: schedule complete");
+        require(
+            block.timestamp >= startTimestamp + epoch * EPOCH_SECONDS,
+            "VestingVault: epoch not due"
+        );
+        if (releasedEpochs == 0) {
+            require(token.balanceOf(address(this)) >= VAULT_ALLOCATION, "VestingVault: not funded");
+        }
+
+        uint256 communityAmount = epoch == EPOCH_COUNT
+            ? COMMUNITY_ALLOCATION - communityReleased
+            : (emissionReference * COMMUNITY_EMISSION_BPS) / 10_000;
+        uint256 teamAmount = epoch == EPOCH_COUNT
+            ? TEAM_ALLOCATION - teamReleased
+            : TEAM_ALLOCATION / EPOCH_COUNT;
+
+        emissionReference -= communityAmount;
+        communityReleased += communityAmount;
+        teamReleased += teamAmount;
+        releasedEpochs = epoch;
+
+        token.safeTransfer(teamTreasury, teamAmount);
+        token.safeTransfer(address(distributor), communityAmount);
+        distributor.fundEpoch(epoch, communityAmount);
+        emit EpochReleased(epoch, communityAmount, teamAmount);
     }
 
     /**
-     * Permissionless release. Anyone may call once `block.timestamp` has passed
-     * the next epoch boundary. Pulls `releasePerEpoch` from this vault into the
-     * distributor. Reverts if called early or if the vault is exhausted.
+     * Releases the 160M Champions reserve plus returned expired claims. The
+     * distributor's terminal root still has to pass governance challenge.
      */
-    function releaseEpoch() external nonReentrant {
-        uint256 next = releasedEpochs + 1;
-        uint256 boundary = startTimestamp + (next * epochSeconds);
-        require(block.timestamp >= boundary, "VestingVault: epoch not ended");
-
-        uint256 balance = token.balanceOf(address(this));
-        require(balance >= releasePerEpoch, "VestingVault: vault exhausted");
-
-        releasedEpochs = next;
-        totalReleased += releasePerEpoch;
-
-        token.safeTransfer(distributor, releasePerEpoch);
-        emit EpochReleased(next, releasePerEpoch, msg.sender);
+    function releaseChampions() external nonReentrant {
+        require(!championsReleased, "VestingVault: champions already released");
+        require(releasedEpochs == EPOCH_COUNT, "VestingVault: epochs incomplete");
+        require(block.timestamp >= terminalTimestamp, "VestingVault: terminal not due");
+        uint256 amount = token.balanceOf(address(this));
+        require(amount >= CHAMPIONS_MINIMUM, "VestingVault: terminal underfunded");
+        championsReleased = true;
+        token.safeTransfer(address(distributor), amount);
+        distributor.fundEpoch(TERMINAL_EPOCH, amount);
+        emit ChampionsReleased(TERMINAL_EPOCH, amount);
     }
 
-    /// Pure helper — what epoch number are we currently inside (0-indexed)?
-    function currentEpoch() public view returns (uint256) {
-        return (block.timestamp - startTimestamp) / epochSeconds;
-    }
-
-    /// Pure helper — timestamp at which `epoch` ends.
-    function epochEndTime(uint256 epoch) public view returns (uint256) {
-        return startTimestamp + ((epoch + 1) * epochSeconds);
+    function nextEpochDueAt() external view returns (uint256) {
+        if (releasedEpochs >= EPOCH_COUNT) return terminalTimestamp;
+        return startTimestamp + (releasedEpochs + 1) * EPOCH_SECONDS;
     }
 }

@@ -16,6 +16,7 @@ enum UserRole {
 
 enum ChainSlug {
   ETHEREUM
+  ROBINHOOD_EVM_TESTNET
   SOLANA
   POLYGON
   ARBITRUM
@@ -2747,6 +2748,7 @@ model WalletConnection {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, chain])
+  @@unique([chain, address])
   @@index([address])
 }
 
@@ -3105,6 +3107,11 @@ model IdeaCheck {
   suggestedOssJson     Json?
   /// Error message captured when status = FAILED.
   errorMessage         String?         @db.Text
+  /// Durable worker metadata. A request is never lost just because the API
+  /// process restarts while browser research is running.
+  attemptCount         Int             @default(0)
+  nextAttemptAt        DateTime?
+  processingStartedAt  DateTime?
   /// Soft-dismissed by the founder — stays in history but hidden from the UI.
   dismissed            Boolean         @default(false)
   /// True once the founder has viewed the result (drives the daily pop-up:
@@ -3120,6 +3127,7 @@ model IdeaCheck {
   @@index([projectId])
   @@index([applicationId])
   @@index([status])
+  @@index([status, nextAttemptAt])
   @@index([createdAt])
 }
 
@@ -3227,6 +3235,17 @@ model DebugSquasherRun {
   @@index([createdAt(sort: Desc)])
   @@index([pillar, createdAt(sort: Desc)])
   @@index([status])
+}
+
+/// Durable singleton watermark for the Learning Engine. Keeping this in
+/// Postgres rather than the API container filesystem makes scheduled rollups
+/// safe across Railway restarts and multiple API instances.
+model LearningEngineState {
+  id                 String   @id
+  lastRollupAt       DateTime?
+  lastProcessedCount Int      @default(0)
+  lastUpdatedCount   Int      @default(0)
+  updatedAt          DateTime @updatedAt
 }
 
 // ─── Phase 8 — Raise Room → Token Launch ─────────────────────────────────────
@@ -3477,8 +3496,11 @@ model LamStep {
 enum EpochStatus {
   OPEN
   SETTLING
+  /// Root is on-chain, but still inside the public challenge/veto window.
+  PROPOSED
   PUBLISHED
   CLOSED
+  FAILED
 }
 
 /// An epoch in the vesting + distribution schedule. Each epoch releases a
@@ -3491,6 +3513,8 @@ model Epoch {
   endTime                  DateTime
   /// Tokens released from the VestingVault for this epoch (raw integer).
   tokensReleased           Int         @default(0)
+  /// Exact uint256 amount funded and committed by the corresponding root.
+  totalAllocatedRaw        String?     @db.Text
   /// Merkle root published on-chain by the settlement job (hex 0x…). Null until PUBLISHED.
   merkleRoot               String?
   /// IPFS CID or URL pointing to the proof data (per-founder leaf + proof path). Null until PUBLISHED.
@@ -3498,9 +3522,22 @@ model Epoch {
   status                   EpochStatus @default(OPEN)
   /// Version of the DistributionModel that produced `merkleRoot` (e.g. "v1-pro-rata").
   distributionModelVersion String?
+  /// Governance-registered source/build hash used by the on-chain ModelRegistry.
+  modelCodeHash            String?
+  /// Immutable hash of DDollar inputs, model configuration and computed leaves.
+  settlementSnapshotHash   String?
+  settlementConfig         Json?
   /// On-chain tx hash of the publishRoot call. Null until published on-chain.
   publishTxHash            String?
+  publicationBlockNumber   Int?
+  /// Seven-day public root challenge window. Claims are unavailable until finalization.
+  challengeEndsAt          DateTime?
+  settlementStartedAt      DateTime?
+  settlementAttemptCount   Int         @default(0)
+  settlementNextAttemptAt  DateTime?
+  settlementError          String?     @db.Text
   publishedAt              DateTime?
+  finalizedAt              DateTime?
   createdAt                DateTime    @default(now())
   updatedAt                DateTime    @updatedAt
 
@@ -3508,6 +3545,7 @@ model Epoch {
 
   @@index([status])
   @@index([epochNumber])
+  @@index([settlementNextAttemptAt])
 }
 
 /// A founder's claim of their epoch allocation. One row per (epoch, user).
@@ -3520,6 +3558,8 @@ model EpochClaim {
   walletAddress String
   /// Whole tokens allocated for this founder in this epoch.
   amount        Int       @default(0)
+  /// Exact uint256 claim amount in 18-decimal token units, serialized as decimal text.
+  amountRaw     String    @default("0") @db.Text
   /// True once the founder has claimed on-chain via EpochDistributor.claim().
   claimed       Boolean   @default(false)
   claimedAt     DateTime?
@@ -3537,6 +3577,25 @@ model EpochClaim {
   @@index([epochId])
   @@index([userId])
   @@index([walletAddress])
+}
+
+/// Off-chain audit mirror of a governance-approved ModelRegistry entry.
+/// The settlement service also checks the on-chain registry before every root;
+/// this table never acts as an independent authority to switch models.
+model DistributionModelApproval {
+  id              String    @id @default(cuid())
+  version         String
+  codeHash        String    @unique
+  activationEpoch Int
+  governanceTxHash String?  @unique
+  approved        Boolean   @default(true)
+  approvedAt      DateTime  @default(now())
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([version, activationEpoch])
+  @@index([approved, activationEpoch])
 }
 
 /// A DDollar grant for an Economic activity (see DDollarActivityType in utils).

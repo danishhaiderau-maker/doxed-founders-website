@@ -15,7 +15,7 @@ import type {
   Epoch,
   DDollarSnapshot,
 } from './base-distribution-model';
-import { tokensForFounder } from './base-distribution-model';
+import { allocateTokenUnits } from './base-distribution-model';
 import { buildMerkleTree } from '../merkle-tree';
 
 export class V1ProRataDistributionModel implements DistributionModel {
@@ -25,19 +25,9 @@ export class V1ProRataDistributionModel implements DistributionModel {
   readonly governanceApproved = true;
 
   computeShares(epoch: Epoch, snapshot: DDollarSnapshot) {
-    const totalDdollar = snapshot.founders.reduce(
-      (sum, f) => sum + Math.max(0, f.rawDdollar),
-      0,
-    );
-
-    const leaves = snapshot.founders
+    const leaves = allocateTokenUnits(epoch.tokensReleased, snapshot.founders
       .filter((f) => f.rawDdollar > 0 && f.walletAddress)
-      .map((f) => {
-        const ratio = totalDdollar > 0 ? f.rawDdollar / totalDdollar : 0;
-        const amount = tokensForFounder(ratio, epoch.tokensReleased);
-        return { walletAddress: f.walletAddress, amount };
-      })
-      .filter((leaf) => leaf.amount > 0);
+      .map((f) => ({ walletAddress: f.walletAddress, score: f.rawDdollar })));
 
     return buildMerkleTree(leaves);
   }
