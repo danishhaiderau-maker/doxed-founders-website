@@ -17,7 +17,7 @@ export default function BuilderSettingsPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Integrations</h1>
             <p className="text-sm text-zinc-500">
-              Downloads &amp; pairing · AI providers · Infrastructure · Security
+              Founder Stack pairing · AI providers · Infrastructure · Security
             </p>
           </div>
           <SiteNav />

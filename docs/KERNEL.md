@@ -265,7 +265,7 @@ The outcome-signal columns are the training data the Learning Engine consumes in
 | Memory Engine | Kernel | 🚧 Phase 1+ | Skeleton in Phase 1, fills in Phases 2-4 |
 | Execution Engine | Kernel | 🚧 Phase 3 | Cursor adapter first |
 | Learning Engine | Kernel | 🚧 Phase 4 | Updates Capability successRate |
-| Founder Intent Engine | Kernel | 🚧 Phase 5 | Goal → Task → Execution Graph |
+| Founder Intent Engine | Kernel | ✅ Thin skeleton | `POST /api/intent/decompose` → AI Gateway steps + Flight Recorder |
 | Auth + Vault | Kernel | ⚠ Partial | Twitter + Founder Node done; integration vault exists |
 | Raise Room | App | ⚠ Partial | Existing, matures in Phase 7+ |
 | Marketplace | App | 🚧 Spec | Phase 6+ |

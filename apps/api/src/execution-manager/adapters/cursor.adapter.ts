@@ -1,4 +1,4 @@
-import { Injectable, NotImplementedException } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type {
   CommandResult,
   EditOutcome,
@@ -7,30 +7,50 @@ import type {
   RunCommandOpts,
   WorkspaceNode,
 } from '../execution-manager.types';
+import { FilesystemAdapter } from './filesystem.adapter';
+import { LocalShellAdapter } from './local-shell.adapter';
 
 /**
- * CursorAdapter — STUB. The `cursor` execution target.
+ * CursorAdapter — IDE execution target with a real local fallback path.
  *
- * Placeholder so the kernel can register a Cursor target, surface it
- * in /api/execution-manager/health, and route actions to it — while
- * making it loud and clear that the transport isn't wired yet. The
- * real implementation lands in Phase 5+, once Founder Node IPC is in
- * place (docs/KERNEL.md §10, "Execution Engine 🚧 Phase 3 → Cursor
- * adapter first" but Founder Node IPC is the gating dependency).
+ * Full Cursor / Founder Node IPC (remote agent dispatch into a live Cursor
+ * session) is still Phase 5+ transport work. Until that lands, this adapter
+ * does **not** throw NotImplementedException on every call — it delegates
+ * to the LocalShell + Filesystem adapters that already work on the kernel
+ * host (and on Founder Node when the API runs co-located with the vault).
  *
- * connect() resolves immediately and flips a flag so health checks
- * report Cursor as a connected target. Every other method throws
- * NotImplementedException with a Phase 5+ pointer.
+ * Health therefore reports `cursor` as connected when the local path is
+ * live, and actions succeed for shell / file-read / file-write graphs.
+ * Callers that need true Cursor Agent IPC should check
+ * `usesRemoteIpc()` once that flag flips true.
  */
 @Injectable()
 export class CursorAdapter implements ExecutionAdapter {
   readonly target = 'cursor' as const;
+  private readonly logger = new Logger(CursorAdapter.name);
   private connected = false;
 
+  constructor(
+    @Optional() private readonly shell?: LocalShellAdapter,
+    @Optional() private readonly filesystem?: FilesystemAdapter,
+  ) {}
+
+  /** True only when real Cursor/Founder-Node IPC is wired (not yet). */
+  usesRemoteIpc(): boolean {
+    return false;
+  }
+
   async connect(): Promise<void> {
-    // No transport to establish yet. We flip the flag so the kernel's
-    // health endpoint can honestly say "cursor target registered".
-    this.connected = true;
+    this.connected = Boolean(this.shell || this.filesystem);
+    if (!this.connected) {
+      this.logger.warn(
+        'CursorAdapter connected without local shell/filesystem delegates — actions will fail until adapters are wired.',
+      );
+    } else {
+      this.logger.log(
+        'CursorAdapter using local shell/filesystem path (Founder Node IPC pending).',
+      );
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -41,26 +61,37 @@ export class CursorAdapter implements ExecutionAdapter {
     return this.connected;
   }
 
-  async readWorkspace(_path?: string): Promise<WorkspaceNode[]> {
-    throw this.notImplemented('readWorkspace');
+  async readWorkspace(path?: string): Promise<WorkspaceNode[]> {
+    if (this.filesystem) return this.filesystem.readWorkspace(path);
+    if (this.shell) return this.shell.readWorkspace(path);
+    return this.fail('readWorkspace');
   }
 
-  async applyEdits(_edits: FileEdit[]): Promise<EditOutcome[]> {
-    throw this.notImplemented('applyEdits');
+  async applyEdits(edits: FileEdit[]): Promise<EditOutcome[]> {
+    if (this.filesystem) return this.filesystem.applyEdits(edits);
+    if (this.shell) return this.shell.applyEdits(edits);
+    return edits.map((e) => ({
+      path: e.path,
+      ok: false,
+      error: 'CursorAdapter has no filesystem delegate',
+    }));
   }
 
-  async runCommand(_command: string, _opts?: RunCommandOpts): Promise<CommandResult> {
-    throw this.notImplemented('runCommand');
+  async runCommand(command: string, opts?: RunCommandOpts): Promise<CommandResult> {
+    if (this.shell) return this.shell.runCommand(command, opts);
+    return {
+      command,
+      exitCode: 126,
+      stdout: '',
+      stderr:
+        'CursorAdapter has no shell delegate — register LocalShellAdapter or wait for Founder Node IPC.',
+      durationMs: 0,
+    };
   }
 
-  // streamOutput() intentionally omitted — it's optional on the
-  // ExecutionAdapter contract. The real Cursor adapter will add it
-  // when Founder Node IPC lands (Phase 5+).
-
-  private notImplemented(op: string): NotImplementedException {
-    return new NotImplementedException(
-      `Cursor execution adapter.${op}() is Phase 5+ work — ` +
-        `wire through Founder Node IPC then.`,
+  private fail(op: string): never {
+    throw new Error(
+      `CursorAdapter.${op}() unavailable — no local shell/filesystem delegate registered.`,
     );
   }
 }

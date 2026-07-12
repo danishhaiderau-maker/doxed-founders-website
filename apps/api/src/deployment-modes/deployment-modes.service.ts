@@ -201,9 +201,10 @@ export class DeploymentModesService {
   /**
    * Kick off the 4-step Hybrid → Public publish flow (spec §5).
    *
-   * Creates a DeploymentPublishJob in RUNNING state and executes real steps
-   * via `runPublishSteps` (GitHub create+mirror → Neon migrate → Vercel hook →
-   * health poll). Missing credentials surface as FAILED with a clear message.
+   * Preflight: fail immediately with a clear message if required credentials
+   * are missing, so the founder sees which env vars to set before a job is
+   * left RUNNING forever. Creates a DeploymentPublishJob in RUNNING state and
+   * executes real steps via `runPublishSteps`.
    */
   async startPublish(projectId: string): Promise<PublishResult> {
     const project = await this.prisma.project.findUnique({
@@ -219,6 +220,38 @@ export class DeploymentModesService {
       }));
 
     const plan = (config.publishPlan as PublishPlan | null) ?? this.generatePublishPlan(projectId);
+
+    // Preflight — surface missing credentials before creating a RUNNING job.
+    const preflightErrors: string[] = [];
+    if (!process.env.GITHUB_TOKEN?.trim()) {
+      preflightErrors.push('GITHUB_TOKEN not set on the API service');
+    }
+    if (!process.env.VERCEL_DEPLOY_HOOK_URL?.trim()) {
+      preflightErrors.push('VERCEL_DEPLOY_HOOK_URL not set on the API service');
+    }
+    if (!config.dbUrl?.trim()) {
+      preflightErrors.push('Project deployment config.dbUrl is empty (Neon connection string required)');
+    }
+    if (!plan.targetGithubRepo?.includes('/')) {
+      preflightErrors.push(`publishPlan.targetGithubRepo "${plan.targetGithubRepo}" must be owner/repo`);
+    }
+    if (preflightErrors.length > 0) {
+      const message = `Publish preflight failed: ${preflightErrors.join('; ')}`;
+      this.logger.warn(message);
+      const failedJob = await this.prisma.deploymentPublishJob.create({
+        data: {
+          projectId,
+          planSnapshot: json(plan),
+          status: PublishJobStatus.FAILED,
+          currentStep: 0,
+          steps: json(this.emptySteps()),
+          errorMessage: message,
+          startedAt: new Date(),
+          completedAt: new Date(),
+        },
+      });
+      return this.toPublishResult(failedJob);
+    }
 
     const job = await this.prisma.deploymentPublishJob.create({
       data: {

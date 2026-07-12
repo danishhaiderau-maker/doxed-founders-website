@@ -481,7 +481,13 @@ export class LamOrchestratorService {
   // Adapter availability — used by the controller + frontend
   // -------------------------------------------------------------------------
 
-  adapterStatus(): Array<{ id: LamAdapterId; available: boolean; reason?: string; premium?: boolean }> {
+  adapterStatus(): Array<{
+    id: LamAdapterId;
+    available: boolean;
+    reason?: string;
+    premium?: boolean;
+    contract?: ReturnType<ComputerUseAdapter['describeContract']>;
+  }> {
     return [
       { id: 'browser', available: this.browser.isConnected() },
       {
@@ -491,6 +497,7 @@ export class LamOrchestratorService {
         reason: this.computerUse.isEnabled()
           ? undefined
           : 'Premium tier not enabled (COMPUTER_USE_ENABLED != true). Doxxed Builders only.',
+        contract: this.computerUse.describeContract(),
       },
     ];
   }

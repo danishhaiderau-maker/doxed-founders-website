@@ -5,20 +5,21 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import type {
+  DexQuote,
+  DexRouter,
+  DexSwapResult,
+  DexVolume,
+} from './dex-router.interface';
 
 /**
- * DEX stub for Phase 8. Real AMM integration is Phase 7+ (the spec defers
- * the Pump.fun-vs-Meteora decision). For now this is a fixed-price swap at
- * launch.initialPrice, with the 0.1% platform fee calculated and accrued
- * to the PlatformTreasury row.
- *
- * The owner's monetization model: primary revenue = 0.1% DEX fee on token
- * launches. The fee math is real here so the treasury ledger is correct
- * from day one; only the swap execution is stubbed (no real AMM curve, no
- * on-chain settle).
+ * DEX stub for Phase 8 — implements DexRouter. Real AMM / Jupiter plugs in
+ * via the same interface (dex-router.interface.ts). Fixed-price swap at
+ * launch.initialPrice; 0.1% platform fee accrues to PlatformTreasury.
  */
 @Injectable()
-export class DexStubService {
+export class DexStubService implements DexRouter {
+  readonly routerId = 'stub' as const;
   private readonly logger = new Logger(DexStubService.name);
 
   /** Platform fee in basis points. 0.1% = 10 bps. */
@@ -30,12 +31,7 @@ export class DexStubService {
    * Fixed price for a launch. Phase 8 = launch.initialPrice (no AMM curve yet).
    * Returns USD per whole token.
    */
-  async getPrice(launchId: string): Promise<{
-    launchId: string;
-    priceUsd: number;
-    feeBps: number;
-    live: boolean;
-  }> {
+  async getPrice(launchId: string): Promise<DexQuote> {
     const launch = await this.prisma.tokenLaunch.findUnique({
       where: { id: launchId },
       select: { initialPrice: true, status: true },
@@ -47,6 +43,8 @@ export class DexStubService {
       priceUsd: Number(launch.initialPrice),
       feeBps: DexStubService.FEE_BPS,
       live: launch.status === 'LIVE',
+      router: 'stub',
+      note: 'Fixed-price demo swap — Jupiter DexRouter interface ready for later wiring.',
     };
   }
 
@@ -65,13 +63,7 @@ export class DexStubService {
     launchId: string,
     userId: string | null,
     inputAmount: number,
-  ): Promise<{
-    swapId: string;
-    inputAmount: number;
-    outputAmount: number;
-    feeUsd: number;
-    priceUsd: number;
-  }> {
+  ): Promise<DexSwapResult> {
     if (inputAmount <= 0) {
       throw new BadRequestException('Input amount must be positive');
     }
@@ -127,6 +119,7 @@ export class DexStubService {
           inputUsd: inputAmount,
           feeUsd,
           projectId: launch.projectId,
+          router: 'stub',
         },
       },
     });
@@ -141,18 +134,14 @@ export class DexStubService {
       outputAmount,
       feeUsd,
       priceUsd,
+      router: 'stub',
     };
   }
 
   /**
    * Aggregate DEX volume + fees for a launch (for the launch progress panel).
    */
-  async getVolume(launchId: string): Promise<{
-    totalInputUsd: number;
-    totalOutputTokens: number;
-    totalFeeUsd: number;
-    swapCount: number;
-  }> {
+  async getVolume(launchId: string): Promise<DexVolume> {
     const rows = await this.prisma.dexSwap.findMany({
       where: { launchId },
       select: { inputAmount: true, outputAmount: true, feeUsd: true },

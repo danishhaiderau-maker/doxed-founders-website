@@ -58,9 +58,12 @@ import {
   discoverClaudeCodeWorkspaces,
 } from './claude-code-discovery';
 import {
+  connectAllIdes,
   connectCursor,
+  connectFounderIde,
   connectShellEnv,
   disconnectCursor,
+  disconnectFounderIde,
   type ConnectResult,
 } from './connect-ide';
 import { CLAUDE_CODE_CAPABILITIES, CURSOR_CAPABILITIES } from '@dcf/utils';
@@ -833,7 +836,18 @@ app.whenReady().then(() => {
 
   // ─── Founder OS AI Proxy — IDE connect/disconnect ────────────────────────
   // One click in the UI writes Founder OS proxy credentials into the IDE
-  // config (Cursor's settings.json or shell env for OpenAI-compat tools).
+  // config (Founder IDE + Cursor settings.json, or shell env for OpenAI-compat).
+  ipcMain.handle(
+    'connect-founder-ide',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return connectFounderIde(config);
+    },
+  );
+
   ipcMain.handle(
     'connect-cursor',
     async (_event: unknown): Promise<ConnectResult> => {
@@ -842,6 +856,17 @@ app.whenReady().then(() => {
         return { ok: false, error: 'Founder Node is not paired yet.' };
       }
       return connectCursor(config);
+    },
+  );
+
+  ipcMain.handle(
+    'connect-ides',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return connectAllIdes(config);
     },
   );
 
@@ -864,6 +889,17 @@ app.whenReady().then(() => {
         return { ok: false, error: 'Founder Node is not paired yet.' };
       }
       return disconnectCursor(config);
+    },
+  );
+
+  ipcMain.handle(
+    'disconnect-founder-ide',
+    async (_event: unknown): Promise<ConnectResult> => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config) {
+        return { ok: false, error: 'Founder Node is not paired yet.' };
+      }
+      return disconnectFounderIde(config);
     },
   );
 
@@ -900,6 +936,19 @@ app.whenReady().then(() => {
       });
 
       writeNodeConfig(vaultRoot, draftConfig);
+
+      // Auto-wire Founder IDE (+ Cursor) settings so the extension picks up
+      // apiBaseUrl / nodeId / nodeToken without a second "Connect IDE" click.
+      try {
+        const ideResult = connectAllIdes(draftConfig);
+        if (ideResult.ok) {
+          console.log(`[pair] IDE credentials written → ${ideResult.target}`);
+        } else {
+          console.warn(`[pair] IDE connect skipped: ${ideResult.error}`);
+        }
+      } catch (err) {
+        console.warn('[pair] IDE connect failed:', err);
+      }
 
       resetAuthRecoveryState();
       refreshTrayMenu(vaultRoot);

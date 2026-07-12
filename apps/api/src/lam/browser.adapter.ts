@@ -256,23 +256,34 @@ export class BrowserAdapter implements ExecutionAdapter {
   /**
    * Dynamically load Playwright. Cached after first success so the require
    * cost is paid once. Returns null if the package isn't installed.
+   * Retries once after a short delay when the first require fails (transient
+   * native-module load issues on cold Windows hosts).
    */
   private async loadPlaywright(): Promise<LoadedPlaywright | null> {
     if (this.cachedPlaywright !== undefined) return this.cachedPlaywright;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pw = require('playwright') as LoadedPlaywright;
+    const tryLoad = (): LoadedPlaywright | null => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        return require('playwright') as LoadedPlaywright;
+      } catch {
+        return null;
+      }
+    };
+    let pw = tryLoad();
+    if (!pw) {
+      await new Promise((r) => setTimeout(r, 250));
+      pw = tryLoad();
+    }
+    if (pw) {
       this.cachedPlaywright = pw;
       this.logger.log('Playwright loaded — browser target fully functional.');
       return pw;
-    } catch (err) {
-      this.logger.warn(
-        `Playwright not available — BrowserAdapter will throw on use. ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      );
-      this.cachedPlaywright = null;
-      return null;
     }
+    this.logger.warn(
+      'Playwright not available — BrowserAdapter will throw on use. Run `npx playwright install chromium`.',
+    );
+    this.cachedPlaywright = null;
+    return null;
   }
 }
 

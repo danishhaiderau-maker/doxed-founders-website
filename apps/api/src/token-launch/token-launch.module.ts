@@ -6,6 +6,8 @@ import { TokenLaunchService } from './token-launch.service';
 import { TokenLaunchCron } from './token-launch.cron';
 import { SolanaMintService } from './solana-mint.service';
 import { DexStubService } from './dex-stub.service';
+import { JupiterDexRouter } from './jupiter-dex.router';
+import { DEX_ROUTER } from './dex-router.interface';
 
 /**
  * Phase 8 — Raise Room → Token Launch module.
@@ -18,6 +20,8 @@ import { DexStubService } from './dex-stub.service';
  *   - On LIVE finalization → PRODUCT_LAUNCH_VIA_RAISE_ROOM DDollar grant
  *
  * Imports FounderEconomicsModule for the LIVE→DDollar grant path only.
+ * DEX_ROUTER defaults to DexStubService; JupiterDexRouter is provided but
+ * not bound until explicitly switched.
  */
 @Module({
   imports: [PrismaModule, FounderEconomicsModule],
@@ -27,7 +31,9 @@ import { DexStubService } from './dex-stub.service';
     TokenLaunchCron,
     SolanaMintService,
     DexStubService,
+    JupiterDexRouter,
+    { provide: DEX_ROUTER, useExisting: DexStubService },
   ],
-  exports: [TokenLaunchService, DexStubService, SolanaMintService],
+  exports: [TokenLaunchService, DexStubService, SolanaMintService, DEX_ROUTER],
 })
 export class TokenLaunchModule {}

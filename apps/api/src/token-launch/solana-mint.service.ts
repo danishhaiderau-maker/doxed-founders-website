@@ -59,22 +59,26 @@ export class SolanaMintService {
   }
 
   /**
-   * Mint a new SPL-style token on devnet for a launch. Returns the mint
-   * address + supply. Records the mint keypair in env on first use so a
-   * restart keeps the same wallet.
+   * Mint a new SPL-style token on **devnet only** for a launch. Returns the
+   * mint address + supply. Never targets mainnet — SOLANA_DEVNET_RPC_URL
+   * defaults to clusterApiUrl('devnet').
    *
-   * For the Phase 8 thin slice, this is a System Program account creation
-   * (placeholder mint). Real SPL token mint is Phase 7+ once the legal /
-   * program-choice questions in the spec are answered.
+   * Phase 8 thin slice: System Program account creation (placeholder mint).
+   * Real SPL Token Program mint is deferred until counsel / program choice.
+   * When airdrop or fund-to-mint fails (rate limits), we still return a
+   * deterministic mint address + explorer URL so the launch UX stays real.
    */
   async mintLaunchToken(projectName: string, supply: number): Promise<{
     mintAddress: string;
     supply: number;
     signature?: string;
     explorerUrl: string;
+    network: 'devnet';
+    stub: boolean;
   }> {
     const mintKeypair = Keypair.generate();
     const mintAddress = mintKeypair.publicKey.toBase58();
+    let stub = true;
 
     // Fund the mint account with a small amount of SOL for rent + fees.
     // Wrapped in try/catch — devnet airdrops are rate-limited and flaky.
@@ -111,6 +115,7 @@ export class SolanaMintService {
           mintKeypair,
         ]);
         await this.connection.confirmTransaction(signature, 'confirmed');
+        stub = false;
       }
     } catch (err) {
       this.logger.warn(
@@ -122,10 +127,10 @@ export class SolanaMintService {
 
     const explorerUrl = `https://explorer.solana.com/address/${mintAddress}?cluster=devnet`;
     this.logger.log(
-      `minted devnet token for "${projectName}" → ${mintAddress} (supply ${supply})`,
+      `minted devnet token for "${projectName}" → ${mintAddress} (supply ${supply}, stub=${stub})`,
     );
 
-    return { mintAddress, supply, signature, explorerUrl };
+    return { mintAddress, supply, signature, explorerUrl, network: 'devnet', stub };
   }
 
   /**
