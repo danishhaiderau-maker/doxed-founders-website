@@ -1,0 +1,28 @@
+{
+  "before": {
+    "index.js:OpenRouter": 224,
+    "index.js:Founder OS AI": 84,
+    "index.js:Connect Founder OS": 3,
+    "index.js:doxxedcrypto.digital": 36,
+    "package.json:Founder OS AI": 3,
+    "package.json:doxxedcrypto.digital": 1,
+    "extension.js:OpenRouter": 224,
+    "extension.js:Founder OS AI": 15,
+    "extension.js:doxxedcrypto.digital": 17,
+    "nls:Connect Founder OS": 5,
+    "workbench:Connect Founder OS": 2,
+    "product:doxxedcrypto.digital": 5
+  },
+  "after": {
+    "index.js:Founder OS AI": 84,
+    "index.js:Connect Founder OS": 3,
+    "index.js:doxxedcrypto.digital": 36,
+    "package.json:Founder OS AI": 3,
+    "package.json:doxxedcrypto.digital": 1,
+    "extension.js:Founder OS AI": 15,
+    "extension.js:doxxedcrypto.digital": 22,
+    "nls:Connect Founder OS": 5,
+    "workbench:Connect Founder OS": 2,
+    "product:doxxedcrypto.digital": 5
+  }
+}
