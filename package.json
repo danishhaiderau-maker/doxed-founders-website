@@ -29,6 +29,8 @@
     "start:api:prod": "node scripts/start-api-prod.mjs",
     "verify:prod": "powershell -ExecutionPolicy Bypass -File scripts/verify-prod-ready.ps1",
     "verify:deploy": "node scripts/verify-stack-deployed.mjs",
+    "verify:founder-stack-local": "node scripts/verify-founder-stack-local.mjs",
+    "keeper:founder-economics": "node scripts/founder-economics-keeper.mjs",
     "watch:deploy-health": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/watch-deploy-health.ps1",
     "smoke:test": "node scripts/smoke-test.mjs",
     "demo:full": "node scripts/demo-harness.mjs",

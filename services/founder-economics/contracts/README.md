@@ -34,7 +34,14 @@ OFF-CHAIN (swappable, upgradeable without touching contracts)
 
 ## Deployment
 
-When we wire deployment (post-MVP):
+**MVP:** contracts stay as design artifacts. Off-chain settlement + claim UI
+ship without a live deploy. See
+[docs/FOUNDER-ECONOMICS-MVP-VS-PRODUCTION.md](../../../docs/FOUNDER-ECONOMICS-MVP-VS-PRODUCTION.md).
+
+**Keeper stub:** `npm run keeper:founder-economics` exits non-zero until
+production env + counsel deploy are configured — it will never fake a tx.
+
+When we wire deployment (post-MVP / counsel-gated):
 
 1. Install Foundry or Hardhat + `@openzeppelin/contracts@^5`.
 2. Deploy `PlatformToken(name, symbol, totalSupply, vestingVaultAddress)`.

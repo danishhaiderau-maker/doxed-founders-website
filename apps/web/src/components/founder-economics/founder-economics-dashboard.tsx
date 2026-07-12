@@ -81,13 +81,15 @@ export function FounderEconomicsDashboard() {
       <section className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-widest text-violet-400">
-            Phase 8 · MVP
+            Phase 8 · MVP (off-chain) · Production counsel-gated
           </p>
           <h2 className="mt-1 text-3xl font-bold text-white">Founder Economics</h2>
           <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-            Automated epoch-based vesting and distribution. The on-chain layer
-            is intentionally dumb and immutable; the off-chain distribution
-            model is swappable without touching contracts.
+            <strong className="text-zinc-300">MVP now:</strong> DDollar ledger, knowledge graph, Merkle
+            proofs, GDP dashboard — no live token mint.{' '}
+            <strong className="text-zinc-300">Production later:</strong> audited PlatformToken /
+            VestingVault / EpochDistributor on-chain (keys + counsel required). See{' '}
+            <code className="text-zinc-500">docs/FOUNDER-ECONOMICS-MVP-VS-PRODUCTION.md</code>.
           </p>
         </div>
         <button

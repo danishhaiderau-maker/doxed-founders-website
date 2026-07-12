@@ -16,6 +16,7 @@ import { FounderGdpService } from '../founder-economics/founder-gdp.service';
 import { DdollarEngineService } from '../founder-economics/ddollar-engine.service';
 import { KnowledgeGraphService } from '../founder-economics/knowledge-graph.service';
 import { EpochSettlementService } from '../founder-economics/epoch-settlement.service';
+import { IntentEngineService } from '../intent-engine/intent-engine.service';
 import type { CheckResult } from './readiness-scorecard.types';
 
 /**
@@ -33,6 +34,7 @@ import type { CheckResult } from './readiness-scorecard.types';
  *   9. raise_room       — dashboard + filter pipeline + token launch eligibility/status (Phase 8)
  *  10. debug_squasher   — DebugSquasherRun table + consent + feature flag (Phase 6.5)
  *  11. founder_economics — GDP + epoch tables + DDollar grant + knowledge graph
+ *  12. intent_engine    — decompose + optional safe first-step filesystem list
  *
  * Every check is best-effort: a missing module or unavailable backend produces
  * a failed check with a helpful detail, never an uncaught exception. The
@@ -60,6 +62,7 @@ export class KernelPillarsService {
     private readonly ddollarEngine: DdollarEngineService,
     private readonly knowledgeGraph: KnowledgeGraphService,
     private readonly epochSettlement: EpochSettlementService,
+    private readonly intentEngine: IntentEngineService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -819,6 +822,62 @@ export class KernelPillarsService {
     checks.push(await this.runCheck('founder_economics_ddollar_grant', () => this.probeDdollarGrant()));
     checks.push(await this.runCheck('founder_economics_knowledge', () => this.probeKnowledgeGraph()));
     return checks;
+  }
+
+  // -------------------------------------------------------------------------
+  // Intent Engine pillar
+  // -------------------------------------------------------------------------
+  async runIntentEngineChecks(): Promise<CheckResult[]> {
+    const checks: CheckResult[] = [];
+    checks.push(await this.runCheck('intent_engine_decompose', () => this.probeIntentDecompose()));
+    checks.push(
+      await this.runCheck('intent_engine_safe_first_step', () => this.probeIntentSafeFirstStep()),
+    );
+    return checks;
+  }
+
+  private async probeIntentDecompose(): Promise<CheckResult> {
+    try {
+      const user = await this.demoUser();
+      if (!user) return fail('no demo user available for intent decompose');
+      const result = await this.intentEngine.decomposeGoal({
+        userId: user.id,
+        goal: 'List the top-level workspace files and summarize layout',
+        maxSteps: 4,
+        executeFirstStep: false,
+      });
+      if (!result.steps || result.steps.length < 2) {
+        return fail(`decompose returned ${result.steps?.length ?? 0} steps`);
+      }
+      return pass(`decompose ok steps=${result.steps.length} goalId=${result.goalId}`);
+    } catch (err) {
+      return fail(err);
+    }
+  }
+
+  private async probeIntentSafeFirstStep(): Promise<CheckResult> {
+    try {
+      const user = await this.demoUser();
+      if (!user) return fail('no demo user available for intent first-step');
+      const result = await this.intentEngine.decomposeGoal({
+        userId: user.id,
+        goal: 'Inspect the workspace file list before making any changes',
+        maxSteps: 3,
+        executeFirstStep: true,
+        cwd: process.cwd(),
+      });
+      const exec = result.firstStepExecution;
+      if (!exec) return fail('executeFirstStep requested but firstStepExecution missing');
+      if (exec.status === 'success' && exec.attempted) {
+        return pass(`safe first step ok: ${exec.detail}`);
+      }
+      if (exec.status === 'unsafe' || exec.status === 'skipped') {
+        return pass(`safe gate held (${exec.status}): ${exec.detail}`);
+      }
+      return fail(`first step status=${exec.status} detail=${exec.detail}`);
+    } catch (err) {
+      return fail(err);
+    }
   }
 
   private async probeFounderGdp(): Promise<CheckResult> {

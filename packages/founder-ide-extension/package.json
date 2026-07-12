@@ -11,7 +11,7 @@
     "directory": "packages/founder-ide-extension"
   },
   "engines": {
-    "vscode": "^1.104.0"
+    "vscode": "^1.90.0"
   },
   "categories": ["Chat", "AI", "Machine Learning", "Other"],
   "keywords": ["ai", "chat", "founder-os", "openai-compatible", "llm"],
@@ -20,19 +20,11 @@
     "onStartupFinished"
   ],
   "contributes": {
-    "languageModelChatProviders": [
-      {
-        "vendor": "founder-os",
-        "displayName": "Founder OS",
-        "managementCommand": "founderOs.manage"
-      }
-    ],
     "chatParticipants": [
       {
         "id": "founder-os.chat",
-        "name": "Founder OS",
+        "name": "FounderOS",
         "description": "Chat with the Founder OS AI Gateway (routed via your node)",
-        "isDefault": true,
         "commands": [
           {
             "name": "code",
@@ -142,6 +134,10 @@
       {
         "command": "founderOs.pair",
         "title": "Founder OS: Pair with Founder Node"
+      },
+      {
+        "command": "founderOs.connectFounderOs",
+        "title": "Founder OS: Connect Founder OS (Twitter)"
       },
       {
         "command": "founderOs.selectModel",

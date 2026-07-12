@@ -100,8 +100,10 @@ export function FounderNodeHubPanel({
         <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
           <p className="text-sm font-semibold text-emerald-100">Download Founder Stack</p>
           <p className="mt-0.5 text-xs text-zinc-500">
-            One installer — Founder IDE + Founder Node. The bundled Stack is coming soon; Founder Node standalone is
-            available today ({FOUNDER_NODE_MIN_VERSION_LABEL}).{' '}
+            Prefer Founder Stack (IDE + Node). Standalone Node ({FOUNDER_NODE_MIN_VERSION_LABEL}) still works for vault
+            pairing. After pair, Founder IDE loads{' '}
+            <code className="text-zinc-400">~/FounderVault/node-config.json</code> — chat uses the AI Gateway with the
+            Node token (no IDE OAuth).{' '}
             <a href="/downloads#founder-node" className="text-cyan-400 underline hover:text-cyan-300">
               All downloads hub →
             </a>
@@ -138,7 +140,9 @@ export function FounderNodeHubPanel({
       <div className="mt-5 rounded-xl border border-cyan-500/20 bg-zinc-950/40 p-5">
         <h3 className="font-semibold text-white">Pair your device</h3>
         <p className="mt-0.5 text-xs text-zinc-500">
-          Choose vault mode, then generate a pairing code for desktop or Android.
+          Choose <strong className="text-zinc-300">Founder Vault (Founder Node)</strong>, then generate a pairing
+          code for desktop or Android. The code appears here (and in onboarding) — not in the tray until you open
+          Pair / Enter code.
         </p>
         <div className="mt-4">
           <MemoryStoragePanel

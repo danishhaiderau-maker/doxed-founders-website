@@ -17,6 +17,7 @@ import { DeploymentModesModule } from '../deployment-modes/deployment-modes.modu
 import { RaiseRoomModule } from '../raise-room/raise-room.module';
 import { TokenLaunchModule } from '../token-launch/token-launch.module';
 import { FounderEconomicsModule } from '../founder-economics/founder-economics.module';
+import { IntentEngineModule } from '../intent-engine/intent-engine.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { DemoController } from './demo.controller';
 import { DemoModeGuard } from './demo-mode.guard';
@@ -48,6 +49,7 @@ import { DemoHarnessService } from './demo-harness.service';
     RaiseRoomModule,
     TokenLaunchModule,
     FounderEconomicsModule,
+    IntentEngineModule,
     PrismaModule,
   ],
   controllers: [DemoController],

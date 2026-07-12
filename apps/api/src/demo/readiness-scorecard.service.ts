@@ -52,6 +52,7 @@ export class ReadinessScorecardService {
     raiseRoom: CheckResult[];
     debugSquasher: CheckResult[];
     founderEconomics: CheckResult[];
+    intentEngine: CheckResult[];
     switches: SwitchStates;
     numbers: FakeCounts;
     startedAt: number;
@@ -76,11 +77,11 @@ export class ReadinessScorecardService {
       raiseRoom: pillarFromChecks(params.raiseRoom, this.extractRaiseRoomNumbers(params.raiseRoom)),
       debugSquasher: pillarFromChecks(params.debugSquasher, this.extractDebugSquasherNumbers(params.debugSquasher)),
       founderEconomics: pillarFromChecks(params.founderEconomics, this.extractFounderEconomicsNumbers(params.founderEconomics)),
+      intentEngine: pillarFromChecks(params.intentEngine),
     };
-    // Weights — sum to 1.0. Founder Economics takes 0.02, shaved from
-    // platform + raiseRoom so the overall readiness bar stays comparable.
+    // Weights — sum to 1.0. Intent Engine takes 0.02 from platform.
     const weights: Record<keyof typeof pillars, number> = {
-      platform: 0.11,
+      platform: 0.09,
       bot: 0.1,
       analyzer: 0.07,
       genome: 0.05,
@@ -99,6 +100,7 @@ export class ReadinessScorecardService {
       raiseRoom: 0.03,
       debugSquasher: 0.03,
       founderEconomics: 0.02,
+      intentEngine: 0.02,
     };
     const readinessScore = Math.round(
       (Object.entries(pillars) as [keyof typeof pillars, PillarView][]).reduce(

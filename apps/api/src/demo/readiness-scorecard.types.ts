@@ -64,6 +64,7 @@ export type ReadinessScorecard = {
     raiseRoom: PillarReport;
     debugSquasher: PillarReport;
     founderEconomics: PillarReport;
+    intentEngine: PillarReport;
   };
   switches: SwitchStates;
   numbers: FakeCounts;
