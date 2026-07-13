@@ -6,8 +6,9 @@
       "ai": { "win_prob": 70, "bull_score": 85, "bear_score": 75 },
       "direction": "LONG",
       "spread": 10,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
+      "expect_lanes": [],
       "reject_lanes": [
+        "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_65_SP5_CHASE_3PLUS",
         "COMBO_604_SP4_CHASE_3PLUS",
         "COMBO_604_SP4_DIRECT"
@@ -18,16 +19,16 @@
       "ai": { "win_prob": 68, "bull_score": 40, "bear_score": 46 },
       "direction": "SHORT",
       "spread": null,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"]
+      "expect_lanes": [],
+      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"]
     },
     {
       "id": "virtual-chase-long-62-spread4",
       "ai": { "win_prob": 62, "bull_score": 70, "bear_score": 66 },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS", "COMBO_65_SP5_CHASE_3PLUS"]
+      "expect_lanes": [],
+      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_604_SP4_CHASE_3PLUS", "COMBO_65_SP5_CHASE_3PLUS"]
     },
     {
       "id": "ai-low-reject-all",
@@ -46,8 +47,8 @@
       "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 68 },
       "direction": "LONG",
       "spread": 3,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
+      "expect_lanes": [],
+      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
     },
     {
       "id": "spread-too-low-virtual-chase",
@@ -63,7 +64,7 @@
       "expect_benchmark": true
     },
     {
-      "id": "virtual-chase-not-benchmark",
+      "id": "retired-virtual-chase-not-benchmark",
       "lane": "AI60_SP3_VIRTUAL_CHASE",
       "expect_benchmark": false
     }
