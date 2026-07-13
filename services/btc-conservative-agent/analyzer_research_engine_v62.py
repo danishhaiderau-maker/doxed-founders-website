@@ -15119,6 +15119,12 @@ def pre_test_analytics_reports(
     missed_opportunity_heatmap_report(trades=trades, session=session)
     chase_payload = chase_attribution_report(trades=trades, session=session)
     chase_effectiveness_report(trades=trades, session=session, chase_payload=chase_payload)
+    try:
+        from static_limit_vs_chase_report import build_static_limit_vs_chase_report
+        build_static_limit_vs_chase_report()
+        print(f"  STATIC_LIMIT_VS_CHASE_REPORT written {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as exc:
+        print(f"  ⚠️ STATIC_LIMIT_VS_CHASE_REPORT skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     chase_threshold_report(trades=trades, session=session, chase_payload=chase_payload)
     chase_profit_report(trades=trades, session=session, chase_payload=chase_payload)
     urgent_chase_report(

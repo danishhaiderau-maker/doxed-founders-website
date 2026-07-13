@@ -26,12 +26,15 @@ $prefix = "http://127.0.0.1:$Port/"
 # passes -Force after killing the old bridge, so genuine restarts still bind.
 function Test-BridgeAlreadyBound([int]$ProbePort) {
   try {
-    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ProbePort/health")
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ProbePort/status")
     $req.Method = "GET"
     $req.Timeout = 1500
     $req.ReadWriteTimeout = 1500
     $resp = $req.GetResponse()
-    $ok = ($resp.StatusCode -eq 200)
+    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $payload = $reader.ReadToEnd() | ConvertFrom-Json
+    $ok = ($resp.StatusCode -eq 200 -and $payload.launcher -eq "running")
+    $reader.Close()
     $resp.Close()
     return $ok
   } catch {
@@ -120,8 +123,12 @@ function Get-FullStatus {
     # cloudflared gone -> invalidate cache so a restart re-probes immediately.
     $script:TunnelLiveCache = @{ url = ""; live = $false; at = [datetime]::MinValue }
   }
+  $stackReady = [bool]($botOnline -and $analyzerRunning)
+  $stackStatus = if ($stackReady) { "ready" } elseif ($botOnline -or $analyzerRunning) { "degraded" } else { "offline" }
   $payload = @{
-    ok = $true
+    ok = $stackReady
+    ready = $stackReady
+    status = $stackStatus
     launcher = "running"
     mode = "production"
     stackLabel = "Doxxedcrypto global showcase :$BotPort / :$AnalyzerPort"
@@ -403,7 +410,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
   try {
     $payload = switch -Regex ($path) {
       "^/status$" { Get-FullStatus }
-      "^/health$" { @{ ok = $true; launcher = "running" } }
+      "^/health$" { @{ ok = $true; launcher = "running"; status_endpoint = "/status" } }
       "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
       "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
       "^/cmd/restart-bridge$" { Invoke-HomeCommand "restart-bridge" $tunnelParam }

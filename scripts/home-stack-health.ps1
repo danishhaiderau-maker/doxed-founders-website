@@ -56,7 +56,12 @@ function Test-AnalyzerHealthy {
 }
 
 function Test-BridgeHealthy {
-  return (Test-HttpOk "http://127.0.0.1:$BridgePort/health" 3)
+  try {
+    $status = Invoke-RestMethod -Uri "http://127.0.0.1:$BridgePort/status" -TimeoutSec 3
+    return ($status.launcher -eq "running")
+  } catch {
+    return $false
+  }
 }
 
 function Test-TunnelPublicHealthy {

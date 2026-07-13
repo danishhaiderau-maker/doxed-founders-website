@@ -16,12 +16,15 @@ function Log([string]$msg) {
 
 function Test-BridgeHealthy {
   try {
-    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/health")
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/status")
     $req.Method = "GET"
     $req.Timeout = 1500
     $req.ReadWriteTimeout = 1500
     $resp = $req.GetResponse()
-    $ok = ($resp.StatusCode -eq 200)
+    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $payload = $reader.ReadToEnd() | ConvertFrom-Json
+    $ok = ($resp.StatusCode -eq 200 -and $payload.launcher -eq "running")
+    $reader.Close()
     $resp.Close()
     return $ok
   } catch {

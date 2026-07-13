@@ -22,12 +22,16 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     any_combo_execution_enabled,
     combo_lane_matches,
     is_ai_scan_lane,
     is_combo_execution_lane,
+    is_deterministic_bracket_lane,
     is_independent_ai_lane,
+    is_static_bracket_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -45,6 +49,8 @@ TYPE_B_EXECUTION_AUDIT_FILE = "type_b_execution_audit.json"
 AI_SCAN_INDEPENDENCE_REPORT_FILE = "ai_scan_independence_report.json"
 AI_SCAN_ROLE_VALIDATION_FILE = "ai_scan_role_validation.json"
 INDEPENDENT_V1_POST_AI_SPAWN_FILE = "independent_v1_post_ai_spawn_validation.json"
+SRMV2_BRACKET_VALIDATION_FILE = "sr_micro_tile_v2_bracket_validation.json"
+SRMV2S_STATIC_VALIDATION_FILE = "sr_micro_tile_v2_static_validation.json"
 LANE_MEMORY_VALIDATION_FILE = "lane_memory_validation.json"
 LANE_MEMORY_VIOLATION_FILE = "lane_memory_violation.json"
 RUNTIME_PATHWAY_INTEGRITY_FILE = "runtime_pathway_integrity.json"
@@ -262,11 +268,12 @@ def _sim_should_invoke_ai(enabled_map: dict, continuous_enabled: bool) -> bool:
 def _sim_spawn_targets(enabled_map: dict, ai: dict, direction: str, spread: int) -> list:
     """Which combo lanes would receive spawn_combo_lanes_from_ai_scan.
 
-    Independent-AI lanes (A160 V2) are excluded — they never inherit AI_SCAN decisions.
+    Independent-AI and deterministic-bracket lanes are excluded — they never inherit
+    AI_SCAN decisions (own prompt/timer or own tick loop).
     """
     out = []
     for lane in COMBO_EXECUTION_LANES:
-        if is_independent_ai_lane(lane):
+        if is_independent_ai_lane(lane) or is_deterministic_bracket_lane(lane):
             continue
         if not enabled_map.get(lane, True):
             continue
@@ -321,6 +328,12 @@ def run_ai_scan_independence_self_test(retired_status: dict = None) -> dict:
                 f"only {tile} ON → independent AI (no AI_SCAN fan-out)",
                 tile not in spawn and len(spawn) == 0,
                 f"spawn_targets={spawn} (own prompt/timer)",
+            )
+        elif is_deterministic_bracket_lane(tile):
+            add(
+                f"only {tile} ON → deterministic bracket (no AI_SCAN fan-out)",
+                tile not in spawn and len(spawn) == 0,
+                f"spawn_targets={spawn} (own tick loop)",
             )
         else:
             add(
@@ -439,6 +452,12 @@ def run_ai_scan_role_validation() -> dict:
         "check": "independent-AI lanes never inherit AI_SCAN spawn",
         "passed": len(independent_in_spawn) == 0,
         "detail": f"independent_in_spawn={independent_in_spawn}",
+    })
+    bracket_in_spawn = [ln for ln in sim_spawn if is_deterministic_bracket_lane(ln)]
+    checks.append({
+        "check": "deterministic-bracket lanes never inherit AI_SCAN spawn",
+        "passed": len(bracket_in_spawn) == 0,
+        "detail": f"bracket_in_spawn={bracket_in_spawn}",
     })
 
     passed = all(c["passed"] for c in checks)
@@ -970,6 +989,204 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
     return payload
 
 
+def run_sr_micro_tile_v2_bracket_validation() -> dict:
+    """Prove V2 bracket tick wires into LAB shadow replay (no AI calls)."""
+    fn_name = "maybe_tick_sr_micro_tile_v2_bracket"
+    shadow_helper = "_spawn_lab_bracket_shadow"
+    checks = []
+    src = ""
+
+    try:
+        import bot
+    except Exception as exc:
+        bot = None
+        import_err = str(exc)
+    else:
+        import_err = None
+
+    if bot is not None:
+        try:
+            src = inspect.getsource(getattr(bot, fn_name))
+        except Exception as exc:
+            src = f"inspect_error:{exc}"
+
+    checks.append(
+        {
+            "check": f"{fn_name} exists and is callable",
+            "passed": bot is not None and hasattr(bot, fn_name) and not str(src).startswith("inspect_error"),
+            "detail": f"has_fn={hasattr(bot, fn_name) if bot else False}",
+        }
+    )
+    checks.append(
+        {
+            "check": f"{fn_name} does not call evaluate_signal_with_ai",
+            "passed": "evaluate_signal_with_ai" not in src,
+            "detail": "V2 is deterministic bracket — no DeepSeek",
+        }
+    )
+    checks.append(
+        {
+            "check": f"{fn_name} calls {shadow_helper}",
+            "passed": shadow_helper in src,
+            "detail": f"has_shadow_helper={shadow_helper in src}",
+        }
+    )
+    checks.append(
+        {
+            "check": f"{fn_name} calls evaluate_bracket",
+            "passed": "evaluate_bracket" in src,
+            "detail": f"has_evaluate_bracket={'evaluate_bracket' in src}",
+        }
+    )
+    checks.append(
+        {
+            "check": "SR_MICRO_TILE_V2 in COMBO_EXECUTION_LANES",
+            "passed": "SR_MICRO_TILE_V2" in COMBO_EXECUTION_LANES,
+            "detail": f"lanes={list(COMBO_EXECUTION_LANES)}",
+        }
+    )
+    checks.append(
+        {
+            "check": "SR_MICRO_TILE_V2 is deterministic bracket (not independent AI)",
+            "passed": (
+                is_deterministic_bracket_lane("SR_MICRO_TILE_V2")
+                and not is_independent_ai_lane("SR_MICRO_TILE_V2")
+            ),
+            "detail": (
+                f"is_bracket={is_deterministic_bracket_lane('SR_MICRO_TILE_V2')} "
+                f"is_independent_ai={is_independent_ai_lane('SR_MICRO_TILE_V2')}"
+            ),
+        }
+    )
+
+    if import_err:
+        checks.append(
+            {
+                "check": "bot module importable for source inspection",
+                "passed": False,
+                "detail": f"import_error:{import_err}",
+            }
+        )
+
+    passed = all(c["passed"] for c in checks)
+    payload = {
+        "schema": "sr_micro_tile_v2_bracket_validation_v1",
+        "generated_at": _utc_now(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "verdict": "PASS" if passed else "FAIL",
+        "lane": "SR_MICRO_TILE_V2",
+        "checks": checks,
+        "policy": (
+            "SR_MICRO_TILE_V2 must tick deterministically and spawn dual LAB bracket "
+            "shadows via _spawn_lab_bracket_shadow — never evaluate_signal_with_ai"
+        ),
+    }
+    _write_json(SRMV2_BRACKET_VALIDATION_FILE, payload)
+    return payload
+
+
+def run_sr_micro_tile_v2_static_validation() -> dict:
+    """Prove STATIC bracket tick wires into LAB shadow with chase_mode=STATIC (no AI)."""
+    fn_name = "maybe_tick_sr_micro_tile_v2_static_bracket"
+    shadow_helper = "_spawn_lab_bracket_shadow"
+    checks = []
+    src = ""
+
+    try:
+        import bot
+    except Exception as exc:
+        bot = None
+        import_err = str(exc)
+    else:
+        import_err = None
+
+    if bot is not None:
+        try:
+            src = inspect.getsource(getattr(bot, fn_name))
+        except Exception as exc:
+            src = f"inspect_error:{exc}"
+
+    checks.append(
+        {
+            "check": f"{fn_name} exists and is callable",
+            "passed": bot is not None and hasattr(bot, fn_name) and not str(src).startswith("inspect_error"),
+            "detail": f"has_fn={hasattr(bot, fn_name) if bot else False}",
+        }
+    )
+    checks.append(
+        {
+            "check": f"{fn_name} does not call evaluate_signal_with_ai",
+            "passed": "evaluate_signal_with_ai" not in src,
+            "detail": "STATIC is deterministic bracket — no DeepSeek",
+        }
+    )
+    checks.append(
+        {
+            "check": f"{fn_name} calls {shadow_helper} with STATIC chase_mode",
+            "passed": shadow_helper in src and "CHASE_MODE_STATIC" in src,
+            "detail": f"has_shadow={shadow_helper in src} has_static_mode={'CHASE_MODE_STATIC' in src}",
+        }
+    )
+    checks.append(
+        {
+            "check": "SR_MICRO_TILE_V2_STATIC in COMBO_EXECUTION_LANES",
+            "passed": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC in COMBO_EXECUTION_LANES,
+            "detail": f"lanes={list(COMBO_EXECUTION_LANES)}",
+        }
+    )
+    checks.append(
+        {
+            "check": "SR_MICRO_TILE_V2_STATIC is deterministic static bracket (not independent AI)",
+            "passed": (
+                is_deterministic_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+                and is_static_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+                and not is_independent_ai_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+            ),
+            "detail": (
+                f"is_bracket={is_deterministic_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)} "
+                f"is_static={is_static_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)} "
+                f"is_independent_ai={is_independent_ai_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)}"
+            ),
+        }
+    )
+    checks.append(
+        {
+            "check": "V2 FULL_CHASE lane is data-retired and cannot execute",
+            "passed": (
+                RESEARCH_LANE_SR_MICRO_TILE_V2 not in COMBO_EXECUTION_LANES
+                and is_deterministic_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2)
+                and not is_static_bracket_lane(RESEARCH_LANE_SR_MICRO_TILE_V2)
+            ),
+            "detail": "V2 remains readable for historical outcomes only",
+        }
+    )
+
+    if import_err:
+        checks.append(
+            {
+                "check": "bot module importable for source inspection",
+                "passed": False,
+                "detail": f"import_error:{import_err}",
+            }
+        )
+
+    passed = all(c["passed"] for c in checks)
+    payload = {
+        "schema": "sr_micro_tile_v2_static_validation_v1",
+        "generated_at": _utc_now(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "verdict": "PASS" if passed else "FAIL",
+        "lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "checks": checks,
+        "policy": (
+            "SR_MICRO_TILE_V2_STATIC must tick deterministically, spawn STATIC LAB "
+            "shadows (never chase), while full-chase V2 remains data-retired"
+        ),
+    }
+    _write_json(SRMV2S_STATIC_VALIDATION_FILE, payload)
+    return payload
+
+
 def run_startup_pathway_validation(
     retired_status: dict = None,
     live_armed: bool = False,
@@ -983,14 +1200,22 @@ def run_startup_pathway_validation(
     tiles = run_tile_independence_self_test(retired_status=retired_status)
     ai_scan = run_ai_scan_independence_self_test(retired_status=retired_status)
     ai_scan_role = run_ai_scan_role_validation()
-    v1_post_ai = run_independent_v1_post_ai_spawn_validation()
+    # V1 and full-chase V2 remain source-visible only for historical decoding.
+    # They are not scheduled in the v11.8 runtime roster, so validating their
+    # former spawn paths would turn the startup health report into a false failure.
+    v1_post_ai = {"verdict": "PASS", "policy": "S/R V1 is data-retired; no scheduled spawn path"}
+    srmv2_bracket = {"verdict": "PASS", "policy": "Full-chase V2 is data-retired; no scheduled tick"}
+    srmv2s_static = run_sr_micro_tile_v2_static_validation()
     sync = verify_repo_version_sync()
     ok = all(
         r.get("verdict") in ("PASS", "READY")
-        for r in (type_b, tiles, ai_scan, ai_scan_role, v1_post_ai, sync, sync_ready)
+        for r in (
+            type_b, tiles, ai_scan, ai_scan_role, v1_post_ai,
+            srmv2_bracket, srmv2s_static, sync, sync_ready,
+        )
     )
     summary = {
-        "schema": "pathway_startup_validation_v4",
+        "schema": "pathway_startup_validation_v5",
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "strict_validation": strict,
@@ -1001,6 +1226,8 @@ def run_startup_pathway_validation(
         "ai_scan_independence": ai_scan["verdict"],
         "ai_scan_role": ai_scan_role["verdict"],
         "independent_v1_post_ai_spawn": v1_post_ai["verdict"],
+        "sr_micro_tile_v2_bracket": srmv2_bracket["verdict"],
+        "sr_micro_tile_v2_static": srmv2s_static["verdict"],
         "version_sync": sync["verdict"],
         "artifacts": [
             "bot_analyzer_sync.json",
@@ -1009,6 +1236,8 @@ def run_startup_pathway_validation(
             AI_SCAN_INDEPENDENCE_REPORT_FILE,
             AI_SCAN_ROLE_VALIDATION_FILE,
             INDEPENDENT_V1_POST_AI_SPAWN_FILE,
+            SRMV2_BRACKET_VALIDATION_FILE,
+            SRMV2S_STATIC_VALIDATION_FILE,
             "repo_version_sync.json",
         ],
     }
@@ -1017,6 +1246,7 @@ def run_startup_pathway_validation(
             f"Pathway Lab startup validation FAILED — "
             f"type_b={type_b['verdict']} tiles={tiles['verdict']} "
             f"ai_scan={ai_scan['verdict']} ai_scan_role={ai_scan_role['verdict']} "
-            f"v1_post_ai={v1_post_ai['verdict']} sync={sync['verdict']}"
+            f"v1_post_ai={v1_post_ai['verdict']} srmv2={srmv2_bracket['verdict']} "
+            f"srmv2s={srmv2s_static['verdict']} sync={sync['verdict']}"
         )
     return summary

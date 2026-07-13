@@ -79,12 +79,14 @@ def get_type_b_score(
     if ai_prob >= 65:
         score += SCORE_CONF65_PLUS
 
+    # Optional floats may be absent from feature snapshots (e.g. no adx key).
+    # Never compare None — that TypeError silently killed APPROVE→SPAWN after AI.
     delta = _safe_float(features.get("delta") or features.get("features_delta") or features.get("orderflow_delta"))
-    if delta >= 18:
+    if delta is not None and delta >= 18:
         score += SCORE_DELTA_18_PLUS
 
     vol_ratio = _safe_float(features.get("volume_ratio") or features.get("features_volume_ratio") or features.get("vol_ratio"))
-    if vol_ratio >= 0.90:
+    if vol_ratio is not None and vol_ratio >= 0.90:
         score += SCORE_VOLUME_RATIO_090
 
     # Tier 2
@@ -92,7 +94,7 @@ def get_type_b_score(
         features.get("adx") or features.get("adx_at_entry") or features.get("mom_adx")
         or (features.get("market_context") or {}).get("trend_strength", {}).get("adx")
     )
-    if 20 <= adx <= 40:
+    if adx is not None and 20 <= adx <= 40:
         score += SCORE_ADX_20_40
 
     spread = _safe_int(
@@ -109,13 +111,13 @@ def get_type_b_score(
     # Tier 3
     structure = _safe_float(
         features.get("structure_bias_at_entry") or features.get("structure")
-        or features.get("structure_score_at_entry")
+        or features.get("structure_score_at_entry") or features.get("structure_score")
     )
     if structure is not None and structure <= -3:
         score += SCORE_STRUCTURE_MINUS3
 
     edge = _safe_float(features.get("edge_score") or features.get("controls_edge_threshold"))
-    if edge >= 3.5:
+    if edge is not None and edge >= 3.5:
         score += SCORE_EDGE_3_5_PLUS
 
     return round(score, 2)
