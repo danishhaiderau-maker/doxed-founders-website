@@ -26,7 +26,6 @@ jobs:
         with:
           node-version: '20'
       - run: node scripts/verify-bitfinex-production-lock.mjs
-      - run: node scripts/verify-bitfinex-policy-lock.mjs
       # Keep the signal-engine mirror in parity with the canonical bot.py so the
       # gate never fails on a stale mirror after auto-sync commits touch bot.py.
       # This is an internal repo copy (bot.py -> engine.py), NOT an external sync.

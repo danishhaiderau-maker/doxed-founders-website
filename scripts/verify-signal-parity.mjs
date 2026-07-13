@@ -14,6 +14,10 @@ const engine = join(root, 'services/btc-signal-engine/engine.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_config.py');
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
+const typeBAgent = join(root, 'services/btc-conservative-agent/type_b_hunter_v1.py');
+const typeBEngine = join(root, 'services/btc-signal-engine/type_b_hunter_v1.py');
+const srAgent = join(root, 'services/btc-conservative-agent/sr_micro_tile_v1.py');
+const srEngine = join(root, 'services/btc-signal-engine/sr_micro_tile_v1.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 
@@ -39,11 +43,21 @@ if (botHash !== engineHash) {
 }
 console.log(`OK  bot.py === engine.py (${botHash})`);
 
-if (existsSync(combosAgent) && existsSync(combosEngine)) {
-  const ca = sha256(combosAgent);
-  const ce = sha256(combosEngine);
-  if (ca !== ce) fail(`combo_pathway_config (${ca}) !== signal-engine/combos.py (${ce})`);
-  console.log(`OK  combo configs match (${ca})`);
+const mirroredModules = [
+  { source: combosAgent, target: combosEngine, label: 'combo_pathway_config.py' },
+  { source: typeBAgent, target: typeBEngine, label: 'type_b_hunter_v1.py' },
+  { source: srAgent, target: srEngine, label: 'sr_micro_tile_v1.py' },
+];
+for (const module of mirroredModules) {
+  if (!existsSync(module.source) || !existsSync(module.target)) {
+    fail(`Missing mirrored module ${module.label}`);
+  }
+  const sourceHash = sha256(module.source);
+  const targetHash = sha256(module.target);
+  if (sourceHash !== targetHash) {
+    fail(`${module.label} (${sourceHash}) !== signal-engine/${module.label} (${targetHash})`);
+  }
+  console.log(`OK  ${module.label} matches (${sourceHash})`);
 }
 
 if (existsSync(manifestPath)) {

@@ -1,71 +1,127 @@
 {
-  "description": "Frozen parity cases — combo lane matching for v11.1 Virtual Chase tile (legacy lanes always reject).",
-  "cases": [
+  "description": "Current v11.6 parity cases for the CONTINUOUS benchmark and the two independent, shadow-first research candidates. Retired Virtual Chase and Combo lanes must never match.",
+  "combo_cases": [
     {
-      "id": "virtual-chase-long-70-spread10",
-      "ai": { "win_prob": 70, "bull_score": 85, "bear_score": 75 },
-      "direction": "LONG",
-      "spread": 10,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": [
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "COMBO_604_SP4_DIRECT"
-      ]
-    },
-    {
-      "id": "virtual-chase-short-68-spread6",
-      "ai": { "win_prob": 68, "bull_score": 40, "bear_score": 46 },
-      "direction": "SHORT",
-      "spread": null,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"]
-    },
-    {
-      "id": "virtual-chase-long-62-spread4",
-      "ai": { "win_prob": 62, "bull_score": 70, "bear_score": 66 },
-      "direction": "LONG",
-      "spread": 4,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS", "COMBO_65_SP5_CHASE_3PLUS"]
-    },
-    {
-      "id": "ai-low-reject-all",
-      "ai": { "win_prob": 55, "bull_score": 60, "bear_score": 50 },
-      "direction": "LONG",
-      "spread": 8,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS"
-      ]
-    },
-    {
-      "id": "spread-min-edge-virtual-chase",
-      "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 68 },
-      "direction": "LONG",
-      "spread": 3,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
-    },
-    {
-      "id": "spread-too-low-virtual-chase",
-      "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 69 },
-      "direction": "LONG",
-      "spread": 2,
-      "expect_lanes": [],
-      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_CHASE_3PLUS"]
-    },
-    {
-      "id": "benchmark-flag-continuous",
+      "id": "continuous-is-benchmark",
+      "kind": "benchmark",
       "lane": "CONTINUOUS",
-      "expect_benchmark": true
+      "expect": true
     },
     {
-      "id": "virtual-chase-not-benchmark",
+      "id": "type-b-is-independent-research-candidate",
+      "kind": "independent-research-candidate",
+      "lane": "TYPE_B_HUNTER_V1",
+      "expect": true
+    },
+    {
+      "id": "sr-micro-is-independent-research-candidate",
+      "kind": "independent-research-candidate",
+      "lane": "SR_MICRO_TILE_V1",
+      "expect": true
+    },
+    {
+      "id": "retired-virtual-chase-never-matches",
+      "kind": "inherited-match",
       "lane": "AI60_SP3_VIRTUAL_CHASE",
-      "expect_benchmark": false
+      "ai": { "win_prob": 90, "bull_score": 95, "bear_score": 5 },
+      "direction": "LONG",
+      "spread": 90,
+      "expect": false
+    },
+    {
+      "id": "independent-type-b-never-uses-inherited-match",
+      "kind": "inherited-match",
+      "lane": "TYPE_B_HUNTER_V1",
+      "ai": { "win_prob": 90, "bull_score": 95, "bear_score": 5 },
+      "direction": "LONG",
+      "spread": 90,
+      "expect": false
+    }
+  ],
+  "type_b_cases": [
+    {
+      "id": "type-b-high-conviction-admits",
+      "ai_prob": 70,
+      "features": {
+        "delta": 22,
+        "volume_ratio": 1.1,
+        "adx": 25,
+        "spread": 3,
+        "ema_slope": "up",
+        "structure_bias_at_entry": -3,
+        "edge_score": 4
+      },
+      "expect_enter": true
+    },
+    {
+      "id": "type-b-rejects-low-confidence",
+      "ai_prob": 54,
+      "features": { "delta": 30, "volume_ratio": 2, "spread": 4 },
+      "expect_enter": false,
+      "expect_reason": "CONFIDENCE_FLOOR"
+    },
+    {
+      "id": "type-b-rejects-insufficient-composite-score",
+      "ai_prob": 55,
+      "features": { "delta": 1, "volume_ratio": 0.2, "spread": 2 },
+      "expect_enter": false,
+      "expect_reason": "SCORE_BELOW_THRESHOLD"
+    }
+  ],
+  "sr_cases": [
+    {
+      "id": "sr-long-near-support-admits",
+      "side": "LONG",
+      "ai_prob": 70,
+      "features": {
+        "micro_support": 100,
+        "micro_resistance": 200,
+        "price": 110,
+        "adx": 20,
+        "volatility_percentile": 40,
+        "structure_bias": "BULLISH_STRUCTURE"
+      },
+      "expect_enter": true
+    },
+    {
+      "id": "sr-short-near-resistance-admits",
+      "side": "SHORT",
+      "ai_prob": 65,
+      "features": {
+        "micro_support": 100,
+        "micro_resistance": 200,
+        "price": 190,
+        "adx": 25,
+        "volatility_percentile": 50,
+        "structure_bias": "BEARISH_STRUCTURE"
+      },
+      "expect_enter": true
+    },
+    {
+      "id": "sr-rejects-trending-market",
+      "side": "LONG",
+      "ai_prob": 70,
+      "features": {
+        "micro_support": 100,
+        "micro_resistance": 200,
+        "price": 110,
+        "adx": 41
+      },
+      "expect_enter": false,
+      "expect_reason": "ADX_TRENDING"
+    },
+    {
+      "id": "sr-rejects-midpoint-chase",
+      "side": "LONG",
+      "ai_prob": 70,
+      "features": {
+        "micro_support": 100,
+        "micro_resistance": 200,
+        "price": 140,
+        "adx": 20
+      },
+      "expect_enter": false,
+      "expect_reason": "MIDPOINT"
     }
   ]
 }

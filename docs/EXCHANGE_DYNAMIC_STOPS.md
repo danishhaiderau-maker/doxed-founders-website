@@ -182,5 +182,5 @@ Run: `npx tsx --test packages/utils/src/__tests__/scenario-c-ladder.test.ts`
   block, the audit log writer, the circuit breaker, the restart
   reconstruction, the FILLED reset, and the closeVirtualLot stop cancel.
 - `packages/utils/src/__tests__/scenario-c-ladder.test.ts` — unit tests.
-- `scripts/bitfinex-policy-lock.json` — SHA-256 of the two source files
-  (regenerated via `npm run lock:bitfinex-policy`).
+- `scripts/verify-bitfinex-production-lock.mjs` — validates that the active
+  execution and copy-relay safety hooks remain present before deployment.

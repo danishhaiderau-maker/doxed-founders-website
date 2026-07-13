@@ -14,6 +14,10 @@ const bot = join(root, 'services/btc-conservative-agent/bot.py');
 const engine = join(root, 'services/btc-signal-engine/engine.py');
 const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_config.py');
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
+const typeBAgent = join(root, 'services/btc-conservative-agent/type_b_hunter_v1.py');
+const typeBEngine = join(root, 'services/btc-signal-engine/type_b_hunter_v1.py');
+const srAgent = join(root, 'services/btc-conservative-agent/sr_micro_tile_v1.py');
+const srEngine = join(root, 'services/btc-signal-engine/sr_micro_tile_v1.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 
 function sha256(text) {
@@ -54,6 +58,18 @@ if (existsSync(combosAgent)) {
   };
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   console.log(`Updated manifest (engine=${manifest.engine_version} hash=${botHash})`);
+
+  for (const module of [
+    { source: typeBAgent, target: typeBEngine, label: 'type_b_hunter_v1.py' },
+    { source: srAgent, target: srEngine, label: 'sr_micro_tile_v1.py' },
+  ]) {
+    if (!existsSync(module.source)) {
+      throw new Error(`Missing canonical ${module.label}`);
+    }
+    const source = readFileSync(module.source, 'utf8');
+    writeFileSync(module.target, source, 'utf8');
+    console.log(`Mirrored ${module.label} (${sha256(source)})`);
+  }
 }
 
 console.log('Done — run npm run verify:signal-parity to confirm.');

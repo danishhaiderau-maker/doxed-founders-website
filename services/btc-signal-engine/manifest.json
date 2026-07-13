@@ -1,9 +1,9 @@
 {
-  "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "eb9ed8aa41e2",
-  "source": "services/btc-conservative-agent/bot.py",
+  "engine_version": "v11.6-dual-research-candidates",
+  "combo_version": "2026-07-13",
   "exit_version": "scenario-c-v4",
-  "combo_version": "2026-06-26",
-  "engine_version": "v11.1-virtual-chase-known-combos-v1",
-  "updated_at": "2026-07-06T05:22:20.374Z"
+  "benchmark_lane": "CONTINUOUS",
+  "signal_hash": "3f869ec2a4a1",
+  "source": "services/btc-conservative-agent/bot.py",
+  "updated_at": "2026-07-13T08:53:31.847Z"
 }
