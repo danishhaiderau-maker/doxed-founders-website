@@ -10556,7 +10556,7 @@ def run_integrity_checks(
         work = source.drop_duplicates(subset=["trade_id"], keep="last")
         csv_total = int(len(work))
         direct_lane_total = int(work.groupby("research_lane")["trade_id"].nunique().sum())
-        direct_cont = int((work["research_lane"] == BENCHMARK_LANE)["trade_id"].nunique())
+        direct_cont = int(work.loc[work["research_lane"] == BENCHMARK_LANE, "trade_id"].nunique())
         reported_cont = int((lanes.get(BENCHMARK_LANE) or {}).get("real_fills") or 0)
         _add(
             "direct_lane_fill_reconcile",
