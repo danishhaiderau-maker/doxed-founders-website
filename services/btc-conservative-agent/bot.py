@@ -18379,6 +18379,7 @@ def build_static_pathway_lane_specs() -> dict:
             or deterministic_bracket
         )
         static_bracket = is_static_bracket_lane(lane_id)
+        type_b_hunter = lane_id == RESEARCH_LANE_TYPE_B_HUNTER_V1
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
@@ -18397,6 +18398,9 @@ def build_static_pathway_lane_specs() -> dict:
                 )
             else:
                 execution = "Dual LAB shadow at micro_support (LONG) + micro_resistance (SHORT) · Scenario C"
+        elif type_b_hunter:
+            trigger = "Fixed pre-entry Type B score · walk-forward collection · paper research only"
+            execution = "Paper limit research only when enabled · never Bitfinex live · Scenario C"
         elif independent_ai:
             trigger = (
                 "AI 60+ · Spread ≥3 · Context veto BULL+SHORT+LONG_PREF · "
@@ -18476,6 +18480,43 @@ def build_static_pathway_lane_specs() -> dict:
                 "orders": "Phase 1 shadow only (toggle OFF default)",
                 "filters": entry_filters,
             }
+        elif type_b_hunter:
+            filter_chips = [
+                "AI 55+",
+                "Spread ≥2",
+                "Fixed pre-entry score",
+                "Walk-forward holdout",
+                "Paper-only",
+                f"Ladder {lane_ladder_label}",
+            ]
+            hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
+            research_q = spec.get("research_question") or "Does the fixed Type B policy beat CONTINUOUS out of sample?"
+            strategy_extra = [
+                "Tile OFF: collect calibration and rejected-signal counterfactual shadows; no paper limits",
+                "Tile ON: paper limits only; Bitfinex live execution remains disabled",
+                "Policy is fixed before evaluation; outcome labels are not used for tuning",
+                "Logs: type_b_ai_input + type_b_replay + shadow_lane_outcome + lane_lab_pnl_ledger",
+                f"Independence: {shared['independence']}",
+            ]
+            entry_filters = {
+                "ai_probability_bucket": "55+",
+                "directional_spread_bucket": "≥2",
+                "entry_mode": "TYPE_B_PRE_ENTRY_SCORE",
+                "calibration": "walk-forward only; rejected signals collect counterfactual shadows",
+            }
+            type_b_entry = {
+                "trigger": trigger,
+                "entry_path": "TYPE_B_PRE_ENTRY_SCORE",
+                "fill_path": "PAPER_LIMIT_SHADOW",
+                "ai_path": "Independent Type B scorer (fixed policy)",
+                "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
+                "chase_detail": "No full-chase V2 path; paper limit research only",
+                "post_ai_gates": "Fixed score threshold; walk-forward validation only",
+                "margin_usd": ai_direct["margin_usd"],
+                "execution": execution,
+                "orders": "Paper limits only when tile ON; never Bitfinex live",
+                "filters": entry_filters,
+            }
         elif independent_ai:
             filter_chips = [
                 "AI 60+",
@@ -18552,6 +18593,8 @@ def build_static_pathway_lane_specs() -> dict:
         badge = "PROBATION - PAPER ONLY" if lane_status == "PROBATION" else (RESEARCH_CANDIDATE_ROLE if is_candidate else "")
         if deterministic_bracket:
             entry_block = bracket_entry
+        elif type_b_hunter:
+            entry_block = type_b_entry
         elif independent_ai:
             entry_block = v2_entry
         else:
@@ -18594,9 +18637,13 @@ def build_static_pathway_lane_specs() -> dict:
                 )
                 if deterministic_bracket
                 else (
-                    "Context-veto + chase timing + independent V2 prompt vs known weak pockets"
-                    if independent_ai
-                    else "Historical winners: strong AI + spread ≥4 at entry"
+                    "Fixed pre-entry policy evaluated only on walk-forward outcomes"
+                    if type_b_hunter
+                    else (
+                        "Context-veto + chase timing + independent V2 prompt vs known weak pockets"
+                        if independent_ai
+                        else "Historical winners: strong AI + spread ≥4 at entry"
+                    )
                 )
             ),
             "expected_risk": (
@@ -18607,9 +18654,13 @@ def build_static_pathway_lane_specs() -> dict:
                 )
                 if deterministic_bracket
                 else (
-                    "Overfit to in-sample BULL/SHORT cells · parse drift"
-                    if independent_ai
-                    else "TYPE_A drag if filters too loose — monitor exit leakage"
+                    "Insufficient rejected-signal counterfactual coverage until fresh shadows accumulate"
+                    if type_b_hunter
+                    else (
+                        "Overfit to in-sample BULL/SHORT cells · parse drift"
+                        if independent_ai
+                        else "TYPE_A drag if filters too loose — monitor exit leakage"
+                    )
                 )
             ),
             "benchmark_comparison": (
@@ -18620,10 +18671,14 @@ def build_static_pathway_lane_specs() -> dict:
                 )
                 if deterministic_bracket
                 else (
-                    f"vs {COMPARISON_BENCHMARK_LANE} and AI60_SP3_VIRTUAL_CHASE (same window) · "
-                    f"CONTINUOUS benchmark unaffected"
-                    if independent_ai
-                    else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
+                    f"Walk-forward holdout vs {COMPARISON_BENCHMARK_LANE}; no outcome-label tuning"
+                    if type_b_hunter
+                    else (
+                        f"vs {COMPARISON_BENCHMARK_LANE} and AI60_SP3_VIRTUAL_CHASE (same window) · "
+                        f"CONTINUOUS benchmark unaffected"
+                        if independent_ai
+                        else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
+                    )
                 )
             ),
             "diff_vs_benchmark": (
@@ -18648,17 +18703,26 @@ def build_static_pathway_lane_specs() -> dict:
                 if deterministic_bracket
                 else (
                     [
-                        "Independent V2 prompt (not AI_SCAN inheritance)",
-                        "Context veto BULL+SHORT+LONG_PREFERRED (symmetric BEAR)",
-                        "Paper fill after age≥180s + virtual chase ≥3",
-                        "Own trade IDs / ledger — CONTINUOUS prompt & orders unchanged",
+                        "Fixed pre-entry score; calibration is evaluated walk-forward only",
+                        "Rejected executable signals collect counterfactual paper shadows",
+                        "Paper limits only when enabled; never Bitfinex live",
+                        "Own Type B input, replay, outcome and ledger records",
                     ]
-                    if independent_ai
-                    else [
-                        f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
-                        f"Filters: AI {ai_label} spread {spread_label}",
-                        "Beat benchmark on EV/appr to promote",
-                    ]
+                    if type_b_hunter
+                    else (
+                        [
+                            "Independent V2 prompt (not AI_SCAN inheritance)",
+                            "Context veto BULL+SHORT+LONG_PREFERRED (symmetric BEAR)",
+                            "Paper fill after age≥180s + virtual chase ≥3",
+                            "Own trade IDs / ledger — CONTINUOUS prompt & orders unchanged",
+                        ]
+                        if independent_ai
+                        else [
+                            f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
+                            f"Filters: AI {ai_label} spread {spread_label}",
+                            "Beat benchmark on EV/appr to promote",
+                        ]
+                    )
                 )
             ),
             "strategy_detail": _strategy_detail_lines(
@@ -18667,26 +18731,40 @@ def build_static_pathway_lane_specs() -> dict:
                         "Deterministic bracket evaluator · never shares AI_SCAN clock"
                         if deterministic_bracket
                         else (
-                            "Phase-shifted independent V2 DeepSeek · never shares CONTINUOUS AI clock"
-                            if independent_ai
-                            else f"Spawn on AI_SCAN APPROVE · filters {trigger}"
+                            "Fixed-policy Type B scorer · no outcome-label tuning"
+                            if type_b_hunter
+                            else (
+                                "Phase-shifted independent V2 DeepSeek · never shares CONTINUOUS AI clock"
+                                if independent_ai
+                                else f"Spawn on AI_SCAN APPROVE · filters {trigger}"
+                            )
                         )
                     ),
                     "execution": execution,
                     **(
                         {
-                            "chase_detail": (
-                                "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
-                            ),
-                            "ai_cadence": (
-                                f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s · "
-                                f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
-                            ),
+                            "ai_path": "Independent Type B scorer (fixed policy)",
+                            "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
+                            "chase_detail": "No full-chase V2 path; paper limit research only",
                             "margin_usd": ai_direct["margin_usd"],
-                            "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                            "post_ai_gates": "Fixed score threshold; walk-forward validation only",
                         }
-                        if independent_ai
-                        else ai_direct
+                        if type_b_hunter
+                        else (
+                            {
+                                "chase_detail": (
+                                    "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
+                                ),
+                                "ai_cadence": (
+                                    f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s · "
+                                    f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
+                                ),
+                                "margin_usd": ai_direct["margin_usd"],
+                                "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                            }
+                            if independent_ai
+                            else (bracket_entry if deterministic_bracket else ai_direct)
+                        )
                     ),
                 },
                 scenario_c,
@@ -18816,7 +18894,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + AI60_SP3 Virtual Chase + A160 V2 independent paper orders",
+        "architecture_freeze_note": "v11.8 paper-research roster — CONTINUOUS benchmark + Type B Hunter + static S/R; all other lanes are archived analytics only",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -18824,12 +18902,12 @@ def build_static_pathway_lane_specs() -> dict:
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": COMPARISON_BENCHMARK_LANE,
-        "primary_production_lane": RESEARCH_CANDIDATE_LANE,
+        "primary_production_lane": COMPARISON_BENCHMARK_LANE,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "primary_production_role": RESEARCH_CANDIDATE_ROLE,
+        "primary_production_role": COMBO_BENCHMARK_ROLE,
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
-        "legacy_lanes_retired": list(LEGACY_PATHWAY_LANES),
+        "legacy_lanes_retired": list(ARCHIVED_PATHWAY_LANES),
         "lanes": lanes,
     }
 
@@ -19636,9 +19714,9 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Production</strong>
+  <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">5-tile research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1 + SR_MICRO_TILE_V2 (FULL_CHASE) + SR_MICRO_TILE_V2_STATIC</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane paper-research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC (no full-chase S/R)</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
