@@ -13,7 +13,7 @@
 import * as vscode from 'vscode';
 import {
   type FounderOsCredentials,
-  bearerFromCredentials,
+  authorizationHeaderFromCredentials,
   proxyBaseUrl,
 } from './credentials';
 import {
@@ -112,7 +112,7 @@ export class FounderOsChatProvider
 
     this.client = {
       baseUrl: proxyBaseUrl(creds.apiBaseUrl),
-      bearer: bearerFromCredentials(creds),
+      bearer: authorizationHeaderFromCredentials(creds),
     };
   }
 

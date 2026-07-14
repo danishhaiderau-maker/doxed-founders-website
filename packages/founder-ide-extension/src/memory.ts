@@ -15,7 +15,7 @@
  */
 import type { CancellationToken } from 'vscode';
 import type { FounderOsCredentials } from './credentials';
-import { bearerFromCredentials } from './credentials';
+import { authorizationHeaderFromCredentials } from './credentials';
 
 export interface MemoryEntrySnippet {
   store?: string;
@@ -72,7 +72,7 @@ export async function fetchMemoryContext(
     const res = await fetch(url.toString(), {
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${bearerFromCredentials(creds)}`,
+        Authorization: authorizationHeaderFromCredentials(creds),
         Accept: 'application/json',
       },
       signal: controller.signal,

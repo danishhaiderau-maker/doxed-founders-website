@@ -6,10 +6,15 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test src/founder-economics/__tests__/*.test.ts src/__tests__/*.test.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
 }

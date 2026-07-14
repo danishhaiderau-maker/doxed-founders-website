@@ -55,9 +55,12 @@ function epochSeconds(): number {
   return isTestEpochMode() ? TEST_EPOCH_SECONDS : PRODUCTION_EPOCH_SECONDS;
 }
 
-function tokensPerEpoch(): number {
+function tokensPerEpoch(): bigint {
   const env = Number(process.env.FOUNDER_ECONOMICS_TOKENS_PER_EPOCH);
-  return Number.isFinite(env) && env > 0 ? env : DEFAULT_TOKENS_PER_EPOCH;
+  const n = Number.isFinite(env) && env > 0 ? env : DEFAULT_TOKENS_PER_EPOCH;
+  // Schedule amounts are 20M-flat and untouched — the bigint conversion is a
+  // type-only change so the leaf hash matches the on-chain uint256 word.
+  return BigInt(Math.floor(n));
 }
 
 @Injectable()
@@ -152,11 +155,20 @@ export class EpochSettlementService {
       const founder = snapshotWithMultiplier.founders.find(
         (f) => f.walletAddress.toLowerCase() === leaf.walletAddress,
       );
+      // EpochClaim.amount is an Int column; values are 20M-flat (well within
+      // Int32). Convert leaf bigint back to Number for persistence — guard
+      // against any value that would overflow a safe integer.
+      const amountNum = Number(leaf.amount);
+      if (!Number.isSafeInteger(amountNum) || amountNum > 0x7fffffff) {
+        throw new Error(
+          `Epoch ${epoch.epochNumber} leaf for ${leaf.walletAddress} (${leaf.amount.toString()}) exceeds Int32 — refuse to publish.`,
+        );
+      }
       return {
         epochId: epoch.id,
         userId: founder?.userId ?? '',
         walletAddress: leaf.walletAddress,
-        amount: leaf.amount,
+        amount: amountNum,
         merkleProof: proof?.proof ?? [],
       };
     }).filter((row) => row.userId && row.amount > 0);
@@ -172,14 +184,15 @@ export class EpochSettlementService {
     const merkleResult = await this.merklePublisher.publish(
       epoch.epochNumber,
       tree.root,
-      tokensReleased,
+      // Publisher interface takes raw number of tokens — 20M-flat fits.
+      Number(tokensReleased),
     );
     const proofResult = await this.proofDataPublisher.publish(epoch.epochNumber, {
       merkleRoot: tree.root,
       modelVersion: model.version,
       founderCount: claimRows.length,
-      tokensReleased,
-      leaves: tree.leaves.map((l) => ({ wallet: l.walletAddress, amount: l.amount })),
+      tokensReleased: tokensReleased.toString(),
+      leaves: tree.leaves.map((l) => ({ wallet: l.walletAddress, amount: l.amount.toString() })),
     });
     this.logger.log(
       `Epoch ${epoch.epochNumber} publish: merkle=${merkleResult.mode} (${merkleResult.detail.slice(0, 80)}) proof=${proofResult.mode}`,
@@ -194,7 +207,7 @@ export class EpochSettlementService {
         publishTxHash: merkleResult.txHash,
         publishedAt: new Date(),
         distributionModelVersion: model.version,
-        tokensReleased,
+        tokensReleased: Number(tokensReleased),
       },
     });
 
@@ -234,7 +247,7 @@ export class EpochSettlementService {
         epochNumber: nextNumber,
         startTime,
         endTime,
-        tokensReleased: tokensPerEpoch(),
+        tokensReleased: Number(tokensPerEpoch()),
       },
       update: {},
     });

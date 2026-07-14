@@ -2,6 +2,14 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.callGateway = callGateway;
 exports.gatewayJson = gatewayJson;
+/** Prefer full `FounderNode …` headers; wrap bare `fos_…` as Bearer. */
+function authorizationHeader(credential) {
+    const trimmed = credential.trim();
+    if (trimmed.startsWith('FounderNode ') || /^Bearer\s+/i.test(trimmed)) {
+        return trimmed;
+    }
+    return `Bearer ${trimmed}`;
+}
 /**
  * POST /chat/completions with `stream: true` and pump SSE chunks into `onToken`.
  * Resolves when the stream ends (`[DONE]` or socket close). Rejects on auth /
@@ -17,7 +25,7 @@ async function callGateway(client, options, callbacks, token) {
     try {
         const headers = {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${client.bearer}`,
+            Authorization: authorizationHeader(client.bearer),
             Accept: 'text/event-stream',
         };
         if (options.executionProfile && options.executionProfile !== 'auto') {
@@ -152,7 +160,7 @@ async function gatewayJson(client, method, path, body, token) {
             method,
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${client.bearer}`,
+                Authorization: authorizationHeader(client.bearer),
             },
             body: body ? JSON.stringify(body) : undefined,
             signal: controller.signal,

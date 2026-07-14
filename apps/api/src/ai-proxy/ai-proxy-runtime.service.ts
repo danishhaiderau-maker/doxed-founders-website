@@ -15,7 +15,6 @@ import { DDOLLAR_ACTION_KEYS } from '../ddollar/ddollar.constants';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
 import { RoutingEngineService } from '../routing-engine/routing-engine.service';
 import { RetryDetectorService } from '../learning-engine/retry-detector.service';
-import { ContextBuilderService } from '../founder-ai-runtime/context-builder.service';
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
@@ -85,10 +84,11 @@ type ResolvedRoute = AiProxyRouteDecision & {
  * (DDollar spend + usage log + Flight Recorder row).
  *
  * Routing path:
- *   - USE_ROUTING_ENGINE_V2=true (default): Routing Engine v2 — cache
- *     lookup → capability gate → intent + cost-latency scoring. Falls
- *     back to legacy on RoutingInfeasibleError / empty Capability table.
- *   - USE_ROUTING_ENGINE_V2=false: force the legacy ModelRouterService.
+ *   - USE_ROUTING_ENGINE_V2=false (default, production-safe): the legacy
+ *     ModelRouterService picks the provider/model exactly as before. The
+ *     only observable change is that a Flight Recorder row is written.
+ *   - USE_ROUTING_ENGINE_V2=true: the Routing Engine v2 takes over — cache
+ *     lookup → capability gate → intent + cost-latency scoring.
  */
 @Injectable()
 export class AiProxyRuntimeService {
@@ -103,7 +103,6 @@ export class AiProxyRuntimeService {
     private readonly flightRecorder: FlightRecorderService,
     private readonly retryDetector: RetryDetectorService,
     private readonly intentClassifier: IntentClassifierService,
-    private readonly contextBuilder: ContextBuilderService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -223,13 +222,9 @@ export class AiProxyRuntimeService {
         ? `${getGlmApiBaseUrl()}/chat/completions`
         : DEEPSEEK_CHAT_URL;
 
-    // Inject Memory Engine context into the system message (kernel §3).
-    // Best-effort — empty memory or a store hiccup leaves messages unchanged.
-    const messages = await this.injectMemoryContext(auth.userId, body.messages);
-
     const payload = {
       model: route.model,
-      messages: messages.map((m: ChatCompletionMessageDto) => ({
+      messages: body.messages.map((m: ChatCompletionMessageDto) => ({
         role: m.role,
         content: body.fim
           ? this.buildFimPrompt(body.fim.prefix, body.fim.suffix)
@@ -613,36 +608,6 @@ export class AiProxyRuntimeService {
     // DeepSeek FIM format: <|fim▁begin|>PREFIX<|fim▁hole|>SUFFIX<|fim▁end|>
     // The ▁ is U+2581 (LOWER ONE EIGHTH BLOCK)
     return `<|fim\u2581begin|>${prefix}<|fim\u2581hole|>${suffix}<|fim\u2581end|>`;
-  }
-
-  /**
-   * Prepend Memory Engine context to the first system message (or insert
-   * one). Best-effort — never breaks the upstream call.
-   */
-  private async injectMemoryContext(
-    userId: string,
-    messages: ChatCompletionMessageDto[],
-  ): Promise<ChatCompletionMessageDto[]> {
-    try {
-      const memoryCtx = await this.contextBuilder.buildMemoryContext(userId);
-      if (!memoryCtx) return messages;
-      const out = messages.map((m) => ({ ...m }));
-      const sysIdx = out.findIndex((m) => m.role === 'system');
-      if (sysIdx >= 0) {
-        out[sysIdx] = {
-          ...out[sysIdx],
-          content: `${memoryCtx}\n${out[sysIdx].content}`,
-        };
-      } else {
-        out.unshift({ role: 'system', content: memoryCtx });
-      }
-      return out;
-    } catch (err) {
-      this.logger.debug(
-        `memory context inject failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return messages;
-    }
   }
 
   /** Resolve the founder-friendly display model for /v1/models. */

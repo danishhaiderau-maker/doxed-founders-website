@@ -44,7 +44,10 @@ export interface GatewayFounderOsMetadata {
 export interface GatewayClient {
   /** Base URL ending in `/api/v1` (no trailing slash). */
   baseUrl: string;
-  /** `Bearer fos_{nodeId}:{nodeToken}`. */
+  /**
+   * Authorization credential. Prefer the full `FounderNode {id}:{token}` header
+   * value. Legacy `fos_{id}:{token}` is still accepted (sent as Bearer).
+   */
   bearer: string;
 }
 
@@ -53,6 +56,15 @@ export interface StreamCallbacks {
   onMetadata?: (meta: GatewayFounderOsMetadata) => void;
   /** Called once with the HTTP status if the response is not ok (and no stream was started). */
   onError?: (status: number, body: string) => void;
+}
+
+/** Prefer full `FounderNode …` headers; wrap bare `fos_…` as Bearer. */
+function authorizationHeader(credential: string): string {
+  const trimmed = credential.trim();
+  if (trimmed.startsWith('FounderNode ') || /^Bearer\s+/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `Bearer ${trimmed}`;
 }
 
 /**
@@ -77,7 +89,7 @@ export async function callGateway(
   try {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${client.bearer}`,
+      Authorization: authorizationHeader(client.bearer),
       Accept: 'text/event-stream',
     };
     if (options.executionProfile && options.executionProfile !== 'auto') {
@@ -219,7 +231,7 @@ export async function gatewayJson<T = unknown>(
       method,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${client.bearer}`,
+        Authorization: authorizationHeader(client.bearer),
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,

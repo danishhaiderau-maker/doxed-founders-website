@@ -84,6 +84,13 @@ Get-Content $VaultEnv | ForEach-Object {
   }
 }
 
+# The current Tile 1 study is paper research.  Apply these after the vault is
+# loaded so a stale persisted setting or a vault value cannot arm Bitfinex when
+# the supervisor, bridge, or scheduled task restarts the bot.
+$env:FORCE_PAPER_MODE = "1"
+$env:BITFINEX_LIVE_ENABLED = "false"
+$env:LIVE_TRADING_ENABLED = "False"
+
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {
   Write-Host "Monorepo agent dir not found: $agentDir"

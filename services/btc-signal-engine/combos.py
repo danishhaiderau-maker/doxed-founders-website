@@ -5,7 +5,7 @@ CONTINUOUS: permanent benchmark / scientific control group.
 TYPE_B_HUNTER_V1: research candidate — pre-entry TYPE_B prediction (independent AI, shadow).
 SR_MICRO_TILE_V1: research candidate — micro S/R mean-reversion (independent AI, shadow).
 SR_MICRO_TILE_V2: research candidate — deterministic dual-leg bracket (no AI, shadow).
-SR_MICRO_TILE_V2_STATIC: resting-limit A/B vs V2 FULL_CHASE (no chase/reprice, shadow).
+SR_MICRO_TILE_V2_STATIC: resting-limit paper study (no chase/reprice, shadow).
 
 Retired 2026-07-11:
   SL_AVOIDANCE_V1 — 47% WR LAB, -$2.03, EV -$0.14/close (UNDERPERFORMING)
@@ -55,13 +55,13 @@ COMBO_LANE_SPECS = {
     # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter V1 -- pre-entry TYPE_B prediction",
+        "label": "Type B Hunter — prospective fixed policy v2",
         "subtitle": (
-            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live orders "
-            "composite scoring (delta+volume+adx+conf) independent AI at T+60s"
+            "RESEARCH_CANDIDATE — fixed-policy paper research only; "
+            "deterministic ADX/volume/regime/structure gate, no live execution"
         ),
-        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V1",
-        "ai_min": 55,
+        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
+        "ai_min": 0,
         "ai_max": 101,
         "spread_min": 2,
         "spread_max": 99,
@@ -81,9 +81,12 @@ COMBO_LANE_SPECS = {
             "filter selectivity > 40pct"
         ),
         "hypothesis": (
-            "TYPE_B trades (MFE>=15pct) are identifiable pre-entry via order-flow "
-            "delta (+67pct vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
-            "ema_slope, structure)."
+            "A pre-registered direction-aware feature gate may identify TYPE_B "
+            "outcomes prospectively; legacy LAB data is retained only as an archived baseline."
+        ),
+        "research_question": (
+            "Does the fixed pre-entry Type B policy beat CONTINUOUS on a walk-forward "
+            "holdout without using its own outcome labels for tuning?"
         ),
     },
     RESEARCH_LANE_SR_MICRO_TILE_V1: {
@@ -217,12 +220,9 @@ RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v11.8-sr-micro-static-ab"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + 4 research candidates "
-    "(TYPE_B_HUNTER_V1, SR_MICRO_TILE_V1, SR_MICRO_TILE_V2, SR_MICRO_TILE_V2_STATIC) "
-    "— V2 FULL_CHASE vs V2_STATIC resting-limit A/B — "
-    "all legacy lanes retired 2026-07-11 — "
-    "Trading Genome v1 — Event bus + research.db — "
-    "3-lane AI cadence (T+0, T+60, T+120) + dual deterministic bracket ticks"
+    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC "
+    "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
+    "fixed-policy Type B walk-forward collection + static S/R bracket ticks"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -238,7 +238,7 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter V1"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v2"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"

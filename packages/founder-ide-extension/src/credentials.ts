@@ -5,9 +5,9 @@
  *   1. `founderOs.apiBaseUrl` / `founderOs.nodeId` / `founderOs.nodeToken` settings
  *   2. `~/FounderVault/node-config.json`  (written by Founder Node on pair)
  *
- * The bearer token format is `fos_{nodeId}:{nodeToken}` — exactly what the
- * API's `FounderNodeGuard` accepts, and what `connect-ide.ts` writes into
- * Cursor / Founder IDE settings.json. See `apps/founder-node/src/connect-ide.ts`.
+ * The bearer token format is `fos_{nodeId}:{nodeToken}` (OpenAI-compat) or
+ * `FounderNode {nodeId}:{nodeToken}` (preferred for gateway calls). See
+ * `parseFounderNodeAuthHeader` in `@dcf/founder-vault` and `connect-ide.ts`.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -86,15 +86,22 @@ export function resolveCredentials(): FounderOsCredentials | null {
 }
 
 /**
- * Normalize vault / marketing host to the API host used by the gateway.
- * `https://doxxedcrypto.digital` → `https://api.doxxedcrypto.digital`
+ * Normalize vault / marketing host to the API origin used by the gateway.
+ *
+ * Production serves the Nest API on the apex host (`https://doxxedcrypto.digital/api/...`).
+ * Do **not** rewrite to `api.doxxedcrypto.digital` — that hostname has no DNS record.
  */
 export function normalizeApiBaseUrl(url: string): string {
   const trimmed = url.replace(/\/$/, '');
   try {
     const u = new URL(trimmed);
-    if (u.hostname === 'doxxedcrypto.digital' || u.hostname === 'www.doxxedcrypto.digital') {
-      u.hostname = 'api.doxxedcrypto.digital';
+    if (u.hostname === 'www.doxxedcrypto.digital') {
+      u.hostname = 'doxxedcrypto.digital';
+      return u.origin;
+    }
+    if (u.hostname === 'api.doxxedcrypto.digital') {
+      // Legacy / mistaken settings — map back to the live apex API.
+      u.hostname = 'doxxedcrypto.digital';
       return u.origin;
     }
   } catch {
@@ -114,7 +121,8 @@ export async function syncVaultIntoSettings(): Promise<FounderOsCredentials | nu
 
   const apiBaseUrl = normalizeApiBaseUrl(vault.apiBaseUrl);
   const bearer = `fos_${vault.nodeId}:${vault.nodeToken}`;
-  const openaiBase = `${apiBaseUrl}/v1`;
+  // Nest global prefix is `/api`, controller is `v1` → `/api/v1`.
+  const openaiBase = proxyBaseUrl(apiBaseUrl);
 
   const cfg = vscode.workspace.getConfiguration('founderOs');
   try {
@@ -147,9 +155,16 @@ export function proxyBaseUrl(apiBaseUrl: string): string {
   return `${apiBaseUrl.replace(/\/$/, '')}/api/v1`;
 }
 
-/** Builds the `Authorization: Bearer fos_{nodeId}:{nodeToken}` header value. */
+/** OpenAI-compat apiKey value — clients send `Authorization: Bearer <this>`. */
 export function bearerFromCredentials(creds: FounderOsCredentials): string {
   return `fos_${creds.nodeId}:${creds.nodeToken}`;
+}
+
+/** Full Authorization header for the Nest FounderNodeGuard (preferred). */
+export function authorizationHeaderFromCredentials(
+  creds: FounderOsCredentials,
+): string {
+  return `FounderNode ${creds.nodeId}:${creds.nodeToken}`;
 }
 
 /** True if the vault file is present on disk (regardless of whether it parses). */

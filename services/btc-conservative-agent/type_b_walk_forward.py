@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from type_b_hunter_v1 import LANE_ID, should_enter_type_b
+from type_b_hunter_v1 import LANE_ID, POLICY_VERSION, should_enter_type_b
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -79,6 +79,8 @@ def evaluate(agent_dir: Path, holdout_fraction: float = 0.30) -> dict[str, Any]:
     for outcome in _read_jsonl(agent_dir / "shadow_lane_outcome.jsonl"):
         if str(outcome.get("research_lane") or "").upper() != LANE_ID:
             continue
+        if outcome.get("policy_version") != POLICY_VERSION:
+            continue
         source_id = str(outcome.get("source_trade_id") or "")
         # Last terminal snapshot wins if a study was written more than once.
         if source_id and source_id in ai_inputs:
@@ -92,7 +94,9 @@ def evaluate(agent_dir: Path, holdout_fraction: float = 0.30) -> dict[str, Any]:
         ai_row = ai_inputs[source_id]
         ai = ai_row.get("ai") or {}
         features = _entry_features(ai_row)
-        entered, detail = should_enter_type_b(int(_number(ai.get("win_prob"))), features)
+        entered, detail = should_enter_type_b(
+            int(_number(ai.get("win_prob"))), features, str(ai.get("direction") or "")
+        )
         joined.append({
             "ts_epoch": _number(ai_row.get("ts_epoch"), _number(outcome.get("ts_epoch"))),
             "policy_entered": bool(entered),
@@ -115,7 +119,7 @@ def evaluate(agent_dir: Path, holdout_fraction: float = 0.30) -> dict[str, Any]:
         verdict = "READY_FOR_REVIEW" if holdout_summary["ev_per_close_usd"] > 0 else "HOLD_NEGATIVE_EV"
     return {
         "schema": "type_b_walk_forward_v1",
-        "policy": "existing fixed Type B policy; validation only; no fitting or threshold mutation",
+        "policy": POLICY_VERSION + "; validation only; no fitting or threshold mutation",
         "lane": LANE_ID,
         "holdout_fraction": holdout_fraction,
         "ai_input_rows": len(ai_inputs),
@@ -135,6 +139,12 @@ def self_test() -> None:
     assert [r["ts_epoch"] for r in sample[:split]] == list(range(7))
     assert _summary(sample[split:])["policy_entries"] == 3
     assert _summary(sample[split:])["joined_outcomes"] == 3
+    favorable = {
+        "adx": 22.0, "volume_ratio": 0.6, "spread": 4, "regime": "BEAR",
+        "structure_score": -4.0, "edge_score": 4.0, "delta": -22.0, "ema_slope": "down",
+    }
+    assert should_enter_type_b(1, favorable, "SHORT")[0] is True
+    assert should_enter_type_b(99, {**favorable, "volume_ratio": 2.1}, "SHORT")[0] is False
 
 
 def main() -> int:

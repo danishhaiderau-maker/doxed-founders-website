@@ -29,14 +29,13 @@ export type ModelAlias = (typeof MODEL_ALIASES)[number];
 export const MAX_PROMPT_TOKENS_SOFT_CAP = 64_000;
 
 /**
- * Feature flag — when true (default), the proxy routes through Routing Engine
- * v2 (Capability Registry + Flight Recorder). Set USE_ROUTING_ENGINE_V2=false
- * to force the legacy ModelRouterService (instant rollback without redeploy).
- * v2 already falls back to legacy on RoutingInfeasibleError / empty Capability
- * table, so default-on is production-safe.
+ * Feature flag — when true, the proxy routes through the new Routing Engine
+ * v2 (Capability Registry + Flight Recorder). When false (default), it uses
+ * the legacy ModelRouterService. Lets us ship Phase 1 without breaking the
+ * existing flow.
  */
 export const USE_ROUTING_ENGINE_V2 =
-  process.env.USE_ROUTING_ENGINE_V2 !== 'false';
+  process.env.USE_ROUTING_ENGINE_V2 === 'true';
 
 /**
  * Feature flag — when true, intent classification uses the Phase 5b hybrid

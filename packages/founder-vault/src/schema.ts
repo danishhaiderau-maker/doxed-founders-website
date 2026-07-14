@@ -118,11 +118,30 @@ export function founderNodeAuthHeader(nodeId: string, nodeToken: string): string
   return `FounderNode ${nodeId}:${nodeToken}`;
 }
 
+/**
+ * Parse Founder Node credentials from an Authorization header.
+ *
+ * Accepted forms (docs + IDE clients use both):
+ *   - `FounderNode {nodeId}:{nodeToken}`  (Node tray / sync clients)
+ *   - `Bearer fos_{nodeId}:{nodeToken}`   (OpenAI-compat IDE / extension)
+ */
 export function parseFounderNodeAuthHeader(
   header: string | undefined,
 ): { nodeId: string; nodeToken: string } | null {
-  if (!header?.startsWith('FounderNode ')) return null;
-  const creds = header.slice('FounderNode '.length).trim();
+  if (!header) return null;
+  const trimmed = header.trim();
+
+  let creds: string | null = null;
+  if (trimmed.startsWith('FounderNode ')) {
+    creds = trimmed.slice('FounderNode '.length).trim();
+  } else if (/^Bearer\s+/i.test(trimmed)) {
+    const token = trimmed.replace(/^Bearer\s+/i, '').trim();
+    if (token.startsWith('fos_')) {
+      creds = token.slice('fos_'.length);
+    }
+  }
+
+  if (!creds) return null;
   const colon = creds.indexOf(':');
   if (colon <= 0) return null;
   const nodeId = creds.slice(0, colon);

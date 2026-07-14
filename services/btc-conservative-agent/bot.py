@@ -785,6 +785,19 @@ def _apply_env_live_gating() -> None:
     rather than crash. The persisted flag is then re-saved so the dashboard
     reflects the env-driven state.
     """
+    force_paper = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in ("1", "true", "yes", "on")
+    if force_paper:
+        with state_lock:
+            state["bitfinex_live_enabled"] = False
+            state["live_armed"] = False
+            state["strategy_mode"] = "RESEARCH"
+        logger.warning("[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled")
+        try:
+            save_persistent_config()
+        except Exception as exc:
+            logger.warning(f"[PAPER MODE] persist failed: {exc}")
+        return
+
     raw = (os.getenv("BITFINEX_LIVE_ENABLED") or "").strip().lower()
     if not raw:
         return
@@ -10717,6 +10730,11 @@ def _spawn_lab_combo_shadow(
         source_trade_id=(ctx or {}).get("trade_id"),
         collection_mode=collection_mode,
         is_counterfactual=bool(is_counterfactual),
+        policy_version=(
+            _type_b_policy_version()
+            if str(target_lane).upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+            else None
+        ),
         size_mult=size_mult,
         session_bucket=enriched.get("session_bucket"),
         entry_features=copy.deepcopy(enriched),
@@ -11218,6 +11236,7 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "collection_mode": buf.get("collection_mode") or PATHWAY_STATUS_SHADOW_COLLECTING,
         "is_counterfactual": bool(buf.get("is_counterfactual")),
         "policy_entered": not bool(buf.get("is_counterfactual")),
+        "policy_version": buf.get("policy_version"),
         "executed": False,
         "direction": buf.get("direction"),
         "exit_config": buf.get("exit_config"),
@@ -11715,13 +11734,25 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
 _lane_last_ts = {}  # {'CONTINUOUS': ts, 'TYPE_B_HUNTER_V1': ts, 'SR_MICRO_TILE_V1': ts}
 
 
+def _type_b_policy_version() -> str:
+    """Return the Tile 1 policy marker without making the paper path fail open."""
+    try:
+        from type_b_hunter_v1 import POLICY_VERSION
+        return str(POLICY_VERSION)
+    except Exception:
+        return "TYPE_B_POLICY_UNAVAILABLE"
+
+
 def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
     """Optional TYPE_B composite filter. Returns (ok, block_reason)."""
     try:
         from type_b_hunter_v1 import should_enter_type_b
-    except Exception:
-        return True, None
+    except Exception as e:
+        logger.error(f"[TYPE_B_HUNTER_V1] policy import failed: {e} [PIPELINE ENFORCEMENT]")
+        return False, "TYPE_B_POLICY_UNAVAILABLE"
     feat = dict(features or {})
+    direction = str((ai or {}).get("direction") or "").upper()
+    feat["direction"] = direction
     if "edge_score" not in feat:
         feat["edge_score"] = edge_score
     try:
@@ -11749,8 +11780,15 @@ def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: f
     ):
         if feat.get(key) is None and src is not None:
             feat[key] = src
+    ms = mc.get("market_structure") if isinstance(mc.get("market_structure"), dict) else {}
+    if feat.get("structure_score") is None:
+        feat["structure_score"] = ms.get("structure_score")
+    if feat.get("structure") is None:
+        feat["structure"] = ms.get("structure_score")
+    if feat.get("regime") is None:
+        feat["regime"] = ctx.get("regime") or mc.get("regime") or ms.get("regime")
     try:
-        ok, detail = should_enter_type_b(ai_prob, feat)
+        ok, detail = should_enter_type_b(ai_prob, feat, direction)
     except Exception as e:
         logger.error(
             f"[TYPE_B_HUNTER_V1] entry filter crash: {e} — treating as FILTERED "
@@ -11759,7 +11797,8 @@ def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: f
         return False, f"TYPE_B_FILTER_CRASH ({type(e).__name__})"
     if ok:
         return True, None
-    return False, (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+    block_reason = (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+    return False, f"{block_reason} [{_type_b_policy_version()}]"
 
 
 def _apply_sr_micro_tile_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
@@ -11798,7 +11837,11 @@ def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str
     Mirrors V2 tick post-AI routing and combo `_spawn_combo_lane` LAB/ON split.
     Never silently drops an executable APPROVE — every path logs SPAWN_*.
     """
-    if not ai or not ai_decision_should_execute(ai):
+    type_b_policy_lane = lane == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    type_b_direction_ready = bool(
+        ai and not ai.get("ai_error") and str(ai.get("direction") or "").upper() in ("LONG", "SHORT")
+    )
+    if not ai or (not type_b_policy_lane and not ai_decision_should_execute(ai)) or (type_b_policy_lane and not type_b_direction_ready):
         logger.info(
             f"[{lane}_AI] soft-reject — not executable "
             f"decision={((ai or {}).get('decision'))} tier={((ai or {}).get('execution_tier'))} "
@@ -11842,6 +11885,14 @@ def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str
             )
         logger.info(f"[{lane}_AI] entry filter blocked spawn reason={br} [PIPELINE ENFORCEMENT]")
         return
+    if type_b_policy_lane:
+        ai = dict(ai or {})
+        ai["pre_policy_decision"] = ai.get("decision")
+        ai["pre_policy_execution_tier"] = ai.get("execution_tier")
+        ai["decision"] = "APPROVE"
+        ai["approved"] = True
+        ai["execution_tier"] = "TYPE_B_POLICY"
+        ai["policy_version"] = _type_b_policy_version()
     try:
         _spawn_combo_lane(ctx, ai, edge_score, features, lane, trigger_reason)
     except Exception as e:
@@ -17485,31 +17536,179 @@ Given the following market data:
 
 {context}
 
-=== TYPE_B IDENTIFICATION RULES ===
+=== EVIDENCE-BACKED TYPE_B IDENTIFICATION RULES ===
+(Pre-registered hypotheses for prospective paper evaluation; legacy LAB metrics are not proof of calibration.)
 
-Key predictors of TYPE_B outcomes (from historical data):
-1. Order-flow delta (+67% higher for TYPE_B vs TYPE_A). Delta >= 18 = bullish.
-2. Volume ratio (TYPE_B mean=1.12 vs TYPE_A mean=0.76). Ratio >= 0.90 = strong.
-3. AI confidence >= 65 = P(TYPE_B) 48.3%, WR 86.2%.
-4. ADX 20-40 range = P(TYPE_B) 35-36% range.
-5. Spread 3-4 = P(TYPE_B) 36.3%, WR 69.2%.
-6. EMA slope UP = P(TYPE_B) 34.3%.
+CRITICAL: Feature ranking reflects actual predictive power, not intuition.
+Many commonly assumed relationships are INVERTED in real data.
 
-=== DECISION RULES ===
+---
 
-APPROVE (confidence >= 65) ONLY when:
-- Delta >= 18 OR volume_ratio >= 0.90 (at least one Tier-1 factor)
-- ADX between 20-40 (not flat, not extreme)
-- Direction aligns with EMA slope and trend health
-- Not mid-session chop (check regime)
+TIER 1 — Strongest Predictors (determine REJECT vs APPROVE)
 
-SOFT_REJECT (confidence 55-64):
-- Some factors align but not enough conviction
+1. ADX — THE SINGLE STRONGEST FEATURE SEPARATOR
+   Statistically, ADX alone determines more trade outcomes than any other signal.
+   - ADX 20-25: OPTIMAL ZONE. Best historical Type B conversion rate.
+     Most profitable ADX bucket — this is where the bot makes money.
+   - ADX 25-30: STRONG. Good directional follow-through, high conviction.
+   - ADX 30-35: VALID. Still directional but monitor for exhaustion.
+   - ADX > 35: WARNING. Extended trends — require MULTIPLE confirmations.
+   - ADX < 20: HARD REJECT. Flat/choppy market. Zero win rate in some historical
+     buckets. No directional conviction possible — the bot bleeds money here.
+
+2. VOLUME RATIO — WARNING: RELATIONSHIP IS INVERTED
+   Historical reality contradicts intuition:
+   - Type A (loser) trades average volume ratio = 1.38 (high volume = CHASE/PANIC)
+   - Type B (winner) trades average volume ratio = 0.41 (low volume = ACCUMULATION)
+   - Low ratio (< 0.80): STRONG Type B signal. Quiet accumulation before breakout.
+     These are the setups where smart positioning happens before the crowd.
+   - Normal ratio (0.80-1.20): NEUTRAL. Neither helps nor hurts.
+   - High ratio (1.20-1.50): DANGER ZONE. Chase/panic entry behavior.
+     These are the setups where retail FOMO destroys edge.
+   - Extreme ratio (> 1.50): HEAVY REJECT. Abnormal volume = capitulation or fakeout.
+     The bot should NEVER enter when volume spikes this high.
+
+---
+
+TIER 2 — Important Contextual Separators
+
+3. REGIME — Determines baseline Type B probability
+   Type B win rates vary dramatically by market regime:
+   - BEAR regime: Historically highest Type B WR. Sustained directional moves
+     create more reliable follow-through opportunities.
+   - RANGE regime: Solid. Requires clean feature alignment.
+   - BULL regime: LOWER Type B WR — choppier market with more false breakouts.
+     Extra caution required — default to conservative sizing and higher thresholds.
+   - CHOPPY / EXPANSION / UNKNOWN: REJECT unless overwhelming evidence
+     from 3+ Tier 1+2 factors.
+
+4. STRUCTURE SCORE — Directional conviction from market context
+   Value is in the market_context.market_structure.structure_score field
+   (or trend_health.structure_score in the context).
+   - Structure < -3 (bearish bias): Favorable for SHORT Type B setups.
+     Clean bearish market structure supports sustained downside.
+   - Structure > 3 (bullish bias): Supports LONG. Exercise extra caution
+     in BULL regime where bull structure is less reliable.
+   - Structure between -3 and 3: No structural edge — requires other factors.
+
+5. DELTA (order-flow imbalance) — Directional confirmation
+   - Positive delta: Buy pressure supports LONG thesis.
+   - Negative delta: Sell pressure supports SHORT thesis.
+   - Very negative (< -25): PANIC ZONE. Often precedes reversals, not continuation.
+   - USAGE: Delta confirms direction, but must be read WITH volume ratio.
+     High delta + Low volume ratio = quiet accumulation (BEST).
+     High delta + High volume ratio = chase behavior (WORST).
+
+6. SPREAD (conviction spread) — Signal quality indicator
+   - Spread 3-4: BEST historical range. Good conviction without overcommitment.
+   - Spread 2-3: Moderate quality. Valid with other strong factors.
+   - Spread < 2: LOW conviction. Skepticism warranted.
+   - Spread > 5: OVERCOMMITMENT. Historically counterproductive at scale
+     (the "trying too hard" zone).
+
+---
+
+TIER 3 — Supplementary Signals
+
+7. EDGE SCORE — Paradoxically, high edge ≠ high win rate
+   - Edge 3-5: GOLDILOCKS ZONE. Best historical Type B conversion (62.5% WR).
+   - Edge > 5: COUNTERINTUITIVE — LOWER win rate at scale (43.5% WR).
+     The bot's highest confidence zones are historically worse.
+     Overconfidence kills edge — base decisions on features, not self-calibration.
+     Do NOT inflate your confidence just because you see high edge numbers.
+   - Edge < 3: Low conviction. Insufficient for standalone entry.
+
+8. EMA SLOPE — Trend alignment (weakest Tier-3 signal)
+   - UP slope + bullish structure: Confirms LONG bias. Valid but weak alone.
+   - DOWN slope + bearish structure: Confirms SHORT bias. Valid but weak alone.
+   - UP slope + bearish structure: CONFLICTING — REJECT.
+   - DOWN slope + bullish structure: CONFLICTING — REJECT.
+   - EMA slope alone without structure/regime confirmation: NEVER the deciding
+     factor. This is a directional sanity check, not a primary signal.
+
+9. TREND HEALTH (bull_score/bear_score change over 15m)
+   Check bull_score_change_15m and bear_score_change_15m in the context.
+   - Convergent signals: All pointing same direction = stronger conviction.
+   - Divergent signals: Mixed direction = REJECT or SOFT_APPROVE only.
+   - Rapid score changes (>5 pts in 15m): Volatility warning — lower conviction.
+
+---
+
+=== DECISION FRAMEWORK ===
+
+STRONG_APPROVE (features strongly align; do not use the numeric confidence as a gate):
+- ADX 20-30 (optimal trending zone)
+- Volume ratio < 1.20 (NOT in chase/panic zone)
+- Direction aligned with BOTH regime and structure
+- At least 3 TIER 1+2 factors favorable
+- Edge 3-5 (goldilocks, not overconfidence zone)
+- Spread 3-5
+- No "SIT OUT" conditions triggered
+
+APPROVE (features align; do not use the numeric confidence as a gate):
+- ADX 20-35
+- Volume ratio < 1.50
+- Direction aligned with regime or structure (at least one)
+- At least 2 TIER 1+2 factors favorable
+- No "SIT OUT" conditions triggered
+
+SOFT_APPROVE (some features are weak or missing; do not use the numeric confidence as a gate):
+- Most factors align but one key signal is weak or missing
+- OR in BULL regime with only partial alignment
+- OR normal feature set but no standout signal
+- Directionally correct but conviction is low
 
 REJECT:
-- Delta < 10 and volume_ratio < 0.7
-- ADX < 20 (flat market)
-- Conflicting signals
+- Any "SIT OUT" condition triggered (see below)
+- ADX < 20 (flat market — no edge possible)
+- Volume ratio > 1.50 (abnormal/panic volume)
+- Direction conflicts with BOTH regime AND structure
+- Three or more Tier 1+2 signals in warning/danger zones
+
+---
+
+=== WHEN TO SIT OUT (HARD REJECT — no exceptions, no override) ===
+
+These are pre-registered risk hypotheses to validate on the new policy cohort:
+
+1. ADX < 20 = FLAT/DEAD MARKET
+   No directional edge possible. Historically negative expected value.
+   Even if other signals look good, the market context kills the edge.
+
+2. Volume ratio > 2.0 = EXTREME ANOMALY
+   High probability of fakeout or reversal. Not a sustainable Type B setup.
+   These outliers almost never convert to profitable trades.
+
+3. BULL regime + Low delta (< 10) + High volume ratio (> 1.2)
+   Classic FOMO pattern — chasing in a choppy bull market.
+   This specific combination destroys expected value.
+
+4. Structure < -3 + LONG direction
+   Trading against established bearish structure. Very low probability.
+
+5. Structure > 3 + SHORT direction
+   Trading against established bullish structure. Very low probability.
+
+6. Edge > 5 + Volume ratio > 1.2
+   Overconfidence combined with chase behavior. Historically awful combo.
+   The AI's self-calibration fails here — trust the data, not the number.
+
+7. ADX > 35 + Edge > 5 + Volume ratio > 1.5
+   Extended trend + overconfidence + panic volume. Triple danger zone.
+   This combination has near-zero historical win rate.
+
+---
+
+=== CRITICAL INSTRUCTIONS ===
+
+- Base your confidence on the FEATURES in the context data, not on
+  self-calibration. AI confidence scores have zero correlation with actual
+  win rates at scale — only the market features predict outcomes.
+- When in doubt between APPROVE and REJECT, prefer REJECT.
+  False positives destroy more value than missed opportunities.
+- The context data contains market_context.trend_health, market_context.market_structure,
+  market_regime_tracker, reversal_risk_score, and quality_score_components.
+  Use ALL of these — they contain more signal than any single number.
 
 Respond ONLY with a JSON object in this format:
 
@@ -17523,7 +17722,7 @@ Respond ONLY with a JSON object in this format:
   "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
   "reason": "Brief one-line explanation",
   "type_b_score": 0.0-5.0,
-  "type_b_factors": ["delta", "volume_ratio", ...]
+  "type_b_factors": ["adx", "volume_ratio", "regime", ...]
 }}
 
 Direction: LONG / SHORT / NO_TRADE
@@ -18482,9 +18681,11 @@ def build_static_pathway_lane_specs() -> dict:
             }
         elif type_b_hunter:
             filter_chips = [
-                "AI 55+",
+                "Direction only",
+                "ADX >=20",
+                "No confidence gate",
+                "Fixed policy v2",
                 "Spread ≥2",
-                "Fixed pre-entry score",
                 "Walk-forward holdout",
                 "Paper-only",
                 f"Ladder {lane_ladder_label}",
@@ -18494,14 +18695,14 @@ def build_static_pathway_lane_specs() -> dict:
             strategy_extra = [
                 "Tile OFF: collect calibration and rejected-signal counterfactual shadows; no paper limits",
                 "Tile ON: paper limits only; Bitfinex live execution remains disabled",
-                "Policy is fixed before evaluation; outcome labels are not used for tuning",
+                f"Policy {_type_b_policy_version()} is fixed before evaluation; outcome labels are not used for tuning",
                 "Logs: type_b_ai_input + type_b_replay + shadow_lane_outcome + lane_lab_pnl_ledger",
                 f"Independence: {shared['independence']}",
             ]
             entry_filters = {
-                "ai_probability_bucket": "55+",
+                "ai_probability_bucket": "audit-only; not an entry gate",
                 "directional_spread_bucket": "≥2",
-                "entry_mode": "TYPE_B_PRE_ENTRY_SCORE",
+                "entry_mode": "TYPE_B_FIXED_POLICY_V2",
                 "calibration": "walk-forward only; rejected signals collect counterfactual shadows",
             }
             type_b_entry = {
@@ -19022,6 +19223,8 @@ def _load_reconciled_lab_outcome_metrics() -> dict:
                     or str(row.get("collection_mode") or "").upper() != "LAB"
                 ):
                     continue
+                if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1 and row.get("policy_version") != _type_b_policy_version():
+                    continue
                 # A repeated study row replaces the earlier snapshot; only the
                 # terminal row is counted, and unfilled/cancelled rows are not trades.
                 rows[(lane, trade_id)] = row
@@ -19032,7 +19235,7 @@ def _load_reconciled_lab_outcome_metrics() -> dict:
     result = {}
     for lane in target_lanes:
         completed = [r for (ln, _), r in rows.items() if ln == lane and bool(r.get("filled"))]
-        if not completed:
+        if not completed and lane != RESEARCH_LANE_TYPE_B_HUNTER_V1:
             continue
         pnl = round(sum(float(r.get("net_pnl_usd") or 0.0) for r in completed), 2)
         wins = sum(1 for r in completed if float(r.get("net_pnl_usd") or 0.0) > 0)
@@ -19043,9 +19246,10 @@ def _load_reconciled_lab_outcome_metrics() -> dict:
             "lab_net_pnl": pnl,
             "lab_wins": wins,
             "lab_losses": closes - wins,
-            "lab_win_rate": round(100.0 * wins / closes, 1),
-            "lab_per_close_ev": round(pnl / closes, 2),
+            "lab_win_rate": round(100.0 * wins / closes, 1) if closes else 0.0,
+            "lab_per_close_ev": round(pnl / closes, 2) if closes else 0.0,
             "lab_pnl_source": "reconciled_shadow_outcomes",
+            "policy_version": _type_b_policy_version() if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1 else None,
         }
     return result
 
@@ -19241,6 +19445,11 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     open_lab = count_open_lab_shadows()
     lab_lanes = set(live_lab_ledger.keys()) | set(open_lab.keys())
     for lane in lab_lanes:
+        # Tile 1's convenience ledger predates policy v2 and has no policy
+        # dimension.  Its live dashboard metrics come only from versioned raw
+        # outcomes below, never from this aggregate legacy cache.
+        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            continue
         lb = live_lab_ledger.get(lane) or {}
         lab_closes = int(lb.get("closes") or 0)
         lab_pnl = float(lb.get("net_pnl_usd") or 0)
@@ -24959,6 +25168,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "source_trade_id": meta.get("source_trade_id"),
             "collection_mode": meta.get("collection_mode"),
             "is_counterfactual": bool(meta.get("is_counterfactual")),
+            "policy_version": meta.get("policy_version"),
             "size_mult": meta.get("size_mult"),
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),

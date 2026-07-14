@@ -21,6 +21,29 @@ function Write-GuardLog([string]$msg) {
 }
 
 $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+
+# Do not let an old but healthy process mask a newly installed bot revision.
+# The recovery helper performs all destructive checks itself: exact listener
+# PID, exact source path and source-newer-than-process timestamp.
+if ($conn) {
+  try {
+    $state = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/state" -TimeoutSec 8
+    $canonicalBot = Join-Path $repoRoot 'services\btc-conservative-agent\bot.py'
+    $reportedBot = [System.IO.Path]::GetFullPath([string]$state.bot_script)
+    $expectedBot = [System.IO.Path]::GetFullPath($canonicalBot)
+    $started = [DateTimeOffset]::FromUnixTimeSeconds([long][math]::Floor([double]$state.bot_start_time)).UtcDateTime
+    $sourceIsNewer = (Get-Item -LiteralPath $canonicalBot -ErrorAction Stop).LastWriteTimeUtc -gt $started
+    if ($reportedBot.Equals($expectedBot, [System.StringComparison]::OrdinalIgnoreCase) -and $sourceIsNewer) {
+      $helper = Join-Path $PSScriptRoot 'replace-stale-home-bot.ps1'
+      Write-GuardLog "[autostart-guard] stale bot revision detected on :$port; running guarded replacement"
+      & $helper -Port $port | ForEach-Object { Write-GuardLog "[autostart-guard] stale recovery: $_" }
+      $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+  } catch {
+    Write-GuardLog "[autostart-guard] stale-revision check skipped: $($_.Exception.Message)"
+  }
+}
+
 if (-not $conn) {
   Write-GuardLog "[autostart-guard] no listener on :$port, proceeding with startup"
   exit 0

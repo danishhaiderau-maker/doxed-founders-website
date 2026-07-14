@@ -55,13 +55,13 @@ COMBO_LANE_SPECS = {
     # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter V1 -- pre-entry TYPE_B prediction",
+        "label": "Type B Hunter — prospective fixed policy v2",
         "subtitle": (
             "RESEARCH_CANDIDATE — fixed-policy paper research only; "
-            "pre-entry scoring (delta+volume+adx+confidence), no live execution"
+            "deterministic ADX/volume/regime/structure gate, no live execution"
         ),
-        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V1",
-        "ai_min": 55,
+        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
+        "ai_min": 0,
         "ai_max": 101,
         "spread_min": 2,
         "spread_max": 99,
@@ -81,9 +81,8 @@ COMBO_LANE_SPECS = {
             "filter selectivity > 40pct"
         ),
         "hypothesis": (
-            "TYPE_B trades (MFE>=15pct) are identifiable pre-entry via order-flow "
-            "delta (+67pct vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
-            "ema_slope, structure)."
+            "A pre-registered direction-aware feature gate may identify TYPE_B "
+            "outcomes prospectively; legacy LAB data is retained only as an archived baseline."
         ),
         "research_question": (
             "Does the fixed pre-entry Type B policy beat CONTINUOUS on a walk-forward "
@@ -239,7 +238,7 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter V1"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v2"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"

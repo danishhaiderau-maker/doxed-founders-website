@@ -16,6 +16,7 @@
  */
 import * as vscode from 'vscode';
 import type { FounderOsCredentials } from './credentials';
+import { authorizationHeaderFromCredentials } from './credentials';
 
 type SuggestedFix = {
   title: string;
@@ -130,7 +131,7 @@ function renderStatus(status: vscode.StatusBarItem, run: LatestRun): void {
 async function fetchLatest(creds: FounderOsCredentials): Promise<LatestRun | null> {
   const url = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/latest`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}` },
+    headers: { Authorization: authorizationHeaderFromCredentials(creds) },
   });
   if (!res.ok) return null;
   const data = (await res.json()) as { run: LatestRun | null };
@@ -162,7 +163,7 @@ async function maybePromptConsent(
   try {
     const consentUrl = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/consent`;
     const headers = {
-      Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}`,
+      Authorization: authorizationHeaderFromCredentials(creds),
     };
     const checkRes = await fetch(consentUrl, { headers });
     if (!checkRes.ok) return;

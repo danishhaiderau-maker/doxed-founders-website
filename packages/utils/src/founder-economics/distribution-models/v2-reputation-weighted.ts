@@ -55,7 +55,7 @@ export class V2ReputationWeightedDistributionModel implements DistributionModel 
         const amount = tokensForFounder(ratio, epoch.tokensReleased);
         return { walletAddress: w.founder.walletAddress, amount };
       })
-      .filter((leaf) => leaf.amount > 0);
+      .filter((leaf) => leaf.amount > 0n);
 
     return buildMerkleTree(leaves);
   }

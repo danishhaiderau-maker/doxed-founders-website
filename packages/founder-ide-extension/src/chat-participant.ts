@@ -18,7 +18,7 @@ import { findModelAlias, FOUNDER_OS_MODELS } from './models';
 import type { ProfileManager } from './profile-manager';
 import { buildSystemPrompt } from './memory';
 import type { FounderOsCredentials } from './credentials';
-import { bearerFromCredentials, proxyBaseUrl } from './credentials';
+import { authorizationHeaderFromCredentials, proxyBaseUrl } from './credentials';
 import { CostTracker } from './cost-tracker';
 import {
   type GatewayMessage,
@@ -93,7 +93,7 @@ async function handleParticipantRequest(
 
   const client: GatewayClient = {
     baseUrl: proxyBaseUrl(deps.creds.apiBaseUrl),
-    bearer: bearerFromCredentials(deps.creds),
+    bearer: authorizationHeaderFromCredentials(deps.creds),
   };
 
   const cfg = vscode.workspace.getConfiguration('founderOs');

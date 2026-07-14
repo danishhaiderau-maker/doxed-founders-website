@@ -1,180 +1,238 @@
-"""
-TYPE_B_HUNTER_V1 — Pre-entry TYPE_B prediction scoring module.
+"""Deterministic, pre-entry gate for the Tile 1 Type B paper study.
 
-Classification: TYPE_A (MFE<10%), TYPE_B (MFE>=15%), MIXED (between).
-TYPE_B is the only profitable cohort (96.5% WR, +$357.20, EV +$2.52).
-
-This module scores signals BEFORE entry using features that separate TYPE_B
-from TYPE_A in post-trade analysis. It runs as a SHADOW lane — toggle ON to
-place real limit orders, OFF for shadow simulation with full data collection.
-
-Data source: type_b_predictor_report.json from the Type B Discovery dashboard.
+``TYPE_B`` remains a post-trade MFE label.  This module does not use that
+label to make an entry decision.  The constants below are a fixed,
+prospective policy: it must not be retuned until its own paper cohort has
+completed the declared evaluation window.
 """
 from __future__ import annotations
 
 
-# ── Cohort definitions (from Type B Discovery) ────────────────────────────
-TYPE_B_MIN_MFE_PCT = 15      # MFE >= 15% → TYPE_B
-TYPE_A_MAX_MFE_PCT = 10      # MFE < 10%  → TYPE_A
-# MIXED: 10% <= MFE < 15%
+TYPE_B_MIN_MFE_PCT = 15
+TYPE_A_MAX_MFE_PCT = 10
 
+# The lane id remains stable so the three-lane architecture and dashboard do
+# not gain a fourth lane.  The policy id splits new outcomes from legacy LAB
+# simulations, which were collected under the old confidence/volume scorer.
+LANE_ID = "TYPE_B_HUNTER_V1"
+LANE_LABEL = "Type B Hunter — prospective fixed policy v2a"
+LANE_ID_PREFIX = "tbhv1"
+LANE_STATUS = "SHADOW_COLLECTING"
+IS_INDEPENDENT_AI = True
+POLICY_VERSION = "type_b_fixed_policy_v2a_20260715"
 
-# ── Scoring weights (data-backed from type_b_predictor_report.json) ──────
-# Tier 1 — strongest separators between TYPE_A and TYPE_B
-SCORE_CONF65_PLUS          = 2.0   # P(TYPE_B): 48.3%, WR: 86.2% (29 trades)
-SCORE_DELTA_18_PLUS        = 1.5   # TYPE_B mean=21.22 vs TYPE_A mean=12.74 (+67%)
-SCORE_VOLUME_RATIO_090     = 1.0   # TYPE_B mean=1.12 vs TYPE_A mean=0.76 (+47%)
-
-# Tier 2 — moderate predictors
-SCORE_ADX_20_40            = 0.5   # adx20-30: 35.2% P(TYPE_B), adx30+: 36.0%
-SCORE_SPREAD_3_4           = 0.5   # spread3-4: 36.3% P(TYPE_B), 69.2% WR (237 trades)
-SCORE_EMA_UP               = 0.3   # ema_up: 34.3% P(TYPE_B), 67.6% WR (210 trades)
-
-# Tier 3 — weak but directional
-SCORE_STRUCTURE_MINUS3     = 0.3   # TYPE_B mean=-2.35 vs TYPE_A mean=-1.93
-SCORE_EDGE_3_5_PLUS        = 0.2   # TYPE_B mean=3.44 vs TYPE_A mean=3.33
-
-# ── Entry thresholds ─────────────────────────────────────────────────────
-MIN_SCORE_TO_ENTER         = 2.5   # Spawn shadow entry only if score >= this
-MIN_CONFIDENCE_FLOOR        = 55    # Absolute floor — never enter below this
-MIN_SPREAD_FLOOR            = 2     # Absolute floor — never enter below this
-
-# ── Lane configuration ────────────────────────────────────────────────────
-LANE_ID                     = "TYPE_B_HUNTER_V1"
-LANE_LABEL                  = "Type B Hunter V1 — pre-entry TYPE_B prediction"
-LANE_ID_PREFIX              = "tbhv1"
-LANE_STATUS                 = "SHADOW_COLLECTING"  # starts as shadow — toggle ON for live
-IS_INDEPENDENT_AI           = True  # Uses its own DeepSeek prompt (not CONTINUOUS mirror)
-
-# ── AI configuration ──────────────────────────────────────────────────────
-# Independent AI — fires 60s after CONTINUOUS to avoid collision in 3-lane setup.
-# Cadence: T+60s (CONTINUOUS at T+0, TYPE_B at T+60, S/R at T+120)
-AI_OFFSET_SEC               = 60
-AI_MAX_AGE_SEC              = 180
-AI_PROMPT_FOCUS             = (
-    "TYPE_B_HUNTER: Evaluate if current setup has strong directional follow-through. "
-    "Key factors: order-flow delta, volume ratio, trend strength, structure. "
-    "Confidence >= 55 required. Respond with direction, confidence, bull_score, bear_score."
+# Independent AI fires sixty seconds after CONTINUOUS in the three-lane setup.
+AI_OFFSET_SEC = 60
+AI_MAX_AGE_SEC = 180
+AI_PROMPT_FOCUS = (
+    "TYPE_B_HUNTER: return a direction and market facts. The deterministic "
+    "policy, not the model's self-reported confidence, decides whether to enter."
 )
 
+# Pre-registered fixed-policy thresholds.  They are deliberately explicit so
+# walk-forward reports can identify exactly which policy produced each record.
+MIN_SCORE_TO_ENTER = 3.0
+MIN_SPREAD_FLOOR = 2
+ADX_FLOOR = 20.0
+VOLUME_DANGER = 2.0
 
-def get_type_b_score(
-    ai_prob: int,
-    features: dict,
-) -> float:
-    """Compute composite TYPE_B score from pre-entry features.
 
-    Args:
-        ai_prob: AI win probability (0-100)
-        features: Signal/market features dict. Expected keys:
-            delta, volume_ratio, adx, spread, ema_slope, structure_bias, edge_score
+def _market_context(features: dict) -> dict:
+    context = features.get("market_context") or {}
+    return context if isinstance(context, dict) else {}
 
-    Returns:
-        Float score. >= MIN_SCORE_TO_ENTER means the signal qualifies.
-    """
-    score = 0.0
+
+def _market_structure(features: dict) -> dict:
+    structure = _market_context(features).get("market_structure") or {}
+    return structure if isinstance(structure, dict) else {}
+
+
+def _first_number(*values) -> float | None:
+    for value in values:
+        result = _safe_float(value)
+        if result is not None:
+            return result
+    return None
+
+
+def _normalise_direction(value) -> str:
+    direction = str(value or "").upper()
+    return direction if direction in {"LONG", "SHORT"} else ""
+
+
+def _normalise_regime(value) -> str:
+    regime = str(value or "").upper()
+    if regime.startswith("BEAR"):
+        return "BEAR"
+    if regime.startswith("BULL"):
+        return "BULL"
+    if regime.startswith("RANGE"):
+        return "RANGE"
+    if regime.startswith("CHOP"):
+        return "CHOPPY"
+    if regime.startswith("EXPANS"):
+        return "EXPANSION"
+    return regime or "UNKNOWN"
+
+
+def resolve_features(features: dict, direction: str = None) -> dict:
+    """Normalize only features available before an entry is made."""
     features = features or {}
+    market_context = _market_context(features)
+    trend_strength = market_context.get("trend_strength") or {}
+    if not isinstance(trend_strength, dict):
+        trend_strength = {}
+    structure_context = _market_structure(features)
+    resolved_direction = _normalise_direction(direction or features.get("direction"))
+    return {
+        "direction": resolved_direction,
+        "delta": _first_number(
+            features.get("delta"), features.get("features_delta"), features.get("orderflow_delta")
+        ),
+        "volume_ratio": _first_number(
+            features.get("volume_ratio"), features.get("features_volume_ratio"), features.get("vol_ratio")
+        ),
+        "adx": _first_number(
+            features.get("adx"), features.get("adx_at_entry"), features.get("mom_adx"), trend_strength.get("adx")
+        ),
+        "spread": _safe_int(
+            features.get("spread") or features.get("conviction_spread") or features.get("directional_spread")
+        ),
+        "regime": _normalise_regime(
+            features.get("regime") or market_context.get("regime") or structure_context.get("regime")
+        ),
+        "structure": _first_number(
+            features.get("structure_score"), features.get("structure_score_at_entry"),
+            features.get("structure_bias_at_entry"), features.get("structure"),
+            structure_context.get("structure_score")
+        ),
+        "edge": _first_number(features.get("edge_score"), features.get("controls_edge_threshold")),
+        "ema_slope": str(features.get("ema_slope") or features.get("ema_hybrid_slope") or "").lower(),
+    }
 
-    # Tier 1
-    if ai_prob >= 65:
-        score += SCORE_CONF65_PLUS
 
-    # Optional floats may be absent from feature snapshots (e.g. no adx key).
-    # Never compare None — that TypeError silently killed APPROVE→SPAWN after AI.
-    delta = _safe_float(features.get("delta") or features.get("features_delta") or features.get("orderflow_delta"))
-    if delta is not None and delta >= 18:
-        score += SCORE_DELTA_18_PLUS
+def get_type_b_score(ai_prob: int, features: dict, direction: str = None) -> float:
+    """Return the fixed policy score without using AI probability as a feature.
 
-    vol_ratio = _safe_float(features.get("volume_ratio") or features.get("features_volume_ratio") or features.get("vol_ratio"))
-    if vol_ratio is not None and vol_ratio >= 0.90:
-        score += SCORE_VOLUME_RATIO_090
+    ``ai_prob`` remains an argument for backwards-compatible callers and audit
+    rows, but it intentionally contributes zero to the score.
+    """
+    values = resolve_features(features, direction)
+    score = 0.0
+    adx = values["adx"]
+    volume_ratio = values["volume_ratio"]
+    structure = values["structure"]
+    edge = values["edge"]
+    trade_direction = values["direction"]
 
-    # Tier 2
-    adx = _safe_float(
-        features.get("adx") or features.get("adx_at_entry") or features.get("mom_adx")
-        or (features.get("market_context") or {}).get("trend_strength", {}).get("adx")
-    )
-    if adx is not None and 20 <= adx <= 40:
-        score += SCORE_ADX_20_40
+    if adx is not None:
+        if 20.0 <= adx < 25.0:
+            score += 1.5
+        elif 25.0 <= adx < 30.0:
+            score += 1.2
+        elif 30.0 <= adx <= 35.0:
+            score += 0.75
+        elif adx > 35.0:
+            score += 0.25
 
-    spread = _safe_int(
-        features.get("spread") or features.get("conviction_spread")
-        or features.get("directional_spread")
-    )
-    if 3 <= spread <= 4:
-        score += SCORE_SPREAD_3_4
+    if volume_ratio is not None:
+        if volume_ratio < 0.80:
+            score += 1.0
+        elif volume_ratio < 1.20:
+            score += 0.5
 
-    ema_slope = str(features.get("ema_slope") or features.get("ema_hybrid_slope") or "").lower()
-    if ema_slope in ("up", "bullish", "positive"):
-        score += SCORE_EMA_UP
+    if values["regime"] == "BEAR":
+        score += 0.5
+    elif values["regime"] == "RANGE":
+        score += 0.25
 
-    # Tier 3
-    structure = _safe_float(
-        features.get("structure_bias_at_entry") or features.get("structure")
-        or features.get("structure_score_at_entry") or features.get("structure_score")
-    )
-    if structure is not None and structure <= -3:
-        score += SCORE_STRUCTURE_MINUS3
+    if structure is not None:
+        if (trade_direction == "SHORT" and structure <= -3.0) or (
+            trade_direction == "LONG" and structure >= 3.0
+        ):
+            score += 1.0
+        elif -3.0 < structure < 3.0:
+            score += 0.25
 
-    edge = _safe_float(features.get("edge_score") or features.get("controls_edge_threshold"))
-    if edge is not None and edge >= 3.5:
-        score += SCORE_EDGE_3_5_PLUS
+    delta = values["delta"]
+    if (trade_direction == "LONG" and delta is not None and delta >= 18.0) or (
+        trade_direction == "SHORT" and delta is not None and delta <= -18.0
+    ):
+        score += 0.75
 
+    if 3 <= values["spread"] <= 5:
+        score += 0.5
+    if edge is not None and 3.0 <= edge <= 5.0:
+        score += 0.5
+
+    ema_slope = values["ema_slope"]
+    if (trade_direction == "LONG" and ema_slope in {"up", "bullish", "positive"}) or (
+        trade_direction == "SHORT" and ema_slope in {"down", "bearish", "negative"}
+    ):
+        score += 0.25
     return round(score, 2)
 
 
-def should_enter_type_b(ai_prob: int, features: dict) -> tuple[bool, dict]:
-    """Determine if a signal qualifies as a TYPE_B_HUNTER entry.
-
-    Returns:
-        (entered, detail_dict) where detail_dict has score, reasons, and block reason.
-    """
-    features = features or {}
-    detail = {"lane": LANE_ID, "score": 0.0, "entered": False, "block_reason": None, "breakdown": {}}
-
-    # Absolute safety floors
-    if ai_prob < MIN_CONFIDENCE_FLOOR:
-        detail["block_reason"] = f"CONFIDENCE_FLOOR ({ai_prob} < {MIN_CONFIDENCE_FLOOR})"
-        return False, detail
-
-    spread = _safe_int(
-        features.get("spread") or features.get("conviction_spread")
-        or features.get("directional_spread")
-    )
-    if spread < MIN_SPREAD_FLOOR:
-        detail["block_reason"] = f"SPREAD_FLOOR ({spread} < {MIN_SPREAD_FLOOR})"
-        return False, detail
-
-    # Composite scoring
-    score = get_type_b_score(ai_prob, features)
-    detail["score"] = score
-
-    # Build breakdown for audit
-    detail["breakdown"] = {
-        "ai_prob": ai_prob,
-        "delta": _safe_float(features.get("delta") or features.get("features_delta")),
-        "volume_ratio": _safe_float(features.get("volume_ratio") or features.get("features_volume_ratio")),
-        "adx": _safe_float(features.get("adx") or features.get("adx_at_entry")),
-        "spread": spread,
-        "ema_slope": str(features.get("ema_slope") or ""),
-        "structure": _safe_float(features.get("structure_bias_at_entry") or features.get("structure")),
-        "edge_score": _safe_float(features.get("edge_score")),
-        "composite_score": score,
-        "threshold": MIN_SCORE_TO_ENTER,
+def should_enter_type_b(ai_prob: int, features: dict, direction: str = None) -> tuple[bool, dict]:
+    """Evaluate the fixed Type B policy and return an auditable decision."""
+    values = resolve_features(features, direction)
+    detail = {
+        "lane": LANE_ID,
+        "policy_version": POLICY_VERSION,
+        "score": 0.0,
+        "entered": False,
+        "block_reason": None,
+        "breakdown": {**values, "ai_prob_audit_only": ai_prob, "threshold": MIN_SCORE_TO_ENTER},
     }
 
+    if not values["direction"]:
+        detail["block_reason"] = "NO_DIRECTION"
+        return False, detail
+    missing = [name for name in ("adx", "volume_ratio", "structure", "edge") if values[name] is None]
+    if missing:
+        detail["block_reason"] = f"MISSING_FEATURES ({','.join(missing)})"
+        return False, detail
+    if values["regime"] in {"UNKNOWN", "CHOPPY", "EXPANSION"}:
+        detail["block_reason"] = f"REGIME_BLOCK ({values['regime']})"
+        return False, detail
+    if values["adx"] < ADX_FLOOR:
+        detail["block_reason"] = f"ADX_FLOOR ({values['adx']:.2f} < {ADX_FLOOR:.0f})"
+        return False, detail
+    # BULL regime requires stronger trend confirmation — historically choppier, more false breakouts
+    if values["regime"] == "BULL" and values["adx"] is not None and values["adx"] < 25.0:
+        detail["block_reason"] = f"BULL_NEEDS_ADX_25_PLUS (adx={values['adx']:.2f})"
+        return False, detail
+    if values["spread"] < MIN_SPREAD_FLOOR:
+        detail["block_reason"] = f"SPREAD_FLOOR ({values['spread']} < {MIN_SPREAD_FLOOR})"
+        return False, detail
+    if values["volume_ratio"] > VOLUME_DANGER:
+        detail["block_reason"] = f"VOLUME_DANGER ({values['volume_ratio']:.3f} > {VOLUME_DANGER:.1f})"
+        return False, detail
+    if values["direction"] == "LONG" and values["structure"] <= -3.0:
+        detail["block_reason"] = "COUNTER_STRUCTURE_LONG"
+        return False, detail
+    if values["direction"] == "SHORT" and values["structure"] >= 3.0:
+        detail["block_reason"] = "COUNTER_STRUCTURE_SHORT"
+        return False, detail
+    if values["edge"] > 5.0 and values["volume_ratio"] > 1.20:
+        detail["block_reason"] = "EDGE_VOLUME_DANGER"
+        return False, detail
+    if values["adx"] > 35.0 and values["edge"] > 5.0 and values["volume_ratio"] > 1.50:
+        detail["block_reason"] = "TRIPLE_DANGER"
+        return False, detail
+
+    score = get_type_b_score(ai_prob, features, values["direction"])
+    detail["score"] = score
+    detail["breakdown"]["composite_score"] = score
     if score >= MIN_SCORE_TO_ENTER:
         detail["entered"] = True
         return True, detail
-
     detail["block_reason"] = f"SCORE_BELOW_THRESHOLD ({score} < {MIN_SCORE_TO_ENTER})"
     return False, detail
 
 
 def classify_type(cohort_pct: float) -> str:
-    """Post-trade classification based on MFE %.
-    Used for shadow outcome labeling — not for entry decisions.
-    """
+    """Post-trade classification only; never an entry input."""
     if cohort_pct >= TYPE_B_MIN_MFE_PCT:
         return "TYPE_B"
     if cohort_pct <= TYPE_A_MAX_MFE_PCT:
@@ -182,7 +240,34 @@ def classify_type(cohort_pct: float) -> str:
     return "MIXED"
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+def self_test() -> None:
+    favorable = {
+        "adx": 22.0, "volume_ratio": 0.6, "spread": 4, "regime": "BEAR",
+        "structure_score": -4.0, "edge_score": 4.0, "delta": -22.0, "ema_slope": "down",
+    }
+    entered, detail = should_enter_type_b(1, favorable, "SHORT")
+    assert entered and detail["score"] >= MIN_SCORE_TO_ENTER
+    assert should_enter_type_b(99, {**favorable, "volume_ratio": 2.1}, "SHORT")[0] is False
+    assert should_enter_type_b(99, {**favorable, "adx": 19.9}, "SHORT")[0] is False
+    assert should_enter_type_b(99, favorable, "LONG")[0] is False
+    assert should_enter_type_b(99, {**favorable, "regime": "UNKNOWN"}, "SHORT")[0] is False
+    nested = {"market_context": {"trend_strength": {"adx": 22}, "market_structure": {"regime": "BEAR", "structure_score": -4}}, **{k: v for k, v in favorable.items() if k not in {"adx", "regime", "structure_score"}}}
+    assert should_enter_type_b(1, nested, "SHORT")[0] is True
+    # BULL regime gate: ADX < 25 must BLOCK even with otherwise favorable features
+    bull_favorable_low_adx = {
+        "adx": 22.0, "volume_ratio": 0.6, "spread": 4, "regime": "BULL",
+        "structure_score": 4.0, "edge_score": 4.0, "delta": 22.0, "ema_slope": "up",
+    }
+    blocked_low, low_detail = should_enter_type_b(1, bull_favorable_low_adx, "LONG")
+    assert blocked_low is False
+    assert low_detail["block_reason"].startswith("BULL_NEEDS_ADX_25_PLUS")
+    # BULL regime with ADX >= 25 passes the new gate and enters when score is sufficient
+    bull_favorable_high_adx = {**bull_favorable_low_adx, "adx": 26.0}
+    entered_bull, bull_detail = should_enter_type_b(1, bull_favorable_high_adx, "LONG")
+    assert entered_bull is True
+    assert bull_detail["score"] >= MIN_SCORE_TO_ENTER
+
+
 def _safe_float(val) -> float | None:
     if val is None:
         return None
