@@ -258,19 +258,15 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-bot" {
-      Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
-      return @{
-        ok = $true
-        message = "Bot console opened on :$BotPort - keep the window open."
-      }
+      # The bridge is deliberately single-threaded.  Starting a service can
+      # perform slow health checks, so it must use the worker just like the
+      # stop/resume actions; otherwise one click freezes every status request.
+      Invoke-HomeCommandBackground "start-bot"
+      return @{ ok = $true; message = "Bot start queued in the background. Refresh status in 15-30 seconds." }
     }
     "start-analyzer" {
-      Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-      Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -Title "Doxed Analyzer :$AnalyzerPort"
-      return @{
-        ok = $true
-        message = "Analyzer start queued on :$AnalyzerPort - refresh status in 15-30 seconds."
-      }
+      Invoke-HomeCommandBackground "start-analyzer"
+      return @{ ok = $true; message = "Analyzer start queued in the background. Refresh status in 15-30 seconds." }
     }
     "start-analyzer-once" {
       if ($stackMode.Mode -eq "local-collection") {
@@ -468,8 +464,8 @@ try {
   # Task.Run approach had two PowerShell-specific bugs: Task.Run(ScriptBlock) is an
   # ambiguous overload (kills the listener on the first request), and functions
   # defined in the main runspace (Serve-Request, Get-FullStatus, etc.) are NOT
-  # visible inside pool runspaces, so no response was ever sent. Get-FullStatus is
-  # port-only (<500ms), so serialized handling is fine for an admin command bridge.
+  # visible inside pool runspaces, so no response was ever sent. Status probes are
+  # bounded and all service start/stop work is handed to a background worker.
   while ($listener.IsListening) {
     $context = $listener.GetContext()
     try {
