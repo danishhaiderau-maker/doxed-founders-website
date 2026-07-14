@@ -89,7 +89,7 @@ if (Test-BridgeHealthy) {
   exit 0
 }
 
-Start-VisibleConsole $launcher @() -Title "Doxed Home Bridge :$Port"
+Start-VisibleConsole $launcher @("-Force") -Title "Doxed Home Bridge :$Port"
 
 $deadline = (Get-Date).AddSeconds(35)
 while ((Get-Date) -lt $deadline) {
