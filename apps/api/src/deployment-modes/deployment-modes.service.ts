@@ -567,8 +567,9 @@ export class DeploymentModesService {
 
   /**
    * Best-effort content mirror after repo create. Tries in order:
-   *   1. `git push` from PUBLISH_SOURCE_DIR (or cwd) when that git remote can
-   *      authenticate with GITHUB_TOKEN.
+   *   1. A fast-forward-only `git push` from PUBLISH_SOURCE_DIR (or cwd) when
+   *      that git remote can authenticate with GITHUB_TOKEN. It must never
+   *      rewrite an existing founder repository's history.
    *   2. GitHub Contents API seed of a Founder OS publish manifest README.
    *
    * Never throws past the caller — createGithubRepo already succeeded; mirror
@@ -587,7 +588,7 @@ export class DeploymentModesService {
     try {
       const { stdout, stderr } = await execFileAsync(
         'git',
-        ['push', '--force', remoteUrl, 'HEAD:refs/heads/main'],
+        ['push', remoteUrl, 'HEAD:refs/heads/main'],
         {
           cwd: sourceDir,
           env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
