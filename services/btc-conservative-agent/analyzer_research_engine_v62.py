@@ -7869,8 +7869,14 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             lane_trades = trade_df[trade_df["trade_id"].astype(str).isin(approve_ids)]
         else:
             lane_trades = pd.DataFrame()
+        if not lane_trades.empty and "trade_id" in lane_trades.columns:
+            lane_trades = lane_trades.drop_duplicates(subset=["trade_id"], keep="last")
         real_fills = len(lane_trades)
         net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
+        direct_trade_ids = set(lane_trades["trade_id"].dropna().astype(str)) if not lane_trades.empty and "trade_id" in lane_trades.columns else set()
+        lab_closes = 0
+        lab_net_pnl = 0.0
+        lab_pnl_source = None
 
         v2_lane_extra = {}
         if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
@@ -7892,8 +7898,10 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                     "Reject sims=checker-reject counterfactuals (not session fills)."
                 ),
             }
-            if real_fills == 0 and v2_lane_extra["v2_checker_pass_sims"] > 0:
-                net_pnl_real = float(v2_lane_extra["v2_checker_pass_pnl"])
+            if v2_lane_extra["v2_checker_pass_sims"] > 0:
+                lab_closes = max(lab_closes, v2_lane_extra["v2_checker_pass_sims"])
+                lab_net_pnl = float(v2_lane_extra["v2_checker_pass_pnl"])
+                lab_pnl_source = "v2_checker_simulated"
         elif lane == "AI_SCAN":
             coord = _ai_scan_coordinator_stats(decisions, ai_log)
             v2_lane_extra = {
@@ -7909,11 +7917,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 lane_sl = shadow_lane_df[shadow_lane_df["research_lane"].astype(str) == lane]
                 sim_n = len(lane_sl)
                 if sim_n:
-                    real_fills = sim_n
-                    net_pnl_real = round(
+                    lab_closes = max(lab_closes, sim_n)
+                    lab_net_pnl = round(
                         float(pd.to_numeric(lane_sl.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
                     )
-                    approves_n = max(approves_n, sim_n)
+                    lab_pnl_source = "shadow_simulated"
 
         # LAB / OFF-tile breadcrumbs: opportunity capture + lab PnL ledger when no closed fills.
         if approves_n == 0 or real_fills == 0:
@@ -7928,15 +7936,16 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 opp_spawn = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "SPAWN_LAB")
                 approves_n = max(approves_n, opp_appr, opp_orders, opp_spawn)
             lab_path = _agent_data_path("lane_lab_pnl_ledger.json")
-            if real_fills == 0 and os.path.isfile(lab_path):
+            if os.path.isfile(lab_path):
                 try:
                     with open(lab_path, encoding="utf-8") as _lf:
                         _lab = (json.load(_lf) or {}).get("lanes") or {}
                     _lab_row = _lab.get(lane) or {}
                     _lab_closes = int(_lab_row.get("closes") or 0)
                     if _lab_closes:
-                        real_fills = _lab_closes
-                        net_pnl_real = round(float(_lab_row.get("net_pnl_usd") or 0), 2)
+                        lab_closes = max(lab_closes, _lab_closes)
+                        lab_net_pnl = round(float(_lab_row.get("net_pnl_usd") or 0), 2)
+                        lab_pnl_source = str(_lab_row.get("pnl_source") or "lab_simulated")
                 except Exception:
                     pass
 
@@ -7968,17 +7977,39 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             good_blocks_saved_usd = float(shadow_by_lane[lane].get("good_block_saved") or 0.0)
             net_pnl_shadow_blocked = round(costly_blocks_usd - good_blocks_saved_usd, 2)
 
-        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else 0.0
+        matched_direct_fills = len(direct_trade_ids & approve_ids)
+        direct_approval_coverage_pct = round(100.0 * matched_direct_fills / real_fills, 1) if real_fills else 0.0
+        comparison_eligible = bool(real_fills and direct_approval_coverage_pct >= 95.0)
+        if comparison_eligible:
+            comparison_note = "Direct CSV fills are linked to the same-window approve records."
+        elif lab_closes:
+            comparison_note = "LAB-simulated outcomes are shown separately and excluded from lane performance comparison."
+        elif real_fills:
+            comparison_note = "Direct CSV fills exist, but same-window approve linkage is incomplete; fill-rate and EV comparison withheld."
+        else:
+            comparison_note = "No direct CSV fills in this lane for the current scope."
+        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if comparison_eligible and approves_n else 0.0
         shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else 0.0
-        per_approve_ev = round((net_pnl_real + net_pnl_shadow_blocked) / approves_n, 2) if approves_n else 0.0
+        per_approve_ev = round((net_pnl_real + net_pnl_shadow_blocked) / approves_n, 2) if comparison_eligible and approves_n else 0.0
 
         lane_metrics[lane] = {
             "approves": approves_n,
+            "research_approves": approves_n,
             "real_fills": real_fills,
+            "direct_trade_ids": len(direct_trade_ids),
+            "matched_direct_fills": matched_direct_fills,
+            "direct_approval_coverage_pct": direct_approval_coverage_pct,
+            "comparison_eligible": comparison_eligible,
+            "comparison_note": comparison_note,
+            "metric_source": "direct_csv" if real_fills else ("lab_simulated" if lab_closes else "none"),
             "approve_to_fill_pct": approve_to_fill_pct,
             "shadow_filled": shadow_filled,
             "shadow_fill_pct": shadow_fill_pct,
             "net_pnl_real": net_pnl_real,
+            "lab_closes": lab_closes,
+            "lab_net_pnl_usd": lab_net_pnl,
+            "lab_ev_per_close": round(lab_net_pnl / lab_closes, 2) if lab_closes else 0.0,
+            "lab_pnl_source": lab_pnl_source,
             "net_pnl_shadow_blocked": net_pnl_shadow_blocked,
             "per_approve_ev": per_approve_ev,
             "costly_blocks_usd": costly_blocks_usd,
@@ -7999,12 +8030,12 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             metrics["delta_costly_blocks_usd"] = 0.0
             metrics["verdict"] = _benchmark_lane_verdict(lane, {}, bench)
             continue
-        if metrics["approves"] == 0:
+        if not metrics.get("comparison_eligible") or not bench.get("comparison_eligible"):
             metrics["delta_approve_to_fill_pct"] = None
             metrics["delta_net_pnl_real"] = None
             metrics["delta_per_approve_ev"] = None
             metrics["delta_costly_blocks_usd"] = None
-            metrics["verdict"] = "no session approves"
+            metrics["verdict"] = "not comparable — direct approval/fill linkage incomplete"
             continue
         metrics["delta_approve_to_fill_pct"] = round(metrics["approve_to_fill_pct"] - bench["approve_to_fill_pct"], 1)
         metrics["delta_net_pnl_real"] = round(metrics["net_pnl_real"] - bench["net_pnl_real"], 2)
@@ -10513,22 +10544,35 @@ def run_integrity_checks(
             "; ".join(mismatch[:6]) if mismatch else "trades_3factor.limit_chase_count matches report buckets",
         )
 
-    # Lane totals vs CONTINUOUS
+    # Direct CSV lane reconciliation. Lab/shadow outcomes intentionally overlap
+    # research cohorts, so summing their metrics cannot reconcile to executed CSV
+    # trades and must never be presented as a real-fill total.
     if benchmark_report and trades is not None and not trades.empty and "research_lane" in trades.columns:
         lanes = (benchmark_report or {}).get("lanes") or {}
-        cont = int((lanes.get("CONTINUOUS") or {}).get("real_fills") or (lanes.get("CONTINUOUS") or {}).get("fills") or 0)
-        lane_sum = 0
-        for ln, m in lanes.items():
-            if ln in ("AI_SCAN", "EXEC_5M"):
-                continue
-            lane_sum += int(m.get("real_fills") or m.get("fills") or 0)
-        work = trades.drop_duplicates(subset=["trade_id"])
+        source = trades.copy()
+        source["trade_id"] = source["trade_id"].fillna("").astype(str)
+        source["research_lane"] = source["research_lane"].fillna("UNATTRIBUTED").astype(str).str.upper()
+        source = source[source["trade_id"] != ""]
+        lane_values = source.groupby("trade_id")["research_lane"].nunique()
+        ambiguous_ids = int((lane_values > 1).sum())
+        work = source.drop_duplicates(subset=["trade_id"], keep="last")
         csv_total = int(len(work))
+        direct_lane_total = int(work.groupby("research_lane")["trade_id"].nunique().sum())
+        direct_cont = int((work["research_lane"] == BENCHMARK_LANE)["trade_id"].nunique())
+        reported_cont = int((lanes.get(BENCHMARK_LANE) or {}).get("real_fills") or 0)
         _add(
-            "lane_fill_reconcile",
-            lane_sum >= cont and csv_total >= cont,
-            f"lane_fills_sum≥CONTINUOUS({cont}), csv_trades={csv_total}",
-            f"lane_fills_sum={lane_sum}",
+            "direct_lane_fill_reconcile",
+            direct_lane_total == csv_total and ambiguous_ids == 0,
+            f"direct_lane_fills={csv_total}, ambiguous_trade_ids=0",
+            f"direct_lane_fills={direct_lane_total}, ambiguous_trade_ids={ambiguous_ids}",
+            "Direct CSV trade IDs only; simulated LAB/shadow outcomes are excluded from this accounting check.",
+        )
+        _add(
+            "benchmark_direct_fill_reconcile",
+            reported_cont == direct_cont,
+            f"reported_CONTINUOUS_direct_fills={direct_cont}",
+            f"reported_CONTINUOUS_direct_fills={reported_cont}",
+            "Benchmark report must use deduplicated direct CSV fills, not simulated lane totals.",
         )
 
     # Genome vs completed trades (best-effort)
@@ -15234,13 +15278,27 @@ def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, 
         shadow = shadow_by_lane.get(lane_key) or {}
         ttl = int((shadow.get("counts") or {}).get("Shadow fill + TTL expired") or 0)
         gate_blocks = int((shadow.get("counts") or {}).get("Shadow fill + blocked (gates)") or 0)
-        session_line = (
-            f"n={metrics.get('approves', 0)} approves · "
-            f"{metrics.get('real_fills', 0)} trades · "
-            f"{metrics.get('approve_to_fill_pct', 0):.0f}% fill · "
-            f"${metrics.get('net_pnl_real', 0):.2f} real · "
-            f"EV ${metrics.get('per_approve_ev', 0):.2f}/approve"
-        )
+        if metrics.get("lab_closes", 0):
+            session_line = (
+                f"LAB simulated · {metrics.get('lab_closes', 0)} closes · "
+                f"${metrics.get('lab_net_pnl_usd', 0):.2f} simulated · "
+                f"EV ${metrics.get('lab_ev_per_close', 0):.2f}/close · "
+                "excluded from direct lane comparison"
+            )
+        elif not metrics.get("comparison_eligible", False):
+            session_line = (
+                f"Direct CSV · {metrics.get('real_fills', 0)} fills · "
+                f"${metrics.get('net_pnl_real', 0):.2f} booked · "
+                "approval linkage incomplete; fill/EV comparison withheld"
+            )
+        else:
+            session_line = (
+                f"n={metrics.get('approves', 0)} approves · "
+                f"{metrics.get('real_fills', 0)} trades · "
+                f"{metrics.get('approve_to_fill_pct', 0):.0f}% fill · "
+                f"${metrics.get('net_pnl_real', 0):.2f} real · "
+                f"EV ${metrics.get('per_approve_ev', 0):.2f}/approve"
+            )
         if ttl:
             session_line += f" · {ttl} TTL expired"
         if gate_blocks:
@@ -15252,6 +15310,13 @@ def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, 
             "shadow_fill_pct": metrics.get("shadow_fill_pct", 0),
             "net_pnl_real": metrics.get("net_pnl_real", 0),
             "per_approve_ev": metrics.get("per_approve_ev", 0),
+            "metric_source": metrics.get("metric_source", "none"),
+            "comparison_eligible": bool(metrics.get("comparison_eligible", False)),
+            "comparison_note": metrics.get("comparison_note", ""),
+            "lab_closes": metrics.get("lab_closes", 0),
+            "lab_net_pnl_usd": metrics.get("lab_net_pnl_usd", 0),
+            "lab_ev_per_close": metrics.get("lab_ev_per_close", 0),
+            "lab_pnl_source": metrics.get("lab_pnl_source"),
             "verdict": metrics.get("verdict"),
             "summary_line": session_line,
         }
