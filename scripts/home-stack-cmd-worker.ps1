@@ -27,6 +27,7 @@ if ($AnalyzerPort -le 0 -or ($AnalyzerPort -eq 9500 -and $StackMode -eq "product
 $isLocal = $StackMode -eq "local-collection"
 $botTitle = if ($isLocal) { "Local Collection Bot :$BotPort" } else { "Doxed Bot :$BotPort" }
 $analyzerTitle = if ($isLocal) { "Local Collection Analyzer :$AnalyzerPort" } else { "Doxed Analyzer" }
+$analyzerStoppedFile = Join-Path $repoRoot ".home-analyzer-user-stopped"
 
 switch ($Action) {
   "start-bot" {
@@ -47,6 +48,9 @@ switch ($Action) {
     }
   }
   "start-analyzer" {
+    # Analyzer stop is intentionally component-scoped: stopping the read-only
+    # research dashboard must not disable the paper-bot watchdog.
+    Remove-Item $analyzerStoppedFile -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     if (Test-AnalyzerHung) {
       Stop-PythonMatching "analyzer_research_engine" | Out-Null
@@ -75,6 +79,13 @@ switch ($Action) {
     Stop-ListenPortFast $BotPort | Out-Null
   }
   "stop-analyzer" {
+    # Tell the analyzer watchdog this is an operator-requested stop before
+    # terminating its listener.  Without this marker, the watchdog can treat
+    # the expected exit as a crash and resurrect a stale dashboard process.
+    Set-Content -Path $analyzerStoppedFile -Value (Get-Date -Format "o") -NoNewline -Encoding UTF8
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer-auto-restart.ps1*" } |
+      ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Stop-PythonMatching "analyzer_research_engine" | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq $analyzerTitle" 2>$null | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer" 2>$null | Out-Null
@@ -82,6 +93,8 @@ switch ($Action) {
     & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Analyzer :9500" 2>$null | Out-Null
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $repoRoot ".home-analyzer.pid") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $repoRoot ".local-collection-analyzer.lock") -Force -ErrorAction SilentlyContinue
   }
   "stop-all" {
