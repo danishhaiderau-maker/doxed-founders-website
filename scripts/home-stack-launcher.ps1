@@ -42,7 +42,7 @@ function Test-BridgeAlreadyBound([int]$ProbePort) {
   }
 }
 
-if (Test-BridgeAlreadyBound $Port) {
+if (-not $Force -and (Test-BridgeAlreadyBound $Port)) {
   $Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port (already running)"
   Write-Host "Bridge already OK on :$Port (skipping second listener) - auto-closing duplicate window." -ForegroundColor Green
   try {
