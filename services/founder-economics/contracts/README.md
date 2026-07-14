@@ -1,62 +1,69 @@
-# Founder Economics — Smart Contracts (Design Artifacts)
+# Founder Economics contracts — testnet-only
 
-These `.sol` files are **design artifacts** for the Phase 8 Founder Economics
-MVP. They do not need to compile without a Solidity toolchain installed.
+These Solidity contracts implement the immutable **1,000,000,000-token**
+Founder Economics fixture. They are complete enough for local contract tests,
+but are **not deployed, funded, audited, or approved for production**.
 
-## Architecture — on-chain simple, off-chain swappable
+Permitted network: **Robinhood EVM testnet only** (chain ID `46630`). Mainnet,
+DEX launch, treasury funding, and the initial liquidity action remain outside
+this repository's implementation scope until every production gate passes.
 
+## Locked allocation
+
+| Allocation | Tokens | Share |
+| --- | ---: | ---: |
+| Initial DCF liquidity pool | 200,000,000 | 20.00% |
+| 40 decaying community epochs | 509,414,048 | 50.94% |
+| Champions terminal reward | 160,000,000 | 16.00% |
+| Team / treasury reserve | 130,585,952 | 13.06% |
+| **Total** | **1,000,000,000** | **100.00%** |
+
+The initial 200M allocation is funded outside `VestingVault`. The vault holds
+the other 800M: 40 quarterly community/team releases, followed by the terminal
+Champions release on day 3,650. Community releases apply 2.5% to the remaining
+virtual emission reference for epochs 1–39; epoch 40 normalizes rounding so the
+locked 509,414,048 allocation is exact.
+
+## Contract responsibilities
+
+```text
+PlatformToken       fixed 1B ERC-20 supply
+VestingVault        permissionless 90-day release schedule
+EpochDistributor    funded root proposal → 7-day challenge → final claim
+ModelRegistry       governance-approved source/build hash and activation epoch
 ```
-ON-CHAIN (non-upgradeable, immutable, auditable)
-  PlatformToken.sol    → ERC-20 + ERC-2612 permit, fixed supply minted once
-  VestingVault.sol     → releases 20M tokens/epoch on 90-day schedule
-  EpochDistributor.sol → stores Merkle roots per epoch, verifies proofs, pays
 
-OFF-CHAIN (swappable, upgradeable without touching contracts)
-  DistributionModel    → computes who gets what each epoch (TypeScript)
-  DDollar Engine       → tracks activity, grants DDollar (NestJS)
-  Knowledge Graph      → tracks contribution vs impact, lineage (NestJS)
-  Proof of Success     → verifies real milestones (Stripe, GitHub, Vercel)
-  Settlement Job       → runs each epoch, computes Merkle root, publishes root
+- `VestingVault` cannot change the allocation, cadence, terminal date, or team
+  recipient after deployment.
+- `EpochDistributor` only accepts a root for an already funded epoch from the
+  approved keeper. A root is claimable only after its seven-day challenge
+  window; governance may veto during that window.
+- Leaves are `keccak256(abi.encode(address,uint256))` and use exact `uint256`
+  token units. A wallet may occur only once in an epoch.
+- Expired unclaimed balances return to the vault for the terminal reserve.
+- A model can be used only when its code hash has been governance-approved for
+  the relevant activation epoch. Environment variables are not an authority
+  path for model selection.
+
+## Local verification
+
+From the repository root:
+
+```text
+npx tsx --test packages/utils/src/founder-economics/merkle-tree.test.ts
+npm test --prefix services/founder-economics
 ```
 
-## Why this shape
+The tests cover exact allocation and rounding, Solidity-compatible Merkle
+proofs, duplicate-wallet rejection, funded epochs, model approval, challenge
+and veto behaviour, claims, expiry returns, and the day-3,650 terminal gate.
 
-- **VestingVault.releaseEpoch() is permissionless** — anyone can call it when
-  the epoch ends. No admin key, no pause, no upgrade. The schedule is law.
-- **EpochDistributor is blind** — it has no idea how the Merkle root was
-  computed. It only verifies proofs and pays. This means swapping the
-  distribution model (v1 pro-rata → v2 reputation-weighted → ...) requires
-  zero contract changes — only the off-chain settlement job changes which
-  model it runs.
-- **Claim windows are 365 days** — after that, unclaimed tokens stay in the
-  distributor treasury for future epochs (no admin clawback because there is
-  no admin).
+## Required gates before any deployment
 
-## Deployment
-
-**MVP:** contracts stay as design artifacts. Off-chain settlement + claim UI
-ship without a live deploy. See
-[docs/FOUNDER-ECONOMICS-MVP-VS-PRODUCTION.md](../../../docs/FOUNDER-ECONOMICS-MVP-VS-PRODUCTION.md).
-
-**Keeper stub:** `npm run keeper:founder-economics` exits non-zero until
-production env + counsel deploy are configured — it will never fake a tx.
-
-When we wire deployment (post-MVP / counsel-gated):
-
-1. Install Foundry or Hardhat + `@openzeppelin/contracts@^5`.
-2. Deploy `PlatformToken(name, symbol, totalSupply, vestingVaultAddress)`.
-3. Deploy `VestingVault(token, distributor, releasePerEpoch, epochSeconds)`.
-4. Deploy `EpochDistributor(token)`.
-5. The off-chain settlement job calls `publishRoot(epoch, root, total)` each
-   epoch after computing the Merkle tree from the active DistributionModel.
-6. Founders call `claim(epoch, account, amount, proof)` with the proof the
-   settlement job published to IPFS.
-
-## Constants (production)
-
-| Constant | Value |
-|---|---|
-| `releasePerEpoch` | 20,000,000 × 10^18 |
-| `epochSeconds` | 7,776,000 (90 days) |
-| `CLAIM_WINDOW_SECONDS` | 31,536,000 (365 days) |
-| `totalSupply` | depends on vesting length (e.g. 80 epochs × 20M = 1.6B) |
+1. Apply migrations to an isolated Neon staging database and verify recovery.
+2. Deploy and fund only on Robinhood EVM testnet (`46630`), using dedicated
+   protected operations keys.
+3. Run the accelerated five-minute, 40-epoch end-to-end testnet simulation and
+   reconcile every contract event.
+4. Complete independent Solidity/security review and legal/counsel approval.
+5. Obtain explicit approval before any production, liquidity, or mainnet step.

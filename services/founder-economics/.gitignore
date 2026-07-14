@@ -1,0 +1,3 @@
+# Hardhat build products are reproducible and must not be committed.
+artifacts/
+cache/
