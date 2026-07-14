@@ -3245,7 +3245,13 @@ model LearningEngineState {
   lastRollupAt       DateTime?
   lastProcessedCount Int      @default(0)
   lastUpdatedCount   Int      @default(0)
+  /// Short-lived ownership lease prevents two API replicas from processing the
+  /// same Flight Recorder window. A crashed worker is reclaimable at expiry.
+  leaseOwner         String?
+  leaseExpiresAt     DateTime?
   updatedAt          DateTime @updatedAt
+
+  @@index([leaseExpiresAt])
 }
 
 // ─── Phase 8 — Raise Room → Token Launch ─────────────────────────────────────

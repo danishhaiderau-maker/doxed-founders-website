@@ -1,35 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { CapabilityRegistryService } from '../capability-registry/capability-registry.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { RoutingDecisionRow } from './learning-engine.types';
 
 /**
- * Learning Engine — Phase 4 kernel service (docs/KERNEL.md §3.6).
- *
- * Consumes Flight Recorder outcomes and adapts routing weights via the
- * Capability Registry's `updateReputation` EMA. The moat:
- *
- *   GLM ↓ founder immediately retries ↓ negative signal
- *     → over time the router stops picking GLM for that founder
- *
- * Phase 4 (this) learns GLOBALLY across all founders. Phase 4.5 will add
- * per-founder personalization; intentionally out of scope here.
- *
- * State: the singleton LearningEngineState row stores the watermark. A local
- * file is not safe on Railway's ephemeral filesystem or when more than one
- * API instance is running.
+ * Consumes Flight Recorder outcomes and updates global routing reputation.
+ * Its watermark and lease live in Postgres: a local file is unsafe on Railway
+ * and a watermark without a lease lets multiple API replicas learn the same
+ * window twice.
  */
 @Injectable()
 export class LearningEngineService {
   private readonly logger = new Logger(LearningEngineService.name);
-
   private static readonly STATE_ID = 'global';
+  /** A rollup is bounded to 50k rows, so two hours gives a healthy worker ample time. */
+  private static readonly LEASE_MS = 2 * 60 * 60 * 1000;
 
-  /** Treat outcome as a success unless we saw a retry or a heavy edit. */
-  static isSuccess(row: {
-    retried: boolean | null;
-    edited: boolean | null;
-  }): boolean {
+  static isSuccess(row: { retried: boolean | null; edited: boolean | null }): boolean {
     return !row.retried && !row.edited;
   }
 
@@ -38,160 +26,147 @@ export class LearningEngineService {
     private readonly capabilityRegistry: CapabilityRegistryService,
   ) {}
 
-  /**
-   * Read new RoutingDecision rows created since the last rollup, group by
-   * `chosenProvider + chosenModel`, compute a per-group outcome score, and
-   * push one EMA update per group through `capabilityRegistry.updateReputation`.
-   *
-   * Input → Decision → Output:
-   *   Input:    RoutingDecision rows with `createdAt > lastRollupAt`.
-   *   Decision: per-group success = !(retried || edited), aggregated.
-   *   Output:   Capability.successRate / retryRate updates + a fresh
-   *             lastRollupAt persisted to disk.
-   *
-   * Returns the counts so the scheduler can log them. Idempotent in the
-   * sense that a crashed run will simply re-read the same window next time
-   * (the timestamp only advances after a successful pass).
-   */
   async rollup(): Promise<{ processed: number; updated: number }> {
-    const startedAt = new Date();
-    const state = await this.readState();
-    const since = state.lastRollupAt ?? new Date(0);
-
-    // -- Input step ----------------------------------------------------------
-    // `prisma.routingDecision.findMany` is typed via the generated client.
-    // We cast the raw rows to RoutingDecisionRow so this file compiles even
-    // if @prisma/client has not been regenerated yet (matches the pattern
-    // used elsewhere in the kernel).
-    const rows = (await this.prisma.routingDecision.findMany({
-      where: { createdAt: { gt: since } },
-      take: 50_000,
-    })) as unknown as RoutingDecisionRow[];
-
-    if (rows.length === 0) {
-      this.logger.log(
-        `rollup: no new rows since ${since.toISOString()}; nothing to do.`,
-      );
-      // Still bump the timestamp so we don't re-scan the same empty window
-      // every 6 hours forever.
-      await this.writeState({ lastRollupAt: startedAt, processed: 0, updated: 0 });
+    const leaseOwner = randomUUID();
+    if (!(await this.acquireLease(leaseOwner))) {
+      this.logger.debug('rollup skipped: another API replica owns the durable lease');
       return { processed: 0, updated: 0 };
     }
 
-    // -- Decision step -------------------------------------------------------
-    // Group rows by capability key and tally successes / failures per group.
-    const groups = new Map<string, { successes: number; failures: number }>();
-    for (const row of rows) {
-      const key = `${row.chosenProvider}\u0000${row.chosenModel}`;
-      const success = LearningEngineService.isSuccess(row);
-      const group = groups.get(key) ?? { successes: 0, failures: 0 };
-      if (success) group.successes += 1;
-      else group.failures += 1;
-      groups.set(key, group);
-    }
+    let committed = false;
+    try {
+      const startedAt = new Date();
+      const state = await this.readState();
+      const since = state.lastRollupAt ?? new Date(0);
+      const rows = (await this.prisma.routingDecision.findMany({
+        where: { createdAt: { gt: since } },
+        take: 50_000,
+      })) as unknown as RoutingDecisionRow[];
 
-    // -- Output step ---------------------------------------------------------
-    let updated = 0;
-    for (const [key, tally] of groups) {
-      const [provider, model] = key.split('\u0000');
-      const cap = await this.capabilityRegistry.findByProviderModel(
-        provider,
-        model,
-      );
-      if (!cap) {
-        // Capability row missing (unseeded model, typo, etc.) — skip silently.
-        // We don't warn because this is expected during early bring-up.
-        continue;
+      if (rows.length === 0) {
+        await this.commitState(leaseOwner, {
+          lastRollupAt: startedAt,
+          processed: 0,
+          updated: 0,
+        });
+        committed = true;
+        this.logger.log(`rollup: no new rows since ${since.toISOString()}; nothing to do.`);
+        return { processed: 0, updated: 0 };
       }
 
-      // Collapse the group into a single reputation update using the group's
-      // observed success ratio as the target value. This gives the EMA one
-      // meaningful nudge per rollup rather than N tiny ones, which keeps
-      // alpha=0.05 responsive enough to detect drift without oscillating.
-      const total = tally.successes + tally.failures;
-      const successRatio = total === 0 ? 1 : tally.successes / total;
+      const groups = new Map<string, { successes: number; failures: number }>();
+      for (const row of rows) {
+        const key = `${row.chosenProvider}\u0000${row.chosenModel}`;
+        const group = groups.get(key) ?? { successes: 0, failures: 0 };
+        if (LearningEngineService.isSuccess(row)) group.successes += 1;
+        else group.failures += 1;
+        groups.set(key, group);
+      }
 
-      // Push the group's outcome as a single boolean for the EMA. We use the
-      // majority signal so a 50/50 split doesn't push successRate toward 0.5
-      // artificially — a tied group is treated as success (the routing
-      // engine is allowed to keep picking this model).
-      const groupSuccess = successRatio >= 0.5;
-      await this.capabilityRegistry.updateReputation(cap.id, groupSuccess);
-      updated += 1;
+      let updated = 0;
+      for (const [key, tally] of groups) {
+        const [provider, model] = key.split('\u0000');
+        const capability = await this.capabilityRegistry.findByProviderModel(provider, model);
+        if (!capability) continue;
+        const total = tally.successes + tally.failures;
+        await this.capabilityRegistry.updateReputation(
+          capability.id,
+          tally.successes / total >= 0.5,
+        );
+        updated += 1;
+      }
+
+      await this.commitState(leaseOwner, {
+        lastRollupAt: startedAt,
+        processed: rows.length,
+        updated,
+      });
+      committed = true;
+      this.logger.log(
+        `rollup: processed=${rows.length} updated=${updated} groups=${groups.size} since=${since.toISOString()}`,
+      );
+      return { processed: rows.length, updated };
+    } finally {
+      if (!committed) await this.releaseLease(leaseOwner);
     }
-
-    await this.writeState({
-      lastRollupAt: startedAt,
-      processed: rows.length,
-      updated,
-    });
-
-    this.logger.log(
-      `rollup: processed=${rows.length} updated=${updated} groups=${groups.size} since=${since.toISOString()}`,
-    );
-
-    return { processed: rows.length, updated };
   }
 
-  /** Surface last-run metadata for the admin status endpoint. */
   async getStatus(): Promise<{
     lastRollupAt: string | null;
     lastProcessedCount: number;
     lastUpdatedCount: number;
   }> {
-    const s = await this.readState();
+    const state = await this.readState();
     return {
-      lastRollupAt: s.lastRollupAt ? s.lastRollupAt.toISOString() : null,
-      lastProcessedCount: s.processed ?? 0,
-      lastUpdatedCount: s.updated ?? 0,
+      lastRollupAt: state.lastRollupAt ? state.lastRollupAt.toISOString() : null,
+      lastProcessedCount: state.processed ?? 0,
+      lastUpdatedCount: state.updated ?? 0,
     };
   }
 
-  private async readState(): Promise<LearningEngineState> {
+  private async acquireLease(owner: string): Promise<boolean> {
+    const now = new Date();
+    const leaseExpiresAt = new Date(now.getTime() + LearningEngineService.LEASE_MS);
+    const claimed = await this.prisma.learningEngineState.updateMany({
+      where: {
+        id: LearningEngineService.STATE_ID,
+        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+      },
+      data: { leaseOwner: owner, leaseExpiresAt },
+    });
+    if (claimed.count === 1) return true;
+
     try {
-      const row = await this.prisma.learningEngineState.findUnique({
-        where: { id: LearningEngineService.STATE_ID },
+      await this.prisma.learningEngineState.create({
+        data: {
+          id: LearningEngineService.STATE_ID,
+          leaseOwner: owner,
+          leaseExpiresAt,
+        },
       });
-      if (!row) return {};
-      return {
-        lastRollupAt: row.lastRollupAt ?? undefined,
-        processed: row.lastProcessedCount,
-        updated: row.lastUpdatedCount,
-      };
+      return true;
     } catch (err) {
-      this.logger.warn(
-        `readState failed (using defaults): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return {};
+      // Another replica may have created the singleton after our conditional
+      // update missed it. It owns this rollup window.
+      if ((err as { code?: string }).code === 'P2002') return false;
+      throw err;
     }
   }
 
-  private async writeState(next: Required<LearningEngineState>): Promise<void> {
+  private async readState(): Promise<LearningEngineState> {
+    const row = await this.prisma.learningEngineState.findUnique({
+      where: { id: LearningEngineService.STATE_ID },
+    });
+    if (!row) throw new Error('Learning Engine state disappeared while its lease was held');
+    return {
+      lastRollupAt: row.lastRollupAt ?? undefined,
+      processed: row.lastProcessedCount,
+      updated: row.lastUpdatedCount,
+    };
+  }
+
+  private async commitState(owner: string, next: Required<LearningEngineState>): Promise<void> {
+    const result = await this.prisma.learningEngineState.updateMany({
+      where: { id: LearningEngineService.STATE_ID, leaseOwner: owner },
+      data: {
+        lastRollupAt: next.lastRollupAt,
+        lastProcessedCount: next.processed,
+        lastUpdatedCount: next.updated,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    if (result.count !== 1) throw new Error('Learning Engine lost its durable rollup lease');
+  }
+
+  private async releaseLease(owner: string): Promise<void> {
     try {
-      await this.prisma.learningEngineState.upsert({
-        where: { id: LearningEngineService.STATE_ID },
-        create: {
-          id: LearningEngineService.STATE_ID,
-          lastRollupAt: next.lastRollupAt,
-          lastProcessedCount: next.processed,
-          lastUpdatedCount: next.updated,
-        },
-        update: {
-          lastRollupAt: next.lastRollupAt,
-          lastProcessedCount: next.processed,
-          lastUpdatedCount: next.updated,
-        },
+      await this.prisma.learningEngineState.updateMany({
+        where: { id: LearningEngineService.STATE_ID, leaseOwner: owner },
+        data: { leaseOwner: null, leaseExpiresAt: null },
       });
     } catch (err) {
-      // The rollup itself still succeeded — we just can't persist the new
-      // watermark. Next run will reprocess the same window, which is safe.
-      this.logger.warn(
-        `writeState failed (will reprocess next cycle): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      this.logger.warn(`rollup lease release failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

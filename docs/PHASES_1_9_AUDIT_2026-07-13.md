@@ -23,10 +23,10 @@ the production gates in this document remain open.
 
 | Phase | Status | Audit result and remaining gate |
 | --- | --- | --- |
-| 1. Kernel / Memory | Partial | Checkout restored; Learning Engine watermark is now Prisma-backed. Apply migrations and run a real multi-instance recovery test. |
+| 1. Kernel / Memory | Partial | Checkout restored; Learning Engine watermark and a short replica lease are Prisma-backed. Apply migrations and run a real multi-instance recovery test. |
 | 2. Founder OS | Implemented, deployment-gated | Founder OS no longer advertises a Solana launch/DEX or a fake Phase-7 waitlist. The dashboard now returns the real founder tier/DDollar balance and reports actual build sessions, update work, bounties, and verified integrations. Staging browser smoke tests still need a live account and connected infrastructure. |
 | 3. Founder IDE | Blocked | The misleading shell/filesystem fallback was removed: the IDE target now reports offline until verified IPC exists. A real Void fork, signed installer, updater, rollback path and live IPC protocol are not present in this repository. |
-| 4. Learning Engine | Implemented, deployment-gated | Durable `LearningEngineState`, migration and existing scheduled rollup are in place. Migration application and operational outcome tests remain required. |
+| 4. Learning Engine | Implemented, deployment-gated | Durable `LearningEngineState`, a two-hour replica lease, migration, scheduled rollup, and recovery tests are in place. Migration application and operational outcome tests remain required. |
 | 5. Routing | Partial | Capability and Flight Recorder code exists, but a distributed-cache/fallback/outcome test has not been demonstrated against staging. |
 | 6. Idea Validator | Implemented, deployment-gated | Queue attempts, stale-work recovery, retry backoff and a one-minute durable worker were added. Apply the migration and test a restart against a real database. |
 | 6.5 Debug Squasher | Partial | Existing consent and scheduled surfaces remain; this audit did not demonstrate real repository checks or a production consent/cron run. |
