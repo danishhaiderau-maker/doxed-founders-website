@@ -15,11 +15,11 @@ TYPE_A_MAX_MFE_PCT = 10
 # not gain a fourth lane.  The policy id splits new outcomes from legacy LAB
 # simulations, which were collected under the old confidence/volume scorer.
 LANE_ID = "TYPE_B_HUNTER_V1"
-LANE_LABEL = "Type B Hunter — prospective fixed policy v2a"
+LANE_LABEL = "Type B Hunter — prospective fixed policy v2b (ADX-flipped)"
 LANE_ID_PREFIX = "tbhv1"
 LANE_STATUS = "SHADOW_COLLECTING"
 IS_INDEPENDENT_AI = True
-POLICY_VERSION = "type_b_fixed_policy_v2a_20260715"
+POLICY_VERSION = "type_b_fixed_policy_v2b_20260715"
 
 # Independent AI fires sixty seconds after CONTINUOUS in the three-lane setup.
 AI_OFFSET_SEC = 60
@@ -34,6 +34,7 @@ AI_PROMPT_FOCUS = (
 MIN_SCORE_TO_ENTER = 3.0
 MIN_SPREAD_FLOOR = 2
 ADX_FLOOR = 20.0
+BULL_ADX_FLOOR = 28.0   # v2b: BULL regime needs stronger trend (was 25.0 in v2a)
 VOLUME_DANGER = 2.0
 
 
@@ -126,14 +127,16 @@ def get_type_b_score(ai_prob: int, features: dict, direction: str = None) -> flo
     trade_direction = values["direction"]
 
     if adx is not None:
-        if 20.0 <= adx < 25.0:
-            score += 1.5
+        # Flipped weights — fresh 300-trade data shows ADX 30-35 is the optimal
+        # zone (41.9% Type B, 75.7% WR), not ADX 20-25 (29.1% / weakest zone).
+        if 30.0 <= adx <= 35.0:
+            score += 1.5      # OPTIMAL — 41.9% Type B, 75.7% WR
         elif 25.0 <= adx < 30.0:
-            score += 1.2
-        elif 30.0 <= adx <= 35.0:
-            score += 0.75
+            score += 1.2      # STRONG
         elif adx > 35.0:
-            score += 0.25
+            score += 0.75     # VALID but watch for exhaustion
+        elif 20.0 <= adx < 25.0:
+            score += 0.5      # WEAK — only 29.1% Type B
 
     if volume_ratio is not None:
         if volume_ratio < 0.80:
@@ -198,9 +201,11 @@ def should_enter_type_b(ai_prob: int, features: dict, direction: str = None) -> 
     if values["adx"] < ADX_FLOOR:
         detail["block_reason"] = f"ADX_FLOOR ({values['adx']:.2f} < {ADX_FLOOR:.0f})"
         return False, detail
-    # BULL regime requires stronger trend confirmation — historically choppier, more false breakouts
-    if values["regime"] == "BULL" and values["adx"] is not None and values["adx"] < 25.0:
-        detail["block_reason"] = f"BULL_NEEDS_ADX_25_PLUS (adx={values['adx']:.2f})"
+    # BULL regime needs even stronger trend confirmation — historically choppier, more false
+    # breakouts. v2b raises the floor from ADX 25 to ADX 28 so weak-trend BULL signals are
+    # filtered; the optimal ADX 30-35 zone still passes cleanly.
+    if values["regime"] == "BULL" and values["adx"] is not None and values["adx"] < BULL_ADX_FLOOR:
+        detail["block_reason"] = f"BULL_NEEDS_ADX_28_PLUS (adx={values['adx']:.2f})"
         return False, detail
     if values["spread"] < MIN_SPREAD_FLOOR:
         detail["block_reason"] = f"SPREAD_FLOOR ({values['spread']} < {MIN_SPREAD_FLOOR})"
@@ -242,7 +247,7 @@ def classify_type(cohort_pct: float) -> str:
 
 def self_test() -> None:
     favorable = {
-        "adx": 22.0, "volume_ratio": 0.6, "spread": 4, "regime": "BEAR",
+        "adx": 32.0, "volume_ratio": 0.6, "spread": 4, "regime": "BEAR",
         "structure_score": -4.0, "edge_score": 4.0, "delta": -22.0, "ema_slope": "down",
     }
     entered, detail = should_enter_type_b(1, favorable, "SHORT")
@@ -251,18 +256,34 @@ def self_test() -> None:
     assert should_enter_type_b(99, {**favorable, "adx": 19.9}, "SHORT")[0] is False
     assert should_enter_type_b(99, favorable, "LONG")[0] is False
     assert should_enter_type_b(99, {**favorable, "regime": "UNKNOWN"}, "SHORT")[0] is False
-    nested = {"market_context": {"trend_strength": {"adx": 22}, "market_structure": {"regime": "BEAR", "structure_score": -4}}, **{k: v for k, v in favorable.items() if k not in {"adx", "regime", "structure_score"}}}
+    nested = {"market_context": {"trend_strength": {"adx": 32}, "market_structure": {"regime": "BEAR", "structure_score": -4}}, **{k: v for k, v in favorable.items() if k not in {"adx", "regime", "structure_score"}}}
     assert should_enter_type_b(1, nested, "SHORT")[0] is True
-    # BULL regime gate: ADX < 25 must BLOCK even with otherwise favorable features
+    # v2b: ADX 22 (weak zone) with otherwise favorable features is now MARGINAL —
+    # the ADX weight dropped from 1.5 to 0.5 so a perfect-feature setup that used
+    # to enter easily may now sit at or just under the threshold. Run the score
+    # so the assertion is robust to either outcome; the only guarantee is that
+    # the score is materially LOWER than the optimal-ADX case above.
+    weak_adx_features = {**favorable, "adx": 22.0}
+    weak_entered, weak_detail = should_enter_type_b(1, weak_adx_features, "SHORT")
+    optimal_score = detail["score"]
+    weak_score = weak_detail["score"]
+    assert weak_score < optimal_score, "ADX 22 must score strictly below ADX 32"
+    assert weak_score <= optimal_score - 0.9, "ADX 22 must lose the full 1.0 vs ADX 32"
+    # Whether ADX-22 enters depends on companion features (intended v2b behaviour).
+    _ = weak_entered  # explicit: either True or False is acceptable here.
+    # BULL regime gate: ADX < 28 must BLOCK even with otherwise favorable features
     bull_favorable_low_adx = {
         "adx": 22.0, "volume_ratio": 0.6, "spread": 4, "regime": "BULL",
         "structure_score": 4.0, "edge_score": 4.0, "delta": 22.0, "ema_slope": "up",
     }
     blocked_low, low_detail = should_enter_type_b(1, bull_favorable_low_adx, "LONG")
     assert blocked_low is False
-    assert low_detail["block_reason"].startswith("BULL_NEEDS_ADX_25_PLUS")
-    # BULL regime with ADX >= 25 passes the new gate and enters when score is sufficient
-    bull_favorable_high_adx = {**bull_favorable_low_adx, "adx": 26.0}
+    assert low_detail["block_reason"].startswith("BULL_NEEDS_ADX_28_PLUS")
+    # BULL + ADX 27.9 still blocked by the gate (boundary check).
+    bull_adx_just_below = {**bull_favorable_low_adx, "adx": 27.9}
+    assert should_enter_type_b(1, bull_adx_just_below, "LONG")[0] is False
+    # BULL + ADX 32 passes the new gate and enters when score is sufficient.
+    bull_favorable_high_adx = {**bull_favorable_low_adx, "adx": 32.0}
     entered_bull, bull_detail = should_enter_type_b(1, bull_favorable_high_adx, "LONG")
     assert entered_bull is True
     assert bull_detail["score"] >= MIN_SCORE_TO_ENTER

@@ -20,6 +20,12 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 from __future__ import annotations
 
 # [CLEAN 2026-07-11] Housekeeping — only CONTINUOUS + 2 new research candidates remain.
+from scenario_c_config import (
+    SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
+    SCENARIO_C_LEGACY_10_6_PROFILE_ID,
+    TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
+)
+
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
 # New research candidates 2026-07-11 — independent AI, shadow collecting, toggle to promote
@@ -55,7 +61,7 @@ COMBO_LANE_SPECS = {
     # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter — prospective fixed policy v2",
+        "label": "Type B Hunter — fixed policy v2b (ADX-flipped)",
         "subtitle": (
             "RESEARCH_CANDIDATE — fixed-policy paper research only; "
             "deterministic ADX/volume/regime/structure gate, no live execution"
@@ -72,6 +78,13 @@ COMBO_LANE_SPECS = {
         "id_prefix": "tbhv1",
         "module": "type_b_hunter_v1.py",
         "ai_cadence_offset_sec": 60,
+        # v2b: TYPE_B_HUNTER_V1 keeps the legacy 10→6 first rung. The v2a backtest
+        # found that tightening the global ladder (12→10) made Type B Hunter worse
+        # (-$22.20); the 12→10 raise is for CONTINUOUS only, applied via the global
+        # TRAIL_LADDER_SCENARIO_C. See `get_lane_ladder_override` for resolution.
+        "ladder": TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
+        "ladder_label": SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
+        "ladder_profile_id": SCENARIO_C_LEGACY_10_6_PROFILE_ID,
         "promotion_criteria": (
             "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
             "(95pct CI) P(TYPE_B) >= 40pct WR >= 75pct"
@@ -238,7 +251,7 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v2"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v2b (ADX-flipped)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"

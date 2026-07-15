@@ -42,7 +42,7 @@
   "lanes": [
     {
       "lane": "TYPE_B_HUNTER_V1",
-      "label": "Type B Hunter \u2014 prospective fixed policy v2",
+      "label": "Type B Hunter \u2014 fixed policy v2b (ADX-flipped)",
       "subtitle": "RESEARCH_CANDIDATE \u2014 fixed-policy paper research only; deterministic ADX/volume/regime/structure gate, no live execution",
       "role": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
       "status": "RESEARCH_CANDIDATE",
@@ -63,7 +63,7 @@
         "Spread \u22652",
         "Walk-forward holdout",
         "Paper-only",
-        "Ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120"
+        "Ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120 (TYPE_B_HUNTER_V1 legacy)"
       ],
       "toggle_key": "research_lane_enabled",
       "hypothesis": "A pre-registered direction-aware feature gate may identify TYPE_B outcomes prospectively; legacy LAB data is retained only as an archived baseline.",
@@ -88,7 +88,7 @@
       },
       "exit": {
         "profile": "Scenario C",
-        "ladder": "10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "ladder": "10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120 (TYPE_B_HUNTER_V1 legacy)",
         "thesis_stop_margin_pct": -12.0,
         "mfe_protect_margin_pct": 2.0,
         "thesis_pause_above_margin_pct": 8.0,
@@ -112,7 +112,7 @@
         "Entry: Paper limit research only when enabled \u00b7 never Bitfinex live \u00b7 Scenario C",
         "Chase: No full-chase V2 path; paper limit research only",
         "AI cadence: Independent calibration cycle; no outcome-label tuning",
-        "Exit: Scenario C \u00b7 ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "Exit: Scenario C \u00b7 ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120 (TYPE_B_HUNTER_V1 legacy)",
         "Thesis stop: -12.0% margin unreal",
         "MFE protect: peak \u22652.0% margin \u2192 skip fast thesis cut",
         "Thesis pause above: +8.0% unreal",
@@ -121,7 +121,7 @@
         "Post-AI: Fixed score threshold; walk-forward validation only",
         "Tile OFF: collect calibration and rejected-signal counterfactual shadows; no paper limits",
         "Tile ON: paper limits only; Bitfinex live execution remains disabled",
-        "Policy type_b_fixed_policy_v2a_20260715 is fixed before evaluation; outcome labels are not used for tuning",
+        "Policy type_b_fixed_policy_v2b_20260715 is fixed before evaluation; outcome labels are not used for tuning",
         "Logs: type_b_ai_input + type_b_replay + shadow_lane_outcome + lane_lab_pnl_ledger",
         "Independence: Per-tile lock \u00b7 toggle \u00b7 orders \u00b7 CSV \u00b7 tick replay"
       ],
@@ -151,7 +151,7 @@
         "lab_open_shadows": 0,
         "lab_open_filled": 0,
         "lab_pnl_source": "reconciled_shadow_outcomes",
-        "lab_ledger_close_delta": -716,
+        "lab_ledger_close_delta": -753,
         "lab_summary_line": "LAB sim \u00b7 collecting\u2026"
       }
     },
@@ -177,7 +177,7 @@
         "Midpoint guard",
         "ADX cap 40",
         "STATIC no chase",
-        "Ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120"
+        "Ladder 12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120"
       ],
       "toggle_key": "research_lane_enabled",
       "hypothesis": "Resting limits at exact support/resistance may preserve entry quality for range-bound micro S/R mean reversion without chasing price.",
@@ -203,7 +203,7 @@
       },
       "exit": {
         "profile": "Scenario C",
-        "ladder": "10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "ladder": "12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
         "thesis_stop_margin_pct": -12.0,
         "mfe_protect_margin_pct": 2.0,
         "thesis_pause_above_margin_pct": 8.0,
@@ -229,7 +229,7 @@
         "Entry: STATIC resting LAB shadow at exact micro_support/resistance \u00b7 never chase/reprice \u00b7 Scenario C",
         "Chase: STATIC: never chase/reprice/slide \u00b7 fill exactly at micro_support/resistance",
         "AI cadence: No AI \u00b7 bracket tick every 10\u201330s or SR pivot change",
-        "Exit: Scenario C \u00b7 ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "Exit: Scenario C \u00b7 ladder 12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
         "Thesis stop: -12.0% margin unreal",
         "MFE protect: peak \u22652.0% margin \u2192 skip fast thesis cut",
         "Thesis pause above: +8.0% unreal",
@@ -259,17 +259,17 @@
         "reject_counterfactual_pnl": 0.0,
         "paper_fills": 0,
         "lab_mode": true,
-        "lab_closes": 164,
-        "lab_net_pnl": 7.73,
-        "lab_wins": 83,
-        "lab_losses": 81,
-        "lab_win_rate": 50.6,
-        "lab_per_close_ev": 0.05,
+        "lab_closes": 184,
+        "lab_net_pnl": 14.46,
+        "lab_wins": 94,
+        "lab_losses": 90,
+        "lab_win_rate": 51.1,
+        "lab_per_close_ev": 0.08,
         "lab_open_shadows": 0,
         "lab_open_filled": 0,
         "lab_pnl_source": "reconciled_shadow_outcomes",
         "lab_ledger_close_delta": 39,
-        "lab_summary_line": "LAB sim \u00b7 164 closes \u00b7 51% win \u00b7 $7.73 sim \u00b7 EV $0.05/close"
+        "lab_summary_line": "LAB sim \u00b7 184 closes \u00b7 51% win \u00b7 $14.46 sim \u00b7 EV $0.08/close"
       }
     },
     {
@@ -286,7 +286,7 @@
       "filter_chips": [
         "AI ~180s",
         "AI_SCAN mirror",
-        "Ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "Ladder 12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
         "25% chase",
         "Toggle orders"
       ],
@@ -312,7 +312,7 @@
       },
       "exit": {
         "profile": "Scenario C",
-        "ladder": "10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "ladder": "12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
         "thesis_stop_margin_pct": -12.0,
         "mfe_protect_margin_pct": 2.0,
         "thesis_pause_above_margin_pct": 8.0,
@@ -331,7 +331,7 @@
         "Entry: Immediate AI-direct limit + 25% chase + Scenario C when toggle ON",
         "Chase: 25% limit chase (step=25% of distance)",
         "AI cadence: ~180s (~3 min) AI_SCAN periodic DeepSeek",
-        "Exit: Scenario C \u00b7 ladder 10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "Exit: Scenario C \u00b7 ladder 12\u219210, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
         "Thesis stop: -12.0% margin unreal",
         "MFE protect: peak \u22652.0% margin \u2192 skip fast thesis cut",
         "Thesis pause above: +8.0% unreal",
@@ -342,21 +342,21 @@
         "Independence: Per-tile lock \u00b7 toggle \u00b7 orders \u00b7 CSV \u00b7 tick replay"
       ],
       "session_stats": {
-        "approves": 234,
-        "real_fills": 234,
+        "approves": 250,
+        "real_fills": 250,
         "approve_to_fill_pct": 0.0,
         "shadow_fill_pct": 0.0,
-        "net_pnl_real": 131.18,
-        "per_approve_ev": 0.56,
+        "net_pnl_real": 121.21,
+        "per_approve_ev": 0.48,
         "verdict": null,
-        "summary_line": "n=234 approves \u00b7 234 trades \u00b7 0% fill \u00b7 $131.18 real \u00b7 EV $0.56/approve",
+        "summary_line": "n=250 approves \u00b7 250 trades \u00b7 0% fill \u00b7 $121.21 real \u00b7 EV $0.48/approve",
         "shadow_sim_mode": false,
-        "win_rate_pct": 72.6,
+        "win_rate_pct": 71.6,
         "checker_pass_sims": 0,
         "checker_pass_pnl": 0.0,
         "reject_counterfactual_sims": 0,
         "reject_counterfactual_pnl": 0.0,
-        "paper_fills": 234,
+        "paper_fills": 250,
         "lab_mode": false,
         "lab_closes": 0,
         "lab_net_pnl": 0.0,

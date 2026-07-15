@@ -1446,13 +1446,18 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
         # and any lane without an explicit override.
         ladder, _lane_ladder_label, profile_id = get_lane_ladder(lane)
         scenario_c = SCENARIO_C_EXIT_PROFILE
+    # v2b: peak-never-loser floor is per-lane so TYPE_B_HUNTER_V1 gets the
+    # backtested 3 / 0 (forces breakeven-or-better on +3%+ peakers) while
+    # CONTINUOUS / SR_MICRO keep the conservative 40 / 10 defaults.
+    pnl_min_peak = peak_never_loser_min_peak_for_lane(lane)
+    pnl_floor = peak_never_loser_floor_for_lane(lane)
     return {
         "trail_ladder": ladder,
         "ladder_first_trigger_pct": ladder[0][0],
         "ladder_first_lock_pct": ladder[0][1],
         "exit_profile_id": profile_id,
-        "peak_never_loser_min_peak": PEAK_NEVER_LOSER_MIN_PEAK,
-        "peak_never_loser_floor": PEAK_NEVER_LOSER_FLOOR,
+        "peak_never_loser_min_peak": pnl_min_peak,
+        "peak_never_loser_floor": pnl_floor,
         "thesis_fast_exit_unreal_pct": thesis_pct,
         "thesis_mfe_protect_pct": mfe_protect,
         "thesis_exit_if_above_unreal_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
@@ -1477,17 +1482,40 @@ def get_exit_config_for_lane(research_lane: str) -> dict:
     return get_exit_config_snapshot(research_lane)
 
 
-def get_profit_lock_floor(peak_pct: float, trail_ladder=None):
+def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_min_peak: float = None, peak_never_loser_floor: float = None):
     ladder = trail_ladder or TRAIL_LADDER
-    if peak_pct is None or peak_pct < ladder[0][0]:
+    if peak_pct is None:
+        return None
+    min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
+    floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
+    # v2b: peak-never-loser can fire BELOW the first ladder rung when the caller
+    # passes a per-lane min_peak lower than ladder[0][0] (e.g. TYPE_B_HUNTER_V1's
+    # 3.0 vs its 10% first rung). Without this, the ladder guard would swallow
+    # the floor for the very 3%-MFE-then-reverse trades the floor is meant to
+    # catch. CONTINUOUS / SR_MICRO keep min_peak=40 (>> ladder[0][0]) so the
+    # legacy "only matters above the ladder" semantics are preserved there.
+    pnl_only = peak_pct < ladder[0][0]
+    if pnl_only and peak_pct < min_peak:
         return None
     floor = None
-    for trigger, lock in ladder:
-        if peak_pct >= trigger:
-            floor = lock
-    if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
-        floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
+    if not pnl_only:
+        for trigger, lock in ladder:
+            if peak_pct >= trigger:
+                floor = lock
+    if peak_pct >= min_peak:
+        floor = max(floor or 0, floor_val)
     return floor
+
+# Per-lane peak-never-loser resolver. Lane-aware callers should use these instead
+# of the bare module constants so TYPE_B_HUNTER_V1 gets the v2b 3/0 floor while
+# CONTINUOUS / SR_MICRO keep the legacy 40/10 conservative defaults.
+def peak_never_loser_min_peak_for_lane(research_lane: str) -> float:
+    lane = str(research_lane or "").upper()
+    return PEAK_NEVER_LOSER_MIN_PEAK_BY_LANE.get(lane, PEAK_NEVER_LOSER_MIN_PEAK)
+
+def peak_never_loser_floor_for_lane(research_lane: str) -> float:
+    lane = str(research_lane or "").upper()
+    return PEAK_NEVER_LOSER_FLOOR_BY_LANE.get(lane, PEAK_NEVER_LOSER_FLOOR)
 
 def compute_trend_health(direction_hint: str = None) -> dict:
     """v83: BULL / BULL_WEAKENING / BEAR / BEAR_WEAKENING / MIXED from live scores + tape."""
@@ -1577,7 +1605,17 @@ def _position_trail_ladder(pos: dict):
 
 
 def _effective_profit_lock_floor(pos: dict, peak_pct: float):
-    floor = get_profit_lock_floor(peak_pct, _position_trail_ladder(pos))
+    exit_cfg = pos.get("exit_config") or {}
+    # Use the per-lane peak_never_loser values baked into the position's exit_config
+    # at entry time so TYPE_B_HUNTER_V1 (3/0) and CONTINUOUS (40/10) coexist.
+    min_peak = _buf_float(exit_cfg.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+    floor_val = _buf_float(exit_cfg.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR)
+    floor = get_profit_lock_floor(
+        peak_pct,
+        _position_trail_ladder(pos),
+        peak_never_loser_min_peak=min_peak,
+        peak_never_loser_floor=floor_val,
+    )
     if floor is None:
         return None
     tighten = 0.0
@@ -1765,7 +1803,14 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     unreal_pct = unrealized_margin_pct(pos, price)
     age_sec = time.time() - pos.get("entry_ts", 0)
     peak = pos.get("max_pnl_pct", 0.0)
-    lock_floor = get_profit_lock_floor(peak)
+    # Per-lane peak_never_loser from the position's exit_config (TYPE_B=3/0, others=40/10).
+    pos_exit_cfg = pos.get("exit_config") or {}
+    lock_floor = get_profit_lock_floor(
+        peak,
+        _position_trail_ladder(pos),
+        peak_never_loser_min_peak=_buf_float(pos_exit_cfg.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK),
+        peak_never_loser_floor=_buf_float(pos_exit_cfg.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR),
+    )
     if lock_floor is not None and unreal_pct > lock_floor:
         return False
     if unreal_pct > THESIS_EXIT_IF_ABOVE_UNREAL_PCT:
@@ -3323,7 +3368,14 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
-    if lock_floor is not None and peak >= ladder[0][0] and unreal_pct <= lock_floor:
+    # v2b: peak-never-loser can fire a PROFIT_LOCK_LADDER exit BELOW the first
+    # ladder rung for TYPE_B_HUNTER_V1 (its 3% min_peak is below the 10% first
+    # rung). For CONTINUOUS / SR_MICRO the 40% min_peak sits above the first
+    # rung so the legacy "peak >= ladder[0][0]" gate remains the operative one.
+    pnl_min_peak = _buf_float((pos.get("exit_config") or {}).get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+    peak_above_ladder = peak >= ladder[0][0]
+    peak_in_pnl_zone = peak >= pnl_min_peak and pnl_min_peak < ladder[0][0]
+    if lock_floor is not None and (peak_above_ladder or peak_in_pnl_zone) and unreal_pct <= lock_floor:
         entry = float(pos.get("entry") or 0)
         logger.info(
             f"[EXIT TRIGGER] PROFIT_LOCK_LADDER trade_id={pos.get('trade_id')} peak={peak:.1f}% "
@@ -5365,8 +5417,19 @@ SPREAD_PENALTY_ENABLED = True
 SPREAD_PENALTY_THRESHOLD = 5
 SPREAD_PENALTY_MARGIN_MULT = 0.75
 SPREAD_PENALTY_LOCK_TIGHTEN_PCT = 1.0
-PEAK_NEVER_LOSER_MIN_PEAK = 40.0
-PEAK_NEVER_LOSER_FLOOR = 10.0
+PEAK_NEVER_LOSER_MIN_PEAK = 40.0  # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
+PEAK_NEVER_LOSER_FLOOR = 10.0     # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
+# v2b per-lane override — TYPE_B_HUNTER_V1 backtest found that lowering the floor
+# threshold from 40.0 to 3.0 and the floor itself from 10.0 to 0.0 flips V2a from
+# -$8.60 to +$5.80. This catches trades that peaked +3% MFE then reversed and
+# forces a breakeven-or-better exit. CONTINUOUS / SR_MICRO keep the conservative
+# 40 / 10 defaults so the benchmark is not disturbed.
+PEAK_NEVER_LOSER_MIN_PEAK_BY_LANE = {
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: 3.0,
+}
+PEAK_NEVER_LOSER_FLOOR_BY_LANE = {
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0,
+}
 TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
@@ -5704,6 +5767,10 @@ RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
 POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
+# Sidecar JSONL that lets post-exit replay buffers survive bot restarts.
+# Each line is one tick event for one trade_id; the loader on startup rebuilds
+# any buffer whose post_exit_deadline_ts has not yet passed.
+POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 ANALYTICS_INTERVAL_SEC = 600
@@ -12740,6 +12807,16 @@ def _ai_prob_in_band(prob: float, band_id: str, lo: float, hi: float) -> bool:
 
 
 def ai_win_prob_in_execution_bands(prob) -> bool:
+    """VESTIGIAL as of 2026-07-15 (Tile 1 300-trade data).
+
+    The AI win-prob call returns exactly ``62`` for 831/853 trades — zero
+    discriminating signal. The dashboard band gate still exists, but as long as
+    the 60-66 band is enabled (the only band containing 62), every AI-evaluated
+    signal passes this check. Keeping it on Option A — leave the gate in place
+    so the existing CONTINUOUS flow is not disturbed, but treat any "AI band"
+    pass/fail in research as effectively a constant-True. Regime-fingerprint
+    gating (Option B) is a separate research tile.
+    """
     try:
         p = float(prob or 0)
     except (TypeError, ValueError):
@@ -12754,7 +12831,12 @@ def ai_win_prob_in_execution_bands(prob) -> bool:
 
 
 def dashboard_ai_band_blocks(prob) -> bool:
-    """Hard dashboard gate — always enforced regardless of research log-only lanes."""
+    """Hard dashboard gate — VESTIGIAL while the AI returns constant 62.
+
+    See ``ai_win_prob_in_execution_bands`` for the full note. Kept ON (Option A)
+    so we don't break the CONTINUOUS benchmark mid-stream; the V2a scorer
+    already zero-weights AI confidence.
+    """
     return not ai_win_prob_in_execution_bands(prob)
 
 
@@ -24374,15 +24456,21 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
 REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
 
 
-def _profit_lock_floor_for_ladder(peak_pct: float, ladder):
-    if peak_pct is None or peak_pct < ladder[0][0]:
+def _profit_lock_floor_for_ladder(peak_pct: float, ladder, peak_never_loser_min_peak: float = None, peak_never_loser_floor: float = None):
+    if peak_pct is None:
+        return None
+    min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
+    floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
+    pnl_only = peak_pct < ladder[0][0]
+    if pnl_only and peak_pct < min_peak:
         return None
     floor = None
-    for trigger, lock in ladder:
-        if peak_pct >= trigger:
-            floor = lock
-    if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
-        floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
+    if not pnl_only:
+        for trigger, lock in ladder:
+            if peak_pct >= trigger:
+                floor = lock
+    if peak_pct >= min_peak:
+        floor = max(floor or 0, floor_val)
     return floor
 
 
@@ -24961,8 +25049,16 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "STOP_LOSS"
             exit_margin_pct = -MAX_SL_MARGIN_PCT
             break
-        lock_floor = _profit_lock_floor_for_ladder(peak, trail_ladder)
-        if lock_floor is not None and peak >= trail_ladder[0][0] and unreal <= lock_floor:
+        lock_floor = _profit_lock_floor_for_ladder(
+            peak,
+            trail_ladder,
+            peak_never_loser_min_peak=_buf_float(exit_config.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK),
+            peak_never_loser_floor=_buf_float(exit_config.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR),
+        )
+        pnl_min_peak = _buf_float(exit_config.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+        peak_above_ladder = peak >= trail_ladder[0][0]
+        peak_in_pnl_zone = peak >= pnl_min_peak and pnl_min_peak < trail_ladder[0][0]
+        if lock_floor is not None and (peak_above_ladder or peak_in_pnl_zone) and unreal <= lock_floor:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
@@ -25225,6 +25321,24 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
+        is_post_exit = bool(buf.get("post_exit"))
+        persist_trade_id = trade_id if is_post_exit else None
+    if persist_trade_id is not None:
+        try:
+            rotate_log(POST_EXIT_REPLAY_FILE)
+            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "kind": "tick",
+                    "trade_id": persist_trade_id,
+                    "ts": now,
+                    "price": float(price),
+                    "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
+                    "phase": "post_exit",
+                    "seq": int(buf["seq"]) if is_post_exit else None,
+                    "t_rel": t_rel,
+                }) + "\n")
+        except Exception as e:
+            logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
 
 
 def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
@@ -25339,6 +25453,27 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
+        # Persist the post-exit trade header to the sidecar so a restart can
+        # rebuild this buffer before the deadline elapses.
+        try:
+            rotate_log(POST_EXIT_REPLAY_FILE)
+            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "kind": "post_exit_header",
+                    "trade_id": trade_id,
+                    "ts": now,
+                    "post_exit_deadline_ts": buf.get("post_exit_deadline_ts"),
+                    "post_exit_started_ts": buf.get("post_exit_started_ts"),
+                    "entry_price": buf.get("entry_price"),
+                    "virtual_entry": buf.get("virtual_entry"),
+                    "direction": buf.get("direction"),
+                    "leverage": buf.get("leverage"),
+                    "exit_reason": buf.get("exit_reason"),
+                    "start_ts": buf.get("start_ts"),
+                    "exit_t_rel": buf.get("exit_t_rel"),
+                }) + "\n")
+        except Exception as e:
+            logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
     logger.info(
         f"[POST_EXIT_REPLAY] trade_id={trade_id} exit_t={exit_t_rel}s "
         f"collecting {POST_EXIT_REPLAY_SEC}s for horizon recovery [PIPELINE ENFORCEMENT]"
@@ -25366,6 +25501,98 @@ def service_post_exit_replays():
                 continue
             unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, price)
         append_replay_tick(tid, price, unreal)
+
+
+def _load_post_exit_replays():
+    """Rebuild post-exit replay buffers from the sidecar JSONL on startup.
+
+    Only buffers whose ``post_exit_deadline_ts`` has not yet elapsed are
+    restored, so the file does not grow unbounded across sessions.  Pre-existing
+    in-memory entries are preserved (live in-progress buffers always take
+    precedence over the on-disk snapshot).
+    """
+    if not os.path.exists(POST_EXIT_REPLAY_FILE):
+        return
+    now = time.time()
+    restored = 0
+    headers: Dict[str, dict] = {}
+    ticks_by_tid: Dict[str, list] = {}
+    try:
+        with open(POST_EXIT_REPLAY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                kind = row.get("kind")
+                tid = row.get("trade_id")
+                if not tid:
+                    continue
+                if kind == "post_exit_header":
+                    headers[tid] = row
+                elif kind == "tick":
+                    ticks_by_tid.setdefault(tid, []).append(row)
+    except Exception as e:
+        logger.error(f"[POST_EXIT_REPLAY] load failed: {e}")
+        return
+    with replay_lock:
+        for tid, header in headers.items():
+            deadline = _buf_float(header.get("post_exit_deadline_ts"), 0)
+            if deadline <= 0 or deadline <= now:
+                continue
+            if tid in replay_buffers and not replay_buffers[tid].get("closed"):
+                # Already rebuilt by the live path this session; skip the stale snapshot.
+                continue
+            start_ts = _buf_float(header.get("start_ts"), now)
+            virtual_entry = _buf_float(header.get("virtual_entry"), 0) or _buf_float(header.get("entry_price"), 0)
+            replay_buffers[tid] = {
+                "start_ts": start_ts,
+                "start_price": virtual_entry,
+                "ticks": [],
+                "last_update": now,
+                "last_tick_ts": 0.0,
+                "closed": False,
+                "seq": 0,
+                "lane": "executed",
+                "direction": header.get("direction") or "LONG",
+                "leverage": _buf_int(header.get("leverage"), _replay_leverage_default()),
+                "margin_usdt": FIXED_MARGIN_USDT,
+                "virtual_entry": virtual_entry,
+                "post_exit": True,
+                "post_exit_started_ts": _buf_float(header.get("post_exit_started_ts"), now),
+                "post_exit_deadline_ts": deadline,
+                "entry_price": _buf_float(header.get("entry_price"), virtual_entry),
+                "exit_reason": header.get("exit_reason"),
+                "exit_t_rel": _buf_float(header.get("exit_t_rel"), 0),
+            }
+            buf = replay_buffers[tid]
+            tick_rows = ticks_by_tid.get(tid, [])
+            tick_rows.sort(key=lambda r: _buf_float(r.get("ts"), 0))
+            for row in tick_rows:
+                ts = _buf_float(row.get("ts"), 0)
+                if ts <= 0:
+                    continue
+                seq = _buf_int(buf.get("seq"), 0) + 1
+                buf["seq"] = seq
+                buf["ticks"].append({
+                    "seq": seq,
+                    "t": round(ts - start_ts, 3),
+                    "price": float(row.get("price") or 0),
+                    "unreal_pct": row.get("unreal_pct"),
+                    "phase": "post_exit",
+                })
+            if buf["ticks"]:
+                buf["last_update"] = _buf_float(tick_rows[-1].get("ts"), now)
+                buf["last_tick_ts"] = _buf_float(tick_rows[-1].get("ts"), 0)
+            restored += 1
+    if restored:
+        logger.info(
+            f"[POST_EXIT_REPLAY] restored {restored} post-exit buffer(s) from sidecar "
+            f"[PIPELINE ENFORCEMENT]"
+        )
 
 
 def close_replay_buffer(trade_id):
@@ -26430,6 +26657,10 @@ def main():
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
+    try:
+        _load_post_exit_replays()
+    except Exception as exc:
+        logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
