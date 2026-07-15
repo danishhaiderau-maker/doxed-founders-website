@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (28 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ci(bitfinex-policy): refresh lock for Phase 6.5-9 signal-subscriber drift
+fix(ci): regenerate package-lock.json with @anthropic-ai/sdk transitive deps
 
 ## Last Activity
 
