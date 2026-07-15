@@ -244,12 +244,14 @@ begin
 
     // Apply the choice to the component set. PRIVATE and HYBRID include the
     // private_core component (Forgejo + cloudflared); PUBLIC deselects it.
-    // We mutate WizardSetupType so the [Components] flags resolve correctly.
+    // WizardSetupType() is read-only per Inno Setup docs, so we drive the
+    // TypesCombo directly: full=0, compact=1, custom=2 (see [Types] section).
     if (SelectedDeploymentMode = 'PRIVATE') or (SelectedDeploymentMode = 'HYBRID') then begin
-      WizardSetupType(False) := 'full';
+      WizardForm.TypesCombo.ItemIndex := 0;
     end else begin
-      WizardSetupType(False) := 'compact';
+      WizardForm.TypesCombo.ItemIndex := 1;
     end;
+    WizardForm.TypesCombo.OnChange(WizardForm.TypesCombo);
   end;
 end;
 
