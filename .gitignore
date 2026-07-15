@@ -358,3 +358,6 @@ services/btc-conservative-agent/research/downloads/
 # must never be committed — would bloat git by hundreds of MB.
 packages/founder-ide/upstream/
 packages/skycode-fork/
+
+# Local secrets vault (never commit)
+vault/
