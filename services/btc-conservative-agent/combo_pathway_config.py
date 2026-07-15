@@ -3,7 +3,12 @@ Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
 TYPE_B_HUNTER_V1: research candidate — pre-entry TYPE_B prediction (independent AI, shadow).
-SR_MICRO_TILE_V1: research candidate — micro S/R mean-reversion (independent AI, shadow).
+  v12 policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
+SR_MICRO_TILE_V2_STATIC: resting-limit paper study (no chase/reprice, shadow).
+
+Retired 2026-07-16 (v12 overhaul):
+  SR_MICRO_TILE_V1 — failed experiment (47% WR, negative PnL). Code preserved for reference.
+  SR_MICRO_TILE_V2 (full chase) — superseded by V2_STATIC; CSV preserved.
 
 Retired 2026-07-11:
   SL_AVOIDANCE_V1 — 47% WR LAB, -$2.03, EV -$0.14/close (UNDERPERFORMING)
@@ -18,11 +23,19 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 from __future__ import annotations
 
 # [CLEAN 2026-07-11] Housekeeping — only CONTINUOUS + 2 new research candidates remain.
+from scenario_c_config import (
+    SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
+    SCENARIO_C_LEGACY_10_6_PROFILE_ID,
+    TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
+)
+
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
 # New research candidates 2026-07-11 — independent AI, shadow collecting, toggle to promote
 RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
+RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
+RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
 
 # Legacy constants — preserved for CSV/historical data references. No live execution.
 RESEARCH_LANE_COMBO_65_SP5_CHASE = "COMBO_65_SP5_CHASE_3PLUS"
@@ -34,32 +47,30 @@ RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 = "A160_CONTEXT_CHASE_EXIT_V2"
 RESEARCH_LANE_SL_AVOIDANCE_V1 = "SL_AVOIDANCE_V1"
 RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 
-# Active execution lanes (CONTINUOUS benchmark + 2 shadow research candidates)
+# Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 COMBO_LANE_SPECS = {
     # =====================================================================
-    # v11.6-dual-research-candidates -- 3-lane research stack
-    # TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1 (research candidates)
-    # SL_AVOIDANCE_V1 + SIZED_CONTINUOUS_V1 (retired, stub only for CSV compat)
-    # All other legacy lanes purged 2026-07-11.
+    # v11.8 paper-research stack: TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC.
+    # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter V1 -- pre-entry TYPE_B prediction",
+        "label": "Type B Hunter — fixed policy v2b (ADX-flipped)",
         "subtitle": (
-            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live orders "
-            "composite scoring (delta+volume+adx+conf) independent AI at T+60s"
+            "RESEARCH_CANDIDATE — fixed-policy paper research only; "
+            "deterministic ADX/volume/regime/structure gate, no live execution"
         ),
-        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V1",
-        "ai_min": 55,
+        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
+        "ai_min": 0,
         "ai_max": 101,
         "spread_min": 2,
         "spread_max": 99,
@@ -70,6 +81,13 @@ COMBO_LANE_SPECS = {
         "id_prefix": "tbhv1",
         "module": "type_b_hunter_v1.py",
         "ai_cadence_offset_sec": 60,
+        # v2b: TYPE_B_HUNTER_V1 keeps the legacy 10→6 first rung. The v2a backtest
+        # found that tightening the global ladder (12→10) made Type B Hunter worse
+        # (-$22.20); the 12→10 raise is for CONTINUOUS only, applied via the global
+        # TRAIL_LADDER_SCENARIO_C. See `get_lane_ladder_override` for resolution.
+        "ladder": TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
+        "ladder_label": SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
+        "ladder_profile_id": SCENARIO_C_LEGACY_10_6_PROFILE_ID,
         "promotion_criteria": (
             "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
             "(95pct CI) P(TYPE_B) >= 40pct WR >= 75pct"
@@ -79,42 +97,93 @@ COMBO_LANE_SPECS = {
             "filter selectivity > 40pct"
         ),
         "hypothesis": (
-            "TYPE_B trades (MFE>=15pct) are identifiable pre-entry via order-flow "
-            "delta (+67pct vs TYPE_A) + composite scoring (conf, volume_ratio, adx, "
-            "ema_slope, structure)."
+            "A pre-registered direction-aware feature gate may identify TYPE_B "
+            "outcomes prospectively; legacy LAB data is retained only as an archived baseline."
+        ),
+        "research_question": (
+            "Does the fixed pre-entry Type B policy beat CONTINUOUS on a walk-forward "
+            "holdout without using its own outcome labels for tuning?"
         ),
     },
     RESEARCH_LANE_SR_MICRO_TILE_V1: {
-        "label": "S/R Micro Tile V1 -- micro S/R mean-reversion",
-        "subtitle": (
-            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live orders "
-            "LONG@support + SHORT@resistance midpoint avoidance volatility suspend"
-        ),
+        # [RETIRED 2026-07-16 v12 overhaul] Failed experiment — 47% WR, negative PnL.
+        # Code file (sr_micro_tile_v1.py) preserved for reference. CSV/historical data
+        # decoding still works because the spec entry remains in COMBO_LANE_SPECS.
+        "label": "S/R Micro Tile V1 (RETIRED 2026-07-16)",
+        "subtitle": "RETIRED 2026-07-16 v12 overhaul -- 47pct WR, negative PnL. Code preserved.",
         "combo_key": "SR_MICRO_TILE++MEAN_REVERSION_V1",
-        "ai_min": 55,
+        "is_legacy": True,
+    },
+    RESEARCH_LANE_SR_MICRO_TILE_V2: {
+        "label": "S/R Micro Tile V2 -- deterministic bracket (no AI)",
+        "subtitle": (
+            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live bracket limits "
+            "LONG@micro_support + SHORT@micro_resistance midpoint envelope guard"
+        ),
+        "combo_key": "SR_MICRO_TILE++DETERMINISTIC_BRACKET_V2",
+        "ai_min": 0,
         "ai_max": 101,
-        "spread_min": 2,
+        "spread_min": 0,
         "spread_max": 99,
-        "entry_mode": "IMMEDIATE",
+        "entry_mode": "BRACKET_LIMIT",
         "is_benchmark": False,
         "is_research_candidate": True,
-        "is_independent_ai": True,
-        "id_prefix": "srmv1",
-        "module": "sr_micro_tile_v1.py",
-        "ai_cadence_offset_sec": 120,
+        "is_independent_ai": False,
+        "is_deterministic_bracket": True,
+        "id_prefix": "srmv2",
+        "module": "sr_micro_tile_v2.py",
+        "bracket_tick_min_sec": 10,
+        "bracket_tick_max_sec": 30,
         "extra_filters": {"adx_max": 40},
         "promotion_criteria": (
             "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
-            "(95pct CI) WR >= 65pct stable across at least 2 regime types"
+            "(95pct CI) dual-leg bracket fill rate stable across 2+ regimes"
         ),
         "kill_criteria": (
-            "ANY after >=75 closes: negative EV WR < 55pct >30pct trades hit "
-            "midpoint avoidance >20pct trades suspended by volatility guard"
+            "ANY after >=75 closes: negative EV fill rate < 40pct "
+            ">25pct trades blocked by midpoint envelope"
         ),
         "hypothesis": (
-            "85-90pct of market time is range-bound. Mean-reversion at micro S/R "
-            "with midpoint avoidance captures crab movement income while volatility "
-            "guard prevents trending losses."
+            "Deterministic micro S/R bracket (no AI latency/cost) captures "
+            "range-bound mean-reversion with simultaneous long+short LAB replay."
+        ),
+    },
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: {
+        "label": "S/R Micro Tile V2 Static -- resting limit (no chase)",
+        "subtitle": (
+            "PROBATION ? SHADOW ONLY ? LONG@micro_support + SHORT@micro_resistance "
+            "never chase/reprice/slide"
+        ),
+        "combo_key": "SR_MICRO_TILE++STATIC_LIMIT_BRACKET_V2",
+        "ai_min": 0,
+        "ai_max": 101,
+        "spread_min": 0,
+        "spread_max": 99,
+        "entry_mode": "BRACKET_LIMIT_STATIC",
+        "is_benchmark": False,
+        "is_research_candidate": True,
+        "is_independent_ai": False,
+        "is_deterministic_bracket": True,
+        "chase_mode": "STATIC",
+        "max_chases": 0,
+        "id_prefix": "srmv2s",
+        "module": "sr_micro_tile_v2.py",
+        "bracket_tick_min_sec": 10,
+        "bracket_tick_max_sec": 30,
+        "extra_filters": {"adx_max": 40},
+        "promotion_criteria": (
+            "PAPER ONLY until >=75 reconciled filled closes, positive holdout EV, "
+            "and no material degradation versus CONTINUOUS in the same window"
+        ),
+        "kill_criteria": (
+            "ANY after >=50 reconciled filled closes: negative holdout EV or fill rate <25pct"
+        ),
+        "hypothesis": (
+            "Resting limits at exact support/resistance may preserve entry quality "
+            "for range-bound micro S/R mean reversion without chasing price."
+        ),
+        "research_question": (
+            "Does STATIC resting limit deliver positive out-of-sample EV while staying paper-only?"
         ),
     },
     # [RETIRED 2026-07-11] Stub entries for CSV/historical data compatibility only
@@ -141,12 +210,11 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v11.6-dual-research-candidates"
+RESEARCH_STACK_VERSION = "v11.8-sr-micro-static-ab"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + 2 research candidates (TYPE_B_HUNTER_V1, SR_MICRO_TILE_V1) "
-    "— all legacy lanes retired 2026-07-11 — "
-    "Trading Genome v1 — Event bus + research.db — "
-    "3-lane AI cadence (T+0, T+60, T+120)"
+    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC "
+    "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
+    "fixed-policy Type B walk-forward collection + static S/R bracket ticks"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -154,7 +222,7 @@ RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
-COMBO_CHASE_DELAY_LANES = COMBO_TILE_DISPLAY_ORDER
+COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()
 ACTIVE_CHASE_ISOLATION_PAIRS = ()
 ACTIVE_CHASE_ISOLATION_LANES = (COMPARISON_BENCHMARK_LANE,)
@@ -162,25 +230,51 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter V1"
-COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v2b (ADX-flipped)"
+COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
+COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
+COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
-# Both new research candidates start OFF (shadow collecting)
+# Research candidates start OFF (shadow collecting)
 _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
-    RESEARCH_LANE_SR_MICRO_TILE_V1: False,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 })
-# Legacy lanes (retired 2026-07-11) — permanently OFF
-for _legacy in (RESEARCH_LANE_SL_AVOIDANCE_V1, RESEARCH_LANE_SIZED_CONTINUOUS_V1):
+# Legacy lanes (retired) — permanently OFF
+for _legacy in (
+    RESEARCH_LANE_SL_AVOIDANCE_V1,
+    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,        # retired 2026-07-16 v12 overhaul (47% WR, negative PnL)
+    RESEARCH_LANE_SR_MICRO_TILE_V2,        # full-chase variant superseded by V2_STATIC
+):
     _COMBO_TOGGLE_DEFAULTS[_legacy] = False
+
+
+def is_deterministic_bracket_lane(lane: str) -> bool:
+    """Bracket tiles — own tick loop, never AI_SCAN fan-out or independent AI."""
+    lane_u = str(lane or "").upper()
+    if lane_u in (RESEARCH_LANE_SR_MICRO_TILE_V2, RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC):
+        return True
+    spec = COMBO_LANE_SPECS.get(lane_u) or {}
+    return bool(spec.get("is_deterministic_bracket"))
+
+
+def is_static_bracket_lane(lane: str) -> bool:
+    """Resting-limit bracket variant — never chase/reprice after submission."""
+    lane_u = str(lane or "").upper()
+    if lane_u == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
+        return True
+    spec = COMBO_LANE_SPECS.get(lane_u) or {}
+    return str(spec.get("chase_mode") or "").upper() == "STATIC"
 
 
 def is_independent_ai_lane(lane: str) -> bool:
     """Lanes with their own DeepSeek prompt — never inherit AI_SCAN / CONTINUOUS decisions."""
     lane_u = str(lane or "").upper()
-    if lane_u in (RESEARCH_LANE_TYPE_B_HUNTER_V1,
-                  RESEARCH_LANE_SR_MICRO_TILE_V1):
+    if is_deterministic_bracket_lane(lane_u):
+        return False
+    if lane_u == RESEARCH_LANE_TYPE_B_HUNTER_V1:
         return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return bool(spec.get("is_independent_ai"))
@@ -369,7 +463,7 @@ def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = 
     (SL_AVOIDANCE_V1). Backward compatible when those kwargs are omitted.
     """
     lane_u = str(lane or "").upper()
-    if is_independent_ai_lane(lane_u):
+    if is_independent_ai_lane(lane_u) or is_deterministic_bracket_lane(lane_u):
         return False
     spec = COMBO_LANE_SPECS.get(lane_u)
     if not spec or not ai or spec.get("is_legacy") or spec.get("is_shadow_only"):
@@ -400,6 +494,8 @@ def combo_lane_match_detail(lane: str, ai: dict, final_direction: str, spread: i
     lane_u = str(lane or "").upper()
     if is_independent_ai_lane(lane_u):
         return {"passes": False, "block_reason": "INDEPENDENT_AI_LANE"}
+    if is_deterministic_bracket_lane(lane_u):
+        return {"passes": False, "block_reason": "DETERMINISTIC_BRACKET_LANE"}
     spec = COMBO_LANE_SPECS.get(lane_u)
     if not spec:
         return {"passes": False, "block_reason": "LANE_NOT_FOUND"}

@@ -1,22 +1,27 @@
 """
-Quality pathway roster -- v11.6-dual-research-candidates (2026-07-11).
+Quality pathway roster -- v12-type-b-overhaul (2026-07-16).
 
-3-lane research stack:
-  - CONTINUOUS (benchmark, T+0s AI, live orders)
+Active paper-research stack:
+  - CONTINUOUS (benchmark, T+0s AI, paper research)
   - TYPE_B_HUNTER_V1 (research candidate, T+60s AI, shadow)
-  - SR_MICRO_TILE_V1 (research candidate, T+120s AI, shadow)
+    v12 fixed policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
+  - SR_MICRO_TILE_V2_STATIC (A/B resting limit, no chase, shadow)
   + AI_SCAN (internal scanner, no orders)
 
-All legacy lanes (SL_AVOIDANCE, SIZED_CONTINUOUS, COMBO variants, shadow collecting,
-experimental) retired 2026-07-11 -- none outperformed CONTINUOUS.
-Historical CSV data preserved; lane definitions purged from codebase.
+Retired 2026-07-16 (v12 overhaul):
+  SR_MICRO_TILE_V1 -- failed experiment (47% WR, negative PnL).
+  Code file (sr_micro_tile_v1.py) preserved for reference.
+
+S/R V2 (full chase) is DATA_RETIRED: historical outcomes remain readable,
+but it is not a dashboard tile and cannot spawn work.
 """
 from __future__ import annotations
 
 from combo_pathway_config import (
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
 )
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
@@ -24,40 +29,44 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 DASHBOARD_PRIMARY_LANES = (
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
-LIVE_PATHWAY_TILE_ORDER = (
-    COMPARISON_BENCHMARK_LANE,
-)
+LIVE_PATHWAY_TILE_ORDER = DASHBOARD_PRIMARY_LANES
+DASHBOARD_PATHWAY_LANES = DASHBOARD_PRIMARY_LANES
 
-DASHBOARD_PATHWAY_LANES = LIVE_PATHWAY_TILE_ORDER
+# Lanes formally retired but whose spec entries remain in COMBO_LANE_SPECS for
+# CSV / historical-data decoding. They are marked is_legacy=True so every
+# execution / dashboard gate rejects them.
+RETIRED_PATHWAY_LANES = frozenset((
+    RESEARCH_LANE_SR_MICRO_TILE_V1,  # retired 2026-07-16 v12 overhaul (47% WR, negative PnL)
+))
 
-RETIRED_PATHWAY_LANES = frozenset()
-
-DATA_RETIRED_PATHWAY_LANES = frozenset()
+DATA_RETIRED_PATHWAY_LANES = frozenset((
+    "SR_MICRO_TILE_V2",  # full-chase variant superseded by V2_STATIC; CSV preserved
+))
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v11.6-dual-research-candidates"
+ROSTER_PHASE = "v12-type-b-overhaul"
 ROSTER_NOTES = (
-    "3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1). "
-    "All legacy lanes permanently retired 2026-07-11. "
-    "Each tile has independent AI prompt and staggered cadence (T+0/60/120s)."
+    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (v12 fixed policy) + "
+    "SR_MICRO_TILE_V2_STATIC. SR_MICRO_TILE_V1 retired 2026-07-16 (47% WR, "
+    "negative PnL); code preserved. Full-chase S/R V2 historical-only."
 )
 
 ANALYZER_COMPARE_LANES = (
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     RESEARCH_LANE_AI_SCAN,
 )
 
 
 def is_ai_focused_lane(lane: str) -> bool:
-    """Primary dashboard filter: 3-lane research stack only.
+    """Primary dashboard filter: active research stack only.
 
-    Legacy COMBO/EDGE/CHASE/shadow lanes permanently retired.
+    SR_MICRO_TILE_V1 and all legacy COMBO/EDGE/CHASE/shadow lanes permanently retired.
     Historical CSV data preserved for reference only.
     """
     u = str(lane or "").upper().strip()
