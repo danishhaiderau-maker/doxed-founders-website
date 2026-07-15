@@ -62,7 +62,7 @@ if ($railwayWho -and $railwayWho -notmatch "Unauthorized|error|Error") {
     Write-Ok "Railway already authed: $railwayWho"
 } else {
     Write-Host "Opening browser for Railway login..."
-    & $Npx --yes @railway/cli login --browser
+    & $Npx --yes @railway/cli login
     if ($LASTEXITCODE -eq 0) {
         $newWho = & $Npx --yes @railway/cli whoami 2>$null
         Write-Ok "Railway authed: $newWho"
@@ -94,7 +94,7 @@ if ($neonWho -and $neonWho -notmatch "Error|error|not authenticated|UNAUTHENTICA
 }
 
 # --- 6. Fly.io (optional) ---------------------------------------------------
-Write-Step "6/6 Fly.io (optional — only if you have a Fly account)"
+Write-Step "6/6 Fly.io (optional - only if you have a Fly account)"
 $flyWho = & $Npx --yes flyctl auth whoami 2>$null
 if ($flyWho -and $flyWho -notmatch "Error|error|not logged") {
     Write-Ok "Fly.io already authed: $flyWho"
