@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Founder Stack update manifest",
+  "type": "object",
+  "required": ["manifestVersion", "product", "latestVersion", "releases"],
+  "properties": {
+    "manifestVersion": { "type": "integer", "const": 1 },
+    "publishedAt": { "type": "string", "format": "date-time" },
+    "product": { "type": "string", "const": "founder-stack" },
+    "channel": { "type": "string", "enum": ["stable", "beta", "insider"] },
+    "latestVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "minimumVersion": {
+      "description": "Hard floor. Clients below this version must reinstall cleanly; in-place upgrade is not supported.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "releaseNotesUrl": { "type": "string", "format": "uri" },
+    "releases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["version", "status", "download", "minimumVersion"],
+        "properties": {
+          "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+          "status": { "type": "string", "enum": ["current", "pending-build", "legacy", "yanked"] },
+          "releasedAt": { "type": ["string", "null"], "format": "date-time" },
+          "foundation": { "type": "string", "enum": ["void", "vscodium"] },
+          "download": {
+            "type": "object",
+            "required": ["url", "sha256"],
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "size": { "type": ["integer", "null"] },
+              "sha256": {
+                "description": "SHA-256 of the installer, hex. PLACEHOLDER_... marks a value that MUST be filled before publish.",
+                "type": ["string", "null"]
+              },
+              "signature": { "type": ["string", "null"] }
+            }
+          },
+          "minimumVersion": {
+            "description": "Lowest version that can upgrade in place to this release.",
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "rollback": {
+            "type": "object",
+            "required": ["mechanism"],
+            "properties": {
+              "mechanism": { "type": "string", "enum": ["nsis-upgrade-in-place", "inno-side-by-side", "manual"] },
+              "previousVersionKept": { "type": "boolean" },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
