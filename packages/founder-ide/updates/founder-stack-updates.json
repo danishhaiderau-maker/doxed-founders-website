@@ -1,0 +1,47 @@
+{
+  "$schema": "./founder-stack-updates.schema.json",
+  "manifestVersion": 1,
+  "publishedAt": "2026-07-15T00:00:00Z",
+  "product": "founder-stack",
+  "channel": "stable",
+  "latestVersion": "0.9.0",
+  "minimumVersion": "0.8.0",
+  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/doxedcryptofounder/releases",
+  "releases": [
+    {
+      "version": "0.9.0",
+      "status": "current",
+      "releasedAt": "2026-07-15T00:00:00Z",
+      "foundation": "void",
+      "download": {
+        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.9.0/Founder-Stack-Setup-0.9.0.exe",
+        "size": 105835389,
+        "sha256": "97a01b76a246c8b02b90a9401a0427226ec5f9a667e660e56095ecda9995efa8",
+        "signature": null
+      },
+      "minimumVersion": "0.8.0",
+      "rollback": {
+        "mechanism": "nsis-upgrade-in-place",
+        "previousVersionKept": false,
+        "note": "Founder Node uses electron-builder NSIS with deleteAppDataOnUninstall=false, so the vault at ~/FounderVault is preserved across upgrades. Founder IDE uses Inno Setup with its own AppId; installing 0.9.0 over 0.8.0 replaces the IDE in place. To roll back, re-run the prior Founder-Stack-Setup-0.8.0.exe installer (NSIS /S downgrade-in-place is supported) and reinstall the 0.8.0 .vsix. The ~/FounderVault is never touched by either installer."
+      }
+    },
+    {
+      "version": "0.8.0",
+      "status": "legacy",
+      "releasedAt": "2026-07-10T00:00:00Z",
+      "foundation": "vscodium",
+      "download": {
+        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.8.0/Founder-Stack-Lite-0.8.0.zip",
+        "size": 85659314,
+        "sha256": "PLACEHOLDER_FILL_AFTER_PUBLISH_SHA256SUM",
+        "signature": null
+      },
+      "minimumVersion": "0.7.0",
+      "rollback": {
+        "mechanism": "manual",
+        "note": "Legacy VSCodium-based Lite deliverable. No rollback path beyond manual reinstall. Archived under packages/founder-ide/legacy/."
+      }
+    }
+  ]
+}

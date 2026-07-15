@@ -1,24 +1,38 @@
 /**
  * Merkle tree builder + verifier for the Founder Economics MVP.
  *
- * Leaf shape: keccak256(abi.encode(address, amount)) on-chain.
- * Off-chain MVP uses SHA-256 via a pure JS implementation so this module
- * stays safe to import from `@dcf/utils` in Next.js client bundles
- * (no `node:crypto` / Node Buffer).
+ * Leaf shape mirrors the on-chain `EpochDistributor.claim` exactly:
  *
- * When ethers lands, swap `hashLeaf` / `hashPair` to keccak256 and the tree
- * layout (sorted pairs, duplicate-last-leaf) already matches OpenZeppelin.
+ *   leaf = keccak256(abi.encode(address, amount))
+ *
+ * where `abi.encode` is STANDARD (non-packed) ABI encoding:
+ *   - address  → 32 bytes (left-padded to 20)
+ *   - uint256  → 32 bytes (big-endian)
+ *
+ * Pair hashing uses the OpenZeppelin MerkleProof convention:
+ *
+ *   parent = keccak256(sorted(left, right))
+ *
+ * The off-chain tree layout (sorted pairs, duplicate-last-leaf) already
+ * matches OpenZeppelin's `MerkleProof.verify`, so a proof generated here
+ * verifies on-chain against `MerkleProof.verify(proof, root, leaf)`.
+ *
+ * Uses `ethers` v6 (`keccak256`, `AbiCoder`, `toUtf8Bytes` are safe to
+ * import from `@dcf/utils` in Next.js client bundles — ethers ships an
+ * isomorphic keccak that does not require `node:crypto`).
  */
+
+import { AbiCoder, keccak256, getBytes } from 'ethers';
 
 export type MerkleLeaf = {
   walletAddress: string;
-  amount: number;
+  amount: bigint;
 };
 
 export type MerkleProofEntry = {
   walletAddress: string;
-  amount: number;
-  /** Ordered list of sibling hashes from leaf to root. */
+  amount: bigint;
+  /** Ordered list of sibling hashes from leaf to root (0x-prefixed hex). */
   proof: string[];
 };
 
@@ -30,83 +44,163 @@ export type MerkleTree = {
   /** Per-leaf proof paths keyed by `walletAddress:amount`. */
   proofs: Record<string, MerkleProofEntry>;
   /** Hash function name — for audit trail. */
-  hashFn: 'sha256-mvp' | 'keccak256';
+  hashFn: 'keccak256';
 };
 
-/** Pure SHA-256 (sync) — browser + Node safe. */
-function sha256(bytes: Uint8Array): Uint8Array {
-  const K = new Uint32Array([
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  ]);
-  const H = new Uint32Array([
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-  ]);
+/** Single abi.encode(address, uint256) coder — reused for every leaf. */
+const LEAF_ABI_CODER = new AbiCoder();
 
-  const bitLen = bytes.length * 8;
-  const withPad = bytes.length + 1 + 8;
-  const total = Math.ceil(withPad / 64) * 64;
-  const msg = new Uint8Array(total);
-  msg.set(bytes);
-  msg[bytes.length] = 0x80;
-  const view = new DataView(msg.buffer);
-  // SHA-256 length is 64-bit big-endian; for our sizes high word is 0.
-  view.setUint32(total - 4, bitLen >>> 0, false);
+/**
+ * Encode a leaf exactly like Solidity `abi.encode(account, amount)`.
+ *
+ * Solidity `abi.encode` pads each argument to a full 32-byte word:
+ *   - address → right-aligned in 32 bytes (left-padded with zeros)
+ *   - uint256 → big-endian 32 bytes
+ *
+ * We pass `amount` as a bigint so values up to 2^256-1 round-trip without
+ * the 53-bit precision loss of a JS number (20M × 10^18 overflows Number).
+ */
+export function encodeLeaf(leaf: MerkleLeaf): Uint8Array {
+  return getBytes(
+    LEAF_ABI_CODER.encode(
+      ['address', 'uint256'],
+      [leaf.walletAddress, leaf.amount],
+    ),
+  );
+}
 
-  const W = new Uint32Array(64);
-  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+/**
+ * Hash a single leaf — `keccak256(abi.encode(address, amount))`.
+ *
+ * Byte-identical to the on-chain `EpochDistributor.claim`:
+ *
+ *   bytes32 leaf = keccak256(abi.encode(account, amount));
+ */
+export function hashLeaf(leaf: MerkleLeaf): Uint8Array {
+  return getBytes(keccak256(encodeLeaf(leaf)));
+}
 
-  for (let offset = 0; offset < total; offset += 64) {
-    for (let i = 0; i < 16; i++) {
-      W[i] = view.getUint32(offset + i * 4, false);
-    }
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >>> 3);
-      const s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >>> 10);
-      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0;
-    }
-    let [a, b, c, d, e, f, g, h] = H;
-    for (let i = 0; i < 64; i++) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const t1 = (h + S1 + ch + K[i] + W[i]) >>> 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const t2 = (S0 + maj) >>> 0;
-      h = g;
-      g = f;
-      f = e;
-      e = (d + t1) >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (t1 + t2) >>> 0;
-    }
-    H[0] = (H[0] + a) >>> 0;
-    H[1] = (H[1] + b) >>> 0;
-    H[2] = (H[2] + c) >>> 0;
-    H[3] = (H[3] + d) >>> 0;
-    H[4] = (H[4] + e) >>> 0;
-    H[5] = (H[5] + f) >>> 0;
-    H[6] = (H[6] + g) >>> 0;
-    H[7] = (H[7] + h) >>> 0;
+/**
+ * Hash two child nodes into their parent. Sorted — smaller hash goes first.
+ *
+ * This mirrors OpenZeppelin's `MerkleProof.processProof`, which expects
+ * the sibling order to be canonical (sorted) so verification is symmetric.
+ */
+export function hashPair(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const [a, b] = compareBytes(left, right) <= 0 ? [left, right] : [right, left];
+  return getBytes(keccak256(concatBytes(a, b)));
+}
+
+/**
+ * Build a Merkle tree from a list of leaves.
+ *
+ * - Deduplicates leaves (same wallet + amount collapses to one entry).
+ * - If the leaf count is odd at any level, duplicates the last node
+ *   (standard Bitcoin/OZ behaviour).
+ * - Returns proofs for every leaf so the settlement job can publish them.
+ */
+export function buildMerkleTree(leaves: MerkleLeaf[]): MerkleTree {
+  const deduped = new Map<string, MerkleLeaf>();
+  for (const l of leaves) {
+    const key = `${l.walletAddress.toLowerCase()}|${l.amount.toString()}`;
+    deduped.set(key, { walletAddress: l.walletAddress.toLowerCase(), amount: l.amount });
+  }
+  const cleanLeaves = Array.from(deduped.values());
+
+  if (cleanLeaves.length === 0) {
+    return {
+      root: ZERO_HASH_32,
+      leaves: [],
+      proofs: {},
+      hashFn: 'keccak256',
+    };
   }
 
-  const out = new Uint8Array(32);
-  const outView = new DataView(out.buffer);
-  for (let i = 0; i < 8; i++) outView.setUint32(i * 4, H[i], false);
-  return out;
+  let level: { hash: Uint8Array; leaves: MerkleLeaf[] }[] = cleanLeaves.map((leaf) => ({
+    hash: hashLeaf(leaf),
+    leaves: [leaf],
+  }));
+
+  // proofMap[key] = ordered list of sibling hashes from leaf → root.
+  const proofMap = new Map<string, string[]>();
+  for (const leaf of cleanLeaves) {
+    proofMap.set(`${leaf.walletAddress}|${leaf.amount.toString()}`, []);
+  }
+
+  while (level.length > 1) {
+    const next: { hash: Uint8Array; leaves: MerkleLeaf[] }[] = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i]!;
+      const right = i + 1 < level.length ? level[i + 1]! : left;
+      const parentHash = hashPair(left.hash, right.hash);
+
+      // Every leaf under `left` gets `right.hash` as its sibling at this
+      // level; every leaf under `right` gets `left.hash`. When `right ===
+      // left` (odd-node duplication) both sides resolve to the same hash,
+      // which is what OpenZeppelin's MerkleProof.verify expects.
+      const leftSiblingHex = toHex(left.hash);
+      const rightSiblingHex = toHex(right.hash);
+      for (const leaf of left.leaves) {
+        proofMap
+          .get(`${leaf.walletAddress}|${leaf.amount.toString()}`)
+          ?.push(rightSiblingHex);
+      }
+      if (right !== left) {
+        for (const leaf of right.leaves) {
+          proofMap
+            .get(`${leaf.walletAddress}|${leaf.amount.toString()}`)
+            ?.push(leftSiblingHex);
+        }
+        next.push({ hash: parentHash, leaves: [...left.leaves, ...right.leaves] });
+      } else {
+        // Odd-node duplication: the parent's leaf set is just left.leaves
+        // (do NOT double-count — that would push duplicate proof entries
+        // for the duplicated leaf at the next level).
+        next.push({ hash: parentHash, leaves: left.leaves });
+      }
+    }
+    level = next;
+  }
+
+  const root = toHex(level[0]!.hash);
+  const proofs: Record<string, MerkleProofEntry> = {};
+  for (const leaf of cleanLeaves) {
+    const key = `${leaf.walletAddress}|${leaf.amount.toString()}`;
+    proofs[key] = {
+      walletAddress: leaf.walletAddress,
+      amount: leaf.amount,
+      proof: proofMap.get(key) ?? [],
+    };
+  }
+
+  return { root, leaves: cleanLeaves, proofs, hashFn: 'keccak256' };
 }
 
-function utf8Bytes(text: string): Uint8Array {
-  return new TextEncoder().encode(text);
+/** Verify a proof against a known root using the same Keccak-256 pair hash. */
+export function verifyMerkleProof(
+  root: string,
+  leaf: MerkleLeaf,
+  proof: string[],
+): boolean {
+  let computed = hashLeaf(leaf);
+  for (const siblingHex of proof) {
+    const sibling = fromHex(siblingHex);
+    computed = hashPair(computed, sibling);
+  }
+  return toHex(computed).toLowerCase() === root.toLowerCase();
 }
+
+/** Look up a proof entry by wallet + amount. */
+export function findProof(
+  tree: MerkleTree,
+  walletAddress: string,
+  amount: bigint,
+): MerkleProofEntry | null {
+  const key = `${walletAddress.toLowerCase()}|${amount.toString()}`;
+  return tree.proofs[key] ?? null;
+}
+
+// ─── internal byte helpers (no Node Buffer — browser-safe) ────────────────
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = new Uint8Array(a.length + b.length);
@@ -118,7 +212,7 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
+    if (a[i] !== b[i]) return a[i]! - b[i]!;
   }
   return a.length - b.length;
 }
@@ -138,115 +232,5 @@ function fromHex(hex: string): Uint8Array {
   return out;
 }
 
-/**
- * Hash a single leaf. We hash `walletAddress.toLowerCase()|amount` as bytes.
- * When we install ethers, replace this with `keccak256(abi.encode(addr, amt))`.
- */
-export function hashLeaf(leaf: MerkleLeaf): Uint8Array {
-  const data = `${leaf.walletAddress.toLowerCase()}|${leaf.amount}`;
-  return sha256(utf8Bytes(data));
-}
-
-/**
- * Hash two child nodes into their parent. Sorted — smaller hash goes first.
- * This mirrors OpenZeppelin's MerkleProof.sortPair.
- */
-export function hashPair(left: Uint8Array, right: Uint8Array): Uint8Array {
-  const [a, b] = compareBytes(left, right) <= 0 ? [left, right] : [right, left];
-  return sha256(concatBytes(a, b));
-}
-
-/**
- * Build a Merkle tree from a list of leaves.
- *
- * - Deduplicates leaves (same wallet + amount collapses to one entry).
- * - If the leaf count is odd at any level, duplicates the last node
- *   (standard Bitcoin/OZ behaviour).
- * - Returns proofs for every leaf so the settlement job can publish them.
- */
-export function buildMerkleTree(leaves: MerkleLeaf[]): MerkleTree {
-  const deduped = new Map<string, MerkleLeaf>();
-  for (const l of leaves) {
-    const key = `${l.walletAddress.toLowerCase()}|${l.amount}`;
-    deduped.set(key, { walletAddress: l.walletAddress.toLowerCase(), amount: l.amount });
-  }
-  const cleanLeaves = Array.from(deduped.values());
-
-  if (cleanLeaves.length === 0) {
-    return {
-      root: toHashZero(),
-      leaves: [],
-      proofs: {},
-      hashFn: 'sha256-mvp',
-    };
-  }
-
-  let level: { hash: Uint8Array; leaf: MerkleLeaf }[] = cleanLeaves.map((leaf) => ({
-    hash: hashLeaf(leaf),
-    leaf,
-  }));
-
-  const proofMap = new Map<string, string[]>();
-  for (const { leaf } of level) {
-    proofMap.set(`${leaf.walletAddress}|${leaf.amount}`, []);
-  }
-
-  while (level.length > 1) {
-    const next: { hash: Uint8Array; leaf: MerkleLeaf }[] = [];
-    for (let i = 0; i < level.length; i += 2) {
-      const left = level[i]!;
-      const right = i + 1 < level.length ? level[i + 1]! : left;
-      const parentHash = hashPair(left.hash, right.hash);
-
-      for (const entry of level.slice(i, i + 2)) {
-        const key = `${entry.leaf.walletAddress}|${entry.leaf.amount}`;
-        const sibling = entry === left ? right : left;
-        proofMap.get(key)?.push(toHex(sibling.hash));
-      }
-
-      next.push({ hash: parentHash, leaf: left.leaf });
-    }
-    level = next;
-  }
-
-  const root = toHex(level[0]!.hash);
-  const proofs: Record<string, MerkleProofEntry> = {};
-  for (const leaf of cleanLeaves) {
-    const key = `${leaf.walletAddress}|${leaf.amount}`;
-    proofs[key] = {
-      walletAddress: leaf.walletAddress,
-      amount: leaf.amount,
-      proof: proofMap.get(key) ?? [],
-    };
-  }
-
-  return { root, leaves: cleanLeaves, proofs, hashFn: 'sha256-mvp' };
-}
-
-/** Verify a proof against a known root. */
-export function verifyMerkleProof(
-  root: string,
-  leaf: MerkleLeaf,
-  proof: string[],
-): boolean {
-  let computed = hashLeaf(leaf);
-  for (const siblingHex of proof) {
-    const sibling = fromHex(siblingHex);
-    computed = hashPair(computed, sibling);
-  }
-  return toHex(computed).toLowerCase() === root.toLowerCase();
-}
-
-/** Look up a proof entry by wallet + amount. */
-export function findProof(
-  tree: MerkleTree,
-  walletAddress: string,
-  amount: number,
-): MerkleProofEntry | null {
-  const key = `${walletAddress.toLowerCase()}|${amount}`;
-  return tree.proofs[key] ?? null;
-}
-
-function toHashZero(): string {
-  return '0x' + '0'.repeat(64);
-}
+/** 32-byte zero hash — root sentinel for an empty tree. */
+const ZERO_HASH_32 = '0x' + '0'.repeat(64);

@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
@@ -20,6 +21,32 @@ import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
+import type { Response } from 'express';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const MANIFEST_PATH =
+  process.env.FOUNDER_IDE_MANIFEST_PATH?.trim() ||
+  join(process.cwd(), '..', '..', 'packages', 'founder-ide', 'updates', 'founder-stack-updates.json');
+
+const MANIFEST_CACHE_TTL_MS = 60_000;
+let manifestCache: { at: number; body: unknown } | null = null;
+
+function readManifestBody(): unknown {
+  const now = Date.now();
+  if (manifestCache && now - manifestCache.at < MANIFEST_CACHE_TTL_MS) {
+    return manifestCache.body;
+  }
+  const raw = readFileSync(MANIFEST_PATH, 'utf8');
+  const body = JSON.parse(raw);
+  manifestCache = { at: now, body };
+  return body;
+}
+
+/** Test-only hook to reset the cache between assertions. */
+export function __resetFounderManifestCacheForTests(): void {
+  manifestCache = null;
+}
 
 @Controller('founder-node')
 export class FounderNodeController {
@@ -64,6 +91,14 @@ export class FounderNodeController {
     const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
     if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
     return res.json();
+  }
+
+  @Public()
+  @Get('manifest')
+  getManifest(@Res({ passthrough: true }) res: Response): unknown {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return readManifestBody();
   }
 
   @Get('ollama-status')

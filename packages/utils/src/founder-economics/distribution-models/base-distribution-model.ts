@@ -11,6 +11,11 @@
  * A model is a pure function: (epoch metadata, ddollar snapshot) → Merkle tree.
  * It must be deterministic so the settlement job can recompute the same root
  * and so governance can audit what produced a given root.
+ *
+ * Amounts are `bigint` throughout to match the on-chain uint256 leaf:
+ *   leaf = keccak256(abi.encode(address, uint256 amount))
+ * 20M tokens with 18 EVM decimals (20_000_000 × 10^18) overflows a JS number,
+ * so any model that talks to the contract MUST emit bigint amounts.
  */
 
 import type { MerkleTree } from '../merkle-tree';
@@ -21,7 +26,7 @@ export interface Epoch {
   startTime: string;
   endTime: string;
   /** Tokens released from the VestingVault for this epoch (raw integer). */
-  tokensReleased: number;
+  tokensReleased: bigint;
   /** Model version that produced the current root (set by settlement job). */
   distributionModelVersion?: string;
 }
@@ -72,13 +77,27 @@ export interface DistributionModel {
 }
 
 /**
- * Helper — normalize raw integer DDollar to a whole-token amount for an epoch.
- * Rounds down to whole tokens (no fractional claims on-chain).
+ * Pro-rata token allocation, computed entirely in integer bigint math.
+ *
+ *   founderTokens = floor(shareRatio * tokensReleased)
+ *                 = floor(founderDdollar * tokensReleased / totalDdollar)
+ *
+ * `tokensReleased` is bigint (uint256 on-chain); `shareRatio` is the founder's
+ * fraction of the total DDollar pool. Rounding is floor, matching the
+ * pre-bigint behaviour (`Math.floor(shareRatio * tokensReleased)`) so the
+ * existing 20M-flat schedule still produces identical roots for identical
+ * snapshots.
+ *
+ * Returns 0n when either input is non-positive.
  */
 export function tokensForFounder(
   shareRatio: number,
-  tokensReleased: number,
-): number {
-  if (tokensReleased <= 0 || shareRatio <= 0) return 0;
-  return Math.floor(shareRatio * tokensReleased);
+  tokensReleased: bigint,
+): bigint {
+  if (tokensReleased <= 0n || !(shareRatio > 0)) return 0n;
+  // shareRatio is a real in [0, 1]. Scale to 1e18 fixed-point to keep integer
+  // precision without floating-point drift on the 20M scale.
+  const SCALE = 1_000_000_000_000_000_000n; // 1e18
+  const scaled = BigInt(Math.floor(shareRatio * 1e18));
+  return (scaled * tokensReleased) / SCALE;
 }

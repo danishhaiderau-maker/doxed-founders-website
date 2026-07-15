@@ -28,13 +28,23 @@ packages/founder-ide/
 │   ├── prepare-founder-ide-void.sh        # branding: Void -> Founder IDE
 │   ├── rewire-llm-to-gateway.sh           # THE REWIRE — AI -> our Gateway
 │   ├── sendFounderOs.ts                   # Gateway client (ports gateway-client.ts)
-│   ├── build-founder-ide.sh               # legacy VSCodium build (kept for reference)
-│   └── prepare-founder-ide.sh             # legacy VSCodium branding
+│   ├── brand-product.json.patch           # product.json branding patch
+│   └── strip-spectre-native-modules.sh    # node-gyp Spectre mitigation fix
+├── updates/                               # update manifest + rollback spec
+│   ├── founder-stack-updates.json
+│   ├── founder-stack-updates.schema.json
+│   └── validate-update-manifest.mjs
+├── scripts/
+│   └── smoke-pairing-and-gateway.mjs      # pairing + SSE smoke test
 ├── assets/
 │   └── product.json.template              # our GUIDs / name / data dir
 ├── installer/
 │   ├── founder-stack.iss                  # Inno Setup — bundles IDE + Node
 │   └── build-stack-installer.ps1          # orchestrator
+├── legacy/                                # ARCHIVED 0.8.0 VSCodium material
+│   ├── dist/Founder-Stack-Lite-0.8.0.zip
+│   ├── staging/                           # 0.8.0 release notes + lite installer
+│   └── build-vscodium/                    # legacy VSCodium build scripts
 └── config/
     └── build-env.sh                       # branding env vars
 ```

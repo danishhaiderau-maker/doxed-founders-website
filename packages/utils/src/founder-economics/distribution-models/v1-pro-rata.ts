@@ -37,7 +37,7 @@ export class V1ProRataDistributionModel implements DistributionModel {
         const amount = tokensForFounder(ratio, epoch.tokensReleased);
         return { walletAddress: f.walletAddress, amount };
       })
-      .filter((leaf) => leaf.amount > 0);
+      .filter((leaf) => leaf.amount > 0n);
 
     return buildMerkleTree(leaves);
   }

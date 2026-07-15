@@ -141,3 +141,112 @@ export interface LamAdapterStatus {
   /** True when the adapter is premium-tier only. */
   premium?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 9 — Computer-Use execution surface
+// ---------------------------------------------------------------------------
+
+/**
+ * The action block Claude emits inside a `tool_use` content block when it
+ * decides to drive the virtual computer. Mirrors the Anthropic
+ * `computer_20250124` tool action union (subset we execute).
+ *
+ * `coordinate` is `[x, y]` in display pixels; `text` is the string for the
+ * `type` action; `key` is a hyphen-separated combo for the `key` action
+ * (e.g. `Return`, `ctrl-s`); `scrollAmount` is signed pixels for `scroll`.
+ *
+ * The optional `duration` is a hint some action types accept; we forward
+ * it when present and ignore it when not supported by the target.
+ */
+export type ComputerUseAction =
+  | { type: 'screenshot' }
+  | { type: 'mouse_move'; coordinate: [number, number] }
+  | { type: 'left_click'; coordinate?: [number, number] }
+  | { type: 'right_click'; coordinate?: [number, number] }
+  | { type: 'middle_click'; coordinate?: [number, number] }
+  | { type: 'double_click'; coordinate?: [number, number] }
+  | { type: 'left_click_drag'; start_coordinate: [number, number]; coordinate: [number, number] }
+  | { type: 'type'; text: string }
+  | { type: 'key'; key: string }
+  | { type: 'scroll'; coordinate?: [number, number]; scroll_direction: 'up' | 'down'; scroll_amount: number }
+  | { type: 'wait'; duration?: number }
+  | { type: 'cursor_position' };
+
+/**
+ * Result of executing one Claude-issued action against an ExecutionTarget.
+ * `screenshotBase64` is only populated by the `screenshot` action (and is
+ * what gets fed back to Claude as the next tool_result).
+ */
+export interface ExecutionTargetResult {
+  ok: boolean;
+  /** Optional human-readable summary for the step log. */
+  summary?: string;
+  /** Base64-encoded PNG, only for `screenshot` actions. */
+  screenshotBase64?: string;
+  /** Set when ok === false. */
+  error?: string;
+}
+
+/**
+ * ExecutionTarget — the abstraction a ComputerUseAdapter drives.
+ *
+ * Two implementations live alongside the adapter:
+ *   - `PlaywrightTarget`  — drives a headless Chromium page. Docker-safe,
+ *                           already proven by the Phase 6 BrowserResearch
+ *                           adapter. Default.
+ *   - `RealScreenTarget`  — drives the host's real display via nut-js /
+ *                           robotjs. Requires native modules and a real
+ *                           display; not safe in CI / containers. The
+ *                           factory returns a stub that throws clearly
+ *                           when native deps are missing.
+ *
+ * Both implementations must round-trip a `screenshot` → base64 PNG so the
+ * adapter can hand it back to Claude as the next tool_result. Pixel
+ * coordinates are in the target's own coordinate space (the display
+ * dimensions the adapter advertises to Claude via the
+ * `computer_20250124` tool definition).
+ */
+export interface ExecutionTarget {
+  readonly id: 'browser' | 'screen';
+  /** Display dimensions advertised to Claude (px). */
+  readonly displayWidthPx: number;
+  readonly displayHeightPx: number;
+  /** Lazy lifecycle so the adapter can boot on first use. */
+  start(): Promise<void>;
+  /** Reap any backing process (browser / native session). Idempotent. */
+  stop(): Promise<void>;
+  /** True once start() has succeeded and stop() hasn't been called. */
+  isRunning(): boolean;
+  /** Execute one Claude action; return a result the adapter can feed back. */
+  execute(action: ComputerUseAction): Promise<ExecutionTargetResult>;
+}
+
+/**
+ * Snapshot of one Claude tool_use round-trip. Used for the durable log
+ * (LamTask.currentStep / lastToolCallId) and for the per-step history the
+ * orchestrator persists so a crashed task resumes mid-loop, not from zero.
+ */
+export interface ComputerUseToolCall {
+  /** Anthropic's `id` of the tool_use block (durable resume key). */
+  toolUseId: string;
+  /** The action Claude asked for (already narrowed). */
+  action: ComputerUseAction;
+  /** Outcome of executing `action` against the target. */
+  result: ExecutionTargetResult;
+  /** ISO timestamps so the row is replayable. */
+  startedAt: string;
+  completedAt: string;
+}
+
+/**
+ * Tier of confirmation a Computer-Use run enforces. Mirrors
+ * LAM_REQUIRE_CONFIRMATION env var — when set to `1`, destructive actions
+ * (clicks on forms / delete buttons / submits) must round-trip through an
+ * external confirmer; otherwise the agent loop auto-confirms but still
+ * logs the destructive intent.
+ */
+export type ConfirmationState =
+  | { kind: 'auto-confirmed'; summary: string }
+  | { kind: 'pending'; summary: string }
+  | { kind: 'confirmed'; summary: string }
+  | { kind: 'denied'; summary: string };

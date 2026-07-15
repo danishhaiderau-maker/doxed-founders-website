@@ -3430,6 +3430,15 @@ model LamTask {
   /// Estimated cost in DDollar (rough: ~1 per step).
   costDdollar  Int?
   errorMessage String?   @db.Text
+  /// Phase 9 follow-up — durable Computer-Use agent-loop state.
+  /// Free-text snapshot of the current iteration (e.g. "iteration-3:screenshot").
+  currentStep       String?
+  /// Anthropic `tool_use` id of the last executed action; null until iter 1.
+  lastToolCallId    String?
+  /// Per-tool retry counter (resets each successful action).
+  retryCount        Int       @default(0)
+  /// Confirmation policy snapshot: { kind, summary }. JsonNull when not destructive.
+  confirmationState Json?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   completedAt  DateTime?
@@ -3621,4 +3630,22 @@ model ProofOfSuccess {
   @@unique([proofType, externalId, userId])
   @@index([userId])
   @@index([proofType])
+}
+
+/// Multi-instance-safe routing-decision cache for Routing Engine v2's
+/// Layer 1. Each row is one cache entry keyed by `cacheKey` (the SHA-256
+/// prompt hash produced by `RoutingCache.computeKey`). Used by
+/// `NeonRoutingCache` when `ROUTING_CACHE_BACKEND=neon` so every Railway
+/// replica shares the same cache. Lazy-expired via `expiresAt`.
+model RoutingCacheEntry {
+  /// The cache key: "v1:" + sha256(normalized first 4KB of prompt).
+  cacheKey   String   @id
+  /// The serialized RoutingDecision (chosenProvider, chosenModel, score, candidates, ...).
+  decision   Json
+  /// When this entry stales out. Lazy sweep on read; reaper optional.
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([expiresAt])
 }

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Capability } from '@prisma/client';
 import { CapabilityRegistryService } from '../capability-registry/capability-registry.service';
 import type {
@@ -6,7 +6,7 @@ import type {
   ExecutionProfile,
 } from '../capability-registry/capability-registry.types';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
-import { RoutingEngineCache } from './routing-engine.cache';
+import { ROUTING_CACHE, type RoutingCache } from './routing-engine.cache';
 import { ExecutionProfileService } from './execution-profile.service';
 import type {
   RoutingDecision,
@@ -17,27 +17,32 @@ import { PROFILE_WEIGHTS } from './routing-engine.types';
 /**
  * Routing Engine v2 — the 3-layer pipeline (docs/KERNEL.md §6):
  *
- *   Layer 1: Cache lookup (RoutingEngineCache)
+ *   Layer 1: Cache lookup (RoutingCache — in-memory LRU or Neon-shared)
  *   Layer 2: Capability gate (CapabilityRegistryService.findBestForIntent)
  *   Layer 3: Intent + cost-latency scoring (this.score, weighted by profile)
  *
  * Every decision is logged to the Flight Recorder regardless of cache state,
  * so the Learning Engine (Phase 4) can later refine the reputation fields
  * on the Capability rows.
+ *
+ * The cache backend is pluggable (see `routing-engine.cache.ts`); the
+ * `RoutingCache` interface's `get`/`set` may be sync or async, so this
+ * service always `await`s them. An in-memory backend returns immediately;
+ * a Neon-backed one round-trips to Postgres.
  */
 @Injectable()
 export class RoutingEngineService {
   constructor(
+    @Inject(ROUTING_CACHE) private readonly cache: RoutingCache,
     private readonly capabilityRegistry: CapabilityRegistryService,
     private readonly flightRecorder: FlightRecorderService,
     private readonly profileService: ExecutionProfileService,
-    private readonly cache: RoutingEngineCache,
   ) {}
 
   async route(request: RoutingRequest): Promise<RoutingDecision> {
     // Layer 1: cache lookup.
     const cacheKey = this.cache.computeKey(request.prompt);
-    const cached = this.cache.get(cacheKey);
+    const cached = await this.cache.get(cacheKey);
     if (cached) {
       const resolvedProfile = await this.profileService.getProfile(
         request.workspaceId,
@@ -99,7 +104,7 @@ export class RoutingEngineService {
       candidates: scored,
     };
 
-    this.cache.set(cacheKey, decision);
+    await this.cache.set(cacheKey, decision);
     void this.flightRecorder.record({
       requestId: request.requestId,
       userId: request.userId,
