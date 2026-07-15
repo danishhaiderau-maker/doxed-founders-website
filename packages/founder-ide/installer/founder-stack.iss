@@ -1,8 +1,10 @@
 ; founder-stack.iss
 ;
-; Inno Setup script for the BUNDLED "Founder Stack" installer.
-; Composes Founder IDE (VSCodium downstream, Inno Setup) + Founder Node
-; (electron-builder NSIS) into ONE .exe that lays down both apps.
+; Inno Setup script for the "Founder Stack" installer.
+; Ships Founder IDE (VSCodium downstream, Inno Setup) + optional Private-mode
+; tooling (Forgejo, cloudflared). As of 0.9.1 the bundle is IDE-only by
+; default — Founder Node was removed because the IDE talks to the Gateway API
+; directly and does not need a paired local node.
 ;
 ; Build with:
 ;   iscc packages\founder-ide\installer\founder-stack.iss
@@ -14,16 +16,14 @@
 ;
 ; Inputs (place these in the build staging dir before running iscc):
 ;   {#FOUNDER_IDE_SETUP}   - Founder-IDE-Setup-x64-<v>.exe  (from build/build-founder-ide.sh)
-;   {#FOUNDER_NODE_SETUP}  - Founder-Node-<v>-win-x64.exe   (from apps/founder-node: npm run pack:win)
 ;   {#FORGEJO_BIN}         - forgejo-x64.exe               (optional; Private/Hybrid mode)
 ;   {#CLOUDFLARED_BIN}     - cloudflared.exe               (optional; Private/Hybrid mode)
 ;
 ; Outputs:
-;   dist\Founder-Stack-Setup-<v>.exe  (one installer, two apps + optional Private-mode tooling)
+;   dist\Founder-Stack-Setup-<v>.exe  (Founder IDE + optional Private-mode tooling)
 ;
-; The two apps are installed side-by-side and each gets its own uninstall
-; entry (their own AppId / appId). Founder Node can optionally auto-start on
-; login (registry Run key, gated by a checkbox).
+; The IDE installs per-user (its own AppId). Optional Private-mode binaries
+; land in {app}\bin and are added to PATH.
 ;
 ; ─── Phase 7 — Deployment mode selection (Private / Public / Hybrid) ───────
 ; The wizard presents a mode-selection screen (doc §7 of DEPLOYMENT-MODES-UX).
@@ -43,10 +43,6 @@
 
 #ifndef FOUNDER_IDE_SETUP
   #define FOUNDER_IDE_SETUP  "..\..\..\staging\Founder-IDE-Setup-x64.exe"
-#endif
-
-#ifndef FOUNDER_NODE_SETUP
-  #define FOUNDER_NODE_SETUP "..\..\..\staging\Founder-Node-win-x64.exe"
 #endif
 
 #ifndef FORGEJO_BIN
@@ -81,9 +77,9 @@ DisableDirPage=yes
 DisableReadyPage=yes
 Uninstallable=yes
 CreateUninstallRegKey=yes
-; The bundle itself is uninstallable and removes the Start Menu group, but
-; the two sub-installers retain their own Add/Remove Programs entries so
-; users can update them independently.
+; The bundle itself is uninstallable and removes the Start Menu group. The
+; IDE sub-installer retains its own Add/Remove Programs entry so users can
+; update it independently of the bundle.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -94,8 +90,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; or by clicking the radio buttons in the UI. "private_core" is the Forgejo +
 ; cloudflared pair; "tailscale" is optional in every mode that includes it.
 [Components]
-; Always installed — the two apps every Founder OS install needs.
-Name: "core"; Description: "Founder IDE + Founder Node (required)"; Types: full compact custom; Flags: fixed
+; Always installed — Founder IDE (the only required app since 0.9.1; Founder
+; Node was removed from the bundle because the IDE talks to the Gateway API
+; directly and no longer needs a paired local node).
+Name: "core"; Description: "Founder IDE (required)"; Types: full compact custom; Flags: fixed
 ; Private-mode core: Forgejo (local git forge, ~100 MB) + cloudflared (tunnel, ~30 MB).
 ; Selected for PRIVATE and HYBRID; deselected for PUBLIC.
 Name: "private_core"; Description: "Forgejo (local git forge) + cloudflared (tunnel)"; Types: full
@@ -109,16 +107,19 @@ Name: "compact"; Description: "Public mode (no extra tooling — use your existi
 Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Files]
-; Stage the two sub-installers inside our bundle so we can ExecWait them.
+; Stage the Founder IDE sub-installer inside our bundle so we can ExecWait it.
 Source: "{#FOUNDER_IDE_SETUP}";  DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Components: core
-Source: "{#FOUNDER_NODE_SETUP}"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Components: core
-; Phase 7 — Private-mode binaries. Only staged when the user picked
-; PRIVATE or HYBRID (private_core component selected). Both are single
-; binaries dropped into the Founder Node install dir + added to PATH.
-; Forgejo ~100 MB, cloudflared ~30 MB. If the build didn't stage them, the
-; [Code] InitializeSetup warns and falls back to PUBLIC-style (no Private mode).
-Source: "{#FORGEJO_BIN}";     DestDir: "{app}\bin"; Flags: ignoreversion nocompression; Components: private_core; Check: ForgejoBinAvailable
-Source: "{#CLOUDFLARED_BIN}"; DestDir: "{app}\bin"; Flags: ignoreversion nocompression; Components: private_core; Check: CloudflaredBinAvailable
+; Phase 7 — Private-mode binaries. Only staged when the build actually has
+; them on disk. ISCC validates Source paths at COMPILE time, so we use a
+; preprocessor #ifexist check to skip the lines entirely when the binaries
+; aren't present (PUBLIC-only release). At install time the matching Check:
+; functions below also gate the Components selection.
+#ifexist "{#FORGEJO_BIN}"
+  Source: "{#FORGEJO_BIN}";     DestDir: "{app}\bin"; Flags: ignoreversion nocompression; Components: private_core; Check: ForgejoBinAvailable
+#endif
+#ifexist "{#CLOUDFLARED_BIN}"
+  Source: "{#CLOUDFLARED_BIN}"; DestDir: "{app}\bin"; Flags: ignoreversion nocompression; Components: private_core; Check: CloudflaredBinAvailable
+#endif
 
 [Run]
 ; --- Founder IDE -------------------------------------------------------------
@@ -129,49 +130,35 @@ Filename: "{tmp}\Founder-IDE-Setup-x64.exe"; \
   StatusMsg: "Installing Founder IDE..."; \
   Flags: waituntilterminated; Components: core
 
-; --- Founder Node ------------------------------------------------------------
-; electron-builder NSIS uses /S for silent. /allusers=0 -> per-user.
-Filename: "{tmp}\Founder-Node-win-x64.exe"; \
-  Parameters: "/S /allusers=0"; \
-  StatusMsg: "Installing Founder Node..."; \
-  Flags: waituntilterminated; Components: core
-
 ; --- Phase 7: Forgejo as a background service (Private/Hybrid only) ---------
 ; Registers Forgejo to run at login as a background process bound to
 ; localhost:3000. Uses a per-user Run key (no admin). If Forgejo isn't
-; installed (PUBLIC mode, or the bin wasn't staged), this step is skipped.
+; staged (PUBLIC mode, or the bin wasn't staged), this step is skipped.
 ; TODO(Phase 7 runtime): ship a tiny wrapper (founder-forgejo-runner.exe) that
 ; starts `forgejo web` with the right config + ports. For now we just lay down
-; the binary; Founder Node probes it via /api/deployment-mode/runtime-status.
+; the binary; Founder IDE probes it via /api/deployment-mode/runtime-status.
 Filename: "{app}\bin\forgejo-x64.exe"; \
   Parameters: "web -c {app}\forgejo\app.ini"; \
   Description: "Start Forgejo local git forge (localhost:3000)"; \
   Flags: postinstall nowait skipifsilent runascurrentuser; \
   Components: private_core; Check: ForgejoBinAvailable
 
-; --- Optional: launch Founder Node after install (gated by checkbox) --------
-Filename: "{code:FounderNodeExe}"; \
-  Description: "Start Founder Node now (pairs your vault)"; \
-  Flags: postinstall nowait skipifsilent unchecked runascurrentuser
-
 ; --- Phase 7: optional Tailscale silent install -----------------------------
 ; Only if the user opted in (tailscale component) AND the Tailscale installer
 ; is reachable. We download it on first run rather than bundling ~25 MB that
 ; most founders don't need. Degrades gracefully if offline.
-; TODO(Phase 7 runtime): wire this to Founder Node's "Enable Tailscale" tray
-; action instead of running it from the installer.
+; TODO(Phase 7 runtime): wire this to a "Enable Tailscale" action instead of
+; running it from the installer.
 
 [Icons]
-; One Start Menu group for the bundle, plus shortcuts to the two apps.
+; One Start Menu group for the bundle, plus a shortcut to Founder IDE.
 Name: "{group}\Founder IDE";  Filename: "{code:FounderIdeExe}"
-Name: "{group}\Founder Node"; Filename: "{code:FounderNodeExe}"
 Name: "{group}\Founder Stack README"; Filename: "https://doxxedcrypto.digital/docs/founder-stack"
 
 [UninstallRun]
-; Best-effort uninstall of the two sub-apps. These invoke each app's own
-; uninstaller silently. Paths use the per-user install locations.
+; Best-effort uninstall of the IDE sub-app. This invokes the IDE's own
+; uninstaller silently. Path uses the per-user install location.
 Filename: "{code:FounderIdeUninstaller}";   Parameters: "/SILENT /CURRENTUSER"; Flags: waituntilterminated; RunOnceId: "UninstallFounderIde"
-Filename: "{code:FounderNodeUninstaller}";  Parameters: "/S";                     Flags: waituntilterminated; RunOnceId: "UninstallFounderNode"
 
 [UninstallDelete]
 Type: dirifempty; Name: "{localappdata}\Founder Stack"
@@ -179,12 +166,6 @@ Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\forgejo"
 
 [Registry]
-; Optional auto-start for Founder Node on login (per-user Run key).
-; Disabled by default — the checkbox in [Tasks] opts in.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
-  ValueType: string; ValueName: "FounderNode"; ValueData: "{code:FounderNodeExe}"; \
-  Flags: uninsdeletevalue; Tasks: autostartnode
-
 ; Phase 7 — remember the mode choice as a per-user default for new projects.
 ; The Founder OS setup wizard reads this on first project creation.
 Root: HKCU; Subkey: "Software\DoxxedCrypto\FounderStack"; \
@@ -192,7 +173,8 @@ Root: HKCU; Subkey: "Software\DoxxedCrypto\FounderStack"; \
   Flags: uninsdeletekey
 
 [Tasks]
-Name: "autostartnode"; Description: "Start Founder Node automatically when I log in to Windows"; GroupDescription: "Startup:"
+; (No installer-visible tasks in 0.9.1 — the Founder Node autostart task was
+; removed along with Founder Node itself.)
 
 [Code]
 // ─── Phase 7 — Deployment-mode selection wizard page ───────────────────────
@@ -244,12 +226,14 @@ begin
 
     // Apply the choice to the component set. PRIVATE and HYBRID include the
     // private_core component (Forgejo + cloudflared); PUBLIC deselects it.
-    // We mutate WizardSetupType so the [Components] flags resolve correctly.
+    // WizardSetupType() is read-only per Inno Setup docs, so we drive the
+    // TypesCombo directly: full=0, compact=1, custom=2 (see [Types] section).
     if (SelectedDeploymentMode = 'PRIVATE') or (SelectedDeploymentMode = 'HYBRID') then begin
-      WizardSetupType(False) := 'full';
+      WizardForm.TypesCombo.ItemIndex := 0;
     end else begin
-      WizardSetupType(False) := 'compact';
+      WizardForm.TypesCombo.ItemIndex := 1;
     end;
+    WizardForm.TypesCombo.OnChange(WizardForm.TypesCombo);
   end;
 end;
 
@@ -257,8 +241,7 @@ end;
 // These gate the [Files] entries so the installer never hard-errors when the
 // build didn't stage the Forgejo / cloudflared binaries (e.g. a PUBLIC-mode-
 // only release). The user still gets a working install; Private mode just
-// won't have local git/tunnel until they run the Founder Node "Install
-// Private-mode tooling" tray action.
+// won't have local git/tunnel until they add Private-mode tooling later.
 
 function ForgejoBinAvailable(): Boolean;
 begin
@@ -277,19 +260,9 @@ begin
   Result := ExpandConstant('{localappdata}\Programs\Founder IDE\Founder IDE.exe');
 end;
 
-function FounderNodeExe(Param: string): string;
-begin
-  Result := ExpandConstant('{localappdata}\Programs\Founder Node\Founder Node.exe');
-end;
-
 function FounderIdeUninstaller(Param: string): string;
 begin
   Result := ExpandConstant('{localappdata}\Programs\Founder IDE\unins000.exe');
-end;
-
-function FounderNodeUninstaller(Param: string): string;
-begin
-  Result := ExpandConstant('{localappdata}\Programs\Founder Node\Uninstall Founder Node.exe');
 end;
 
 function InitializeSetup(): Boolean;
@@ -299,12 +272,8 @@ begin
     MsgBox('Founder IDE setup not found:'#13#10'{#FOUNDER_IDE_SETUP}'#13#10#13#10'Run build-founder-ide.ps1 first.', mbError, MB_OK);
     Result := False;
   end;
-  if not FileExists(ExpandConstant('{#FOUNDER_NODE_SETUP}')) then begin
-    MsgBox('Founder Node setup not found:'#13#10'{#FOUNDER_NODE_SETUP}'#13#10#13#10'Run npm run pack:win in apps\founder-node first.', mbError, MB_OK);
-    Result := False;
-  end;
   // Non-fatal: Private-mode binaries are optional. If missing, we still install
-  // the core apps; the user can add Private-mode tooling later via Founder Node.
+  // the core app; the user can add Private-mode tooling later via Founder IDE.
   if not ForgejoBinAvailable() then begin
     Log('Phase 7: Forgejo binary not staged at {#FORGEJO_BIN} — Private-mode git forge will be unavailable until added.');
   end;

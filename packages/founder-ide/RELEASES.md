@@ -1,6 +1,96 @@
 # Founder IDE — releases
 
-## 0.9.0 (Void fork) — Phase 5 — BUILT
+## 0.9.1 (Void fork) — FIX — BUILT
+
+> **Status: BUILT (unsigned).** Fixes the launcher-exe regression in 0.9.0
+> and drops Founder Node from the bundle (the IDE talks to the Gateway API
+> directly, so a paired local node is no longer needed).
+
+### What changed
+
+- **FIX: launcher exe missing from inner installer.** The 0.9.0 build ran
+  `gulp vscode-win32-x64-min-ci` with an empty `.build/electron` cache while
+  the build machine had only Python 3.14 on PATH (which node-gyp rejects).
+  The task errored mid-build with "Did you forget to signal async completion"
+  right at the `electron()` step, producing a launcher-less
+  `VSCode-win32-x64/` dir — no `Founder IDE.exe`. The subsequent
+  `gulp vscode-win32-x64-user-setup` then packaged a broken inner installer,
+  and the outer Founder Stack installer bundled that broken inner installer.
+- **Rebuilt on Node 20.18.2 + Python 3.12.7.** Used portable Node 20.18.2
+  at `C:\Users\user\node-v20.18.2\` and Python 3.12.7 at
+  `C:\Users\user\Python312\`. Cleared `.build/electron`,
+  `.build/extensions`, and `VSCode-win32-x64/`. Re-ran
+  `gulp vscode-win32-x64-min-ci` — completed in ~40 min, exit 0.
+- **Launcher present.** `VSCode-win32-x64\Founder IDE.exe` is
+  190,528,000 bytes (~181.7 MB), as expected for a Void IDE Electron build.
+- **Founder Node removed from the bundle.** All Founder Node references
+  deleted from `packages/founder-ide/installer/founder-stack.iss`:
+  - `FOUNDER_NODE_SETUP` `#define`
+  - `[Files]` entry staging `Founder-Node-win-x64.exe`
+  - `[Run]` entry invoking the Founder Node NSIS installer
+  - `[Run]` optional "Start Founder Node now" postinstall entry
+  - `[Icons]` Founder Node Start Menu shortcut
+  - `[UninstallRun]` Founder Node uninstaller entry
+  - `[Registry]` `FounderNode` Run-key (auto-start on login)
+  - `[Tasks]` `autostartnode` task
+  - `[Code]` `FounderNodeExe` and `FounderNodeUninstaller` helper functions
+  - `[Code]` `InitializeSetup` Founder Node presence check
+  - Updated the `[Components]` `core` description and the file header
+    comment.
+- **Optional Private-mode files now use `#ifexist`.** The Forgejo/cloudflared
+  `[Files]` entries are wrapped in `#ifexist "{#FORGEJO_BIN}"` /
+  `#ifexist "{#CLOUDFLARED_BIN}"` so ISCC doesn't fail at compile time when
+  the binaries aren't staged (PUBLIC-only release). The install-time
+  `Check:` functions are retained as a second gate.
+- **Orchestrator script also pruned.**
+  `packages/founder-ide/installer/build-stack-installer.ps1` lost its step 3
+  (Founder Node build) and the `/DFOUNDER_NODE_SETUP` ISCC arg; the step
+  counter went from 4/4 to 3/3.
+
+### Build artifacts
+
+- `Founder-IDE-Setup-x64.exe` — the Void-based Founder IDE installer
+  (rebuilt with the launcher). 108,927,778 bytes (~103.9 MB).
+- `Founder-Stack-Setup-0.9.1.exe` — IDE-only bundle (no Founder Node).
+  Produced at
+  `C:\Users\user\Desktop\Final Bots\doxedcryptofounder\packages\founder-ide\installer\dist\Founder-Stack-Setup-0.9.1.exe`.
+  Size 111,025,351 bytes (~105.9 MB).
+  SHA-256 `b5701ce07b1057ed2eab0db6cc7de24bb4e9ee390da634a6d6d89f58dd61bee5`.
+  Also mirrored in the manifest at
+  `packages/founder-ide/updates/founder-stack-updates.json`.
+
+### Known limitations (0.9.1)
+
+- **Unsigned.** Same external signing blocker as 0.9.0.
+- **Private-mode binaries not bundled.** Same as 0.9.0 — the `private_core`
+  component (Forgejo + cloudflared) is silently skipped via the
+  `#ifexist` + `Check:` functions if the binaries aren't staged.
+- **Existing 0.9.0 installs** of Founder Node are NOT auto-removed by the
+  0.9.1 installer (the bundle has no record of ever installing it). Users
+  who want Founder Node gone should uninstall it from Add/Remove Programs.
+  The `~/FounderVault` is never touched by either installer.
+
+### Build commands
+
+```powershell
+# Env (use Node 20.18.2 + Python 3.12.7):
+$env:PYTHON = "C:\Users\user\Python312\python.exe"
+$env:Path = "C:\Users\user\Python312;C:\Users\user\node-v20.18.2;$env:Path"
+
+# Rebuild IDE + launcher (40-60 min):
+Set-Location C:\Users\user\founder-ide-build\void-builder\vscode
+npx.cmd gulp vscode-win32-x64-min-ci
+npx.cmd gulp vscode-win32-x64-inno-updater
+npx.cmd gulp vscode-win32-x64-user-setup
+
+# Compose the Founder Stack bundle (IDE-only now):
+$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+& $ISCC /DFOUNDER_STACK_VERSION="0.9.1" `
+  /DFOUNDER_IDE_SETUP="<path-to-Founder-IDE-Setup-x64.exe>" `
+  "packages\founder-ide\installer\founder-stack.iss"
+```
+
+## 0.9.0 (Void fork) — Phase 5 — BUILT (launcher regression)
 
 > **Status: BUILT (unsigned).** The Void-based Founder IDE and the bundled
 > `Founder-Stack-Setup-0.9.0.exe` were produced on 2026-07-15 with Node

@@ -65,6 +65,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     any_combo_execution_enabled,
     combo_entry_mode,
     combo_lane_match_detail,
@@ -74,10 +76,12 @@ from combo_pathway_config import (
     is_benchmark_lane as is_combo_benchmark_lane,
     is_chase_3plus_entry_lane,
     is_combo_execution_lane,
+    is_deterministic_bracket_lane,
     is_immediate_entry_lane,
     is_independent_ai_lane,
     is_research_candidate_lane,
     is_shadow_only_lane,
+    is_static_bracket_lane,
     get_lane_ladder_override,
     is_virtual_chase_entry_lane,
     resolve_lane_size_multiplier,
@@ -213,22 +217,24 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "RETIRED",
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
-    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "RESEARCH_CANDIDATE",
-    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "DATA_RETIRED",
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "DATA_RETIRED",
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RESEARCH_CANDIDATE",
-    RESEARCH_LANE_SR_MICRO_TILE_V1: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
+    RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "PROBATION",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
-    RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: "DATA_RETIRED",
     RESEARCH_LANE_EXTREME_EDGE: "RETIRED",
     RESEARCH_LANE_EDGE_PLUS_STACK: "RETIRED",
-    RESEARCH_LANE_SHADOW_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_EDGE_ALPHA_4: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_TYPE_B_HUNTER: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_SHORT_BEAR_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_AI_60_65_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_URGENT_CHASE_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_CHASE_3PLUS_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_SHADOW_RUNNER: "DATA_RETIRED",
+    RESEARCH_LANE_EDGE_ALPHA_4: "DATA_RETIRED",
+    RESEARCH_LANE_TYPE_B_HUNTER: "DATA_RETIRED",
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_AI_60_65_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "DATA_RETIRED",
     RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "RETIRED",
     RESEARCH_LANE_RECOVERY_MONSTER_V1: "RETIRED",
     RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "RETIRED",
@@ -253,21 +259,18 @@ RESEARCH_LANE_LABELS = {
     **EXPERIMENTAL_LANE_LABELS,
 }
 RESEARCH_SPAWN_LANES = ()
-# [v11.6] All legacy spawn lanes retired. TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1
-# are independent-AI lanes that use their own DeepSeek calls, not AI_SCAN spawn.
+# v11.8: the persisted toggle map is deliberately an allowlist.  Historical rows
+# remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
-    **combo_toggle_defaults(),
-    **experimental_toggle_defaults(),
-    **shadow_collecting_toggle_defaults(),
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 }
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
 
 # Production execution routing only — legacy alpha lanes excluded (DATA_RETIRED).
-AI_DIRECT_RESEARCH_LANES = frozenset(
-    COMBO_EXECUTION_LANES + EXPERIMENTAL_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,)
-)
+AI_DIRECT_RESEARCH_LANES = frozenset(COMBO_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,))
 _lane_locks = {
     RESEARCH_LANE_AI_SCAN: threading.Lock(),
     RESEARCH_LANE_COMBO_65_SP5_CHASE: threading.Lock(),
@@ -293,7 +296,7 @@ _lane_locks = {
     RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: threading.Lock(),
     RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: threading.Lock(),
 }
-PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES + EXPERIMENTAL_EXECUTION_LANES
+PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
 LEGACY_PATHWAY_LANES = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
@@ -306,6 +309,13 @@ LEGACY_PATHWAY_LANES = (
     RESEARCH_LANE_TYPE_B_HUNTER,
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
     RESEARCH_LANE_CHASE_3PLUS_ALPHA,
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
+    RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
+    RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2,
+)
+ARCHIVED_PATHWAY_LANES = tuple(
+    lane for lane in LEGACY_PATHWAY_LANES if lane != RESEARCH_LANE_CONTINUOUS
 )
 LANE_TRACKING_LANES = tuple(
     dict.fromkeys(PATHWAY_LAB_LANES + LEGACY_PATHWAY_LANES + (RESEARCH_LANE_AI_SCAN,))
@@ -775,6 +785,19 @@ def _apply_env_live_gating() -> None:
     rather than crash. The persisted flag is then re-saved so the dashboard
     reflects the env-driven state.
     """
+    force_paper = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in ("1", "true", "yes", "on")
+    if force_paper:
+        with state_lock:
+            state["bitfinex_live_enabled"] = False
+            state["live_armed"] = False
+            state["strategy_mode"] = "RESEARCH"
+        logger.warning("[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled")
+        try:
+            save_persistent_config()
+        except Exception as exc:
+            logger.warning(f"[PAPER MODE] persist failed: {exc}")
+        return
+
     raw = (os.getenv("BITFINEX_LIVE_ENABLED") or "").strip().lower()
     if not raw:
         return
@@ -1423,13 +1446,18 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
         # and any lane without an explicit override.
         ladder, _lane_ladder_label, profile_id = get_lane_ladder(lane)
         scenario_c = SCENARIO_C_EXIT_PROFILE
+    # v2b: peak-never-loser floor is per-lane so TYPE_B_HUNTER_V1 gets the
+    # backtested 3 / 0 (forces breakeven-or-better on +3%+ peakers) while
+    # CONTINUOUS / SR_MICRO keep the conservative 40 / 10 defaults.
+    pnl_min_peak = peak_never_loser_min_peak_for_lane(lane)
+    pnl_floor = peak_never_loser_floor_for_lane(lane)
     return {
         "trail_ladder": ladder,
         "ladder_first_trigger_pct": ladder[0][0],
         "ladder_first_lock_pct": ladder[0][1],
         "exit_profile_id": profile_id,
-        "peak_never_loser_min_peak": PEAK_NEVER_LOSER_MIN_PEAK,
-        "peak_never_loser_floor": PEAK_NEVER_LOSER_FLOOR,
+        "peak_never_loser_min_peak": pnl_min_peak,
+        "peak_never_loser_floor": pnl_floor,
         "thesis_fast_exit_unreal_pct": thesis_pct,
         "thesis_mfe_protect_pct": mfe_protect,
         "thesis_exit_if_above_unreal_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
@@ -1454,17 +1482,40 @@ def get_exit_config_for_lane(research_lane: str) -> dict:
     return get_exit_config_snapshot(research_lane)
 
 
-def get_profit_lock_floor(peak_pct: float, trail_ladder=None):
+def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_min_peak: float = None, peak_never_loser_floor: float = None):
     ladder = trail_ladder or TRAIL_LADDER
-    if peak_pct is None or peak_pct < ladder[0][0]:
+    if peak_pct is None:
+        return None
+    min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
+    floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
+    # v2b: peak-never-loser can fire BELOW the first ladder rung when the caller
+    # passes a per-lane min_peak lower than ladder[0][0] (e.g. TYPE_B_HUNTER_V1's
+    # 3.0 vs its 10% first rung). Without this, the ladder guard would swallow
+    # the floor for the very 3%-MFE-then-reverse trades the floor is meant to
+    # catch. CONTINUOUS / SR_MICRO keep min_peak=40 (>> ladder[0][0]) so the
+    # legacy "only matters above the ladder" semantics are preserved there.
+    pnl_only = peak_pct < ladder[0][0]
+    if pnl_only and peak_pct < min_peak:
         return None
     floor = None
-    for trigger, lock in ladder:
-        if peak_pct >= trigger:
-            floor = lock
-    if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
-        floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
+    if not pnl_only:
+        for trigger, lock in ladder:
+            if peak_pct >= trigger:
+                floor = lock
+    if peak_pct >= min_peak:
+        floor = max(floor or 0, floor_val)
     return floor
+
+# Per-lane peak-never-loser resolver. Lane-aware callers should use these instead
+# of the bare module constants so TYPE_B_HUNTER_V1 gets the v2b 3/0 floor while
+# CONTINUOUS / SR_MICRO keep the legacy 40/10 conservative defaults.
+def peak_never_loser_min_peak_for_lane(research_lane: str) -> float:
+    lane = str(research_lane or "").upper()
+    return PEAK_NEVER_LOSER_MIN_PEAK_BY_LANE.get(lane, PEAK_NEVER_LOSER_MIN_PEAK)
+
+def peak_never_loser_floor_for_lane(research_lane: str) -> float:
+    lane = str(research_lane or "").upper()
+    return PEAK_NEVER_LOSER_FLOOR_BY_LANE.get(lane, PEAK_NEVER_LOSER_FLOOR)
 
 def compute_trend_health(direction_hint: str = None) -> dict:
     """v83: BULL / BULL_WEAKENING / BEAR / BEAR_WEAKENING / MIXED from live scores + tape."""
@@ -1554,7 +1605,17 @@ def _position_trail_ladder(pos: dict):
 
 
 def _effective_profit_lock_floor(pos: dict, peak_pct: float):
-    floor = get_profit_lock_floor(peak_pct, _position_trail_ladder(pos))
+    exit_cfg = pos.get("exit_config") or {}
+    # Use the per-lane peak_never_loser values baked into the position's exit_config
+    # at entry time so TYPE_B_HUNTER_V1 (3/0) and CONTINUOUS (40/10) coexist.
+    min_peak = _buf_float(exit_cfg.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+    floor_val = _buf_float(exit_cfg.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR)
+    floor = get_profit_lock_floor(
+        peak_pct,
+        _position_trail_ladder(pos),
+        peak_never_loser_min_peak=min_peak,
+        peak_never_loser_floor=floor_val,
+    )
     if floor is None:
         return None
     tighten = 0.0
@@ -1742,7 +1803,14 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     unreal_pct = unrealized_margin_pct(pos, price)
     age_sec = time.time() - pos.get("entry_ts", 0)
     peak = pos.get("max_pnl_pct", 0.0)
-    lock_floor = get_profit_lock_floor(peak)
+    # Per-lane peak_never_loser from the position's exit_config (TYPE_B=3/0, others=40/10).
+    pos_exit_cfg = pos.get("exit_config") or {}
+    lock_floor = get_profit_lock_floor(
+        peak,
+        _position_trail_ladder(pos),
+        peak_never_loser_min_peak=_buf_float(pos_exit_cfg.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK),
+        peak_never_loser_floor=_buf_float(pos_exit_cfg.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR),
+    )
     if lock_floor is not None and unreal_pct > lock_floor:
         return False
     if unreal_pct > THESIS_EXIT_IF_ABOVE_UNREAL_PCT:
@@ -2173,17 +2241,15 @@ def is_research_lane_enabled(lane: str) -> bool:
     lane = str(lane or "").upper()
     if is_research_lane_retired(lane):
         return False
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        return continuous_ai_research_enabled()
     if is_ai_scan_lane(lane):
         return any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
     if is_combo_execution_lane(lane):
-        return bool(research_lane_enabled_map().get(lane, True))
-    if is_experimental_execution_lane(lane):
-        return bool(research_lane_enabled_map().get(lane, True))
-    if lane == RESEARCH_LANE_CONTINUOUS:
-        return continuous_ai_research_enabled()
-    if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
-        return True
-    return bool(research_lane_enabled_map().get(lane, True))
+        return bool(research_lane_enabled_map().get(lane, False))
+    # Unknown and historical lane names fail closed.  This prevents old persisted
+    # flags or new call sites from producing competing paper records or orders.
+    return False
 
 
 def lane_orders_allowed(lane: str = None) -> bool:
@@ -2314,11 +2380,9 @@ def lane_pipeline_allowed(lane: str = None) -> bool:
         return False
     if is_combo_execution_lane(lane):
         return is_research_lane_enabled(lane)
-    if is_experimental_execution_lane(lane):
-        return is_research_lane_enabled(lane)
     if lane == RESEARCH_LANE_CONTINUOUS:
-        return True
-    return is_research_lane_enabled(lane)
+        return continuous_ai_research_enabled()
+    return False
 
 def get_lane_lock(lane: str):
     return _lane_locks.get(lane, process_lock)
@@ -2633,7 +2697,7 @@ def get_retired_lane_archive_rows() -> list:
     """Retired lanes: show session PnL/stats — orders blocked, data still visible."""
     metrics_by_lane = _load_lane_metrics_from_disk()
     rows = []
-    for lane in LEGACY_PATHWAY_LANES:
+    for lane in ARCHIVED_PATHWAY_LANES:
         dm = metrics_by_lane.get(lane) or {}
         pnl = float(dm.get("net_pnl_real") or 0)
         rows.append({
@@ -2642,8 +2706,8 @@ def get_retired_lane_archive_rows() -> list:
             "pathway_status": get_pathway_lane_status(lane),
             "net_pnl_usd": round(pnl, 2),
             "closes": int(dm.get("real_fills") or 0),
-            "wins": 0,
-            "losses": 0,
+            "wins": int(dm.get("wins") or 0),
+            "losses": int(dm.get("losses") or 0),
             "approves": int(dm.get("approves") or 0),
             "per_approve_ev": round(float(dm.get("per_approve_ev") or 0), 2),
         })
@@ -3304,7 +3368,14 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
-    if lock_floor is not None and peak >= ladder[0][0] and unreal_pct <= lock_floor:
+    # v2b: peak-never-loser can fire a PROFIT_LOCK_LADDER exit BELOW the first
+    # ladder rung for TYPE_B_HUNTER_V1 (its 3% min_peak is below the 10% first
+    # rung). For CONTINUOUS / SR_MICRO the 40% min_peak sits above the first
+    # rung so the legacy "peak >= ladder[0][0]" gate remains the operative one.
+    pnl_min_peak = _buf_float((pos.get("exit_config") or {}).get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+    peak_above_ladder = peak >= ladder[0][0]
+    peak_in_pnl_zone = peak >= pnl_min_peak and pnl_min_peak < ladder[0][0]
+    if lock_floor is not None and (peak_above_ladder or peak_in_pnl_zone) and unreal_pct <= lock_floor:
         entry = float(pos.get("entry") or 0)
         logger.info(
             f"[EXIT TRIGGER] PROFIT_LOCK_LADDER trade_id={pos.get('trade_id')} peak={peak:.1f}% "
@@ -5346,8 +5417,19 @@ SPREAD_PENALTY_ENABLED = True
 SPREAD_PENALTY_THRESHOLD = 5
 SPREAD_PENALTY_MARGIN_MULT = 0.75
 SPREAD_PENALTY_LOCK_TIGHTEN_PCT = 1.0
-PEAK_NEVER_LOSER_MIN_PEAK = 40.0
-PEAK_NEVER_LOSER_FLOOR = 10.0
+PEAK_NEVER_LOSER_MIN_PEAK = 40.0  # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
+PEAK_NEVER_LOSER_FLOOR = 10.0     # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
+# v2b per-lane override — TYPE_B_HUNTER_V1 backtest found that lowering the floor
+# threshold from 40.0 to 3.0 and the floor itself from 10.0 to 0.0 flips V2a from
+# -$8.60 to +$5.80. This catches trades that peaked +3% MFE then reversed and
+# forces a breakeven-or-better exit. CONTINUOUS / SR_MICRO keep the conservative
+# 40 / 10 defaults so the benchmark is not disturbed.
+PEAK_NEVER_LOSER_MIN_PEAK_BY_LANE = {
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: 3.0,
+}
+PEAK_NEVER_LOSER_FLOOR_BY_LANE = {
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0,
+}
 TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
@@ -5685,6 +5767,10 @@ RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
 POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
+# Sidecar JSONL that lets post-exit replay buffers survive bot restarts.
+# Each line is one tick event for one trade_id; the loader on startup rebuilds
+# any buffer whose post_exit_deadline_ts has not yet passed.
+POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 ANALYTICS_INTERVAL_SEC = 600
@@ -10591,10 +10677,25 @@ def _lane_sized_margin_usdt(lane: str, features: dict = None) -> tuple:
 
 def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_reason: str):
     if ai.get("decision") != "APPROVE":
+        log_lane_opportunity_event(
+            target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason=f"DECISION_NOT_APPROVE ({(ai or {}).get('decision')})",
+        )
         return
     if not is_research_data_collection():
+        log_lane_opportunity_event(
+            target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason="RESEARCH_DATA_COLLECTION_OFF",
+        )
         return
     if not guard_retired_lane_execution(target_lane, "spawn_combo_lane", (ctx or {}).get("trade_id")):
+        log_lane_opportunity_event(
+            target_lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason="RETIRED_LANE_GUARD",
+        )
         return
     enriched = _enrich_combo_lane_features(features, ctx)
     if not is_research_lane_enabled(target_lane):
@@ -10627,7 +10728,15 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
     })
 
 
-def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str, features: dict = None):
+def _spawn_lab_combo_shadow(
+    ctx,
+    ai,
+    edge_score,
+    target_lane: str,
+    features: dict = None,
+    collection_mode: str = "LAB",
+    is_counterfactual: bool = False,
+):
     """LAB mode for an OFF combo tile — run the FULL strategy pipeline in telemetry/simulation:
     virtual chase fill + Scenario C exit ladder (thesis stop / early-fail / SL / TP / profit-lock),
     WITHOUT placing any real exchange order. Reuses the shadow-collecting replay engine
@@ -10686,9 +10795,21 @@ def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str, features: dic
         edge_score=round(float(edge_score), 1),
         research_lane=target_lane,
         source_trade_id=(ctx or {}).get("trade_id"),
-        collection_mode="LAB",
+        collection_mode=collection_mode,
+        is_counterfactual=bool(is_counterfactual),
+        policy_version=(
+            _type_b_policy_version()
+            if str(target_lane).upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+            else None
+        ),
         size_mult=size_mult,
         session_bucket=enriched.get("session_bucket"),
+        entry_features=copy.deepcopy(enriched),
+        ai_snapshot={
+            "direction": (ai or {}).get("direction"),
+            "win_prob": (ai or {}).get("win_prob"),
+            "decision": (ai or {}).get("decision"),
+        },
     )
     append_replay_tick(study_id, price, None)
     logger.info(
@@ -10696,6 +10817,208 @@ def _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane: str, features: dic
         f"margin=${margin_usdt:.2f} size_mult={size_mult:.2f} session={enriched.get('session_bucket')} "
         f"— simulating full pipeline (virtual fill + Scenario C exit), no real orders [PIPELINE ENFORCEMENT]"
     )
+
+
+def _open_bracket_lab_shadow_for_side(target_lane: str, side: str):
+    """Return (trade_id, buf) for an open unfilled LAB shadow on lane+side, else None."""
+    lane_u = str(target_lane or "").upper()
+    side_u = str(side or "").upper()
+    with replay_lock:
+        for tid, buf in replay_buffers.items():
+            if buf.get("closed"):
+                continue
+            if str(buf.get("research_lane") or "").upper() != lane_u:
+                continue
+            if str(buf.get("collection_mode") or "") != "LAB":
+                continue
+            if buf.get("virtual_entry"):
+                continue
+            if str(buf.get("direction") or "").upper() != side_u:
+                continue
+            return tid, buf
+    return None
+
+
+def _cancel_open_bracket_lab_shadows(
+    target_lane: str,
+    side: str = None,
+    reason: str = "CANCELLED",
+):
+    """Finalize open LAB bracket shadows for a lane (optionally one side) as CANCELLED."""
+    lane_u = str(target_lane or "").upper()
+    side_u = str(side or "").upper() or None
+    to_finalize = []
+    with replay_lock:
+        for tid, buf in list(replay_buffers.items()):
+            if buf.get("closed"):
+                continue
+            if str(buf.get("research_lane") or "").upper() != lane_u:
+                continue
+            if str(buf.get("collection_mode") or "") != "LAB":
+                continue
+            if buf.get("virtual_entry"):
+                continue  # already filled — leave Scenario C exit alone
+            if side_u and str(buf.get("direction") or "").upper() != side_u:
+                continue
+            buf["exit_outcome"] = reason
+            buf["block_reason"] = reason
+            to_finalize.append((tid, {**buf, "ticks": list(buf.get("ticks", []))}))
+    for tid, buf_copy in to_finalize:
+        try:
+            finalize_shadow_lane_collecting(tid, buf_copy)
+            logger.info(
+                f"[{lane_u}] cancelled open LAB shadow study_id={tid} "
+                f"reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+        except Exception as e:
+            logger.error(f"[{lane_u}] cancel shadow failed study_id={tid}: {e}")
+
+
+def _spawn_lab_bracket_shadow(
+    ctx,
+    side: str,
+    limit_price: float,
+    edge_score: float,
+    target_lane: str,
+    features: dict = None,
+    bracket_eval: dict = None,
+    chase_mode: str = None,
+    id_prefix: str = None,
+    max_chases: int = None,
+    fill_at_limit: bool = None,
+):
+    """LAB shadow at a bracket limit (micro S/R level) — real tick replay fill + Scenario C exit.
+
+    chase_mode:
+      FULL_CHASE (default / V2) — unchanged fill-on-cross at market price.
+      STATIC — resting limit at exact S/R; never reprice; fill AT limit or TTL_EXPIRED.
+    """
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(target_lane):
+        return
+    try:
+        from sr_micro_tile_v2 import (
+            bracket_limit_pullback,
+            chase_mode_for_lane,
+            max_chases_for_mode,
+            trade_id_prefix_for_lane,
+            CHASE_MODE_STATIC,
+        )
+    except Exception:
+        bracket_limit_pullback = None
+        chase_mode_for_lane = None
+        max_chases_for_mode = None
+        trade_id_prefix_for_lane = None
+        CHASE_MODE_STATIC = "STATIC"
+
+    direction = str(side or "LONG").upper()
+    if direction not in ("LONG", "SHORT"):
+        return
+    if state.get("invert_signal", False):
+        direction = "SHORT" if direction == "LONG" else "LONG"
+
+    market_price = float(nz(state.get("price")) or 0)
+    limit_price = float(limit_price or 0)
+    if market_price <= 0 or limit_price <= 0:
+        return
+
+    mode = str(chase_mode or "").upper()
+    if not mode and chase_mode_for_lane:
+        mode = chase_mode_for_lane(target_lane)
+    if not mode:
+        mode = "FULL_CHASE"
+    is_static = mode == CHASE_MODE_STATIC or bool(fill_at_limit) or is_static_bracket_lane(target_lane)
+    if max_chases is None and max_chases_for_mode:
+        max_chases = max_chases_for_mode(mode)
+    if max_chases is None and is_static:
+        max_chases = 0
+
+    prefix = id_prefix or (trade_id_prefix_for_lane(target_lane) if trade_id_prefix_for_lane else "srmv2")
+
+    if is_static:
+        # Resting-order model: keep one working limit per side.
+        # Same limit → leave open (do not cancel/respawn). Changed limit → cancel + replace.
+        existing = _open_bracket_lab_shadow_for_side(target_lane, direction)
+        if existing:
+            _tid, _buf = existing
+            cur_lim = float(_buf.get("limit_price") or _buf.get("original_limit_price") or 0)
+            if cur_lim > 0 and abs(cur_lim - limit_price) < 0.01:
+                logger.info(
+                    f"[{target_lane}] STATIC resting limit already working "
+                    f"study_id={_tid} dir={direction} limit={cur_lim:.2f} — skip respawn "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                return "RESTING"
+            _cancel_open_bracket_lab_shadows(target_lane, direction, reason="CANCELLED")
+
+    if bracket_limit_pullback:
+        start_price, pullback_pct = bracket_limit_pullback(direction, market_price, limit_price)
+    else:
+        start_price = market_price
+        if direction == "LONG" and limit_price < market_price:
+            pullback_pct = (market_price - limit_price) / market_price
+        elif direction == "SHORT" and limit_price > market_price:
+            pullback_pct = (limit_price - market_price) / market_price
+        else:
+            pullback_pct = 0.0
+
+    if start_price <= 0:
+        return
+
+    study_id = f"{prefix}-{direction.lower()}-{uuid.uuid4().hex[:12]}"
+    exit_cfg = get_exit_config_for_lane(target_lane)
+    if lane_orders_allowed(target_lane):
+        logger.error(
+            f"[LAB_GUARD] lane={target_lane} unexpectedly orders-allowed in bracket LAB spawn "
+            f"— aborting to avoid real orders [PIPELINE ENFORCEMENT]"
+        )
+        return
+
+    enriched = _enrich_combo_lane_features(features, ctx)
+    margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
+    start_replay_buffer(
+        study_id,
+        start_price,
+        lane=f"shadow_collect_{target_lane}",
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(margin_usdt),
+        pullback_pct=float(pullback_pct),
+        early_fail_enabled=bool(state.get("early_fail_enabled", True)),
+        exit_config=exit_cfg,
+        edge_score=round(float(edge_score), 1),
+        research_lane=target_lane,
+        source_trade_id=(ctx or {}).get("trade_id"),
+        collection_mode="LAB",
+        size_mult=size_mult,
+        session_bucket=enriched.get("session_bucket"),
+        entry_features=copy.deepcopy(enriched),
+        limit_price=float(limit_price),
+        original_limit_price=float(limit_price),
+        chase_mode=mode,
+        max_chases=0 if is_static else max_chases,
+        fill_at_limit=bool(is_static),
+        limit_chase_count=0,
+    )
+    append_replay_tick(study_id, market_price, None)
+    log_lane_opportunity_event(
+        target_lane,
+        "SPAWN_LAB",
+        study_id,
+        direction,
+        None,
+        edge_score,
+        block_reason="BRACKET_LEG_STATIC" if is_static else "BRACKET_LEG",
+    )
+    logger.info(
+        f"[{target_lane}] LAB bracket shadow study_id={study_id} dir={direction} "
+        f"limit={limit_price:.2f} market={market_price:.2f} pullback={pullback_pct:.6f} "
+        f"chase_mode={mode} fill_at_limit={is_static} "
+        f"zone={(bracket_eval or {}).get('zone')} armed={(bracket_eval or {}).get('armed')} "
+        f"— limit replay + Scenario C, no real orders [PIPELINE ENFORCEMENT]"
+    )
+    return "SPAWNED"
 
 
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
@@ -10718,8 +11041,8 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
     spread = int(compute_directional_spread(final_direction, ai))
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
-        # Guard: V2 must not spawn from AI_SCAN (own prompt + own decision only).
-        if is_independent_ai_lane(lane):
+        # Guard: independent-AI and deterministic-bracket lanes never spawn from AI_SCAN.
+        if is_independent_ai_lane(lane) or is_deterministic_bracket_lane(lane):
             continue
         detail = combo_lane_match_detail(
             lane, ai, final_direction, spread, features=enriched,
@@ -10956,7 +11279,19 @@ def _spawn_shadow_collecting_lane(
 
 def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     """Simulate virtual fill + Scenario C exit for off-dashboard shadow lanes."""
+    # Honour explicit cancel before simulate (CANCELLED > TTL).
+    explicit = str(buf.get("exit_outcome") or buf.get("block_reason") or "").upper()
     outcome = simulate_replay_outcome(buf)
+    if explicit == "CANCELLED" and not outcome.get("filled"):
+        outcome["exit_reason"] = "CANCELLED"
+        outcome["entry_outcome"] = "CANCELLED"
+    elif (
+        not outcome.get("filled")
+        and str(outcome.get("exit_reason") or "") in ("NO_FILL", "TTL_EXPIRED")
+        and (buf.get("fill_at_limit") or str(buf.get("chase_mode") or "").upper() == "STATIC")
+    ):
+        outcome["exit_reason"] = "TTL_EXPIRED"
+        outcome["entry_outcome"] = "TTL_EXPIRED"
     lane = str(buf.get("research_lane") or "").upper()
     row = {
         "schema": "shadow_lane_outcome_v1",
@@ -10966,20 +11301,33 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "research_lane": lane,
         "source_trade_id": buf.get("source_trade_id"),
         "collection_mode": buf.get("collection_mode") or PATHWAY_STATUS_SHADOW_COLLECTING,
+        "is_counterfactual": bool(buf.get("is_counterfactual")),
+        "policy_entered": not bool(buf.get("is_counterfactual")),
+        "policy_version": buf.get("policy_version"),
         "executed": False,
         "direction": buf.get("direction"),
         "exit_config": buf.get("exit_config"),
         "margin_usdt": buf.get("margin_usdt"),
         "size_mult": buf.get("size_mult"),
         "session_bucket": buf.get("session_bucket"),
+        "entry_features": copy.deepcopy(buf.get("entry_features") or {}),
+        "ai_snapshot": copy.deepcopy(buf.get("ai_snapshot") or {}),
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "chase_mode": buf.get("chase_mode") or outcome.get("chase_mode"),
+        "limit_price": buf.get("limit_price") or outcome.get("limit_price"),
+        "original_limit_price": buf.get("original_limit_price") or outcome.get("original_limit_price"),
+        "start_price": buf.get("start_price") or outcome.get("start_price"),
+        "max_chases": buf.get("max_chases"),
+        "fill_at_limit": bool(buf.get("fill_at_limit")),
         **outcome,
     }
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
     logger.info(
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
-        f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
+        f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} "
+        f"entry_outcome={outcome.get('entry_outcome')} chase_mode={row.get('chase_mode')} "
+        f"[PIPELINE ENFORCEMENT]"
     )
     # LAB mode (OFF combo tile): record simulated PnL into the parallel lab ledger so the
     # Pathway Lab dashboard can pre-flight a strategy without real orders. Tagged `mode: "lab"`
@@ -11453,13 +11801,25 @@ def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
 _lane_last_ts = {}  # {'CONTINUOUS': ts, 'TYPE_B_HUNTER_V1': ts, 'SR_MICRO_TILE_V1': ts}
 
 
-def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: float) -> tuple:
+def _type_b_policy_version() -> str:
+    """Return the Tile 1 policy marker without making the paper path fail open."""
+    try:
+        from type_b_hunter_v1 import POLICY_VERSION
+        return str(POLICY_VERSION)
+    except Exception:
+        return "TYPE_B_POLICY_UNAVAILABLE"
+
+
+def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
     """Optional TYPE_B composite filter. Returns (ok, block_reason)."""
     try:
         from type_b_hunter_v1 import should_enter_type_b
-    except Exception:
-        return True, None
+    except Exception as e:
+        logger.error(f"[TYPE_B_HUNTER_V1] policy import failed: {e} [PIPELINE ENFORCEMENT]")
+        return False, "TYPE_B_POLICY_UNAVAILABLE"
     feat = dict(features or {})
+    direction = str((ai or {}).get("direction") or "").upper()
+    feat["direction"] = direction
     if "edge_score" not in feat:
         feat["edge_score"] = edge_score
     try:
@@ -11473,10 +11833,39 @@ def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: f
             feat["spread"] = int(compute_directional_spread(direction, ai or {}))
         except Exception:
             pass
-    ok, detail = should_enter_type_b(ai_prob, feat)
+    # Feature snapshot often omits adx/structure/ema — pull from AI ctx / market_context
+    ctx = ctx or {}
+    mc = ctx.get("market_context") if isinstance(ctx.get("market_context"), dict) else {}
+    ts = mc.get("trend_strength") if isinstance(mc.get("trend_strength"), dict) else {}
+    for key, src in (
+        ("adx", ctx.get("adx") or ts.get("adx")),
+        ("adx_at_entry", ctx.get("adx") or ts.get("adx")),
+        ("structure_score", ctx.get("structure_score") or ctx.get("structure")),
+        ("structure", ctx.get("structure_score") or ctx.get("structure")),
+        ("ema_slope", ctx.get("ema_slope") or ctx.get("ema_hybrid_slope")),
+        ("market_context", mc or None),
+    ):
+        if feat.get(key) is None and src is not None:
+            feat[key] = src
+    ms = mc.get("market_structure") if isinstance(mc.get("market_structure"), dict) else {}
+    if feat.get("structure_score") is None:
+        feat["structure_score"] = ms.get("structure_score")
+    if feat.get("structure") is None:
+        feat["structure"] = ms.get("structure_score")
+    if feat.get("regime") is None:
+        feat["regime"] = ctx.get("regime") or mc.get("regime") or ms.get("regime")
+    try:
+        ok, detail = should_enter_type_b(ai_prob, feat, direction)
+    except Exception as e:
+        logger.error(
+            f"[TYPE_B_HUNTER_V1] entry filter crash: {e} — treating as FILTERED "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False, f"TYPE_B_FILTER_CRASH ({type(e).__name__})"
     if ok:
         return True, None
-    return False, (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+    block_reason = (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+    return False, f"{block_reason} [{_type_b_policy_version()}]"
 
 
 def _apply_sr_micro_tile_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
@@ -11513,8 +11902,13 @@ def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str
     """Feed independent-AI V1 APPROVEs into LAB shadow (OFF) or process_signal (ON).
 
     Mirrors V2 tick post-AI routing and combo `_spawn_combo_lane` LAB/ON split.
+    Never silently drops an executable APPROVE — every path logs SPAWN_*.
     """
-    if not ai or not ai_decision_should_execute(ai):
+    type_b_policy_lane = lane == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    type_b_direction_ready = bool(
+        ai and not ai.get("ai_error") and str(ai.get("direction") or "").upper() in ("LONG", "SHORT")
+    )
+    if not ai or (not type_b_policy_lane and not ai_decision_should_execute(ai)) or (type_b_policy_lane and not type_b_direction_ready):
         logger.info(
             f"[{lane}_AI] soft-reject — not executable "
             f"decision={((ai or {}).get('decision'))} tier={((ai or {}).get('execution_tier'))} "
@@ -11526,21 +11920,56 @@ def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str
             block_reason="AI_NOT_EXECUTABLE",
         )
         return
-    if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
-        ok, br = _apply_type_b_hunter_v1_entry_filter(ai, features, edge_score)
-    elif lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
-        ok, br = _apply_sr_micro_tile_v1_entry_filter(ai, features, edge_score, ctx=ctx)
-    else:
-        ok, br = True, None
+    try:
+        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            ok, br = _apply_type_b_hunter_v1_entry_filter(ai, features, edge_score, ctx=ctx)
+        elif lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
+            ok, br = _apply_sr_micro_tile_v1_entry_filter(ai, features, edge_score, ctx=ctx)
+        else:
+            ok, br = True, None
+    except Exception as e:
+        ok, br = False, f"ENTRY_FILTER_CRASH ({type(e).__name__})"
+        logger.error(f"[{lane}_AI] entry filter crash: {e} [PIPELINE ENFORCEMENT]")
     if not ok:
         log_lane_opportunity_event(
             lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
             block_reason=br,
         )
+        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            # Record a paper-only control for every executable signal rejected
+            # by the Type B policy.  It is excluded from the tile ledger and
+            # cannot submit an order, but supplies the held-out negative class
+            # needed for an honest walk-forward calibration test.
+            _spawn_lab_combo_shadow(
+                ctx,
+                ai,
+                edge_score,
+                lane,
+                features,
+                collection_mode="CALIBRATION_COUNTERFACTUAL",
+                is_counterfactual=True,
+            )
         logger.info(f"[{lane}_AI] entry filter blocked spawn reason={br} [PIPELINE ENFORCEMENT]")
         return
-    _spawn_combo_lane(ctx, ai, edge_score, features, lane, trigger_reason)
+    if type_b_policy_lane:
+        ai = dict(ai or {})
+        ai["pre_policy_decision"] = ai.get("decision")
+        ai["pre_policy_execution_tier"] = ai.get("execution_tier")
+        ai["decision"] = "APPROVE"
+        ai["approved"] = True
+        ai["execution_tier"] = "TYPE_B_POLICY"
+        ai["policy_version"] = _type_b_policy_version()
+    try:
+        _spawn_combo_lane(ctx, ai, edge_score, features, lane, trigger_reason)
+    except Exception as e:
+        log_lane_opportunity_event(
+            lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason=f"SPAWN_COMBO_CRASH ({type(e).__name__})",
+        )
+        logger.error(f"[{lane}_AI] spawn_combo crash after APPROVE: {e} [PIPELINE ENFORCEMENT]")
+        raise
 
 
 def maybe_tick_type_b_hunter_v1_research():
@@ -11675,6 +12104,296 @@ def maybe_tick_sr_micro_tile_v1_research():
         )
     except Exception as e:
         logger.error(f"[{lane}_AI] tick crash: {e}")
+
+
+_srmv2_last_tick_ts = 0.0
+_srmv2_last_pivot_sig = None
+SRMV2_TICK_INTERVAL_SEC = int(os.getenv("SRMV2_TICK_INTERVAL_SEC", "20"))
+
+
+def maybe_tick_sr_micro_tile_v2_bracket():
+    """SR_MICRO_TILE_V2 deterministic bracket tick — no AI, dual LAB shadow replay.
+
+    Throttled every ~20s (10-30s) OR on micro S/R pivot change. Phase 1: shadow only.
+    """
+    lane = RESEARCH_LANE_SR_MICRO_TILE_V2
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(lane):
+        return
+
+    global _srmv2_last_tick_ts, _srmv2_last_pivot_sig
+    now = time.time()
+    try:
+        from sr_micro_tile_v2 import evaluate_bracket, should_enter_bracket_leg
+    except Exception as e:
+        logger.error(f"[{lane}] import failed: {e}")
+        return
+
+    try:
+        if not is_buffer_ready():
+            return
+        price = float(nz(state.get("price")) or 0)
+        if price <= 0:
+            return
+
+        ms = build_micro_sr_levels()
+        pivot_sig = (ms.get("micro_support"), ms.get("micro_resistance"))
+        pivot_changed = pivot_sig != _srmv2_last_pivot_sig
+        elapsed = now - _srmv2_last_tick_ts
+        if not pivot_changed and elapsed < SRMV2_TICK_INTERVAL_SEC:
+            return
+
+        with state_lock:
+            candles = copy.deepcopy(latest_candles) or []
+        swing_high, swing_low = compute_structural_sr(candles)
+
+        features = build_full_feature_snapshot() or {}
+        adx = (
+            features.get("adx")
+            or features.get("adx_at_entry")
+            or features.get("mom_adx")
+        )
+        vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+
+        eval_result = evaluate_bracket(
+            price,
+            ms.get("micro_support"),
+            ms.get("micro_resistance"),
+            swing_low,
+            swing_high,
+            adx=adx,
+            vol_pct=vol_pct,
+        )
+
+        _srmv2_last_tick_ts = now
+        _srmv2_last_pivot_sig = pivot_sig
+
+        edge_score = compute_edge_score(features) if features else 0.0
+        bracket_id = f"srmv2-bracket-{uuid.uuid4().hex[:12]}"
+        ctx = {
+            "trade_id": bracket_id,
+            "price": price,
+            "micro_support": ms.get("micro_support"),
+            "micro_resistance": ms.get("micro_resistance"),
+            "swing_low": swing_low,
+            "swing_high": swing_high,
+            "structure_bias": ms.get("structure_bias"),
+            "bracket_eval": eval_result,
+        }
+        enriched = _enrich_combo_lane_features(features, ctx)
+
+        log_lane_opportunity_event(
+            lane,
+            "BRACKET_EVAL",
+            bracket_id,
+            None,
+            None,
+            edge_score,
+            block_reason=eval_result.get("block_reason") or eval_result.get("zone"),
+        )
+
+        if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
+            logger.info(
+                f"[{lane}] bracket idle zone={eval_result.get('zone')} "
+                f"reason={eval_result.get('block_reason')} pivot_changed={pivot_changed} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            return
+
+        tile_on = is_research_lane_enabled(lane)
+        legs_spawned = 0
+        for side in ("LONG", "SHORT"):
+            if not should_enter_bracket_leg(side, eval_result):
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason=f"LEG_NOT_ARMED_{side}",
+                )
+                continue
+            limit = (
+                eval_result.get("long_limit")
+                if side == "LONG"
+                else eval_result.get("short_limit")
+            )
+            if tile_on:
+                # Phase 1: shadow-only even when toggle ON — live bracket orders deferred.
+                logger.info(
+                    f"[{lane}] tile ON but Phase 1 shadow-only — LAB replay for {side} "
+                    f"limit={limit} [PIPELINE ENFORCEMENT]"
+                )
+            _spawn_lab_bracket_shadow(
+                ctx, side, limit, edge_score, lane, enriched, eval_result,
+            )
+            legs_spawned += 1
+
+        logger.info(
+            f"[{lane}] bracket tick pivot_changed={pivot_changed} elapsed={elapsed:.0f}s "
+            f"zone={eval_result.get('zone')} legs={legs_spawned} "
+            f"long={eval_result.get('long_armed')} short={eval_result.get('short_armed')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    except Exception as e:
+        logger.error(f"[{lane}] bracket tick crash: {e}")
+
+
+_srmv2s_last_tick_ts = 0.0
+_srmv2s_last_pivot_sig = None
+SRMV2S_TICK_INTERVAL_SEC = int(os.getenv("SRMV2S_TICK_INTERVAL_SEC", os.getenv("SRMV2_TICK_INTERVAL_SEC", "20")))
+
+
+def maybe_tick_sr_micro_tile_v2_static_bracket():
+    """SR_MICRO_TILE_V2_STATIC: probationary resting S/R limit, never repriced.
+
+    Paper-only until its reconciled filled-sample gate is met.
+    """
+    lane = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    if not is_research_data_collection():
+        return
+    if not is_combo_execution_lane(lane):
+        return
+
+    global _srmv2s_last_tick_ts, _srmv2s_last_pivot_sig
+    now = time.time()
+    try:
+        from sr_micro_tile_v2 import (
+            evaluate_bracket,
+            should_enter_bracket_leg,
+            CHASE_MODE_STATIC,
+            STATIC_LANE_ID_PREFIX,
+            STATIC_MAX_CHASES,
+        )
+    except Exception as e:
+        logger.error(f"[{lane}] import failed: {e}")
+        return
+
+    try:
+        if not is_buffer_ready():
+            return
+        price = float(nz(state.get("price")) or 0)
+        if price <= 0:
+            return
+
+        ms = build_micro_sr_levels()
+        pivot_sig = (ms.get("micro_support"), ms.get("micro_resistance"))
+        pivot_changed = pivot_sig != _srmv2s_last_pivot_sig
+        elapsed = now - _srmv2s_last_tick_ts
+        if not pivot_changed and elapsed < SRMV2S_TICK_INTERVAL_SEC:
+            return
+
+        with state_lock:
+            candles = copy.deepcopy(latest_candles) or []
+        swing_high, swing_low = compute_structural_sr(candles)
+
+        features = build_full_feature_snapshot() or {}
+        adx = (
+            features.get("adx")
+            or features.get("adx_at_entry")
+            or features.get("mom_adx")
+        )
+        vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+
+        eval_result = evaluate_bracket(
+            price,
+            ms.get("micro_support"),
+            ms.get("micro_resistance"),
+            swing_low,
+            swing_high,
+            adx=adx,
+            vol_pct=vol_pct,
+        )
+        # Tag eval for telemetry — arming rules identical to V2.
+        eval_result = dict(eval_result)
+        eval_result["lane"] = lane
+        eval_result["chase_mode"] = CHASE_MODE_STATIC
+
+        _srmv2s_last_tick_ts = now
+        _srmv2s_last_pivot_sig = pivot_sig
+
+        edge_score = compute_edge_score(features) if features else 0.0
+        bracket_id = f"srmv2s-bracket-{uuid.uuid4().hex[:12]}"
+        ctx = {
+            "trade_id": bracket_id,
+            "price": price,
+            "micro_support": ms.get("micro_support"),
+            "micro_resistance": ms.get("micro_resistance"),
+            "swing_low": swing_low,
+            "swing_high": swing_high,
+            "structure_bias": ms.get("structure_bias"),
+            "bracket_eval": eval_result,
+            "chase_mode": CHASE_MODE_STATIC,
+        }
+        enriched = _enrich_combo_lane_features(features, ctx)
+
+        log_lane_opportunity_event(
+            lane,
+            "BRACKET_EVAL",
+            bracket_id,
+            None,
+            None,
+            edge_score,
+            block_reason=eval_result.get("block_reason") or eval_result.get("zone"),
+        )
+
+        if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
+            # Structural idle/suspend — cancel any resting STATIC shadows (CANCELLED).
+            if eval_result.get("block_reason") in (
+                "ADX_TRENDING", "VOLATILITY_SPIKE", "PRICE_OUTSIDE_ENVELOPE", "MICRO_OUTSIDE_SWING",
+            ):
+                _cancel_open_bracket_lab_shadows(lane, reason="CANCELLED")
+            logger.info(
+                f"[{lane}] bracket idle zone={eval_result.get('zone')} "
+                f"reason={eval_result.get('block_reason')} pivot_changed={pivot_changed} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            return
+
+        tile_on = is_research_lane_enabled(lane)
+        legs_spawned = 0
+        for side in ("LONG", "SHORT"):
+            if not should_enter_bracket_leg(side, eval_result):
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason=f"LEG_NOT_ARMED_{side}",
+                )
+                continue
+            limit = (
+                eval_result.get("long_limit")
+                if side == "LONG"
+                else eval_result.get("short_limit")
+            )
+            if tile_on:
+                logger.info(
+                    f"[{lane}] tile ON but Phase 1 shadow-only — LAB STATIC replay for {side} "
+                    f"limit={limit} [PIPELINE ENFORCEMENT]"
+                )
+            spawn_result = _spawn_lab_bracket_shadow(
+                ctx, side, limit, edge_score, lane, enriched, eval_result,
+                chase_mode=CHASE_MODE_STATIC,
+                id_prefix=STATIC_LANE_ID_PREFIX,
+                max_chases=STATIC_MAX_CHASES,
+                fill_at_limit=True,
+            )
+            if spawn_result == "SPAWNED":
+                legs_spawned += 1
+
+        logger.info(
+            f"[{lane}] STATIC bracket tick pivot_changed={pivot_changed} elapsed={elapsed:.0f}s "
+            f"zone={eval_result.get('zone')} legs={legs_spawned} "
+            f"long={eval_result.get('long_armed')} short={eval_result.get('short_armed')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    except Exception as e:
+        logger.error(f"[{lane}] STATIC bracket tick crash: {e}")
 
 
 def maybe_tick_a160_v2_research():
@@ -12088,6 +12807,16 @@ def _ai_prob_in_band(prob: float, band_id: str, lo: float, hi: float) -> bool:
 
 
 def ai_win_prob_in_execution_bands(prob) -> bool:
+    """VESTIGIAL as of 2026-07-15 (Tile 1 300-trade data).
+
+    The AI win-prob call returns exactly ``62`` for 831/853 trades — zero
+    discriminating signal. The dashboard band gate still exists, but as long as
+    the 60-66 band is enabled (the only band containing 62), every AI-evaluated
+    signal passes this check. Keeping it on Option A — leave the gate in place
+    so the existing CONTINUOUS flow is not disturbed, but treat any "AI band"
+    pass/fail in research as effectively a constant-True. Regime-fingerprint
+    gating (Option B) is a separate research tile.
+    """
     try:
         p = float(prob or 0)
     except (TypeError, ValueError):
@@ -12102,7 +12831,12 @@ def ai_win_prob_in_execution_bands(prob) -> bool:
 
 
 def dashboard_ai_band_blocks(prob) -> bool:
-    """Hard dashboard gate — always enforced regardless of research log-only lanes."""
+    """Hard dashboard gate — VESTIGIAL while the AI returns constant 62.
+
+    See ``ai_win_prob_in_execution_bands`` for the full note. Kept ON (Option A)
+    so we don't break the CONTINUOUS benchmark mid-stream; the V2a scorer
+    already zero-weights AI confidence.
+    """
     return not ai_win_prob_in_execution_bands(prob)
 
 
@@ -16045,13 +16779,11 @@ def state_monitor_loop():
                                 _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
-            # V2 phase-shifted AI (last_ai_call_ts + 90s, own ~180s cooldown).
-            # Never shares AI_SCAN call or CONTINUOUS last_ai_call_ts.
-            maybe_tick_a160_v2_research()
-            # v11.6 Research tiles: TYPE_B_HUNTER_V1 (T+60s) + SR_MICRO_TILE_V1 (T+120s)
-            # Independent AI calls with custom prompts. Shadow-only when tile OFF.
+            # v11.8 paper roster: only Type B and static S/R have independent
+            # collectors. Historical V1/full-chase/A160 code remains archived,
+            # but is intentionally never scheduled.
             maybe_tick_type_b_hunter_v1_research()
-            maybe_tick_sr_micro_tile_v1_research()
+            maybe_tick_sr_micro_tile_v2_static_bracket()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -16878,39 +17610,181 @@ def close_position(pos: dict, exit_reason: str):
 # These replace AI_PROMPT_TEMPLATE when research_lane matches.
 
 TYPE_B_HUNTER_PROMPT_TEMPLATE = """
-You are a TYPE_B trade prediction engine for BTC perpetual trades.
+You are a TYPE_B trade prediction engine for BTC perpetual trades (v12 policy).
 TYPE_B trades are defined as setups that achieve >=15% MFE (maximum favorable excursion).
-Your job is to predict whether the current setup will reach TYPE_B status.
+Your job is to surface market facts and propose a direction. The deterministic v12 policy
+in type_b_hunter_v1.py is the ACTUAL entry gate — your numeric confidence is vestigial
+(97% of historical outputs were the constant value 62 and have ZERO correlation with win rate).
+You should still emit direction + reason, but DO NOT treat your own confidence as a predictor.
 
 Given the following market data:
 
 {context}
 
-=== TYPE_B IDENTIFICATION RULES ===
+=== v12 EVIDENCE-BACKED TYPE_B IDENTIFICATION RULES ===
+(Pre-registered for prospective paper evaluation. Numbers below are from a fresh 305-trade cohort.)
 
-Key predictors of TYPE_B outcomes (from historical data):
-1. Order-flow delta (+67% higher for TYPE_B vs TYPE_A). Delta >= 18 = bullish.
-2. Volume ratio (TYPE_B mean=1.12 vs TYPE_A mean=0.76). Ratio >= 0.90 = strong.
-3. AI confidence >= 65 = P(TYPE_B) 48.3%, WR 86.2%.
-4. ADX 20-40 range = P(TYPE_B) 35-36% range.
-5. Spread 3-4 = P(TYPE_B) 36.3%, WR 69.2%.
-6. EMA slope UP = P(TYPE_B) 34.3%.
+CRITICAL: Feature ranking reflects actual predictive power, not intuition.
+Several commonly assumed relationships are INVERTED in real data.
 
-=== DECISION RULES ===
+---
 
-APPROVE (confidence >= 65) ONLY when:
-- Delta >= 18 OR volume_ratio >= 0.90 (at least one Tier-1 factor)
-- ADX between 20-40 (not flat, not extreme)
-- Direction aligns with EMA slope and trend health
-- Not mid-session chop (check regime)
+TIER 1 — Strongest Predictors (determine REJECT vs APPROVE)
 
-SOFT_REJECT (confidence 55-64):
-- Some factors align but not enough conviction
+1. ADX — THE SINGLE STRONGEST FEATURE SEPARATOR (v12: FLIPPED from earlier beliefs)
+   On the fresh 305-trade cohort the high-ADX buckets are the profitable ones:
+   - ADX 30-35: OPTIMAL ZONE. 41.9% of these trades convert to TYPE_B,
+     75.7% win rate. This is the BEST bucket — strongest directional follow-through.
+   - ADX 25-30: STRONG. Solid directional conviction, good conversion.
+   - ADX > 35: VALID but watch exhaustion. Still profitable, but extended —
+     require clean alignment with regime and structure.
+   - ADX 20-25: WEAK. Only 28.9% TYPE_B conversion. Marginal edge — pass unless
+     every other factor is strongly favorable.
+   - ADX < 20: HARD REJECT. Only 17.1% TYPE_B conversion, 61% WR. Flat/dead
+     market — no directional conviction is possible here. The bot bleeds money.
+
+2. VOLUME RATIO — RELATIONSHIP IS INVERTED vs intuition
+   - Type A (loser) trades mean volume ratio = 1.04 (high volume = CHASE/PANIC)
+   - Type B (winner) trades mean volume ratio = 0.60 (low volume = ACCUMULATION)
+   - Low ratio (< 0.80): STRONG Type B signal. Quiet accumulation before breakout.
+     These are the setups where smart positioning happens before the crowd.
+   - Normal ratio (0.80-1.20): NEUTRAL. Neither helps nor hurts.
+   - High ratio (1.20-1.50): DANGER ZONE. Chase/panic entry behavior.
+     Retail FOMO destroys edge here.
+   - Extreme ratio (> 1.50): HEAVY REJECT. Abnormal volume = capitulation or fakeout.
+     The bot should NEVER enter when volume spikes this high.
+
+---
+
+TIER 2 — Important Contextual Separators
+
+3. REGIME — Determines baseline Type B probability
+   - BEAR regime: Historically BEST for Type B. Sustained directional moves
+     create more reliable follow-through. Default to favorable.
+   - RANGE regime: Solid. Requires clean feature alignment.
+   - BULL regime: LOWER Type B WR — choppier market with more false breakouts.
+     BULL requires ADX >= 28 to clear the gate (BULL_NEEDS_ADX_28_PLUS).
+     Default to conservative sizing and higher thresholds.
+   - CHOPPY / EXPANSION / UNKNOWN: HARD REJECT. The policy blocks these outright
+     (REGIME_BLOCK) — do not waste confidence on them.
+
+4. STRUCTURE SCORE — Directional conviction from market context
+   Value is in the market_context.market_structure.structure_score field
+   (or trend_health.structure_score in the context).
+   - Structure <= -3 (bearish bias): Favorable for SHORT Type B setups.
+     Clean bearish market structure supports sustained downside.
+   - Structure >= 3 (bullish bias): Supports LONG. Exercise extra caution
+     in BULL regime where bull structure is less reliable.
+   - Structure between -3 and 3: No structural edge — requires other factors.
+   - LONG while structure <= -3 = COUNTER_STRUCTURE_LONG (HARD REJECT)
+   - SHORT while structure >= 3 = COUNTER_STRUCTURE_SHORT (HARD REJECT)
+
+5. DELTA (order-flow imbalance) — Directional confirmation
+   - Positive delta: Buy pressure supports LONG thesis.
+   - Negative delta: Sell pressure supports SHORT thesis.
+   - USAGE: Delta confirms direction, but must be read WITH volume ratio.
+     Direction-aligned delta (>= 18 long / <= -18 short) earns credit.
+     High delta + Low volume ratio = quiet accumulation (BEST).
+     High delta + High volume ratio = chase behavior (WORST).
+
+6. SPREAD (conviction spread) — Signal quality indicator
+   - Spread 3-5: BEST historical range. Good conviction without overcommitment.
+   - Spread 2-3: Moderate quality. Valid with other strong factors.
+   - Spread < 2: HARD REJECT (SPREAD_FLOOR) — insufficient conviction.
+
+---
+
+TIER 3 — Supplementary Signals
+
+7. EDGE SCORE — Paradoxically, high edge != high win rate
+   - Edge 3-5: GOLDILOCKS ZONE. Best historical Type B conversion.
+   - Edge > 5: COUNTERINTUITIVE — LOWER win rate at scale.
+     The bot's highest confidence zones are historically worse.
+     Overconfidence kills edge — base decisions on features, not self-calibration.
+     Do NOT inflate your confidence just because you see high edge numbers.
+   - Edge > 5 + Volume ratio > 1.20: HARD REJECT (EDGE_VOLUME_DANGER).
+
+8. EMA SLOPE — Trend alignment (weakest Tier-3 signal)
+   - UP slope + LONG direction: confirms bias.
+   - DOWN slope + SHORT direction: confirms bias.
+   - Conflicting slope vs direction: minor negative.
+
+---
+
+=== DECISION FRAMEWORK ===
+
+STRONG_APPROVE (features strongly align; do not use the numeric confidence as a gate):
+- ADX 30-35 (OPTIMAL ZONE — flipped from earlier belief)
+- Volume ratio < 1.20 (NOT in chase/panic zone)
+- Direction aligned with BOTH regime and structure
+- At least 3 TIER 1+2 factors favorable
+- Edge 3-5 (goldilocks, not overconfidence zone)
+- Spread 3-5
+- No "SIT OUT" conditions triggered
+
+APPROVE (features align; do not use the numeric confidence as a gate):
+- ADX 25-35
+- Volume ratio < 1.50
+- Direction aligned with regime or structure (at least one)
+- At least 2 TIER 1+2 factors favorable
+- No "SIT OUT" conditions triggered
+
+SOFT_APPROVE (some features are weak or missing; do not use the numeric confidence as a gate):
+- Most factors align but one key signal is weak or missing
+- OR in BULL regime with only partial alignment
+- OR normal feature set but no standout signal
+- Directionally correct but conviction is low
 
 REJECT:
-- Delta < 10 and volume_ratio < 0.7
-- ADX < 20 (flat market)
-- Conflicting signals
+- Any "SIT OUT" condition triggered (see below)
+- ADX < 20 (flat market — no edge possible)
+- Volume ratio > 1.50 (abnormal/panic volume)
+- Direction conflicts with BOTH regime AND structure
+- Three or more Tier 1+2 signals in warning/danger zones
+
+---
+
+=== WHEN TO SIT OUT (HARD REJECT — no exceptions, no override) ===
+
+These are the seven pre-registered v12 risk hypotheses. The deterministic gate enforces
+every one of them — your confidence does NOT override them.
+
+1. ADX < 20 = FLAT/DEAD MARKET (ADX_FLOOR)
+   No directional edge possible. 17.1% TYPE_B conversion, 61% WR on fresh data.
+
+2. Volume ratio > 2.0 = EXTREME ANOMALY (VOLUME_DANGER)
+   High probability of fakeout or reversal. Not a sustainable Type B setup.
+
+3. BULL regime + ADX < 28 (BULL_NEEDS_ADX_28_PLUS)
+   BULL is historically choppy — require a strongly trending ADX to clear the gate.
+
+4. Structure <= -3 + LONG direction (COUNTER_STRUCTURE_LONG)
+   Trading against established bearish structure. Very low probability.
+
+5. Structure >= 3 + SHORT direction (COUNTER_STRUCTURE_SHORT)
+   Trading against established bullish structure. Very low probability.
+
+6. Edge > 5 + Volume ratio > 1.20 (EDGE_VOLUME_DANGER)
+   Overconfidence combined with chase behavior. Historically awful combo.
+   The AI's self-calibration fails here — trust the data, not the number.
+
+7. ADX > 35 + Edge > 5 + Volume ratio > 1.50 (TRIPLE_DANGER)
+   Extended trend + overconfidence + panic volume. Triple danger zone.
+   Near-zero historical win rate.
+
+---
+
+=== CRITICAL INSTRUCTIONS ===
+
+- Your numeric confidence output is AUDIT-ONLY. 97% of historical outputs were
+  the constant value 62 and have ZERO correlation with actual win rate.
+  The deterministic gate in type_b_hunter_v1.py decides entry — not your confidence.
+- Base your DIRECTION on the FEATURES in the context data, not on self-calibration.
+- When in doubt between APPROVE and REJECT, prefer REJECT.
+  False positives destroy more value than missed opportunities.
+- The context data contains market_context.trend_health, market_context.market_structure,
+  market_regime_tracker, reversal_risk_score, and quality_score_components.
+  Use ALL of these — they contain more signal than any single number.
 
 Respond ONLY with a JSON object in this format:
 
@@ -16924,7 +17798,7 @@ Respond ONLY with a JSON object in this format:
   "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
   "reason": "Brief one-line explanation",
   "type_b_score": 0.0-5.0,
-  "type_b_factors": ["delta", "volume_ratio", ...]
+  "type_b_factors": ["adx", "volume_ratio", "regime", ...]
 }}
 
 Direction: LONG / SHORT / NO_TRADE
@@ -17653,14 +18527,8 @@ _cached_pathway_lane_specs = {}
 PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
 PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_HIGH_EDGE_RUNNER,
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
-    RESEARCH_LANE_SHADOW_RUNNER,
-    RESEARCH_LANE_EDGE_ALPHA_4,
-    RESEARCH_LANE_SHORT_BEAR_ALPHA,
-    RESEARCH_LANE_AI_60_65_ALPHA,
-    RESEARCH_LANE_TYPE_B_HUNTER,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 
@@ -17668,9 +18536,7 @@ def _pathway_lanes_live() -> dict:
     enabled = research_lane_enabled_map()
     live = {RESEARCH_LANE_AI_SCAN: any_combo_execution_enabled(enabled, continuous_ai_research_enabled())}
     for lane in COMBO_EXECUTION_LANES:
-        live[lane] = bool(enabled.get(lane, True))
-    for lane in EXPERIMENTAL_EXECUTION_LANES:
-        live[lane] = bool(enabled.get(lane, True))
+        live[lane] = bool(enabled.get(lane, False))
     live[RESEARCH_LANE_CONTINUOUS] = continuous_ai_research_enabled()
     return live
 
@@ -17780,14 +18646,37 @@ def build_static_pathway_lane_specs() -> dict:
         spec = COMBO_LANE_SPECS[lane_id]
         shadow_only = bool(spec.get("is_shadow_only")) or is_shadow_only_lane(lane_id)
         independent_ai = is_independent_ai_lane(lane_id)
+        deterministic_bracket = is_deterministic_bracket_lane(lane_id)
         chase = spec.get("entry_mode") == "CHASE_3PLUS"
         virtual_chase = spec.get("entry_mode") == "VIRTUAL_CHASE"
+        bracket_limit = (
+            spec.get("entry_mode") in ("BRACKET_LIMIT", "BRACKET_LIMIT_STATIC")
+            or deterministic_bracket
+        )
+        static_bracket = is_static_bracket_lane(lane_id)
+        type_b_hunter = lane_id == RESEARCH_LANE_TYPE_B_HUNTER_V1
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
         ai_label = "60+" if (virtual_chase or ai_lo >= 60) else ("65+" if ai_lo >= 65 else "60-65")
-        entry_mode_label = "Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")
-        if independent_ai:
+        entry_mode_label = (
+            "Static Bracket" if static_bracket else
+            ("Bracket Limit" if bracket_limit else
+            ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")))
+        )
+        if deterministic_bracket:
+            trigger = "Structural envelope + midpoint guard · tick 10–30s or pivot change"
+            if static_bracket:
+                execution = (
+                    "STATIC resting LAB shadow at exact micro_support/resistance · "
+                    "never chase/reprice · Scenario C"
+                )
+            else:
+                execution = "Dual LAB shadow at micro_support (LONG) + micro_resistance (SHORT) · Scenario C"
+        elif type_b_hunter:
+            trigger = "Fixed pre-entry Type B score · walk-forward collection · paper research only"
+            execution = "Paper limit research only when enabled · never Bitfinex live · Scenario C"
+        elif independent_ai:
             trigger = (
                 "AI 60+ · Spread ≥3 · Context veto BULL+SHORT+LONG_PREF · "
                 "Chase 3–5 · Age ≥180s · V2 prompt"
@@ -17808,12 +18697,104 @@ def build_static_pathway_lane_specs() -> dict:
                 )
             )
         is_candidate = bool(spec.get("is_research_candidate"))
-        lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
+        lane_status = get_pathway_lane_status(lane_id)
+        if lane_status == "ACTIVE" and is_candidate:
+            lane_status = RESEARCH_CANDIDATE_ROLE
         lane_promote = spec.get("promotion_criteria") or promote
         lane_kill = spec.get("kill_criteria") or kill
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
-        if independent_ai:
+        if deterministic_bracket:
+            filter_chips = [
+                "No AI",
+                "Dual leg",
+                "Micro S/R",
+                "Midpoint guard",
+                "ADX cap 40",
+                ("STATIC no chase" if static_bracket else "FULL_CHASE baseline"),
+                f"Ladder {lane_ladder_label}",
+            ]
+            hypothesis = spec.get("hypothesis") or (
+                "Deterministic micro S/R bracket captures range-bound mean-reversion without AI."
+            )
+            research_q = spec.get("research_question") or (
+                "Does deterministic V2 bracket beat V1 AI tile and CONTINUOUS on EV/close?"
+            )
+            strategy_extra = [
+                "Tile OFF: LAB shadow replay with real Bitfinex ticks + Scenario C",
+                "Tile ON: Phase 1 shadow-only (live bracket orders deferred)",
+                "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger",
+                (
+                    "Paper-only: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
+                    if static_bracket
+                    else "Historical bracket collector; data archived"
+                ),
+                f"Independence: {shared['independence']}",
+            ]
+            entry_filters = {
+                "entry_mode": "BRACKET_LIMIT_STATIC" if static_bracket else "BRACKET_LIMIT",
+                "adx_max": 40,
+                "midpoint_buffer_pct": 0.15,
+                "chase_mode": "STATIC" if static_bracket else "FULL_CHASE",
+                "max_chases": 0 if static_bracket else None,
+            }
+            bracket_entry = {
+                "trigger": trigger,
+                "entry_path": "DETERMINISTIC_BRACKET",
+                "fill_path": "STATIC_LIMIT_REPLAY" if static_bracket else "BRACKET_LIMIT_REPLAY",
+                "ai_path": "None (deterministic evaluator)",
+                "ai_cadence": "No AI · bracket tick every 10–30s or SR pivot change",
+                "chase_detail": (
+                    "STATIC: never chase/reprice/slide · fill exactly at micro_support/resistance"
+                    if static_bracket
+                    else "Limit at micro_support (LONG) + micro_resistance (SHORT) · FULL_CHASE baseline"
+                ),
+                "post_ai_gates": "evaluate_bracket + should_enter_bracket_leg",
+                "margin_usd": shared["margin_usd"],
+                "execution": execution,
+                "orders": "Phase 1 shadow only (toggle OFF default)",
+                "filters": entry_filters,
+            }
+        elif type_b_hunter:
+            filter_chips = [
+                "Direction only",
+                "ADX >=20",
+                "No confidence gate",
+                "Fixed policy v2",
+                "Spread ≥2",
+                "Walk-forward holdout",
+                "Paper-only",
+                f"Ladder {lane_ladder_label}",
+            ]
+            hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
+            research_q = spec.get("research_question") or "Does the fixed Type B policy beat CONTINUOUS out of sample?"
+            strategy_extra = [
+                "Tile OFF: collect calibration and rejected-signal counterfactual shadows; no paper limits",
+                "Tile ON: paper limits only; Bitfinex live execution remains disabled",
+                f"Policy {_type_b_policy_version()} is fixed before evaluation; outcome labels are not used for tuning",
+                "Logs: type_b_ai_input + type_b_replay + shadow_lane_outcome + lane_lab_pnl_ledger",
+                f"Independence: {shared['independence']}",
+            ]
+            entry_filters = {
+                "ai_probability_bucket": "audit-only; not an entry gate",
+                "directional_spread_bucket": "≥2",
+                "entry_mode": "TYPE_B_FIXED_POLICY_V2",
+                "calibration": "walk-forward only; rejected signals collect counterfactual shadows",
+            }
+            type_b_entry = {
+                "trigger": trigger,
+                "entry_path": "TYPE_B_PRE_ENTRY_SCORE",
+                "fill_path": "PAPER_LIMIT_SHADOW",
+                "ai_path": "Independent Type B scorer (fixed policy)",
+                "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
+                "chase_detail": "No full-chase V2 path; paper limit research only",
+                "post_ai_gates": "Fixed score threshold; walk-forward validation only",
+                "margin_usd": ai_direct["margin_usd"],
+                "execution": execution,
+                "orders": "Paper limits only when tile ON; never Bitfinex live",
+                "filters": entry_filters,
+            }
+        elif independent_ai:
             filter_chips = [
                 "AI 60+",
                 "Spread ≥3",
@@ -17886,14 +18867,21 @@ def build_static_pathway_lane_specs() -> dict:
                 "entry_mode": spec["entry_mode"],
             }
             v2_entry = None
-        badge = RESEARCH_CANDIDATE_ROLE if is_candidate else ""
-        entry_block = v2_entry if independent_ai else {
-            "trigger": trigger,
-            **ai_direct,
-            "execution": execution,
-            "orders": None,
-            "filters": entry_filters,
-        }
+        badge = "PROBATION - PAPER ONLY" if lane_status == "PROBATION" else (RESEARCH_CANDIDATE_ROLE if is_candidate else "")
+        if deterministic_bracket:
+            entry_block = bracket_entry
+        elif type_b_hunter:
+            entry_block = type_b_entry
+        elif independent_ai:
+            entry_block = v2_entry
+        else:
+            entry_block = {
+                "trigger": trigger,
+                **ai_direct,
+                "execution": execution,
+                "orders": None,
+                "filters": entry_filters,
+            }
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
@@ -17905,6 +18893,7 @@ def build_static_pathway_lane_specs() -> dict:
             "is_research_candidate": is_candidate,
             "is_shadow_only": shadow_only,
             "is_independent_ai": independent_ai,
+            "is_deterministic_bracket": deterministic_bracket,
             "badge": badge,
             "tile_number": tile_idx,
             "entry_mode_label": entry_mode_label,
@@ -17918,57 +18907,141 @@ def build_static_pathway_lane_specs() -> dict:
             "promotion_criteria": lane_promote,
             "kill_criteria": lane_kill,
             "expected_advantage": (
-                "Context-veto + chase timing + independent V2 prompt vs known weak pockets"
-                if independent_ai
-                else "Historical winners: strong AI + spread ≥4 at entry"
+                (
+                    "Cleaner fill location at exact S/R · isolates chase damage vs V2"
+                    if static_bracket
+                    else "Zero AI cost/latency · simultaneous dual-leg range capture"
+                )
+                if deterministic_bracket
+                else (
+                    "Fixed pre-entry policy evaluated only on walk-forward outcomes"
+                    if type_b_hunter
+                    else (
+                        "Context-veto + chase timing + independent V2 prompt vs known weak pockets"
+                        if independent_ai
+                        else "Historical winners: strong AI + spread ≥4 at entry"
+                    )
+                )
             ),
             "expected_risk": (
-                "Overfit to in-sample BULL/SHORT cells · parse drift"
-                if independent_ai
-                else "TYPE_A drag if filters too loose — monitor exit leakage"
+                (
+                    "Lower fill rate (TTL_EXPIRED) · missed moves that chase would catch"
+                    if static_bracket
+                    else "Over-trading in chop · midpoint dead-zone skips"
+                )
+                if deterministic_bracket
+                else (
+                    "Insufficient rejected-signal counterfactual coverage until fresh shadows accumulate"
+                    if type_b_hunter
+                    else (
+                        "Overfit to in-sample BULL/SHORT cells · parse drift"
+                        if independent_ai
+                        else "TYPE_A drag if filters too loose — monitor exit leakage"
+                    )
+                )
             ),
             "benchmark_comparison": (
-                f"vs {COMPARISON_BENCHMARK_LANE} and AI60_SP3_VIRTUAL_CHASE (same window) · "
-                f"CONTINUOUS benchmark unaffected"
-                if independent_ai
-                else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
+                (
+                    "Paper-only comparison vs CONTINUOUS over the same window"
+                    if static_bracket
+                    else f"vs {COMPARISON_BENCHMARK_LANE} and SR_MICRO_TILE_V1 (same window)"
+                )
+                if deterministic_bracket
+                else (
+                    f"Walk-forward holdout vs {COMPARISON_BENCHMARK_LANE}; no outcome-label tuning"
+                    if type_b_hunter
+                    else (
+                        f"vs {COMPARISON_BENCHMARK_LANE} and AI60_SP3_VIRTUAL_CHASE (same window) · "
+                        f"CONTINUOUS benchmark unaffected"
+                        if independent_ai
+                        else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
+                    )
+                )
             ),
             "diff_vs_benchmark": (
-                [
-                    "Independent V2 prompt (not AI_SCAN inheritance)",
-                    "Context veto BULL+SHORT+LONG_PREFERRED (symmetric BEAR)",
-                    "Paper fill after age≥180s + virtual chase ≥3",
-                    "Own trade IDs / ledger — CONTINUOUS prompt & orders unchanged",
-                ]
-                if independent_ai
-                else [
-                    f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
-                    f"Filters: AI {ai_label} spread {spread_label}",
-                    "Beat benchmark on EV/appr to promote",
-                ]
+                (
+                    [
+                        "No DeepSeek calls",
+                        "STATIC resting limit at exact micro S/R",
+                        "Never chase/reprice/slide (max_chases=0)",
+                        "Outcomes: FILLED / TTL_EXPIRED / CANCELLED",
+                        "Own trade IDs (srmv2s-long-* / srmv2s-short-*)",
+                        "Paper-only until at least 75 reconciled filled outcomes and positive holdout EV",
+                    ]
+                    if static_bracket
+                    else [
+                        "No DeepSeek calls",
+                        "Dual simultaneous bracket limits",
+                        "Deterministic structural envelope",
+                        "FULL_CHASE baseline (keep collecting)",
+                        "Own trade IDs (srmv2-long-* / srmv2-short-*)",
+                    ]
+                )
+                if deterministic_bracket
+                else (
+                    [
+                        "Fixed pre-entry score; calibration is evaluated walk-forward only",
+                        "Rejected executable signals collect counterfactual paper shadows",
+                        "Paper limits only when enabled; never Bitfinex live",
+                        "Own Type B input, replay, outcome and ledger records",
+                    ]
+                    if type_b_hunter
+                    else (
+                        [
+                            "Independent V2 prompt (not AI_SCAN inheritance)",
+                            "Context veto BULL+SHORT+LONG_PREFERRED (symmetric BEAR)",
+                            "Paper fill after age≥180s + virtual chase ≥3",
+                            "Own trade IDs / ledger — CONTINUOUS prompt & orders unchanged",
+                        ]
+                        if independent_ai
+                        else [
+                            f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
+                            f"Filters: AI {ai_label} spread {spread_label}",
+                            "Beat benchmark on EV/appr to promote",
+                        ]
+                    )
+                )
             ),
             "strategy_detail": _strategy_detail_lines(
                 {
                     "spawn": (
-                        "Phase-shifted independent V2 DeepSeek · never shares CONTINUOUS AI clock"
-                        if independent_ai
-                        else f"Spawn on AI_SCAN APPROVE · filters {trigger}"
+                        "Deterministic bracket evaluator · never shares AI_SCAN clock"
+                        if deterministic_bracket
+                        else (
+                            "Fixed-policy Type B scorer · no outcome-label tuning"
+                            if type_b_hunter
+                            else (
+                                "Phase-shifted independent V2 DeepSeek · never shares CONTINUOUS AI clock"
+                                if independent_ai
+                                else f"Spawn on AI_SCAN APPROVE · filters {trigger}"
+                            )
+                        )
                     ),
                     "execution": execution,
                     **(
                         {
-                            "chase_detail": (
-                                "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
-                            ),
-                            "ai_cadence": (
-                                f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s · "
-                                f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
-                            ),
+                            "ai_path": "Independent Type B scorer (fixed policy)",
+                            "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
+                            "chase_detail": "No full-chase V2 path; paper limit research only",
                             "margin_usd": ai_direct["margin_usd"],
-                            "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                            "post_ai_gates": "Fixed score threshold; walk-forward validation only",
                         }
-                        if independent_ai
-                        else ai_direct
+                        if type_b_hunter
+                        else (
+                            {
+                                "chase_detail": (
+                                    "Virtual chase hide 1–2 · live at chase 3 · age≥180s · market @6+60s"
+                                ),
+                                "ai_cadence": (
+                                    f"V2 phase-shift +{V2_AI_OFFSET_FROM_MAIN_SEC}s · "
+                                    f"every ~{V2_RESEARCH_AI_COOLDOWN_SEC}s · no hourly cap"
+                                ),
+                                "margin_usd": ai_direct["margin_usd"],
+                                "post_ai_gates": "win_prob≥60 · spread≥3 · context veto · V2 checker",
+                            }
+                            if independent_ai
+                            else (bracket_entry if deterministic_bracket else ai_direct)
+                        )
                     ),
                 },
                 scenario_c,
@@ -18098,7 +19171,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + AI60_SP3 Virtual Chase + A160 V2 independent paper orders",
+        "architecture_freeze_note": "v11.8 paper-research roster — CONTINUOUS benchmark + Type B Hunter + static S/R; all other lanes are archived analytics only",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -18106,12 +19179,12 @@ def build_static_pathway_lane_specs() -> dict:
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": COMPARISON_BENCHMARK_LANE,
-        "primary_production_lane": RESEARCH_CANDIDATE_LANE,
+        "primary_production_lane": COMPARISON_BENCHMARK_LANE,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "primary_production_role": RESEARCH_CANDIDATE_ROLE,
+        "primary_production_role": COMBO_BENCHMARK_ROLE,
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
-        "legacy_lanes_retired": list(LEGACY_PATHWAY_LANES),
+        "legacy_lanes_retired": list(ARCHIVED_PATHWAY_LANES),
         "lanes": lanes,
     }
 
@@ -18151,6 +19224,9 @@ def _load_lane_metrics_from_disk() -> dict:
         fill_pct = bm.get("approve_to_fill_pct")
         if approves and fill_pct is None:
             fill_pct = round(100.0 * fills / approves, 1)
+        wins = int(lb.get("wins") or bm.get("wins") or 0)
+        losses = int(lb.get("losses") or bm.get("losses") or 0)
+        win_rate = round(100.0 * wins / fills, 1) if fills else float(bm.get("win_rate_pct") or 0)
         lab_closes = int(lab.get("closes") or 0)
         lab_pnl = float(lab.get("net_pnl_usd") or 0)
         lab_wins = int(lab.get("wins") or 0)
@@ -18162,6 +19238,9 @@ def _load_lane_metrics_from_disk() -> dict:
             "shadow_fill_pct": float(bm.get("shadow_fill_pct") or 0),
             "net_pnl_real": round(pnl, 2),
             "per_approve_ev": round(float(bm.get("per_approve_ev") or 0), 2),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": win_rate,
             "verdict": bm.get("verdict"),
             # LAB (OFF-combo) simulated metrics — parallel to real metrics, never mixed.
             "lab_mode": bool(lab_closes or lab_pnl),
@@ -18192,6 +19271,63 @@ def _load_lane_metrics_from_disk() -> dict:
                 "verdict": "benchmark baseline",
             }
     return out
+
+
+def _load_reconciled_lab_outcome_metrics() -> dict:
+    """Derive active LAB tile metrics from immutable outcome rows.
+
+    The legacy JSON ledger is a convenience cache and can lag process restarts.
+    This reconciliation never rewrites it; it only deduplicates completed outcomes
+    by study id so the dashboard reports the raw close count and PnL truthfully.
+    """
+    target_lanes = set(COMBO_EXECUTION_LANES)
+    rows = {}
+    if not os.path.isfile(SHADOW_LANE_OUTCOME_FILE):
+        return {}
+    try:
+        with open(SHADOW_LANE_OUTCOME_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                lane = str(row.get("research_lane") or "").upper()
+                trade_id = str(row.get("trade_id") or row.get("study_id") or "")
+                if (
+                    lane not in target_lanes
+                    or not trade_id
+                    or str(row.get("collection_mode") or "").upper() != "LAB"
+                ):
+                    continue
+                if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1 and row.get("policy_version") != _type_b_policy_version():
+                    continue
+                # A repeated study row replaces the earlier snapshot; only the
+                # terminal row is counted, and unfilled/cancelled rows are not trades.
+                rows[(lane, trade_id)] = row
+    except Exception as e:
+        logger.debug(f"[LAB_RECONCILE] outcome read failed: {e}")
+        return {}
+
+    result = {}
+    for lane in target_lanes:
+        completed = [r for (ln, _), r in rows.items() if ln == lane and bool(r.get("filled"))]
+        if not completed and lane != RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            continue
+        pnl = round(sum(float(r.get("net_pnl_usd") or 0.0) for r in completed), 2)
+        wins = sum(1 for r in completed if float(r.get("net_pnl_usd") or 0.0) > 0)
+        closes = len(completed)
+        result[lane] = {
+            "lab_mode": True,
+            "lab_closes": closes,
+            "lab_net_pnl": pnl,
+            "lab_wins": wins,
+            "lab_losses": closes - wins,
+            "lab_win_rate": round(100.0 * wins / closes, 1) if closes else 0.0,
+            "lab_per_close_ev": round(pnl / closes, 2) if closes else 0.0,
+            "lab_pnl_source": "reconciled_shadow_outcomes",
+            "policy_version": _type_b_policy_version() if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1 else None,
+        }
+    return result
 
 
 def _session_stats_from_lane_metrics(metrics: dict) -> dict:
@@ -18266,6 +19402,8 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "lab_per_close_ev": lab_ev,
         "lab_open_shadows": lab_open,
         "lab_open_filled": int(m.get("lab_open_filled") or 0),
+        "lab_pnl_source": m.get("lab_pnl_source") or "lab_ledger",
+        "lab_ledger_close_delta": int(m.get("lab_ledger_close_delta") or 0),
         "lab_summary_line": lab_line,
     }
 
@@ -18369,6 +19507,12 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
                 "shadow_fill_pct": float(prev.get("shadow_fill_pct") or 0),
                 "net_pnl_real": round(pnl, 2),
                 "per_approve_ev": per_ev,
+                "wins": int(lb.get("wins") or 0),
+                "losses": int(lb.get("losses") or 0),
+                "win_rate_pct": (
+                    round(100.0 * int(lb.get("wins") or 0) / closes, 1)
+                    if closes else float(prev.get("win_rate_pct") or 0.0)
+                ),
                 "verdict": prev.get("verdict"),
             }
     # Fold live LAB (OFF-combo) simulated ledger into the per-lane metrics so the dashboard
@@ -18377,6 +19521,11 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     open_lab = count_open_lab_shadows()
     lab_lanes = set(live_lab_ledger.keys()) | set(open_lab.keys())
     for lane in lab_lanes:
+        # Tile 1's convenience ledger predates policy v2 and has no policy
+        # dimension.  Its live dashboard metrics come only from versioned raw
+        # outcomes below, never from this aggregate legacy cache.
+        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
+            continue
         lb = live_lab_ledger.get(lane) or {}
         lab_closes = int(lb.get("closes") or 0)
         lab_pnl = float(lb.get("net_pnl_usd") or 0)
@@ -18397,6 +19546,16 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
             "lab_per_close_ev": round(lab_pnl / lab_closes, 2) if lab_closes else 0.0,
             "lab_open_shadows": open_n,
             "lab_open_filled": int(open_info.get("filled") or 0),
+            "lab_pnl_source": "lab_ledger",
+        }
+    # Raw terminal outcomes are the authoritative source for active LAB tiles.
+    # Merge after the convenience ledger so stale ledger counts cannot mask results.
+    for lane, raw in _load_reconciled_lab_outcome_metrics().items():
+        prev = disk_metrics.get(lane) or {}
+        disk_metrics[lane] = {
+            **prev,
+            **raw,
+            "lab_ledger_close_delta": int(raw.get("lab_closes") or 0) - int(prev.get("lab_closes") or 0),
         }
     # Ensure every Pathway Lab tile has session_stats (zeros / LAB collecting) so OFF
     # tiles never render blank Trades/PnL/EV fields.
@@ -18444,6 +19603,7 @@ def get_pathway_lane_specs_cached() -> dict:
     ledger_mtime = None
     lab_ledger_mtime = None
     v2_mtime = None
+    outcome_mtime = None
     open_lab_sig = ()
     if os.path.isfile(LANE_PNL_LEDGER_FILE):
         try:
@@ -18453,6 +19613,11 @@ def get_pathway_lane_specs_cached() -> dict:
     if os.path.isfile(LANE_LAB_PNL_LEDGER_FILE):
         try:
             lab_ledger_mtime = os.path.getmtime(LANE_LAB_PNL_LEDGER_FILE)
+        except Exception:
+            pass
+    if os.path.isfile(SHADOW_LANE_OUTCOME_FILE):
+        try:
+            outcome_mtime = os.path.getmtime(SHADOW_LANE_OUTCOME_FILE)
         except Exception:
             pass
     try:
@@ -18477,6 +19642,7 @@ def get_pathway_lane_specs_cached() -> dict:
             cached_ledger = (_cached_pathway_lane_specs or {}).get("_cached_ledger_mtime")
             cached_lab_ledger = (_cached_pathway_lane_specs or {}).get("_cached_lab_ledger_mtime")
             cached_v2 = (_cached_pathway_lane_specs or {}).get("_cached_v2_mtime")
+            cached_outcome = (_cached_pathway_lane_specs or {}).get("_cached_outcome_mtime")
             cached_open_lab = (_cached_pathway_lane_specs or {}).get("_cached_open_lab_sig")
             if (
                 cached_at == mtime
@@ -18484,6 +19650,7 @@ def get_pathway_lane_specs_cached() -> dict:
                 and cached_ledger == ledger_mtime
                 and cached_lab_ledger == lab_ledger_mtime
                 and cached_v2 == v2_mtime
+                and cached_outcome == outcome_mtime
                 and cached_open_lab == open_lab_sig
                 and _cached_pathway_lane_specs.get("lanes")
             ):
@@ -18499,6 +19666,7 @@ def get_pathway_lane_specs_cached() -> dict:
     merged["_cached_ledger_mtime"] = ledger_mtime
     merged["_cached_lab_ledger_mtime"] = lab_ledger_mtime
     merged["_cached_v2_mtime"] = v2_mtime
+    merged["_cached_outcome_mtime"] = outcome_mtime
     merged["_cached_open_lab_sig"] = open_lab_sig
     _cached_pathway_lane_specs = merged
     return merged
@@ -18831,9 +19999,9 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Production</strong>
+  <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane paper-research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC (no full-chase S/R)</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
@@ -19215,12 +20383,16 @@ DASHBOARD_JS = """(function () {
         'CONTINUOUS': '#58a6ff',
         'TYPE_B_HUNTER_V1': '#bc8cff',
         'SR_MICRO_TILE_V1': '#3fb950',
+        'SR_MICRO_TILE_V2': '#2ea043',
+        'SR_MICRO_TILE_V2_STATIC': '#7ee787',
         'AI_SCAN': '#6e7681',
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
         'TYPE_B_HUNTER_V1': 'Type B Hunter V1',
         'SR_MICRO_TILE_V1': 'S/R Micro Tile V1',
+        'SR_MICRO_TILE_V2': 'S/R Micro Tile V2',
+        'SR_MICRO_TILE_V2_STATIC': 'S/R Micro V2 Static',
         'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
@@ -19702,9 +20874,11 @@ DASHBOARD_JS = """(function () {
                 ? statRow('Trades', labPrimaryTrades, '#58a6ff')
                   + statRow('PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
                   + statRow('EV/appr', labPrimaryEv, '#58a6ff')
+                  + statRow('Win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
                 : statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
                   + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-                  + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2)))
+                  + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
+                  + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%'))
             + '</div>'
             + (v2Shadow ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow('Paper fills', v2PaperFills, '#58a6ff')
@@ -19713,7 +20887,7 @@ DASHBOARD_JS = """(function () {
               + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
               + '</div>') : '')
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
-              + statRow('LAB sim', '🧪 ' + labCloses + (labOpen ? (' · ' + labOpen + ' open') : ''), '#58a6ff')
+              + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
               + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
               + statRow('LAB win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
               + statRow('LAB EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
@@ -23276,15 +24450,21 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
 REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
 
 
-def _profit_lock_floor_for_ladder(peak_pct: float, ladder):
-    if peak_pct is None or peak_pct < ladder[0][0]:
+def _profit_lock_floor_for_ladder(peak_pct: float, ladder, peak_never_loser_min_peak: float = None, peak_never_loser_floor: float = None):
+    if peak_pct is None:
+        return None
+    min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
+    floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
+    pnl_only = peak_pct < ladder[0][0]
+    if pnl_only and peak_pct < min_peak:
         return None
     floor = None
-    for trigger, lock in ladder:
-        if peak_pct >= trigger:
-            floor = lock
-    if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
-        floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
+    if not pnl_only:
+        for trigger, lock in ladder:
+            if peak_pct >= trigger:
+                floor = lock
+    if peak_pct >= min_peak:
+        floor = max(floor or 0, floor_val)
     return floor
 
 
@@ -23696,6 +24876,34 @@ def _try_shadow_limit_fill(buf: dict, price: float, t_rel: float):
     pullback_pct = _buf_float(buf.get("pullback_pct"), 0)
     if start_price <= 0:
         return
+    # STATIC resting limit: fill AT exact limit when price touches/crosses — never slide.
+    if buf.get("fill_at_limit") or str(buf.get("chase_mode") or "").upper() == "STATIC":
+        lim = _buf_float(buf.get("limit_price"), 0)
+        if lim <= 0:
+            # Derive limit from start_price + pullback if limit_price missing.
+            if pullback_pct > 0:
+                lim = (
+                    start_price * (1 - pullback_pct)
+                    if str(direction).upper() == "LONG"
+                    else start_price * (1 + pullback_pct)
+                )
+            else:
+                lim = start_price
+        if lim <= 0:
+            return
+        if str(direction).upper() == "LONG" and price <= lim:
+            buf["virtual_entry"] = float(lim)
+            buf["virtual_fill_t"] = t_rel
+            buf["fill_reason"] = "STATIC_LIMIT"
+            buf["limit_chase_count"] = 0
+            return
+        if str(direction).upper() == "SHORT" and price >= lim:
+            buf["virtual_entry"] = float(lim)
+            buf["virtual_fill_t"] = t_rel
+            buf["fill_reason"] = "STATIC_LIMIT"
+            buf["limit_chase_count"] = 0
+            return
+        return
     if pullback_pct <= 0.0:
         buf["virtual_entry"] = float(price)
         buf["virtual_fill_t"] = t_rel
@@ -23747,11 +24955,32 @@ def simulate_replay_outcome(buf: dict) -> dict:
 
     entry = buf.get("virtual_entry")
     fill_t = buf.get("virtual_fill_t")
+    fill_at_limit = bool(buf.get("fill_at_limit") or str(buf.get("chase_mode") or "").upper() == "STATIC")
+    lim = _buf_float(buf.get("limit_price"), 0)
     if entry is None:
         for tick in ticks:
             price = _buf_float(tick.get("price"), 0)
             t = _buf_float(tick.get("t"), 0)
             if price <= 0 or t > REPLAY_TTL_SEC:
+                continue
+            if fill_at_limit:
+                use_lim = lim
+                if use_lim <= 0 and pullback_pct > 0 and start_price > 0:
+                    use_lim = (
+                        start_price * (1 - pullback_pct)
+                        if direction == "LONG"
+                        else start_price * (1 + pullback_pct)
+                    )
+                if use_lim <= 0:
+                    continue
+                if direction == "LONG" and price <= use_lim:
+                    entry = use_lim
+                    fill_t = t
+                    break
+                if direction == "SHORT" and price >= use_lim:
+                    entry = use_lim
+                    fill_t = t
+                    break
                 continue
             if pullback_pct <= 0.0:
                 entry = price
@@ -23766,14 +24995,22 @@ def simulate_replay_outcome(buf: dict) -> dict:
                 fill_t = t
                 break
     if entry is None or fill_t is None:
+        outcome_label = "TTL_EXPIRED" if fill_at_limit else "NO_FILL"
+        if str(buf.get("exit_outcome") or "").upper() == "CANCELLED":
+            outcome_label = "CANCELLED"
         return {
             "filled": False,
-            "exit_reason": "NO_FILL",
+            "exit_reason": outcome_label,
+            "entry_outcome": outcome_label,
             "net_pnl_usd": 0.0,
             "gross_pnl_margin_pct": 0.0,
             "max_profit_margin_pct": 0.0,
             "max_drawdown_margin_pct": 0.0,
             "fill_delay_sec": None,
+            "chase_mode": buf.get("chase_mode"),
+            "limit_chase_count": int(buf.get("limit_chase_count") or 0),
+            "limit_price": lim if lim else None,
+            "original_limit_price": _buf_float(buf.get("original_limit_price"), 0) or None,
         }
 
     sl = entry * (1 - dir_factor * sl_pct)
@@ -23806,8 +25043,16 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "STOP_LOSS"
             exit_margin_pct = -MAX_SL_MARGIN_PCT
             break
-        lock_floor = _profit_lock_floor_for_ladder(peak, trail_ladder)
-        if lock_floor is not None and peak >= trail_ladder[0][0] and unreal <= lock_floor:
+        lock_floor = _profit_lock_floor_for_ladder(
+            peak,
+            trail_ladder,
+            peak_never_loser_min_peak=_buf_float(exit_config.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK),
+            peak_never_loser_floor=_buf_float(exit_config.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR),
+        )
+        pnl_min_peak = _buf_float(exit_config.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
+        peak_above_ladder = peak >= trail_ladder[0][0]
+        peak_in_pnl_zone = peak >= pnl_min_peak and pnl_min_peak < trail_ladder[0][0]
+        if lock_floor is not None and (peak_above_ladder or peak_in_pnl_zone) and unreal <= lock_floor:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
@@ -23829,6 +25074,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
     return {
         "filled": True,
         "exit_reason": exit_reason,
+        "entry_outcome": "FILLED",
         "net_pnl_usd": round(net_usd, 4),
         "gross_pnl_margin_pct": round(exit_margin_pct, 4),
         "max_profit_margin_pct": round(peak, 4),
@@ -23836,6 +25082,12 @@ def simulate_replay_outcome(buf: dict) -> dict:
         "fill_delay_sec": round(_buf_float(fill_t, 0), 3),
         "entry": entry,
         "fill_price": entry,
+        "chase_mode": buf.get("chase_mode"),
+        "limit_chase_count": int(buf.get("limit_chase_count") or 0),
+        "fill_reason": buf.get("fill_reason") or ("STATIC_LIMIT" if fill_at_limit else None),
+        "limit_price": lim if lim else None,
+        "original_limit_price": _buf_float(buf.get("original_limit_price"), 0) or None,
+        "start_price": start_price if start_price else None,
     }
 
 
@@ -24005,14 +25257,29 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "research_lane": meta.get("research_lane"),
             "source_trade_id": meta.get("source_trade_id"),
             "collection_mode": meta.get("collection_mode"),
+            "is_counterfactual": bool(meta.get("is_counterfactual")),
+            "policy_version": meta.get("policy_version"),
             "size_mult": meta.get("size_mult"),
             "session_bucket": meta.get("session_bucket"),
+            "entry_features": copy.deepcopy(meta.get("entry_features") or {}),
+            "ai_snapshot": copy.deepcopy(meta.get("ai_snapshot") or {}),
             "v2_min_fill_age_sec": meta.get("v2_min_fill_age_sec"),
             "v2_chase_target_min": meta.get("v2_chase_target_min"),
             "v2_chase_target_max": meta.get("v2_chase_target_max"),
             "prompt_id": meta.get("prompt_id"),
             "v2_checker_accepted": meta.get("v2_checker_accepted"),
             "v2_fail_reasons": meta.get("v2_fail_reasons"),
+            "limit_price": _buf_float(meta["limit_price"], 0) if meta.get("limit_price") is not None else None,
+            "original_limit_price": (
+                _buf_float(meta["original_limit_price"], 0)
+                if meta.get("original_limit_price") is not None
+                else None
+            ),
+            "chase_mode": meta.get("chase_mode"),
+            "max_chases": meta.get("max_chases"),
+            "fill_at_limit": bool(meta.get("fill_at_limit")),
+            "limit_chase_count": int(meta.get("limit_chase_count") or 0),
+            "exit_outcome": meta.get("exit_outcome"),
         }
 
 
@@ -24048,6 +25315,24 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
+        is_post_exit = bool(buf.get("post_exit"))
+        persist_trade_id = trade_id if is_post_exit else None
+    if persist_trade_id is not None:
+        try:
+            rotate_log(POST_EXIT_REPLAY_FILE)
+            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "kind": "tick",
+                    "trade_id": persist_trade_id,
+                    "ts": now,
+                    "price": float(price),
+                    "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
+                    "phase": "post_exit",
+                    "seq": int(buf["seq"]) if is_post_exit else None,
+                    "t_rel": t_rel,
+                }) + "\n")
+        except Exception as e:
+            logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
 
 
 def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
@@ -24162,6 +25447,27 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
+        # Persist the post-exit trade header to the sidecar so a restart can
+        # rebuild this buffer before the deadline elapses.
+        try:
+            rotate_log(POST_EXIT_REPLAY_FILE)
+            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "kind": "post_exit_header",
+                    "trade_id": trade_id,
+                    "ts": now,
+                    "post_exit_deadline_ts": buf.get("post_exit_deadline_ts"),
+                    "post_exit_started_ts": buf.get("post_exit_started_ts"),
+                    "entry_price": buf.get("entry_price"),
+                    "virtual_entry": buf.get("virtual_entry"),
+                    "direction": buf.get("direction"),
+                    "leverage": buf.get("leverage"),
+                    "exit_reason": buf.get("exit_reason"),
+                    "start_ts": buf.get("start_ts"),
+                    "exit_t_rel": buf.get("exit_t_rel"),
+                }) + "\n")
+        except Exception as e:
+            logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
     logger.info(
         f"[POST_EXIT_REPLAY] trade_id={trade_id} exit_t={exit_t_rel}s "
         f"collecting {POST_EXIT_REPLAY_SEC}s for horizon recovery [PIPELINE ENFORCEMENT]"
@@ -24189,6 +25495,98 @@ def service_post_exit_replays():
                 continue
             unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, price)
         append_replay_tick(tid, price, unreal)
+
+
+def _load_post_exit_replays():
+    """Rebuild post-exit replay buffers from the sidecar JSONL on startup.
+
+    Only buffers whose ``post_exit_deadline_ts`` has not yet elapsed are
+    restored, so the file does not grow unbounded across sessions.  Pre-existing
+    in-memory entries are preserved (live in-progress buffers always take
+    precedence over the on-disk snapshot).
+    """
+    if not os.path.exists(POST_EXIT_REPLAY_FILE):
+        return
+    now = time.time()
+    restored = 0
+    headers: Dict[str, dict] = {}
+    ticks_by_tid: Dict[str, list] = {}
+    try:
+        with open(POST_EXIT_REPLAY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                kind = row.get("kind")
+                tid = row.get("trade_id")
+                if not tid:
+                    continue
+                if kind == "post_exit_header":
+                    headers[tid] = row
+                elif kind == "tick":
+                    ticks_by_tid.setdefault(tid, []).append(row)
+    except Exception as e:
+        logger.error(f"[POST_EXIT_REPLAY] load failed: {e}")
+        return
+    with replay_lock:
+        for tid, header in headers.items():
+            deadline = _buf_float(header.get("post_exit_deadline_ts"), 0)
+            if deadline <= 0 or deadline <= now:
+                continue
+            if tid in replay_buffers and not replay_buffers[tid].get("closed"):
+                # Already rebuilt by the live path this session; skip the stale snapshot.
+                continue
+            start_ts = _buf_float(header.get("start_ts"), now)
+            virtual_entry = _buf_float(header.get("virtual_entry"), 0) or _buf_float(header.get("entry_price"), 0)
+            replay_buffers[tid] = {
+                "start_ts": start_ts,
+                "start_price": virtual_entry,
+                "ticks": [],
+                "last_update": now,
+                "last_tick_ts": 0.0,
+                "closed": False,
+                "seq": 0,
+                "lane": "executed",
+                "direction": header.get("direction") or "LONG",
+                "leverage": _buf_int(header.get("leverage"), _replay_leverage_default()),
+                "margin_usdt": FIXED_MARGIN_USDT,
+                "virtual_entry": virtual_entry,
+                "post_exit": True,
+                "post_exit_started_ts": _buf_float(header.get("post_exit_started_ts"), now),
+                "post_exit_deadline_ts": deadline,
+                "entry_price": _buf_float(header.get("entry_price"), virtual_entry),
+                "exit_reason": header.get("exit_reason"),
+                "exit_t_rel": _buf_float(header.get("exit_t_rel"), 0),
+            }
+            buf = replay_buffers[tid]
+            tick_rows = ticks_by_tid.get(tid, [])
+            tick_rows.sort(key=lambda r: _buf_float(r.get("ts"), 0))
+            for row in tick_rows:
+                ts = _buf_float(row.get("ts"), 0)
+                if ts <= 0:
+                    continue
+                seq = _buf_int(buf.get("seq"), 0) + 1
+                buf["seq"] = seq
+                buf["ticks"].append({
+                    "seq": seq,
+                    "t": round(ts - start_ts, 3),
+                    "price": float(row.get("price") or 0),
+                    "unreal_pct": row.get("unreal_pct"),
+                    "phase": "post_exit",
+                })
+            if buf["ticks"]:
+                buf["last_update"] = _buf_float(tick_rows[-1].get("ts"), now)
+                buf["last_tick_ts"] = _buf_float(tick_rows[-1].get("ts"), 0)
+            restored += 1
+    if restored:
+        logger.info(
+            f"[POST_EXIT_REPLAY] restored {restored} post-exit buffer(s) from sidecar "
+            f"[PIPELINE ENFORCEMENT]"
+        )
 
 
 def close_replay_buffer(trade_id):
@@ -25253,6 +26651,10 @@ def main():
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
+    try:
+        _load_post_exit_replays()
+    except Exception as exc:
+        logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
@@ -25451,7 +26853,9 @@ def main():
         logger.info(
             f"[PATHWAY VALIDATION] {v['verdict']} type_b={v['type_b_audit']} "
             f"tiles={v['tile_independence']} ai_scan={v.get('ai_scan_independence')} "
-            f"ai_scan_role={v.get('ai_scan_role')} sync={v.get('bot_analyzer_sync')} [PIPELINE ENFORCEMENT]"
+            f"ai_scan_role={v.get('ai_scan_role')} srmv2={v.get('sr_micro_tile_v2_bracket')} "
+            f"srmv2s={v.get('sr_micro_tile_v2_static')} sync={v.get('bot_analyzer_sync')} "
+            f"[PIPELINE ENFORCEMENT]"
         )
     except SystemExit:
         raise
