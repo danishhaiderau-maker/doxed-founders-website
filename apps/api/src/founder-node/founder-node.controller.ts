@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
@@ -20,6 +21,42 @@ import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
+import type { Response } from 'express';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+// The canonical IDE manifest lives at the monorepo root under
+// packages/founder-ide/updates/founder-stack-updates.json. The API process
+// always runs with cwd = apps/api (both `nest start` in dev and
+// `node dist/main.js` from start-api-prod.mjs in prod), so resolving two
+// levels up from cwd lands on the monorepo root in both environments. Allow
+// the path to be overridden via FOUNDER_IDE_MANIFEST_PATH for self-hosts that
+// run from a different checkout layout.
+const MANIFEST_PATH =
+  process.env.FOUNDER_IDE_MANIFEST_PATH?.trim() ||
+  join(process.cwd(), '..', '..', 'packages', 'founder-ide', 'updates', 'founder-stack-updates.json');
+
+// 60s TTL in-process cache so the JSON file is re-read at most once per
+// minute even under burst traffic. Bumping the manifest only needs to wait
+// up to this long to be visible.
+const MANIFEST_CACHE_TTL_MS = 60_000;
+let manifestCache: { at: number; body: unknown } | null = null;
+
+function readManifestBody(): unknown {
+  const now = Date.now();
+  if (manifestCache && now - manifestCache.at < MANIFEST_CACHE_TTL_MS) {
+    return manifestCache.body;
+  }
+  const raw = readFileSync(MANIFEST_PATH, 'utf8');
+  const body = JSON.parse(raw);
+  manifestCache = { at: now, body };
+  return body;
+}
+
+/** Test-only hook to reset the cache between assertions. */
+export function __resetFounderManifestCacheForTests(): void {
+  manifestCache = null;
+}
 
 @Controller('founder-node')
 export class FounderNodeController {
@@ -64,6 +101,23 @@ export class FounderNodeController {
     const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
     if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
     return res.json();
+  }
+
+  /**
+   * Serves the canonical Founder IDE update manifest directly from
+   * packages/founder-ide/updates/founder-stack-updates.json. Unlike
+   * /latest-release (a proxy of GitHub's release API), this returns a stable
+   * manifest shape (releases[], latestVersion, minimumVersion) independent of
+   * GitHub's response schema. Read-through cached for 60s in-process; the
+   * route also advertises `Cache-Control: public, max-age=60` so the CDN/route
+   * cache can hold it briefly between polls.
+   */
+  @Public()
+  @Get('manifest')
+  getManifest(@Res({ passthrough: true }) res: Response): unknown {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return readManifestBody();
   }
 
   @Get('ollama-status')
