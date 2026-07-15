@@ -3622,3 +3622,21 @@ model ProofOfSuccess {
   @@index([userId])
   @@index([proofType])
 }
+
+/// Multi-instance-safe routing-decision cache for Routing Engine v2's
+/// Layer 1. Each row is one cache entry keyed by `cacheKey` (the SHA-256
+/// prompt hash produced by `RoutingCache.computeKey`). Used by
+/// `NeonRoutingCache` when `ROUTING_CACHE_BACKEND=neon` so every Railway
+/// replica shares the same cache. Lazy-expired via `expiresAt`.
+model RoutingCacheEntry {
+  /// The cache key: "v1:" + sha256(normalized first 4KB of prompt).
+  cacheKey   String   @id
+  /// The serialized RoutingDecision (chosenProvider, chosenModel, score, candidates, ...).
+  decision   Json
+  /// When this entry stales out. Lazy sweep on read; reaper optional.
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([expiresAt])
+}

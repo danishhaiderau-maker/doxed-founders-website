@@ -116,30 +116,48 @@ export function buildMerkleTree(leaves: MerkleLeaf[]): MerkleTree {
     };
   }
 
-  let level: { hash: Uint8Array; leaf: MerkleLeaf }[] = cleanLeaves.map((leaf) => ({
+  let level: { hash: Uint8Array; leaves: MerkleLeaf[] }[] = cleanLeaves.map((leaf) => ({
     hash: hashLeaf(leaf),
-    leaf,
+    leaves: [leaf],
   }));
 
+  // proofMap[key] = ordered list of sibling hashes from leaf → root.
   const proofMap = new Map<string, string[]>();
-  for (const { leaf } of level) {
+  for (const leaf of cleanLeaves) {
     proofMap.set(`${leaf.walletAddress}|${leaf.amount.toString()}`, []);
   }
 
   while (level.length > 1) {
-    const next: { hash: Uint8Array; leaf: MerkleLeaf }[] = [];
+    const next: { hash: Uint8Array; leaves: MerkleLeaf[] }[] = [];
     for (let i = 0; i < level.length; i += 2) {
       const left = level[i]!;
       const right = i + 1 < level.length ? level[i + 1]! : left;
       const parentHash = hashPair(left.hash, right.hash);
 
-      for (const entry of level.slice(i, i + 2)) {
-        const key = `${entry.leaf.walletAddress}|${entry.leaf.amount.toString()}`;
-        const sibling = entry === left ? right : left;
-        proofMap.get(key)?.push(toHex(sibling.hash));
+      // Every leaf under `left` gets `right.hash` as its sibling at this
+      // level; every leaf under `right` gets `left.hash`. When `right ===
+      // left` (odd-node duplication) both sides resolve to the same hash,
+      // which is what OpenZeppelin's MerkleProof.verify expects.
+      const leftSiblingHex = toHex(left.hash);
+      const rightSiblingHex = toHex(right.hash);
+      for (const leaf of left.leaves) {
+        proofMap
+          .get(`${leaf.walletAddress}|${leaf.amount.toString()}`)
+          ?.push(rightSiblingHex);
       }
-
-      next.push({ hash: parentHash, leaf: left.leaf });
+      if (right !== left) {
+        for (const leaf of right.leaves) {
+          proofMap
+            .get(`${leaf.walletAddress}|${leaf.amount.toString()}`)
+            ?.push(leftSiblingHex);
+        }
+        next.push({ hash: parentHash, leaves: [...left.leaves, ...right.leaves] });
+      } else {
+        // Odd-node duplication: the parent's leaf set is just left.leaves
+        // (do NOT double-count — that would push duplicate proof entries
+        // for the duplicated leaf at the next level).
+        next.push({ hash: parentHash, leaves: left.leaves });
+      }
     }
     level = next;
   }

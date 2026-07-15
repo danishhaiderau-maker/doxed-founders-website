@@ -68,6 +68,11 @@ jobs:
       - name: Type-check API
         run: npm run build --workspace=@dcf/api
 
+      - name: Run tests
+        run: |
+          npm test --workspace=@dcf/utils
+          npm test --workspace=@dcf/api
+
       - name: Build web (catch Vercel build errors before Vercel does)
         run: npm run build --workspace=@dcf/web
         env:

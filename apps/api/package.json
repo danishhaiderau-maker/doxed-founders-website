@@ -8,7 +8,7 @@
     "start": "node dist/main",
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "test": "tsx --test src/ddollar/ddollar-ledger.logic.test.ts"
+    "test": "tsx --test src/ddollar/ddollar-ledger.logic.test.ts src/flight-recorder/flight-recorder.service.spec.ts src/idea-validator/idea-validator.service.spec.ts src/memory-engine/memory-engine.service.spec.ts src/routing-engine/routing-engine.cache.spec.ts"
   },
   "dependencies": {
     "@coinbase/x402": "^2.1.0",
