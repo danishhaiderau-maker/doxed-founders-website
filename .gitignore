@@ -296,3 +296,65 @@ services/btc-conservative-agent/research/downloads/
 # Tmp/scratch data files (snapshot dumps, partial writes)
 *.jsonl.tmp
 *.jsonl.*.tmp
+
+# --- Repo-root research scratch + runtime reports (added 2026-07-15) ------------
+# These are personal Type B / V2a investigation scripts and regenerable runtime
+# reports that accumulated at the repo root across prior sessions. They contain
+# hardcoded absolute paths, reference purged runtime files, and have zero value
+# in any cloud/collaborator environment. Same category as the bot_runtime logs
+# cleaned up post-cleanup — keeping them out of git permanently.
+
+# Throwaway Type B / V2a analysis scripts (root-level scratch, not production tooling)
+/_*.py
+/_analysis_*.py
+/_check_*.py
+/_debug_*.py
+/_deep_dive*.py
+/_diag_*.py
+/_filter_design.py
+/_find_*.py
+/_fix_chain*.py
+/_full_analysis*.py
+/_parse_*.py
+/_scan_*.py
+
+# Regenerable runtime report JSONs at repo root (analyzer snapshots, audit output)
+/ai_scan_*.json
+/approval_ev_report.json
+/bot_analyzer_sync.json
+/execution_funnel_summary.json
+/feature_drift_report.json
+/fill_quality_report.json
+/independent_v1_post_ai_spawn_validation.json
+/lane_memory_validation.json
+/repo_version_sync.json
+/research_session.json
+/runtime_pathway_integrity.json
+/shadow_vs_live_entry_report.json
+/tile_independence_report.json
+/type_b_execution_audit.json
+/*_report.json
+/*_validation.json
+
+# Runtime CSV at repo root
+/trend_health.csv
+
+# Duplicate pathway specs at repo root (canonical copy lives in services/)
+/pathway_lane_specs.json
+
+# Debug screenshots at repo root
+/founder-ide-window-*.png
+
+# Pickled analysis dataframes
+*.pkl
+/services/*.pkl
+
+# Home analyzer runtime markers
+.home-analyzer-user-stopped
+.home-analyzer-*
+
+# Large build-input source trees (cloned upstream/fork sources used as inputs to
+# the IDE build). These are reproducible by re-running the build prep scripts and
+# must never be committed — would bloat git by hundreds of MB.
+packages/founder-ide/upstream/
+packages/skycode-fork/
