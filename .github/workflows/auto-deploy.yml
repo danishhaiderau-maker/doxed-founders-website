@@ -80,6 +80,8 @@ jobs:
           PUBLIC_SITE_URL: https://doxxedcrypto.digital
 
       - name: Trigger Railway redeploy
+        continue-on-error: true
+        id: railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: node scripts/ci-railway-redeploy.mjs
@@ -87,6 +89,8 @@ jobs:
       - name: Wait for Vercel + Railway to settle
         run: |
           echo "Waiting 120s for Vercel auto-deploy + Railway rebuild to start..."
+          echo "Railway step outcome: ${{ steps.railway.outcome }}"
+          echo "(Railway also auto-deploys from GitHub push — a failed/missing token here does not block production.)"
           sleep 120
 
       - name: Smoke test production
@@ -104,3 +108,4 @@ jobs:
           echo "- **API:** https://doxed-founders-website-production.up.railway.app/api/health" >> $GITHUB_STEP_SUMMARY
           echo "- **Schema push:** ${{ steps.schema.outputs.changed == 'true' && 'applied' || 'skipped (no changes)' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Vercel:** auto-deployed from GitHub (check Vercel dashboard)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Railway redeploy:** ${{ steps.railway.outcome }} (non-fatal — Railway auto-deploys from GitHub push)" >> $GITHUB_STEP_SUMMARY
