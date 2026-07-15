@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Ship remaining product-usable Founder Stack and Economics MVP work.
+ci(bitfinex-policy): refresh lock for Phase 6.5-9 signal-subscriber drift
 
 ## Last Activity
 
