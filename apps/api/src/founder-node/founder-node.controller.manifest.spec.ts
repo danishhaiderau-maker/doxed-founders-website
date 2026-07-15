@@ -75,14 +75,15 @@ describe('FounderNodeController — GET /manifest', () => {
     assert.ok((manifest.releases as unknown[]).length > 0, 'expected at least one release entry');
   });
 
-  it('the 0.9.0 release entry has status "current"', () => {
+  it('the latest release entry has status "current"', () => {
     const controller = makeController();
     const res = makeRes();
     const body = controller.getManifest(res as never) as {
       releases: Array<{ version: string; status: string }>;
+      latestVersion: string;
     };
-    const entry = body.releases.find((r) => r.version === '0.9.0');
-    assert.ok(entry, 'expected a 0.9.0 entry in releases');
+    const entry = body.releases.find((r) => r.version === body.latestVersion);
+    assert.ok(entry, 'expected a latestVersion entry in releases');
     assert.equal(entry!.status, 'current');
   });
 
