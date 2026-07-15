@@ -261,3 +261,38 @@ tmp-*.py
 tmp_*.txt
 tmp_*.py
 .env*
+
+# --- Post-cleanup hardening (added 2026-07-15) --------------------------------
+# These patterns were purged from git history via git-filter-repo on the
+# codex/v11-8-runtime-cleanup branch (~506 MB reclaimed). They are regenerable
+# bot runtime output / vestigial research data with zero value in any cloud or
+# collaborator environment. Most are already covered by the broader rules above;
+# this block is the explicit deny-list so future `git add -A` can never re-introduce
+# them even if a narrower rule above is ever edited.
+services/btc-conservative-agent/bot_runtime.log*
+services/btc-conservative-agent/signal_replay.jsonl*
+services/btc-conservative-agent/signal_snapshot.jsonl*
+services/btc-conservative-agent/execution_funnel.jsonl*
+services/btc-conservative-agent/shadow_*.jsonl*
+services/btc-conservative-agent/shadow_*.jsonl.*
+services/btc-conservative-agent/ai_input_log.jsonl*
+services/btc-conservative-agent/ai_tranche_log.csv
+services/btc-conservative-agent/ai_reason_research.jsonl*
+services/btc-conservative-agent/approved_but_rejected.jsonl*
+services/btc-conservative-agent/golden_stack_rejections.jsonl*
+services/btc-conservative-agent/blocked_signals_3factor.csv
+services/btc-conservative-agent/pipeline_events_3factor.csv
+services/btc-conservative-agent/decisions_3factor.csv
+services/btc-conservative-agent/trades_3factor.csv
+services/btc-conservative-agent/lane_opportunity_capture.jsonl*
+services/btc-conservative-agent/reversal_study.jsonl*
+services/btc-conservative-agent/trade_outcome.jsonl*
+services/btc-conservative-agent/research_archive/
+services/btc-conservative-agent/research_accumulator/
+services/btc-conservative-agent/research/downloads/
+# Defensive repo-wide catch for rotated logs (*.log.1, *.log.2, ...) so no
+# future service can re-introduce the bot_runtime.log.N bloat pattern.
+*.log.*
+# Tmp/scratch data files (snapshot dumps, partial writes)
+*.jsonl.tmp
+*.jsonl.*.tmp
