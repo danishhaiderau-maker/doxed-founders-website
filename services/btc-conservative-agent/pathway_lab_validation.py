@@ -27,6 +27,7 @@ from combo_pathway_config import (
     combo_lane_matches,
     is_ai_scan_lane,
     is_combo_execution_lane,
+    is_deterministic_bracket_lane,
     is_independent_ai_lane,
 )
 from legacy_pathway_config import (
@@ -262,11 +263,15 @@ def _sim_should_invoke_ai(enabled_map: dict, continuous_enabled: bool) -> bool:
 def _sim_spawn_targets(enabled_map: dict, ai: dict, direction: str, spread: int) -> list:
     """Which combo lanes would receive spawn_combo_lanes_from_ai_scan.
 
-    Independent-AI lanes (A160 V2) are excluded — they never inherit AI_SCAN decisions.
+    Independent-AI lanes (A160 V2 / TYPE_B_HUNTER_V1) and deterministic
+    bracket lanes (SR_MICRO_TILE_V2_STATIC — own tick loop) are excluded:
+    they never inherit AI_SCAN decisions.
     """
     out = []
     for lane in COMBO_EXECUTION_LANES:
         if is_independent_ai_lane(lane):
+            continue
+        if is_deterministic_bracket_lane(lane):
             continue
         if not enabled_map.get(lane, True):
             continue
@@ -321,6 +326,12 @@ def run_ai_scan_independence_self_test(retired_status: dict = None) -> dict:
                 f"only {tile} ON → independent AI (no AI_SCAN fan-out)",
                 tile not in spawn and len(spawn) == 0,
                 f"spawn_targets={spawn} (own prompt/timer)",
+            )
+        elif is_deterministic_bracket_lane(tile):
+            add(
+                f"only {tile} ON → deterministic bracket (no AI_SCAN fan-out)",
+                tile not in spawn and len(spawn) == 0,
+                f"spawn_targets={spawn} (own tick loop)",
             )
         else:
             add(
