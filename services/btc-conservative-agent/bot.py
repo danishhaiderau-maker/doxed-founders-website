@@ -65,6 +65,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     any_combo_execution_enabled,
     combo_entry_mode,
     combo_lane_match_detail,
@@ -2411,7 +2413,11 @@ def execution_mode_for_lane(lane: str = None) -> str:
     Fail-closed: any unknown lane, missing data, or retired lane returns
     LAB_SHADOW (safest mode -- no new orders).
     """
-    lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
+    # Fail-closed for None/empty: do NOT default to AI_SCAN here, because
+    # a caller that forgot to pass a lane must never silently place orders.
+    if not lane or not str(lane).strip():
+        return EXEC_MODE_LAB_SHADOW
+    lane = str(lane).strip().upper()
 
     # EXIT_ONLY takes precedence (set after Bitfinex disarm w/ open exposure)
     if lane_is_exit_only(lane):
