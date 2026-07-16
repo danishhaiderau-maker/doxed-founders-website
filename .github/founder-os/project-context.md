@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): drop -min to skip Void mangler OVERLAPPING edit crash
+fix(ide-build): pre-build Void React subprojects before main compile
 
 ## Last Activity
 
