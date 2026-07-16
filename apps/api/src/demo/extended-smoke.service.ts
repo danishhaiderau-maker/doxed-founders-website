@@ -65,7 +65,12 @@ export class ExtendedSmokeService {
 
   private async probeBotPing(botUrl: string): Promise<CheckResult> {
     try {
-      const res = await fetch(`${botUrl}/api/ping`, { signal: AbortSignal.timeout(8000) });
+      // [DEMO_BOT_FETCH_TIMEOUT_2026-07-16] Was 8s — too tight when the demo
+      // harness runs 12+ kernel pillars in parallel against the same Nest
+      // process. Event-loop starvation caused ping/state/lane_size probes to
+      // abort spuriously. 20s gives the API loop enough slack while still
+      // surfacing genuinely-dead bots.
+      const res = await fetch(`${botUrl}/api/ping`, { signal: AbortSignal.timeout(20_000) });
       if (!res.ok) return fail(`HTTP ${res.status}`);
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       const ok = Boolean(body?.status === 'ok' || body?.ok === true || body?.version);
@@ -79,7 +84,7 @@ export class ExtendedSmokeService {
     try {
       // Mirror the BotBridgeService parser: it pulls /api/relay-state or /api/state.
       const res = await fetch(`${botUrl}/api/state`, {
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(25_000),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) return fail(`/api/state HTTP ${res.status}`);
@@ -128,7 +133,7 @@ export class ExtendedSmokeService {
     // open/pending order carries a non-1.0 size_mult marker.
     try {
       const res = await fetch(`${botUrl}/api/state`, {
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(25_000),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) return fail(`/api/state HTTP ${res.status}`);
