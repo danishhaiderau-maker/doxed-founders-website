@@ -11861,11 +11861,46 @@ def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: f
             f"[TYPE_B_HUNTER_V1] entry filter crash: {e} — treating as FILTERED "
             f"[PIPELINE ENFORCEMENT]"
         )
+        _stamp_type_b_verdict(ctx, ok=False, score=None, block_reason=f"TYPE_B_FILTER_CRASH ({type(e).__name__})")
         return False, f"TYPE_B_FILTER_CRASH ({type(e).__name__})"
+    _score = (detail or {}).get("score")
+    _br = (detail or {}).get("block_reason") or ("TYPE_B_FILTER" if not ok else None)
+    _stamp_type_b_verdict(ctx, ok=ok, score=_score, block_reason=_br)
     if ok:
         return True, None
-    block_reason = (detail or {}).get("block_reason") or "TYPE_B_FILTER"
+    block_reason = _br or "TYPE_B_FILTER"
     return False, f"{block_reason} [{_type_b_policy_version()}]"
+
+
+def _stamp_type_b_verdict(ctx, ok: bool, score, block_reason):
+    """Surface Type B scorer verdict on the matching AI history row (transparency).
+
+    AI history is appended in _append_ai_history_row right after DeepSeek evaluates,
+    but BEFORE the deterministic Type B scorer runs. This stamps the scorer's
+    verdict back onto the row matching the trade_id so the dashboard AI History
+    table can show WHY a signal was approved/rejected by the policy.
+    """
+    try:
+        tid = (ctx or {}).get("trade_id")
+        if not tid:
+            return
+        verdict = {
+            "ok": bool(ok),
+            "score": score,
+            "block_reason": block_reason,
+            "policy_version": _type_b_policy_version(),
+            "stamped_at": time.time(),
+        }
+        with state_lock:
+            for row in reversed(state.get("ai_history") or []):
+                if row.get("trade_id") == tid:
+                    row["type_b_verdict"] = verdict
+                    break
+            else:
+                return
+            state["ai_history_updated"] = time.time()
+    except Exception as e:
+        logger.warning(f"[TYPE_B_HUNTER_V1] verdict stamp failed: {e}")
 
 
 def _apply_sr_micro_tile_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
@@ -18763,29 +18798,62 @@ def build_static_pathway_lane_specs() -> dict:
                 "filters": entry_filters,
             }
         elif type_b_hunter:
+            # Pull live thresholds from the v12 scorer so chips can never drift.
+            from type_b_hunter_v1 import (
+                ADX_FLOOR as _TB_ADX_FLOOR,
+                BULL_ADX_FLOOR as _TB_BULL_ADX_FLOOR,
+                MIN_SCORE_TO_ENTER as _TB_MIN_SCORE,
+                MIN_SPREAD_FLOOR as _TB_MIN_SPREAD,
+                VOLUME_DANGER as _TB_VOL_DANGER,
+            )
+            _tb_policy = _type_b_policy_version()
             filter_chips = [
                 "Direction only",
-                "ADX >=20",
-                "No confidence gate",
-                "Fixed policy v2",
-                "Spread ≥2",
-                "Walk-forward holdout",
+                f"ADX ≥{_TB_ADX_FLOOR:.0f} hard floor",
+                f"ADX 30-35 OPTIMAL (+1.5)",
+                f"BULL → ADX ≥{_TB_BULL_ADX_FLOOR:.0f}",
+                "Volume <0.80 = accumulation",
+                f"Volume >{_TB_VOL_DANGER:.1f} = danger",
+                "AI confidence audit-only",
+                f"Score ≥{_TB_MIN_SCORE:.1f}",
+                f"Spread ≥{_TB_MIN_SPREAD}",
+                f"{_tb_policy}",
                 "Paper-only",
                 f"Ladder {lane_ladder_label}",
             ]
             hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
             research_q = spec.get("research_question") or "Does the fixed Type B policy beat CONTINUOUS out of sample?"
             strategy_extra = [
-                "Tile OFF: collect calibration and rejected-signal counterfactual shadows; no paper limits",
-                "Tile ON: paper limits only; Bitfinex live execution remains disabled",
-                f"Policy {_type_b_policy_version()} is fixed before evaluation; outcome labels are not used for tuning",
-                "Logs: type_b_ai_input + type_b_replay + shadow_lane_outcome + lane_lab_pnl_ledger",
+                f"Scorer: {_tb_policy} — fixed feature gates, no outcome-label tuning",
+                "Scoring rubric (sum must clear threshold):",
+                f"  • ADX 30-35 = +1.5 (OPTIMAL) · 25-30 = +1.2 · >35 = +0.75 · 20-25 = +0.5",
+                f"  • Volume ratio <0.80 = +1.0 (accumulation) · <1.20 = +0.5",
+                "  • Regime BEAR = +0.5 · RANGE = +0.25",
+                "  • Structure aligned w/ direction (≥3 abs) = +1.0 · neutral = +0.25",
+                "  • Delta aligned w/ direction (≥18 abs) = +0.75",
+                "  • Spread 3-5 = +0.5 · Edge 3-5 = +0.5 · EMA slope aligned = +0.25",
+                f"Hard rejects (override score): ADX <{_TB_ADX_FLOOR:.0f} · BULL+ADX<{_TB_BULL_ADX_FLOOR:.0f} · "
+                f"vol>{_TB_VOL_DANGER:.1f} · spread<{_TB_MIN_SPREAD} · counter-structure · triple-danger",
+                "AI confidence: vestigial (constant 62 in fresh data) — logged for audit, NOT a gate",
+                "Tile OFF: collect calibration + counterfactual shadows; no paper limits",
+                "Tile ON: paper limits only; Bitfinex live remains disabled",
+                "Logs: lane_opportunity_capture.jsonl + shadow_lane_outcome.jsonl + lane_lab_pnl_ledger.json",
                 f"Independence: {shared['independence']}",
             ]
             entry_filters = {
-                "ai_probability_bucket": "audit-only; not an entry gate",
+                "ai_probability_bucket": "audit-only; not an entry gate (vestigial since v12)",
                 "directional_spread_bucket": "≥2",
-                "entry_mode": "TYPE_B_FIXED_POLICY_V2",
+                "entry_mode": "TYPE_B_FIXED_POLICY_V12",
+                "policy_version": _tb_policy,
+                "adx_floor": float(_TB_ADX_FLOOR),
+                "bull_adx_floor": float(_TB_BULL_ADX_FLOOR),
+                "adx_optimal_zone": [30.0, 35.0],
+                "adx_optimal_points": 1.5,
+                "volume_accumulation_below": 0.80,
+                "volume_danger_above": float(_TB_VOL_DANGER),
+                "min_score_to_enter": float(_TB_MIN_SCORE),
+                "min_spread": int(_TB_MIN_SPREAD),
+                "ai_weight": 0.0,
                 "calibration": "walk-forward only; rejected signals collect counterfactual shadows",
             }
             type_b_entry = {
@@ -20215,9 +20283,9 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 AI evaluations — full log in ai_tranche_log.csv / ai_input_log.jsonl.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 AI evaluations — full log in ai_tranche_log.csv / ai_input_log.jsonl. <strong>Tile Verdict</strong> shows the deterministic Type B / SR_MICRO scorer result (separate from AI decision).</p>
 <table>
-    <thead><tr><th>Time</th><th>Trade ID</th><th>Model</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th></tr></thead>
+    <thead><tr><th>Time</th><th>Trade ID</th><th>Model</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th><th>Tile Verdict</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -21708,6 +21776,22 @@ DASHBOARD_JS = """(function () {
           const prob = a.win_prob != null && a.win_prob !== '' ? Number(a.win_prob) : null;
           const c = a.comment || '';
           const cShort = c.length > 80 ? c.substring(0, 80) + '...' : (c || '-');
+          // Tile Verdict cell: deterministic scorer result (Type B / SR_MICRO).
+          // Shows APPROVE w/ score, or REJECT w/ human-readable block reason.
+          const v = a.type_b_verdict;
+          let verdictCell = '<span style="color:#8b949e">-</span>';
+          if (v) {
+            if (v.ok) {
+              const sc = v.score != null ? ` score=${v.score}` : '';
+              verdictCell = `<span style="color:#3fb950" title="${(v.policy_version||'').replace(/"/g,'&quot;')}">APPROVE${sc}</span>`;
+            } else {
+              const br = (v.block_reason || 'REJECTED').replace(/"/g, '&quot;');
+              const sc = v.score != null ? ` (score=${v.score})` : '';
+              verdictCell = `<span style="color:#f85149" title="${br}">${br}${sc}</span>`;
+            }
+          } else if (a.research_lane && /TYPE_B|SR_MICRO/i.test(String(a.research_lane))) {
+            verdictCell = '<span style="color:#d29922" title="Scorer has not returned yet for this trade_id">pending…</span>';
+          }
           return `
           <tr>
             <td>${a.melbourne_time || formatMelbourneDateTime(a.time || a.ts)}</td>
@@ -21719,8 +21803,9 @@ DASHBOARD_JS = """(function () {
             <td>${a.decision || '-'}</td>
             <td>${prob != null && !Number.isNaN(prob) ? prob.toFixed(0) + '%' : '-'}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
+            <td style="font-size:0.85em">${verdictCell}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="9" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="10" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
         safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
           <tr>
             <td>${k}%</td>
