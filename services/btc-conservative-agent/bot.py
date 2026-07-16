@@ -19096,6 +19096,10 @@ def build_static_pathway_lane_specs() -> dict:
                 VOLUME_DANGER as _TB_VOL_DANGER,
             )
             _tb_policy = _type_b_policy_version()
+            # Pt 7a (integrity): pull live peak-never-loser floor so the
+            # dashboard displays the actual +3% -> breakeven protection.
+            _tb_min_peak = peak_never_loser_min_peak_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
+            _tb_floor = peak_never_loser_floor_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
             filter_chips = [
                 "Direction only",
                 f"ADX ≥{_TB_ADX_FLOOR:.0f} hard floor",
@@ -19107,7 +19111,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Score ≥{_TB_MIN_SCORE:.1f}",
                 f"Spread ≥{_TB_MIN_SPREAD}",
                 f"{_tb_policy}",
-                "Paper-only",
+                f"Peak ≥{_tb_min_peak:.0f}% → floor {_tb_floor:.0f}%",
                 f"Ladder {lane_ladder_label}",
             ]
             hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
