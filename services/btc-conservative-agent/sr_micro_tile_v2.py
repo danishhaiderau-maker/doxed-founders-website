@@ -40,11 +40,14 @@ ADX_TRENDING_THRESHOLD = 40
 VOLATILITY_PCT_THRESHOLD = 80
 
 # v12 per-tile tuning for SR_MICRO_TILE_V2_STATIC (from 346-trade LAB dataset).
+# Reverted cap to 40 after full re-analysis: the ADX 35-40 bucket is the
+# second-best in the dataset (+$0.47/close, 50% win), so capping at 35 was
+# killing profitable trades. Original cap 40 retained.
+#
 # Data: SHORT lost -$0.26/close, LONG made +$0.38/close -> SHORT leg disabled.
-# Data: ADX 25-30 = -$1.57/close, ADX 40+ = -$0.52/close, ADX 35-40 = +$0.59/close
-#   -> STATIC ADX cap tightened from 40 to 35.
 # Data: LONDON session = -$0.54/close, ASIA = +$0.49/close -> blacklist LONDON.
-STATIC_ADX_TRENDING_THRESHOLD = 35
+# Data: Real bleed is THESIS_FAST_CUT (-$165.60 / 69 stops = -$2.40 each), not ADX.
+STATIC_ADX_TRENDING_THRESHOLD = 40
 STATIC_DISABLE_SHORT_LEG = True
 STATIC_SESSION_BLACKLIST = frozenset({"LONDON"})
 
