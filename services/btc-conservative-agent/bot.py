@@ -12155,6 +12155,7 @@ def maybe_tick_sr_micro_tile_v2_bracket():
             or features.get("mom_adx")
         )
         vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+        sess_bucket = _research_session_bucket()
 
         eval_result = evaluate_bracket(
             price,
@@ -12164,6 +12165,8 @@ def maybe_tick_sr_micro_tile_v2_bracket():
             swing_high,
             adx=adx,
             vol_pct=vol_pct,
+            lane=lane,
+            session_bucket=sess_bucket,
         )
 
         _srmv2_last_tick_ts = now
@@ -12296,6 +12299,7 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             or features.get("mom_adx")
         )
         vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+        sess_bucket = _research_session_bucket()
 
         eval_result = evaluate_bracket(
             price,
@@ -12305,6 +12309,8 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             swing_high,
             adx=adx,
             vol_pct=vol_pct,
+            lane=lane,
+            session_bucket=sess_bucket,
         )
         # Tag eval for telemetry — arming rules identical to V2.
         eval_result = dict(eval_result)
@@ -12341,9 +12347,10 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
             # Structural idle/suspend — cancel any resting STATIC shadows (CANCELLED).
-            if eval_result.get("block_reason") in (
+            _br = eval_result.get("block_reason") or ""
+            if _br in (
                 "ADX_TRENDING", "VOLATILITY_SPIKE", "PRICE_OUTSIDE_ENVELOPE", "MICRO_OUTSIDE_SWING",
-            ):
+            ) or _br.startswith("SESSION_BLACKLISTED"):
                 _cancel_open_bracket_lab_shadows(lane, reason="CANCELLED")
             logger.info(
                 f"[{lane}] bracket idle zone={eval_result.get('zone')} "
@@ -18693,12 +18700,22 @@ def build_static_pathway_lane_specs() -> dict:
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
         if deterministic_bracket:
+            # Per-lane ADX cap (v12): STATIC=35, V2 full-chase=40
+            from sr_micro_tile_v2 import (
+                ADX_TRENDING_THRESHOLD as _V2_ADX_CAP,
+                STATIC_ADX_TRENDING_THRESHOLD as _STATIC_ADX_CAP,
+                STATIC_DISABLE_SHORT_LEG as _STATIC_DISABLE_SHORT,
+                STATIC_SESSION_BLACKLIST as _STATIC_SESS_BL,
+            )
+            _adx_cap = _STATIC_ADX_CAP if static_bracket else _V2_ADX_CAP
+            _short_note = " · SHORT-disabled (v12)" if (static_bracket and _STATIC_DISABLE_SHORT) else ""
+            _sess_bl_note = (f" · {','.join(sorted(_STATIC_SESS_BL))}-blacklisted" if (static_bracket and _STATIC_SESS_BL) else "")
             filter_chips = [
                 "No AI",
-                "Dual leg",
+                "Dual leg" if not (static_bracket and _STATIC_DISABLE_SHORT) else "LONG-only",
                 "Micro S/R",
                 "Midpoint guard",
-                "ADX cap 40",
+                f"ADX cap {_adx_cap}{_short_note}{_sess_bl_note}",
                 ("STATIC no chase" if static_bracket else "FULL_CHASE baseline"),
                 f"Ladder {lane_ladder_label}",
             ]
@@ -18721,10 +18738,12 @@ def build_static_pathway_lane_specs() -> dict:
             ]
             entry_filters = {
                 "entry_mode": "BRACKET_LIMIT_STATIC" if static_bracket else "BRACKET_LIMIT",
-                "adx_max": 40,
+                "adx_max": _adx_cap,
                 "midpoint_buffer_pct": 0.15,
                 "chase_mode": "STATIC" if static_bracket else "FULL_CHASE",
                 "max_chases": 0 if static_bracket else None,
+                "short_disabled_v12": bool(static_bracket and _STATIC_DISABLE_SHORT),
+                "session_blacklist_v12": sorted(_STATIC_SESS_BL) if (static_bracket and _STATIC_SESS_BL) else [],
             }
             bracket_entry = {
                 "trigger": trigger,

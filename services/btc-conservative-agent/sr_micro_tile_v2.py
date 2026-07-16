@@ -35,8 +35,18 @@ FULL_MAX_CHASES = None  # unlimited / global chase policy
 MIDPOINT_BUFFER_PCT = 0.15
 MAX_CHASE_DIST_PCT = 0.30
 
+# Global trend/volatility caps (apply to V2 full-chase baseline).
 ADX_TRENDING_THRESHOLD = 40
 VOLATILITY_PCT_THRESHOLD = 80
+
+# v12 per-tile tuning for SR_MICRO_TILE_V2_STATIC (from 346-trade LAB dataset).
+# Data: SHORT lost -$0.26/close, LONG made +$0.38/close -> SHORT leg disabled.
+# Data: ADX 25-30 = -$1.57/close, ADX 40+ = -$0.52/close, ADX 35-40 = +$0.59/close
+#   -> STATIC ADX cap tightened from 40 to 35.
+# Data: LONDON session = -$0.54/close, ASIA = +$0.49/close -> blacklist LONDON.
+STATIC_ADX_TRENDING_THRESHOLD = 35
+STATIC_DISABLE_SHORT_LEG = True
+STATIC_SESSION_BLACKLIST = frozenset({"LONDON"})
 
 BRACKET_TICK_MIN_SEC = 10
 BRACKET_TICK_MAX_SEC = 30
@@ -76,8 +86,19 @@ def evaluate_bracket(
     swing_high,
     adx=None,
     vol_pct=None,
+    lane=None,
+    session_bucket=None,
 ) -> dict:
-    """Evaluate dual-leg bracket arming — no AI, structural rules only."""
+    """Evaluate dual-leg bracket arming — no AI, structural rules only.
+
+    Per-lane tuning (v12):
+      - STATIC lane uses tighter ADX cap (35 vs 40), blocks SHORT leg, and
+        blacklists LONDON session. Pass lane=RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+        to opt in; V2 full-chase lane keeps historical baseline.
+    """
+    lane_u = str(lane or "").upper()
+    is_static = lane_u == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    adx_cap = STATIC_ADX_TRENDING_THRESHOLD if is_static else ADX_TRENDING_THRESHOLD
     px = _sf(price)
     ms = _sf(micro_support)
     mr = _sf(micro_resistance)
@@ -85,9 +106,10 @@ def evaluate_bracket(
     sh = _sf(swing_high)
     adx_v = _sf(adx)
     vol_v = _sf(vol_pct)
+    sess = str(session_bucket or "").upper()
 
     result = {
-        "lane": LANE_ID,
+        "lane": lane_u or LANE_ID,
         "armed": False,
         "long_armed": False,
         "short_armed": False,
@@ -104,6 +126,7 @@ def evaluate_bracket(
         "swing_high": sh,
         "adx": adx_v,
         "vol_pct": vol_v,
+        "session_bucket": sess,
         "in_midpoint_zone": False,
     }
 
@@ -112,7 +135,12 @@ def evaluate_bracket(
         result["zone"] = "INCOMPLETE"
         return result
 
-    if adx_v is not None and adx_v > ADX_TRENDING_THRESHOLD:
+    if is_static and sess and sess in STATIC_SESSION_BLACKLIST:
+        result["block_reason"] = f"SESSION_BLACKLISTED_{sess}"
+        result["zone"] = "SUSPENDED"
+        return result
+
+    if adx_v is not None and adx_v > adx_cap:
         result["block_reason"] = "ADX_TRENDING"
         result["zone"] = "SUSPENDED"
         return result
@@ -159,7 +187,15 @@ def evaluate_bracket(
     short_too_far = short_dist > sr * MAX_CHASE_DIST_PCT * 2
 
     result["long_armed"] = bool(px > ms and not long_mid_block and not long_too_far)
-    result["short_armed"] = bool(px < mr and not short_mid_block and not short_too_far)
+    short_qualifies = bool(px < mr and not short_mid_block and not short_too_far)
+    # v12 STATIC-only: SHORT leg historically loses (-$0.26/close vs LONG +$0.38).
+    # Disable it for STATIC lane; V2 full-chase baseline keeps dual-leg behavior.
+    if is_static and STATIC_DISABLE_SHORT_LEG:
+        result["short_armed"] = False
+        if short_qualifies:
+            result["short_leg_disabled_v12"] = True
+    else:
+        result["short_armed"] = short_qualifies
     result["armed"] = bool(result["long_armed"] or result["short_armed"])
 
     if not result["armed"]:
