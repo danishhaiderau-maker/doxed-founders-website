@@ -20380,7 +20380,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "v11.8 paper-research roster — CONTINUOUS benchmark + Type B Hunter + static S/R; all other lanes are archived analytics only",
+        "architecture_freeze_note": "v12 paper-research roster — CONTINUOUS benchmark + Type B Hunter + static S/R; all other lanes are archived analytics only",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -20537,6 +20537,102 @@ def _load_reconciled_lab_outcome_metrics() -> dict:
             "policy_version": _type_b_policy_version() if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1 else None,
         }
     return result
+
+
+def _reconcile_type_b_trade_count() -> dict:
+    """Pt 7b: Cross-source trade-count reconciliation for TYPE_B_HUNTER_V1.
+
+    Surfaces mismatches between the three independent sources of Type B trade
+    counts so the dashboard can render consistent totals and the operator can
+    spot drift (e.g. a paper trade that did not produce a shadow outcome row,
+    or a live fill that did not reach session_stats).
+
+    Sources:
+      - ``paper``   : ``session_stats``/ledger closes for TYPE_B_HUNTER_V1
+      - ``shadow``  : ``shadow_lane_outcome.jsonl`` rows where
+                      ``research_lane == TYPE_B_HUNTER_V1`` and ``filled == True``
+                      and ``policy_version`` matches the running policy
+      - ``live``    : ``open_positions`` for the same lane; only present in LIVE mode
+
+    The output is purely diagnostic -- it never rewrites ledgers. The dashboard
+    surfaces ``type_b_trade_reconciliation`` from this dict via ``/api/state``.
+    """
+    lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
+    policy_v = _type_b_policy_version()
+    out = {
+        "lane": lane,
+        "policy_version": policy_v,
+        "paper_closes": 0,
+        "shadow_closes": 0,
+        "live_open": 0,
+        "live_closed": 0,
+        "consistent": True,
+        "mismatch_note": "",
+    }
+
+    # Paper (ledger closes for the lane, excluding pure-LAB rows)
+    try:
+        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+            with open(LANE_PNL_LEDGER_FILE, encoding="utf-8") as f:
+                ld = (json.load(f) or {}).get("lanes") or {}
+            row = ld.get(lane) or {}
+            out["paper_closes"] = int(row.get("closes") or 0)
+    except Exception as e:
+        logger.debug(f"[TYPE_B_RECONCILE] paper read failed: {e}")
+
+    # Shadow outcome rows (authoritative for LAB)
+    try:
+        if os.path.isfile(SHADOW_LANE_OUTCOME_FILE):
+            seen = set()
+            with open(SHADOW_LANE_OUTCOME_FILE, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if str(r.get("research_lane") or "").upper() != lane:
+                        continue
+                    if r.get("policy_version") != policy_v:
+                        continue
+                    tid = str(r.get("trade_id") or r.get("study_id") or "")
+                    if not tid or tid in seen:
+                        continue
+                    seen.add(tid)
+                    if bool(r.get("filled")):
+                        out["shadow_closes"] += 1
+    except Exception as e:
+        logger.debug(f"[TYPE_B_RECONCILE] shadow read failed: {e}")
+
+    # Live open positions for the lane
+    try:
+        with state_lock:
+            positions = copy.deepcopy(state.get("open_positions") or [])
+        out["live_open"] = sum(
+            1 for p in positions
+            if str(p.get("lane") or p.get("research_lane") or "").upper() == lane
+        )
+    except Exception as e:
+        logger.debug(f"[TYPE_B_RECONCILE] open_positions read failed: {e}")
+
+    # Consistency check -- paper and shadow should agree for the same policy
+    # cohort. Allow paper >= shadow because the ledger may include older
+    # policy cohorts before the policy_version gate was introduced.
+    paper = int(out["paper_closes"])
+    shadow = int(out["shadow_closes"])
+    if paper != shadow:
+        out["consistent"] = False
+        if paper > shadow:
+            out["mismatch_note"] = (
+                f"paper ({paper}) > shadow ({shadow}) -- ledger likely includes "
+                f"older policy cohorts; shadow count is the authoritative figure "
+                f"for policy {policy_v}"
+            )
+        else:
+            out["mismatch_note"] = (
+                f"shadow ({shadow}) > paper ({paper}) -- a filled shadow outcome "
+                f"did not reach lane_pnl_ledger; rebuild the ledger from jsonl"
+            )
+    return out
 
 
 def _session_stats_from_lane_metrics(metrics: dict) -> dict:
@@ -24407,6 +24503,10 @@ def _build_api_state_snapshot():
         # tile can render the full Section 2 spec without re-deriving from
         # raw opportunity events each poll.
         snapshot["tile2_counters"] = tile2_dashboard_metrics()
+        # Pt 7b: TYPE_B_HUNTER_V1 cross-source trade-count reconciliation.
+        # Surfaces paper/shadow/live count mismatches so the dashboard never
+        # silently reports inconsistent totals across the three sources.
+        snapshot["type_b_trade_reconciliation"] = _reconcile_type_b_trade_count()
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
