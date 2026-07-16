@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): pre-build Void React subprojects before main compile
+fix(ide-build): verify launcher at ../VSCode-win32-x64 (gulp output path)
 
 ## Last Activity
 
