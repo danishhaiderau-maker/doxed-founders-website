@@ -388,8 +388,12 @@ jobs:
           }
 
           # Critical native modules that have regressed in past builds.
+          # NOTE on paths: Void uses @vscode/policy-watcher (Microsoft's
+          # official package), NOT @vscodium/policy-watcher (the VSCodium
+          # fork). The previous version of this list had the VSCodium path
+          # and always failed even though the module was built correctly.
           $requiredNode = @(
-            "resources\app\node_modules\@vscodium\policy-watcher\build\Release\policy_watcher.node",
+            "resources\app\node_modules\@vscode\policy-watcher\build\Release\policy_watcher.node",
             "resources\app\node_modules\native-keymap\build\Release\keymapping.node",
             "resources\app\node_modules\@vscode\windows-registry\build\Release\win32_registry.node",
             "resources\app\node_modules\@vscode\windows-process-tree\build\Release\win_process_tree.node"
