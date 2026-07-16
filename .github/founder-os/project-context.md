@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): verify launcher at ../VSCode-win32-x64 (gulp output path)
+fix(ide-build): check @vscode/policy-watcher, not @vscodium/
 
 ## Last Activity
 
