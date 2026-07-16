@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-ci(ide): don't pin Inno Setup version - runner already has 6.7.1
+fix(ide-build): use vscode-win32-x64-min instead of -min-ci target
 
 ## Last Activity
 
