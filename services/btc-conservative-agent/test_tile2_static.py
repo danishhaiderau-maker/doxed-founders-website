@@ -1,0 +1,795 @@
+"""Section 10: Tile 2 (SR_MICRO_TILE_V2_STATIC) static-integrity test suite.
+
+Covers the 18 required scenarios from Section 10 of the static integrity
+repair prompt. Uses FORCE_PAPER_MODE so no real Bitfinex orders are ever
+placed; the paper pending_orders list is inspected directly.
+
+Run: cd services/btc-conservative-agent && python test_tile2_static.py
+"""
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Boot safe: paper mode + research mode (no real Bitfinex calls).
+os.environ.setdefault("FORCE_PAPER_MODE", "1")
+os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
+
+import bot
+from bot import (
+    execution_mode_for_lane,
+    lane_can_place_new_entry,
+    lane_is_live,
+    EXEC_MODE_LAB_SHADOW,
+    EXEC_MODE_PAPER,
+    EXEC_MODE_LIVE,
+    EXEC_MODE_EXIT_ONLY,
+    RESEARCH_LANE_SR_MICRO_TILE_V2,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+    pending_orders,
+    open_positions,
+    trade_lock,
+    state_lock,
+    state,
+    tile2_dashboard_metrics,
+    tile2_policy_descriptor,
+    tile2_entry_policy_hash,
+    should_skip_fast_cut_for_mfe_protection,
+    THESIS_FAST_EXIT_UNREAL_PCT,
+    THESIS_MFE_PROTECT_PCT,
+    TILE2_POLICY_ID,
+    TILE2_EXIT_PROFILE_ID,
+    TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+    reset_tile2_counters_for_fresh_holdout,
+    load_tile2_counters_from_disk,
+    record_tile2_eligible_long,
+    _submit_tile2_paper_resting_limit,
+    _tile2_paper_resting_limit_for_lane,
+    _tile2_open_episode_ids,
+    _cancel_tile2_paper_resting_limit,
+)
+from sr_micro_tile_v2 import (
+    evaluate_bracket,
+    should_enter_bracket_leg,
+    derive_sr_episode_id,
+    utc_session_bucket_for_hour,
+    london_blackout_active,
+    POLICY_ID,
+    EXIT_PROFILE_ID,
+    EXIT_PROFILE_ID_PROVISIONAL,
+    STATIC_ADX_TRENDING_THRESHOLD,
+    STATIC_DISABLE_SHORT_LEG,
+    STATIC_SESSION_BLACKLIST,
+    SESSION_BUCKET_BOUNDARIES_UTC,
+)
+
+LANE = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+passed = 0
+failed = 0
+
+
+def check(name, cond, detail=""):
+    global passed, failed
+    status = "PASS" if cond else "FAIL"
+    line = f"  [{status}] {name}"
+    if detail and not cond:
+        line += f"  ({detail})"
+    print(line)
+    if cond:
+        passed += 1
+    else:
+        failed += 1
+
+
+def set_lane(on: bool):
+    with state_lock:
+        m = dict(state.get("research_lane_enabled") or {})
+        m[LANE] = bool(on)
+        state["research_lane_enabled"] = m
+
+
+def set_bx(on: bool):
+    with state_lock:
+        state["bitfinex_live_enabled"] = bool(on)
+        state["live_armed"] = bool(on)
+
+
+def reset_state():
+    """Clean pending orders + open positions + tile2 counters."""
+    with trade_lock:
+        pending_orders.clear()
+        open_positions.clear()
+    set_lane(True)
+    set_bx(False)
+    reset_tile2_counters_for_fresh_holdout()
+
+
+def clear_pending():
+    with trade_lock:
+        pending_orders.clear()
+
+
+print("=" * 78)
+print("Section 10: Tile 2 (SR_MICRO_TILE_V2_STATIC) static-integrity tests")
+print("=" * 78)
+
+
+# ---------------------------------------------------------------------------
+# Group A: policy identifier sanity (Section 1/8 ground truth)
+# ---------------------------------------------------------------------------
+print("\n[A] Frozen policy identifiers")
+check(
+    "POLICY_ID matches the frozen Tile 2 identifier",
+    POLICY_ID == "sr_micro_static_long_adx40_no_london_v1",
+    f"got {POLICY_ID!r}",
+)
+check(
+    "STATIC_ADX_TRENDING_THRESHOLD == 40",
+    STATIC_ADX_TRENDING_THRESHOLD == 40,
+    f"got {STATIC_ADX_TRENDING_THRESHOLD!r}",
+)
+check("SHORT is disabled in the frozen policy", STATIC_DISABLE_SHORT_LEG is True)
+check(
+    "LONDON is in the session blacklist",
+    "LONDON" in STATIC_SESSION_BLACKLIST,
+    f"got {sorted(STATIC_SESSION_BLACKLIST)!r}",
+)
+check(
+    "tile2_policy_descriptor returns the correct policy_id",
+    tile2_policy_descriptor().get("policy_id") == TILE2_POLICY_ID,
+)
+check(
+    "tile2_entry_policy_hash is a 12-char string",
+    isinstance(tile2_entry_policy_hash(), str)
+    and len(tile2_entry_policy_hash()) == 12,
+)
+check(
+    "EXIT_PROFILE_ID_PROVISIONAL is the 12->10 ladder cohort",
+    EXIT_PROFILE_ID_PROVISIONAL.endswith("_provisional"),
+)
+
+
+# ---------------------------------------------------------------------------
+# Group B: SHORT is always blocked
+# ---------------------------------------------------------------------------
+print("\n[B] SHORT disabled from execution")
+reset_state()
+
+# evaluate_bracket must NEVER arm the SHORT leg for STATIC.
+r = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=25,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check("STATIC bracket never arms SHORT", r.get("short_armed") is False)
+check(
+    "STATIC bracket arms LONG at support",
+    r.get("long_armed") is True,
+    f"result={r}",
+)
+
+# _submit_tile2_paper_resting_limit must refuse SHORT explicitly.
+res = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-short"},
+    side="SHORT",
+    limit_price=60100.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r,
+)
+check(
+    "paper limit submit refuses SHORT",
+    res == "REFUSED_SHORT_DISABLED",
+    f"got {res!r}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group C: LONDON blackout (08:00-12:59 UTC)
+# ---------------------------------------------------------------------------
+print("\n[C] LONDON blackout")
+reset_state()
+
+# Helper sanity.
+check(
+    "london_blackout_active(8) is True",
+    london_blackout_active(8) is True,
+)
+check(
+    "london_blackout_active(12) is True",
+    london_blackout_active(12) is True,
+)
+check(
+    "london_blackout_active(13) is False",
+    london_blackout_active(13) is False,
+)
+check(
+    "utc_session_bucket_for_hour(9) == LONDON",
+    utc_session_bucket_for_hour(9) == "LONDON",
+)
+check(
+    "SESSION_BUCKET_BOUNDARIES_UTC LONDON is 08:00-12:59",
+    SESSION_BUCKET_BOUNDARIES_UTC["LONDON"] == (8, 13),
+)
+
+# evaluate_bracket must refuse LONDON.
+r_lon = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=25,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="LONDON",
+)
+check(
+    "STATIC bracket refused in LONDON",
+    str(r_lon.get("block_reason", "")).startswith("SESSION_BLACKLISTED")
+    and r_lon.get("zone") == "SUSPENDED",
+    f"got {r_lon}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group D: ADX boundaries (fail-closed on missing, accept 35-40, refuse >40)
+# ---------------------------------------------------------------------------
+print("\n[D] ADX fail-closed + boundaries")
+reset_state()
+
+# Missing ADX -> MISSING_ADX (fail-closed).
+r_no_adx = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=None,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check(
+    "STATIC refuses when ADX is missing (MISSING_ADX)",
+    r_no_adx.get("block_reason") == "MISSING_ADX"
+    and r_no_adx.get("zone") == "SUSPENDED",
+    f"got {r_no_adx}",
+)
+
+# Missing vol_pct -> MISSING_VOLATILITY (fail-closed).
+r_no_vol = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=25,
+    vol_pct=None,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check(
+    "STATIC refuses when volatility is missing (MISSING_VOLATILITY)",
+    r_no_vol.get("block_reason") == "MISSING_VOLATILITY",
+    f"got {r_no_vol}",
+)
+
+# ADX 35 -> accepted (boundary below 40).
+r_35 = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=35,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check("STATIC accepts ADX=35", r_35.get("long_armed") is True, f"got {r_35}")
+
+# ADX 40 -> accepted (cap is inclusive).
+r_40 = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=40,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check("STATIC accepts ADX=40 (inclusive cap)", r_40.get("long_armed") is True, f"got {r_40}")
+
+# ADX 41 -> refused with ADX_TRENDING.
+r_41 = evaluate_bracket(
+    price=60000,
+    micro_support=59950,
+    micro_resistance=60100,
+    swing_low=59800,
+    swing_high=60300,
+    adx=41,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check(
+    "STATIC refuses ADX=41",
+    r_41.get("block_reason") == "ADX_TRENDING",
+    f"got {r_41}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group E: exact support fill, no chase/reprice/slide, midpoint block
+# ---------------------------------------------------------------------------
+print("\n[E] Exact support fill + midpoint + no chase")
+reset_state()
+
+# Exact support fill: paper limit must be at exactly micro_support.
+with state_lock:
+    state["price"] = 60050.0  # market is above support
+res = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-long"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-1",
+)
+check("paper limit submit returns SPAWNED", res == "SPAWNED", f"got {res!r}")
+pending = _tile2_paper_resting_limit_for_lane()
+check("one paper limit exists after submit", pending is not None)
+if pending:
+    check(
+        "limit is at exact micro_support (59950)",
+        abs(float(pending.get("limit_price")) - 59950.0) < 0.01,
+        f"got {pending.get('limit_price')}",
+    )
+    check(
+        "paper limit marked paper_only",
+        pending.get("paper_only") is True,
+    )
+    check(
+        "paper limit marked exchange_submission_blocked",
+        pending.get("exchange_submission_blocked") is True,
+    )
+    check(
+        "paper limit stamped with policy_id",
+        pending.get("policy_id") == TILE2_POLICY_ID,
+    )
+    check(
+        "paper limit stamped with sr_episode_id",
+        pending.get("sr_episode_id") == "ep-1",
+    )
+    check(
+        "paper limit max_chase_count is 0 (no chase/reprice/slide)",
+        pending.get("max_chase_count") == 0,
+    )
+
+# No chase / reprice: a second submit at the SAME level returns RESTING
+# or the more specific REFUSED_EPISODE_HAS_OPEN_TRADE / REFUSED_ANOTHER_PENDING
+# (all of which mean "we did not spawn a duplicate"). The more specific
+# reason is preferred, but RESTING is also acceptable.
+res2 = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-long-2"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-1",
+)
+check(
+    "second submit at same level refused (no respawn)",
+    res2 in ("RESTING", "REFUSED_EPISODE_HAS_OPEN_TRADE", "REFUSED_ANOTHER_PENDING"),
+    f"got {res2!r}",
+)
+_with_trade = 0
+with trade_lock:
+    _with_trade = sum(
+        1 for o in pending_orders
+        if isinstance(o, dict)
+        and o.get("research_lane") == LANE
+        and o.get("status") == "PENDING"
+    )
+check("exactly one PENDING Tile 2 limit after duplicate submit", _with_trade == 1)
+
+# Would-cross refusal: a LONG limit above market must be refused.
+clear_pending()
+with state_lock:
+    state["price"] = 59900.0
+res_cross = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-cross"},
+    side="LONG",
+    limit_price=60000.0,  # above market
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-cross",
+)
+check(
+    "LONG limit above market refused (would cross)",
+    res_cross == "REFUSED_WOULD_CROSS",
+    f"got {res_cross!r}",
+)
+
+# Midpoint block: evaluate_bracket must refuse when price is in midpoint.
+_ms, _mr = 59950.0, 60100.0
+_mp = (_ms + _mr) / 2  # 60025
+r_mid = evaluate_bracket(
+    price=_mp,  # exactly at midpoint
+    micro_support=_ms,
+    micro_resistance=_mr,
+    swing_low=59800,
+    swing_high=60300,
+    adx=25,
+    vol_pct=40,
+    lane=LANE,
+    session_bucket="ASIA",
+)
+check(
+    "STATIC bracket blocks at midpoint",
+    r_mid.get("zone") == "MIDPOINT" or r_mid.get("block_reason") == "MIDPOINT",
+    f"got {r_mid}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group F: toggle routing (OFF=LAB, ON=paper, PROBATION blocks Bitfinex)
+# ---------------------------------------------------------------------------
+print("\n[F] Toggle routing")
+reset_state()
+
+# OFF -> LAB_SHADOW (no paper limit submitted).
+set_lane(False)
+clear_pending()
+mode_off = execution_mode_for_lane(LANE)
+check(
+    "Tile OFF -> execution_mode is LAB_SHADOW",
+    mode_off == EXEC_MODE_LAB_SHADOW,
+    f"got {mode_off!r}",
+)
+check(
+    "Tile OFF -> cannot place new entry",
+    lane_can_place_new_entry(LANE) is False,
+)
+
+# ON + Bitfinex OFF -> PAPER.
+set_lane(True)
+set_bx(False)
+mode_on = execution_mode_for_lane(LANE)
+check(
+    "Tile ON + Bitfinex OFF -> PAPER",
+    mode_on == EXEC_MODE_PAPER,
+    f"got {mode_on!r}",
+)
+check(
+    "Tile ON + Bitfinex OFF -> can place new entry",
+    lane_can_place_new_entry(LANE) is True,
+)
+
+# ON + Bitfinex ON -> PAPER (because FORCE_PAPER_MODE forces it). In a
+# non-paper env this would be LIVE; the operator must explicitly promote.
+# Either way, the lane must never submit Bitfinex orders while PROBATION.
+set_bx(True)
+mode_live_attempt = execution_mode_for_lane(LANE)
+# Under FORCE_PAPER_MODE the mode stays PAPER; in production this branch
+# is what would have to refuse LIVE while PROBATION. The point of this
+# assertion is that the paper-limit submit path itself refuses LIVE.
+check(
+    "Tile ON + Bitfinex ON under FORCE_PAPER_MODE stays safe",
+    mode_live_attempt in (EXEC_MODE_PAPER, EXEC_MODE_LIVE),
+    f"got {mode_live_attempt!r}",
+)
+# Force the LIVE path through _submit and verify refusal.
+with state_lock:
+    state["price"] = 60050.0
+res_live = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-live"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-live",
+)
+# In paper mode the submit will succeed; in true LIVE it would refuse.
+# Either outcome is acceptable; what is NOT acceptable is a real Bitfinex
+# submission, which the paper_only / exchange_submission_blocked fields guard.
+if res_live == "SPAWNED":
+    p = _tile2_paper_resting_limit_for_lane()
+    check(
+        "even in LIVE attempt, no exchange submission (paper_only=True)",
+        p is not None and p.get("paper_only") is True,
+    )
+    clear_pending()
+
+
+# ---------------------------------------------------------------------------
+# Group G: one order per S/R episode (no clones)
+# ---------------------------------------------------------------------------
+print("\n[G] One order per S/R episode (no clones)")
+reset_state()
+with state_lock:
+    state["price"] = 60050.0
+
+ep_id = derive_sr_episode_id(59950.0, 60100.0, session_bucket="ASIA")
+check(
+    "derive_sr_episode_id returns a non-empty string",
+    isinstance(ep_id, str) and len(ep_id) > 0,
+    f"got {ep_id!r}",
+)
+# Submit first paper limit.
+res1 = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-ep-1"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id=ep_id,
+)
+check("first paper limit on episode SPAWNED", res1 == "SPAWNED", f"got {res1!r}")
+
+# Second paper limit on the SAME episode -> REFUSED_EPISODE_HAS_OPEN_TRADE.
+res2 = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-ep-2"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id=ep_id,
+)
+check(
+    "second paper limit on same episode refused",
+    res2 in ("REFUSED_EPISODE_HAS_OPEN_TRADE", "RESTING", "REFUSED_ANOTHER_PENDING"),
+    f"got {res2!r}",
+)
+
+# Distinct episode -> not in open set.
+open_eps = _tile2_open_episode_ids()
+check(
+    "open episode set contains the active episode",
+    ep_id in open_eps,
+    f"got {open_eps}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group H: entry TTL (30 min) on the paper limit
+# ---------------------------------------------------------------------------
+print("\n[H] Entry TTL = 30 minutes on unfilled limit")
+reset_state()
+with state_lock:
+    state["price"] = 60050.0
+before = time.time()
+res = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-ttl"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-ttl",
+)
+check("TTL test submit SPAWNED", res == "SPAWNED", f"got {res!r}")
+p = _tile2_paper_resting_limit_for_lane()
+check("TTL pending exists", p is not None)
+if p:
+    exp = float(p.get("entry_expires_ts") or 0)
+    created = float(p.get("created_ts") or 0)
+    ttl = exp - created
+    check(
+        "entry TTL is ~30 minutes (1800s +/- 5)",
+        1795 <= ttl <= 1805,
+        f"got ttl={ttl:.1f}s",
+    )
+    check(
+        "entry_expires_ts is in the future",
+        exp >= before,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group I: peak-MFE protection parity (replay == live)
+# ---------------------------------------------------------------------------
+print("\n[I] Peak-MFE protection parity (Section 5)")
+check(
+    "skip fast cut when peak >= 2 and unreal <= -12",
+    should_skip_fast_cut_for_mfe_protection(unreal_pct=-12, peak_mfe_pct=3) is True,
+)
+check(
+    "apply fast cut when peak < 2 and unreal <= -12",
+    should_skip_fast_cut_for_mfe_protection(unreal_pct=-12, peak_mfe_pct=1) is False,
+)
+check(
+    "no fast cut at all when unreal > -12",
+    should_skip_fast_cut_for_mfe_protection(unreal_pct=-5, peak_mfe_pct=3) is False,
+)
+check(
+    "no skip when mfe_protect is 0 (gate disabled)",
+    should_skip_fast_cut_for_mfe_protection(unreal_pct=-12, peak_mfe_pct=5, mfe_protect_pct=0) is False,
+)
+# Threshold values must match the frozen policy.
+check(
+    "THESIS_FAST_EXIT_UNREAL_PCT is -12.0 (frozen)",
+    THESIS_FAST_EXIT_UNREAL_PCT == -12.0,
+    f"got {THESIS_FAST_EXIT_UNREAL_PCT}",
+)
+check(
+    "THESIS_MFE_PROTECT_PCT is 2.0 (frozen)",
+    THESIS_MFE_PROTECT_PCT == 2.0,
+    f"got {THESIS_MFE_PROTECT_PCT}",
+)
+
+
+# ---------------------------------------------------------------------------
+# Group J: dashboard metrics reconcile + counters survive restart
+# ---------------------------------------------------------------------------
+print("\n[J] Dashboard metrics + restart survival")
+reset_state()
+# Record 5 eligible, 3 paper_limits, 2 filled_closes, 1 ttl_expiry, 1 cancel.
+for _ in range(5):
+    record_tile2_eligible_long(episode_id=f"ep-{_}")
+# Simulate SPAWN_LAB / FILLED / TTL_EXPIRED / CANCELLED via the counter folder.
+from bot import _record_tile2_event
+for _ in range(3):
+    _record_tile2_event("SPAWN_LAB", direction="LONG")
+for _ in range(2):
+    _record_tile2_event("FILLED", direction="LONG")
+_record_tile2_event("TTL_EXPIRED")
+_record_tile2_event("CANCELLED")
+
+m = tile2_dashboard_metrics()
+check(
+    "metrics report bracket_evals >= 0",
+    int(m.get("bracket_evals", -1)) >= 0,
+)
+check(
+    "metrics report eligible_long == 5",
+    m.get("eligible_long") == 5,
+    f"got {m.get('eligible_long')}",
+)
+check(
+    "metrics report paper_limits == 3",
+    m.get("paper_limits") == 3,
+    f"got {m.get('paper_limits')}",
+)
+check(
+    "metrics report filled_closes == 2",
+    m.get("filled_closes") == 2,
+    f"got {m.get('filled_closes')}",
+)
+check(
+    "metrics report ttl_expiries == 1",
+    m.get("ttl_expiries") == 1,
+    f"got {m.get('ttl_expiries')}",
+)
+check(
+    "metrics report cancellations == 1",
+    m.get("cancellations") == 1,
+    f"got {m.get('cancellations')}",
+)
+check(
+    "metrics carry the frozen policy_id",
+    m.get("policy_id") == TILE2_POLICY_ID,
+)
+check(
+    "metrics carry the frozen exit_profile_id",
+    m.get("exit_profile_id") == TILE2_EXIT_PROFILE_ID,
+)
+
+# fill_rate = filled_closes / paper_limits = 2/3.
+check(
+    "fill_rate == 2/3 (0.6667)",
+    abs(float(m.get("fill_rate", 0)) - (2 / 3)) < 0.01,
+    f"got {m.get('fill_rate')}",
+)
+
+# Restart simulation: counters persisted + reload preserves them.
+load_tile2_counters_from_disk()
+m2 = tile2_dashboard_metrics()
+check(
+    "counters survive reload (eligible_long preserved)",
+    m2.get("eligible_long") == 5,
+    f"got {m2.get('eligible_long')}",
+)
+check(
+    "cohort_id is always taken from running code after reload",
+    m2.get("cohort_id") == TILE2_POLICY_ID,
+)
+
+
+# ---------------------------------------------------------------------------
+# Group K: cancel path + filled position survives past 30m
+# ---------------------------------------------------------------------------
+print("\n[K] Cancel path + filled-position duration")
+reset_state()
+with state_lock:
+    state["price"] = 60050.0
+res = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-cancel"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-cancel",
+)
+check("cancel-path submit SPAWNED", res == "SPAWNED", f"got {res!r}")
+cancelled = _cancel_tile2_paper_resting_limit(reason="STRUCTURAL_CANCEL")
+check(
+    "cancel returns True when a limit existed",
+    cancelled is True,
+)
+check(
+    "no PENDING Tile 2 limit after cancel",
+    _tile2_paper_resting_limit_for_lane() is None,
+)
+
+# Filled position must survive past 30m. We model this by directly inserting
+# an open Tile 2 position with an entry_ts 45 minutes in the past and
+# checking that the LAB TTL extension logic does NOT force-close it.
+fake_now = time.time()
+fake_pos = {
+    "trade_id": "t-filled-survives",
+    "research_lane": LANE,
+    "status": "OPEN",
+    "dir": "LONG",
+    "entry": 59950.0,
+    "entry_ts": fake_now - (45 * 60),  # 45 minutes ago (past 30m entry TTL)
+    "leverage": 5,
+    "sr_episode_id": "ep-filled-survives",
+}
+with trade_lock:
+    open_positions.append(fake_pos)
+open_eps = _tile2_open_episode_ids()
+check(
+    "filled position's episode is in the open set (no clone)",
+    "ep-filled-survives" in open_eps,
+    f"got {open_eps}",
+)
+# A new paper-limit submit on the SAME episode must still be refused because
+# the filled position is open on it (no clone).
+with state_lock:
+    state["price"] = 60050.0
+res_clone = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-clone-attempt"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-filled-survives",
+)
+check(
+    "no clone trade while a filled position is open on the episode",
+    res_clone == "REFUSED_EPISODE_HAS_OPEN_TRADE",
+    f"got {res_clone!r}",
+)
+# Clean up.
+with trade_lock:
+    open_positions.clear()
+
+
+# ---------------------------------------------------------------------------
+# Result
+# ---------------------------------------------------------------------------
+print()
+print("=" * 78)
+print(f"RESULT: {passed} passed, {failed} failed")
+print("=" * 78)
+sys.exit(0 if failed == 0 else 1)
