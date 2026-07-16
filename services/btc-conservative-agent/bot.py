@@ -1446,7 +1446,7 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
         # and any lane without an explicit override.
         ladder, _lane_ladder_label, profile_id = get_lane_ladder(lane)
         scenario_c = SCENARIO_C_EXIT_PROFILE
-    # v2b: peak-never-loser floor is per-lane so TYPE_B_HUNTER_V1 gets the
+    # v12: peak-never-loser floor is per-lane so TYPE_B_HUNTER_V1 gets the
     # backtested 3 / 0 (forces breakeven-or-better on +3%+ peakers) while
     # CONTINUOUS / SR_MICRO keep the conservative 40 / 10 defaults.
     pnl_min_peak = peak_never_loser_min_peak_for_lane(lane)
@@ -1488,7 +1488,7 @@ def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_m
         return None
     min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
     floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
-    # v2b: peak-never-loser can fire BELOW the first ladder rung when the caller
+    # v12: peak-never-loser can fire BELOW the first ladder rung when the caller
     # passes a per-lane min_peak lower than ladder[0][0] (e.g. TYPE_B_HUNTER_V1's
     # 3.0 vs its 10% first rung). Without this, the ladder guard would swallow
     # the floor for the very 3%-MFE-then-reverse trades the floor is meant to
@@ -1507,7 +1507,7 @@ def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_m
     return floor
 
 # Per-lane peak-never-loser resolver. Lane-aware callers should use these instead
-# of the bare module constants so TYPE_B_HUNTER_V1 gets the v2b 3/0 floor while
+# of the bare module constants so TYPE_B_HUNTER_V1 gets the v12 3/0 floor while
 # CONTINUOUS / SR_MICRO keep the legacy 40/10 conservative defaults.
 def peak_never_loser_min_peak_for_lane(research_lane: str) -> float:
     lane = str(research_lane or "").upper()
@@ -3368,7 +3368,7 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
-    # v2b: peak-never-loser can fire a PROFIT_LOCK_LADDER exit BELOW the first
+    # v12: peak-never-loser can fire a PROFIT_LOCK_LADDER exit BELOW the first
     # ladder rung for TYPE_B_HUNTER_V1 (its 3% min_peak is below the 10% first
     # rung). For CONTINUOUS / SR_MICRO the 40% min_peak sits above the first
     # rung so the legacy "peak >= ladder[0][0]" gate remains the operative one.
@@ -5419,7 +5419,7 @@ SPREAD_PENALTY_MARGIN_MULT = 0.75
 SPREAD_PENALTY_LOCK_TIGHTEN_PCT = 1.0
 PEAK_NEVER_LOSER_MIN_PEAK = 40.0  # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
 PEAK_NEVER_LOSER_FLOOR = 10.0     # global default (CONTINUOUS + others); TYPE_B_HUNTER_V1 override below
-# v2b per-lane override — TYPE_B_HUNTER_V1 backtest found that lowering the floor
+# v12 per-lane override — TYPE_B_HUNTER_V1 backtest found that lowering the floor
 # threshold from 40.0 to 3.0 and the floor itself from 10.0 to 0.0 flips V2a from
 # -$8.60 to +$5.80. This catches trades that peaked +3% MFE then reversed and
 # forces a breakeven-or-better exit. CONTINUOUS / SR_MICRO keep the conservative
@@ -12807,37 +12807,25 @@ def _ai_prob_in_band(prob: float, band_id: str, lo: float, hi: float) -> bool:
 
 
 def ai_win_prob_in_execution_bands(prob) -> bool:
-    """VESTIGIAL as of 2026-07-15 (Tile 1 300-trade data).
+    """v12 — AI confidence no longer gates execution (constant-62, zero signal).
 
-    The AI win-prob call returns exactly ``62`` for 831/853 trades — zero
-    discriminating signal. The dashboard band gate still exists, but as long as
-    the 60-66 band is enabled (the only band containing 62), every AI-evaluated
-    signal passes this check. Keeping it on Option A — leave the gate in place
-    so the existing CONTINUOUS flow is not disturbed, but treat any "AI band"
-    pass/fail in research as effectively a constant-True. Regime-fingerprint
-    gating (Option B) is a separate research tile.
+    The DeepSeek win-prob call returns ``62`` for 831/853 trades; it carries no
+    discriminating information, so v12 makes it advisory-only. This function
+    always returns True so no execution path is blocked on AI confidence. The
+    dashboard still records the band selection (informational telemetry) and the
+    raw value is still logged to ``ai_input_log.jsonl`` for future analysis, but
+    the gate itself is a permanent pass-through.
+
+    Per-tile deterministic gates (TYPE_B_HUNTER_V1 scorer, SR_MICRO_TILE_V2_STATIC
+    ADX cap, CONTINUOUS spread/chase) decide entry; the AI is asked only for
+    direction (LONG / SHORT / NO_TRADE).
     """
-    try:
-        p = float(prob or 0)
-    except (TypeError, ValueError):
-        return False
-    bands = get_ai_execution_bands()
-    if not any(bands.values()):
-        return False
-    for band_id, lo, hi in AI_EXECUTION_BAND_DEFS:
-        if bands.get(band_id) and _ai_prob_in_band(p, band_id, lo, hi):
-            return True
-    return False
+    return True
 
 
 def dashboard_ai_band_blocks(prob) -> bool:
-    """Hard dashboard gate — VESTIGIAL while the AI returns constant 62.
-
-    See ``ai_win_prob_in_execution_bands`` for the full note. Kept ON (Option A)
-    so we don't break the CONTINUOUS benchmark mid-stream; the V2a scorer
-    already zero-weights AI confidence.
-    """
-    return not ai_win_prob_in_execution_bands(prob)
+    """v12 — never blocks. See ``ai_win_prob_in_execution_bands``."""
+    return False
 
 
 def _ai_execution_verdict_text() -> str:
