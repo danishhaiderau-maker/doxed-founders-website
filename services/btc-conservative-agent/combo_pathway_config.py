@@ -210,11 +210,13 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v11.8-sr-micro-static-ab"
+RESEARCH_STACK_VERSION = "v12-type-b-overhaul"
 RESEARCH_STACK_FEATURES = (
     "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC "
     "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
-    "fixed-policy Type B walk-forward collection + static S/R bracket ticks"
+    "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
+    "v12 toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 frozen policy "
+    "sr_micro_static_long_adx40_no_london_v1"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
