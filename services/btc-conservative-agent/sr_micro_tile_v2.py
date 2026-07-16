@@ -89,6 +89,53 @@ BRACKET_TICK_MIN_SEC = 10
 BRACKET_TICK_MAX_SEC = 30
 
 
+# ---------------------------------------------------------------------------
+# Section 7 of Tile 2 static integrity repair.
+#
+# Explicit UTC session bucket boundaries. "LONDON" means 08:00-12:59 UTC
+# explicitly -- the historical sample showed LONDON = -$0.54/close vs ASIA
+# +$0.49/close, so the bucket is blacklisted for the frozen Tile 2 policy.
+#
+# Boundaries are [start_hour, end_hour_inclusive) so a bucket is exactly 4h.
+# Hour values are UTC hours 0-23.
+# ---------------------------------------------------------------------------
+SESSION_BUCKET_BOUNDARIES_UTC = {
+    "ASIA": (0, 8),       # 00:00-07:59 UTC
+    "LONDON": (8, 13),    # 08:00-12:59 UTC (blacklisted for STATIC)
+    "NEWYORK": (13, 17),  # 13:00-16:59 UTC
+    "OVERLAP": (17, 21),  # 17:00-20:59 UTC
+    "OFF": (21, 24),      # 21:00-23:59 UTC
+}
+
+
+def utc_session_bucket_for_hour(hour_utc: int) -> str:
+    """Return the session bucket name for a given UTC hour (0-23).
+
+    Used by Section 7 to log the exact UTC session bucket alongside every
+    bracket evaluation, so the historical ambiguity about what 'LONDON'
+    means cannot recur.
+    """
+    try:
+        h = int(hour_utc)
+    except (TypeError, ValueError):
+        return ""
+    if not (0 <= h <= 23):
+        return ""
+    for name, (lo, hi) in SESSION_BUCKET_BOUNDARIES_UTC.items():
+        if lo <= h < hi:
+            return name
+    return ""
+
+
+def london_blackout_active(hour_utc: int) -> bool:
+    """True iff the given UTC hour is inside the LONDON blackout (08:00-12:59 UTC)."""
+    try:
+        h = int(hour_utc)
+    except (TypeError, ValueError):
+        return False
+    return 8 <= h <= 12
+
+
 def chase_mode_for_lane(lane: str) -> str:
     """Map lane id → chase mode for spawn/fill telemetry."""
     lane_u = str(lane or "").upper()
@@ -177,6 +224,26 @@ def evaluate_bracket(
 
     if is_static and sess and sess in STATIC_SESSION_BLACKLIST:
         result["block_reason"] = f"SESSION_BLACKLISTED_{sess}"
+        result["zone"] = "SUSPENDED"
+        return result
+
+    # Section 7: Tile 2 (STATIC) must FAIL CLOSED when ADX is missing.
+    # The historical sample had ADX missing from 42 final-filter outcomes,
+    # and the previous logic (only check when adx_v is not None) meant the
+    # cap silently passed whenever ADX was absent. The frozen Tile 2 policy
+    # requires ADX to be present AND <= cap; otherwise the bracket is
+    # refused with MISSING_ADX.
+    if is_static and adx_v is None:
+        result["block_reason"] = "MISSING_ADX"
+        result["zone"] = "SUSPENDED"
+        return result
+
+    # Section 7: same fail-closed semantics for volatility percentile. The
+    # historical sample had vol_pct missing from all 346 outcomes, so any
+    # claim that the gate was evaluated was wrong. For STATIC we now refuse
+    # when vol_pct is missing -- the gate is either real or it is not.
+    if is_static and vol_v is None:
+        result["block_reason"] = "MISSING_VOLATILITY"
         result["zone"] = "SUSPENDED"
         return result
 

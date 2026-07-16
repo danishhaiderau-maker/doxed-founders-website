@@ -13194,6 +13194,14 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         eval_result = dict(eval_result)
         eval_result["lane"] = lane
         eval_result["chase_mode"] = CHASE_MODE_STATIC
+        # Section 7: stamp the exact UTC hour + bucket boundaries so the
+        # historical ambiguity about what 'LONDON' means cannot recur.
+        try:
+            _utc_hour = datetime.fromtimestamp(now, tz=timezone.utc).hour
+            eval_result["utc_hour"] = _utc_hour
+            eval_result["utc_session_window_utc"] = "08:00-12:59" if sess_bucket == "LONDON" else ""
+        except Exception:
+            pass
 
         _srmv2s_last_tick_ts = now
         _srmv2s_last_pivot_sig = pivot_sig
