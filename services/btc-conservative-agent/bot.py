@@ -88,6 +88,19 @@ from combo_pathway_config import (
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
 )
+# Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
+# Single source of truth for policy/exit-profile tagging on every outcome.
+from sr_micro_tile_v2 import (
+    POLICY_ID as TILE2_POLICY_ID,
+    POLICY_LABEL as TILE2_POLICY_LABEL,
+    EXIT_PROFILE_ID as TILE2_EXIT_PROFILE_ID,
+    EXIT_PROFILE_ID_PROVISIONAL as TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+    THESIS_FAST_CUT_UNREAL_PCT as TILE2_THESIS_FAST_CUT_UNREAL_PCT,
+    STATIC_ADX_TRENDING_THRESHOLD as AS_EXPLICIT_ADX_CAP,
+    STATIC_DISABLE_SHORT_LEG as AS_EXPLICIT_DISABLE_SHORT,
+    STATIC_SESSION_BLACKLIST as AS_EXPLICIT_SESSION_BLACKLIST,
+    derive_sr_episode_id as tile2_derive_sr_episode_id,
+)
 from a160_v2_research import (
     V2_AI_DECISION_LOG_FILE,
     V2_AI_INPUT_LOG_FILE,
@@ -1819,7 +1832,14 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
-        if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
+        # Section 5: route the MFE fast-cut skip through the shared helper so
+        # live and replay always agree on whether the floor was reached.
+        if should_skip_fast_cut_for_mfe_protection(
+            unreal_pct=unreal_pct,
+            peak_mfe_pct=peak,
+            mfe_protect_pct=THESIS_MFE_PROTECT_PCT,
+            fast_cut_pct=THESIS_FAST_EXIT_UNREAL_PCT,
+        ):
             now_ts = time.time()
             last_log = float(pos.get("_mfe_protect_log_ts") or 0)
             if now_ts - last_log >= 30.0:
@@ -5689,6 +5709,53 @@ THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
 THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
 THESIS_MFE_PROTECT_PCT = 2.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 2% margin
+
+
+def should_skip_fast_cut_for_mfe_protection(
+    unreal_pct: float,
+    peak_mfe_pct: float,
+    mfe_protect_pct: float = None,
+    fast_cut_pct: float = None,
+) -> bool:
+    """Section 5: SINGLE source of truth for the MFE fast-cut skip decision.
+
+    Both the live position exit path (check_thesis_invalidation) and the LAB
+    replay simulator (simulate_replay_outcome) MUST call this function so the
+    MFE protection is applied identically in both.
+
+    Historical bug: simulate_replay_outcome checked
+        `unreal >= mfe_protect`
+    instead of
+        `peak_mfe >= mfe_protect`
+    Given that the fast-cut branch only fires when `unreal <= fast_cut`
+    (i.e. unreal <= -12), the condition `unreal >= 2` was unreachable, so
+    MFE protection NEVER fired in replay. Of the 69 historical fast cuts,
+    29 had previously reached >= +2% MFE -- their replay PnL is therefore
+    not trustworthy under the displayed policy.
+
+    The frozen Tile 2 policy keeps the threshold unchanged (-12% fast cut,
+    >= +2% MFE skip); this function fixes the SEMANTICS only.
+
+    Returns True iff the fast cut should be SKIPPED because the position
+    previously reached the MFE protection floor.
+    """
+    mp = float(THESIS_MFE_PROTECT_PCT if mfe_protect_pct is None else mfe_protect_pct)
+    fc = float(THESIS_FAST_EXIT_UNREAL_PCT if fast_cut_pct is None else fast_cut_pct)
+    try:
+        u = float(unreal_pct or 0.0)
+        p = float(peak_mfe_pct or 0.0)
+    except (TypeError, ValueError):
+        return False
+    # Fast cut only applies when unreal has breached the fast-cut threshold.
+    if u > fc:
+        return False
+    # MFE protection only applies when the protect floor is positive.
+    if mp <= 0:
+        return False
+    # Correct check: was the peak MFE ever >= the protect floor?
+    return p >= mp
+
+
 ADX_BLOCK_NEW_ENTRY = 15.0
 RESEARCH_ADX_MIN = 12.0  # v93: logging reference in sole research (live block still ADX_BLOCK_NEW_ENTRY)
 ADX_HALF_SIZE_BELOW = 18.0
@@ -6037,6 +6104,92 @@ PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
 EXECUTION_FIX_VERSION = COMBO_EXECUTION_FIX_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Section 1 of Tile 2 static integrity repair.
+#
+# `_runtime_git_rev` exposes the running commit so /health and /api/state can
+# unambiguously report which exact source revision produced this process. The
+# bot process is long-lived and is sometimes restarted by a different checkout
+# than the working tree HEAD, so we read the resolved revision lazily and
+# cache it. Failure to read git (e.g. bare deployments) degrades to "unknown"
+# rather than crashing the bot.
+# ---------------------------------------------------------------------------
+_RUNTIME_GIT_REV_CACHE = {"value": None}
+
+
+def _runtime_git_rev() -> str:
+    """Return the short git SHA this process was started from, or 'unknown'.
+
+    Cached after first successful read. Best-effort: returns 'unknown' if git
+    is unavailable (e.g. deployed without .git). Never raises.
+    """
+    if _RUNTIME_GIT_REV_CACHE["value"]:
+        return _RUNTIME_GIT_REV_CACHE["value"]
+    rev = "unknown"
+    try:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=here,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        if out.returncode == 0:
+            rev = (out.stdout or "").strip() or "unknown"
+    except Exception:
+        rev = "unknown"
+    _RUNTIME_GIT_REV_CACHE["value"] = rev
+    return rev
+
+
+def tile2_policy_descriptor() -> dict:
+    """Section 1/8: single source of truth for the Tile 2 frozen policy.
+
+    Returned dict is attached to /health, /api/status, /api/state, and stamped
+    on every outcome record so that no historical archived row can ever be
+    confused with the fresh independent holdout cohort.
+    """
+    return {
+        "policy_id": TILE2_POLICY_ID,
+        "policy_label": TILE2_POLICY_LABEL,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "exit_profile_id_provisional": TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+        "adx_cap": AS_EXPLICIT_ADX_CAP,
+        "short_disabled": AS_EXPLICIT_DISABLE_SHORT,
+        "session_blacklist": sorted(AS_EXPLICIT_SESSION_BLACKLIST),
+        "thesis_fast_cut_unreal_pct": TILE2_THESIS_FAST_CUT_UNREAL_PCT,
+        # entry_policy_hash: a deterministic short hash of the policy fields
+        # that affect entry eligibility. Two outcomes with the same
+        # entry_policy_hash were produced under the same entry rules; this
+        # lets the promotion rule reject mixed-cohort samples even if the
+        # human-readable policy_id string is reused.
+        "entry_policy_hash": tile2_entry_policy_hash(),
+    }
+
+
+def tile2_entry_policy_hash() -> str:
+    """Section 8: deterministic short hash of the Tile 2 entry policy fields.
+
+    Includes only the fields that affect entry eligibility (cap, short
+    disable, session blacklist, fast cut, midpoint buffer, max chase dist).
+    Excludes labels and ids so cosmetic renames don't bump the hash.
+    """
+    import hashlib as _hashlib
+    fields = (
+        f"adx_cap={AS_EXPLICIT_ADX_CAP}",
+        f"short_disabled={bool(AS_EXPLICIT_DISABLE_SHORT)}",
+        f"session_blacklist={','.join(sorted(AS_EXPLICIT_SESSION_BLACKLIST))}",
+        f"thesis_fast_cut={TILE2_THESIS_FAST_CUT_UNREAL_PCT}",
+        "midpoint_buffer=0.15",
+        "max_chase_dist=0.30",
+        "static_max_chases=0",
+    )
+    digest = _hashlib.sha1("|".join(fields).encode("utf-8")).hexdigest()
+    return digest[:12]
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -9846,8 +9999,246 @@ def log_lane_opportunity_event(
                 bucket["spawn_skipped"] = int(bucket.get("spawn_skipped", 0)) + 1
         rotate_log(LANE_OPPORTUNITY_CAPTURE_FILE)
         _safe_append_jsonl(LANE_OPPORTUNITY_CAPTURE_FILE, row, label="LANE_OPPORTUNITY")
+
+        # Section 2 (Tile 2 dashboard metrics): when this event belongs to the
+        # frozen Tile 2 lane, also fold it into state["tile2_counters"] so the
+        # dashboard tile can render the full Section 2 metric set without
+        # re-deriving it from raw opportunity events each poll.
+        if lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
+            _record_tile2_event(event, direction, block_reason)
     except Exception as e:
         logger.error(f"[LANE_OPPORTUNITY] log failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Section 2 of Tile 2 static integrity repair.
+#
+# Per-tile funnel counters for SR_MICRO_TILE_V2_STATIC (Tile 2).
+# These counters survive restart (loaded from lane_lab_pnl_ledger.json
+# alongside the LAB PnL ledger) and are exposed via /api/state as
+# snapshot["tile2_counters"] for dashboard rendering.
+#
+# Counters tracked (Section 2 spec):
+#   bracket_evals          - every evaluate_bracket() invocation
+#   eligible_long          - LONG leg qualified (post-midpoint, post-structure)
+#   paper_limits           - local paper resting limits actually submitted
+#   filled_closes          - filled positions that closed
+#   ttl_expiries           - 30m resting limit expired unfilled
+#   cancellations          - structural cancel (SR invalid, ADX blow, etc.)
+#   episode_ids_seen       - count of distinct S/R episode IDs observed
+#   cohort_id              - Tile 2 frozen policy/exit-profile identifier
+#
+# Derived metrics (computed lazily in tile2_dashboard_metrics()):
+#   fill_rate              - filled_closes / paper_limits
+#   paper_pnl_usd          - sum of closed LAB PnL for Tile 2 lane
+#   ev_per_eligible        - paper_pnl_usd / eligible_long
+#   ev_per_filled          - paper_pnl_usd / filled_closes
+# ---------------------------------------------------------------------------
+TILE2_COUNTERS_FILE = "tile2_counters.json"
+TILE2_COUNTERS_SCHEMA = "tile2_counters_v1"
+
+
+def _tile2_counters_bucket() -> dict:
+    """Return (creating if necessary) the Tile 2 counter bucket from state."""
+    bucket = state.setdefault(
+        "tile2_counters",
+        {
+            "schema": TILE2_COUNTERS_SCHEMA,
+            "lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+            "bracket_evals": 0,
+            "eligible_long": 0,
+            "paper_limits": 0,
+            "filled_closes": 0,
+            "ttl_expiries": 0,
+            "cancellations": 0,
+            "episode_ids_seen": [],
+            "cohort_id": TILE2_POLICY_ID,
+            "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        },
+    )
+    if "episode_ids_seen" not in bucket:
+        bucket["episode_ids_seen"] = []
+    if "cohort_id" not in bucket:
+        bucket["cohort_id"] = TILE2_POLICY_ID
+    if "exit_profile_id" not in bucket:
+        bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
+    return bucket
+
+
+def _persist_tile2_counters(bucket: dict) -> None:
+    """Persist Tile 2 counters to disk so they survive restarts (Section 2)."""
+    try:
+        with state_lock:
+            payload = {
+                "schema": TILE2_COUNTERS_SCHEMA,
+                "ts": utc_iso(),
+                "git_rev": _runtime_git_rev(),
+                "policy_id": TILE2_POLICY_ID,
+                "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+                "counters": copy.deepcopy(bucket),
+            }
+        with open(TILE2_COUNTERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+
+
+def _record_tile2_event(event: str, direction: str = None, block_reason: str = None) -> None:
+    """Increment Tile 2 counters based on a lane opportunity event.
+
+    Pure counter update — no business logic. Safe to call from
+    log_lane_opportunity_event() when lane == SR_MICRO_TILE_V2_STATIC.
+    """
+    try:
+        with state_lock:
+            bucket = _tile2_counters_bucket()
+            if event == "BRACKET_EVAL":
+                bucket["bracket_evals"] = int(bucket.get("bracket_evals", 0)) + 1
+            elif event == "SPAWN_LAB":
+                bucket["paper_limits"] = int(bucket.get("paper_limits", 0)) + 1
+            elif event == "FILLED":
+                bucket["filled_closes"] = int(bucket.get("filled_closes", 0)) + 1
+            elif event in ("TTL_EXPIRED", "ENTRY_TTL_EXPIRED"):
+                bucket["ttl_expiries"] = int(bucket.get("ttl_expiries", 0)) + 1
+            elif event in ("CANCELLED", "STRUCTURAL_CANCEL"):
+                bucket["cancellations"] = int(bucket.get("cancellations", 0)) + 1
+            # ELIGIBLE_LONG is recorded explicitly via record_tile2_eligible_long()
+            # because eligibility is determined before any SPAWN_LAB event.
+        _persist_tile2_counters(bucket)
+    except Exception as e:
+        logger.error(f"[TILE2_COUNTERS] record event failed: {e}")
+
+
+def record_tile2_eligible_long(episode_id: str = None) -> None:
+    """Mark a Tile 2 LONG opportunity as eligible for entry.
+
+    Called from the bracket tick when evaluate_bracket() returns long_armed=True
+    for the STATIC lane. Optionally tracks distinct S/R episodes (Section 4).
+    """
+    try:
+        with state_lock:
+            bucket = _tile2_counters_bucket()
+            bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
+            if episode_id:
+                seen = bucket.setdefault("episode_ids_seen", [])
+                if episode_id not in seen:
+                    seen.append(episode_id)
+                    # Cap stored list size; we only need distinct count, but
+                    # keeping the IDs themselves supports audit/replay.
+                    if len(seen) > 500:
+                        del seen[: len(seen) - 500]
+        _persist_tile2_counters(bucket)
+    except Exception as e:
+        logger.error(f"[TILE2_COUNTERS] record eligible failed: {e}")
+
+
+def tile2_dashboard_metrics() -> dict:
+    """Section 2: build the Tile 2 dashboard payload.
+
+    Combines raw counters with derived metrics (fill rate, paper PnL, EVs) and
+    the frozen cohort identifier so the dashboard can render the full Section
+    2 metric set in one call. Used by /api/state and /api/pathway_scorecard.
+    """
+    with state_lock:
+        bucket = copy.deepcopy(_tile2_counters_bucket())
+    # Pull live LAB PnL for the Tile 2 lane so EV / paper PnL are always
+    # consistent with the closed-trade ledger (no parallel accounting).
+    lab = get_lane_lab_pnl_ledger(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC) or {}
+    paper_pnl = round(float(lab.get("net_pnl_usd") or 0.0), 2)
+    eligible = int(bucket.get("eligible_long", 0))
+    filled = int(bucket.get("filled_closes", 0))
+    paper_limits = int(bucket.get("paper_limits", 0))
+    fill_rate = (filled / paper_limits) if paper_limits > 0 else 0.0
+    ev_per_eligible = (paper_pnl / eligible) if eligible > 0 else 0.0
+    ev_per_filled = (paper_pnl / filled) if filled > 0 else 0.0
+    return {
+        "schema": TILE2_COUNTERS_SCHEMA,
+        "lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "policy_id": TILE2_POLICY_ID,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "cohort_id": bucket.get("cohort_id") or TILE2_POLICY_ID,
+        # Raw counters (Section 2 spec).
+        "bracket_evals": int(bucket.get("bracket_evals", 0)),
+        "eligible_long": eligible,
+        "paper_limits": paper_limits,
+        "filled_closes": filled,
+        "ttl_expiries": int(bucket.get("ttl_expiries", 0)),
+        "cancellations": int(bucket.get("cancellations", 0)),
+        "independent_episodes": len(set(bucket.get("episode_ids_seen") or [])),
+        # Derived metrics.
+        "fill_rate": round(fill_rate, 4),
+        "paper_pnl_usd": paper_pnl,
+        "ev_per_eligible_opportunity": round(ev_per_eligible, 4),
+        "ev_per_filled_close": round(ev_per_filled, 4),
+        # Cohort marker for the dashboard tile footer.
+        "cohort_label": (
+            f"{TILE2_POLICY_ID} · exit={TILE2_EXIT_PROFILE_ID}"
+        ),
+    }
+
+
+def load_tile2_counters_from_disk() -> None:
+    """Restore Tile 2 counters from disk on startup so the funnel survives restart."""
+    try:
+        if not os.path.isfile(TILE2_COUNTERS_FILE):
+            return
+        with open(TILE2_COUNTERS_FILE, encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        counters = payload.get("counters") or {}
+        if not isinstance(counters, dict):
+            return
+        with state_lock:
+            bucket = _tile2_counters_bucket()
+            for k in (
+                "bracket_evals", "eligible_long", "paper_limits", "filled_closes",
+                "ttl_expiries", "cancellations",
+            ):
+                if isinstance(counters.get(k), int):
+                    bucket[k] = counters[k]
+            seen = counters.get("episode_ids_seen") or []
+            if isinstance(seen, list):
+                bucket["episode_ids_seen"] = [str(x) for x in seen][-500:]
+            # Cohort is determined by the running source code, not the on-disk
+            # snapshot, so that a stale on-disk cohort cannot silently lie.
+            bucket["cohort_id"] = TILE2_POLICY_ID
+            bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
+        logger.info(
+            f"[TILE2_COUNTERS] restored from disk: "
+            f"bracket_evals={bucket.get('bracket_evals', 0)} "
+            f"eligible_long={bucket.get('eligible_long', 0)} "
+            f"paper_limits={bucket.get('paper_limits', 0)} "
+            f"filled_closes={bucket.get('filled_closes', 0)} "
+            f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as e:
+        logger.warning(f"[TILE2_COUNTERS] load failed: {e}")
+
+
+def reset_tile2_counters_for_fresh_holdout() -> dict:
+    """Zero out Tile 2 counters when the operator starts the fresh holdout.
+
+    Per Section 8/9: 'Start new counters at zero after the corrected process
+    restarts.' This is invoked once, at the explicit operator action that
+    marks the start of the independent holdout (NOT automatically on every
+    restart, so that accidental restarts don't wipe the cohort).
+    """
+    with state_lock:
+        bucket = _tile2_counters_bucket()
+        bucket["bracket_evals"] = 0
+        bucket["eligible_long"] = 0
+        bucket["paper_limits"] = 0
+        bucket["filled_closes"] = 0
+        bucket["ttl_expiries"] = 0
+        bucket["cancellations"] = 0
+        bucket["episode_ids_seen"] = []
+        bucket["cohort_id"] = TILE2_POLICY_ID
+        bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
+    _persist_tile2_counters(bucket)
+    logger.warning(
+        f"[TILE2_COUNTERS] RESET for fresh holdout cohort={TILE2_POLICY_ID} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return tile2_dashboard_metrics()
 
 
 def log_ai_edge_disagreement(ctx: dict, ai_result: dict, edge_score: float, research_lane: str = None):
@@ -11203,6 +11594,13 @@ def _spawn_lab_bracket_shadow(
 
     enriched = _enrich_combo_lane_features(features, ctx)
     margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
+    # Section 8: carry the policy/episode identifiers into the buffer so the
+    # finalized outcome row can stamp them on every record. For non-Tile 2
+    # lanes these are None and the schema fields are skipped on finalize.
+    _ctx_src = ctx or {}
+    _tile2_policy = _ctx_src.get("policy_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
+    _tile2_exit = _ctx_src.get("exit_profile_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
+    _tile2_episode = _ctx_src.get("sr_episode_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
     start_replay_buffer(
         study_id,
         start_price,
@@ -11226,6 +11624,9 @@ def _spawn_lab_bracket_shadow(
         max_chases=0 if is_static else max_chases,
         fill_at_limit=bool(is_static),
         limit_chase_count=0,
+        policy_version=_tile2_policy,
+        sr_episode_id=_tile2_episode,
+        exit_profile_id=_tile2_exit,
     )
     append_replay_tick(study_id, market_price, None)
     log_lane_opportunity_event(
@@ -11243,6 +11644,259 @@ def _spawn_lab_bracket_shadow(
         f"chase_mode={mode} fill_at_limit={is_static} "
         f"zone={(bracket_eval or {}).get('zone')} armed={(bracket_eval or {}).get('armed')} "
         f"— limit replay + Scenario C, no real orders [PIPELINE ENFORCEMENT]"
+    )
+    return "SPAWNED"
+
+
+# ---------------------------------------------------------------------------
+# Section 3 of Tile 2 static integrity repair.
+#
+# Replace the contradictory Tile 2 ON path. Previously the ON path called
+# _spawn_lab_bracket_shadow, but the LAB guard aborted when
+# lane_orders_allowed(target_lane) was true. The result was: tile ON did
+# nothing (silently swallowed by the LAB guard error log).
+#
+# The fix routes Tile 2 explicitly via execution_mode_for_lane():
+#   LAB_SHADOW  -> _spawn_lab_bracket_shadow (LAB shadow + counterfactual, no order)
+#   PAPER       -> _submit_tile2_paper_resting_limit (local paper pending order)
+#   LIVE        -> BLOCKED while PROBATION; never submit Bitfinex orders
+#                  until the operator explicitly promotes the lane.
+#   EXIT_ONLY   -> no new entries; existing filled positions still managed
+# ---------------------------------------------------------------------------
+TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
+
+
+def _tile2_paper_resting_limit_for_lane() -> dict | None:
+    """Return the current Tile 2 paper resting limit (PENDING), or None.
+
+    A Tile 2 paper limit is uniquely keyed by research_lane == SR_MICRO_TILE_V2_STATIC
+    AND status == PENDING. Used by Section 4 (one order per S/R episode).
+    """
+    with trade_lock:
+        for o in pending_orders:
+            if (
+                isinstance(o, dict)
+                and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and o.get("status") == "PENDING"
+            ):
+                return o
+    return None
+
+
+def _tile2_open_episode_ids() -> set:
+    """Section 4: episode IDs currently attached to open/pending Tile 2 trades.
+
+    Includes both pending paper limits and open positions. The bracket tick
+    consults this before submitting a new paper limit so we never have two
+    Tile 2 trades running on the same S/R episode.
+    """
+    seen = set()
+    with trade_lock:
+        for o in pending_orders:
+            if (
+                isinstance(o, dict)
+                and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and o.get("status") == "PENDING"
+                and o.get("sr_episode_id")
+            ):
+                seen.add(str(o.get("sr_episode_id")))
+        for p in open_positions:
+            if (
+                isinstance(p, dict)
+                and p.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and p.get("status") == "OPEN"
+                and p.get("sr_episode_id")
+            ):
+                seen.add(str(p.get("sr_episode_id")))
+    return seen
+
+
+def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
+    """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
+    existing = _tile2_paper_resting_limit_for_lane()
+    if not existing:
+        return False
+    try:
+        existing["status"] = "CANCELLED"
+        existing["exit_reason"] = reason
+        existing["cancelled_ts"] = time.time()
+        lane_unregister_pending_order(existing)
+        log_lane_opportunity_event(
+            RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+            "CANCELLED",
+            existing.get("trade_id"),
+            existing.get("signal_dir") or existing.get("dir"),
+            None,
+            float(existing.get("edge_score") or 0),
+            block_reason=reason,
+        )
+        logger.info(
+            f"[{RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC}] paper resting limit CANCELLED "
+            f"trade_id={existing.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"[TILE2] cancel paper limit failed: {e}")
+        return False
+
+
+def _submit_tile2_paper_resting_limit(
+    ctx: dict,
+    side: str,
+    limit_price: float,
+    edge_score: float,
+    features: dict = None,
+    bracket_eval: dict = None,
+    sr_episode_id: str = "",
+) -> str:
+    """Section 3 ON path: submit a local paper resting limit at exact micro-support.
+
+    This is the PAPER-mode replacement for _spawn_lab_bracket_shadow when the
+    tile is ON. The limit is a *real pending_orders* entry (so the existing
+    fill/exit machinery manages it) but is marked paper_only=True and never
+    submitted to Bitfinex.
+
+    LONG-only by policy. SHORT must never reach this function (caller guards).
+    Section 4: refuses to spawn a second paper limit on the same S/R episode
+    while one is already pending or open.
+    """
+    direction = str(side or "LONG").upper()
+    if direction == "SHORT":
+        logger.error(
+            f"[TILE2] SHORT paper limit refused — SHORT is disabled by policy "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_SHORT_DISABLED"
+    if direction != "LONG":
+        return "REFUSED_BAD_SIDE"
+
+    # Section 4: one-trade-per-episode guard. If we already have a pending or
+    # open Tile 2 trade on this same S/R episode, refuse the spawn. The
+    # episode_id is derived in the bracket tick from support + resistance +
+    # UTC bucket; without an episode_id we conservatively allow at most one
+    # pending Tile 2 limit at a time.
+    open_episodes = _tile2_open_episode_ids()
+    if sr_episode_id and sr_episode_id in open_episodes:
+        logger.info(
+            f"[TILE2] paper limit refused — episode {sr_episode_id} already has "
+            f"an open/pending Tile 2 trade [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_EPISODE_HAS_OPEN_TRADE"
+    existing_pending = _tile2_paper_resting_limit_for_lane()
+    if existing_pending:
+        # Conservative guard: even without an episode_id match, we never want
+        # two simultaneous Tile 2 paper limits. If the existing pending limit
+        # is at the SAME support level, leave it alone. If it's at a different
+        # level, the structural-cancel path above should already have killed
+        # it; we still refuse here as a belt-and-braces safety.
+        _existing_lim = float(existing_pending.get("limit_price") or 0)
+        _new_lim = float(limit_price or 0)
+        if _existing_lim > 0 and _new_lim > 0 and abs(_existing_lim - _new_lim) < 0.01:
+            return "RESTING"
+        logger.info(
+            f"[TILE2] paper limit refused — another Tile 2 limit already pending "
+            f"(existing={_existing_lim:.2f} new={_new_lim:.2f}) [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_ANOTHER_PENDING"
+
+    market_price = float(nz(state.get("price")) or 0)
+    limit_price = float(limit_price or 0)
+    if market_price <= 0 or limit_price <= 0:
+        return "REFUSED_BAD_PRICE"
+    # Frozen policy: STATIC resting limit must be at exact micro-support.
+    # Reject if the requested limit is above the current market (would cross).
+    if direction == "LONG" and limit_price >= market_price:
+        logger.warning(
+            f"[TILE2] LONG paper limit refused — limit {limit_price:.2f} >= market "
+            f"{market_price:.2f} (would cross, not resting at support) "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_WOULD_CROSS"
+
+    # Bitfinex submission is forbidden while the lane is PROBATION.
+    mode = execution_mode_for_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    if mode == EXEC_MODE_LIVE:
+        logger.error(
+            f"[TILE2] LIVE mode reached while lane is PROBATION — refusing exchange "
+            f"submission (operator must explicitly promote) [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_LIVE_BLOCKED_PROBATION"
+    if mode not in (EXEC_MODE_PAPER,):
+        logger.info(
+            f"[TILE2] paper limit not submitted — execution_mode={mode} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return f"REFUSED_MODE_{mode}"
+
+    enriched = _enrich_combo_lane_features(features, ctx)
+    margin_usdt, size_mult = _lane_sized_margin_usdt(
+        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC, enriched
+    )
+    leverage = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+    qty = (float(margin_usdt) * leverage) / limit_price if limit_price > 0 else 0.0
+    trade_id = allocate_lane_trade_id(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    exit_cfg = get_exit_config_for_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    now_ts = time.time()
+    # Section 6: the entry TTL is for the UNFILLED resting limit only. Once
+    # filled, the resulting open position must continue until a genuine
+    # strategy exit (Scenario C / thesis / stop / TIME_EXIT). We stamp
+    # entry_expires_ts so the chase loop can expire the unfilled limit
+    # without finalizing any filled position as MARK_TO_MARKET.
+    entry_expires_ts = now_ts + TILE2_ENTRY_TTL_SEC
+    order = {
+        "trade_id": trade_id,
+        "bitfinex_order_id": "",  # paper-only: never has a real exchange id
+        "signal_dir": "buy",
+        "side": "buy",
+        "dir": direction,
+        "direction": direction,
+        "limit_price": float(limit_price),
+        "original_limit_price": float(limit_price),
+        "planned_limit_price": float(limit_price),
+        "qty": float(qty),
+        "created_ts": now_ts,
+        "entry_submitted_ts": now_ts,
+        "entry_expires_ts": entry_expires_ts,
+        "limit_chase_count": 0,
+        "max_chase_count": 0,  # STATIC: never chase/reprice/slide
+        "last_chase_ts": 0,
+        "status": "PENDING",
+        "entry_type": "TILE2_STATIC_PAPER",
+        "research_lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "edge_score": round(float(edge_score), 1),
+        "size_mult": size_mult,
+        "margin_usdt": float(margin_usdt),
+        "leverage": leverage,
+        "paper_only": True,
+        "exchange_submission_blocked": True,  # PROBATION marker
+        "policy_id": TILE2_POLICY_ID,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "sr_episode_id": str(sr_episode_id or ""),  # Section 4 dedup key
+        "exit_config": exit_cfg,
+        "chase_mode": "STATIC",
+        "fill_at_limit": True,
+        # Audit fields (Section 8 outcome schema).
+        "micro_support": float(bracket_eval.get("micro_support") or limit_price) if bracket_eval else float(limit_price),
+        "micro_resistance": float((bracket_eval or {}).get("micro_resistance") or 0),
+        "adx_at_entry": float((bracket_eval or {}).get("adx") or 0) or None,
+        "session_bucket_at_entry": str((bracket_eval or {}).get("session_bucket") or ""),
+        "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
+    }
+    lane_register_pending_order(order)
+    log_lane_opportunity_event(
+        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "SPAWN_LAB",  # SPAWN_LAB event is what folds into paper_limits counter
+        trade_id,
+        direction,
+        None,
+        edge_score,
+        block_reason="BRACKET_LEG_STATIC_PAPER",
+    )
+    logger.info(
+        f"[TILE2] paper resting limit submitted trade_id={trade_id} dir={direction} "
+        f"limit={limit_price:.2f} market={market_price:.2f} qty={qty:.6f} "
+        f"entry_ttl={TILE2_ENTRY_TTL_SEC}s mode={mode} policy={TILE2_POLICY_ID} "
+        f"— paper only, Bitfinex BLOCKED [PIPELINE ENFORCEMENT]"
     )
     return "SPAWNED"
 
@@ -11519,6 +12173,13 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         outcome["exit_reason"] = "TTL_EXPIRED"
         outcome["entry_outcome"] = "TTL_EXPIRED"
     lane = str(buf.get("research_lane") or "").upper()
+    # Section 8: stable outcome schema for the Tile 2 frozen policy cohort.
+    # When this row belongs to SR_MICRO_TILE_V2_STATIC, stamp the full
+    # required field set so the fresh holdout cohort can never be silently
+    # confused with the archived historical 346-row training sample.
+    is_tile2 = (lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    entry_features = buf.get("entry_features") or {}
+    bracket_eval = entry_features.get("bracket_eval") if isinstance(entry_features, dict) else None
     row = {
         "schema": "shadow_lane_outcome_v1",
         "ts": utc_iso(),
@@ -11548,6 +12209,35 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "fill_at_limit": bool(buf.get("fill_at_limit")),
         **outcome,
     }
+    if is_tile2:
+        # Section 8 required fields (frozen Tile 2 policy):
+        #   policy_id, entry_policy_hash, exit_profile_id, source_commit,
+        #   sr_episode_id, adx, utc_session_bucket, exact support level,
+        #   fill/cancel/expiry reason.
+        row["policy_id"] = TILE2_POLICY_ID
+        row["entry_policy_hash"] = tile2_entry_policy_hash()
+        row["exit_profile_id"] = (
+            buf.get("exit_profile_id") or TILE2_EXIT_PROFILE_ID_PROVISIONAL
+        )
+        row["source_commit"] = _runtime_git_rev()
+        row["sr_episode_id"] = buf.get("sr_episode_id") or ""
+        row["adx"] = (
+            entry_features.get("adx")
+            if isinstance(entry_features, dict)
+            else None
+        ) or (bracket_eval or {}).get("adx")
+        row["utc_session_bucket"] = row.get("session_bucket") or ""
+        row["support_level"] = float(
+            (bracket_eval or {}).get("micro_support")
+            or buf.get("limit_price")
+            or 0
+        )
+        # exit_reason is already in `outcome` (merged via **outcome above);
+        # this alias makes the fill/cancel/expiry reason explicit on Tile 2
+        # rows for the promotion-rule filter.
+        row["fill_cancel_or_expiry_reason"] = (
+            row.get("exit_reason") or row.get("entry_outcome") or ""
+        )
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
     logger.info(
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
@@ -12577,12 +13267,28 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         eval_result = dict(eval_result)
         eval_result["lane"] = lane
         eval_result["chase_mode"] = CHASE_MODE_STATIC
+        # Section 7: stamp the exact UTC hour + bucket boundaries so the
+        # historical ambiguity about what 'LONDON' means cannot recur.
+        try:
+            _utc_hour = datetime.fromtimestamp(now, tz=timezone.utc).hour
+            eval_result["utc_hour"] = _utc_hour
+            eval_result["utc_session_window_utc"] = "08:00-12:59" if sess_bucket == "LONDON" else ""
+        except Exception:
+            pass
 
         _srmv2s_last_tick_ts = now
         _srmv2s_last_pivot_sig = pivot_sig
 
         edge_score = compute_edge_score(features) if features else 0.0
         bracket_id = f"srmv2s-bracket-{uuid.uuid4().hex[:12]}"
+        # Section 4: derive the S/R episode ID up front so both the LAB spawn
+        # path and the paper-limit path stamp the same identifier on the
+        # outcome record (Section 8).
+        sr_episode_id = tile2_derive_sr_episode_id(
+            ms.get("micro_support"),
+            ms.get("micro_resistance"),
+            session_bucket=sess_bucket,
+        )
         ctx = {
             "trade_id": bracket_id,
             "price": price,
@@ -12593,6 +13299,9 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             "structure_bias": ms.get("structure_bias"),
             "bracket_eval": eval_result,
             "chase_mode": CHASE_MODE_STATIC,
+            "sr_episode_id": sr_episode_id,
+            "policy_id": TILE2_POLICY_ID,
+            "exit_profile_id": TILE2_EXIT_PROFILE_ID_PROVISIONAL,
         }
         enriched = _enrich_combo_lane_features(features, ctx)
 
@@ -12605,6 +13314,20 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             edge_score,
             block_reason=eval_result.get("block_reason") or eval_result.get("zone"),
         )
+
+        # Section 2: count a distinct eligible-LONG opportunity when the LONG
+        # leg actually qualified (post-midpoint, post-structure, post-ADX).
+        # This is the denominator for EV-per-eligible-opportunity. We count
+        # at most one eligible per bracket tick (the LONG leg) so the metric
+        # is not inflated by tick frequency.
+        if (
+            eval_result.get("armed")
+            and not eval_result.get("in_midpoint_zone")
+            and should_enter_bracket_leg("LONG", eval_result)
+        ):
+            # sr_episode_id was derived above (Section 4) so both the eligible
+            # counter and the outcome record use the same identifier.
+            record_tile2_eligible_long(episode_id=sr_episode_id)
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
             # Structural idle/suspend — cancel any resting STATIC shadows (CANCELLED).
@@ -12621,6 +13344,15 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             return
 
         tile_on = is_research_lane_enabled(lane)
+        # Section 3: explicit execution-mode routing. The previous code called
+        # _spawn_lab_bracket_shadow even when tile_on, but that function's LAB
+        # guard aborted whenever lane_orders_allowed() was true, silently
+        # dropping the spawn. Now we route explicitly:
+        #   LAB_SHADOW -> _spawn_lab_bracket_shadow (no order)
+        #   PAPER      -> _submit_tile2_paper_resting_limit (local paper limit)
+        #   LIVE       -> BLOCKED (lane is PROBATION; operator must promote)
+        #   EXIT_ONLY  -> no new entries
+        exec_mode = execution_mode_for_lane(lane)
         legs_spawned = 0
         for side in ("LONG", "SHORT"):
             if not should_enter_bracket_leg(side, eval_result):
@@ -12634,25 +13366,96 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                     block_reason=f"LEG_NOT_ARMED_{side}",
                 )
                 continue
+            # SHORT is fully disabled by the frozen Tile 2 policy.
+            if side == "SHORT":
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason="SHORT_DISABLED_POLICY",
+                )
+                logger.info(
+                    f"[{lane}] SHORT spawn refused — disabled by frozen Tile 2 policy "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                continue
             limit = (
                 eval_result.get("long_limit")
                 if side == "LONG"
                 else eval_result.get("short_limit")
             )
-            if tile_on:
-                logger.info(
-                    f"[{lane}] tile ON but Phase 1 shadow-only — LAB STATIC replay for {side} "
-                    f"limit={limit} [PIPELINE ENFORCEMENT]"
+            if exec_mode == EXEC_MODE_PAPER:
+                # ON + Bitfinex OFF: local paper resting limit at exact support.
+                # Section 4: pass the derived episode_id so the one-trade-
+                # per-episode guard can refuse clone trades.
+                spawn_result = _submit_tile2_paper_resting_limit(
+                    ctx, side, limit, edge_score, enriched, eval_result,
+                    sr_episode_id=sr_episode_id,
                 )
-            spawn_result = _spawn_lab_bracket_shadow(
-                ctx, side, limit, edge_score, lane, enriched, eval_result,
-                chase_mode=CHASE_MODE_STATIC,
-                id_prefix=STATIC_LANE_ID_PREFIX,
-                max_chases=STATIC_MAX_CHASES,
-                fill_at_limit=True,
-            )
-            if spawn_result == "SPAWNED":
+                if spawn_result == "SPAWNED":
+                    legs_spawned += 1
+                elif spawn_result == "REFUSED_EPISODE_HAS_OPEN_TRADE":
+                    log_lane_opportunity_event(
+                        lane,
+                        "SPAWN_FILTERED",
+                        bracket_id,
+                        side,
+                        None,
+                        edge_score,
+                        block_reason="EPISODE_HAS_OPEN_TRADE",
+                    )
+            elif exec_mode in (EXEC_MODE_LAB_SHADOW, EXEC_MODE_EXIT_ONLY):
+                # OFF, retired, or post-disarm EXIT_ONLY: LAB shadow + counterfactual.
+                if tile_on and exec_mode == EXEC_MODE_EXIT_ONLY:
+                    logger.info(
+                        f"[{lane}] EXIT_ONLY — no new entries; collecting LAB shadow only "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
                 legs_spawned += 1
+            elif exec_mode == EXEC_MODE_LIVE:
+                # Lane is PROBATION — Bitfinex exchange entry is forbidden.
+                logger.error(
+                    f"[{lane}] LIVE mode refused while PROBATION — operator must explicitly "
+                    f"promote the lane; collecting LAB shadow only [PIPELINE ENFORCEMENT]"
+                )
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason="LIVE_BLOCKED_PROBATION",
+                )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
+            else:
+                logger.warning(
+                    f"[{lane}] unknown exec_mode={exec_mode} — defaulting to LAB shadow "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
 
         logger.info(
             f"[{lane}] STATIC bracket tick pivot_changed={pivot_changed} elapsed={elapsed:.0f}s "
@@ -16963,7 +17766,23 @@ def state_monitor_loop():
                         if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
                             expired_ids.append(tid)
                     elif is_lab_or_collect and age_from_start > LAB_REPLAY_TTL_SEC:
-                        expired_ids.append(tid)
+                        # Section 6: do NOT expire a Tile 2 LAB shadow at the
+                        # 30m buffer TTL once it has filled. A filled Tile 2
+                        # position must continue until a genuine strategy exit
+                        # (Scenario C / thesis / stop / TIME_EXIT). Use the
+                        # global MAX_POSITION_AGE_SEC (2h) + small slack for
+                        # the post-exit replay window. UNFILLED Tile 2 limits
+                        # still expire at LAB_REPLAY_TTL_SEC, which is the
+                        # entry TTL the spec calls out (30 minutes).
+                        if (
+                            buf.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                            and buf.get("virtual_entry")
+                            and FIXED_TIME_EXIT_ENABLED
+                            and age_from_start < (MAX_POSITION_AGE_SEC + 600)
+                        ):
+                            pass  # keep running until strategy exit
+                        else:
+                            expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
@@ -18987,11 +19806,11 @@ def build_static_pathway_lane_specs() -> dict:
             trigger = "Structural envelope + midpoint guard · tick 10–30s or pivot change"
             if static_bracket:
                 execution = (
-                    "STATIC resting LAB shadow at exact micro_support/resistance · "
-                    "never chase/reprice · Scenario C"
+                    "STATIC resting limit at exact micro_support (LONG only) · "
+                    "never chase/reprice/slide · Scenario C · $20 paper margin"
                 )
             else:
-                execution = "Dual LAB shadow at micro_support (LONG) + micro_resistance (SHORT) · Scenario C"
+                execution = "Historical FULL_CHASE dual-leg collector (data archived); not on the frozen Tile 2 policy"
         elif type_b_hunter:
             trigger = "Fixed pre-entry Type B score · walk-forward collection · execution mode per toggle contract"
             execution = "Dynamic per execution_mode_for_lane(): LAB_SHADOW / PAPER / LIVE / EXIT_ONLY"
@@ -19024,7 +19843,8 @@ def build_static_pathway_lane_specs() -> dict:
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
         if deterministic_bracket:
-            # Per-lane ADX cap (v12): STATIC=35, V2 full-chase=40
+            # Per-lane ADX cap (v12): STATIC=40, V2 full-chase=40 (both retained
+            # at 40 after re-analysis showed 35-40 was the second-best cohort).
             from sr_micro_tile_v2 import (
                 ADX_TRENDING_THRESHOLD as _V2_ADX_CAP,
                 STATIC_ADX_TRENDING_THRESHOLD as _STATIC_ADX_CAP,
@@ -19050,11 +19870,17 @@ def build_static_pathway_lane_specs() -> dict:
                 "Does deterministic V2 bracket beat V1 AI tile and CONTINUOUS on EV/close?"
             )
             strategy_extra = [
-                "Tile OFF: LAB shadow replay with real Bitfinex ticks + Scenario C",
-                "Tile ON: Phase 1 shadow-only (live bracket orders deferred)",
-                "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger",
+                "Tile OFF: LAB shadow replay + counterfactual outcome (no paper limit)",
                 (
-                    "Paper P&L in PAPER mode · Bitfinex P&L only in LIVE mode: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
+                    "Tile ON (PAPER, PROBATION): local paper resting limit at exact micro-support · Scenario C"
+                    if static_bracket else
+                    "Tile ON: local paper limit at micro S/R · Scenario C"
+                ),
+                "Bitfinex exchange entry BLOCKED while lane is PROBATION (PAPER_ONLY)",
+                "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger + tile2_counters.json",
+                (
+                    "Outcomes: FILLED / TTL_EXPIRED (30m) / CANCELLED · ids srmv2s-* · cohort="
+                    + TILE2_POLICY_ID
                     if static_bracket
                     else "Historical bracket collector; data archived"
                 ),
@@ -19068,6 +19894,17 @@ def build_static_pathway_lane_specs() -> dict:
                 "max_chases": 0 if static_bracket else None,
                 "short_disabled_v12": bool(static_bracket and _STATIC_DISABLE_SHORT),
                 "session_blacklist_v12": sorted(_STATIC_SESS_BL) if (static_bracket and _STATIC_SESS_BL) else [],
+                # Section 2/8: explicit cohort identifier on the tile so the
+                # dashboard cannot silently conflate frozen Tile 2 with the
+                # archived historical 346-row training sample.
+                "policy_id": TILE2_POLICY_ID if static_bracket else None,
+                "exit_profile_id": (
+                    TILE2_EXIT_PROFILE_ID_PROVISIONAL
+                    if static_bracket else None
+                ),
+                "cohort_label": (
+                    TILE2_POLICY_LABEL if static_bracket else None
+                ),
             }
             bracket_entry = {
                 "trigger": trigger,
@@ -19076,14 +19913,18 @@ def build_static_pathway_lane_specs() -> dict:
                 "ai_path": "None (deterministic evaluator)",
                 "ai_cadence": "No AI · bracket tick every 10–30s or SR pivot change",
                 "chase_detail": (
-                    "STATIC: never chase/reprice/slide · fill exactly at micro_support/resistance"
+                    "STATIC: never chase/reprice/slide · fill exactly at micro_support (LONG only)"
                     if static_bracket
-                    else "Limit at micro_support (LONG) + micro_resistance (SHORT) · FULL_CHASE baseline"
+                    else "Historical FULL_CHASE dual-leg collector (data archived)"
                 ),
                 "post_ai_gates": "evaluate_bracket + should_enter_bracket_leg",
                 "margin_usd": shared["margin_usd"],
                 "execution": execution,
-                "orders": "Phase 1 shadow only (toggle OFF default)",
+                "orders": (
+                    "OFF=LAB only · ON=paper limit at micro-support · Bitfinex BLOCKED while PROBATION"
+                    if static_bracket else
+                    "Phase 1 shadow only (toggle OFF default)"
+                ),
                 "filters": entry_filters,
             }
         elif type_b_hunter:
@@ -20527,6 +21368,7 @@ HTML = """<!DOCTYPE html>
     <p><strong>Pipeline Funnel (session):</strong> <span id="pipelineFunnel">-</span></p>
     <p><strong>Research Isolation:</strong> <span id="researchIsolation">-</span></p>
     <p><strong>Lane Opportunity (session):</strong> <span id="laneOpportunity">-</span></p>
+    <p><strong>Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel:</strong> <span id="tile2Metrics">-</span></p>
     <p><strong>Last AI Call:</strong> <span id="lastAICall">-</span></p>
     <p><strong>AI Score:</strong> <span id="aiScore">-</span></p>
     <p><strong>Signal Cooldown:</strong> <span id="signalCooldown">-</span></p>
@@ -22180,6 +23022,28 @@ DASHBOARD_JS = """(function () {
         } else {
           safeText('laneOpportunity', 'collecting…');
         }
+        // Section 2: Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel metrics.
+        // Renders the full Section 2 metric set on the dashboard tile footer.
+        const t2 = d.tile2_counters || {};
+        if (t2 && t2.lane) {
+          const t2Txt = [
+            'bracket evals=' + (t2.bracket_evals || 0),
+            'eligible LONG=' + (t2.eligible_long || 0),
+            'paper limits=' + (t2.paper_limits || 0),
+            'filled closes=' + (t2.filled_closes || 0),
+            'TTL exp=' + (t2.ttl_expiries || 0),
+            'cancels=' + (t2.cancellations || 0),
+            'fill%=' + ((t2.fill_rate != null) ? (t2.fill_rate * 100).toFixed(1) : '0.0'),
+            'paper P&L=$' + (t2.paper_pnl_usd || 0).toFixed(2),
+            'EV/elig=$' + (t2.ev_per_eligible_opportunity || 0).toFixed(3),
+            'EV/fill=$' + (t2.ev_per_filled_close || 0).toFixed(3),
+            'episodes=' + (t2.independent_episodes || 0),
+            'cohort=' + (t2.cohort_label || '-')
+          ].join(' · ');
+          safeText('tile2Metrics', t2Txt);
+        } else {
+          safeText('tile2Metrics', 'Tile 2 counters not yet collected');
+        }
         safeText('lastAICall', dbg.last_ai_call || '-');
         safeText('aiScore', dbg.last_ai_score || '-');
         safeText('signalCooldown', dbg.signal_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_signal + 's)' : 'READY');
@@ -23534,6 +24398,15 @@ def _build_api_state_snapshot():
         snapshot["bot_pid"] = os.getpid()
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
+        # Section 1: surface the running commit + Tile 2 frozen policy so that
+        # /api/state (the dashboard's primary poll) cannot be silent about a
+        # stale running process or a drifted ADX cap.
+        snapshot["git_rev"] = _runtime_git_rev()
+        snapshot["tile2_policy"] = tile2_policy_descriptor()
+        # Section 2: Tile 2 dashboard funnel metrics (raw + derived) so the
+        # tile can render the full Section 2 spec without re-deriving from
+        # raw opportunity events each poll.
+        snapshot["tile2_counters"] = tile2_dashboard_metrics()
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
@@ -23931,6 +24804,8 @@ def health():
         paused = bool(state.get("execution_paused", False))
         reason = state.get("execution_reason", "")
         manual = bool(state.get("manual_admin_pause", False))
+        bot_version = state.get("bot_version") or EXECUTION_FIX_VERSION
+        analyzer_sync_id = state.get("analyzer_sync_id") or ANALYZER_SYNC_ID
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
@@ -23939,6 +24814,12 @@ def health():
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
+        # Section 1: explicit running source revision + policy identifiers.
+        # The running bot must not lie about which commit produced it.
+        "bot_version": bot_version,
+        "analyzer_sync_id": analyzer_sync_id,
+        "git_rev": _runtime_git_rev(),
+        "tile2_policy": tile2_policy_descriptor(),
     })
 
 @app.route('/debug_state')
@@ -24012,6 +24893,35 @@ def toggle_profit_gates():
         "research_lanes_independent": research_lanes_independent(),
         "research_execution_mode": mode,
     })
+
+# Section 8/9: explicit operator action that starts the fresh independent
+# Tile 2 holdout cohort. Zeros out the funnel counters (NOT automatic on
+# every restart, so an accidental restart cannot wipe the cohort).
+@app.route('/api/tile2/reset_counters', methods=['POST'])
+def api_tile2_reset_counters():
+    if not _admin_authed_strict():
+        return jsonify({
+            "status": "auth_required",
+            "message": "Tile 2 counter reset is admin-only — present X-Bot-Admin-Token",
+        }), 401
+    metrics = reset_tile2_counters_for_fresh_holdout()
+    logger.warning(
+        f"[ADMIN] Tile 2 counters RESET via /api/tile2/reset_counters "
+        f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "status": "reset",
+        "policy_id": TILE2_POLICY_ID,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "metrics": metrics,
+    })
+
+
+@app.route('/api/tile2/metrics', methods=['GET'])
+def api_tile2_metrics():
+    """Section 2: public read-only endpoint for Tile 2 funnel metrics."""
+    return jsonify(tile2_dashboard_metrics())
+
 
 @app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
 def toggle_duplicate_limit_block():
@@ -25496,7 +26406,18 @@ def simulate_replay_outcome(buf: dict) -> dict:
             break
         mfe_protect = _buf_float(exit_config.get("thesis_mfe_protect_pct"), THESIS_MFE_PROTECT_PCT)
         if peak < trail_ladder[0][0] and unreal <= fast_cut:
-            if not (mfe_protect > 0 and unreal >= mfe_protect):
+            # Section 5: route through the SAME MFE-protection helper used by
+            # the live exit path. Historical bug checked `unreal >= mfe_protect`
+            # which can never be true when `unreal <= fast_cut` (= -12); the
+            # correct check is `peak >= mfe_protect`. The fast-cut P&L of 29
+            # of the 69 historical fast-cut rows is not trustworthy under the
+            # displayed policy until this fix lands.
+            if not should_skip_fast_cut_for_mfe_protection(
+                unreal_pct=unreal,
+                peak_mfe_pct=peak,
+                mfe_protect_pct=mfe_protect,
+                fast_cut_pct=fast_cut,
+            ):
                 exit_reason = "THESIS_FAST_CUT"
                 exit_margin_pct = fast_cut
                 break
@@ -25504,9 +26425,27 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "TAKE_PROFIT"
             exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
             break
+        # Section 6: genuine two-hour TIME_EXIT. Once filled, a position must
+        # continue until a strategy exit fires; MARK_TO_MARKET is reserved for
+        # the rare case where the LAB buffer is truncated before any exit
+        # could trigger. Without this check, 61 historical outcomes were
+        # classified MARK_TO_MARKET (contributing +$27.39) -- those are
+        # EXCLUDED from promotion unless reclassified through a truthful
+        # strategy exit, which is what this branch now does.
+        if FIXED_TIME_EXIT_ENABLED and (t - fill_t) >= MAX_POSITION_AGE_SEC:
+            exit_reason = "TIME_EXIT"
+            exit_margin_pct = unreal
+            break
         exit_margin_pct = unreal
     else:
         exit_margin_pct = _buf_float(last_unreal, 0) if ticks else 0.0
+        # Section 6: if the for loop fell through without any exit firing,
+        # the position ran out of ticks before MAX_POSITION_AGE_SEC. That is
+        # NOT a MARK_TO_MARKET -- it is a buffer truncation. The honest
+        # classification is BUFFER_TRUNCATED so the promotion rule can
+        # exclude these rows from the reconciled sample.
+        if FIXED_TIME_EXIT_ENABLED and exit_reason == "MARK_TO_MARKET":
+            exit_reason = "BUFFER_TRUNCATED"
 
     net_usd = _margin_pct_to_usd(exit_margin_pct, margin_usdt)
     return {
@@ -25701,6 +26640,10 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),
             "ai_snapshot": copy.deepcopy(meta.get("ai_snapshot") or {}),
+            # Section 8: stable policy/episode identifiers, threaded from the
+            # bracket tick through the LAB spawn into the outcome record.
+            "sr_episode_id": meta.get("sr_episode_id"),
+            "exit_profile_id": meta.get("exit_profile_id"),
             "v2_min_fill_age_sec": meta.get("v2_min_fill_age_sec"),
             "v2_chase_target_min": meta.get("v2_chase_target_min"),
             "v2_chase_target_max": meta.get("v2_chase_target_max"),
@@ -27042,6 +27985,9 @@ def main():
     _apply_env_live_gating()
     reset_transient_runtime_state()
     load_lane_pnl_ledgers_from_disk()
+    # Section 2: restore Tile 2 dashboard counters from disk so the funnel
+    # metrics survive restarts without silently zeroing out mid-cohort.
+    load_tile2_counters_from_disk()
     update_logger_level()
     validate_startup()
     startup_hard_fix_ai_threshold()

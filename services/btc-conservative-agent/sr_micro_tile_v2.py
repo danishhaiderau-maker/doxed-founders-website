@@ -1,15 +1,49 @@
 """
 SR_MICRO_TILE_V2 — Deterministic micro S/R bracket tile (no AI).
 
-Places simultaneous LONG@micro_support + SHORT@micro_resistance when structural
-envelope + midpoint rules pass. Phase 1: shadow LAB replay only (toggle OFF default).
+Legacy collector lane (RESEARCH_LANE_SR_MICRO_TILE_V2): historical FULL_CHASE
+dual-leg bracket. SHORT leg now disabled by default; only LONG@micro_support
+remains as a research data point. This module owns both the V2 (full-chase)
+and V2_STATIC (resting limit) tunings; the FROZEN policy for promotion-track
+collection is the V2_STATIC LONG-only lane under POLICY_ID below.
 
-Chase experiment (2026-07-12):
-  V2 (this lane) = FULL_CHASE baseline — keep collecting unchanged.
-  SR_MICRO_TILE_V2_STATIC = resting limit at exact micro S/R, never chase/reprice.
-  LIGHT_CHASE (max_chases=1) reserved as Phase 2 — scaffolding only.
+  V2 (legacy lane)   = FULL_CHASE baseline — historical data only.
+  V2_STATIC (frozen) = resting limit at exact micro S/R, never chase/reprice,
+                       LONG-only, ADX<=40, LONDON blacklisted, $20 paper margin.
+
+Tile 2 frozen entry policy (POLICY_ID = sr_micro_static_long_adx40_no_london_v1):
+  - No AI
+  - LONG at micro_support only (SHORT fully disabled from execution + dashboard)
+  - London bucket blacklisted (08:00-12:59 UTC)
+  - ADX must be present and <= 40 (fail-closed on missing ADX)
+  - STATIC resting limit at exact micro_support
+  - No chase, reprice, or slide
+  - Midpoint guard retained unchanged
+  - $20 paper margin
+  - Entry TTL: 30 minutes (UNFILLED resting limit expiry only)
+  - Thesis fast cut remains -12% (semantics fixed, threshold unchanged)
+  - Scenario C 12->10 ladder PROVISIONAL (separate exit-profile cohort)
+
+The legacy "places LONG + SHORT" wording is OBSOLETE. Use POLICY_LABEL.
 """
 from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
+#
+# These are STABLE identifiers that travel with every outcome record so that
+# the independent holdout cohort can never be silently confused with the
+# archived historical 346-row training sample.
+# ---------------------------------------------------------------------------
+POLICY_ID = "sr_micro_static_long_adx40_no_london_v1"
+POLICY_LABEL = "Tile 2: LONG@micro-support only (ADX<=40, no LONDON, paper)"
+# Exit-profile ID for the canonical Scenario C 12->10 ladder used by Tile 2.
+# A separate EXIT_PROFILE_*_PROVISIONAL tag tracks the 12->10 ladder cohort
+# (19 historical fills) which is held frozen and evaluated separately.
+EXIT_PROFILE_ID = "scenario_c_ladder_12_to_10_v1"
+EXIT_PROFILE_ID_PROVISIONAL = "scenario_c_ladder_12_to_10_v1_provisional"
+# Threshold retained from historical training sample; do NOT regress.
+THESIS_FAST_CUT_UNREAL_PCT = -12.0
 
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
@@ -55,6 +89,53 @@ BRACKET_TICK_MIN_SEC = 10
 BRACKET_TICK_MAX_SEC = 30
 
 
+# ---------------------------------------------------------------------------
+# Section 7 of Tile 2 static integrity repair.
+#
+# Explicit UTC session bucket boundaries. "LONDON" means 08:00-12:59 UTC
+# explicitly -- the historical sample showed LONDON = -$0.54/close vs ASIA
+# +$0.49/close, so the bucket is blacklisted for the frozen Tile 2 policy.
+#
+# Boundaries are [start_hour, end_hour_inclusive) so a bucket is exactly 4h.
+# Hour values are UTC hours 0-23.
+# ---------------------------------------------------------------------------
+SESSION_BUCKET_BOUNDARIES_UTC = {
+    "ASIA": (0, 8),       # 00:00-07:59 UTC
+    "LONDON": (8, 13),    # 08:00-12:59 UTC (blacklisted for STATIC)
+    "NEWYORK": (13, 17),  # 13:00-16:59 UTC
+    "OVERLAP": (17, 21),  # 17:00-20:59 UTC
+    "OFF": (21, 24),      # 21:00-23:59 UTC
+}
+
+
+def utc_session_bucket_for_hour(hour_utc: int) -> str:
+    """Return the session bucket name for a given UTC hour (0-23).
+
+    Used by Section 7 to log the exact UTC session bucket alongside every
+    bracket evaluation, so the historical ambiguity about what 'LONDON'
+    means cannot recur.
+    """
+    try:
+        h = int(hour_utc)
+    except (TypeError, ValueError):
+        return ""
+    if not (0 <= h <= 23):
+        return ""
+    for name, (lo, hi) in SESSION_BUCKET_BOUNDARIES_UTC.items():
+        if lo <= h < hi:
+            return name
+    return ""
+
+
+def london_blackout_active(hour_utc: int) -> bool:
+    """True iff the given UTC hour is inside the LONDON blackout (08:00-12:59 UTC)."""
+    try:
+        h = int(hour_utc)
+    except (TypeError, ValueError):
+        return False
+    return 8 <= h <= 12
+
+
 def chase_mode_for_lane(lane: str) -> str:
     """Map lane id → chase mode for spawn/fill telemetry."""
     lane_u = str(lane or "").upper()
@@ -95,9 +176,12 @@ def evaluate_bracket(
     """Evaluate dual-leg bracket arming — no AI, structural rules only.
 
     Per-lane tuning (v12):
-      - STATIC lane uses tighter ADX cap (35 vs 40), blocks SHORT leg, and
-        blacklists LONDON session. Pass lane=RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
-        to opt in; V2 full-chase lane keeps historical baseline.
+      - STATIC lane uses ADX cap 40 (cap reverted from 35 after re-analysis:
+        the 35-40 bucket was the second-best cohort in the historical sample,
+        so capping at 35 was killing profitable trades). STATIC also disables
+        the SHORT leg and blacklists LONDON session. Pass
+        lane=RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC to opt in; the V2
+        full-chase lane keeps the historical baseline.
     """
     lane_u = str(lane or "").upper()
     is_static = lane_u == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
@@ -140,6 +224,26 @@ def evaluate_bracket(
 
     if is_static and sess and sess in STATIC_SESSION_BLACKLIST:
         result["block_reason"] = f"SESSION_BLACKLISTED_{sess}"
+        result["zone"] = "SUSPENDED"
+        return result
+
+    # Section 7: Tile 2 (STATIC) must FAIL CLOSED when ADX is missing.
+    # The historical sample had ADX missing from 42 final-filter outcomes,
+    # and the previous logic (only check when adx_v is not None) meant the
+    # cap silently passed whenever ADX was absent. The frozen Tile 2 policy
+    # requires ADX to be present AND <= cap; otherwise the bracket is
+    # refused with MISSING_ADX.
+    if is_static and adx_v is None:
+        result["block_reason"] = "MISSING_ADX"
+        result["zone"] = "SUSPENDED"
+        return result
+
+    # Section 7: same fail-closed semantics for volatility percentile. The
+    # historical sample had vol_pct missing from all 346 outcomes, so any
+    # claim that the gate was evaluated was wrong. For STATIC we now refuse
+    # when vol_pct is missing -- the gate is either real or it is not.
+    if is_static and vol_v is None:
+        result["block_reason"] = "MISSING_VOLATILITY"
         result["zone"] = "SUSPENDED"
         return result
 
@@ -253,3 +357,75 @@ def _sf(val):
         return float(val)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Section 4 of Tile 2 static integrity repair.
+#
+# Episode ID + one-trade-per-episode guard.
+#
+# The historical sample inflated fills because a new bracket tick every ~20s
+# could spawn a new shadow / paper limit on the same support level while the
+# previous trade on that thesis was still active. The frozen Tile 2 policy
+# requires at most ONE pending or open Tile 2 LONG per S/R episode.
+#
+# Episode ID derivation:
+#   - micro_support (the level we're trying to buy)
+#   - micro_resistance (defines the S/R range)
+#   - pivot_revision (a coarse counter that bumps when the S/R levels move)
+#   - bucket_ts (the UTC session bucket start, so episodes don't bleed across
+#     very different times of day even if the level is identical)
+#
+# The resulting string is short, stable, and human-auditable. It is stamped
+# on every outcome record (Section 8) and used as the dedup key for the
+# one-trade-per-episode guard.
+# ---------------------------------------------------------------------------
+
+# How much the support/resistance levels must move (in absolute price units)
+# before we count it as a new "pivot revision". Small noise within this band
+# is treated as the same pivot. Tuned for BTC at the ~$60-120k range.
+EPISODE_PIVOT_BAND_USD = 25.0
+
+
+def derive_sr_episode_id(
+    micro_support,
+    micro_resistance,
+    session_bucket: str = "",
+    session_bucket_start_ts: float = 0.0,
+    pivot_band_usd: float = EPISODE_PIVOT_BAND_USD,
+) -> str:
+    """Stable S/R episode ID for one-trade-per-episode dedup (Section 4).
+
+    Buckets the support level to the nearest `pivot_band_usd` so that
+    micro-noise on the support level does not inflate the episode count.
+    Includes the UTC session bucket so that identical levels seen in very
+    different sessions are distinct episodes.
+    """
+    ms = _sf(micro_support)
+    mr = _sf(micro_resistance)
+    if ms is None or mr is None or ms <= 0 or mr <= 0:
+        return ""
+    band = max(1.0, float(pivot_band_usd or EPISODE_PIVOT_BAND_USD))
+    ms_b = int(round(ms / band)) * band
+    mr_b = int(round(mr / band)) * band
+    bucket_label = str(session_bucket or "").upper().strip()
+    if session_bucket_start_ts:
+        try:
+            bucket_label = f"{bucket_label}:{int(float(session_bucket_start_ts))}"
+        except (TypeError, ValueError):
+            pass
+    return f"ms{ms_b:.0f}-mr{mr_b:.0f}-{bucket_label}"
+
+
+def episode_id_matches_open_trade(
+    episode_id: str,
+    open_episodes_seen: list,
+) -> bool:
+    """True iff this episode_id already has an open or pending Tile 2 trade.
+
+    `open_episodes_seen` is the list of episode IDs currently attached to
+    open/pending Tile 2 trades (caller-supplied).
+    """
+    if not episode_id:
+        return False
+    return any(str(x) == str(episode_id) for x in (open_episodes_seen or []))
