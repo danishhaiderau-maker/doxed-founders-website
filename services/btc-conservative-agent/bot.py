@@ -88,6 +88,18 @@ from combo_pathway_config import (
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
 )
+# Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
+# Single source of truth for policy/exit-profile tagging on every outcome.
+from sr_micro_tile_v2 import (
+    POLICY_ID as TILE2_POLICY_ID,
+    POLICY_LABEL as TILE2_POLICY_LABEL,
+    EXIT_PROFILE_ID as TILE2_EXIT_PROFILE_ID,
+    EXIT_PROFILE_ID_PROVISIONAL as TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+    THESIS_FAST_CUT_UNREAL_PCT as TILE2_THESIS_FAST_CUT_UNREAL_PCT,
+    STATIC_ADX_TRENDING_THRESHOLD as AS_EXPLICIT_ADX_CAP,
+    STATIC_DISABLE_SHORT_LEG as AS_EXPLICIT_DISABLE_SHORT,
+    STATIC_SESSION_BLACKLIST as AS_EXPLICIT_SESSION_BLACKLIST,
+)
 from a160_v2_research import (
     V2_AI_DECISION_LOG_FILE,
     V2_AI_INPUT_LOG_FILE,
@@ -6037,6 +6049,65 @@ PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
 EXECUTION_FIX_VERSION = COMBO_EXECUTION_FIX_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Section 1 of Tile 2 static integrity repair.
+#
+# `_runtime_git_rev` exposes the running commit so /health and /api/state can
+# unambiguously report which exact source revision produced this process. The
+# bot process is long-lived and is sometimes restarted by a different checkout
+# than the working tree HEAD, so we read the resolved revision lazily and
+# cache it. Failure to read git (e.g. bare deployments) degrades to "unknown"
+# rather than crashing the bot.
+# ---------------------------------------------------------------------------
+_RUNTIME_GIT_REV_CACHE = {"value": None}
+
+
+def _runtime_git_rev() -> str:
+    """Return the short git SHA this process was started from, or 'unknown'.
+
+    Cached after first successful read. Best-effort: returns 'unknown' if git
+    is unavailable (e.g. deployed without .git). Never raises.
+    """
+    if _RUNTIME_GIT_REV_CACHE["value"]:
+        return _RUNTIME_GIT_REV_CACHE["value"]
+    rev = "unknown"
+    try:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=here,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        if out.returncode == 0:
+            rev = (out.stdout or "").strip() or "unknown"
+    except Exception:
+        rev = "unknown"
+    _RUNTIME_GIT_REV_CACHE["value"] = rev
+    return rev
+
+
+def tile2_policy_descriptor() -> dict:
+    """Section 1/8: single source of truth for the Tile 2 frozen policy.
+
+    Returned dict is attached to /health, /api/status, /api/state, and stamped
+    on every outcome record so that no historical archived row can ever be
+    confused with the fresh independent holdout cohort.
+    """
+    return {
+        "policy_id": TILE2_POLICY_ID,
+        "policy_label": TILE2_POLICY_LABEL,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "exit_profile_id_provisional": TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+        "adx_cap": AS_EXPLICIT_ADX_CAP,
+        "short_disabled": AS_EXPLICIT_DISABLE_SHORT,
+        "session_blacklist": sorted(AS_EXPLICIT_SESSION_BLACKLIST),
+        "thesis_fast_cut_unreal_pct": TILE2_THESIS_FAST_CUT_UNREAL_PCT,
+    }
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -19024,7 +19095,8 @@ def build_static_pathway_lane_specs() -> dict:
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
         if deterministic_bracket:
-            # Per-lane ADX cap (v12): STATIC=35, V2 full-chase=40
+            # Per-lane ADX cap (v12): STATIC=40, V2 full-chase=40 (both retained
+            # at 40 after re-analysis showed 35-40 was the second-best cohort).
             from sr_micro_tile_v2 import (
                 ADX_TRENDING_THRESHOLD as _V2_ADX_CAP,
                 STATIC_ADX_TRENDING_THRESHOLD as _STATIC_ADX_CAP,
@@ -23534,6 +23606,11 @@ def _build_api_state_snapshot():
         snapshot["bot_pid"] = os.getpid()
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
+        # Section 1: surface the running commit + Tile 2 frozen policy so that
+        # /api/state (the dashboard's primary poll) cannot be silent about a
+        # stale running process or a drifted ADX cap.
+        snapshot["git_rev"] = _runtime_git_rev()
+        snapshot["tile2_policy"] = tile2_policy_descriptor()
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
@@ -23931,6 +24008,8 @@ def health():
         paused = bool(state.get("execution_paused", False))
         reason = state.get("execution_reason", "")
         manual = bool(state.get("manual_admin_pause", False))
+        bot_version = state.get("bot_version") or EXECUTION_FIX_VERSION
+        analyzer_sync_id = state.get("analyzer_sync_id") or ANALYZER_SYNC_ID
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
@@ -23939,6 +24018,12 @@ def health():
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
+        # Section 1: explicit running source revision + policy identifiers.
+        # The running bot must not lie about which commit produced it.
+        "bot_version": bot_version,
+        "analyzer_sync_id": analyzer_sync_id,
+        "git_rev": _runtime_git_rev(),
+        "tile2_policy": tile2_policy_descriptor(),
     })
 
 @app.route('/debug_state')

@@ -1,15 +1,49 @@
 """
 SR_MICRO_TILE_V2 — Deterministic micro S/R bracket tile (no AI).
 
-Places simultaneous LONG@micro_support + SHORT@micro_resistance when structural
-envelope + midpoint rules pass. Phase 1: shadow LAB replay only (toggle OFF default).
+Legacy collector lane (RESEARCH_LANE_SR_MICRO_TILE_V2): historical FULL_CHASE
+dual-leg bracket. SHORT leg now disabled by default; only LONG@micro_support
+remains as a research data point. This module owns both the V2 (full-chase)
+and V2_STATIC (resting limit) tunings; the FROZEN policy for promotion-track
+collection is the V2_STATIC LONG-only lane under POLICY_ID below.
 
-Chase experiment (2026-07-12):
-  V2 (this lane) = FULL_CHASE baseline — keep collecting unchanged.
-  SR_MICRO_TILE_V2_STATIC = resting limit at exact micro S/R, never chase/reprice.
-  LIGHT_CHASE (max_chases=1) reserved as Phase 2 — scaffolding only.
+  V2 (legacy lane)   = FULL_CHASE baseline — historical data only.
+  V2_STATIC (frozen) = resting limit at exact micro S/R, never chase/reprice,
+                       LONG-only, ADX<=40, LONDON blacklisted, $20 paper margin.
+
+Tile 2 frozen entry policy (POLICY_ID = sr_micro_static_long_adx40_no_london_v1):
+  - No AI
+  - LONG at micro_support only (SHORT fully disabled from execution + dashboard)
+  - London bucket blacklisted (08:00-12:59 UTC)
+  - ADX must be present and <= 40 (fail-closed on missing ADX)
+  - STATIC resting limit at exact micro_support
+  - No chase, reprice, or slide
+  - Midpoint guard retained unchanged
+  - $20 paper margin
+  - Entry TTL: 30 minutes (UNFILLED resting limit expiry only)
+  - Thesis fast cut remains -12% (semantics fixed, threshold unchanged)
+  - Scenario C 12->10 ladder PROVISIONAL (separate exit-profile cohort)
+
+The legacy "places LONG + SHORT" wording is OBSOLETE. Use POLICY_LABEL.
 """
 from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
+#
+# These are STABLE identifiers that travel with every outcome record so that
+# the independent holdout cohort can never be silently confused with the
+# archived historical 346-row training sample.
+# ---------------------------------------------------------------------------
+POLICY_ID = "sr_micro_static_long_adx40_no_london_v1"
+POLICY_LABEL = "Tile 2: LONG@micro-support only (ADX<=40, no LONDON, paper)"
+# Exit-profile ID for the canonical Scenario C 12->10 ladder used by Tile 2.
+# A separate EXIT_PROFILE_*_PROVISIONAL tag tracks the 12->10 ladder cohort
+# (19 historical fills) which is held frozen and evaluated separately.
+EXIT_PROFILE_ID = "scenario_c_ladder_12_to_10_v1"
+EXIT_PROFILE_ID_PROVISIONAL = "scenario_c_ladder_12_to_10_v1_provisional"
+# Threshold retained from historical training sample; do NOT regress.
+THESIS_FAST_CUT_UNREAL_PCT = -12.0
 
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
@@ -95,9 +129,12 @@ def evaluate_bracket(
     """Evaluate dual-leg bracket arming — no AI, structural rules only.
 
     Per-lane tuning (v12):
-      - STATIC lane uses tighter ADX cap (35 vs 40), blocks SHORT leg, and
-        blacklists LONDON session. Pass lane=RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
-        to opt in; V2 full-chase lane keeps historical baseline.
+      - STATIC lane uses ADX cap 40 (cap reverted from 35 after re-analysis:
+        the 35-40 bucket was the second-best cohort in the historical sample,
+        so capping at 35 was killing profitable trades). STATIC also disables
+        the SHORT leg and blacklists LONDON session. Pass
+        lane=RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC to opt in; the V2
+        full-chase lane keeps the historical baseline.
     """
     lane_u = str(lane or "").upper()
     is_static = lane_u == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
