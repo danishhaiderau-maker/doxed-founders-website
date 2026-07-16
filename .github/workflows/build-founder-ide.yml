@@ -275,6 +275,49 @@ jobs:
           npm ci --no-fund --no-audit
           if ($LASTEXITCODE -ne 0) { throw "npm ci failed (exit $LASTEXITCODE)" }
 
+      # ── 13.5. Pre-compile: build Void's React subprojects ────────────────
+      # Void ships React/TSX sources under src/vs/workbench/contrib/void/browser/react/src/.
+      # The main TS compile imports their compiled output via paths like
+      #   './react/out/sidebar-tsx/index.js'
+      # Those out/ artifacts are NOT in git (gitignored as build output) and
+      # are NOT produced by any gulp target - they're built by a separate
+      # script: src/vs/workbench/contrib/void/browser/react/build.js, which
+      # runs `scope-tailwind` (rewrites Tailwind class names into a sandboxed
+      # scope, copying src/ -> src2/) and then `tsup` (bundles each entry
+      # tsx into out/<name>/index.js). Without this step the gulp compile
+      # dies with 9x "Cannot find module './react/out/<name>/index.js'" errors.
+      - name: Build Void React subprojects (scope-tailwind + tsup)
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          $reactDir = "src\vs\workbench\contrib\void\browser\react"
+          if (-not (Test-Path $reactDir)) {
+            Write-Host "No Void React dir at $reactDir (unexpected) - skipping"
+            return
+          }
+          Write-Host "Building React subprojects in $reactDir ..."
+          Push-Location $reactDir
+          try {
+            node build.js
+            if ($LASTEXITCODE -ne 0) { throw "Void React build.js failed (exit $LASTEXITCODE)" }
+            # Sanity-check the artifacts exist - if any are missing the next
+            # step will fail with a less helpful TS error.
+            $expected = @(
+              "out\diff\index.js",
+              "out\sidebar-tsx\index.js",
+              "out\void-settings-tsx\index.js",
+              "out\void-tooltip\index.js",
+              "out\void-onboarding\index.js",
+              "out\quick-edit-tsx\index.js",
+              "out\void-editor-widgets-tsx\index.js"
+            )
+            foreach ($p in $expected) {
+              if (-not (Test-Path $p)) { throw "Expected React build artifact missing: $p" }
+            }
+            Write-Host "React subprojects built OK ($($expected.Count) artifacts)"
+          }
+          finally { Pop-Location }
+
       # ── 14. Compile VS Code + download Electron + build native extensions ──
       # This is the BIG step (40-70 min cold, 20-35 min warm). Produces
       # VSCode-win32-x64/ with the launcher exe + all .node modules.
