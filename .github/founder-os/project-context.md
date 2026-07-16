@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+ci(ide): don't pin Inno Setup version - runner already has 6.7.1
 
 ## Last Activity
 
