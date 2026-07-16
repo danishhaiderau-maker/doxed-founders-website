@@ -18808,6 +18808,46 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
     return lines
 
 
+def _annotate_lanes_with_exec_mode(lanes: list) -> list:
+    """Pt 5 (toggle contract): tag each lane spec with its current execution
+    mode + human-readable banner text so the dashboard never lies about what
+    a tile is actually allowed to do.
+
+    Replaces hardcoded 'paper-only' / 'never Bitfinex live' strings with
+    dynamic per-mode wording driven by execution_mode_for_lane().
+    """
+    out = []
+    for spec in lanes or []:
+        try:
+            spec = dict(spec)  # shallow copy so we don't mutate caller's dict
+            lane_id = str(spec.get("lane") or "").upper()
+            mode = execution_mode_for_lane(lane_id)
+            block = lane_execution_block_reason(lane_id)
+            spec["exec_mode"] = mode
+            spec["exec_block_reason"] = block
+            spec["exec_banner"] = _exec_mode_banner_text(mode, block, lane_id)
+            out.append(spec)
+        except Exception:
+            out.append(spec)
+    return out
+
+
+def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
+    """Truthful short banner for the tile. Drives the green/blue/yellow/red strip."""
+    if mode == EXEC_MODE_LIVE:
+        return "LIVE BITFINEX LIMIT ORDERS ENABLED"
+    if mode == EXEC_MODE_PAPER:
+        return "PAPER ORDERS ENABLED — no Bitfinex submission"
+    if mode == EXEC_MODE_EXIT_ONLY:
+        return "OFF — no new entries; existing positions still managed"
+    # LAB_SHADOW
+    if block == "LANE_RETIRED":
+        return "RETIRED — research data only"
+    if block == "SHADOW_ONLY_LANE":
+        return "LAB SHADOW — no new orders (shadow-collecting lane)"
+    return "LAB SHADOW — no new orders"
+
+
 def build_static_pathway_lane_specs() -> dict:
     """Combo Pathway Lab v2 — tile specs for dashboard (architecture frozen; change tiles only)."""
     shared = _pathway_shared_execution_spec()
@@ -18862,8 +18902,8 @@ def build_static_pathway_lane_specs() -> dict:
             else:
                 execution = "Dual LAB shadow at micro_support (LONG) + micro_resistance (SHORT) · Scenario C"
         elif type_b_hunter:
-            trigger = "Fixed pre-entry Type B score · walk-forward collection · paper research only"
-            execution = "Paper limit research only when enabled · never Bitfinex live · Scenario C"
+            trigger = "Fixed pre-entry Type B score · walk-forward collection · execution mode per toggle contract"
+            execution = "Dynamic per execution_mode_for_lane(): LAB_SHADOW / PAPER / LIVE / EXIT_ONLY"
         elif independent_ai:
             trigger = (
                 "AI 60+ · Spread ≥3 · Context veto BULL+SHORT+LONG_PREF · "
@@ -18923,7 +18963,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "Tile ON: Phase 1 shadow-only (live bracket orders deferred)",
                 "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger",
                 (
-                    "Paper-only: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
+                    "Paper P&L in PAPER mode · Bitfinex P&L only in LIVE mode: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
                     if static_bracket
                     else "Historical bracket collector; data archived"
                 ),
@@ -19418,7 +19458,7 @@ def build_static_pathway_lane_specs() -> dict:
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(ARCHIVED_PATHWAY_LANES),
-        "lanes": lanes,
+        "lanes": _annotate_lanes_with_exec_mode(lanes),
     }
 
 
@@ -21133,7 +21173,24 @@ DASHBOARD_JS = """(function () {
             : '';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           let orderBanner = '';
-          if (spec.planned) {
+          // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
+          // execution_mode_for_lane() so the dashboard never lies. Fall back
+          // to the legacy hardcoded banners only when exec_banner is missing.
+          const modeBg = spec.exec_mode === 'LIVE' ? '#0f2a1a'
+                       : spec.exec_mode === 'PAPER' ? '#0f2a1a'
+                       : spec.exec_mode === 'EXIT_ONLY' ? '#3d2e00'
+                       : '#0f2d4a';
+          const modeBorder = spec.exec_mode === 'LIVE' ? '#238636'
+                           : spec.exec_mode === 'PAPER' ? '#238636'
+                           : spec.exec_mode === 'EXIT_ONLY' ? '#d4a72c'
+                           : '#1f6feb';
+          const modeColor = spec.exec_mode === 'LIVE' ? '#3fb950'
+                          : spec.exec_mode === 'PAPER' ? '#3fb950'
+                          : spec.exec_mode === 'EXIT_ONLY' ? '#f0c14b'
+                          : '#58a6ff';
+          if (spec.exec_banner) {
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:' + modeBg + ';border:1px solid ' + modeBorder + ';border-radius:6px;color:' + modeColor + ';font-size:0.82em;font-weight:700;">' + spec.exec_banner + (spec.exec_block_reason && spec.exec_mode === 'LIVE' ? ' · gate: ' + spec.exec_block_reason : '') + '</div>';
+          } else if (spec.planned) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#6e7681;font-size:0.82em;font-weight:600;">PLANNED — no orders</div>';
           } else if (spec.is_shadow_only) {
             if (on) {
