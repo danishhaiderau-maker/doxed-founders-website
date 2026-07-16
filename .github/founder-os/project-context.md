@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-ci(founder-ide): add reproducible Windows installer build workflow
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
