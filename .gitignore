@@ -323,6 +323,12 @@ services/btc-conservative-agent/research/downloads/
 /services/*.pkl
 .home-analyzer-user-stopped
 .home-analyzer-*
-packages/founder-ide/upstream/
+# packages/founder-ide/upstream/ holds the local Void checkout + build trees
+# (gitignored — multi-GB of build output), EXCEPT the overlay/ subdirectory
+# which IS tracked because CI (build-founder-ide.yml) needs MANIFEST.json +
+# the 4 overlay files to reconstruct the Founder IDE source on a fresh runner.
+packages/founder-ide/upstream/*
+!packages/founder-ide/upstream/overlay/
+!packages/founder-ide/upstream/overlay/**
 packages/skycode-fork/
 vault/
