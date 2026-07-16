@@ -1832,7 +1832,14 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
-        if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
+        # Section 5: route the MFE fast-cut skip through the shared helper so
+        # live and replay always agree on whether the floor was reached.
+        if should_skip_fast_cut_for_mfe_protection(
+            unreal_pct=unreal_pct,
+            peak_mfe_pct=peak,
+            mfe_protect_pct=THESIS_MFE_PROTECT_PCT,
+            fast_cut_pct=THESIS_FAST_EXIT_UNREAL_PCT,
+        ):
             now_ts = time.time()
             last_log = float(pos.get("_mfe_protect_log_ts") or 0)
             if now_ts - last_log >= 30.0:
@@ -5702,6 +5709,53 @@ THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
 THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
 THESIS_MFE_PROTECT_PCT = 2.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 2% margin
+
+
+def should_skip_fast_cut_for_mfe_protection(
+    unreal_pct: float,
+    peak_mfe_pct: float,
+    mfe_protect_pct: float = None,
+    fast_cut_pct: float = None,
+) -> bool:
+    """Section 5: SINGLE source of truth for the MFE fast-cut skip decision.
+
+    Both the live position exit path (check_thesis_invalidation) and the LAB
+    replay simulator (simulate_replay_outcome) MUST call this function so the
+    MFE protection is applied identically in both.
+
+    Historical bug: simulate_replay_outcome checked
+        `unreal >= mfe_protect`
+    instead of
+        `peak_mfe >= mfe_protect`
+    Given that the fast-cut branch only fires when `unreal <= fast_cut`
+    (i.e. unreal <= -12), the condition `unreal >= 2` was unreachable, so
+    MFE protection NEVER fired in replay. Of the 69 historical fast cuts,
+    29 had previously reached >= +2% MFE -- their replay PnL is therefore
+    not trustworthy under the displayed policy.
+
+    The frozen Tile 2 policy keeps the threshold unchanged (-12% fast cut,
+    >= +2% MFE skip); this function fixes the SEMANTICS only.
+
+    Returns True iff the fast cut should be SKIPPED because the position
+    previously reached the MFE protection floor.
+    """
+    mp = float(THESIS_MFE_PROTECT_PCT if mfe_protect_pct is None else mfe_protect_pct)
+    fc = float(THESIS_FAST_EXIT_UNREAL_PCT if fast_cut_pct is None else fast_cut_pct)
+    try:
+        u = float(unreal_pct or 0.0)
+        p = float(peak_mfe_pct or 0.0)
+    except (TypeError, ValueError):
+        return False
+    # Fast cut only applies when unreal has breached the fast-cut threshold.
+    if u > fc:
+        return False
+    # MFE protection only applies when the protect floor is positive.
+    if mp <= 0:
+        return False
+    # Correct check: was the peak MFE ever >= the protect floor?
+    return p >= mp
+
+
 ADX_BLOCK_NEW_ENTRY = 15.0
 RESEARCH_ADX_MIN = 12.0  # v93: logging reference in sole research (live block still ADX_BLOCK_NEW_ENTRY)
 ADX_HALF_SIZE_BELOW = 18.0
@@ -26252,7 +26306,18 @@ def simulate_replay_outcome(buf: dict) -> dict:
             break
         mfe_protect = _buf_float(exit_config.get("thesis_mfe_protect_pct"), THESIS_MFE_PROTECT_PCT)
         if peak < trail_ladder[0][0] and unreal <= fast_cut:
-            if not (mfe_protect > 0 and unreal >= mfe_protect):
+            # Section 5: route through the SAME MFE-protection helper used by
+            # the live exit path. Historical bug checked `unreal >= mfe_protect`
+            # which can never be true when `unreal <= fast_cut` (= -12); the
+            # correct check is `peak >= mfe_protect`. The fast-cut P&L of 29
+            # of the 69 historical fast-cut rows is not trustworthy under the
+            # displayed policy until this fix lands.
+            if not should_skip_fast_cut_for_mfe_protection(
+                unreal_pct=unreal,
+                peak_mfe_pct=peak,
+                mfe_protect_pct=mfe_protect,
+                fast_cut_pct=fast_cut,
+            ):
                 exit_reason = "THESIS_FAST_CUT"
                 exit_margin_pct = fast_cut
                 break
