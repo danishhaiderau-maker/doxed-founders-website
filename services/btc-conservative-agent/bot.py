@@ -65,8 +65,6 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     any_combo_execution_enabled,
     combo_entry_mode,
     combo_lane_match_detail,
@@ -2347,6 +2345,160 @@ def lane_blocks_live_orders(lane: str) -> bool:
     if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
         return True
     return is_shadow_collecting_lane(lane)
+
+
+# ---------------------------------------------------------------------------
+# Pt 1 (toggle contract): centralized execution-mode resolver.
+#
+# Returns one of four modes; this is the SINGLE source of truth that every
+# entry, chase, cancel, close, and dashboard banner MUST consult:
+#
+#   LAB_SHADOW  -- Tile OFF (or retired): no new orders of any kind.
+#                  LAB shadows + counterfactuals still collected for research.
+#                  Already-filled positions are still managed to exit.
+#   PAPER       -- Tile ON + Bitfinex OFF: local paper limit orders only.
+#                  Zero contact with Bitfinex private order API.
+#   LIVE        -- Tile ON + Bitfinex ON: real Bitfinex limit orders.
+#                  Still subject to keys, DDollar gate, execution gates.
+#   EXIT_ONLY   -- Special mode set after Bitfinex ON->OFF with open exposure:
+#                  no new entries, but exits for filled positions continue.
+#
+# WARNING: callers MUST NOT re-derive execution mode by reading
+# `is_research_lane_enabled` + `bitfinex_live_enabled` separately. Always go
+# through this resolver.
+# ---------------------------------------------------------------------------
+
+EXEC_MODE_LAB_SHADOW = "LAB_SHADOW"
+EXEC_MODE_PAPER = "PAPER"
+EXEC_MODE_LIVE = "LIVE"
+EXEC_MODE_EXIT_ONLY = "EXIT_ONLY"
+
+# Per-lane override: lanes forced into EXIT_ONLY (e.g. after Bitfinex disarm
+# with open exposure). Keyed by uppercase lane id; values are timestamps.
+_exit_only_until: dict = {}
+
+
+def mark_lane_exit_only(lane: str, reason: str = "BITFINEX_DISARMED") -> None:
+    """Force a lane into EXIT_ONLY mode (no new entries, exits continue).
+
+    Used when Bitfinex is disarmed while the lane has open filled positions.
+    Cleared automatically when the lane toggle goes OFF and back ON, or when
+    `clear_lane_exit_only()` is called explicitly.
+    """
+    lane = str(lane or "").upper()
+    if not lane:
+        return
+    _exit_only_until[lane] = time.time()
+    logger.warning(
+        f"[EXEC_MODE] {lane} -> EXIT_ONLY reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+
+
+def clear_lane_exit_only(lane: str) -> bool:
+    """Remove EXIT_ONLY marker. Returns True if a marker was present."""
+    lane = str(lane or "").upper()
+    return bool(_exit_only_until.pop(lane, None))
+
+
+def lane_is_exit_only(lane: str) -> bool:
+    lane = str(lane or "").upper()
+    return lane in _exit_only_until
+
+
+def execution_mode_for_lane(lane: str = None) -> str:
+    """Single source of truth for what a lane is allowed to do right now.
+
+    Fail-closed: any unknown lane, missing data, or retired lane returns
+    LAB_SHADOW (safest mode -- no new orders).
+    """
+    lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
+
+    # EXIT_ONLY takes precedence (set after Bitfinex disarm w/ open exposure)
+    if lane_is_exit_only(lane):
+        return EXEC_MODE_EXIT_ONLY
+
+    # Retired / benchmark / unknown -> no orders ever
+    if is_research_lane_retired(lane):
+        return EXEC_MODE_LAB_SHADOW
+    status = get_pathway_lane_status(lane)
+    if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Tile OFF -> LAB shadow only
+    if not is_research_lane_enabled(lane):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Shadow-only / shadow-collecting lanes never place orders
+    if is_shadow_only_lane(lane) or is_shadow_collecting_lane(lane):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Tile ON. Now decide PAPER vs LIVE based on Bitfinex state.
+    # Bitfinex arming is global (env-gated + relay-controlled); dashboard
+    # does not have a separate Bitfinex toggle per the toggle contract.
+    try:
+        import bitfinex_live_executor as bx
+        bitfinex_on = bx.is_enabled(state)
+    except Exception:
+        bitfinex_on = False
+
+    if not bitfinex_on:
+        return EXEC_MODE_PAPER
+
+    # Bitfinex ON -- still subject to keys + DDollar + execution gates.
+    # Those gates are evaluated at submit time; here we just say LIVE.
+    return EXEC_MODE_LIVE
+
+
+def lane_can_place_new_entry(lane: str) -> bool:
+    """True iff execution_mode_for_lane allows NEW entry orders (PAPER or LIVE).
+
+    LAB_SHADOW and EXIT_ONLY both block new entries.
+    """
+    mode = execution_mode_for_lane(lane)
+    return mode in (EXEC_MODE_PAPER, EXEC_MODE_LIVE)
+
+
+def lane_is_live(lane: str) -> bool:
+    """True iff this lane currently routes entries to Bitfinex."""
+    return execution_mode_for_lane(lane) == EXEC_MODE_LIVE
+
+
+def lane_execution_block_reason(lane: str) -> str | None:
+    """Return a human-readable reason when entries are blocked, else None.
+
+    Used by the dashboard banner and by submit paths to surface WHY a live
+    order was refused (toggle off, bitfinex disarmed, gate failed, etc.).
+    """
+    lane = str(lane or "").upper()
+    mode = execution_mode_for_lane(lane)
+    if mode == EXEC_MODE_PAPER:
+        return None  # paper entries are allowed; not blocked
+    if mode == EXEC_MODE_LIVE:
+        # Live mode is allowed in principle; sub-gates (keys/DDollar/health)
+        # are evaluated at submit time. Surface them here for visibility.
+        if not _private_api_keys_ok():
+            return "BITFINEX_KEYS_MISSING"
+        try:
+            import bitfinex_live_executor as bx
+            allowed, reason = bx._ddollar_gate_ok_for_entry()
+            if not allowed:
+                return f"DDOLLAR_GATE_BLOCKED ({reason})"
+        except Exception:
+            pass
+        return None
+    if mode == EXEC_MODE_EXIT_ONLY:
+        return "EXIT_ONLY (bitfinex disarmed with open exposure)"
+    # LAB_SHADOW
+    if is_research_lane_retired(lane) or get_pathway_lane_status(lane) in (
+        "RETIRED", "DATA_RETIRED", "BENCHMARK"
+    ):
+        return "LANE_RETIRED"
+    if not is_research_lane_enabled(lane):
+        return "TILE_OFF"
+    if is_shadow_only_lane(lane) or is_shadow_collecting_lane(lane):
+        return "SHADOW_ONLY_LANE"
+    return "TILE_OFF"
+
 
 
 def guard_retired_lane_execution(lane: str, context: str, trade_id: str = None) -> bool:
