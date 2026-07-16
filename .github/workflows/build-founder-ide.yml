@@ -279,25 +279,35 @@ jobs:
       # This is the BIG step (40-70 min cold, 20-35 min warm). Produces
       # VSCode-win32-x64/ with the launcher exe + all .node modules.
       #
-      # TARGET CHOICE: we use `vscode-win32-x64-min` (NOT `-min-ci`).
-      # The `-ci` variant assumes `out-vscode-min/` was already produced by a
-      # separate upstream compile job (Void's official Azure pipeline runs
-      # compilation as its own stage and downloads `compilation.tar.gz` before
-      # invoking any `-ci` target). We have no such upstream stage, so `-ci`
-      # crashes with ENOENT on
-      #   out-vscode-min/vs/base/parts/sandbox/electron-sandbox/preload.js
-      # the moment packageTask() tries to compute checksums.
-      # The non-`-ci` variant runs the FULL chain in one task:
-      #   compile-build-with-mangling -> clean extensions ->
-      #   compile non-native extensions -> compile extension media ->
-      #   minify-vscode (produces out-vscode-min/) -> then the same packaging
-      # steps as -ci. See build/gulpfile.vscode.js lines 505-513.
-      - name: Compile VS Code (gulp vscode-win32-x64-min)
+      # TARGET CHOICE HISTORY:
+      # 1. `vscode-win32-x64-min-ci` (original) - BROKEN. The `-ci` variant
+      #    assumes `out-vscode-min/` was already produced by a separate upstream
+      #    compile stage (Void's official Azure pipeline downloads a pre-built
+      #    `compilation.tar.gz` before invoking any `-ci` target). We have no
+      #    such upstream stage, so it crashed with ENOENT on
+      #    out-vscode-min/vs/base/parts/sandbox/electron-sandbox/preload.js
+      #    the moment packageTask() tried to compute checksums.
+      # 2. `vscode-win32-x64-min` (second attempt) - ALSO BROKEN. This variant
+      #    runs compile-build-WITH-mangling, and Void's mangler crashed 32min
+      #    in with "OVERLAPPING edit" on
+      #    node_modules/google-auth-library/build/src/auth/impersonated.d.ts
+      #    because 16 different source paths alias the same exported symbol
+      #    from that package, producing 16 colliding rename edits at one offset.
+      # 3. `vscode-win32-x64` (current) - the non-minified variant. Runs
+      #    compile-build-WITHOUT-mangling (skips the broken mangler entirely)
+      #    and bundleVSCodeTask instead of minifyVSCodeTask. Produces
+      #    `out-vscode/` (unminified) instead of `out-vscode-min/`. The output
+      #    directory is then packaged into ../VSCode-win32-x64/ identically to
+      #    the minified path - the setup task only cares that VSCode-win32-x64/
+      #    exists, not whether its contents were minified. Tradeoff: bundle is
+      #    ~20-30% larger, but a working unminified installer beats a broken
+      #    minified one. See build/gulpfile.vscode.js lines 488-517.
+      - name: Compile VS Code (gulp vscode-win32-x64)
         working-directory: ${{ steps.paths.outputs.vscode_dir }}
         shell: pwsh
         run: |
-          npx gulp vscode-win32-x64-min
-          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-min failed (exit $LASTEXITCODE)" }
+          npx gulp vscode-win32-x64
+          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64 failed (exit $LASTEXITCODE)" }
 
       # ── 15. Verify the launcher + critical native modules are present ──────
       # This is the regression check for the 0.9.0 launcher-less build. Abort
