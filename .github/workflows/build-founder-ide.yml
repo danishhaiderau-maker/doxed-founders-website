@@ -356,13 +356,29 @@ jobs:
       # This is the regression check for the 0.9.0 launcher-less build. Abort
       # the pipeline HERE if the launcher is missing rather than producing a
       # broken installer that bundles silently.
+      #
+      # PATH NOTE: gulp's packageTask() writes to `path.dirname(root)` (one
+      # level ABOVE the void-src dir), NOT inside void-src. See
+      # build/gulpfile.vscode.js line 229:
+      #   const destination = path.join(path.dirname(root), destinationFolderName);
+      # The previous version of this step looked for void-src/VSCode-win32-x64/
+      # and always failed with "LAUNCHER MISSING" even on a good build.
       - name: Verify launcher + native modules
         working-directory: ${{ steps.paths.outputs.vscode_dir }}
         shell: pwsh
         run: |
-          $root = Join-Path (Get-Location) "VSCode-win32-x64"
+          # packageTask output is one dir above the vscode checkout (the parent of void-src).
+          $root = Join-Path (Get-Location) "..\VSCode-win32-x64"
+          # Resolve to an absolute path without the .. segment so Test-Path / error messages are unambiguous.
+          $root = (Resolve-Path -LiteralPath $root -ErrorAction SilentlyContinue)?.Path
+          if (-not $root) {
+            throw "VSCode-win32-x64 output directory not found at expected location (one dir above void-src). gulp packageTask() did not run?"
+          }
+          Write-Host "Packaged output root: $root"
           $launcher = Join-Path $root "Founder IDE.exe"
           if (-not (Test-Path $launcher)) {
+            Write-Host "--- contents of $root (first 40 entries) ---"
+            Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Host "  $($_.Name)" }
             throw "LAUNCHER MISSING: $launcher (the gulp electron() step must have failed silently)"
           }
           $len = (Get-Item $launcher).Length
