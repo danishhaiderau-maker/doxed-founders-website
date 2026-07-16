@@ -6162,7 +6162,34 @@ def tile2_policy_descriptor() -> dict:
         "short_disabled": AS_EXPLICIT_DISABLE_SHORT,
         "session_blacklist": sorted(AS_EXPLICIT_SESSION_BLACKLIST),
         "thesis_fast_cut_unreal_pct": TILE2_THESIS_FAST_CUT_UNREAL_PCT,
+        # entry_policy_hash: a deterministic short hash of the policy fields
+        # that affect entry eligibility. Two outcomes with the same
+        # entry_policy_hash were produced under the same entry rules; this
+        # lets the promotion rule reject mixed-cohort samples even if the
+        # human-readable policy_id string is reused.
+        "entry_policy_hash": tile2_entry_policy_hash(),
     }
+
+
+def tile2_entry_policy_hash() -> str:
+    """Section 8: deterministic short hash of the Tile 2 entry policy fields.
+
+    Includes only the fields that affect entry eligibility (cap, short
+    disable, session blacklist, fast cut, midpoint buffer, max chase dist).
+    Excludes labels and ids so cosmetic renames don't bump the hash.
+    """
+    import hashlib as _hashlib
+    fields = (
+        f"adx_cap={AS_EXPLICIT_ADX_CAP}",
+        f"short_disabled={bool(AS_EXPLICIT_DISABLE_SHORT)}",
+        f"session_blacklist={','.join(sorted(AS_EXPLICIT_SESSION_BLACKLIST))}",
+        f"thesis_fast_cut={TILE2_THESIS_FAST_CUT_UNREAL_PCT}",
+        "midpoint_buffer=0.15",
+        "max_chase_dist=0.30",
+        "static_max_chases=0",
+    )
+    digest = _hashlib.sha1("|".join(fields).encode("utf-8")).hexdigest()
+    return digest[:12]
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -11567,6 +11594,13 @@ def _spawn_lab_bracket_shadow(
 
     enriched = _enrich_combo_lane_features(features, ctx)
     margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
+    # Section 8: carry the policy/episode identifiers into the buffer so the
+    # finalized outcome row can stamp them on every record. For non-Tile 2
+    # lanes these are None and the schema fields are skipped on finalize.
+    _ctx_src = ctx or {}
+    _tile2_policy = _ctx_src.get("policy_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
+    _tile2_exit = _ctx_src.get("exit_profile_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
+    _tile2_episode = _ctx_src.get("sr_episode_id") if target_lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC else None
     start_replay_buffer(
         study_id,
         start_price,
@@ -11590,6 +11624,9 @@ def _spawn_lab_bracket_shadow(
         max_chases=0 if is_static else max_chases,
         fill_at_limit=bool(is_static),
         limit_chase_count=0,
+        policy_version=_tile2_policy,
+        sr_episode_id=_tile2_episode,
+        exit_profile_id=_tile2_exit,
     )
     append_replay_tick(study_id, market_price, None)
     log_lane_opportunity_event(
@@ -12136,6 +12173,13 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         outcome["exit_reason"] = "TTL_EXPIRED"
         outcome["entry_outcome"] = "TTL_EXPIRED"
     lane = str(buf.get("research_lane") or "").upper()
+    # Section 8: stable outcome schema for the Tile 2 frozen policy cohort.
+    # When this row belongs to SR_MICRO_TILE_V2_STATIC, stamp the full
+    # required field set so the fresh holdout cohort can never be silently
+    # confused with the archived historical 346-row training sample.
+    is_tile2 = (lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    entry_features = buf.get("entry_features") or {}
+    bracket_eval = entry_features.get("bracket_eval") if isinstance(entry_features, dict) else None
     row = {
         "schema": "shadow_lane_outcome_v1",
         "ts": utc_iso(),
@@ -12165,6 +12209,35 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "fill_at_limit": bool(buf.get("fill_at_limit")),
         **outcome,
     }
+    if is_tile2:
+        # Section 8 required fields (frozen Tile 2 policy):
+        #   policy_id, entry_policy_hash, exit_profile_id, source_commit,
+        #   sr_episode_id, adx, utc_session_bucket, exact support level,
+        #   fill/cancel/expiry reason.
+        row["policy_id"] = TILE2_POLICY_ID
+        row["entry_policy_hash"] = tile2_entry_policy_hash()
+        row["exit_profile_id"] = (
+            buf.get("exit_profile_id") or TILE2_EXIT_PROFILE_ID_PROVISIONAL
+        )
+        row["source_commit"] = _runtime_git_rev()
+        row["sr_episode_id"] = buf.get("sr_episode_id") or ""
+        row["adx"] = (
+            entry_features.get("adx")
+            if isinstance(entry_features, dict)
+            else None
+        ) or (bracket_eval or {}).get("adx")
+        row["utc_session_bucket"] = row.get("session_bucket") or ""
+        row["support_level"] = float(
+            (bracket_eval or {}).get("micro_support")
+            or buf.get("limit_price")
+            or 0
+        )
+        # exit_reason is already in `outcome` (merged via **outcome above);
+        # this alias makes the fill/cancel/expiry reason explicit on Tile 2
+        # rows for the promotion-rule filter.
+        row["fill_cancel_or_expiry_reason"] = (
+            row.get("exit_reason") or row.get("entry_outcome") or ""
+        )
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
     logger.info(
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
@@ -13208,6 +13281,14 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
 
         edge_score = compute_edge_score(features) if features else 0.0
         bracket_id = f"srmv2s-bracket-{uuid.uuid4().hex[:12]}"
+        # Section 4: derive the S/R episode ID up front so both the LAB spawn
+        # path and the paper-limit path stamp the same identifier on the
+        # outcome record (Section 8).
+        sr_episode_id = tile2_derive_sr_episode_id(
+            ms.get("micro_support"),
+            ms.get("micro_resistance"),
+            session_bucket=sess_bucket,
+        )
         ctx = {
             "trade_id": bracket_id,
             "price": price,
@@ -13218,6 +13299,9 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             "structure_bias": ms.get("structure_bias"),
             "bracket_eval": eval_result,
             "chase_mode": CHASE_MODE_STATIC,
+            "sr_episode_id": sr_episode_id,
+            "policy_id": TILE2_POLICY_ID,
+            "exit_profile_id": TILE2_EXIT_PROFILE_ID_PROVISIONAL,
         }
         enriched = _enrich_combo_lane_features(features, ctx)
 
@@ -13236,21 +13320,13 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         # This is the denominator for EV-per-eligible-opportunity. We count
         # at most one eligible per bracket tick (the LONG leg) so the metric
         # is not inflated by tick frequency.
-        sr_episode_id = ""
         if (
             eval_result.get("armed")
             and not eval_result.get("in_midpoint_zone")
             and should_enter_bracket_leg("LONG", eval_result)
         ):
-            # Section 4: derive a stable S/R episode ID from support +
-            # resistance + UTC bucket so distinct levels / sessions are
-            # counted distinctly and the one-trade-per-episode guard can
-            # dedup cleanly.
-            sr_episode_id = tile2_derive_sr_episode_id(
-                eval_result.get("micro_support"),
-                eval_result.get("micro_resistance"),
-                session_bucket=sess_bucket,
-            )
+            # sr_episode_id was derived above (Section 4) so both the eligible
+            # counter and the outcome record use the same identifier.
             record_tile2_eligible_long(episode_id=sr_episode_id)
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
@@ -26564,6 +26640,10 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),
             "ai_snapshot": copy.deepcopy(meta.get("ai_snapshot") or {}),
+            # Section 8: stable policy/episode identifiers, threaded from the
+            # bracket tick through the LAB spawn into the outcome record.
+            "sr_episode_id": meta.get("sr_episode_id"),
+            "exit_profile_id": meta.get("exit_profile_id"),
             "v2_min_fill_age_sec": meta.get("v2_min_fill_age_sec"),
             "v2_chase_target_min": meta.get("v2_chase_target_min"),
             "v2_chase_target_max": meta.get("v2_chase_target_max"),
