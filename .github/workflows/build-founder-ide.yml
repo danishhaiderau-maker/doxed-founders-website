@@ -1,0 +1,434 @@
+name: Build Founder IDE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Builds the Founder IDE Windows installer (Founder-Stack-Setup-<v>.exe) on a
+# GitHub-hosted Windows runner, with every dependency pinned so the result is
+# identical across runs.
+#
+# WHY THIS EXISTS
+#   Local rebuilds kept producing broken installers:
+#     - empty .build/electron cache -> launcher exe missing
+#     - Python 3.13+ on PATH        -> node-gyp crashes during native extensions
+#     - Node 24 instead of 20.18.2  -> ABI mismatch, native modules don't load
+#     - @vscodium/policy-watcher .node missing -> "Could not locate the bindings file"
+#   This pipeline pins all four and verifies the result.
+#
+# VOID SOURCE STRATEGY (Option B - overlay-on-clone)
+#   The Founder IDE layer is small (4 files: product.json, code.iss,
+#   sendLLMMessage.ts, sendFounderOs.ts). We store those 4 files verbatim in
+#   packages/founder-ide/upstream/overlay/ + a MANIFEST.json, clone upstream
+#   voideditor/void at the pinned commit, then run scripts/apply-founder-customizations.ps1
+#   to copy the overlay on top. This is more robust than a git .patch because
+#   Windows checkout flips LF->CRLF and breaks line-anchored hunks. It is also
+#   how Void itself layers its overrides via void-builder.
+#
+# PIPELINE OVERVIEW
+#   1.  checkout this monorepo
+#   2.  read pins from packages/founder-ide/upstream/overlay/MANIFEST.json
+#   3.  clone voideditor/void at the pinned commit, into ../vscode
+#   4.  setup Node 20.18.2 + Python 3.12 + Inno Setup 6
+#   5.  apply the Founder IDE overlay (scripts/apply-founder-customizations.ps1)
+#   6.  cache .build/electron (the ~200MB Electron download) + node_modules + .npmrc
+#   7.  npm ci (with the pinned Python on PATH for node-gyp)
+#   8.  gulp vscode-win32-x64-min-ci          (compiles TS + downloads Electron + native ext)
+#   9.  gulp vscode-win32-x64-user-setup      (builds the inner Founder-IDE-Setup-x64.exe)
+#   10. stage the inner installer + build the outer Founder Stack bundle via iscc
+#   11. compute SHA256 + size
+#   12. upload as a GitHub Release asset (if triggered by tag) AND as a workflow artifact (always)
+#
+# DURATION
+#   First run (cold): ~70-110 min (Electron download + native compile dominates).
+#   Warm cache:       ~30-45 min (Electron + node_modules reused).
+#
+# DO NOT SIGN THE EXE. SmartScreen will warn on first run; that's a separate
+# external blocker (cert acquisition). See packages/founder-ide/RELEASES.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Founder Stack version to build (e.g. 0.9.2)'
+        required: true
+        default: '0.9.2'
+      skip_release:
+        description: 'Skip the GitHub Release upload (artifact-only build)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'founder-stack-v*'
+
+# Belt-and-suspenders: never let two builds race for the same release tag.
+concurrency:
+  group: build-founder-ide-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # needed by softprops/action-gh-release to create/edit releases
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 240
+
+    steps:
+      # ── 1. Checkout the monorepo (this repo) ───────────────────────────────
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Read pinned upstream commit + toolchain from MANIFEST.json ──────
+      # Exposes steps.manifest.outputs.void_commit / void_repo / subdir
+      - name: Read upstream pins from MANIFEST.json
+        id: manifest
+        shell: pwsh
+        run: |
+          $m = Get-Content "packages/founder-ide/upstream/overlay/MANIFEST.json" -Raw | ConvertFrom-Json
+          Write-Host "Void repo    : $($m.upstream.repo)"
+          Write-Host "Void commit  : $($m.upstream.commit)"
+          Write-Host "Void subdir  : $($m.upstream.subdir)"
+          Write-Host "Electron     : $($m.upstream.electron_version)"
+          Write-Host "Node pin     : $($m.toolchain_pins.node)"
+          Write-Host "Python pin   : $($m.toolchain_pins.python)"
+          "void_repo=$($m.upstream.repo)"            >> $env:GITHUB_OUTPUT
+          "void_commit=$($m.upstream.commit)"        >> $env:GITHUB_OUTPUT
+          "void_subdir=$($m.upstream.subdir)"        >> $env:GITHUB_OUTPUT
+          "electron_ver=$($m.upstream.electron_version)" >> $env:GITHUB_OUTPUT
+          "node_pin=$($m.toolchain_pins.node)"       >> $env:GITHUB_OUTPUT
+          "python_pin=$($m.toolchain_pins.python)"   >> $env:GITHUB_OUTPUT
+
+      # ── 3. Resolve the build version ───────────────────────────────────────
+      # Tag pushes (founder-stack-v0.9.2) -> strip the prefix.
+      # Manual dispatches -> use the input verbatim.
+      - name: Resolve build version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -match '^refs/tags/founder-stack-v(.+)$') {
+            $v = $Matches[1]
+          } elseif ('${{ inputs.version }}' -ne '') {
+            $v = '${{ inputs.version }}'
+          } else {
+            $v = '0.0.0-dev'
+          }
+          Write-Host "Build version: $v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      # ── 4. Setup Node (pinned by MANIFEST, default 20.18.2) ────────────────
+      # Node 20.18.2 matches the Electron 34.3.2 ABI. Node 22/24 will compile
+      # native modules against the wrong ABI and the IDE will crash on launch
+      # with "Could not locate the bindings file".
+      - name: Setup Node ${{ steps.manifest.outputs.node_pin }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.manifest.outputs.node_pin }}
+
+      # ── 5. Setup Python (pinned 3.12 - NOT 3.13+) ──────────────────────────
+      # node-gyp's bundled dist URL has no wheel for Python 3.13/3.14 yet, so
+      # native extensions (notably @vscodium/policy-watcher, native-keymap,
+      # @vscode/windows-registry) fail to compile and the IDE is unlaunchable.
+      - name: Setup Python ${{ steps.manifest.outputs.python_pin }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.manifest.outputs.python_pin }}
+
+      # ── 6. Install Inno Setup 6 (outer bundle compiler) ────────────────────
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress --version=6.4.3
+          # ISCC.exe ends up at C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          Write-Host "ISCC: $iscc"
+
+      # ── 7. Clone upstream Void at the pinned commit ────────────────────────
+      # voideditor/void clones as a FLAT repo (product.json, gulpfile.js,
+      # package.json at root - NOT wrapped in a vscode/ subdir). Our local
+      # void-builder/vscode/ layout was just where the dev chose to clone it;
+      # the actual upstream repo is flat. Cloned into ../void-src so the
+      # monorepo's git status isn't polluted by ~80k VS Code files.
+      - name: Clone upstream Void
+        shell: pwsh
+        env:
+          VOID_REPO:   ${{ steps.manifest.outputs.void_repo }}
+          VOID_COMMIT: ${{ steps.manifest.outputs.void_commit }}
+          VOID_SUBDIR: ${{ steps.manifest.outputs.void_subdir }}
+        run: |
+          $voidRoot = Join-Path (Get-Location) "..\void-src"
+          if (Test-Path $voidRoot) { Remove-Item -Recurse -Force $voidRoot }
+          New-Item -ItemType Directory -Force -Path $voidRoot | Out-Null
+
+          Write-Host "Cloning $env:VOID_REPO @ $env:VOID_COMMIT ..."
+          # --filter=tree:0 keeps the clone small (~50MB vs ~500MB) by fetching
+          # tree objects lazily. We fetch by SHA explicitly because shallow +
+          # filter clones sometimes can't resolve an arbitrary SHA via checkout.
+          git clone --no-tags --filter=tree:0 $env:VOID_REPO $voidRoot
+          if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
+          git -C $voidRoot fetch --filter=tree:0 origin $env:VOID_COMMIT
+          if ($LASTEXITCODE -ne 0) {
+            # The commit may not be reachable from a tip fetch on a different
+            # default branch; fall back to fetching all heads + the SHA.
+            Write-Host "Targeted fetch failed, trying full fetch..."
+            git -C $voidRoot fetch --filter=tree:0 --all
+          }
+          git -C $voidRoot checkout $env:VOID_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "git checkout $env:VOID_COMMIT failed" }
+          $got = git -C $voidRoot rev-parse HEAD
+          Write-Host "Checked out: $got"
+
+          # void_subdir is "." for voideditor/void (flat layout). If upstream
+          # ever wraps the source (like void-builder does), set subdir in MANIFEST.
+          $vscodeDir = if ($env:VOID_SUBDIR -and $env:VOID_SUBDIR -ne ".") {
+              Join-Path $voidRoot $env:VOID_SUBDIR
+          } else { $voidRoot }
+
+          if (-not (Test-Path (Join-Path $vscodeDir "product.json"))) {
+            throw "Expected product.json under $vscodeDir (repo layout changed?)"
+          }
+          Write-Host "VS Code source at: $vscodeDir"
+          "vscode_dir=$($vscodeDir)" >> $env:GITHUB_OUTPUT
+        id: paths
+
+      # (vscode_dir output from the clone step is used directly in subsequent steps)
+
+      # ── 8. Apply Founder IDE overlay (product.json, code.iss, sendLLMMessage.ts, sendFounderOs.ts) ──
+      - name: Apply Founder IDE overlay
+        shell: pwsh
+        env:
+          VSCODE_CHECKOUT: ${{ steps.paths.outputs.vscode_dir }}
+        run: |
+          & ".\scripts\apply-founder-customizations.ps1" -VscodiumCheckout $env:VSCODE_CHECKOUT
+          if ($LASTEXITCODE -ne 0) { throw "apply-founder-customizations.ps1 failed (exit $LASTEXITCODE)" }
+
+      # ── 9. Cache Electron binary (~200MB, biggest download) ────────────────
+      # Keyed on the pinned Electron version so a bump invalidates automatically.
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.paths.outputs.vscode_dir }}\.build\electron
+          key: electron-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-v1
+          restore-keys: |
+            electron-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-
+
+      # ── 10. Cache node_modules ─────────────────────────────────────────────
+      # Keyed on package-lock hash. Falls back to any node_modules for this OS
+      # so a partial restore + npm ci is still faster than a cold install.
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.paths.outputs.vscode_dir }}\node_modules
+          key: nodemodules-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-${{ hashFiles('packages/founder-ide/upstream/overlay/MANIFEST.json') }}
+          restore-keys: |
+            nodemodules-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-
+
+      # ── 11. Cache native module downloads (.build/extensions) ──────────────
+      # VS Code downloads prebuilt native extensions (rg, tar, @vscode/*). They
+      # are keyed on the upstream commit so a Void bump picks up new versions.
+      - name: Cache builtInExtensions downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.paths.outputs.vscode_dir }}\.build\extensions
+          key: builtinext-${{ runner.os }}-${{ steps.manifest.outputs.void_commit }}-v1
+
+      # ── 12. Pin python/node on PATH for node-gyp + npm ─────────────────────
+      # setup-node puts node first; setup-python puts python first. We re-export
+      # so node-gyp explicitly finds Python 3.12 and not any runner default.
+      - name: Verify toolchain (node/python/gulp/iscc)
+        shell: pwsh
+        env:
+          VSCODE_CHECKOUT: ${{ steps.paths.outputs.vscode_dir }}
+        run: |
+          Write-Host "node    : $(node --version)"
+          Write-Host "npm     : $(npm --version)"
+          Write-Host "python  : $(python --version)"
+          Write-Host "ISCC    : $(Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe')"
+          # node-gyp uses the PYTHON env var if set; forces it away from any
+          # runner-installed 3.13+ default.
+          $env:PYTHON = (Get-Command python).Source
+          Write-Host "PYTHON env -> $($env:PYTHON)"
+          # Save the resolved python path for the next step via GITHUB_ENV.
+          "PYTHON=$($env:PYTHON)" >> $env:GITHUB_ENV
+
+      # ── 13. npm ci (pinned Python 3.12 active) ─────────────────────────────
+      - name: npm ci (Void)
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          # npmrc already exists in the checkout; we just run npm ci. The
+          # ELECTRON_SKIP_BINARY_DOWNLOAD flag is NOT set because gulp's
+          # electron() step needs the Electron binary downloaded.
+          npm ci --no-fund --no-audit
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed (exit $LASTEXITCODE)" }
+
+      # ── 14. Compile VS Code + download Electron + build native extensions ──
+      # This is the BIG step (40-70 min cold, 20-35 min warm). Produces
+      # VSCode-win32-x64/ with the launcher exe + all .node modules.
+      - name: Compile VS Code (gulp vscode-win32-x64-min-ci)
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          npx gulp vscode-win32-x64-min-ci
+          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-min-ci failed (exit $LASTEXITCODE)" }
+
+      # ── 15. Verify the launcher + critical native modules are present ──────
+      # This is the regression check for the 0.9.0 launcher-less build. Abort
+      # the pipeline HERE if the launcher is missing rather than producing a
+      # broken installer that bundles silently.
+      - name: Verify launcher + native modules
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          $root = Join-Path (Get-Location) "VSCode-win32-x64"
+          $launcher = Join-Path $root "Founder IDE.exe"
+          if (-not (Test-Path $launcher)) {
+            throw "LAUNCHER MISSING: $launcher (the gulp electron() step must have failed silently)"
+          }
+          $len = (Get-Item $launcher).Length
+          Write-Host "Launcher OK: $launcher ($([math]::Round($len/1MB,1)) MB)"
+          if ($len -lt 50MB) {
+            throw "Launcher suspiciously small ($len bytes) - Electron binary missing"
+          }
+
+          # Critical native modules that have regressed in past builds.
+          $requiredNode = @(
+            "resources\app\node_modules\@vscodium\policy-watcher\build\Release\policy_watcher.node",
+            "resources\app\node_modules\native-keymap\build\Release\keymapping.node",
+            "resources\app\node_modules\@vscode\windows-registry\build\Release\win32_registry.node",
+            "resources\app\node_modules\@vscode\windows-process-tree\build\Release\win_process_tree.node"
+          )
+          foreach ($n in $requiredNode) {
+            $p = Join-Path $root $n
+            if (-not (Test-Path $p)) {
+              throw "NATIVE MODULE MISSING: $n (the IDE will crash with 'Could not locate the bindings file')"
+            }
+            Write-Host "  native OK: $n"
+          }
+          Write-Host "All native modules present."
+
+      # ── 16. Build the inner installer (Founder-IDE-Setup-x64.exe) ──────────
+      - name: Build inner installer (gulp vscode-win32-x64-user-setup)
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          npx gulp vscode-win32-x64-user-setup
+          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-user-setup failed (exit $LASTEXITCODE)" }
+
+      # ── 17. Stage the inner installer + run the outer Inno Setup ───────────
+      # The outer .iss expects Founder-IDE-Setup-x64.exe at a known staging path.
+      # We resolve the freshly built FounderIDESetup.exe and copy it there.
+      - name: Build outer Founder Stack installer (iscc)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $vscode   = "${{ steps.paths.outputs.vscode_dir }}"
+          $innerDir = Join-Path $vscode ".build\win32-x64\user-setup"
+          $innerExe = Get-ChildItem $innerDir -Filter "FounderIDESetup.exe" -ErrorAction Stop | Select-Object -First 1
+          Write-Host "Inner installer: $($innerExe.FullName) ($([math]::Round($innerExe.Length/1MB,1)) MB)"
+
+          # Stage into the location the outer .iss expects.
+          $staging = Join-Path (Get-Location) "staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          $stagedInner = Join-Path $staging "Founder-IDE-Setup-x64.exe"
+          Copy-Item $innerExe.FullName $stagedInner -Force
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $iss  = "packages\founder-ide\installer\founder-stack.iss"
+          if (-not (Test-Path $iss)) { throw "Outer .iss not found at $iss" }
+
+          Write-Host "Running iscc for Founder Stack $env:VERSION ..."
+          & $iscc `
+            "/DFOUNDER_STACK_VERSION=$env:VERSION" `
+            "/DFOUNDER_IDE_SETUP=`"$stagedInner`"" `
+            $iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
+
+          # Output goes to packages/founder-ide/installer/dist/ (per the .iss OutputDir).
+          $distDir = "packages\founder-ide\installer\dist"
+          $bundle  = Get-ChildItem $distDir -Filter "Founder-Stack-Setup-*.exe" |
+                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $bundle) { throw "Founder Stack installer not found in $distDir after iscc" }
+          Write-Host "Outer installer: $($bundle.FullName) ($([math]::Round($bundle.Length/1MB,1)) MB)"
+          "bundle_path=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+          "bundle_name=$($bundle.Name)"     >> $env:GITHUB_OUTPUT
+        id: iscc
+
+      # ── 18. Compute SHA256 + size ──────────────────────────────────────────
+      - name: Compute SHA256 + size
+        id: hash
+        shell: pwsh
+        run: |
+          $exe = "${{ steps.iscc.outputs.bundle_path }}"
+          if (-not (Test-Path $exe)) { throw "Installer missing at $exe" }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $exe).Length
+          Write-Host "SHA256 : $hash"
+          Write-Host "Size   : $size bytes ($([math]::Round($size/1MB,1)) MB)"
+          Write-Host "Path   : $exe"
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "size=$size"   >> $env:GITHUB_OUTPUT
+          "path=$exe"    >> $env:GITHUB_OUTPUT
+
+      # ── 19. Upload as a workflow artifact (always, even on non-release builds) ──
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Founder-Stack-Setup-${{ steps.ver.outputs.version }}
+          path: ${{ steps.hash.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── 20. Upload SHA256 sidecar artifact (for manifest updates) ──────────
+      - name: Write + upload SHA256 sidecar
+        shell: pwsh
+        run: |
+          $sidecar = "Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe.sha256"
+          "${{ steps.hash.outputs.sha256 }}  Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe" | Set-Content -Path $sidecar -NoNewline -Encoding ascii
+          Write-Host "Wrote $sidecar"
+      - name: Upload SHA256 sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: Founder-Stack-Setup-${{ steps.ver.outputs.version }}-sha256
+          path: Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── 21. Attach to GitHub Release (only for tag pushes or non-skipped dispatches) ──
+      - name: Upload to GitHub Release
+        if: ${{ (github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.skip_release) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: founder-stack-v${{ steps.ver.outputs.version }}
+          name: Founder Stack ${{ steps.ver.outputs.version }}
+          body: |
+            # Founder Stack ${{ steps.ver.outputs.version }}
+
+            Built by GitHub Actions run ${{ github.run_id }}.
+
+            - **File:** `${{ steps.hash.outputs.path }}`
+            - **Size:** ${{ steps.hash.outputs.size }} bytes
+            - **SHA-256:** `${{ steps.hash.outputs.sha256 }}`
+            - **Unsigned.** SmartScreen will warn on first run; this is a known external blocker.
+
+            See `packages/founder-ide/RELEASES.md` in the repo for release notes.
+          files: |
+            ${{ steps.hash.outputs.path }}
+            Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe.sha256
+          fail_on_unmatched_files: true
+
+      # ── 22. Final summary ──────────────────────────────────────────────────
+      - name: Build summary
+        shell: pwsh
+        run: |
+          Write-Host "============================================================"
+          Write-Host " Founder Stack ${{ steps.ver.outputs.version }} BUILD OK"
+          Write-Host "============================================================"
+          Write-Host " Installer  : ${{ steps.hash.outputs.path }}"
+          Write-Host " Size       : ${{ steps.hash.outputs.size }} bytes"
+          Write-Host " SHA-256    : ${{ steps.hash.outputs.sha256 }}"
+          Write-Host " Artifact   : Founder-Stack-Setup-${{ steps.ver.outputs.version }}"
+          Write-Host "============================================================"

@@ -1,0 +1,23 @@
+{
+  "$comment": "Founder IDE overlay on top of upstream Void (voideditor/void). Each entry is a file that exists in the upstream checkout and is OVERWRITTEN by the version in this overlay. New files (not present upstream) use mode:'add'. This overlay is applied by scripts/apply-founder-customizations.ps1 before the VS Code build.",
+  "upstream": {
+    "repo": "https://github.com/voideditor/void.git",
+    "subdir": ".",
+    "commit": "b3166e7ef2aefbdfeb139445fdf248a561b85d4d",
+    "commit_subject": "all repos",
+    "vscode_version": "1.99.3",
+    "electron_version": "34.3.2"
+  },
+  "toolchain_pins": {
+    "node": "20.18.2",
+    "python": "3.12",
+    "inno_setup": "6",
+    "runner": "windows-2022"
+  },
+  "files": [
+    { "src": "product.json",                                                                              "dest": "product.json",                                                                              "mode": "replace" },
+    { "src": "build/win32/code.iss",                                                                      "dest": "build/win32/code.iss",                                                                      "mode": "replace" },
+    { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "mode": "replace" },
+    { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "mode": "add"     }
+  ]
+}
