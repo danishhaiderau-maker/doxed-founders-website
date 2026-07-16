@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): use real native binary names from .moduleignore
+Merge branch 'v12-type-b-overhaul': ignore transient docs in .gitignore
 
 ## Last Activity
 
