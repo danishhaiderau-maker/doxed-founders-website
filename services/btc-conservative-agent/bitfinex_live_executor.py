@@ -203,9 +203,21 @@ def configure(symbol: str) -> None:
 
 
 def is_enabled(state: dict) -> bool:
-    """True only when the operator has armed live execution on Bitfinex."""
+    """True only when Bitfinex live execution is BOTH armed and enabled.
+
+    Pt 3 (toggle contract): historically this only checked `bitfinex_live_enabled`,
+    while the dashboard also exposed a separate `live_armed` flag. That allowed
+    contradictory UI states (UI showing "disarmed" while private orders could
+    still be submitted). Now both flags must be True for live order submission.
+
+    Bitfinex is globally armed (env-gated + relay-controlled per the toggle
+    contract); the dashboard does not surface a separate Bitfinex toggle.
+    `live_armed` is the operator-level safety, `bitfinex_live_enabled` is the
+    exchange-specific enable. Both must be True.
+    """
     try:
-        return bool((state or {}).get("bitfinex_live_enabled", False))
+        s = state or {}
+        return bool(s.get("bitfinex_live_enabled", False)) and bool(s.get("live_armed", False))
     except Exception:
         return False
 
