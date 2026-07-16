@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): check @vscode/policy-watcher, not @vscodium/
+fix(ide-build): use real native binary names from .moduleignore
 
 ## Last Activity
 
