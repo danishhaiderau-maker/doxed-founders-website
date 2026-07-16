@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ci): regenerate package-lock.json with @anthropic-ai/sdk transitive deps
+ci(founder-ide): add reproducible Windows installer build workflow
 
 ## Last Activity
 
