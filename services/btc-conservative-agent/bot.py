@@ -2315,12 +2315,80 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
             f"[PIPELINE ENFORCEMENT]"
         )
         pipeline_state_sync()
+    # Pt 4a (toggle contract): also cancel corresponding Bitfinex live orders
+    # for this lane (using their saved exchange IDs). Best-effort -- if the
+    # exchange API is unreachable or no keys are configured, the local state
+    # cancellation above is still authoritative.
+    bx_cancelled = _cancel_bitfinex_orders_for_lane(lane, reason=reason)
     return {
         "lane": lane,
         "reason": reason,
         "cancelled_pending": cancelled_pending,
         "expired_awaiting": expired_awaiting,
+        "bitfinex_cancelled": bx_cancelled.get("cancelled", []),
+        "bitfinex_failed": bx_cancelled.get("failed", []),
+        "open_positions_remaining": bx_cancelled.get("open_positions_remaining", 0),
     }
+
+
+def _cancel_bitfinex_orders_for_lane(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
+    """Cancel outstanding Bitfinex entry orders for a lane (Pt 4a toggle contract).
+
+    Returns dict with cancelled/failed/open_positions_remaining. Best-effort:
+    if Bitfinex is not armed, no keys, or no live orders exist, returns empty.
+    Exits for already-filled positions are NOT cancelled here -- those continue
+    to be managed until flat.
+    """
+    out = {"cancelled": [], "failed": [], "open_positions_remaining": 0}
+    try:
+        if not (state.get("bitfinex_live_enabled") and state.get("live_armed")):
+            return out
+        if not _private_api_keys_ok():
+            return out
+        import bitfinex_live_executor as bx
+        exchange = None
+        retry_fn = None
+        if hasattr(bx, "get_exchange"):
+            try:
+                exchange, retry_fn = bx.get_exchange(state)
+            except Exception:
+                exchange, retry_fn = None, None
+        if exchange is None or retry_fn is None:
+            return out
+        lane_u = str(lane or "").upper()
+        with trade_lock:
+            # Find PENDING orders in this lane that have a saved Bitfinex order id.
+            candidates = []
+            for o in list(pending_orders):
+                if _normalize_lane_key(o) != lane_u:
+                    continue
+                oid = o.get("bitfinex_order_id")
+                tid = o.get("trade_id")
+                if oid and tid:
+                    candidates.append((str(oid), str(tid)))
+            # Count already-filled positions in this lane (still managed to exit).
+            open_in_lane = sum(
+                1 for p in open_positions
+                if _normalize_lane_key(p) == lane_u and p.get("status") in ("FILLED", "OPEN")
+            )
+        out["open_positions_remaining"] = open_in_lane
+        sym = str(state.get("trade_symbol") or "BTC/USDT")
+        for oid, tid in candidates:
+            ok = bx.cancel_exchange_order(exchange, retry_fn, oid, sym, tid)
+            if ok:
+                out["cancelled"].append({"trade_id": tid, "exchange_order_id": oid})
+            else:
+                out["failed"].append({"trade_id": tid, "exchange_order_id": oid, "reason": "CANCEL_FAILED"})
+        if out["cancelled"] or out["failed"]:
+            logger.warning(
+                f"[BITFINEX CANCEL LANE] lane={lane_u} reason={reason} "
+                f"cancelled={len(out['cancelled'])} failed={len(out['failed'])} "
+                f"open_positions_remaining={open_in_lane} [PIPELINE ENFORCEMENT]"
+            )
+    except Exception as exc:
+        logger.warning(f"[BITFINEX CANCEL LANE] error lane={lane}: {exc}")
+    return out
+
 
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
@@ -2347,6 +2415,164 @@ def lane_blocks_live_orders(lane: str) -> bool:
     if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
         return True
     return is_shadow_collecting_lane(lane)
+
+
+# ---------------------------------------------------------------------------
+# Pt 1 (toggle contract): centralized execution-mode resolver.
+#
+# Returns one of four modes; this is the SINGLE source of truth that every
+# entry, chase, cancel, close, and dashboard banner MUST consult:
+#
+#   LAB_SHADOW  -- Tile OFF (or retired): no new orders of any kind.
+#                  LAB shadows + counterfactuals still collected for research.
+#                  Already-filled positions are still managed to exit.
+#   PAPER       -- Tile ON + Bitfinex OFF: local paper limit orders only.
+#                  Zero contact with Bitfinex private order API.
+#   LIVE        -- Tile ON + Bitfinex ON: real Bitfinex limit orders.
+#                  Still subject to keys, DDollar gate, execution gates.
+#   EXIT_ONLY   -- Special mode set after Bitfinex ON->OFF with open exposure:
+#                  no new entries, but exits for filled positions continue.
+#
+# WARNING: callers MUST NOT re-derive execution mode by reading
+# `is_research_lane_enabled` + `bitfinex_live_enabled` separately. Always go
+# through this resolver.
+# ---------------------------------------------------------------------------
+
+EXEC_MODE_LAB_SHADOW = "LAB_SHADOW"
+EXEC_MODE_PAPER = "PAPER"
+EXEC_MODE_LIVE = "LIVE"
+EXEC_MODE_EXIT_ONLY = "EXIT_ONLY"
+
+# Per-lane override: lanes forced into EXIT_ONLY (e.g. after Bitfinex disarm
+# with open exposure). Keyed by uppercase lane id; values are timestamps.
+_exit_only_until: dict = {}
+
+
+def mark_lane_exit_only(lane: str, reason: str = "BITFINEX_DISARMED") -> None:
+    """Force a lane into EXIT_ONLY mode (no new entries, exits continue).
+
+    Used when Bitfinex is disarmed while the lane has open filled positions.
+    Cleared automatically when the lane toggle goes OFF and back ON, or when
+    `clear_lane_exit_only()` is called explicitly.
+    """
+    lane = str(lane or "").upper()
+    if not lane:
+        return
+    _exit_only_until[lane] = time.time()
+    logger.warning(
+        f"[EXEC_MODE] {lane} -> EXIT_ONLY reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+
+
+def clear_lane_exit_only(lane: str) -> bool:
+    """Remove EXIT_ONLY marker. Returns True if a marker was present."""
+    lane = str(lane or "").upper()
+    return bool(_exit_only_until.pop(lane, None))
+
+
+def lane_is_exit_only(lane: str) -> bool:
+    lane = str(lane or "").upper()
+    return lane in _exit_only_until
+
+
+def execution_mode_for_lane(lane: str = None) -> str:
+    """Single source of truth for what a lane is allowed to do right now.
+
+    Fail-closed: any unknown lane, missing data, or retired lane returns
+    LAB_SHADOW (safest mode -- no new orders).
+    """
+    # Fail-closed for None/empty: do NOT default to AI_SCAN here, because
+    # a caller that forgot to pass a lane must never silently place orders.
+    if not lane or not str(lane).strip():
+        return EXEC_MODE_LAB_SHADOW
+    lane = str(lane).strip().upper()
+
+    # EXIT_ONLY takes precedence (set after Bitfinex disarm w/ open exposure)
+    if lane_is_exit_only(lane):
+        return EXEC_MODE_EXIT_ONLY
+
+    # Retired / benchmark / unknown -> no orders ever
+    if is_research_lane_retired(lane):
+        return EXEC_MODE_LAB_SHADOW
+    status = get_pathway_lane_status(lane)
+    if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Tile OFF -> LAB shadow only
+    if not is_research_lane_enabled(lane):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Shadow-only / shadow-collecting lanes never place orders
+    if is_shadow_only_lane(lane) or is_shadow_collecting_lane(lane):
+        return EXEC_MODE_LAB_SHADOW
+
+    # Tile ON. Now decide PAPER vs LIVE based on Bitfinex state.
+    # Bitfinex arming is global (env-gated + relay-controlled); dashboard
+    # does not have a separate Bitfinex toggle per the toggle contract.
+    try:
+        import bitfinex_live_executor as bx
+        bitfinex_on = bx.is_enabled(state)
+    except Exception:
+        bitfinex_on = False
+
+    if not bitfinex_on:
+        return EXEC_MODE_PAPER
+
+    # Bitfinex ON -- still subject to keys + DDollar + execution gates.
+    # Those gates are evaluated at submit time; here we just say LIVE.
+    return EXEC_MODE_LIVE
+
+
+def lane_can_place_new_entry(lane: str) -> bool:
+    """True iff execution_mode_for_lane allows NEW entry orders (PAPER or LIVE).
+
+    LAB_SHADOW and EXIT_ONLY both block new entries.
+    """
+    mode = execution_mode_for_lane(lane)
+    return mode in (EXEC_MODE_PAPER, EXEC_MODE_LIVE)
+
+
+def lane_is_live(lane: str) -> bool:
+    """True iff this lane currently routes entries to Bitfinex."""
+    return execution_mode_for_lane(lane) == EXEC_MODE_LIVE
+
+
+def lane_execution_block_reason(lane: str) -> str | None:
+    """Return a human-readable reason when entries are blocked, else None.
+
+    Used by the dashboard banner and by submit paths to surface WHY a live
+    order was refused (toggle off, bitfinex disarmed, gate failed, etc.).
+    """
+    lane = str(lane or "").upper()
+    mode = execution_mode_for_lane(lane)
+    if mode == EXEC_MODE_PAPER:
+        return None  # paper entries are allowed; not blocked
+    if mode == EXEC_MODE_LIVE:
+        # Live mode is allowed in principle; sub-gates (keys/DDollar/health)
+        # are evaluated at submit time. Surface them here for visibility.
+        if not _private_api_keys_ok():
+            return "BITFINEX_KEYS_MISSING"
+        try:
+            import bitfinex_live_executor as bx
+            allowed, reason = bx._ddollar_gate_ok_for_entry()
+            if not allowed:
+                return f"DDOLLAR_GATE_BLOCKED ({reason})"
+        except Exception:
+            pass
+        return None
+    if mode == EXEC_MODE_EXIT_ONLY:
+        return "EXIT_ONLY (bitfinex disarmed with open exposure)"
+    # LAB_SHADOW
+    if is_research_lane_retired(lane) or get_pathway_lane_status(lane) in (
+        "RETIRED", "DATA_RETIRED", "BENCHMARK"
+    ):
+        return "LANE_RETIRED"
+    if not is_research_lane_enabled(lane):
+        return "TILE_OFF"
+    if is_shadow_only_lane(lane) or is_shadow_collecting_lane(lane):
+        return "SHADOW_ONLY_LANE"
+    return "TILE_OFF"
+
 
 
 def guard_retired_lane_execution(lane: str, context: str, trade_id: str = None) -> bool:
@@ -16841,23 +17067,46 @@ def execute_order(signal, ai=None):
     lane = signal.get("research_lane")
     if not guard_retired_lane_execution(lane, "execute_order", signal.get("trade_id")):
         return False
-    if not lane_orders_allowed(lane):
+    # Pt 1 (toggle contract): centralized execution-mode resolver.
+    # Replaces the older lane_orders_allowed() check with a fail-closed
+    # decision that also knows about EXIT_ONLY and Bitfinex live state.
+    mode = execution_mode_for_lane(lane)
+    if mode not in (EXEC_MODE_PAPER, EXEC_MODE_LIVE):
+        block = lane_execution_block_reason(lane)
         logger.warning(
-            f"[EXECUTION BLOCK] lane={signal.get('research_lane')} toggle OFF "
+            f"[EXECUTION BLOCK] lane={lane} mode={mode} reason={block} "
             f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
         )
+        full_pipeline_trace("[EXECUTION]", "MODE_BLOCKED", signal.get("trade_id"))
+        return False
+    # Pt 2 (toggle contract): TYPE_B_HUNTER_V1 must NEVER fall into the
+    # shared market-entry route. Force limit-only regardless of global
+    # pullback / compression settings.
+    is_type_b = str(lane or "").upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    if is_type_b and mode == EXEC_MODE_LIVE and not _private_api_keys_ok():
+        logger.warning(
+            f"[EXECUTION BLOCK] TYPE_B_LIVE keys missing trade_id={signal.get('trade_id')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        full_pipeline_trace("[EXECUTION]", "LIVE_KEYS_MISSING", signal.get("trade_id"))
         return False
     if not state.get("live_armed", False) and state.get("strategy_mode") != "RESEARCH":
         logger.warning("[LIVE ARM BLOCK] execute_order skipped - live_armed=False")
         full_pipeline_trace("[EXECUTION]", "LIVE_ARM_BLOCKED", signal.get("trade_id"))
         return False
     try:
-        logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
+        logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} mode={mode} [PIPELINE ENFORCEMENT]")
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
         pullback_pct = float(state.get("pullback_threshold", 0.001))
-        use_instant = pullback_pct <= 0.0
+        # Pt 2: TYPE_B_HUNTER_V1 ignores the global pullback/compression toggle.
+        # It always creates a limit order in both PAPER and LIVE modes.
+        use_instant = (not is_type_b) and (pullback_pct <= 0.0)
         if use_instant or not state.get("allow_compression", True):
+            # Pt 2: even when global compression is off, TYPE_B still uses limits.
+            if is_type_b:
+                use_instant = False
+        if use_instant:
             execute_market_order(signal)
             with trade_lock:
                 filled = any(p.get("trade_id") == signal.get("trade_id") for p in open_positions)
@@ -18650,6 +18899,46 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
     return lines
 
 
+def _annotate_lanes_with_exec_mode(lanes: list) -> list:
+    """Pt 5 (toggle contract): tag each lane spec with its current execution
+    mode + human-readable banner text so the dashboard never lies about what
+    a tile is actually allowed to do.
+
+    Replaces hardcoded 'paper-only' / 'never Bitfinex live' strings with
+    dynamic per-mode wording driven by execution_mode_for_lane().
+    """
+    out = []
+    for spec in lanes or []:
+        try:
+            spec = dict(spec)  # shallow copy so we don't mutate caller's dict
+            lane_id = str(spec.get("lane") or "").upper()
+            mode = execution_mode_for_lane(lane_id)
+            block = lane_execution_block_reason(lane_id)
+            spec["exec_mode"] = mode
+            spec["exec_block_reason"] = block
+            spec["exec_banner"] = _exec_mode_banner_text(mode, block, lane_id)
+            out.append(spec)
+        except Exception:
+            out.append(spec)
+    return out
+
+
+def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
+    """Truthful short banner for the tile. Drives the green/blue/yellow/red strip."""
+    if mode == EXEC_MODE_LIVE:
+        return "LIVE BITFINEX LIMIT ORDERS ENABLED"
+    if mode == EXEC_MODE_PAPER:
+        return "PAPER ORDERS ENABLED — no Bitfinex submission"
+    if mode == EXEC_MODE_EXIT_ONLY:
+        return "OFF — no new entries; existing positions still managed"
+    # LAB_SHADOW
+    if block == "LANE_RETIRED":
+        return "RETIRED — research data only"
+    if block == "SHADOW_ONLY_LANE":
+        return "LAB SHADOW — no new orders (shadow-collecting lane)"
+    return "LAB SHADOW — no new orders"
+
+
 def build_static_pathway_lane_specs() -> dict:
     """Combo Pathway Lab v2 — tile specs for dashboard (architecture frozen; change tiles only)."""
     shared = _pathway_shared_execution_spec()
@@ -18704,8 +18993,8 @@ def build_static_pathway_lane_specs() -> dict:
             else:
                 execution = "Dual LAB shadow at micro_support (LONG) + micro_resistance (SHORT) · Scenario C"
         elif type_b_hunter:
-            trigger = "Fixed pre-entry Type B score · walk-forward collection · paper research only"
-            execution = "Paper limit research only when enabled · never Bitfinex live · Scenario C"
+            trigger = "Fixed pre-entry Type B score · walk-forward collection · execution mode per toggle contract"
+            execution = "Dynamic per execution_mode_for_lane(): LAB_SHADOW / PAPER / LIVE / EXIT_ONLY"
         elif independent_ai:
             trigger = (
                 "AI 60+ · Spread ≥3 · Context veto BULL+SHORT+LONG_PREF · "
@@ -18765,7 +19054,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "Tile ON: Phase 1 shadow-only (live bracket orders deferred)",
                 "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger",
                 (
-                    "Paper-only: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
+                    "Paper P&L in PAPER mode · Bitfinex P&L only in LIVE mode: resting limit at exact S/R; outcomes FILLED/TTL_EXPIRED/CANCELLED; ids srmv2s-*"
                     if static_bracket
                     else "Historical bracket collector; data archived"
                 ),
@@ -18807,6 +19096,10 @@ def build_static_pathway_lane_specs() -> dict:
                 VOLUME_DANGER as _TB_VOL_DANGER,
             )
             _tb_policy = _type_b_policy_version()
+            # Pt 7a (integrity): pull live peak-never-loser floor so the
+            # dashboard displays the actual +3% -> breakeven protection.
+            _tb_min_peak = peak_never_loser_min_peak_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
+            _tb_floor = peak_never_loser_floor_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
             filter_chips = [
                 "Direction only",
                 f"ADX ≥{_TB_ADX_FLOOR:.0f} hard floor",
@@ -18818,7 +19111,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Score ≥{_TB_MIN_SCORE:.1f}",
                 f"Spread ≥{_TB_MIN_SPREAD}",
                 f"{_tb_policy}",
-                "Paper-only",
+                f"Peak ≥{_tb_min_peak:.0f}% → floor {_tb_floor:.0f}%",
                 f"Ladder {lane_ladder_label}",
             ]
             hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
@@ -19260,7 +19553,7 @@ def build_static_pathway_lane_specs() -> dict:
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(ARCHIVED_PATHWAY_LANES),
-        "lanes": lanes,
+        "lanes": _annotate_lanes_with_exec_mode(lanes),
     }
 
 
@@ -20975,7 +21268,24 @@ DASHBOARD_JS = """(function () {
             : '';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           let orderBanner = '';
-          if (spec.planned) {
+          // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
+          // execution_mode_for_lane() so the dashboard never lies. Fall back
+          // to the legacy hardcoded banners only when exec_banner is missing.
+          const modeBg = spec.exec_mode === 'LIVE' ? '#0f2a1a'
+                       : spec.exec_mode === 'PAPER' ? '#0f2a1a'
+                       : spec.exec_mode === 'EXIT_ONLY' ? '#3d2e00'
+                       : '#0f2d4a';
+          const modeBorder = spec.exec_mode === 'LIVE' ? '#238636'
+                           : spec.exec_mode === 'PAPER' ? '#238636'
+                           : spec.exec_mode === 'EXIT_ONLY' ? '#d4a72c'
+                           : '#1f6feb';
+          const modeColor = spec.exec_mode === 'LIVE' ? '#3fb950'
+                          : spec.exec_mode === 'PAPER' ? '#3fb950'
+                          : spec.exec_mode === 'EXIT_ONLY' ? '#f0c14b'
+                          : '#58a6ff';
+          if (spec.exec_banner) {
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:' + modeBg + ';border:1px solid ' + modeBorder + ';border-radius:6px;color:' + modeColor + ';font-size:0.82em;font-weight:700;">' + spec.exec_banner + (spec.exec_block_reason && spec.exec_mode === 'LIVE' ? ' · gate: ' + spec.exec_block_reason : '') + '</div>';
+          } else if (spec.planned) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#6e7681;font-size:0.82em;font-weight:600;">PLANNED — no orders</div>';
           } else if (spec.is_shadow_only) {
             if (on) {
@@ -23837,21 +24147,57 @@ def api_bitfinex_live():
     if enabled and not _private_api_keys_ok():
         return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
     with state_lock:
+        prev = bool(state.get("bitfinex_live_enabled", False))
         state["bitfinex_live_enabled"] = enabled
+        # Pt 3 (toggle contract): keep live_armed synchronized with the Bitfinex
+        # toggle so the dashboard never shows "disarmed" while orders can fire.
+        state["live_armed"] = enabled
         save_persistent_config()
     import bitfinex_live_executor as bx
 
+    # Pt 4b (toggle contract): when Bitfinex is disarmed while positions remain
+    # open, mark those lanes EXIT_ONLY -- no new entries, but exit management
+    # continues until flat.
+    disarm_exit_only = {}
+    if prev and not enabled:
+        disarm_exit_only = _mark_exit_only_for_open_bitfinex_positions(reason="BITFINEX_DISARMED")
+
     logger.warning(
         f"[BITFINEX LIVE] dashboard toggle -> {'ON' if enabled else 'OFF'} "
-        f"keys_ok={_private_api_keys_ok()} [PIPELINE ENFORCEMENT]"
+        f"keys_ok={_private_api_keys_ok()} "
+        f"exit_only_lanes={list(disarm_exit_only.keys()) if disarm_exit_only else []} "
+        f"[PIPELINE ENFORCEMENT]"
     )
     return jsonify(
         {
             "bitfinex_live_enabled": state["bitfinex_live_enabled"],
+            "live_armed": state["live_armed"],
             "keys_ok": _private_api_keys_ok(),
+            "exit_only_lanes": list(disarm_exit_only.keys()) if disarm_exit_only else [],
             **bx.live_status(state, _private_api_keys_ok()),
         }
     )
+
+
+def _mark_exit_only_for_open_bitfinex_positions(reason: str = "BITFINEX_DISARMED") -> dict:
+    """Pt 4b: after Bitfinex disarm, mark lanes with open filled positions as
+    EXIT_ONLY so new entries stop but exits continue. Returns dict lane->count.
+    """
+    out: dict = {}
+    try:
+        with trade_lock:
+            for p in open_positions:
+                if p.get("status") not in ("FILLED", "OPEN"):
+                    continue
+                lane = _normalize_lane_key(p)
+                if not lane:
+                    continue
+                out[lane] = out.get(lane, 0) + 1
+        for lane in out.keys():
+            mark_lane_exit_only(lane, reason=reason)
+    except Exception as exc:
+        logger.warning(f"[EXIT_ONLY MARK] error: {exc}")
+    return out
 
 @app.route('/api/set_leverage', methods=['POST'])
 def set_leverage():
