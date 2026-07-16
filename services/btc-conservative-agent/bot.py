@@ -2313,12 +2313,80 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
             f"[PIPELINE ENFORCEMENT]"
         )
         pipeline_state_sync()
+    # Pt 4a (toggle contract): also cancel corresponding Bitfinex live orders
+    # for this lane (using their saved exchange IDs). Best-effort -- if the
+    # exchange API is unreachable or no keys are configured, the local state
+    # cancellation above is still authoritative.
+    bx_cancelled = _cancel_bitfinex_orders_for_lane(lane, reason=reason)
     return {
         "lane": lane,
         "reason": reason,
         "cancelled_pending": cancelled_pending,
         "expired_awaiting": expired_awaiting,
+        "bitfinex_cancelled": bx_cancelled.get("cancelled", []),
+        "bitfinex_failed": bx_cancelled.get("failed", []),
+        "open_positions_remaining": bx_cancelled.get("open_positions_remaining", 0),
     }
+
+
+def _cancel_bitfinex_orders_for_lane(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
+    """Cancel outstanding Bitfinex entry orders for a lane (Pt 4a toggle contract).
+
+    Returns dict with cancelled/failed/open_positions_remaining. Best-effort:
+    if Bitfinex is not armed, no keys, or no live orders exist, returns empty.
+    Exits for already-filled positions are NOT cancelled here -- those continue
+    to be managed until flat.
+    """
+    out = {"cancelled": [], "failed": [], "open_positions_remaining": 0}
+    try:
+        if not (state.get("bitfinex_live_enabled") and state.get("live_armed")):
+            return out
+        if not _private_api_keys_ok():
+            return out
+        import bitfinex_live_executor as bx
+        exchange = None
+        retry_fn = None
+        if hasattr(bx, "get_exchange"):
+            try:
+                exchange, retry_fn = bx.get_exchange(state)
+            except Exception:
+                exchange, retry_fn = None, None
+        if exchange is None or retry_fn is None:
+            return out
+        lane_u = str(lane or "").upper()
+        with trade_lock:
+            # Find PENDING orders in this lane that have a saved Bitfinex order id.
+            candidates = []
+            for o in list(pending_orders):
+                if _normalize_lane_key(o) != lane_u:
+                    continue
+                oid = o.get("bitfinex_order_id")
+                tid = o.get("trade_id")
+                if oid and tid:
+                    candidates.append((str(oid), str(tid)))
+            # Count already-filled positions in this lane (still managed to exit).
+            open_in_lane = sum(
+                1 for p in open_positions
+                if _normalize_lane_key(p) == lane_u and p.get("status") in ("FILLED", "OPEN")
+            )
+        out["open_positions_remaining"] = open_in_lane
+        sym = str(state.get("trade_symbol") or "BTC/USDT")
+        for oid, tid in candidates:
+            ok = bx.cancel_exchange_order(exchange, retry_fn, oid, sym, tid)
+            if ok:
+                out["cancelled"].append({"trade_id": tid, "exchange_order_id": oid})
+            else:
+                out["failed"].append({"trade_id": tid, "exchange_order_id": oid, "reason": "CANCEL_FAILED"})
+        if out["cancelled"] or out["failed"]:
+            logger.warning(
+                f"[BITFINEX CANCEL LANE] lane={lane_u} reason={reason} "
+                f"cancelled={len(out['cancelled'])} failed={len(out['failed'])} "
+                f"open_positions_remaining={open_in_lane} [PIPELINE ENFORCEMENT]"
+            )
+    except Exception as exc:
+        logger.warning(f"[BITFINEX CANCEL LANE] error lane={lane}: {exc}")
+    return out
+
 
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
@@ -16993,23 +17061,46 @@ def execute_order(signal, ai=None):
     lane = signal.get("research_lane")
     if not guard_retired_lane_execution(lane, "execute_order", signal.get("trade_id")):
         return False
-    if not lane_orders_allowed(lane):
+    # Pt 1 (toggle contract): centralized execution-mode resolver.
+    # Replaces the older lane_orders_allowed() check with a fail-closed
+    # decision that also knows about EXIT_ONLY and Bitfinex live state.
+    mode = execution_mode_for_lane(lane)
+    if mode not in (EXEC_MODE_PAPER, EXEC_MODE_LIVE):
+        block = lane_execution_block_reason(lane)
         logger.warning(
-            f"[EXECUTION BLOCK] lane={signal.get('research_lane')} toggle OFF "
+            f"[EXECUTION BLOCK] lane={lane} mode={mode} reason={block} "
             f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
         )
+        full_pipeline_trace("[EXECUTION]", "MODE_BLOCKED", signal.get("trade_id"))
+        return False
+    # Pt 2 (toggle contract): TYPE_B_HUNTER_V1 must NEVER fall into the
+    # shared market-entry route. Force limit-only regardless of global
+    # pullback / compression settings.
+    is_type_b = str(lane or "").upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    if is_type_b and mode == EXEC_MODE_LIVE and not _private_api_keys_ok():
+        logger.warning(
+            f"[EXECUTION BLOCK] TYPE_B_LIVE keys missing trade_id={signal.get('trade_id')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        full_pipeline_trace("[EXECUTION]", "LIVE_KEYS_MISSING", signal.get("trade_id"))
         return False
     if not state.get("live_armed", False) and state.get("strategy_mode") != "RESEARCH":
         logger.warning("[LIVE ARM BLOCK] execute_order skipped - live_armed=False")
         full_pipeline_trace("[EXECUTION]", "LIVE_ARM_BLOCKED", signal.get("trade_id"))
         return False
     try:
-        logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
+        logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} mode={mode} [PIPELINE ENFORCEMENT]")
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
         pullback_pct = float(state.get("pullback_threshold", 0.001))
-        use_instant = pullback_pct <= 0.0
+        # Pt 2: TYPE_B_HUNTER_V1 ignores the global pullback/compression toggle.
+        # It always creates a limit order in both PAPER and LIVE modes.
+        use_instant = (not is_type_b) and (pullback_pct <= 0.0)
         if use_instant or not state.get("allow_compression", True):
+            # Pt 2: even when global compression is off, TYPE_B still uses limits.
+            if is_type_b:
+                use_instant = False
+        if use_instant:
             execute_market_order(signal)
             with trade_lock:
                 filled = any(p.get("trade_id") == signal.get("trade_id") for p in open_positions)
@@ -24046,21 +24137,57 @@ def api_bitfinex_live():
     if enabled and not _private_api_keys_ok():
         return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
     with state_lock:
+        prev = bool(state.get("bitfinex_live_enabled", False))
         state["bitfinex_live_enabled"] = enabled
+        # Pt 3 (toggle contract): keep live_armed synchronized with the Bitfinex
+        # toggle so the dashboard never shows "disarmed" while orders can fire.
+        state["live_armed"] = enabled
         save_persistent_config()
     import bitfinex_live_executor as bx
 
+    # Pt 4b (toggle contract): when Bitfinex is disarmed while positions remain
+    # open, mark those lanes EXIT_ONLY -- no new entries, but exit management
+    # continues until flat.
+    disarm_exit_only = {}
+    if prev and not enabled:
+        disarm_exit_only = _mark_exit_only_for_open_bitfinex_positions(reason="BITFINEX_DISARMED")
+
     logger.warning(
         f"[BITFINEX LIVE] dashboard toggle -> {'ON' if enabled else 'OFF'} "
-        f"keys_ok={_private_api_keys_ok()} [PIPELINE ENFORCEMENT]"
+        f"keys_ok={_private_api_keys_ok()} "
+        f"exit_only_lanes={list(disarm_exit_only.keys()) if disarm_exit_only else []} "
+        f"[PIPELINE ENFORCEMENT]"
     )
     return jsonify(
         {
             "bitfinex_live_enabled": state["bitfinex_live_enabled"],
+            "live_armed": state["live_armed"],
             "keys_ok": _private_api_keys_ok(),
+            "exit_only_lanes": list(disarm_exit_only.keys()) if disarm_exit_only else [],
             **bx.live_status(state, _private_api_keys_ok()),
         }
     )
+
+
+def _mark_exit_only_for_open_bitfinex_positions(reason: str = "BITFINEX_DISARMED") -> dict:
+    """Pt 4b: after Bitfinex disarm, mark lanes with open filled positions as
+    EXIT_ONLY so new entries stop but exits continue. Returns dict lane->count.
+    """
+    out: dict = {}
+    try:
+        with trade_lock:
+            for p in open_positions:
+                if p.get("status") not in ("FILLED", "OPEN"):
+                    continue
+                lane = _normalize_lane_key(p)
+                if not lane:
+                    continue
+                out[lane] = out.get(lane, 0) + 1
+        for lane in out.keys():
+            mark_lane_exit_only(lane, reason=reason)
+    except Exception as exc:
+        logger.warning(f"[EXIT_ONLY MARK] error: {exc}")
+    return out
 
 @app.route('/api/set_leverage', methods=['POST'])
 def set_leverage():
