@@ -290,3 +290,75 @@ def _sf(val):
         return float(val)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Section 4 of Tile 2 static integrity repair.
+#
+# Episode ID + one-trade-per-episode guard.
+#
+# The historical sample inflated fills because a new bracket tick every ~20s
+# could spawn a new shadow / paper limit on the same support level while the
+# previous trade on that thesis was still active. The frozen Tile 2 policy
+# requires at most ONE pending or open Tile 2 LONG per S/R episode.
+#
+# Episode ID derivation:
+#   - micro_support (the level we're trying to buy)
+#   - micro_resistance (defines the S/R range)
+#   - pivot_revision (a coarse counter that bumps when the S/R levels move)
+#   - bucket_ts (the UTC session bucket start, so episodes don't bleed across
+#     very different times of day even if the level is identical)
+#
+# The resulting string is short, stable, and human-auditable. It is stamped
+# on every outcome record (Section 8) and used as the dedup key for the
+# one-trade-per-episode guard.
+# ---------------------------------------------------------------------------
+
+# How much the support/resistance levels must move (in absolute price units)
+# before we count it as a new "pivot revision". Small noise within this band
+# is treated as the same pivot. Tuned for BTC at the ~$60-120k range.
+EPISODE_PIVOT_BAND_USD = 25.0
+
+
+def derive_sr_episode_id(
+    micro_support,
+    micro_resistance,
+    session_bucket: str = "",
+    session_bucket_start_ts: float = 0.0,
+    pivot_band_usd: float = EPISODE_PIVOT_BAND_USD,
+) -> str:
+    """Stable S/R episode ID for one-trade-per-episode dedup (Section 4).
+
+    Buckets the support level to the nearest `pivot_band_usd` so that
+    micro-noise on the support level does not inflate the episode count.
+    Includes the UTC session bucket so that identical levels seen in very
+    different sessions are distinct episodes.
+    """
+    ms = _sf(micro_support)
+    mr = _sf(micro_resistance)
+    if ms is None or mr is None or ms <= 0 or mr <= 0:
+        return ""
+    band = max(1.0, float(pivot_band_usd or EPISODE_PIVOT_BAND_USD))
+    ms_b = int(round(ms / band)) * band
+    mr_b = int(round(mr / band)) * band
+    bucket_label = str(session_bucket or "").upper().strip()
+    if session_bucket_start_ts:
+        try:
+            bucket_label = f"{bucket_label}:{int(float(session_bucket_start_ts))}"
+        except (TypeError, ValueError):
+            pass
+    return f"ms{ms_b:.0f}-mr{mr_b:.0f}-{bucket_label}"
+
+
+def episode_id_matches_open_trade(
+    episode_id: str,
+    open_episodes_seen: list,
+) -> bool:
+    """True iff this episode_id already has an open or pending Tile 2 trade.
+
+    `open_episodes_seen` is the list of episode IDs currently attached to
+    open/pending Tile 2 trades (caller-supplied).
+    """
+    if not episode_id:
+        return False
+    return any(str(x) == str(episode_id) for x in (open_episodes_seen or []))

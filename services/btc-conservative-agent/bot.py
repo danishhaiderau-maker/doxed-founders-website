@@ -99,6 +99,7 @@ from sr_micro_tile_v2 import (
     STATIC_ADX_TRENDING_THRESHOLD as AS_EXPLICIT_ADX_CAP,
     STATIC_DISABLE_SHORT_LEG as AS_EXPLICIT_DISABLE_SHORT,
     STATIC_SESSION_BLACKLIST as AS_EXPLICIT_SESSION_BLACKLIST,
+    derive_sr_episode_id as tile2_derive_sr_episode_id,
 )
 from a160_v2_research import (
     V2_AI_DECISION_LOG_FILE,
@@ -11591,6 +11592,34 @@ def _tile2_paper_resting_limit_for_lane() -> dict | None:
     return None
 
 
+def _tile2_open_episode_ids() -> set:
+    """Section 4: episode IDs currently attached to open/pending Tile 2 trades.
+
+    Includes both pending paper limits and open positions. The bracket tick
+    consults this before submitting a new paper limit so we never have two
+    Tile 2 trades running on the same S/R episode.
+    """
+    seen = set()
+    with trade_lock:
+        for o in pending_orders:
+            if (
+                isinstance(o, dict)
+                and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and o.get("status") == "PENDING"
+                and o.get("sr_episode_id")
+            ):
+                seen.add(str(o.get("sr_episode_id")))
+        for p in open_positions:
+            if (
+                isinstance(p, dict)
+                and p.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and p.get("status") == "OPEN"
+                and p.get("sr_episode_id")
+            ):
+                seen.add(str(p.get("sr_episode_id")))
+    return seen
+
+
 def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
     """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
     existing = _tile2_paper_resting_limit_for_lane()
@@ -11627,6 +11656,7 @@ def _submit_tile2_paper_resting_limit(
     edge_score: float,
     features: dict = None,
     bracket_eval: dict = None,
+    sr_episode_id: str = "",
 ) -> str:
     """Section 3 ON path: submit a local paper resting limit at exact micro-support.
 
@@ -11636,6 +11666,8 @@ def _submit_tile2_paper_resting_limit(
     submitted to Bitfinex.
 
     LONG-only by policy. SHORT must never reach this function (caller guards).
+    Section 4: refuses to spawn a second paper limit on the same S/R episode
+    while one is already pending or open.
     """
     direction = str(side or "LONG").upper()
     if direction == "SHORT":
@@ -11646,6 +11678,35 @@ def _submit_tile2_paper_resting_limit(
         return "REFUSED_SHORT_DISABLED"
     if direction != "LONG":
         return "REFUSED_BAD_SIDE"
+
+    # Section 4: one-trade-per-episode guard. If we already have a pending or
+    # open Tile 2 trade on this same S/R episode, refuse the spawn. The
+    # episode_id is derived in the bracket tick from support + resistance +
+    # UTC bucket; without an episode_id we conservatively allow at most one
+    # pending Tile 2 limit at a time.
+    open_episodes = _tile2_open_episode_ids()
+    if sr_episode_id and sr_episode_id in open_episodes:
+        logger.info(
+            f"[TILE2] paper limit refused — episode {sr_episode_id} already has "
+            f"an open/pending Tile 2 trade [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_EPISODE_HAS_OPEN_TRADE"
+    existing_pending = _tile2_paper_resting_limit_for_lane()
+    if existing_pending:
+        # Conservative guard: even without an episode_id match, we never want
+        # two simultaneous Tile 2 paper limits. If the existing pending limit
+        # is at the SAME support level, leave it alone. If it's at a different
+        # level, the structural-cancel path above should already have killed
+        # it; we still refuse here as a belt-and-braces safety.
+        _existing_lim = float(existing_pending.get("limit_price") or 0)
+        _new_lim = float(limit_price or 0)
+        if _existing_lim > 0 and _new_lim > 0 and abs(_existing_lim - _new_lim) < 0.01:
+            return "RESTING"
+        logger.info(
+            f"[TILE2] paper limit refused — another Tile 2 limit already pending "
+            f"(existing={_existing_lim:.2f} new={_new_lim:.2f}) [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_ANOTHER_PENDING"
 
     market_price = float(nz(state.get("price")) or 0)
     limit_price = float(limit_price or 0)
@@ -11719,6 +11780,7 @@ def _submit_tile2_paper_resting_limit(
         "exchange_submission_blocked": True,  # PROBATION marker
         "policy_id": TILE2_POLICY_ID,
         "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "sr_episode_id": str(sr_episode_id or ""),  # Section 4 dedup key
         "exit_config": exit_cfg,
         "chase_mode": "STATIC",
         "fill_at_limit": True,
@@ -13112,18 +13174,22 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         # This is the denominator for EV-per-eligible-opportunity. We count
         # at most one eligible per bracket tick (the LONG leg) so the metric
         # is not inflated by tick frequency.
+        sr_episode_id = ""
         if (
             eval_result.get("armed")
             and not eval_result.get("in_midpoint_zone")
             and should_enter_bracket_leg("LONG", eval_result)
         ):
-            # Episode ID is derived in Section 4; stubbed here as the
-            # support-level hash so distinct levels are counted distinctly
-            # even before the full episode-ID refactor lands.
-            _ms_v = eval_result.get("micro_support")
-            _mr_v = eval_result.get("micro_resistance")
-            _ep_id = f"ms-{_ms_v}-mr-{_mr_v}"
-            record_tile2_eligible_long(episode_id=_ep_id)
+            # Section 4: derive a stable S/R episode ID from support +
+            # resistance + UTC bucket so distinct levels / sessions are
+            # counted distinctly and the one-trade-per-episode guard can
+            # dedup cleanly.
+            sr_episode_id = tile2_derive_sr_episode_id(
+                eval_result.get("micro_support"),
+                eval_result.get("micro_resistance"),
+                session_bucket=sess_bucket,
+            )
+            record_tile2_eligible_long(episode_id=sr_episode_id)
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
             # Structural idle/suspend — cancel any resting STATIC shadows (CANCELLED).
@@ -13185,11 +13251,24 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             )
             if exec_mode == EXEC_MODE_PAPER:
                 # ON + Bitfinex OFF: local paper resting limit at exact support.
+                # Section 4: pass the derived episode_id so the one-trade-
+                # per-episode guard can refuse clone trades.
                 spawn_result = _submit_tile2_paper_resting_limit(
                     ctx, side, limit, edge_score, enriched, eval_result,
+                    sr_episode_id=sr_episode_id,
                 )
                 if spawn_result == "SPAWNED":
                     legs_spawned += 1
+                elif spawn_result == "REFUSED_EPISODE_HAS_OPEN_TRADE":
+                    log_lane_opportunity_event(
+                        lane,
+                        "SPAWN_FILTERED",
+                        bracket_id,
+                        side,
+                        None,
+                        edge_score,
+                        block_reason="EPISODE_HAS_OPEN_TRADE",
+                    )
             elif exec_mode in (EXEC_MODE_LAB_SHADOW, EXEC_MODE_EXIT_ONLY):
                 # OFF, retired, or post-disarm EXIT_ONLY: LAB shadow + counterfactual.
                 if tile_on and exec_mode == EXEC_MODE_EXIT_ONLY:
