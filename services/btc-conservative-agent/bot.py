@@ -11556,6 +11556,198 @@ def _spawn_lab_bracket_shadow(
     return "SPAWNED"
 
 
+# ---------------------------------------------------------------------------
+# Section 3 of Tile 2 static integrity repair.
+#
+# Replace the contradictory Tile 2 ON path. Previously the ON path called
+# _spawn_lab_bracket_shadow, but the LAB guard aborted when
+# lane_orders_allowed(target_lane) was true. The result was: tile ON did
+# nothing (silently swallowed by the LAB guard error log).
+#
+# The fix routes Tile 2 explicitly via execution_mode_for_lane():
+#   LAB_SHADOW  -> _spawn_lab_bracket_shadow (LAB shadow + counterfactual, no order)
+#   PAPER       -> _submit_tile2_paper_resting_limit (local paper pending order)
+#   LIVE        -> BLOCKED while PROBATION; never submit Bitfinex orders
+#                  until the operator explicitly promotes the lane.
+#   EXIT_ONLY   -> no new entries; existing filled positions still managed
+# ---------------------------------------------------------------------------
+TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
+
+
+def _tile2_paper_resting_limit_for_lane() -> dict | None:
+    """Return the current Tile 2 paper resting limit (PENDING), or None.
+
+    A Tile 2 paper limit is uniquely keyed by research_lane == SR_MICRO_TILE_V2_STATIC
+    AND status == PENDING. Used by Section 4 (one order per S/R episode).
+    """
+    with trade_lock:
+        for o in pending_orders:
+            if (
+                isinstance(o, dict)
+                and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and o.get("status") == "PENDING"
+            ):
+                return o
+    return None
+
+
+def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
+    """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
+    existing = _tile2_paper_resting_limit_for_lane()
+    if not existing:
+        return False
+    try:
+        existing["status"] = "CANCELLED"
+        existing["exit_reason"] = reason
+        existing["cancelled_ts"] = time.time()
+        lane_unregister_pending_order(existing)
+        log_lane_opportunity_event(
+            RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+            "CANCELLED",
+            existing.get("trade_id"),
+            existing.get("signal_dir") or existing.get("dir"),
+            None,
+            float(existing.get("edge_score") or 0),
+            block_reason=reason,
+        )
+        logger.info(
+            f"[{RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC}] paper resting limit CANCELLED "
+            f"trade_id={existing.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"[TILE2] cancel paper limit failed: {e}")
+        return False
+
+
+def _submit_tile2_paper_resting_limit(
+    ctx: dict,
+    side: str,
+    limit_price: float,
+    edge_score: float,
+    features: dict = None,
+    bracket_eval: dict = None,
+) -> str:
+    """Section 3 ON path: submit a local paper resting limit at exact micro-support.
+
+    This is the PAPER-mode replacement for _spawn_lab_bracket_shadow when the
+    tile is ON. The limit is a *real pending_orders* entry (so the existing
+    fill/exit machinery manages it) but is marked paper_only=True and never
+    submitted to Bitfinex.
+
+    LONG-only by policy. SHORT must never reach this function (caller guards).
+    """
+    direction = str(side or "LONG").upper()
+    if direction == "SHORT":
+        logger.error(
+            f"[TILE2] SHORT paper limit refused — SHORT is disabled by policy "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_SHORT_DISABLED"
+    if direction != "LONG":
+        return "REFUSED_BAD_SIDE"
+
+    market_price = float(nz(state.get("price")) or 0)
+    limit_price = float(limit_price or 0)
+    if market_price <= 0 or limit_price <= 0:
+        return "REFUSED_BAD_PRICE"
+    # Frozen policy: STATIC resting limit must be at exact micro-support.
+    # Reject if the requested limit is above the current market (would cross).
+    if direction == "LONG" and limit_price >= market_price:
+        logger.warning(
+            f"[TILE2] LONG paper limit refused — limit {limit_price:.2f} >= market "
+            f"{market_price:.2f} (would cross, not resting at support) "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_WOULD_CROSS"
+
+    # Bitfinex submission is forbidden while the lane is PROBATION.
+    mode = execution_mode_for_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    if mode == EXEC_MODE_LIVE:
+        logger.error(
+            f"[TILE2] LIVE mode reached while lane is PROBATION — refusing exchange "
+            f"submission (operator must explicitly promote) [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_LIVE_BLOCKED_PROBATION"
+    if mode not in (EXEC_MODE_PAPER,):
+        logger.info(
+            f"[TILE2] paper limit not submitted — execution_mode={mode} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return f"REFUSED_MODE_{mode}"
+
+    enriched = _enrich_combo_lane_features(features, ctx)
+    margin_usdt, size_mult = _lane_sized_margin_usdt(
+        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC, enriched
+    )
+    leverage = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+    qty = (float(margin_usdt) * leverage) / limit_price if limit_price > 0 else 0.0
+    trade_id = allocate_lane_trade_id(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    exit_cfg = get_exit_config_for_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
+    now_ts = time.time()
+    # Section 6: the entry TTL is for the UNFILLED resting limit only. Once
+    # filled, the resulting open position must continue until a genuine
+    # strategy exit (Scenario C / thesis / stop / TIME_EXIT). We stamp
+    # entry_expires_ts so the chase loop can expire the unfilled limit
+    # without finalizing any filled position as MARK_TO_MARKET.
+    entry_expires_ts = now_ts + TILE2_ENTRY_TTL_SEC
+    order = {
+        "trade_id": trade_id,
+        "bitfinex_order_id": "",  # paper-only: never has a real exchange id
+        "signal_dir": "buy",
+        "side": "buy",
+        "dir": direction,
+        "direction": direction,
+        "limit_price": float(limit_price),
+        "original_limit_price": float(limit_price),
+        "planned_limit_price": float(limit_price),
+        "qty": float(qty),
+        "created_ts": now_ts,
+        "entry_submitted_ts": now_ts,
+        "entry_expires_ts": entry_expires_ts,
+        "limit_chase_count": 0,
+        "max_chase_count": 0,  # STATIC: never chase/reprice/slide
+        "last_chase_ts": 0,
+        "status": "PENDING",
+        "entry_type": "TILE2_STATIC_PAPER",
+        "research_lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "edge_score": round(float(edge_score), 1),
+        "size_mult": size_mult,
+        "margin_usdt": float(margin_usdt),
+        "leverage": leverage,
+        "paper_only": True,
+        "exchange_submission_blocked": True,  # PROBATION marker
+        "policy_id": TILE2_POLICY_ID,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "exit_config": exit_cfg,
+        "chase_mode": "STATIC",
+        "fill_at_limit": True,
+        # Audit fields (Section 8 outcome schema).
+        "micro_support": float(bracket_eval.get("micro_support") or limit_price) if bracket_eval else float(limit_price),
+        "micro_resistance": float((bracket_eval or {}).get("micro_resistance") or 0),
+        "adx_at_entry": float((bracket_eval or {}).get("adx") or 0) or None,
+        "session_bucket_at_entry": str((bracket_eval or {}).get("session_bucket") or ""),
+        "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
+    }
+    lane_register_pending_order(order)
+    log_lane_opportunity_event(
+        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "SPAWN_LAB",  # SPAWN_LAB event is what folds into paper_limits counter
+        trade_id,
+        direction,
+        None,
+        edge_score,
+        block_reason="BRACKET_LEG_STATIC_PAPER",
+    )
+    logger.info(
+        f"[TILE2] paper resting limit submitted trade_id={trade_id} dir={direction} "
+        f"limit={limit_price:.2f} market={market_price:.2f} qty={qty:.6f} "
+        f"entry_ttl={TILE2_ENTRY_TTL_SEC}s mode={mode} policy={TILE2_POLICY_ID} "
+        f"— paper only, Bitfinex BLOCKED [PIPELINE ENFORCEMENT]"
+    )
+    return "SPAWNED"
+
+
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
@@ -12948,6 +13140,15 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             return
 
         tile_on = is_research_lane_enabled(lane)
+        # Section 3: explicit execution-mode routing. The previous code called
+        # _spawn_lab_bracket_shadow even when tile_on, but that function's LAB
+        # guard aborted whenever lane_orders_allowed() was true, silently
+        # dropping the spawn. Now we route explicitly:
+        #   LAB_SHADOW -> _spawn_lab_bracket_shadow (no order)
+        #   PAPER      -> _submit_tile2_paper_resting_limit (local paper limit)
+        #   LIVE       -> BLOCKED (lane is PROBATION; operator must promote)
+        #   EXIT_ONLY  -> no new entries
+        exec_mode = execution_mode_for_lane(lane)
         legs_spawned = 0
         for side in ("LONG", "SHORT"):
             if not should_enter_bracket_leg(side, eval_result):
@@ -12961,25 +13162,83 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                     block_reason=f"LEG_NOT_ARMED_{side}",
                 )
                 continue
+            # SHORT is fully disabled by the frozen Tile 2 policy.
+            if side == "SHORT":
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason="SHORT_DISABLED_POLICY",
+                )
+                logger.info(
+                    f"[{lane}] SHORT spawn refused — disabled by frozen Tile 2 policy "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                continue
             limit = (
                 eval_result.get("long_limit")
                 if side == "LONG"
                 else eval_result.get("short_limit")
             )
-            if tile_on:
-                logger.info(
-                    f"[{lane}] tile ON but Phase 1 shadow-only — LAB STATIC replay for {side} "
-                    f"limit={limit} [PIPELINE ENFORCEMENT]"
+            if exec_mode == EXEC_MODE_PAPER:
+                # ON + Bitfinex OFF: local paper resting limit at exact support.
+                spawn_result = _submit_tile2_paper_resting_limit(
+                    ctx, side, limit, edge_score, enriched, eval_result,
                 )
-            spawn_result = _spawn_lab_bracket_shadow(
-                ctx, side, limit, edge_score, lane, enriched, eval_result,
-                chase_mode=CHASE_MODE_STATIC,
-                id_prefix=STATIC_LANE_ID_PREFIX,
-                max_chases=STATIC_MAX_CHASES,
-                fill_at_limit=True,
-            )
-            if spawn_result == "SPAWNED":
+                if spawn_result == "SPAWNED":
+                    legs_spawned += 1
+            elif exec_mode in (EXEC_MODE_LAB_SHADOW, EXEC_MODE_EXIT_ONLY):
+                # OFF, retired, or post-disarm EXIT_ONLY: LAB shadow + counterfactual.
+                if tile_on and exec_mode == EXEC_MODE_EXIT_ONLY:
+                    logger.info(
+                        f"[{lane}] EXIT_ONLY — no new entries; collecting LAB shadow only "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
                 legs_spawned += 1
+            elif exec_mode == EXEC_MODE_LIVE:
+                # Lane is PROBATION — Bitfinex exchange entry is forbidden.
+                logger.error(
+                    f"[{lane}] LIVE mode refused while PROBATION — operator must explicitly "
+                    f"promote the lane; collecting LAB shadow only [PIPELINE ENFORCEMENT]"
+                )
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason="LIVE_BLOCKED_PROBATION",
+                )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
+            else:
+                logger.warning(
+                    f"[{lane}] unknown exec_mode={exec_mode} — defaulting to LAB shadow "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                _spawn_lab_bracket_shadow(
+                    ctx, side, limit, edge_score, lane, enriched, eval_result,
+                    chase_mode=CHASE_MODE_STATIC,
+                    id_prefix=STATIC_LANE_ID_PREFIX,
+                    max_chases=STATIC_MAX_CHASES,
+                    fill_at_limit=True,
+                )
 
         logger.info(
             f"[{lane}] STATIC bracket tick pivot_changed={pivot_changed} elapsed={elapsed:.0f}s "
@@ -24401,6 +24660,35 @@ def toggle_profit_gates():
         "research_lanes_independent": research_lanes_independent(),
         "research_execution_mode": mode,
     })
+
+# Section 8/9: explicit operator action that starts the fresh independent
+# Tile 2 holdout cohort. Zeros out the funnel counters (NOT automatic on
+# every restart, so an accidental restart cannot wipe the cohort).
+@app.route('/api/tile2/reset_counters', methods=['POST'])
+def api_tile2_reset_counters():
+    if not _admin_authed_strict():
+        return jsonify({
+            "status": "auth_required",
+            "message": "Tile 2 counter reset is admin-only — present X-Bot-Admin-Token",
+        }), 401
+    metrics = reset_tile2_counters_for_fresh_holdout()
+    logger.warning(
+        f"[ADMIN] Tile 2 counters RESET via /api/tile2/reset_counters "
+        f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "status": "reset",
+        "policy_id": TILE2_POLICY_ID,
+        "exit_profile_id": TILE2_EXIT_PROFILE_ID,
+        "metrics": metrics,
+    })
+
+
+@app.route('/api/tile2/metrics', methods=['GET'])
+def api_tile2_metrics():
+    """Section 2: public read-only endpoint for Tile 2 funnel metrics."""
+    return jsonify(tile2_dashboard_metrics())
+
 
 @app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
 def toggle_duplicate_limit_block():
