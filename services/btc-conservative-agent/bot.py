@@ -17682,7 +17682,23 @@ def state_monitor_loop():
                         if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
                             expired_ids.append(tid)
                     elif is_lab_or_collect and age_from_start > LAB_REPLAY_TTL_SEC:
-                        expired_ids.append(tid)
+                        # Section 6: do NOT expire a Tile 2 LAB shadow at the
+                        # 30m buffer TTL once it has filled. A filled Tile 2
+                        # position must continue until a genuine strategy exit
+                        # (Scenario C / thesis / stop / TIME_EXIT). Use the
+                        # global MAX_POSITION_AGE_SEC (2h) + small slack for
+                        # the post-exit replay window. UNFILLED Tile 2 limits
+                        # still expire at LAB_REPLAY_TTL_SEC, which is the
+                        # entry TTL the spec calls out (30 minutes).
+                        if (
+                            buf.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                            and buf.get("virtual_entry")
+                            and FIXED_TIME_EXIT_ENABLED
+                            and age_from_start < (MAX_POSITION_AGE_SEC + 600)
+                        ):
+                            pass  # keep running until strategy exit
+                        else:
+                            expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
@@ -26325,9 +26341,27 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "TAKE_PROFIT"
             exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
             break
+        # Section 6: genuine two-hour TIME_EXIT. Once filled, a position must
+        # continue until a strategy exit fires; MARK_TO_MARKET is reserved for
+        # the rare case where the LAB buffer is truncated before any exit
+        # could trigger. Without this check, 61 historical outcomes were
+        # classified MARK_TO_MARKET (contributing +$27.39) -- those are
+        # EXCLUDED from promotion unless reclassified through a truthful
+        # strategy exit, which is what this branch now does.
+        if FIXED_TIME_EXIT_ENABLED and (t - fill_t) >= MAX_POSITION_AGE_SEC:
+            exit_reason = "TIME_EXIT"
+            exit_margin_pct = unreal
+            break
         exit_margin_pct = unreal
     else:
         exit_margin_pct = _buf_float(last_unreal, 0) if ticks else 0.0
+        # Section 6: if the for loop fell through without any exit firing,
+        # the position ran out of ticks before MAX_POSITION_AGE_SEC. That is
+        # NOT a MARK_TO_MARKET -- it is a buffer truncation. The honest
+        # classification is BUFFER_TRUNCATED so the promotion rule can
+        # exclude these rows from the reconciled sample.
+        if FIXED_TIME_EXIT_ENABLED and exit_reason == "MARK_TO_MARKET":
+            exit_reason = "BUFFER_TRUNCATED"
 
     net_usd = _margin_pct_to_usd(exit_margin_pct, margin_usdt)
     return {
