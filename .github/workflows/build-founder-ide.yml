@@ -278,12 +278,26 @@ jobs:
       # ── 14. Compile VS Code + download Electron + build native extensions ──
       # This is the BIG step (40-70 min cold, 20-35 min warm). Produces
       # VSCode-win32-x64/ with the launcher exe + all .node modules.
-      - name: Compile VS Code (gulp vscode-win32-x64-min-ci)
+      #
+      # TARGET CHOICE: we use `vscode-win32-x64-min` (NOT `-min-ci`).
+      # The `-ci` variant assumes `out-vscode-min/` was already produced by a
+      # separate upstream compile job (Void's official Azure pipeline runs
+      # compilation as its own stage and downloads `compilation.tar.gz` before
+      # invoking any `-ci` target). We have no such upstream stage, so `-ci`
+      # crashes with ENOENT on
+      #   out-vscode-min/vs/base/parts/sandbox/electron-sandbox/preload.js
+      # the moment packageTask() tries to compute checksums.
+      # The non-`-ci` variant runs the FULL chain in one task:
+      #   compile-build-with-mangling -> clean extensions ->
+      #   compile non-native extensions -> compile extension media ->
+      #   minify-vscode (produces out-vscode-min/) -> then the same packaging
+      # steps as -ci. See build/gulpfile.vscode.js lines 505-513.
+      - name: Compile VS Code (gulp vscode-win32-x64-min)
         working-directory: ${{ steps.paths.outputs.vscode_dir }}
         shell: pwsh
         run: |
-          npx gulp vscode-win32-x64-min-ci
-          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-min-ci failed (exit $LASTEXITCODE)" }
+          npx gulp vscode-win32-x64-min
+          if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-min failed (exit $LASTEXITCODE)" }
 
       # ── 15. Verify the launcher + critical native modules are present ──────
       # This is the regression check for the 0.9.0 launcher-less build. Abort
