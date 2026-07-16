@@ -136,14 +136,25 @@ jobs:
           python-version: ${{ steps.manifest.outputs.python_pin }}
 
       # ── 6. Install Inno Setup 6 (outer bundle compiler) ────────────────────
+      # windows-2022 runners ship Inno Setup 6.x pre-installed at
+      # C:\Program Files (x86)\Inno Setup 6\ISCC.exe. We try choco as a fallback
+      # for self-hosted runners that don't, but we DON'T pin a version (choco
+      # refuses to "downgrade" if a newer release is already present, and that
+      # nonzero exit code fails the whole step even though ISCC.exe is fine).
       - name: Install Inno Setup 6
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress --version=6.4.3
-          # ISCC.exe ends up at C:\Program Files (x86)\Inno Setup 6\ISCC.exe
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
-          Write-Host "ISCC: $iscc"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "ISCC.exe not at $iscc - installing via choco..."
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed (exit $LASTEXITCODE)" }
+          } else {
+            Write-Host "ISCC.exe already installed at $iscc (skipping choco)"
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe still not found at $iscc after install attempt" }
+          & $iscc /? 2>&1 | Select-Object -First 1
+          Write-Host "ISCC ready: $iscc"
 
       # ── 7. Clone upstream Void at the pinned commit ────────────────────────
       # voideditor/void clones as a FLAT repo (product.json, gulpfile.js,
