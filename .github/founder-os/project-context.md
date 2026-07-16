@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-fix(ide-build): use vscode-win32-x64-min instead of -min-ci target
+fix(ide-build): drop -min to skip Void mangler OVERLAPPING edit crash
 
 ## Last Activity
 
