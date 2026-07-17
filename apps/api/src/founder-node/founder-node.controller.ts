@@ -155,12 +155,155 @@ export class FounderNodeController {
       label: string;
       platform?: string;
       appVersion?: string;
+      installId?: string;
+      ipcSecret?: string;
     },
   ) {
     if (!body.code?.trim() || !body.nodeId?.trim()) {
       throw new BadRequestException('code and nodeId required');
     }
     return this.nodes.pair(body);
+  }
+
+  // ─── Phase 2 — device-code (RFC 8628) first-run flow ──────────────────────
+
+  /**
+   * Start a device-authorization grant. The Founder Node tray calls this on
+   * first run (no node-config.json present). Returns the RFC 8628 shape:
+   *   { deviceCode, userCode, verificationUri, verificationUriComplete,
+   *     expiresAt, interval }
+   * The tray displays the userCode and polls /device-code/poll with deviceCode.
+   *
+   * Public endpoint — the device isn't authenticated yet (that's the point of
+   * the flow). The userId is bound to the grant only when the founder
+   * authorizes in the browser.
+   *
+   * NOTE: this is a Phase 2 shim — the tray passes installId + ipcSecret so
+   * the eventual paired node has IPC identity from the moment it's authorized.
+   * The founderId/nodeId/nodeToken are minted at authorize time, not here.
+   */
+  @Public()
+  @Post('device-code')
+  createDeviceCode(
+    @Body() body?: { installId?: string; ipcSecret?: string },
+  ) {
+    // Without a userId we can't bind the grant to a founder yet. The web app
+    // also calls this endpoint WITH auth (CurrentUser) when the founder starts
+    // the flow from the browser instead of the tray. Detect the authenticated
+    // case via the FounderNodeGuard-free path: if no Authorization header is
+    // present, we return a "pending web authorize" grant that the browser
+    // later binds. For now, the tray-side flow is: tray calls this (no auth),
+    // gets deviceCode, shows userCode, founder opens verificationUri in
+    // browser, browser calls /device-code/authorize (auth) which binds userId.
+    //
+    // The installId is stashed on the grant row so authorize() can pair a
+    // fresh node with the caller's installId in one shot.
+    return this.nodes.createDeviceCode('pending-web-authorize', {
+      installId: body?.installId,
+    });
+  }
+
+  /**
+   * Poll a device-authorization grant. The Founder Node tray calls this every
+   * `interval` seconds with the deviceCode until status === 'authorized'.
+   *
+   * Returns 202 with Retry-After on pending (per RFC 8628 §3.5). Returns 200
+   * with the tokens on authorized. Returns 400 on expired/denied.
+   */
+  @Public()
+  @Post('device-code/poll')
+  async pollDeviceCode(
+    @Body() body: { deviceCode: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!body.deviceCode?.trim()) {
+      throw new BadRequestException('deviceCode required');
+    }
+    const result = await this.nodes.pollDeviceCode(body.deviceCode.trim());
+    if (result.status === 'pending' || result.status === 'slow_down') {
+      // RFC 8628: pending/slow_down should return 202 + Retry-After.
+      res.status(202);
+      res.setHeader('Retry-After', String(FounderNodeService.DEVICE_CODE_INTERVAL_S));
+    }
+    return result;
+  }
+
+  /**
+   * Web app calls this when the founder clicks "Authorize" on the verification
+   * page. Requires a logged-in Founder OS user (CurrentUser). Pairs a fresh
+   * node, flips the grant to 'authorized', stashes the tokens for the next
+   * /device-code/poll to return.
+   *
+   * The web UI (apps/web/) is Worker 1's territory if it lives there; this is
+   * just the API. The web page calls POST /founder-node/device-code/authorize
+   * with { userCode, nodeId, label }.
+   */
+  @Post('device-code/authorize')
+  authorizeDeviceCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { userCode: string; nodeId: string; label: string; platform?: string; appVersion?: string },
+  ) {
+    if (!body.userCode?.trim() || !body.nodeId?.trim()) {
+      throw new BadRequestException('userCode and nodeId required');
+    }
+    return this.nodes.authorizeDeviceCode(user.id, body.userCode, {
+      nodeId: body.nodeId,
+      label: body.label,
+      platform: body.platform,
+      appVersion: body.appVersion,
+    });
+  }
+
+  /** Web app calls this when the founder clicks "Deny". */
+  @Post('device-code/deny')
+  denyDeviceCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { userCode: string },
+  ) {
+    if (!body.userCode?.trim()) {
+      throw new BadRequestException('userCode required');
+    }
+    return this.nodes.denyDeviceCode(user.id, body.userCode);
+  }
+
+  // ─── Phase 2 — token lifecycle: rotate / revoke / logout ──────────────────
+
+  /**
+   * Issue a new nodeToken, invalidate the old one. Called by Founder Node
+   * proactively when within 7 days of expiry, or by the user via "Rotate
+   * token" in the tray. Requires the current valid token.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('rotate-token')
+  rotateToken(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.nodes.rotateToken(req.founderNode.nodeId);
+  }
+
+  /**
+   * Revoke a node identity — server-side, permanent. Called by the user via
+   * "Revoke this node" in Founder OS settings. The DELETE :nodeId endpoint
+   * below already does this; this is the explicit /revoke alias for clarity
+   * and so the tray can call POST /revoke (some corporate proxies block
+   * DELETE bodies).
+   */
+  @Post('revoke')
+  revokeAlias(@CurrentUser() user: AuthUser, @Body() body: { nodeId: string }) {
+    if (!body.nodeId?.trim()) {
+      throw new BadRequestException('nodeId required');
+    }
+    return this.nodes.revokeNode(user.id, body.nodeId);
+  }
+
+  /**
+   * Logout — local-only invalidation. The server-side identity stays revocable
+   * separately. The tray calls this when the user clicks "Sign out"; the API
+   * records the timestamp so the status panel shows "logged out" rather than
+   * "revoked". The actual node-config.json deletion happens client-side.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('logout')
+  logout(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.nodes.logout(req.founderNode.nodeId);
   }
 
   @UseGuards(FounderNodeGuard)
