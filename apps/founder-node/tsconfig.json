@@ -2,9 +2,16 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src",
     "module": "CommonJS",
-    "moduleResolution": "Node"
+    "moduleResolution": "Node",
+    "baseUrl": ".",
+    "rootDirs": [
+      "./src",
+      "../../packages/founder-ide-extension/src"
+    ],
+    "paths": {
+      "@dcf/founder-ide-extension/ipc": ["../../packages/founder-ide-extension/src/ipc/protocol.ts"]
+    }
   },
   "include": ["src/**/*"]
 }

@@ -117,6 +117,8 @@ import {
   pairingStateLabel,
   pairingStateTooltip,
 } from './pairing-state';
+// Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
+import { IdeIpcClient, startIdeIpcClient } from './ide-ipc-client';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
@@ -218,6 +220,11 @@ interface ActiveDeviceCode {
 let activeDeviceCode: ActiveDeviceCode | null = null;
 /** Set to true while the pair window is open with a flow in progress. */
 let pairingInProgress = false;
+/**
+ * Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
+ * Owned here so the heartbeat loop can read ideHandshakeActive from it.
+ */
+let ideIpcClient: IdeIpcClient | null = null;
 
 const inferenceUsageReporter = new InferenceUsageReporter();
 
@@ -956,6 +963,14 @@ app.whenReady().then(() => {
     });
   }
 
+  // Phase 3 — start the named-pipe IPC client so the IDE extension can
+  // bridge workspace state to the API via Founder Node. The client retries
+  // in the background; if no IDE is running yet, it'll connect when one
+  // starts. Safe to call when not paired (resolves false immediately).
+  if (config) {
+    ideIpcClient = startIdeIpcClient();
+  }
+
   configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
   startAutoUpdateChecks();
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
@@ -1107,6 +1122,11 @@ app.whenReady().then(() => {
       if (isWindows() && app.isPackaged) {
         void tryAddWindowsFirewallRules().catch(console.warn);
       }
+
+      // Phase 3 — start the IPC client on legacy pair too.
+      if (!ideIpcClient) {
+        ideIpcClient = startIdeIpcClient();
+      }
     },
   );
 
@@ -1220,6 +1240,13 @@ app.whenReady().then(() => {
         refreshTrayMenu(vaultRoot);
         startSyncLoop(vaultRoot);
 
+        // Phase 3 — start the IPC client now that we have credentials +
+        // install identity. If the IDE isn't running yet, the client will
+        // retry in the background until it is.
+        if (!ideIpcClient) {
+          ideIpcClient = startIdeIpcClient();
+        }
+
         notifyDesktop(
           'Founder Node connected',
           `Signed in as ${pair.founderId}. Keep one tray app open.`,
@@ -1253,6 +1280,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBackgroundLoops(loops);
+  ideIpcClient?.disconnect();
+  ideIpcClient = null;
   deploymentStatusServer?.close();
   deploymentStatusServer = null;
   tray?.destroy();
