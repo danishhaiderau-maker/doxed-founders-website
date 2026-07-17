@@ -4715,6 +4715,10 @@ export function resumeMyAgentInstance(slug: string, token: string) {
     status: string;
     message: string;
     validated?: { derivativesUsd?: number; credentialsOk: boolean };
+    executionMode?: 'LIVE' | 'PAUSED' | 'PAPER';
+    relayPolicyVersion?: string;
+    mirrorLanes?: string[];
+    confirmedAt?: string | null;
   }>(
     `/trading-agents/${slug}/instance/resume`,
     { method: 'POST' },

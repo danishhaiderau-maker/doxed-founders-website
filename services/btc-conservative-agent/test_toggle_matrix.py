@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Boot safe: paper mode + research mode (no real Bitfinex calls)
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
+os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
 from bot import (

@@ -29,6 +29,7 @@ from combo_pathway_config import (
     is_combo_execution_lane,
     is_deterministic_bracket_lane,
     is_independent_ai_lane,
+    is_shared_ai_direction_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -171,16 +172,17 @@ def assert_bot_analyzer_sync_ready() -> dict:
 
 
 def audit_type_b_not_in_execution() -> dict:
-    """Prove combo matcher uses only AI + spread — never TYPE_B/TYPE_A."""
+    """Prove Type B entry is prospective and never reads outcome labels."""
     matcher_src = inspect.getsource(combo_lane_matches)
     forbidden = ("TYPE_B", "TYPE_A", "trade_mfe_type", "predicted_combo", "mfe_type")
     hits = [tok for tok in forbidden if tok in matcher_src]
-    sample_ai = {"win_prob": 62, "bull_score": 2, "bear_score": 8, "decision": "APPROVE"}
+    sample_ai = {"win_prob": 0, "bull_score": 2, "bear_score": 8, "decision": "APPROVE"}
     sample_spread = 4
     matches_research_candidate = combo_lane_matches(
         RESEARCH_CANDIDATE_LANE, sample_ai, "SHORT", sample_spread
     )
     candidate_independent = is_independent_ai_lane(str(RESEARCH_CANDIDATE_LANE or ""))
+    candidate_shared = is_shared_ai_direction_lane(str(RESEARCH_CANDIDATE_LANE or ""))
     checks = [
         {
             "check": "combo_lane_matches source has no TYPE_B/TYPE_A gates",
@@ -188,26 +190,29 @@ def audit_type_b_not_in_execution() -> dict:
             "detail": f"forbidden tokens in matcher: {hits or 'none'}",
         },
         {
-            "check": "combo_lane_matches uses ai_min/ai_max + spread only",
+            "check": "combo_lane_matches uses prospective direction/spread fields only",
             "passed": "ai_min" in matcher_src and "spread_min" in matcher_src,
-            "detail": "matcher inspects win_prob and directional spread buckets",
+            "detail": "matcher inspects prospective direction/spread buckets; confidence is neutralized",
         },
         {
-            "check": "RESEARCH_CANDIDATE lane recognized (combo or independent AI)",
-            "passed": matches_research_candidate or candidate_independent,
+            "check": "RESEARCH_CANDIDATE lane recognized (combo/shared/independent AI)",
+            "passed": matches_research_candidate or candidate_shared or candidate_independent,
             "detail": (
                 f"{RESEARCH_CANDIDATE_LANE} match={matches_research_candidate}"
-                f" independent_ai={candidate_independent}"
+                f" shared_ai={candidate_shared} independent_ai={candidate_independent}"
             ),
         },
     ]
     payload = {
-        "schema": "type_b_execution_audit_v1",
+        "schema": "type_b_execution_audit_v2",
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "verdict": "PASS" if all(c["passed"] for c in checks) else "FAIL",
-        "policy": "TYPE_B is post-trade classification only — never an entry/execution gate",
+        "policy": (
+            "Type B consumes the shared prospective direction, then applies its fixed "
+            "deterministic entry gate. TYPE_B/TYPE_A outcome labels never authorize entry."
+        ),
         "checks": checks,
     }
     _write_json(TYPE_B_EXECUTION_AUDIT_FILE, payload)
@@ -263,13 +268,14 @@ def _sim_should_invoke_ai(enabled_map: dict, continuous_enabled: bool) -> bool:
 def _sim_spawn_targets(enabled_map: dict, ai: dict, direction: str, spread: int) -> list:
     """Which combo lanes would receive spawn_combo_lanes_from_ai_scan.
 
-    Independent-AI lanes (A160 V2 / TYPE_B_HUNTER_V1) and deterministic
-    bracket lanes (SR_MICRO_TILE_V2_STATIC — own tick loop) are excluded:
-    they never inherit AI_SCAN decisions.
+    Independent-AI lanes, shared-direction lanes (explicit dedicated fan-out), and
+    deterministic bracket lanes are excluded from the generic combo fan-out.
     """
     out = []
     for lane in COMBO_EXECUTION_LANES:
         if is_independent_ai_lane(lane):
+            continue
+        if is_shared_ai_direction_lane(lane):
             continue
         if is_deterministic_bracket_lane(lane):
             continue
@@ -321,7 +327,13 @@ def run_ai_scan_independence_self_test(retired_status: dict = None) -> dict:
             tile_orders,
             f"orders={tile_orders}",
         )
-        if is_independent_ai_lane(tile):
+        if is_shared_ai_direction_lane(tile):
+            add(
+                f"only {tile} ON → shared AI direction (dedicated fan-out)",
+                tile not in spawn and len(spawn) == 0,
+                f"spawn_targets={spawn} (explicit shared-direction router)",
+            )
+        elif is_independent_ai_lane(tile):
             add(
                 f"only {tile} ON → independent AI (no AI_SCAN fan-out)",
                 tile not in spawn and len(spawn) == 0,
@@ -450,6 +462,12 @@ def run_ai_scan_role_validation() -> dict:
         "check": "independent-AI lanes never inherit AI_SCAN spawn",
         "passed": len(independent_in_spawn) == 0,
         "detail": f"independent_in_spawn={independent_in_spawn}",
+    })
+    shared_in_spawn = [ln for ln in sim_spawn if is_shared_ai_direction_lane(ln)]
+    checks.append({
+        "check": "shared-direction lanes never inherit generic combo spawn",
+        "passed": len(shared_in_spawn) == 0,
+        "detail": f"shared_in_spawn={shared_in_spawn}",
     })
 
     passed = all(c["passed"] for c in checks)
@@ -881,19 +899,12 @@ def verify_repo_version_sync() -> dict:
 
 def run_independent_v1_post_ai_spawn_validation() -> dict:
     """
-    Prove independent AI V1 research tiles wire post-AI into LAB/process_signal.
+    Prove Type B consumes the shared direction call exactly once.
 
-    Catches the class of bug where maybe_tick_* calls evaluate_signal_with_ai but
-    never calls _spawn_independent_v1_lane_after_ai / _spawn_lab_combo_shadow /
-    process_signal — so AI ticks run while Lane Lab opportunity capture stays at 0.
+    Catches duplicate DeepSeek calls, missing explicit Type B fan-out, confidence
+    leakage, and accidental inheritance through the generic combo router.
     """
-    tick_fns = {
-        RESEARCH_LANE_TYPE_B_HUNTER_V1: "maybe_tick_type_b_hunter_v1_research",
-        RESEARCH_LANE_SR_MICRO_TILE_V1: "maybe_tick_sr_micro_tile_v1_research",
-    }
-    helper_name = "_spawn_independent_v1_lane_after_ai"
     checks = []
-    sources: dict[str, str] = {}
 
     try:
         import bot
@@ -903,57 +914,60 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
     else:
         import_err = None
 
-    for lane, fn_name in tick_fns.items():
-        src = ""
-        if bot is not None:
-            try:
-                src = inspect.getsource(getattr(bot, fn_name))
-            except Exception as exc:
-                src = f"inspect_error:{exc}"
-        sources[fn_name] = src
-
-        has_ai = "evaluate_signal_with_ai" in src
-        has_spawn = helper_name in src
-        checks.append(
-            {
-                "check": f"{fn_name} calls evaluate_signal_with_ai",
-                "passed": has_ai and not src.startswith("inspect_error"),
-                "detail": f"lane={lane} has_ai={has_ai}",
-            }
-        )
-        checks.append(
-            {
-                "check": f"{fn_name} calls {helper_name} after AI",
-                "passed": has_ai and has_spawn,
-                "detail": (
-                    f"lane={lane} has_spawn_helper={has_spawn} "
-                    "(AI-only ticks without spawn leave Lane Lab at 0)"
-                ),
-            }
-        )
-
-    helper_src = ""
+    shared_spawn_src = ""
+    compatibility_tick_src = ""
+    generic_spawn_src = ""
+    process_signal_src = ""
     if bot is not None:
         try:
-            helper_src = inspect.getsource(getattr(bot, helper_name))
+            shared_spawn_src = inspect.getsource(bot.spawn_type_b_lane_from_shared_ai)
+            compatibility_tick_src = inspect.getsource(bot.maybe_tick_type_b_hunter_v1_research)
+            generic_spawn_src = inspect.getsource(bot.spawn_combo_lanes_from_ai_scan)
+            process_signal_src = inspect.getsource(bot.process_signal)
         except Exception as exc:
-            helper_src = f"inspect_error:{exc}"
-    sources[helper_name] = helper_src
+            shared_spawn_src = f"inspect_error:{exc}"
 
-    helper_ok = (
-        "_spawn_combo_lane" in helper_src
-        and ("SPAWN_SKIPPED" in helper_src or "log_lane_opportunity_event" in helper_src)
-    )
-    checks.append(
+    checks.extend([
         {
-            "check": f"{helper_name} routes into _spawn_combo_lane / opportunity log",
-            "passed": helper_ok and not str(helper_src).startswith("inspect_error"),
-            "detail": (
-                f"calls_spawn_combo_lane={'_spawn_combo_lane' in helper_src} "
-                f"logs_opportunity={'log_lane_opportunity_event' in helper_src}"
+            "check": "Type B is declared as a shared-direction lane",
+            "passed": is_shared_ai_direction_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1),
+            "detail": f"lane={RESEARCH_LANE_TYPE_B_HUNTER_V1}",
+        },
+        {
+            "check": "shared Type B router uses the existing AI payload without another API call",
+            "passed": (
+                "_spawn_independent_v1_lane_after_ai" in shared_spawn_src
+                and "evaluate_signal_with_ai" not in shared_spawn_src
             ),
-        }
-    )
+            "detail": "shared router forwards the existing AI_SCAN result",
+        },
+        {
+            "check": "shared Type B router neutralizes AI confidence",
+            "passed": (
+                'shared_ai["win_prob"] = 0' in shared_spawn_src
+                and 'shared_ai["confidence_used_for_entry"] = False' in shared_spawn_src
+            ),
+            "detail": "win probability is audit-only and cannot gate entry",
+        },
+        {
+            "check": "legacy Type B timer is a compatibility no-op",
+            "passed": (
+                "evaluate_signal_with_ai" not in compatibility_tick_src
+                and "return" in compatibility_tick_src
+            ),
+            "detail": "no second Type B prompt/timer remains",
+        },
+        {
+            "check": "AI_SCAN explicitly fans the one result into Type B",
+            "passed": "spawn_type_b_lane_from_shared_ai" in process_signal_src,
+            "detail": "Continuous and Type B receive the same completed AI result",
+        },
+        {
+            "check": "generic combo fan-out excludes shared-direction lanes",
+            "passed": "is_shared_ai_direction_lane" in generic_spawn_src,
+            "detail": "prevents duplicate Type B spawn from the same AI result",
+        },
+    ])
 
     if import_err:
         checks.append(
@@ -966,15 +980,15 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
 
     passed = all(c["passed"] for c in checks)
     payload = {
-        "schema": "independent_v1_post_ai_spawn_validation_v1",
+        "schema": "shared_direction_post_ai_spawn_validation_v2",
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "verdict": "PASS" if passed else "FAIL",
-        "lanes": list(tick_fns.keys()),
+        "lanes": [RESEARCH_LANE_TYPE_B_HUNTER_V1],
         "checks": checks,
         "policy": (
-            "Independent AI V1 tiles must call _spawn_independent_v1_lane_after_ai "
-            "after evaluate_signal_with_ai so LAB shadow / process_signal can run"
+            "One direction-only AI_SCAN result feeds Continuous and Type B. Type B "
+            "keeps its own fixed gate and order book without issuing another AI request."
         ),
     }
     _write_json(INDEPENDENT_V1_POST_AI_SPAWN_FILE, payload)

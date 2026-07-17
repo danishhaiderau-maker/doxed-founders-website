@@ -274,6 +274,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setInstanceBusy(true);
     try {
       const res = await resumeMyAgentInstance(slug, session.accessToken);
+      if (exchangeProvider !== 'paper' && (res.executionMode !== 'LIVE' || !res.confirmedAt)) {
+        throw new Error('Relay did not return a confirmed LIVE execution state.');
+      }
       setInstanceStatus('ACTIVE');
       // F8 — refresh dashboard state immediately so the user sees the
       // backend's actual lastError / derivativesUsd / openPositions right

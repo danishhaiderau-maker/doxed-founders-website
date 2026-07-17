@@ -8,7 +8,7 @@ type RelayState = 'idle' | 'active' | 'paused' | 'copy' | 'sim';
 function relayLabel(state: RelayState, exchangeLabel: string) {
   switch (state) {
     case 'active':
-      return `Copying showcase signals on ${exchangeLabel}`;
+      return `Copying Continuous + Type B showcase orders on ${exchangeLabel}`;
     case 'sim':
       return `Relay simulation active — paper book on ${exchangeLabel}; live orders blocked`;
     case 'paused':
@@ -161,7 +161,9 @@ export function ExchangeRelayControl({
           <strong className="text-zinc-400">Stop</strong> severs the showcase relay — no new trades from the admin bot
           will hit your {exchangeLabel} account. Open positions stay on the exchange.{' '}
           <strong className="text-zinc-400">Start real trading</strong> resumes copy from where you left off
-          {rentalExpired ? ' after you renew your rental.' : '.'}
+          {rentalExpired
+            ? ' after you renew your rental.'
+            : '. It mirrors Continuous and Type B pending limits, chases, fills, and exits; Tile 2 stays paper-only.'}
         </p>
       )}
     </div>

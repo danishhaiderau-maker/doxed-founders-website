@@ -14,6 +14,7 @@ import tempfile
 
 # Force paper mode so no real Bitfinex orders are ever attempted.
 os.environ["FORCE_PAPER_MODE"] = "1"
+os.environ["SKIP_EXCHANGE_MARKET_LOAD"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

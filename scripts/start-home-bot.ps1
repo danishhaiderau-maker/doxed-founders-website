@@ -84,6 +84,14 @@ Get-Content $VaultEnv | ForEach-Object {
   }
 }
 
+# The :7002 process is the canonical paper showcase. Real funds are handled by
+# the per-user website relay after explicit consent; the showcase must never
+# inherit a stale live flag from a local config or parent environment.
+$env:FORCE_PAPER_MODE = "1"
+$env:LIVE_TRADING_ENABLED = "0"
+$env:BITFINEX_LIVE_ENABLED = "0"
+$env:LIVE_ARMED = "0"
+
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {
   Write-Host "Monorepo agent dir not found: $agentDir"
@@ -149,6 +157,27 @@ if ($NoWait) {
           }
         }
       } catch { $monitorHealthy = $false }
+    }
+
+    # A fresh heartbeat file is not proof that the monitor process still
+    # exists: a manual stop can end the monitor seconds before a restart. Verify
+    # the recorded monitor PID and command line so a stale heartbeat cannot
+    # leave the canonical bot running unwatched.
+    if ($monitorHealthy) {
+      try {
+        $monitorPidFile = Join-Path $repoRoot ".home-bot-crash-monitor.pid"
+        $monitorPidRaw = if (Test-Path $monitorPidFile) {
+          (Get-Content $monitorPidFile -Raw -ErrorAction Stop).Trim()
+        } else { "" }
+        if (-not $monitorPidRaw -or $monitorPidRaw -notmatch "^\d+$") {
+          $monitorHealthy = $false
+        } else {
+          $monitorProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $monitorPidRaw" -ErrorAction Stop
+          $monitorHealthy = [bool]($monitorProcess -and $monitorProcess.CommandLine -and $monitorProcess.CommandLine -like "*bot-auto-restart.ps1*")
+        }
+      } catch {
+        $monitorHealthy = $false
+      }
     }
 
     if ($monitorHealthy) {
