@@ -12030,8 +12030,9 @@ def _submit_tile2_paper_resting_limit(
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
-    Independent-AI lanes (A160 V2) are excluded — they never inherit AI_SCAN / CONTINUOUS
-    decisions; they run their own prompt on a phase-shifted timer.
+    Independent-AI lanes, shared-direction policy lanes, and deterministic bracket
+    lanes are excluded. Shared Type B is routed explicitly from the same completed
+    AI result so it keeps a separate policy and order book without a duplicate call.
     """
     if not is_ai_scan_lane(source_lane) or ai.get("decision") != "APPROVE":
         return
@@ -22423,7 +22424,7 @@ DASHBOARD_JS = """(function () {
               : (spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2'
               ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — V2 uses own prompt, trade IDs, and AI clock</div>'
               : (spec.is_independent_ai
-                ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — independent AI prompt + staggered cadence; OFF = LAB shadow</div>'
+                ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS and Type B share one direction call; policies, orders, chase, and P&amp;L remain independent. OFF = LAB shadow.</div>'
                 : '')))
             + (function () {
               const prom = spec.promotion_criteria;
@@ -28427,7 +28428,7 @@ def main():
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(
             f"[{COMBO_BENCHMARK_ROLE}] {BENCHMARK_PROFILE_ID} — {COMBO_BENCHMARK_LANE} | "
-            f"~{get_research_ai_cooldown_sec()}s AI_SCAN | 4 combo tiles independent | Scenario C exits "
+            f"~{get_research_ai_cooldown_sec()}s shared direction AI | separate Continuous/Type B policies | Scenario C exits "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
