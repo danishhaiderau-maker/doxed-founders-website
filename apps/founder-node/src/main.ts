@@ -99,6 +99,24 @@ import {
   runFounderLocalAsync,
 } from './founder-cloud';
 import { startDeploymentRuntimeStatusServer } from './deployment-mode-status';
+// Phase 2 — device-code first-run + pairing state machine.
+import {
+  newInstallId,
+  newIpcSecret,
+  requestDeviceCode,
+  pollDeviceCode,
+  postLogout,
+  postRevoke,
+  postRotateToken,
+  type DeviceCodeRendererGrant,
+  type DeviceCodePollRendererResult,
+  type AuthorizedPair,
+} from './device-code-flow';
+import {
+  computePairingState,
+  pairingStateLabel,
+  pairingStateTooltip,
+} from './pairing-state';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
@@ -186,6 +204,20 @@ let syncPausedUntil = 0;
 let authRecoveryHandled = false;
 let lastAuthDialogAt = 0;
 const AUTH_DIALOG_COOLDOWN_MS = 5 * 60 * 1000;
+
+// ─── Phase 2 — device-code + pairing state runtime handles ────────────────
+/**
+ * In-flight device-code grant. The renderer drives the polling; we hold the
+ * `deviceCode` (the secret) on this object so it never crosses the IPC
+ * boundary (the renderer only sees the userCode + verificationUri).
+ */
+interface ActiveDeviceCode {
+  deviceCode: string;
+  rendererGrant: DeviceCodeRendererGrant;
+}
+let activeDeviceCode: ActiveDeviceCode | null = null;
+/** Set to true while the pair window is open with a flow in progress. */
+let pairingInProgress = false;
 
 const inferenceUsageReporter = new InferenceUsageReporter();
 
@@ -563,6 +595,12 @@ function pairWindowAssetsDir(): string {
 }
 
 function openPairWindow(): void {
+  // Phase 2 — mark pairing in progress so the tray shows the right state
+  // while the user is in the device-code flow. Cleared when pair succeeds
+  // (handled in the IPC handler) or when the window closes without success.
+  pairingInProgress = true;
+  refreshTrayMenu(defaultVaultRoot());
+
   if (pairWindow) {
     pairWindow.focus();
     return;
@@ -585,9 +623,9 @@ function openPairWindow(): void {
   }
 
   pairWindow = new BrowserWindow({
-    width: 440,
-    height: 520,
-    title: 'Pair Founder Node',
+    width: 480,
+    height: 640,
+    title: 'Sign in to Founder OS',
     autoHideMenuBar: true,
     show: false,
     icon: icon.isEmpty() ? undefined : icon,
@@ -612,6 +650,13 @@ function openPairWindow(): void {
   });
   pairWindow.on('closed', () => {
     pairWindow = null;
+    // If we didn't successfully pair (config still null + active grant dropped),
+    // flip back out of the pairing state.
+    if (activeDeviceCode) {
+      activeDeviceCode = null;
+    }
+    pairingInProgress = false;
+    refreshTrayMenu(defaultVaultRoot());
   });
 }
 
@@ -620,17 +665,29 @@ function buildTrayMenu(vaultRoot: string) {
   const cloud = getFounderCloudMode(config);
   const cloudRepo = resolveFounderCloudRepo(config);
   const pending = getPendingUpdate();
+
+  // Phase 2 — pairing state drives the tray label + available actions.
+  const pairingState = computePairingState({
+    config,
+    pairingInProgress,
+    lastSyncOkAt,
+    lastSyncError,
+    authRecoveryHandled,
+    tokenExpiresAt: config?.tokenExpiresAt ? new Date(config.tokenExpiresAt) : null,
+  });
+  const stateLabel = pairingStateLabel(pairingState, config);
+
   const template: Electron.MenuItemConstructorOptions[] = [
     {
       label: `Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`,
       enabled: false,
     },
     {
-      label: config ? `Connected: ${config.label}` : 'Not paired',
+      label: stateLabel,
       enabled: false,
     },
     {
-      label: config ? formatLastSyncLine() : 'Pair to enable sync',
+      label: config ? formatLastSyncLine() : 'Sign in to enable sync',
       enabled: false,
     },
   ];
@@ -640,6 +697,92 @@ function buildTrayMenu(vaultRoot: string) {
       label: `Install update v${pending.version}…`,
       click: () => {
         downloadAndInstallUpdate(pending).catch(console.error);
+      },
+    });
+  }
+
+  template.push({ type: 'separator' });
+
+  // Phase 2 — first-run / re-pair entry point. Label depends on the state.
+  if (pairingState === 'not_paired' || pairingState === 'revoked' || pairingState === 'token_expired') {
+    template.push({
+      label: 'Sign in with Founder ID…',
+      click: () => openPairWindow(),
+    });
+  } else if (pairingState === 'pairing') {
+    template.push({
+      label: 'Pairing in progress…',
+      enabled: false,
+    });
+  } else {
+    template.push({
+      label: 'Re-pair this device…',
+      click: () => openPairWindow(),
+    });
+  }
+
+  // Phase 2 — token + identity lifecycle actions (only when paired).
+  if (config) {
+    template.push({
+      label: 'Rotate node token',
+      enabled: pairingState === 'connected',
+      click: () => {
+        void (async () => {
+          try {
+            const rotated = await postRotateToken(config.apiBaseUrl, config.nodeId, config.nodeToken);
+            const next = { ...config, nodeToken: rotated.nodeToken, tokenRotatedAt: rotated.tokenRotatedAt };
+            if (rotated.tokenExpiresAt) next.tokenExpiresAt = rotated.tokenExpiresAt;
+            writeNodeConfig(vaultRoot, next);
+            notifyDesktop('Token rotated', 'Node token refreshed successfully.');
+            refreshTrayMenu(vaultRoot);
+          } catch (err) {
+            notifyDesktop('Token rotation failed', err instanceof Error ? err.message : String(err));
+          }
+        })();
+      },
+    });
+
+    template.push({
+      label: 'Sign out (logout, keep node identity)',
+      click: () => {
+        void (async () => {
+          await postLogout(config.apiBaseUrl, config.nodeId, config.nodeToken);
+          clearNodeConfig(vaultRoot);
+          authRecoveryHandled = false;
+          pairingInProgress = false;
+          activeDeviceCode = null;
+          stopBackgroundLoops(loops);
+          refreshTrayMenu(vaultRoot);
+          notifyDesktop('Signed out', 'Founder Node credentials cleared. Re-pair from the tray.');
+          openPairWindow();
+        })();
+      },
+    });
+
+    template.push({
+      label: 'Revoke this node (permanent)…',
+      click: () => {
+        void (async () => {
+          const choice = await dialog.showMessageBox({
+            type: 'warning',
+            title: 'Revoke this node?',
+            message: 'This permanently revokes the node identity on the server.',
+            detail: 'You will need to re-pair with a new device-code flow to use this install again.',
+            buttons: ['Revoke', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+          });
+          if (choice.response !== 0) return;
+          await postRevoke(config.apiBaseUrl, config.nodeId);
+          clearNodeConfig(vaultRoot);
+          authRecoveryHandled = false;
+          pairingInProgress = false;
+          activeDeviceCode = null;
+          stopBackgroundLoops(loops);
+          refreshTrayMenu(vaultRoot);
+          notifyDesktop('Node revoked', 'Server-side identity removed. Re-pair to continue.');
+          openPairWindow();
+        })();
       },
     });
   }
@@ -673,13 +816,6 @@ function buildTrayMenu(vaultRoot: string) {
         ]
       : []),
     {
-      label: 'Repair connection (new pairing code)…',
-      click: () => {
-        void shell.openExternal(SETTINGS_BUILDER_URL);
-        openPairWindow();
-      },
-    },
-    {
       label: 'Open Founder OS Settings…',
       click: () => {
         void shell.openExternal(SETTINGS_BUILDER_URL);
@@ -687,7 +823,7 @@ function buildTrayMenu(vaultRoot: string) {
     },
     {
       label: 'Sync now',
-      enabled: Boolean(config),
+      enabled: Boolean(config) && pairingState !== 'token_expired' && pairingState !== 'revoked',
       click: () => {
         runSyncCycle(vaultRoot).catch(console.error);
       },
@@ -755,6 +891,17 @@ function buildTrayMenu(vaultRoot: string) {
 
 function refreshTrayMenu(vaultRoot: string): void {
   tray?.setContextMenu(buildTrayMenu(vaultRoot));
+  // Update tooltip with the current pairing state for at-a-glance status.
+  const config = readNodeConfig(vaultRoot);
+  const state = computePairingState({
+    config,
+    pairingInProgress,
+    lastSyncOkAt,
+    lastSyncError,
+    authRecoveryHandled,
+    tokenExpiresAt: config?.tokenExpiresAt ? new Date(config.tokenExpiresAt) : null,
+  });
+  tray?.setToolTip(pairingStateTooltip(state, lastSyncError));
 }
 
 if (gotSingleInstanceLock) {
@@ -962,6 +1109,142 @@ app.whenReady().then(() => {
       }
     },
   );
+
+  // ─── Phase 2 — device-code first-run flow ──────────────────────────────
+  // Renderer (pair.js) drives the loop via start-device-code + poll-device-code.
+  // The main process holds the `deviceCode` (the secret) and never crosses
+  // the IPC boundary with it — only the userCode + verificationUri are sent
+  // to the renderer for display.
+
+  /**
+   * Ensure the install has an installId + ipcSecret stored in a sidecar
+   * `install.json` next to node-config.json. These are needed by both the
+   * device-code request (server pairs a node with this installId) and the
+   * named-pipe IPC server (pipe name is `founder-ide-{installId}`). On
+   * successful authorize, they're merged into node-config.json so the
+   * existing read/write helpers pick them up.
+   */
+  function ensureInstallIdentity(vaultRoot: string): { installId: string; ipcSecret: string } {
+    const installFile = path.join(vaultRoot, 'install.json');
+    let install: { installId?: string; ipcSecret?: string } = {};
+    try {
+      if (fs.existsSync(installFile)) {
+        install = JSON.parse(fs.readFileSync(installFile, 'utf8'));
+      }
+    } catch {
+      install = {};
+    }
+    if (!install.installId || !install.ipcSecret) {
+      install.installId = install.installId ?? newInstallId();
+      install.ipcSecret = install.ipcSecret ?? newIpcSecret();
+      try {
+        fs.writeFileSync(installFile, JSON.stringify(install, null, 2), 'utf8');
+      } catch (err) {
+        console.warn('Failed to persist install identity:', err);
+      }
+    }
+    return { installId: install.installId, ipcSecret: install.ipcSecret };
+  }
+
+  ipcMain.handle('start-device-code', async (): Promise<DeviceCodeRendererGrant> => {
+    const install = ensureInstallIdentity(vaultRoot);
+    const apiBaseUrl = (readNodeConfig(vaultRoot)?.apiBaseUrl ?? DEFAULT_API).replace(/\/$/, '');
+    const { grant } = await requestDeviceCode(apiBaseUrl, install.installId);
+    activeDeviceCode = {
+      deviceCode: grant.deviceCode,
+      rendererGrant: {
+        userCode: grant.userCode,
+        verificationUri: grant.verificationUri,
+        verificationUriComplete:
+          grant.verificationUriComplete ??
+          `${grant.verificationUri}?user_code=${encodeURIComponent(grant.userCode)}`,
+        expiresAt: grant.expiresAt,
+        interval: grant.interval,
+        installId: install.installId,
+      },
+    };
+    pairingInProgress = true;
+    refreshTrayMenu(vaultRoot);
+    return activeDeviceCode.rendererGrant;
+  });
+
+  ipcMain.handle(
+    'poll-device-code',
+    async (): Promise<DeviceCodePollRendererResult> => {
+      // Use the deviceCode we stashed on start — never trust the renderer.
+      if (!activeDeviceCode) {
+        return { status: 'expired', error: 'No active device-code grant — restart the flow.' };
+      }
+      const apiBaseUrl = (readNodeConfig(vaultRoot)?.apiBaseUrl ?? DEFAULT_API).replace(/\/$/, '');
+      const polled = await pollDeviceCode(apiBaseUrl, activeDeviceCode.deviceCode);
+
+      if (polled.kind === 'authorized') {
+        // Success — write node-config.json with the issued credentials plus
+        // the installId/ipcSecret used at grant time so the named-pipe IPC
+        // can be opened later.
+        const install = ensureInstallIdentity(vaultRoot);
+        const pair: AuthorizedPair = polled.pair;
+        const label = `${os.hostname()} Founder Node`;
+        const newConfig = {
+          version: 1 as const,
+          apiBaseUrl,
+          nodeId: pair.nodeId,
+          nodeToken: pair.nodeToken,
+          label,
+          pairedAt: new Date().toISOString(),
+          ollama: defaultOllamaConfig(),
+          founderId: pair.founderId,
+          installId: pair.installId ?? install.installId,
+          ipcSecret: install.ipcSecret,
+          ...(pair.tokenExpiresAt ? { tokenExpiresAt: pair.tokenExpiresAt } : {}),
+          tokenRotatedAt: new Date().toISOString(),
+        };
+
+        // Prove credentials before saving — avoids a "paired" UI that 401s
+        // on the next sync. If the heartbeat fails, we still save so the
+        // user can debug; the next sync cycle will surface the error.
+        try {
+          await sendHeartbeat(apiBaseUrl, pair.nodeId, pair.nodeToken, {
+            ...defaultHeartbeat(label, vaultRoot),
+            nodeId: pair.nodeId,
+          });
+        } catch (err) {
+          console.warn('Post-pair heartbeat failed (saving anyway):', err);
+        }
+
+        writeNodeConfig(vaultRoot, newConfig);
+        activeDeviceCode = null;
+        pairingInProgress = false;
+        authRecoveryHandled = false;
+        resetAuthRecoveryState();
+        refreshTrayMenu(vaultRoot);
+        startSyncLoop(vaultRoot);
+
+        notifyDesktop(
+          'Founder Node connected',
+          `Signed in as ${pair.founderId}. Keep one tray app open.`,
+        );
+        if (isWindows() && app.isPackaged) {
+          void tryAddWindowsFirewallRules().catch(console.warn);
+        }
+
+        // Close the pair window after a short delay so the user sees the
+        // "authorized" status in the renderer.
+        setTimeout(() => {
+          if (pairWindow && !pairWindow.isDestroyed()) pairWindow.close();
+        }, 1500);
+        return polled.result;
+      }
+
+      return polled.result;
+    },
+  );
+
+  ipcMain.handle('open-url', async (_event: unknown, url: string) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      await shell.openExternal(url);
+    }
+  });
 });
 
 app.on('window-all-closed', () => {
