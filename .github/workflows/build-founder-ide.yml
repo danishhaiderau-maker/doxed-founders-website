@@ -471,23 +471,50 @@ jobs:
       # Founder Node is re-bundled in 0.9.2: the IDE Gateway client requires
       # ~/FounderVault/node-config.json, which only Founder Node creates on
       # first pairing. Built here so the outer Inno Setup can stage it as a
-      # sub-installer. Uses the same Node 20.18.2 already on PATH (Electron
-      # 35.x supports it). CSC_IDENTITY_AUTO_DISCOVERY=false disables
-      # electron-builder's auto-signing (the OUTER bundle is signed by Azure
-      # Trusted Signing in a later step; we don't double-sign the inner NSIS).
+      # sub-installer.
+      #
+      # WORKSPACE BUILD ORDER MATTERS. Founder Node imports workspace packages
+      # (@dcf/founder-vault, @dcf/utils — see apps/founder-node/package.json
+      # "dependencies"). Those packages must be installed AND built before
+      # `tsc` can resolve their type declarations. The pattern mirrors
+      # .github/workflows/founder-node-release.yml:
+      #   1. npm ci at the REPO ROOT (installs workspace symlinks so
+      #      @dcf/founder-vault / @dcf/utils resolve)
+      #   2. npm run build:utils (builds @dcf/utils then @dcf/founder-vault)
+      #   3. descend into apps/founder-node for its tsc + electron-builder
+      # Without step 1+2, `tsc -p apps/founder-node` crashes with
+      # "Cannot find module '@dcf/founder-vault'" (TS2307) — see CI run
+      # 29578049272.
+      #
+      # CSC_IDENTITY_AUTO_DISCOVERY=false disables electron-builder's
+      # auto-signing (the OUTER bundle is signed by Azure Trusted Signing in
+      # a later step; we don't double-sign the inner NSIS).
       - name: Build Founder Node (electron-builder --win)
         shell: pwsh
         run: |
+          # 1. Root install — sets up workspace symlinks so @dcf/* resolves.
+          #    The repo's packageManager is npm@10.9.2 (engines: node>=20);
+          #    the runner's Node 20.18.2 ships a compatible npm.
+          Write-Host "npm ci (repo root — workspace install)..."
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "root npm ci failed (exit $LASTEXITCODE)" }
+
+          # 2. Build the workspace packages Founder Node imports.
+          #    `build:utils` is defined at the repo root and runs
+          #    `npm run build --workspace=@dcf/utils` then
+          #    `npm run build --workspace=@dcf/founder-vault`.
+          Write-Host "npm run build:utils (workspace deps)..."
+          npm run build:utils
+          if ($LASTEXITCODE -ne 0) { throw "build:utils failed (exit $LASTEXITCODE)" }
+
+          # 3. Build Founder Node itself (tsc) + package it (electron-builder).
           $nodeDir = "apps\founder-node"
           if (-not (Test-Path (Join-Path $nodeDir "package.json"))) {
             throw "Founder Node not found at $nodeDir"
           }
           Push-Location $nodeDir
           try {
-            Write-Host "npm ci (founder-node)..."
-            npm ci --no-audit --no-fund
-            if ($LASTEXITCODE -ne 0) { throw "npm ci (founder-node) failed (exit $LASTEXITCODE)" }
-            Write-Host "npm run build (founder-node)..."
+            Write-Host "npm run build (founder-node tsc)..."
             npm run build
             if ($LASTEXITCODE -ne 0) { throw "Founder Node build failed (exit $LASTEXITCODE)" }
             $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
