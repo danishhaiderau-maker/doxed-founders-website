@@ -12,7 +12,7 @@ Product & platform (28 recent commits)
 
 ## Last Commit
 
-Merge branch 'v12-type-b-overhaul': ignore transient docs in .gitignore
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
