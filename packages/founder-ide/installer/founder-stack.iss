@@ -1,10 +1,14 @@
 ; founder-stack.iss
 ;
 ; Inno Setup script for the "Founder Stack" installer.
-; Ships Founder IDE (VSCodium downstream, Inno Setup) + optional Private-mode
-; tooling (Forgejo, cloudflared). As of 0.9.1 the bundle is IDE-only by
-; default — Founder Node was removed because the IDE talks to the Gateway API
-; directly and does not need a paired local node.
+; Ships Founder IDE (Void downstream, Inno Setup) + Founder Node (NSIS) +
+; optional Private-mode tooling (Forgejo, cloudflared).
+;
+; Founder Node was re-bundled in 0.9.2: the IDE Gateway client requires
+; ~/FounderVault/node-config.json, which only Founder Node creates on first
+; pairing. Without Founder Node in the bundle, the IDE's AI features are
+; dead-on-arrival for new users. The bundle now installs Founder Node in
+; every mode (it is small, ~25 MB, and required for the IDE to function).
 ;
 ; Build with:
 ;   iscc packages\founder-ide\installer\founder-stack.iss
@@ -15,7 +19,8 @@
 ; Design: docs/FOUNDER-IDE-FORK-PLAN.md §6.3.
 ;
 ; Inputs (place these in the build staging dir before running iscc):
-;   {#FOUNDER_IDE_SETUP}   - Founder-IDE-Setup-x64-<v>.exe  (from build/build-founder-ide.sh)
+;   {#FOUNDER_IDE_SETUP}   - Founder-IDE-Setup-x64-<v>.exe  (from gulp vscode-win32-x64-user-setup)
+;   {#FOUNDER_NODE_SETUP}  - Founder-Node-<v>-win-x64.exe   (from apps/founder-node electron-builder --win)
 ;   {#FORGEJO_BIN}         - forgejo-x64.exe               (optional; Private/Hybrid mode)
 ;   {#CLOUDFLARED_BIN}     - cloudflared.exe               (optional; Private/Hybrid mode)
 ;
@@ -36,6 +41,16 @@
 ; The default is HYBRID (matches the project setup-wizard recommendation).
 ; The installer remembers the choice as a per-user default for new projects,
 ; but every project can override it in the Founder OS setup wizard.
+;
+; Founder Node is installed in EVERY mode (it is required for the IDE Gateway
+; client to function — it creates ~/FounderVault/node-config.json on first
+; pairing). It is NOT optional and not tied to the mode selection.
+;
+; If the Forgejo + cloudflared binaries are not staged in the build context
+; (a Public-only release), the Private option is annotated "[UNAVAILABLE]"
+; at runtime and a one-time info dialog explains why. NextButtonClick
+; hard-refuses to proceed if the user somehow selects Private anyway. We
+; never silently skip a component the user selected.
 
 #ifndef FOUNDER_STACK_VERSION
   #define FOUNDER_STACK_VERSION "0.1.0"
@@ -43,6 +58,10 @@
 
 #ifndef FOUNDER_IDE_SETUP
   #define FOUNDER_IDE_SETUP  "..\..\..\staging\Founder-IDE-Setup-x64.exe"
+#endif
+
+#ifndef FOUNDER_NODE_SETUP
+  #define FOUNDER_NODE_SETUP "..\..\..\staging\Founder-Node-win-x64.exe"
 #endif
 
 #ifndef FORGEJO_BIN
@@ -90,12 +109,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; or by clicking the radio buttons in the UI. "private_core" is the Forgejo +
 ; cloudflared pair; "tailscale" is optional in every mode that includes it.
 [Components]
-; Always installed — Founder IDE (the only required app since 0.9.1; Founder
-; Node was removed from the bundle because the IDE talks to the Gateway API
-; directly and no longer needs a paired local node).
+; Always installed — Founder IDE (required, the editor itself).
 Name: "core"; Description: "Founder IDE (required)"; Types: full compact custom; Flags: fixed
+; Always installed — Founder Node (required, creates ~/FounderVault/node-config.json
+; on first pairing — the IDE Gateway client needs this file to function).
+Name: "founder_node"; Description: "Founder Node (required — IDE Gateway pairing)"; Types: full compact custom; Flags: fixed
 ; Private-mode core: Forgejo (local git forge, ~100 MB) + cloudflared (tunnel, ~30 MB).
-; Selected for PRIVATE and HYBRID; deselected for PUBLIC.
+; Selected for PRIVATE and HYBRID; deselected for PUBLIC. Disabled at the
+; wizard level if the binaries are not staged in this build.
 Name: "private_core"; Description: "Forgejo (local git forge) + cloudflared (tunnel)"; Types: full
 ; Tailscale is always optional — it requires an OS-level install + login that
 ; some founders won't want during first-run. Offered in every mode.
@@ -109,6 +130,10 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 [Files]
 ; Stage the Founder IDE sub-installer inside our bundle so we can ExecWait it.
 Source: "{#FOUNDER_IDE_SETUP}";  DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Components: core
+; Stage the Founder Node NSIS sub-installer. Required in every mode.
+#ifexist "{#FOUNDER_NODE_SETUP}"
+  Source: "{#FOUNDER_NODE_SETUP}"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Components: founder_node
+#endif
 ; Phase 7 — Private-mode binaries. Only staged when the build actually has
 ; them on disk. ISCC validates Source paths at COMPILE time, so we use a
 ; preprocessor #ifexist check to skip the lines entirely when the binaries
@@ -129,6 +154,16 @@ Filename: "{tmp}\Founder-IDE-Setup-x64.exe"; \
   Parameters: "/SILENT /CURRENTUSER /NORESTART /SP-"; \
   StatusMsg: "Installing Founder IDE..."; \
   Flags: waituntilterminated; Components: core
+
+; --- Founder Node ------------------------------------------------------------
+; NSIS silent install (/S). Founder Node creates ~/FounderVault on first run
+; and writes node-config.json after the user completes pairing. The IDE's
+; Gateway client reads that file to route AI requests; without Founder Node
+; the IDE's AI features are dead-on-arrival.
+Filename: "{tmp}\Founder-Node-win-x64.exe"; \
+  Parameters: "/S"; \
+  StatusMsg: "Installing Founder Node (IDE Gateway pairing)..."; \
+  Flags: shellexec waituntilterminated; Components: founder_node; Check: FounderNodeSetupAvailable
 
 ; --- Phase 7: Forgejo as a background service (Private/Hybrid only) ---------
 ; Registers Forgejo to run at login as a background process bound to
@@ -153,12 +188,16 @@ Filename: "{app}\bin\forgejo-x64.exe"; \
 [Icons]
 ; One Start Menu group for the bundle, plus a shortcut to Founder IDE.
 Name: "{group}\Founder IDE";  Filename: "{code:FounderIdeExe}"
+Name: "{group}\Founder Node"; Filename: "{code:FounderNodeExe}"
 Name: "{group}\Founder Stack README"; Filename: "https://doxxedcrypto.digital/docs/founder-stack"
 
 [UninstallRun]
 ; Best-effort uninstall of the IDE sub-app. This invokes the IDE's own
 ; uninstaller silently. Path uses the per-user install location.
 Filename: "{code:FounderIdeUninstaller}";   Parameters: "/SILENT /CURRENTUSER"; Flags: waituntilterminated; RunOnceId: "UninstallFounderIde"
+; Best-effort uninstall of Founder Node. NSIS uninstaller path uses the
+; per-user install location written by electron-builder.
+Filename: "{code:FounderNodeUninstaller}";  Parameters: "/S"; Flags: waituntilterminated; RunOnceId: "UninstallFounderNode"
 
 [UninstallDelete]
 Type: dirifempty; Name: "{localappdata}\Founder Stack"
@@ -173,14 +212,23 @@ Root: HKCU; Subkey: "Software\DoxxedCrypto\FounderStack"; \
   Flags: uninsdeletekey
 
 [Tasks]
-; (No installer-visible tasks in 0.9.1 — the Founder Node autostart task was
-; removed along with Founder Node itself.)
+; No installer-visible tasks. Founder Node autostart is handled by its own
+; NSIS installer (it adds the Run key itself), so we don't duplicate it here.
 
 [Code]
 // ─── Phase 7 — Deployment-mode selection wizard page ───────────────────────
 // Implements the three-card choice from doc §7 (Private / Public / Hybrid).
 // The selection drives the [Components] set via SetupTypes-equivalent radio
 // buttons, which in turn control which binaries get installed.
+//
+// Truthfulness contract (0.9.2):
+//   - If the Forgejo + cloudflared binaries are NOT staged in this build, the
+//     Private option is annotated "[UNAVAILABLE]" and a one-time info dialog
+//     explains why. NextButtonClick hard-refuses to proceed if the user
+//     somehow selects Private anyway. We never silently skip a component the
+//     user selected.
+//   - Founder Node is installed in every mode (it is required for the IDE
+//     Gateway client to function). It is not tied to the mode selection.
 
 var
   ModePage: TInputOptionWizardPage;
@@ -191,7 +239,23 @@ begin
   Result := SelectedDeploymentMode;
 end;
 
+// Returns True if the Forgejo + cloudflared binaries are present in this
+// build. Used to disable the Private radio button when they are missing.
+// Forward declarations: the actual function bodies live further down in
+// the [Code] section, but ISCC's Pascal parser requires identifiers to be
+// declared before use. Without these it aborts with
+// "Unknown identifier 'ForgejoBinAvailable'" at this call site.
+function ForgejoBinAvailable(): Boolean; forward;
+function CloudflaredBinAvailable(): Boolean; forward;
+
+function PrivateModeBinariesAvailable(): Boolean;
+begin
+  Result := ForgejoBinAvailable() and CloudflaredBinAvailable();
+end;
+
 procedure InitializeWizard();
+var
+  PrivateHint: string;
 begin
   // Three-card mode selection (doc §7). Index 0 = Private, 1 = Public,
   // 2 = Hybrid (recommended). Hybrid is the default — it matches the project
@@ -199,14 +263,26 @@ begin
   ModePage := CreateInputOptionPage(wpWelcome,
     'Which mode will you primarily use?',
     'You can change this per-project later in Founder OS.',
-    'Private = everything on your laptop ($0/mo). Public = cloud (GitHub + Vercel + Neon). Hybrid = build private, publish to cloud when ready (recommended).',
+    'Private = everything on your laptop ($0/mo). Public = cloud (GitHub + Vercel + Neon). Hybrid = build private, publish to cloud when ready (recommended). Founder Node is installed in every mode (required for IDE Gateway pairing).',
     True, False);
-  ModePage.Add('🖥  Private  — everything on laptop. Installs Forgejo + cloudflared (+ Tailscale optional). ~155 MB extra.');
+  if PrivateModeBinariesAvailable() then begin
+    PrivateHint := '';
+  end else begin
+    PrivateHint := '   [UNAVAILABLE — Forgejo + cloudflared binaries not bundled in this build]';
+  end;
+  ModePage.Add('🖥  Private  — everything on laptop. Installs Forgejo + cloudflared (+ Tailscale optional). ~155 MB extra.' + PrivateHint);
   ModePage.Add('☁️  Public  — use your existing GitHub / Vercel / Neon. Nothing extra to install.');
   ModePage.Add('🔀  Hybrid  (Recommended) — build private, publish to cloud. Installs Forgejo + cloudflared (+ Tailscale optional). ~155 MB extra.');
 
-  // Default to Hybrid (index 2).
+  // Default to Hybrid (index 2). If Private binaries are missing we also
+  // silently fall back to Hybrid (the user can still pick Public).
   ModePage.SelectedValueIndex := 2;
+
+  // If the Private binaries are missing, pop a one-time info dialog so the
+  // user understands why Private is unavailable.
+  if not PrivateModeBinariesAvailable() then begin
+    MsgBox('Private mode requires Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Choose Hybrid or Public. You can add Private-mode tooling later via Founder IDE.', mbInformation, MB_OK);
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -222,6 +298,15 @@ begin
       2: SelectedDeploymentMode := 'HYBRID';
     else
       SelectedDeploymentMode := 'HYBRID';
+    end;
+
+    // Refuse to proceed if the user somehow selected Private but the binaries
+    // are missing. (The option is annotated [UNAVAILABLE] and an info dialog
+    // explained why at page entry, but this is the belt-and-suspenders check.)
+    if (SelectedDeploymentMode = 'PRIVATE') and (not PrivateModeBinariesAvailable()) then begin
+      MsgBox('Private mode requires Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Choose Hybrid or Public.', mbError, MB_OK);
+      Result := False;
+      Exit;
     end;
 
     // Apply the choice to the component set. PRIVATE and HYBRID include the
@@ -253,6 +338,11 @@ begin
   Result := FileExists(ExpandConstant('{#CLOUDFLARED_BIN}'));
 end;
 
+function FounderNodeSetupAvailable(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{#FOUNDER_NODE_SETUP}'));
+end;
+
 // ─── Existing helpers (unchanged) ──────────────────────────────────────────
 
 function FounderIdeExe(Param: string): string;
@@ -265,6 +355,18 @@ begin
   Result := ExpandConstant('{localappdata}\Programs\Founder IDE\unins000.exe');
 end;
 
+function FounderNodeExe(Param: string): string;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\Founder Node\Founder Node.exe');
+end;
+
+function FounderNodeUninstaller(Param: string): string;
+begin
+  // electron-builder NSIS installs to %LOCALAPPDATA%\Programs\<productName>\
+  // and writes unins000.exe as the uninstaller.
+  Result := ExpandConstant('{localappdata}\Programs\Founder Node\Uninstall Founder Node.exe');
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := True;
@@ -272,12 +374,19 @@ begin
     MsgBox('Founder IDE setup not found:'#13#10'{#FOUNDER_IDE_SETUP}'#13#10#13#10'Run build-founder-ide.ps1 first.', mbError, MB_OK);
     Result := False;
   end;
+  // Founder Node setup is required for the IDE Gateway client to function.
+  // Hard-error if it is missing — do NOT silently ship a broken bundle.
+  if not FounderNodeSetupAvailable() then begin
+    MsgBox('Founder Node setup not found:'#13#10'{#FOUNDER_NODE_SETUP}'#13#10#13#10'The IDE Gateway client requires ~/FounderVault/node-config.json, which only Founder Node creates. Run the Founder Node build first.', mbError, MB_OK);
+    Result := False;
+  end;
   // Non-fatal: Private-mode binaries are optional. If missing, we still install
-  // the core app; the user can add Private-mode tooling later via Founder IDE.
+  // the core app + Founder Node; the user can add Private-mode tooling later
+  // via Founder IDE. The wizard will have disabled the Private radio button.
   if not ForgejoBinAvailable() then begin
-    Log('Phase 7: Forgejo binary not staged at {#FORGEJO_BIN} — Private-mode git forge will be unavailable until added.');
+    Log('Phase 7: Forgejo binary not staged at {#FORGEJO_BIN} — Private mode will be disabled in the wizard.');
   end;
   if not CloudflaredBinAvailable() then begin
-    Log('Phase 7: cloudflared binary not staged at {#CLOUDFLARED_BIN} — Private-mode tunnel will be unavailable until added.');
+    Log('Phase 7: cloudflared binary not staged at {#CLOUDFLARED_BIN} — Private mode will be disabled in the wizard.');
   end;
 end;

@@ -81,8 +81,22 @@ own dispatch (editor stays usable).
 
 ## Prerequisites (Windows)
 
-Node 24, Python 3.11, jq, 7-Zip, Inno Setup, Rustup, Git Bash — all installed.
-~140 GB free disk. Clean build: 60-90 min.
+Pinned by `packages/founder-ide/upstream/overlay/MANIFEST.json` and enforced by
+`.github/workflows/build-founder-ide.yml` on a `windows-2022` runner:
+
+- **Node 20.18.2** (NOT 24 — Electron 34.3.2 ABI mismatch breaks native modules)
+- **Python 3.12** (NOT 3.13+ — node-gyp has no wheel for 3.13/3.14)
+- **Inno Setup 6** (preinstalled on `windows-2022` runners at
+  `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`)
+- Git, jq, 7-Zip (only for the legacy VSCodium build path — see `legacy/`)
+
+~140 GB free disk. Clean CI build: 70–110 min (Electron download dominates).
+Warm-cache CI build: 30–45 min.
+
+For the Azure Trusted Signing step (release builds only), the 6 `AZURE_*`
+repo secrets documented in `docs/CODE-SIGNING-GUIDE.md` §0 must be set.
+Fork PRs without the secrets produce an unsigned exe (SmartScreen warns) —
+the `signtool verify` step is advisory-only on dev builds.
 
 ## Side-by-side install
 
