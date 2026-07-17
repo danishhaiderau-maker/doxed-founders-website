@@ -19937,9 +19937,10 @@ def build_static_pathway_lane_specs() -> dict:
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
         ai_label = "60+" if (virtual_chase or ai_lo >= 60) else ("65+" if ai_lo >= 65 else "60-65")
         entry_mode_label = (
-            "Static Bracket" if static_bracket else
+            "Bounded Limit Chase" if type_b_hunter else
+            ("Static Bracket" if static_bracket else
             ("Bracket Limit" if bracket_limit else
-            ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")))
+            ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous"))))
         )
         if deterministic_bracket:
             trigger = "Structural envelope + midpoint guard · tick 10–30s or pivot change"

@@ -319,6 +319,7 @@ services/btc-conservative-agent/research/downloads/
 /*_validation.json
 /trend_health.csv
 /pathway_lane_specs.json
+services/btc-conservative-agent/pathway_lane_specs.json
 
 # Transient handoff / analysis docs -- policy-untracked (item 17.4).
 # These are session artifacts that should never be committed; agents and

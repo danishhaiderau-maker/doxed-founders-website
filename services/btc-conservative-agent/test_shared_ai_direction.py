@@ -61,6 +61,11 @@ def run():
     check("shared AI is marked", shared_ai.get("shared_ai_call") is True)
     check("confidence is neutralized", shared_ai.get("win_prob") == 0)
     check("direction is preserved", shared_ai.get("direction") == "SHORT")
+    tile = next(
+        row for row in bot.build_static_pathway_lane_specs()["lanes"]
+        if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    )
+    check("Type B tile truthfully labels its chase entry", tile.get("entry_mode_label") == "Bounded Limit Chase")
     print(f"PASS: {passed} shared AI contract checks")
 
 
