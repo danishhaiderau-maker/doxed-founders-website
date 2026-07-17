@@ -586,11 +586,19 @@ jobs:
           $stagedInnerFwd = $stagedInner -replace '\\','/'
           $stagedNodeFwd  = $stagedNode  -replace '\\','/'
 
+          # ISCC preprocessor treats `\` as an escape char in defines.
+          # Embedded quotes in `/DNAME="value"` produce `\` + `"` which ISCC
+          # parses as the literal `\D:` — "Unknown filename prefix". The .iss
+          # already wraps each Source path in its own quotes (line 132/134),
+          # and CI paths contain no spaces, so we pass the raw forward-slash
+          # path with no extra quoting.
           Write-Host "Running iscc for Founder Stack $env:VERSION ..."
+          Write-Host "  FOUNDER_IDE_SETUP  = $stagedInnerFwd"
+          Write-Host "  FOUNDER_NODE_SETUP = $stagedNodeFwd"
           & $iscc `
             "/DFOUNDER_STACK_VERSION=$env:VERSION" `
-            "/DFOUNDER_IDE_SETUP=`"$stagedInnerFwd`"" `
-            "/DFOUNDER_NODE_SETUP=`"$stagedNodeFwd`"" `
+            "/DFOUNDER_IDE_SETUP=$stagedInnerFwd" `
+            "/DFOUNDER_NODE_SETUP=$stagedNodeFwd" `
             $iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
 
