@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Boot safe: paper mode + research mode (no real Bitfinex calls).
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
+os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
 from bot import (
@@ -122,7 +123,7 @@ print("=" * 78)
 print("\n[A] Frozen policy identifiers")
 check(
     "POLICY_ID matches the frozen Tile 2 identifier",
-    POLICY_ID == "sr_micro_static_long_adx40_no_london_v1",
+    POLICY_ID == "sr_micro_static_normalized_adx_vol_v1_20260718",
     f"got {POLICY_ID!r}",
 )
 check(
@@ -641,15 +642,16 @@ check(
 # ---------------------------------------------------------------------------
 print("\n[J] Dashboard metrics + restart survival")
 reset_state()
-# Record 5 eligible, 3 paper_limits, 2 filled_closes, 1 ttl_expiry, 1 cancel.
+# Record 5 eligible, 3 paper limits, 2 entry fills, 2 closes, 1 expiry, 1 cancel.
 for _ in range(5):
     record_tile2_eligible_long(episode_id=f"ep-{_}")
-# Simulate SPAWN_LAB / FILLED / TTL_EXPIRED / CANCELLED via the counter folder.
+# Simulate the real order lifecycle via the counter folder.
 from bot import _record_tile2_event
 for _ in range(3):
-    _record_tile2_event("SPAWN_LAB", direction="LONG")
+    _record_tile2_event("ORDER_SUBMITTED", direction="LONG", trade_id=f"order-{_}")
 for _ in range(2):
-    _record_tile2_event("FILLED", direction="LONG")
+    _record_tile2_event("FILLED", direction="LONG", trade_id=f"order-{_}")
+    _record_tile2_event("CLOSED", direction="LONG", trade_id=f"order-{_}")
 _record_tile2_event("TTL_EXPIRED")
 _record_tile2_event("CANCELLED")
 
@@ -692,7 +694,7 @@ check(
     m.get("exit_profile_id") == TILE2_EXIT_PROFILE_ID,
 )
 
-# fill_rate = filled_closes / paper_limits = 2/3.
+# fill_rate = entry_fills / paper_limits = 2/3.
 check(
     "fill_rate == 2/3 (0.6667)",
     abs(float(m.get("fill_rate", 0)) - (2 / 3)) < 0.01,

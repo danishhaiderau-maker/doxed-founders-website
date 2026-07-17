@@ -1,10 +1,10 @@
 """
-Quality pathway roster -- v12-type-b-overhaul (2026-07-16).
+Quality pathway roster -- v12-shared-direction-tile2-normalized (2026-07-18).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)
-  - TYPE_B_HUNTER_V1 (research candidate, T+60s AI, shadow)
-    v12 fixed policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
+  - TYPE_B_HUNTER_V1 (research candidate, shared 3-minute direction AI)
+    shared AI direction; ADX-flipped, volume-inverted, regime-aware fixed policy.
   - SR_MICRO_TILE_V2_STATIC (A/B resting limit, no chase, shadow)
   + AI_SCAN (internal scanner, no orders)
 

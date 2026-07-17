@@ -26,6 +26,12 @@ FIXTURES = ROOT / "tests" / "fixtures" / "signal-parity-cases.json"
 
 
 def _load_combos(path: Path):
+    # combos.py is a generated mirror, while scenario_c_config.py remains
+    # canonical in the agent package. Make that dependency resolvable for both
+    # probe targets so parity measures combo behavior instead of import layout.
+    agent_path = str(AGENT_DIR)
+    if agent_path not in sys.path:
+        sys.path.insert(0, agent_path)
     spec = importlib.util.spec_from_file_location("engine_combos", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader

@@ -2,7 +2,7 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-TYPE_B_HUNTER_V1: research candidate — pre-entry TYPE_B prediction (independent AI, shadow).
+TYPE_B_HUNTER_V1: research candidate — shared direction AI + independent fixed gate.
   v12 policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
 SR_MICRO_TILE_V2_STATIC: resting-limit paper study (no chase/reprice, shadow).
 
@@ -31,7 +31,8 @@ from scenario_c_config import (
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
-# New research candidates 2026-07-11 — independent AI, shadow collecting, toggle to promote
+# Research candidates. Type B shares the benchmark direction call but owns its
+# policy, order book, chase lifecycle, and outcome ledger.
 RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
@@ -64,10 +65,10 @@ COMBO_LANE_SPECS = {
     # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter — fixed policy v12 (ADX-flipped)",
+        "label": "Type B Hunter — shared direction / fixed policy",
         "subtitle": (
-            "RESEARCH_CANDIDATE — fixed-policy paper research only; "
-            "deterministic ADX/volume/regime/structure gate, no live execution"
+            "RESEARCH_CANDIDATE — one shared 3-minute direction call; "
+            "independent deterministic gate, orders, chase, and outcome ledger"
         ),
         "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
         "ai_min": 0,
@@ -77,10 +78,11 @@ COMBO_LANE_SPECS = {
         "entry_mode": "IMMEDIATE",
         "is_benchmark": False,
         "is_research_candidate": True,
-        "is_independent_ai": True,
+        "is_independent_ai": False,
+        "uses_shared_ai_direction": True,
         "id_prefix": "tbhv1",
         "module": "type_b_hunter_v1.py",
-        "ai_cadence_offset_sec": 60,
+        "ai_cadence_offset_sec": 0,
         # v12: TYPE_B_HUNTER_V1 keeps the legacy 10→6 first rung. The v12 backtest
         # found that tightening the global ladder (12→10) made Type B Hunter worse
         # (-$22.20); the 12→10 raise is for CONTINUOUS only, applied via the global
@@ -210,13 +212,14 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v12-type-b-overhaul"
+RESEARCH_STACK_VERSION = "v12-shared-direction-tile2-normalized"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC "
+    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
+    "SR_MICRO_TILE_V2_STATIC "
     "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
     "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
-    "v12 toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 frozen policy "
-    "sr_micro_static_long_adx40_no_london_v1"
+    "v12 toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 normalized policy "
+    "sr_micro_static_normalized_adx_vol_v1_20260718"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -232,7 +235,7 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — fixed policy v12 (ADX-flipped)"
+COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — shared direction / fixed policy"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"
@@ -276,10 +279,15 @@ def is_independent_ai_lane(lane: str) -> bool:
     lane_u = str(lane or "").upper()
     if is_deterministic_bracket_lane(lane_u):
         return False
-    if lane_u == RESEARCH_LANE_TYPE_B_HUNTER_V1:
-        return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return bool(spec.get("is_independent_ai"))
+
+
+def is_shared_ai_direction_lane(lane: str) -> bool:
+    """True for lanes that consume AI_SCAN direction without sharing policy state."""
+    lane_u = str(lane or "").upper()
+    spec = COMBO_LANE_SPECS.get(lane_u) or {}
+    return bool(spec.get("uses_shared_ai_direction"))
 
 
 def _session_from_features(features: dict) -> str:

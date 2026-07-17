@@ -8,15 +8,19 @@ TYPE_B_MIN_MFE_PCT = 15
 TYPE_A_MAX_MFE_PCT = 10
 
 LANE_ID = "TYPE_B_HUNTER_V1"
-LANE_LABEL = "Type B Hunter -- v12 fixed policy (ADX-flipped)"
+LANE_LABEL = "Type B Hunter -- shared direction / fixed policy"
 LANE_ID_PREFIX = "tbhv1"
 LANE_STATUS = "SHADOW_COLLECTING"
-IS_INDEPENDENT_AI = True
-POLICY_VERSION = "type_b_v12_20260716"
+IS_INDEPENDENT_AI = False
+USES_SHARED_AI_DIRECTION = True
+POLICY_VERSION = "type_b_shared_direction_v1_20260718"
 
-AI_OFFSET_SEC = 60
+AI_OFFSET_SEC = 0
 AI_MAX_AGE_SEC = 180
-AI_PROMPT_FOCUS = "TYPE_B_HUNTER: return direction and market facts. The deterministic policy decides entry."
+AI_PROMPT_FOCUS = (
+    "Use the shared three-minute direction result. "
+    "The deterministic Type B policy alone decides entry."
+)
 
 MIN_SCORE_TO_ENTER = 3.0
 MIN_SPREAD_FLOOR = 2

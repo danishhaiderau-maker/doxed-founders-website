@@ -11,7 +11,7 @@ collection is the V2_STATIC LONG-only lane under POLICY_ID below.
   V2_STATIC (frozen) = resting limit at exact micro S/R, never chase/reprice,
                        LONG-only, ADX<=40, LONDON blacklisted, $20 paper margin.
 
-Tile 2 frozen entry policy (POLICY_ID = sr_micro_static_long_adx40_no_london_v1):
+Tile 2 normalized holdout policy:
   - No AI
   - LONG at micro_support only (SHORT fully disabled from execution + dashboard)
   - London bucket blacklisted (08:00-12:59 UTC)
@@ -35,8 +35,11 @@ from __future__ import annotations
 # the independent holdout cohort can never be silently confused with the
 # archived historical 346-row training sample.
 # ---------------------------------------------------------------------------
-POLICY_ID = "sr_micro_static_long_adx40_no_london_v1"
-POLICY_LABEL = "Tile 2: LONG@micro-support only (ADX<=40, no LONDON, paper)"
+POLICY_ID = "sr_micro_static_normalized_adx_vol_v1_20260718"
+POLICY_LABEL = (
+    "Tile 2: normalized ADX/ATR-volatility, LONG@micro-support only "
+    "(ADX<=40, no LONDON, paper)"
+)
 # Exit-profile ID for the canonical Scenario C 12->10 ladder used by Tile 2.
 # A separate EXIT_PROFILE_*_PROVISIONAL tag tracks the 12->10 ladder cohort
 # (19 historical fills) which is held frozen and evaluated separately.

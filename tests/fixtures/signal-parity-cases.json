@@ -1,61 +1,62 @@
 {
-  "description": "Frozen parity cases — combo lane matching for v11.1 Virtual Chase tile (legacy lanes always reject).",
+  "description": "Frozen parity cases for the v12 shared-direction stack. AI confidence is absent or zero; Type B matches on directional spread while retired and deterministic lanes never use combo fan-out.",
   "cases": [
     {
-      "id": "virtual-chase-long-70-spread10",
-      "ai": { "win_prob": 70, "bull_score": 85, "bear_score": 75 },
+      "id": "type-b-long-shared-direction",
+      "ai": { "win_prob": 0, "bull_score": 8, "bear_score": 4 },
+      "direction": "LONG",
+      "spread": 4,
+      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "reject_lanes": [
+        "AI60_SP3_VIRTUAL_CHASE",
+        "COMBO_65_SP5_CHASE_3PLUS",
+        "SR_MICRO_TILE_V2_STATIC"
+      ]
+    },
+    {
+      "id": "type-b-short-computed-spread",
+      "ai": { "win_prob": 0, "bull_score": 3, "bear_score": 8 },
+      "direction": "SHORT",
+      "spread": null,
+      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "reject_lanes": [
+        "AI60_SP3_VIRTUAL_CHASE",
+        "COMBO_604_SP4_CHASE_3PLUS",
+        "SR_MICRO_TILE_V2_STATIC"
+      ]
+    },
+    {
+      "id": "type-b-spread-floor",
+      "ai": { "win_prob": 0, "bull_score": 6, "bear_score": 5 },
+      "direction": "LONG",
+      "spread": 2,
+      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_DIRECT"]
+    },
+    {
+      "id": "type-b-spread-too-low",
+      "ai": { "win_prob": 0, "bull_score": 6, "bear_score": 5 },
+      "direction": "LONG",
+      "spread": 1,
+      "expect_lanes": [],
+      "reject_lanes": [
+        "TYPE_B_HUNTER_V1",
+        "AI60_SP3_VIRTUAL_CHASE",
+        "COMBO_65_SP5_CHASE_3PLUS"
+      ]
+    },
+    {
+      "id": "legacy-confidence-cannot-revive-retired-lanes",
+      "ai": { "win_prob": 99, "bull_score": 10, "bear_score": 0 },
       "direction": "LONG",
       "spread": 10,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
+      "expect_lanes": ["TYPE_B_HUNTER_V1"],
       "reject_lanes": [
+        "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_65_SP5_CHASE_3PLUS",
         "COMBO_604_SP4_CHASE_3PLUS",
         "COMBO_604_SP4_DIRECT"
       ]
-    },
-    {
-      "id": "virtual-chase-short-68-spread6",
-      "ai": { "win_prob": 68, "bull_score": 40, "bear_score": 46 },
-      "direction": "SHORT",
-      "spread": null,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"]
-    },
-    {
-      "id": "virtual-chase-long-62-spread4",
-      "ai": { "win_prob": 62, "bull_score": 70, "bear_score": 66 },
-      "direction": "LONG",
-      "spread": 4,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS", "COMBO_65_SP5_CHASE_3PLUS"]
-    },
-    {
-      "id": "ai-low-reject-all",
-      "ai": { "win_prob": 55, "bull_score": 60, "bear_score": 50 },
-      "direction": "LONG",
-      "spread": 8,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS"
-      ]
-    },
-    {
-      "id": "spread-min-edge-virtual-chase",
-      "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 68 },
-      "direction": "LONG",
-      "spread": 3,
-      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
-      "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
-    },
-    {
-      "id": "spread-too-low-virtual-chase",
-      "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 69 },
-      "direction": "LONG",
-      "spread": 2,
-      "expect_lanes": [],
-      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_CHASE_3PLUS"]
     },
     {
       "id": "benchmark-flag-continuous",
@@ -63,8 +64,13 @@
       "expect_benchmark": true
     },
     {
-      "id": "virtual-chase-not-benchmark",
-      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "id": "type-b-not-benchmark",
+      "lane": "TYPE_B_HUNTER_V1",
+      "expect_benchmark": false
+    },
+    {
+      "id": "tile2-not-benchmark",
+      "lane": "SR_MICRO_TILE_V2_STATIC",
       "expect_benchmark": false
     }
   ]

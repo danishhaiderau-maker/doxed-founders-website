@@ -79,6 +79,7 @@ from combo_pathway_config import (
     is_deterministic_bracket_lane,
     is_immediate_entry_lane,
     is_independent_ai_lane,
+    is_shared_ai_direction_lane,
     is_research_candidate_lane,
     is_shadow_only_lane,
     is_static_bracket_lane,
@@ -88,6 +89,7 @@ from combo_pathway_config import (
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
 )
+from normalized_market_indicators import normalize_market_indicators
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -2287,6 +2289,10 @@ def lane_orders_allowed(lane: str = None) -> bool:
 def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
     """Cancel pending limits and block awaiting promotions for a disabled lane."""
     lane = str(lane or RESEARCH_LANE_CONTINUOUS).upper()
+    # Exchange cancellation must happen while the local pending rows still
+    # carry their Bitfinex order ids. Removing local rows first loses the only
+    # deterministic cancellation handle and can orphan a live resting order.
+    bx_cancelled = _cancel_bitfinex_orders_for_lane(lane, reason=reason)
     cancelled_pending = []
     expired_awaiting = []
     now = time.time()
@@ -2335,11 +2341,6 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
             f"[PIPELINE ENFORCEMENT]"
         )
         pipeline_state_sync()
-    # Pt 4a (toggle contract): also cancel corresponding Bitfinex live orders
-    # for this lane (using their saved exchange IDs). Best-effort -- if the
-    # exchange API is unreachable or no keys are configured, the local state
-    # cancellation above is still authoritative.
-    bx_cancelled = _cancel_bitfinex_orders_for_lane(lane, reason=reason)
     return {
         "lane": lane,
         "reason": reason,
@@ -2479,6 +2480,15 @@ def mark_lane_exit_only(lane: str, reason: str = "BITFINEX_DISARMED") -> None:
     if not lane:
         return
     _exit_only_until[lane] = time.time()
+    with state_lock:
+        persisted = {
+            str(item).upper()
+            for item in (state.get("exit_only_lanes") or [])
+            if str(item).strip()
+        }
+        persisted.add(lane)
+        state["exit_only_lanes"] = sorted(persisted)
+        save_persistent_config()
     logger.warning(
         f"[EXEC_MODE] {lane} -> EXIT_ONLY reason={reason} [PIPELINE ENFORCEMENT]"
     )
@@ -2487,12 +2497,30 @@ def mark_lane_exit_only(lane: str, reason: str = "BITFINEX_DISARMED") -> None:
 def clear_lane_exit_only(lane: str) -> bool:
     """Remove EXIT_ONLY marker. Returns True if a marker was present."""
     lane = str(lane or "").upper()
-    return bool(_exit_only_until.pop(lane, None))
+    removed = bool(_exit_only_until.pop(lane, None))
+    with state_lock:
+        persisted = {
+            str(item).upper()
+            for item in (state.get("exit_only_lanes") or [])
+            if str(item).strip()
+        }
+        if lane in persisted:
+            persisted.remove(lane)
+            state["exit_only_lanes"] = sorted(persisted)
+            save_persistent_config()
+            removed = True
+    return removed
 
 
 def lane_is_exit_only(lane: str) -> bool:
     lane = str(lane or "").upper()
-    return lane in _exit_only_until
+    if lane in _exit_only_until:
+        return True
+    with state_lock:
+        return lane in {
+            str(item).upper()
+            for item in (state.get("exit_only_lanes") or [])
+        }
 
 
 def execution_mode_for_lane(lane: str = None) -> str:
@@ -7945,6 +7973,22 @@ def build_full_feature_snapshot():
             "wick_ratio": wick_ratio_agg
         }
         with state_lock:
+            market_context = copy.deepcopy(state.get("market_context") or {})
+        indicators = normalize_market_indicators(
+            features=features,
+            market_context=market_context,
+            candles=copy.deepcopy(latest_candles),
+        )
+        features.update({
+            "adx": indicators.get("adx"),
+            "adx_normalized": indicators.get("adx"),
+            "adx_source": indicators.get("adx_source"),
+            "volatility_percentile": indicators.get("volatility_percentile"),
+            "volatility_atr": indicators.get("atr"),
+            "volatility_source": indicators.get("volatility_source"),
+            "indicator_normalization_version": indicators.get("indicator_normalization_version"),
+        })
+        with state_lock:
             state["feature_snapshot"] = features
         logger.info(f"[FEATURE BUILD] complete - keys: {list(features.keys())} price={price:.2f} volume={vol_agg:.4f} velocity={velocity_agg:.6f} volume_ratio={features['volume_ratio']:.4f} candle_range={candle_range_agg:.4f} body_ratio={body_ratio_agg:.4f} wick_ratio={wick_ratio_agg:.4f} [PIPELINE ENFORCEMENT]")
         return features
@@ -7966,8 +8010,13 @@ def is_valid_feature_set(features):
     if features is None:
         logger.info("[FEATURE VALIDATION] BAD_FEATURE_QUALITY features=None [PIPELINE ENFORCEMENT]")
         return False
-    if any(v is None for v in features.values()):
-        logger.info("[FEATURE VALIDATION] BAD_FEATURE_QUALITY None values present [PIPELINE ENFORCEMENT]")
+    required_values = (
+        "price", "ret_1m", "ret_5m", "ema9", "ema21", "ema200",
+        "dist_to_support", "dist_to_resistance", "volume", "volume_ratio",
+        "delta", "velocity", "imbalance", "candle_range", "body_ratio", "wick_ratio",
+    )
+    if any(features.get(key) is None for key in required_values):
+        logger.info("[FEATURE VALIDATION] BAD_FEATURE_QUALITY required None values present [PIPELINE ENFORCEMENT]")
         return False
     if features.get("volume", 0) < 0.01:
         logger.warning("[FEATURE VALIDATION] LOW_VOLUME_ENV - continuing for research [PIPELINE ENFORCEMENT]")
@@ -9532,28 +9581,23 @@ def extract_ai_json_blob(text: str) -> dict:
 
 
 def derive_research_decision_tier(win_prob: int, long_score: int, short_score: int, direction: str) -> str:
-    """Infer 5-tier decision when DeepSeek returns JSON only (no Decision: line)."""
+    """Derive execution tier from directional separation, never AI confidence."""
     direction = str(direction or "").upper()
     if direction not in ("LONG", "SHORT"):
         return "REJECT"
     long_score = int(long_score or 0)
     short_score = int(short_score or 0)
-    win_prob = int(win_prob or 0)
     if direction == "LONG":
         gap = long_score - short_score
     else:
         gap = short_score - long_score
     if gap < 5:
         return "REJECT"
-    if win_prob >= 65 and gap >= 10:
+    if gap >= 15:
         return "STRONG_APPROVE"
-    if win_prob >= 55 and gap >= 10:
+    if gap >= 10:
         return "APPROVE"
-    if win_prob >= 45:
-        return "SOFT_APPROVE"
-    if win_prob >= 35:
-        return "SOFT_REJECT"
-    return "REJECT"
+    return "SOFT_APPROVE"
 
 
 def parse_ai_response_fields(text: str) -> dict:
@@ -9595,7 +9639,7 @@ def parse_ai_response_fields(text: str) -> dict:
         if jd:
             decision = str(jd).upper()
     parsed_from_json = False
-    if not decision and is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+    if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
         decision = derive_research_decision_tier(
             win_prob,
             factors.get("long_score", 0),
@@ -10005,7 +10049,7 @@ def log_lane_opportunity_event(
         # dashboard tile can render the full Section 2 metric set without
         # re-deriving it from raw opportunity events each poll.
         if lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
-            _record_tile2_event(event, direction, block_reason)
+            _record_tile2_event(event, direction, block_reason, trade_id=trade_id)
     except Exception as e:
         logger.error(f"[LANE_OPPORTUNITY] log failed: {e}")
 
@@ -10035,7 +10079,7 @@ def log_lane_opportunity_event(
 #   ev_per_filled          - paper_pnl_usd / filled_closes
 # ---------------------------------------------------------------------------
 TILE2_COUNTERS_FILE = "tile2_counters.json"
-TILE2_COUNTERS_SCHEMA = "tile2_counters_v1"
+TILE2_COUNTERS_SCHEMA = "tile2_counters_v2"
 
 
 def _tile2_counters_bucket() -> dict:
@@ -10048,16 +10092,28 @@ def _tile2_counters_bucket() -> dict:
             "bracket_evals": 0,
             "eligible_long": 0,
             "paper_limits": 0,
+            "entry_fills": 0,
             "filled_closes": 0,
             "ttl_expiries": 0,
             "cancellations": 0,
             "episode_ids_seen": [],
+            "submitted_episode_ids": [],
+            "paper_order_ids": [],
+            "entry_fill_trade_ids": [],
+            "closed_trade_ids": [],
             "cohort_id": TILE2_POLICY_ID,
             "exit_profile_id": TILE2_EXIT_PROFILE_ID,
         },
     )
-    if "episode_ids_seen" not in bucket:
-        bucket["episode_ids_seen"] = []
+    for list_key in (
+        "episode_ids_seen",
+        "submitted_episode_ids",
+        "paper_order_ids",
+        "entry_fill_trade_ids",
+        "closed_trade_ids",
+    ):
+        if list_key not in bucket:
+            bucket[list_key] = []
     if "cohort_id" not in bucket:
         bucket["cohort_id"] = TILE2_POLICY_ID
     if "exit_profile_id" not in bucket:
@@ -10083,7 +10139,12 @@ def _persist_tile2_counters(bucket: dict) -> None:
         pass
 
 
-def _record_tile2_event(event: str, direction: str = None, block_reason: str = None) -> None:
+def _record_tile2_event(
+    event: str,
+    direction: str = None,
+    block_reason: str = None,
+    trade_id: str = None,
+) -> None:
     """Increment Tile 2 counters based on a lane opportunity event.
 
     Pure counter update — no business logic. Safe to call from
@@ -10094,10 +10155,21 @@ def _record_tile2_event(event: str, direction: str = None, block_reason: str = N
             bucket = _tile2_counters_bucket()
             if event == "BRACKET_EVAL":
                 bucket["bracket_evals"] = int(bucket.get("bracket_evals", 0)) + 1
-            elif event == "SPAWN_LAB":
-                bucket["paper_limits"] = int(bucket.get("paper_limits", 0)) + 1
+            elif event == "ORDER_SUBMITTED" and trade_id:
+                seen = bucket.setdefault("paper_order_ids", [])
+                if trade_id not in seen:
+                    seen.append(trade_id)
+                    bucket["paper_limits"] = int(bucket.get("paper_limits", 0)) + 1
             elif event == "FILLED":
-                bucket["filled_closes"] = int(bucket.get("filled_closes", 0)) + 1
+                seen = bucket.setdefault("entry_fill_trade_ids", [])
+                if trade_id and trade_id not in seen:
+                    seen.append(trade_id)
+                    bucket["entry_fills"] = int(bucket.get("entry_fills", 0)) + 1
+            elif event == "CLOSED":
+                seen = bucket.setdefault("closed_trade_ids", [])
+                if trade_id and trade_id not in seen:
+                    seen.append(trade_id)
+                    bucket["filled_closes"] = int(bucket.get("filled_closes", 0)) + 1
             elif event in ("TTL_EXPIRED", "ENTRY_TTL_EXPIRED"):
                 bucket["ttl_expiries"] = int(bucket.get("ttl_expiries", 0)) + 1
             elif event in ("CANCELLED", "STRUCTURAL_CANCEL"):
@@ -10118,15 +10190,16 @@ def record_tile2_eligible_long(episode_id: str = None) -> None:
     try:
         with state_lock:
             bucket = _tile2_counters_bucket()
-            bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
             if episode_id:
                 seen = bucket.setdefault("episode_ids_seen", [])
-                if episode_id not in seen:
-                    seen.append(episode_id)
-                    # Cap stored list size; we only need distinct count, but
-                    # keeping the IDs themselves supports audit/replay.
-                    if len(seen) > 500:
-                        del seen[: len(seen) - 500]
+                if episode_id in seen:
+                    return
+                seen.append(episode_id)
+                bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
+                if len(seen) > 500:
+                    del seen[: len(seen) - 500]
+            else:
+                bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
         _persist_tile2_counters(bucket)
     except Exception as e:
         logger.error(f"[TILE2_COUNTERS] record eligible failed: {e}")
@@ -10147,8 +10220,9 @@ def tile2_dashboard_metrics() -> dict:
     paper_pnl = round(float(lab.get("net_pnl_usd") or 0.0), 2)
     eligible = int(bucket.get("eligible_long", 0))
     filled = int(bucket.get("filled_closes", 0))
+    entry_fills = int(bucket.get("entry_fills", 0))
     paper_limits = int(bucket.get("paper_limits", 0))
-    fill_rate = (filled / paper_limits) if paper_limits > 0 else 0.0
+    fill_rate = (entry_fills / paper_limits) if paper_limits > 0 else 0.0
     ev_per_eligible = (paper_pnl / eligible) if eligible > 0 else 0.0
     ev_per_filled = (paper_pnl / filled) if filled > 0 else 0.0
     return {
@@ -10161,6 +10235,7 @@ def tile2_dashboard_metrics() -> dict:
         "bracket_evals": int(bucket.get("bracket_evals", 0)),
         "eligible_long": eligible,
         "paper_limits": paper_limits,
+        "entry_fills": entry_fills,
         "filled_closes": filled,
         "ttl_expiries": int(bucket.get("ttl_expiries", 0)),
         "cancellations": int(bucket.get("cancellations", 0)),
@@ -10184,20 +10259,38 @@ def load_tile2_counters_from_disk() -> None:
             return
         with open(TILE2_COUNTERS_FILE, encoding="utf-8") as f:
             payload = json.load(f) or {}
+        if (
+            payload.get("schema") != TILE2_COUNTERS_SCHEMA
+            or payload.get("policy_id") != TILE2_POLICY_ID
+        ):
+            logger.warning(
+                "[TILE2_COUNTERS] stale schema/policy ignored; new cohort starts at zero "
+                f"running={TILE2_COUNTERS_SCHEMA}/{TILE2_POLICY_ID} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            reset_tile2_counters_for_fresh_holdout()
+            return
         counters = payload.get("counters") or {}
         if not isinstance(counters, dict):
             return
         with state_lock:
             bucket = _tile2_counters_bucket()
             for k in (
-                "bracket_evals", "eligible_long", "paper_limits", "filled_closes",
+                "bracket_evals", "eligible_long", "paper_limits", "entry_fills", "filled_closes",
                 "ttl_expiries", "cancellations",
             ):
                 if isinstance(counters.get(k), int):
                     bucket[k] = counters[k]
-            seen = counters.get("episode_ids_seen") or []
-            if isinstance(seen, list):
-                bucket["episode_ids_seen"] = [str(x) for x in seen][-500:]
+            for list_key in (
+                "episode_ids_seen",
+                "submitted_episode_ids",
+                "paper_order_ids",
+                "entry_fill_trade_ids",
+                "closed_trade_ids",
+            ):
+                seen = counters.get(list_key) or []
+                if isinstance(seen, list):
+                    bucket[list_key] = [str(x) for x in seen][-500:]
             # Cohort is determined by the running source code, not the on-disk
             # snapshot, so that a stale on-disk cohort cannot silently lie.
             bucket["cohort_id"] = TILE2_POLICY_ID
@@ -10227,10 +10320,15 @@ def reset_tile2_counters_for_fresh_holdout() -> dict:
         bucket["bracket_evals"] = 0
         bucket["eligible_long"] = 0
         bucket["paper_limits"] = 0
+        bucket["entry_fills"] = 0
         bucket["filled_closes"] = 0
         bucket["ttl_expiries"] = 0
         bucket["cancellations"] = 0
         bucket["episode_ids_seen"] = []
+        bucket["submitted_episode_ids"] = []
+        bucket["paper_order_ids"] = []
+        bucket["entry_fill_trade_ids"] = []
+        bucket["closed_trade_ids"] = []
         bucket["cohort_id"] = TILE2_POLICY_ID
         bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
     _persist_tile2_counters(bucket)
@@ -10669,7 +10767,7 @@ def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_ta
         margin_usdt=float(FIXED_MARGIN_USDT),
         pullback_pct=float(state.get("pullback_threshold", 0.001)),
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
-        exit_config=get_exit_config_snapshot(),
+        exit_config=get_exit_config_for_lane(signal.get("research_lane")),
         ai_win_prob=ai.get("win_prob"),
         edge_score=round(float(edge_score or 0), 1),
         block_reason=shadow_reason,
@@ -11711,6 +11809,25 @@ def _tile2_open_episode_ids() -> set:
     return seen
 
 
+def _tile2_submitted_episode_ids() -> set:
+    """Episodes already admitted to the running clean cohort."""
+    with state_lock:
+        return set(_tile2_counters_bucket().get("submitted_episode_ids") or [])
+
+
+def _mark_tile2_episode_submitted(episode_id: str) -> None:
+    if not episode_id:
+        return
+    with state_lock:
+        bucket = _tile2_counters_bucket()
+        seen = bucket.setdefault("submitted_episode_ids", [])
+        if episode_id not in seen:
+            seen.append(str(episode_id))
+            if len(seen) > 500:
+                del seen[: len(seen) - 500]
+    _persist_tile2_counters(bucket)
+
+
 def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
     """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
     existing = _tile2_paper_resting_limit_for_lane()
@@ -11776,7 +11893,10 @@ def _submit_tile2_paper_resting_limit(
     # UTC bucket; without an episode_id we conservatively allow at most one
     # pending Tile 2 limit at a time.
     open_episodes = _tile2_open_episode_ids()
-    if sr_episode_id and sr_episode_id in open_episodes:
+    submitted_episodes = _tile2_submitted_episode_ids()
+    if sr_episode_id and (
+        sr_episode_id in open_episodes or sr_episode_id in submitted_episodes
+    ):
         logger.info(
             f"[TILE2] paper limit refused — episode {sr_episode_id} already has "
             f"an open/pending Tile 2 trade [PIPELINE ENFORCEMENT]"
@@ -11883,9 +12003,10 @@ def _submit_tile2_paper_resting_limit(
         "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
     }
     lane_register_pending_order(order)
+    _mark_tile2_episode_submitted(str(sr_episode_id or ""))
     log_lane_opportunity_event(
         RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
-        "SPAWN_LAB",  # SPAWN_LAB event is what folds into paper_limits counter
+        "ORDER_SUBMITTED",
         trade_id,
         direction,
         None,
@@ -11921,8 +12042,13 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
     spread = int(compute_directional_spread(final_direction, ai))
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
-        # Guard: independent-AI and deterministic-bracket lanes never spawn from AI_SCAN.
-        if is_independent_ai_lane(lane) or is_deterministic_bracket_lane(lane):
+        # Shared-direction policy lanes are routed explicitly so their own
+        # deterministic gate remains the sole entry authority.
+        if (
+            is_independent_ai_lane(lane)
+            or is_shared_ai_direction_lane(lane)
+            or is_deterministic_bracket_lane(lane)
+        ):
             continue
         detail = combo_lane_match_detail(
             lane, ai, final_direction, spread, features=enriched,
@@ -12289,6 +12415,41 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         "pre_ai": copy.deepcopy(ai),
         "pre_ctx": spawn_ctx,
     })
+
+
+def spawn_type_b_lane_from_shared_ai(ctx, ai, edge_score, features, source_lane: str):
+    """Evaluate Type B from the same AI_SCAN direction used by Continuous.
+
+    This performs no API call.  Type B keeps a separate feature gate, toggle,
+    pending-order/chase lifecycle, trade id, P&L ledger, and policy cohort.
+    """
+    if not is_ai_scan_lane(source_lane) or not ai:
+        return
+    direction = str(ai.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        log_lane_opportunity_event(
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            "SPAWN_SKIPPED",
+            (ctx or {}).get("trade_id"),
+            direction,
+            0,
+            edge_score,
+            block_reason="SHARED_AI_NO_DIRECTION",
+        )
+        return
+    shared_ai = copy.deepcopy(ai)
+    shared_ai["shared_ai_call"] = True
+    shared_ai["shared_ai_source_lane"] = source_lane
+    shared_ai["win_prob"] = 0
+    shared_ai["confidence_used_for_entry"] = False
+    _spawn_independent_v1_lane_after_ai(
+        ctx,
+        shared_ai,
+        edge_score,
+        _enrich_combo_lane_features(features, ctx),
+        RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        "TYPE_B_FROM_SHARED_DIRECTION_AI",
+    )
 
 
 def _v2_benchmark_safety_ok(context: str, trade_id: str = None) -> bool:
@@ -12924,70 +13085,8 @@ def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str
 
 
 def maybe_tick_type_b_hunter_v1_research():
-    """TYPE_B_HUNTER_V1 phase-shifted AI tick -- T+60s from CONTINUOUS.
-
-    Independent DeepSeek call with TYPE_B-specific prompt.
-    Tile OFF → LAB shadow (`_spawn_lab_combo_shadow`); tile ON → `process_signal`.
-    """
-    lane = RESEARCH_LANE_TYPE_B_HUNTER_V1
-    if not is_research_data_collection():
-        return
-    if not is_combo_execution_lane(lane):
-        return
-    now = time.time()
-    if now < _lane_last_ts.get('CONTINUOUS', 0) + 60:
-        return
-    if _lane_pipeline_running(lane):
-        return
-    if _lane_pipeline_running(RESEARCH_LANE_AI_SCAN):
-        return
-    if _lane_pipeline_running(RESEARCH_LANE_SR_MICRO_TILE_V1):
-        return
-    if now < _lane_last_ts.get('TYPE_B_HUNTER_V1', 0) + 120:
-        return
-    _lane_last_ts[lane] = now
-    try:
-        if not is_buffer_ready():
-            return
-        features = build_full_feature_snapshot()
-        if features is None:
-            return
-        edge_score = compute_edge_score(features)
-        buffers = {
-            "ret_1m": ret_1m_buffer,
-            "ret_5m": ret_5m_buffer,
-            "velocity": velocity_buffer,
-            "volume": volume_buffer,
-            "avg_volume": get_aggregated(volume_buffer),
-            "delta": delta_buffer,
-            "delta_change": delta_change_buffer,
-            "imbalance": imbalance_buffer,
-            "range": candle_range_buffer,
-            "wick_ratio": wick_ratio_buffer,
-            "body_ratio": body_ratio_buffer,
-        }
-        ctx = build_pure_ai_context(state, buffers)
-        if not ctx:
-            logger.info(f"[{lane}_AI] CTX_FAIL -- skip tick")
-            return
-        ctx["trade_id"] = f"tbhscan-{uuid.uuid4().hex[:12]}"
-        tile_on = is_research_lane_enabled(lane)
-        shadow_only = not tile_on
-        logger.info(
-            f"[{lane}_AI] independent tick gap=60s+ edge={edge_score:.1f} "
-            f"tile_on={tile_on} shadow={shadow_only}"
-        )
-        ai = evaluate_signal_with_ai(
-            ctx,
-            research_lane=lane,
-            shadow_only=shadow_only,
-            trigger_reason="PERIODIC_RESEARCH_AI",
-        )
-        _spawn_independent_v1_lane_after_ai(
-            ctx, ai, edge_score, features, lane, "TYPE_B_HUNTER_V1_INDEPENDENT_AI",
-        )
-    except Exception as e:
-        logger.error(f"[{lane}_AI] tick crash: {e}")
+    """Compatibility no-op: Type B consumes the shared AI_SCAN result."""
+    return
 
 
 def maybe_tick_sr_micro_tile_v1_research():
@@ -13100,12 +13199,8 @@ def maybe_tick_sr_micro_tile_v2_bracket():
         swing_high, swing_low = compute_structural_sr(candles)
 
         features = build_full_feature_snapshot() or {}
-        adx = (
-            features.get("adx")
-            or features.get("adx_at_entry")
-            or features.get("mom_adx")
-        )
-        vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+        adx = features.get("adx_normalized")
+        vol_pct = features.get("volatility_percentile")
         sess_bucket = _research_session_bucket()
 
         eval_result = evaluate_bracket(
@@ -13174,6 +13269,21 @@ def maybe_tick_sr_micro_tile_v2_bracket():
                 if side == "LONG"
                 else eval_result.get("short_limit")
             )
+            if (
+                exec_mode != EXEC_MODE_PAPER
+                and sr_episode_id
+                and sr_episode_id in _tile2_submitted_episode_ids()
+            ):
+                log_lane_opportunity_event(
+                    lane,
+                    "SPAWN_FILTERED",
+                    bracket_id,
+                    side,
+                    None,
+                    edge_score,
+                    block_reason="EPISODE_ALREADY_COLLECTED",
+                )
+                continue
             if tile_on:
                 # Phase 1: shadow-only even when toggle ON — live bracket orders deferred.
                 logger.info(
@@ -13244,12 +13354,10 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         swing_high, swing_low = compute_structural_sr(candles)
 
         features = build_full_feature_snapshot() or {}
-        adx = (
-            features.get("adx")
-            or features.get("adx_at_entry")
-            or features.get("mom_adx")
-        )
-        vol_pct = features.get("volatility_percentile") or features.get("vol_pct")
+        # The normalized cohort must never fall back to legacy indicator fields:
+        # mixing sources would make the holdout impossible to interpret.
+        adx = features.get("adx_normalized")
+        vol_pct = features.get("volatility_percentile")
         sess_bucket = _research_session_bucket()
 
         eval_result = evaluate_bracket(
@@ -13284,10 +13392,12 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         # Section 4: derive the S/R episode ID up front so both the LAB spawn
         # path and the paper-limit path stamp the same identifier on the
         # outcome record (Section 8).
+        episode_bucket_start_ts = math.floor(now / (4 * 60 * 60)) * (4 * 60 * 60)
         sr_episode_id = tile2_derive_sr_episode_id(
             ms.get("micro_support"),
             ms.get("micro_resistance"),
             session_bucket=sess_bucket,
+            session_bucket_start_ts=episode_bucket_start_ts,
         )
         ctx = {
             "trade_id": bracket_id,
@@ -13302,6 +13412,9 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             "sr_episode_id": sr_episode_id,
             "policy_id": TILE2_POLICY_ID,
             "exit_profile_id": TILE2_EXIT_PROFILE_ID_PROVISIONAL,
+            "indicator_normalization_version": features.get("indicator_normalization_version"),
+            "adx_normalized": adx,
+            "volatility_percentile": vol_pct,
         }
         enriched = _enrich_combo_lane_features(features, ctx)
 
@@ -13414,14 +13527,16 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                         f"[{lane}] EXIT_ONLY — no new entries; collecting LAB shadow only "
                         f"[PIPELINE ENFORCEMENT]"
                     )
-                _spawn_lab_bracket_shadow(
+                spawn_result = _spawn_lab_bracket_shadow(
                     ctx, side, limit, edge_score, lane, enriched, eval_result,
                     chase_mode=CHASE_MODE_STATIC,
                     id_prefix=STATIC_LANE_ID_PREFIX,
                     max_chases=STATIC_MAX_CHASES,
                     fill_at_limit=True,
                 )
-                legs_spawned += 1
+                if spawn_result == "SPAWNED":
+                    _mark_tile2_episode_submitted(sr_episode_id)
+                    legs_spawned += 1
             elif exec_mode == EXEC_MODE_LIVE:
                 # Lane is PROBATION — Bitfinex exchange entry is forbidden.
                 logger.error(
@@ -13437,25 +13552,29 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                     edge_score,
                     block_reason="LIVE_BLOCKED_PROBATION",
                 )
-                _spawn_lab_bracket_shadow(
+                spawn_result = _spawn_lab_bracket_shadow(
                     ctx, side, limit, edge_score, lane, enriched, eval_result,
                     chase_mode=CHASE_MODE_STATIC,
                     id_prefix=STATIC_LANE_ID_PREFIX,
                     max_chases=STATIC_MAX_CHASES,
                     fill_at_limit=True,
                 )
+                if spawn_result == "SPAWNED":
+                    _mark_tile2_episode_submitted(sr_episode_id)
             else:
                 logger.warning(
                     f"[{lane}] unknown exec_mode={exec_mode} — defaulting to LAB shadow "
                     f"[PIPELINE ENFORCEMENT]"
                 )
-                _spawn_lab_bracket_shadow(
+                spawn_result = _spawn_lab_bracket_shadow(
                     ctx, side, limit, edge_score, lane, enriched, eval_result,
                     chase_mode=CHASE_MODE_STATIC,
                     id_prefix=STATIC_LANE_ID_PREFIX,
                     max_chases=STATIC_MAX_CHASES,
                     fill_at_limit=True,
                 )
+                if spawn_result == "SPAWNED":
+                    _mark_tile2_episode_submitted(sr_episode_id)
 
         logger.info(
             f"[{lane}] STATIC bracket tick pivot_changed={pivot_changed} elapsed={elapsed:.0f}s "
@@ -13606,10 +13725,9 @@ def evaluate_signal_with_ai(
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
-        # Custom prompt per research lane (v11.6 independent tiles)
-        if research_lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
-            prompt = TYPE_B_HUNTER_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
-        elif research_lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
+        # Continuous and Type B intentionally share this single direction
+        # prompt. Type B's deterministic scorer remains a separate entry gate.
+        if research_lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
             prompt = SR_MICRO_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
         else:
             prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
@@ -16119,6 +16237,17 @@ def fill_order(order):
             return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
+    fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
+    if fill_lane:
+        log_lane_opportunity_event(
+            fill_lane,
+            "FILLED",
+            order.get("trade_id"),
+            order.get("signal_dir") or order.get("dir"),
+            (ai or {}).get("win_prob"),
+            order.get("edge_score"),
+            block_reason="PENDING_LIMIT_TOUCHED",
+        )
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
     _emit_genome_execution_event("ORDER_FILLED", {
         "trade_id": order.get("trade_id"),
@@ -16632,8 +16761,9 @@ def process_signal(event: dict):
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
-                    # V2 runs on its own phase-shifted timer (maybe_tick_a160_v2_research).
-                    # Never called here — must not share AI_SCAN timestamp or inherit decisions.
+                    spawn_type_b_lane_from_shared_ai(
+                        ctx, ai, edge_score, features, research_lane,
+                    )
 
             if not ai:
                 enforce_log({"trade_id": ctx["trade_id"]}, "BLOCKED", "AI_FAIL")
@@ -17854,10 +17984,8 @@ def state_monitor_loop():
                                 _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
-            # v11.8 paper roster: only Type B and static S/R have independent
-            # collectors. Historical V1/full-chase/A160 code remains archived,
-            # but is intentionally never scheduled.
-            maybe_tick_type_b_hunter_v1_research()
+            # Type B consumes the same three-minute AI_SCAN result as Continuous.
+            # Tile 2 remains a no-AI deterministic bracket collector.
             maybe_tick_sr_micro_tile_v2_static_bracket()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
@@ -18703,11 +18831,10 @@ def close_position(pos: dict, exit_reason: str):
     clear_pending_trade()
     pipeline_state_sync()
 
-# ── Custom independent-AI prompts for research tiles ─────────────────────
-# Each tile gets its own DeepSeek prompt tuned to its specific strategy.
-# These replace AI_PROMPT_TEMPLATE when research_lane matches.
+# Archived Type B prompt retained for historical replay only. The active lane
+# consumes AI_PROMPT_TEMPLATE from the same AI_SCAN call as Continuous.
 
-TYPE_B_HUNTER_PROMPT_TEMPLATE = """
+LEGACY_TYPE_B_HUNTER_PROMPT_TEMPLATE = """
 You are a TYPE_B trade prediction engine for BTC perpetual trades (v12 policy).
 TYPE_B trades are defined as setups that achieve >=15% MFE (maximum favorable excursion).
 Your job is to surface market facts and propose a direction. The deterministic v12 policy
@@ -18963,7 +19090,11 @@ Reason: ...
 """
 
 AI_PROMPT_TEMPLATE = """
-You are a probabilistic trading decision engine for short-duration (10-40 min) BTC perpetual trades.
+You are a directional classification engine for short-duration (10-40 min) BTC perpetual trades.
+Your only predictive job is to choose LONG, SHORT, or NO_TRADE from the supplied facts.
+Do not estimate win probability or confidence. Those numbers were uncalibrated in live
+research and are not used by either strategy. Long/short scores below are comparative
+evidence scores, not probabilities.
 
 Given the following market data:
 
@@ -19012,7 +19143,7 @@ Before selecting direction:
 1. Build the bullish case (list reasons).
 2. Build the bearish case (list reasons).
 3. Score each side independently (0-100).
-4. Choose direction from higher score; confidence should reflect score gap.
+4. Choose direction from the higher score. If the evidence gap is under 5, choose NO_TRADE.
 
 === DECISION PRIORITY (after scoring) ===
 
@@ -19038,7 +19169,6 @@ Return EXACTLY (JSON block before Direction line):
 ```json
 {{
   "direction": "LONG or SHORT or NO_TRADE",
-  "confidence": 0,
   "long_score": 0,
   "short_score": 0,
   "preferred_direction": "LONG or SHORT or NO_TRADE",
@@ -19059,27 +19189,22 @@ Return EXACTLY (JSON block before Direction line):
 long_score and short_score are 0-100. bull_score and bear_score are 0-10 summaries of the same cases.
 
 Direction: LONG / SHORT / NO_TRADE
-Win probability: 0-100
 Long score: 0-100
 Short score: 0-100
 Bull score: 0-10
 Bear score: 0-10
-Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / SOFT_REJECT / REJECT
 Reason: ...
 """
 
 RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
-- Target approval rate 20-40%
-- STRONG_APPROVE / APPROVE / SOFT_APPROVE -> execute limit entry
-- SOFT_REJECT -> shadow replay only (counterfactual study)
-- REJECT -> hard reject + shadow replay
+- One DeepSeek call every three minutes supplies direction to both CONTINUOUS and TYPE_B_HUNTER_V1.
+- CONTINUOUS and TYPE_B_HUNTER_V1 keep separate policy gates, orders, chase state, and ledgers.
+- Do not return or infer a win probability. The bot derives its research tier only from
+  the direction and the long_score versus short_score evidence gap.
 - TREND HIERARCHY still applies: weak counter-trend APPROVEs may be downgraded to SOFT_REJECT by bot gate
-- Use STRONG_APPROVE when win_prob >= 65 and trend + micro structure confirm same direction
-- Use APPROVE when win_prob >= 55 and long_score/short_score gap >= 10 with trend alignment
-- Use SOFT_APPROVE when win_prob 45-54 and direction + orderflow support continuation (not lone SR bounce)
-- Use SOFT_REJECT when uncertain but worth logging (win_prob 35-44)
+- A gap >=15 is STRONG_APPROVE, >=10 APPROVE, 5-9 SOFT_APPROVE, and <5 REJECT.
 - MTF is informational for gating - but BEAR_ALIGNED + ADX>25 means support alone is NOT a LONG signal
 - CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
   LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
@@ -19311,6 +19436,10 @@ def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.
     hiccup to api-pub.bitfinex.com (SSLEOFError, ConnectionReset, timeout) would
     crash the bot with exit 1 before main() runs. Retry with backoff instead so
     the bot survives transient Bitfinex/ISP/Python-3.14 TLS quirks at boot."""
+    if (os.getenv("SKIP_EXCHANGE_MARKET_LOAD") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return {}
     last_err: Exception | None = None
     for i in range(attempts):
         try:
@@ -19948,7 +20077,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"BULL → ADX ≥{_TB_BULL_ADX_FLOOR:.0f}",
                 "Volume <0.80 = accumulation",
                 f"Volume >{_TB_VOL_DANGER:.1f} = danger",
-                "AI confidence audit-only",
+                "AI confidence not requested",
                 f"Score ≥{_TB_MIN_SCORE:.1f}",
                 f"Spread ≥{_TB_MIN_SPREAD}",
                 f"{_tb_policy}",
@@ -19968,16 +20097,17 @@ def build_static_pathway_lane_specs() -> dict:
                 "  • Spread 3-5 = +0.5 · Edge 3-5 = +0.5 · EMA slope aligned = +0.25",
                 f"Hard rejects (override score): ADX <{_TB_ADX_FLOOR:.0f} · BULL+ADX<{_TB_BULL_ADX_FLOOR:.0f} · "
                 f"vol>{_TB_VOL_DANGER:.1f} · spread<{_TB_MIN_SPREAD} · counter-structure · triple-danger",
-                "AI confidence: vestigial (constant 62 in fresh data) — logged for audit, NOT a gate",
+                "AI confidence: not requested; stored as 0 only for legacy schema compatibility",
+                "Shared AI: one three-minute direction call also feeds CONTINUOUS",
                 "Tile OFF: collect calibration + counterfactual shadows; no paper limits",
-                "Tile ON: paper limits only; Bitfinex live remains disabled",
+                f"Tile ON routing: {execution}",
                 "Logs: lane_opportunity_capture.jsonl + shadow_lane_outcome.jsonl + lane_lab_pnl_ledger.json",
                 f"Independence: {shared['independence']}",
             ]
             entry_filters = {
-                "ai_probability_bucket": "audit-only; not an entry gate (vestigial since v12)",
+                "ai_probability_bucket": "not requested; not an entry gate",
                 "directional_spread_bucket": "≥2",
-                "entry_mode": "TYPE_B_FIXED_POLICY_V12",
+                "entry_mode": "TYPE_B_SHARED_DIRECTION_FIXED_POLICY",
                 "policy_version": _tb_policy,
                 "adx_floor": float(_TB_ADX_FLOOR),
                 "bull_adx_floor": float(_TB_BULL_ADX_FLOOR),
@@ -19993,14 +20123,14 @@ def build_static_pathway_lane_specs() -> dict:
             type_b_entry = {
                 "trigger": trigger,
                 "entry_path": "TYPE_B_PRE_ENTRY_SCORE",
-                "fill_path": "PAPER_LIMIT_SHADOW",
-                "ai_path": "Independent Type B scorer (fixed policy)",
-                "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
-                "chase_detail": "No full-chase V2 path; paper limit research only",
+                "fill_path": "LIMIT_ORDER_ROUTER",
+                "ai_path": "Shared 3-minute direction AI; independent Type B fixed scorer",
+                "ai_cadence": "One shared AI_SCAN call every ~3 minutes; no second Type B call",
+                "chase_detail": "Bounded pending-limit chase; independent Type B order and chase history",
                 "post_ai_gates": "Fixed score threshold; walk-forward validation only",
                 "margin_usd": ai_direct["margin_usd"],
                 "execution": execution,
-                "orders": "Paper limits only when tile ON; never Bitfinex live",
+                "orders": execution,
                 "filters": entry_filters,
             }
         elif independent_ai:
@@ -20191,7 +20321,7 @@ def build_static_pathway_lane_specs() -> dict:
                     [
                         "Fixed pre-entry score; calibration is evaluated walk-forward only",
                         "Rejected executable signals collect counterfactual paper shadows",
-                        "Paper limits only when enabled; never Bitfinex live",
+                        "Tile ON follows the centralized PAPER/LIVE/EXIT_ONLY execution contract",
                         "Own Type B input, replay, outcome and ledger records",
                     ]
                     if type_b_hunter
@@ -20229,9 +20359,9 @@ def build_static_pathway_lane_specs() -> dict:
                     "execution": execution,
                     **(
                         {
-                            "ai_path": "Independent Type B scorer (fixed policy)",
-                            "ai_cadence": "Independent calibration cycle; no outcome-label tuning",
-                            "chase_detail": "No full-chase V2 path; paper limit research only",
+                            "ai_path": "Shared 3-minute direction AI; independent Type B fixed scorer",
+                            "ai_cadence": "One shared AI_SCAN call; no second Type B API request",
+                            "chase_detail": "Bounded pending-limit chase with its own order/trade IDs",
                             "margin_usd": ai_direct["margin_usd"],
                             "post_ai_gates": "Fixed score threshold; walk-forward validation only",
                         }
@@ -20380,7 +20510,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "v12 paper-research roster — CONTINUOUS benchmark + Type B Hunter + static S/R; all other lanes are archived analytics only",
+        "architecture_freeze_note": "v12 roster — Continuous + Type B share one direction AI call but keep separate policies/books; static S/R remains paper probation",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -22283,11 +22413,13 @@ DASHBOARD_JS = """(function () {
               if (!parts.length) return '';
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
-            + (spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2'
+            + (spec.lane === 'TYPE_B_HUNTER_V1'
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">One shared direction call feeds both tiles; Type B keeps its own gates, limit orders, chase history, exits, and ledger.</div>'
+              : (spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2'
               ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — V2 uses own prompt, trade IDs, and AI clock</div>'
               : (spec.is_independent_ai
                 ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — independent AI prompt + staggered cadence; OFF = LAB shadow</div>'
-                : ''))
+                : '')))
             + (function () {
               const prom = spec.promotion_criteria;
               const kill = spec.kill_criteria;
@@ -25114,7 +25246,12 @@ def toggle_debug():
 def api_reset_showcase():
     """Admin/platform: wipe all research artifacts and restart session at $500."""
     result = perform_fresh_collection_reset()
-    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
+    status = 200 if result.get("ok") else 409
+    return jsonify({
+        "ok": bool(result.get("ok")),
+        "reset": result,
+        "account_balance": STARTING_BALANCE,
+    }), status
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
@@ -25144,10 +25281,22 @@ def toggle_fresh_collection():
 @app.route('/api/live_arm', methods=['POST'])
 def live_arm():
     data = request.get_json() or {}
+    armed = bool(data.get("armed", False))
+    if armed and not _private_api_keys_ok():
+        return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
     with state_lock:
-        state["live_armed"] = data.get("armed", False)
+        prev = bool(state.get("live_armed") and state.get("bitfinex_live_enabled"))
+        state["live_armed"] = armed
+        state["bitfinex_live_enabled"] = armed
         save_persistent_config()
-    return jsonify({"live_armed": state["live_armed"]})
+    exit_only = {}
+    if prev and not armed:
+        exit_only = _mark_exit_only_for_open_bitfinex_positions(reason="LIVE_ARM_DISARMED")
+    return jsonify({
+        "live_armed": state["live_armed"],
+        "bitfinex_live_enabled": state["bitfinex_live_enabled"],
+        "exit_only_lanes": list(exit_only.keys()),
+    })
 
 
 @app.route('/api/bitfinex_live', methods=['POST'])
@@ -27526,6 +27675,7 @@ def _persistent_config_keys():
         "limit_chase_interval_sec",
         "limit_chase_step_pct",
         "duplicate_limit_block_enabled",
+        "exit_only_lanes",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")

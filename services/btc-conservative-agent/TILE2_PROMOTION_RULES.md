@@ -1,6 +1,6 @@
 # Tile 2 (SR_MICRO_TILE_V2_STATIC) Promotion Rules
 
-**Frozen:** `sr_micro_static_long_adx40_no_london_v1` · exit `scenario_c_ladder_12_to_10_v1`
+**Frozen:** `sr_micro_static_normalized_adx_vol_v1_20260718` · exit `scenario_c_ladder_12_to_10_v1`
 
 This document defines the ONLY conditions under which the Tile 2 lane may
 be promoted out of PROBATION / PAPER_ONLY. The operator makes the final
@@ -14,11 +14,13 @@ holdout sample.
 
 ## Why this document exists
 
-The 346-row historical sample was used to *tune* the Tile 2 policy (ADX
-cap, London blacklist, SHORT disable, etc.). It is **in-sample training
-data**. Promoting the lane on the same data it was tuned on is not a
-valid test. The rules below exist to make sure promotion is justified by
-fresh data the policy has never seen.
+The 346-row historical sample was used to *tune* the earlier Tile 2
+policy (ADX cap, London blacklist, SHORT disable, etc.). It is
+**in-sample training data**. The first normalized-indicator cohort starts
+under a new policy ID so those rows cannot be mixed with the holdout.
+Promoting the lane on the same data it was tuned on is not a valid test.
+The rules below exist to make sure promotion is justified by fresh data
+the policy has never seen.
 
 The historical sample is preserved as an archived training cohort. It is
 NOT deleted, but it MUST NOT be used as evidence for promotion.
@@ -78,9 +80,12 @@ fresh independent holdout cohort (started after `POST /api/tile2/reset_counters`
 
 - **Any historical row.** The 346-row archived training sample is
   explicitly excluded.
-- **Outcomes from before the corrected process restart.** Only rows
-  with `policy_id == sr_micro_static_long_adx40_no_london_v1` and a
-  matching `entry_policy_hash` count.
+- **Outcomes from before the normalized-indicator process restart.**
+  Only rows with
+  `policy_id == sr_micro_static_normalized_adx_vol_v1_20260718` and a
+  matching `entry_policy_hash` count. Rows from
+  `sr_micro_static_long_adx40_no_london_v1` remain archived as the
+  historical baseline and cannot promote this cohort.
 - **Outcomes from the old buggy replay path.** Pre-fix rows where
   MFE protection could not fire (`unreal >= mfe_protect` bug) are
   explicitly excluded. See Section 5 of the static integrity repair.
