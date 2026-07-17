@@ -321,6 +321,22 @@ export class FounderNodeController {
     return this.nodes.heartbeat(req.founderNode.nodeDbId, body);
   }
 
+  /**
+   * Phase 3 — IDE↔node named-pipe IPC handshake state report. The Founder
+   * Node tray POSTs to this endpoint when its IPC client emits 'connected'
+   * or 'disconnected'. The API keeps the latest state in memory so the
+   * FounderIdeAdapter can decide isConnected() in real time.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('ide-handshake')
+  reportIdeHandshake(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: { active: boolean },
+  ) {
+    this.nodes.setIdeHandshakeState(req.founderNode.nodeId, Boolean(body?.active));
+    return { ok: true, active: Boolean(body?.active) };
+  }
+
   @UseGuards(FounderNodeGuard)
   @Post('sync')
   sync(

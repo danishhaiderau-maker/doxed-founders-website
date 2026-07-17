@@ -119,6 +119,20 @@ import {
 } from './pairing-state';
 // Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
 import { IdeIpcClient, startIdeIpcClient } from './ide-ipc-client';
+// Phase 3 — report IDE handshake state to the API so the adapter can decide
+// isConnected() in real time. Defined inline (small) to avoid pulling a new
+// dependency for a single fetch helper.
+function reportIdeHandshake(apiBaseUrl: string, nodeId: string, nodeToken: string, active: boolean): void {
+  const base = apiBaseUrl.replace(/\/$/, '');
+  void fetch(`${base}/api/founder-node/ide-handshake`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `FounderNode ${nodeId}:${nodeToken}`,
+    },
+    body: JSON.stringify({ active }),
+  }).catch((err) => console.warn('[ide-ipc] failed to report handshake state:', err));
+}
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
@@ -969,6 +983,16 @@ app.whenReady().then(() => {
   // starts. Safe to call when not paired (resolves false immediately).
   if (config) {
     ideIpcClient = startIdeIpcClient();
+    // Forward handshake events to the API so FounderIdeAdapter can decide
+    // isConnected() in real time.
+    ideIpcClient.on('connected', () => {
+      const c = readNodeConfig(vaultRoot);
+      if (c) reportIdeHandshake(c.apiBaseUrl, c.nodeId, c.nodeToken, true);
+    });
+    ideIpcClient.on('disconnected', () => {
+      const c = readNodeConfig(vaultRoot);
+      if (c) reportIdeHandshake(c.apiBaseUrl, c.nodeId, c.nodeToken, false);
+    });
   }
 
   configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
@@ -1245,6 +1269,12 @@ app.whenReady().then(() => {
         // retry in the background until it is.
         if (!ideIpcClient) {
           ideIpcClient = startIdeIpcClient();
+          ideIpcClient.on('connected', () => {
+            reportIdeHandshake(apiBaseUrl, pair.nodeId, pair.nodeToken, true);
+          });
+          ideIpcClient.on('disconnected', () => {
+            reportIdeHandshake(apiBaseUrl, pair.nodeId, pair.nodeToken, false);
+          });
         }
 
         notifyDesktop(
