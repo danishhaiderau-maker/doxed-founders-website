@@ -241,6 +241,13 @@ end;
 
 // Returns True if the Forgejo + cloudflared binaries are present in this
 // build. Used to disable the Private radio button when they are missing.
+// Forward declarations: the actual function bodies live further down in
+// the [Code] section, but ISCC's Pascal parser requires identifiers to be
+// declared before use. Without these it aborts with
+// "Unknown identifier 'ForgejoBinAvailable'" at this call site.
+function ForgejoBinAvailable(): Boolean; forward;
+function CloudflaredBinAvailable(): Boolean; forward;
+
 function PrivateModeBinariesAvailable(): Boolean;
 begin
   Result := ForgejoBinAvailable() and CloudflaredBinAvailable();
