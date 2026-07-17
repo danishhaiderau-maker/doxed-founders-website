@@ -13,6 +13,14 @@ build/
 apps/founder-node/release/
 apps/founder-node/release-*/
 apps/founder-node/app.asar
+
+# Founder IDE installer output (multi-hundred-MB .exe artifacts from local/CI builds).
+# The top-level `dist/` rule above does NOT match nested paths in git's pattern language,
+# so installer/dist/ needs an explicit rule to prevent accidental commits.
+packages/founder-ide/installer/dist/
+packages/founder-ide/dist/
+packages/founder-ide/staging/*.exe
+packages/founder-ide/staging/*.sha256
 .tools/
 apps/mobile-android/android/.gradle/
 apps/mobile-android/android/app/build/
