@@ -30,6 +30,10 @@ import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
+// Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
+import { runDeviceCodeSignIn } from './device-code-sign-in';
+import { PairingStatusBar } from './pairing-status-bar';
+import { startIpcServer, stopIpcServer } from './ipc/server';
 
 let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredProvider: vscode.Disposable | undefined;
@@ -38,6 +42,8 @@ let profileManager: ProfileManager | undefined;
 let costTracker: CostTracker | undefined;
 let debugSquasherDisposable: vscode.Disposable | undefined;
 let currentCreds: FounderOsCredentials | null = null;
+/** Phase 2 — pairing-state status bar (refreshes every 15s + on config change). */
+let pairingStatusBar: PairingStatusBar | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   // Status bar (connection state) ----------------------------------------------------
@@ -47,6 +53,11 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   connectionStatusBar.command = 'founderOs.manage';
   context.subscriptions.push(connectionStatusBar);
+
+  // Phase 2 — pairing-state status bar (6 canonical states, heartbeat-driven).
+  pairingStatusBar = new PairingStatusBar();
+  context.subscriptions.push(pairingStatusBar);
+  pairingStatusBar.start();
 
   // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
   profileManager = new ProfileManager(context);
@@ -80,6 +91,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)),
     vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)),
+    // Phase 2 — device-code sign-in (replaces manual paste pair flow).
+    vscode.commands.registerCommand('founderOs.signIn', () => signInWithFounderId(context)),
     vscode.commands.registerCommand('founderOs.connectFounderOs', () =>
       connectFounderOsAccount(context),
     ),
@@ -99,6 +112,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // First-pass registration (synchronous so the model picker populates fast).
   registerOrNotify(context);
+
+  // Phase 3 — start the named-pipe IPC server so the Founder Node tray can
+  // connect to this IDE instance. The server only starts if we have a config
+  // with an installId (otherwise it's a no-op until the user signs in).
+  // Best-effort: failure to start (e.g. another IDE instance already bound)
+  // logs a warning but does not crash activation.
+  startIpcServer().catch((err) => {
+    console.warn('Founder OS IPC server failed to start:', err);
+  });
 
   // Auto-load ~/FounderVault/node-config.json into founderOs.* settings so
   // pairing isn't manual every session. Fire-and-forget; re-registers after.
@@ -129,6 +151,9 @@ export function deactivate(): void {
   profileManager?.dispose();
   costTracker?.dispose();
   debugSquasherDisposable?.dispose();
+  pairingStatusBar?.dispose();
+  // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
+  stopIpcServer();
 }
 
 /** Register the chat provider + participant if we have creds; otherwise show "not paired". */
@@ -241,24 +266,65 @@ let pairPromptShownThisSession = false;
 async function showPairPrompt(context: vscode.ExtensionContext): Promise<void> {
   if (pairPromptShownThisSession) return;
   pairPromptShownThisSession = true;
+
+  // Phase 2 — first-run sign-in prompt. Offer the device-code flow first,
+  // then a BYO-provider fallback (opt-in only, not recommended because it
+  // bypasses the authed IPC layer).
+  const byoEnabled = vscode.workspace
+    .getConfiguration('founderOs')
+    .get<boolean>('byoFallbackEnabled', false);
+
+  const choices: string[] = ['Sign in with Founder ID', 'Dismiss'];
+  if (!byoEnabled) choices.splice(1, 0, 'Enable BYO-provider fallback (not recommended)');
+
   const choice = await vscode.window.showWarningMessage(
-    'Founder OS chat: Founder Node not paired. Pair it to enable Founder OS models in Chat.',
-    'Pair Founder Node',
-    'Open settings',
-    'Dismiss',
+    'Founder OS not configured. Sign in with Founder ID to enable the authed IPC + chat provider.',
+    ...choices,
   );
-  if (choice === 'Pair Founder Node') {
-    await pairWithFounderNode(context);
-  } else if (choice === 'Open settings') {
-    void vscode.commands.executeCommand(
-      'workbench.action.openSettings',
-      'founderOs',
+  if (choice === 'Sign in with Founder ID') {
+    await signInWithFounderId(context);
+  } else if (choice === 'Enable BYO-provider fallback (not recommended)') {
+    await vscode.workspace
+      .getConfiguration('founderOs')
+      .update('byoFallbackEnabled', true, vscode.ConfigurationTarget.Global);
+    void vscode.window.showInformationMessage(
+      'BYO-provider fallback enabled. You can paste your own API credentials in Founder OS settings.',
     );
+    // Re-resolve now that the user opted in — they'll need to fill creds.
+    registerOrNotify(context);
+  }
+}
+
+/**
+ * Phase 2 — device-code sign-in. Drives the RFC 8628 flow interactively,
+ * writes the resulting credentials to ~/FounderVault/node-config.json, then
+ * refreshes the chat provider + status bar.
+ */
+async function signInWithFounderId(context: vscode.ExtensionContext): Promise<void> {
+  if (!pairingStatusBar) return;
+  pairingStatusBar.setPairingInProgress(true);
+  try {
+    const creds = await runDeviceCodeSignIn();
+    if (!creds) return;
+    // Reload from the vault file so the chat provider picks up the new creds.
+    await syncVaultIntoSettings();
+    registerOrNotify(context);
+    pairingStatusBar.setGatewayResult('ok');
+    void vscode.window.showInformationMessage(
+      `Founder OS: signed in as ${creds.founderId} (node ${creds.nodeId}).`,
+    );
+  } finally {
+    pairingStatusBar.setPairingInProgress(false);
   }
 }
 
 async function manageConnection(context: vscode.ExtensionContext): Promise<void> {
   const items: (vscode.QuickPickItem & { action: () => unknown })[] = [
+    {
+      label: 'Sign in with Founder ID…',
+      description: 'device-code (RFC 8628) flow — opens browser to authorize',
+      action: () => signInWithFounderId(context),
+    },
     {
       label: 'Connect Founder OS (Twitter)…',
       description: 'open doxxedcrypto.digital login — identity syncs via Founder Node',
