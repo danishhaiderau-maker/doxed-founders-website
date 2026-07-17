@@ -507,6 +507,16 @@ jobs:
           npm run build:utils
           if ($LASTEXITCODE -ne 0) { throw "build:utils failed (exit $LASTEXITCODE)" }
 
+          # 2b. Generate Founder Node app/tray icons (PNG + ICO).
+          #     Without this, electron-builder fails with
+          #     `cannot find specified resource "build/icon.ico"` because the
+          #     icon files are not committed (they're generated artifacts).
+          #     Mirrors .github/workflows/founder-node-release.yml step
+          #     "Generate app icons" -> scripts/generate-founder-node-icon.mjs.
+          Write-Host "Generating Founder Node icons..."
+          node scripts/generate-founder-node-icon.mjs
+          if ($LASTEXITCODE -ne 0) { throw "icon generation failed (exit $LASTEXITCODE)" }
+
           # 3. Build Founder Node itself (tsc) + package it (electron-builder).
           $nodeDir = "apps\founder-node"
           if (-not (Test-Path (Join-Path $nodeDir "package.json"))) {
