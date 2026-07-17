@@ -49,10 +49,16 @@ CREATE INDEX IF NOT EXISTS "FounderNode_founderId_idx" ON "FounderNode"("founder
 CREATE INDEX IF NOT EXISTS "FounderNode_installId_idx" ON "FounderNode"("installId");
 
 -- ─── FounderNodeDeviceCode (RFC 8628 device-authorization grant) ────────────
+--
+-- userId is NULLABLE per RFC 8628 §3.1: the device-authorization request is
+-- anonymous. The tray calls POST /device-code with no user creds and the
+-- grant is created with userId NULL. The founder's userId is stamped on the
+-- row when they click "Authorize" in the browser. The FK to User is therefore
+-- also nullable.
 
 CREATE TABLE IF NOT EXISTS "FounderNodeDeviceCode" (
     "id"              TEXT NOT NULL,
-    "userId"          TEXT NOT NULL,
+    "userId"          TEXT,
     "deviceCode"      TEXT NOT NULL,
     "userCode"        TEXT NOT NULL,
     "verificationUri" TEXT NOT NULL,
@@ -64,6 +70,7 @@ CREATE TABLE IF NOT EXISTS "FounderNodeDeviceCode" (
     "founderId"       TEXT,
     "installId"       TEXT,
     "tokenExpiresAt"  TIMESTAMP(3),
+    "lastPolledAt"    TIMESTAMP(3),
     "createdAt"       TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt"       TIMESTAMP(3) NOT NULL,
 

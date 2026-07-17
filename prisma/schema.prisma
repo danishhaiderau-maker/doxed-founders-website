@@ -2069,6 +2069,12 @@ model FounderNode {
   ipcSecretHash   String?   @db.Text
 
   @@index([userId])
+  // Index founderId for the "list all nodes for this founder" query (today
+  // equivalent to the userId index, but prepares for the founder/user split).
+  @@index([founderId])
+  // Index installId so the FounderIdeAdapter can look up the IPC pipe path by
+  // installId (the IDE extension sends its installId during the handshake).
+  @@index([installId])
 }
 
 /**
@@ -2172,7 +2178,17 @@ model FounderNodePairingCode {
  */
 model FounderNodeDeviceCode {
   id              String    @id @default(cuid())
-  userId          String
+  /**
+   * Bound at authorize time (when the founder logs in via the browser).
+   * Nullable per RFC 8628 §3.1: the device-authorization request itself is
+   * anonymous — the tray calls POST /device-code with no user creds, and the
+   * grant is created with userId=null. The founder's userId is stamped onto
+   * the row when they click "Authorize" in the browser. Earlier schema had
+   * this as NOT NULL with a FK, which forced the controller to pass a bogus
+   * placeholder string ('pending-web-authorize') that would fail the FK on
+   * INSERT. Nullable + nullable FK is the correct shape.
+   */
+  userId          String?
   /** Long opaque token the device polls with. */
   deviceCode      String    @unique
   /** Short human-readable code like ABCD-1234. */
@@ -2185,7 +2201,7 @@ model FounderNodeDeviceCode {
   /**
    * pending | authorized | denied | expired. The poll endpoint reads this
    * and returns the matching RFC 8628 status. We do NOT delete on authorize
-   * — the row is kept until expiry so the poll can return the tokens safely
+   — the row is kept until expiry so the poll can return the tokens safely
    * (the device may poll once more after authorization before tearing down).
    */
   status          String    @default("pending")
@@ -2195,10 +2211,17 @@ model FounderNodeDeviceCode {
   founderId       String?
   installId       String?
   tokenExpiresAt  DateTime?
+  /**
+   * Server-side timestamp of the last /device-code/poll request for this
+   * grant. Used to detect slow_down (RFC 8628 §3.5) — if the client polls
+   * again within `interval` seconds, we return slow_down and the controller
+   * adds 5s to Retry-After. Null until first poll.
+   */
+  lastPolledAt    DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])

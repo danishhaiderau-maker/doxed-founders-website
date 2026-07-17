@@ -174,31 +174,24 @@ export class FounderNodeController {
    *     expiresAt, interval }
    * The tray displays the userCode and polls /device-code/poll with deviceCode.
    *
-   * Public endpoint — the device isn't authenticated yet (that's the point of
-   * the flow). The userId is bound to the grant only when the founder
-   * authorizes in the browser.
+   * Public endpoint per RFC 8628 §3.1 — the device isn't authenticated yet
+   * (that's the point of the flow). The userId is bound to the grant only
+   * when the founder authorizes in the browser via /device-code/authorize.
    *
-   * NOTE: this is a Phase 2 shim — the tray passes installId + ipcSecret so
-   * the eventual paired node has IPC identity from the moment it's authorized.
-   * The founderId/nodeId/nodeToken are minted at authorize time, not here.
+   * The installId is stashed on the grant row so authorize() can pair a
+   * fresh node with the caller's installId in one shot. The founderId /
+   * nodeId / nodeToken are minted at authorize time, not here.
    */
   @Public()
   @Post('device-code')
   createDeviceCode(
     @Body() body?: { installId?: string; ipcSecret?: string },
   ) {
-    // Without a userId we can't bind the grant to a founder yet. The web app
-    // also calls this endpoint WITH auth (CurrentUser) when the founder starts
-    // the flow from the browser instead of the tray. Detect the authenticated
-    // case via the FounderNodeGuard-free path: if no Authorization header is
-    // present, we return a "pending web authorize" grant that the browser
-    // later binds. For now, the tray-side flow is: tray calls this (no auth),
-    // gets deviceCode, shows userCode, founder opens verificationUri in
-    // browser, browser calls /device-code/authorize (auth) which binds userId.
-    //
-    // The installId is stashed on the grant row so authorize() can pair a
-    // fresh node with the caller's installId in one shot.
-    return this.nodes.createDeviceCode('pending-web-authorize', {
+    // Anonymous grant: userId stays null on the row until the founder
+    // authorizes in the browser. ipcSecret (if provided) is hashed and
+    // stored on the eventual FounderNode at authorize time — not on the
+    // grant, because the grant is single-use and short-lived.
+    return this.nodes.createDeviceCode({
       installId: body?.installId,
     });
   }
@@ -207,8 +200,12 @@ export class FounderNodeController {
    * Poll a device-authorization grant. The Founder Node tray calls this every
    * `interval` seconds with the deviceCode until status === 'authorized'.
    *
-   * Returns 202 with Retry-After on pending (per RFC 8628 §3.5). Returns 200
-   * with the tokens on authorized. Returns 400 on expired/denied.
+   * RFC 8628 §3.5 status mapping:
+   *   - pending     → HTTP 202 + Retry-After: <interval>
+   *   - slow_down   → HTTP 429 + Retry-After: <interval + 5>
+   *   - authorized  → HTTP 200 + token body
+   *   - expired     → HTTP 400 + { status, error }
+   *   - denied      → HTTP 403 + { status, error }
    */
   @Public()
   @Post('device-code/poll')
@@ -220,11 +217,20 @@ export class FounderNodeController {
       throw new BadRequestException('deviceCode required');
     }
     const result = await this.nodes.pollDeviceCode(body.deviceCode.trim());
-    if (result.status === 'pending' || result.status === 'slow_down') {
-      // RFC 8628: pending/slow_down should return 202 + Retry-After.
+    if (result.status === 'pending') {
       res.status(202);
       res.setHeader('Retry-After', String(FounderNodeService.DEVICE_CODE_INTERVAL_S));
+    } else if (result.status === 'slow_down') {
+      // RFC 8628 §3.5: slow_down requires the client to increase its polling
+      // interval by 5 seconds. Retry-After carries the new (larger) interval.
+      res.status(429);
+      res.setHeader('Retry-After', String(FounderNodeService.DEVICE_CODE_INTERVAL_S + 5));
+    } else if (result.status === 'expired') {
+      res.status(400);
+    } else if (result.status === 'denied') {
+      res.status(403);
     }
+    // authorized falls through to default 200.
     return result;
   }
 

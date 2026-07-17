@@ -196,7 +196,7 @@ export type DeviceCodeGrant = {
 export type DeviceCodePollStatus = 'pending' | 'expired' | 'denied' | 'authorized' | 'slow_down';
 
 export type DeviceCodePollResponse =
-  | { status: 'pending' | 'slow_down' }
+  | { status: 'pending' | 'slow_down'; interval: number }
   | { status: 'expired'; error: string }
   | { status: 'denied'; error: string }
   | {

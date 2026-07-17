@@ -254,21 +254,36 @@ export class FounderNodeService {
   // ─── Phase 2 — device-code (RFC 8628) first-run flow ──────────────────────
 
   /**
-   * Create a device-authorization grant. The web app calls this when a founder
-   * starts the device-code flow. Returns the RFC 8628 shape: the Founder Node
-   * tray displays `userCode` + `verificationUri` and polls /device-code/poll
-   * with `deviceCode` until status === 'authorized'.
+   * Create a device-authorization grant. Per RFC 8628 §3.1, the
+   * device-authorization request itself is anonymous — the tray calls this
+   * with no `userId`, and the grant is created with `userId = null`. The
+   * founder's userId is stamped onto the row by `authorizeDeviceCode` when
+   * they click "Authorize" in the browser.
+   *
+   * Returns the RFC 8628 shape: the Founder Node tray displays `userCode` +
+   * `verificationUri` and polls /device-code/poll with `deviceCode` until
+   * status === 'authorized'.
    *
    * The `userCode` is `ABCD-1234` (4 chars, dash, 4 chars) — readable over the
    * phone, hard to confuse (no 0/O/1/I). The `deviceCode` is 32 hex bytes.
+   *
+   * `userId` is optional: if the web app calls this while the founder is
+   * already logged in, it's bound eagerly; otherwise it stays null until
+   * authorize time.
    */
-  async createDeviceCode(userId: string, opts?: { installId?: string }): Promise<DeviceCodeGrant> {
+  async createDeviceCode(
+    opts?: { userId?: string; installId?: string },
+  ): Promise<DeviceCodeGrant> {
     // Expire any prior pending device codes for this user so only one is
     // active at a time — avoids "which code did I just generate?" confusion.
-    await this.prisma.founderNodeDeviceCode.updateMany({
-      where: { userId, status: 'pending' },
-      data: { status: 'expired' },
-    });
+    // Skip when userId is null (anonymous flow) — there's no per-user
+    // dedup possible until authorize binds the founder.
+    if (opts?.userId) {
+      await this.prisma.founderNodeDeviceCode.updateMany({
+        where: { userId: opts.userId, status: 'pending' },
+        data: { status: 'expired' },
+      });
+    }
 
     const deviceCode = randomBytes(32).toString('hex');
     const userCode = this.generateUserCode();
@@ -277,7 +292,9 @@ export class FounderNodeService {
 
     await this.prisma.founderNodeDeviceCode.create({
       data: {
-        userId,
+        // Null until the founder authorizes in the browser. Schema column is
+        // nullable for exactly this reason.
+        userId: opts?.userId ?? null,
         deviceCode,
         userCode,
         verificationUri,
@@ -304,31 +321,66 @@ export class FounderNodeService {
    * Poll a device-authorization grant. Returns the RFC 8628 status:
    *   - pending   — founder hasn't authorized yet; client should wait `interval`
    *                 seconds and poll again.
-   *   - slow_down — client is polling too fast; treat like pending but back off.
+   *   - slow_down — client is polling too fast; treat like pending but back off
+   *                 by `interval + 5` seconds (RFC 8628 §3.5).
    *   - expired   — grant expired; client must start a new device-code flow.
    *   - denied    — founder explicitly denied the request.
    *   - authorized — founder authorized; response includes founderId/nodeId/
    *                 nodeToken. The grant row is single-use: we clear the
    *                 nodeToken after first successful read so a leaked deviceCode
    *                 can't be replayed.
+   *
+   * On each poll we opportunistically delete grants that have been expired for
+   * longer than DEVICE_CODE_TTL_MS × 2 (one extra window past natural expiry).
+   * This keeps the table from growing unbounded — pending grants are kept
+   * until they expire naturally, and expired/denied rows are reaped shortly
+   * after.
    */
-  async pollDeviceCode(deviceCode: string): Promise<DeviceCodePollResponse> {
+  async pollDeviceCode(
+    deviceCode: string,
+    opts?: { now?: number },
+  ): Promise<DeviceCodePollResponse> {
+    // Opportunistic cleanup: sweep grants that have been expired for over
+    // twice the TTL. Cheap (indexed on expiresAt + status) and bounded.
+    await this.cleanupExpiredGrants();
+
     const row = await this.prisma.founderNodeDeviceCode.findUnique({
       where: { deviceCode },
     });
     if (!row) throw new UnauthorizedException('Unknown device code');
 
-    if (row.status === 'expired' || row.expiresAt < new Date()) {
+    const now = opts?.now ?? Date.now();
+
+    if (row.status === 'expired' || row.expiresAt.getTime() < now) {
+      // Mark expired lazily so the next sweep sees it as a reaping candidate.
+      if (row.status !== 'expired') {
+        await this.prisma.founderNodeDeviceCode.update({
+          where: { id: row.id },
+          data: { status: 'expired' },
+        });
+      }
       return { status: 'expired', error: 'Device code expired — start a new sign-in' };
     }
     if (row.status === 'denied') {
       return { status: 'denied', error: 'Founder denied the sign-in request' };
     }
     if (row.status === 'pending') {
-      // slow_down is a soft signal — we don't actually track per-client poll
-      // rate here (that's the controller's job via Retry-After). Return pending
-      // so the client keeps waiting at the recommended interval.
-      return { status: 'pending' };
+      // slow_down: if the client polled again within `interval` seconds of
+      // the last poll, return slow_down. RFC 8628 §3.5 requires the client
+      // to back off by interval + 5s. We track lastPolledAt on the row.
+      const intervalMs = row.interval * 1000;
+      if (row.lastPolledAt && now - row.lastPolledAt.getTime() < intervalMs) {
+        await this.prisma.founderNodeDeviceCode.update({
+          where: { id: row.id },
+          data: { lastPolledAt: new Date(now) },
+        });
+        return { status: 'slow_down', interval: row.interval + 5 };
+      }
+      await this.prisma.founderNodeDeviceCode.update({
+        where: { id: row.id },
+        data: { lastPolledAt: new Date(now) },
+      });
+      return { status: 'pending', interval: row.interval };
     }
     if (row.status !== 'authorized') {
       // Defensive — unknown status on the column.
@@ -361,6 +413,24 @@ export class FounderNodeService {
   }
 
   /**
+   * Delete grants that have been expired or denied for over twice the TTL.
+   * Called lazily on each poll — cheap and bounded because of the index on
+   * expiresAt + status. Pending grants are NEVER reaped here; only terminal
+   * states that are also past their natural expiry.
+   */
+  async cleanupExpiredGrants(opts?: { now?: number }): Promise<number> {
+    const now = opts?.now ?? Date.now();
+    const cutoff = new Date(now - DEVICE_CODE_TTL_MS * 2);
+    const result = await this.prisma.founderNodeDeviceCode.deleteMany({
+      where: {
+        status: { in: ['expired', 'denied'] },
+        expiresAt: { lt: cutoff },
+      },
+    });
+    return result.count;
+  }
+
+  /**
    * Web app calls this when the founder clicks "Authorize" on the verification
    * page. Pairs a fresh node with the grant's installId, flips the grant to
    * 'authorized', and stashes the tokens so the next poll returns them.
@@ -377,7 +447,12 @@ export class FounderNodeService {
     const row = await this.prisma.founderNodeDeviceCode.findUnique({
       where: { userCode: normalized },
     });
-    if (!row || row.userId !== userId) {
+    // A grant is claimable by this founder if it's anonymous (userId null,
+    // the standard RFC 8628 tray flow) OR if it was pre-bound to them by the
+    // web app. A grant pre-bound to a DIFFERENT user is not claimable — that
+    // would let any logged-in founder hijack another's pending grant by
+    // guessing the userCode.
+    if (!row || (row.userId !== null && row.userId !== userId)) {
       throw new NotFoundException('Device code not found');
     }
     if (row.status === 'expired' || row.expiresAt < new Date()) {
@@ -431,6 +506,10 @@ export class FounderNodeService {
       where: { id: row.id },
       data: {
         status: 'authorized',
+        // Bind the founder's userId to the (previously anonymous) grant.
+        // This is the moment RFC 8628 §3.3 calls "device authorization grant
+        // approved" — the resource owner has authenticated and consented.
+        userId,
         nodeToken,
         nodeId: node.nodeId,
         founderId: userId,
@@ -441,13 +520,18 @@ export class FounderNodeService {
     return { authorized: true, founderId: userId };
   }
 
-  /** Web app calls this when the founder clicks "Deny". */
+  /**
+   * Web app calls this when the founder clicks "Deny". For anonymous grants
+   * (the standard RFC 8628 tray flow), any logged-in founder who presents
+   * the correct userCode can deny — the userCode is the binding secret in
+   * that case. For pre-bound grants, only the bound founder can deny.
+   */
   async denyDeviceCode(userId: string, userCode: string): Promise<{ denied: true }> {
     const normalized = userCode.trim().toUpperCase();
     const row = await this.prisma.founderNodeDeviceCode.findUnique({
       where: { userCode: normalized },
     });
-    if (!row || row.userId !== userId) {
+    if (!row || (row.userId !== null && row.userId !== userId)) {
       throw new NotFoundException('Device code not found');
     }
     await this.prisma.founderNodeDeviceCode.update({
