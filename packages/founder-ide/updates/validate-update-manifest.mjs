@@ -109,12 +109,33 @@ for (const r of manifest.releases ?? []) {
   checks++;
   if (isSha256(dl.sha256)) {
     ok(`[${r.version}] sha256 is a valid 64-hex digest`);
-  } else if (isPlaceholder(dl.sha256)) {
-    warn(`[${r.version}] sha256 is a PLACEHOLDER — must be filled before publish`);
   } else if (dl.sha256 == null && r.status === 'pending-build') {
     ok(`[${r.version}] sha256 null + status=pending-build (acceptable pre-build)`);
+  } else if (isPlaceholder(dl.sha256)) {
+    // PLACEHOLDER_* must FAIL validation, not warn. A placeholder that
+    // reaches a published manifest means the updater would happily download
+    // a binary it cannot integrity-check — that is a security regression.
+    fail(`[${r.version}] sha256 is a PLACEHOLDER — must be replaced with the real 64-hex digest before publish`);
+  } else if (dl.sha256 == null && (r.status === 'current' || r.status === 'legacy')) {
+    fail(`[${r.version}] sha256 is null but status=${r.status} requires a digest (only pending-build may omit)`);
   } else {
     fail(`[${r.version}] sha256 invalid: ${dl.sha256}`);
+  }
+
+  // status-specific integrity: yanked releases must warn the user; current must have a real digest.
+  checks++;
+  if (r.status === 'yanked') {
+    if (typeof r.rollback?.note === 'string' && r.rollback.note.length > 0) {
+      ok(`[${r.version}] yanked release has a rollback note explaining why`);
+    } else {
+      warn(`[${r.version}] yanked release has no rollback.note — users won't see why it was pulled`);
+    }
+  } else if (r.status === 'current') {
+    if (!isSha256(dl.sha256)) {
+      fail(`[${r.version}] status=current but sha256 is not a real digest — cannot ship`);
+    } else {
+      ok(`[${r.version}] status=current has a real sha256 digest`);
+    }
   }
 
   // rollback strategy declared
@@ -136,15 +157,26 @@ if (!latestEntry) fail(`latestVersion (${manifest.latestVersion}) has no entry i
 else ok(`latestVersion (${manifest.latestVersion}) exists in releases[]`);
 
 // No release may advertise a minimumVersion below the manifest floor unless it
-// is marked legacy (legacy releases are allowed to predate the floor).
+// is marked legacy or yanked (those releases predate the floor and are not
+// offered for in-place upgrade, so their minimumVersion is informational).
 checks++;
 for (const r of manifest.releases ?? []) {
-  if (r.status === 'legacy') continue;
+  if (r.status === 'legacy' || r.status === 'yanked') continue;
   if (semverLt(r.minimumVersion, manifest.minimumVersion)) {
     fail(`[${r.version}] minimumVersion ${r.minimumVersion} below manifest floor ${manifest.minimumVersion}`);
   }
 }
-ok('non-legacy releases respect the manifest minimumVersion floor');
+ok('non-legacy/yanked releases respect the manifest minimumVersion floor');
+
+// No yanked release may be the latestVersion — the updater would advertise a
+// known-broken build as the upgrade target.
+checks++;
+const latestYanked = latestEntry && latestEntry.status === 'yanked';
+if (latestYanked) {
+  fail(`latestVersion (${manifest.latestVersion}) is yanked — must point at a current/pending-build release`);
+} else {
+  ok('latestVersion is not yanked');
+}
 
 // Exactly one release should be the advertised current/pending-build target.
 checks++;

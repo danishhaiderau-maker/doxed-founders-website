@@ -1,12 +1,12 @@
 {
   "$schema": "./founder-stack-updates.schema.json",
   "manifestVersion": 1,
-  "publishedAt": "2026-07-16T00:00:00Z",
+  "publishedAt": "2026-07-17T00:00:00Z",
   "product": "founder-stack",
   "channel": "stable",
   "latestVersion": "0.9.1",
-  "minimumVersion": "0.8.0",
-  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/doxedcryptofounder/releases",
+  "minimumVersion": "0.9.1",
+  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/doxedfounders-website/releases",
   "releases": [
     {
       "version": "0.9.1",
@@ -19,16 +19,16 @@
         "sha256": "b5701ce07b1057ed2eab0db6cc7de24bb4e9ee390da634a6d6d89f58dd61bee5",
         "signature": null
       },
-      "minimumVersion": "0.8.0",
+      "minimumVersion": "0.9.1",
       "rollback": {
-        "mechanism": "inno-overinstall",
-        "previousVersionKept": false,
-        "note": "0.9.1 is IDE-only: Founder Node is no longer bundled (the IDE talks to the Gateway API directly). Installing 0.9.1 over 0.9.0 replaces the IDE in place (Inno Setup overinstall, same AppId) and the bundle's own uninstaller removes the Start Menu group. The previously-installed Founder Node (if any) is left in place and can be uninstalled separately via Add/Remove Programs. The ~/FounderVault is never touched by the installer."
+        "mechanism": "nsis-upgrade-in-place",
+        "previousVersionKept": true,
+        "note": "0.9.1 is the canonical Founder Stack release (Phase 1b re-bundles Founder Node alongside the IDE). Inno Setup overinstall on the same AppId replaces the IDE in place and refreshes the Founder Node bundle; the Start Menu group is preserved. The previously-installed Founder Node (if any) is upgraded in place, not removed separately. The ~/FounderVault is never touched by the installer. Rollback: the previous installer .exe is retained under ~/FounderVault/updates/ and can be re-run with /SILENT to downgrade (Inno Setup supports overinstall-downgrade on a stable AppId)."
       }
     },
     {
       "version": "0.9.0",
-      "status": "legacy",
+      "status": "yanked",
       "releasedAt": "2026-07-15T00:00:00Z",
       "foundation": "void",
       "download": {
@@ -39,26 +39,9 @@
       },
       "minimumVersion": "0.8.0",
       "rollback": {
-        "mechanism": "inno-overinstall",
+        "mechanism": "nsis-upgrade-in-place",
         "previousVersionKept": false,
-        "note": "Legacy Void-based 0.9.0 bundle. Known issue: this build shipped a launcher-less Founder IDE (the inner installer's gulp electron() step errored on Python 3.14 + empty .build/electron cache, producing a VSCode-win32-x64 dir without Founder IDE.exe). Superseded by 0.9.1 which rebuilds the launcher correctly. To roll back, re-run the 0.9.0 installer; the ~/FounderVault is never touched."
-      }
-    },
-    {
-      "version": "0.8.0",
-      "status": "legacy",
-      "releasedAt": "2026-07-10T00:00:00Z",
-      "foundation": "vscodium",
-      "download": {
-        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.8.0/Founder-Stack-Lite-0.8.0.zip",
-        "size": 85659314,
-        "sha256": "PLACEHOLDER_FILL_AFTER_PUBLISH_SHA256SUM",
-        "signature": null
-      },
-      "minimumVersion": "0.7.0",
-      "rollback": {
-        "mechanism": "manual",
-        "note": "Legacy VSCodium-based Lite deliverable. No rollback path beyond manual reinstall. Archived under packages/founder-ide/legacy/."
+        "note": "YANKED on 2026-07-17. This build shipped a launcher-less Founder IDE — the inner installer's gulp electron() step errored on Python 3.14 + an empty .build/electron cache, producing a VSCode-win32-x64 directory without Founder IDE.exe. Users who installed 0.9.0 must upgrade to 0.9.1 (or later). The updater refuses to offer 0.9.0 to clients below 0.9.1. To roll back off 0.9.0, install 0.9.1 over the top; the ~/FounderVault is never touched by the installer."
       }
     }
   ]
