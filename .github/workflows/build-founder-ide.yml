@@ -541,11 +541,19 @@ jobs:
           $iss  = "packages\founder-ide\installer\founder-stack.iss"
           if (-not (Test-Path $iss)) { throw "Outer .iss not found at $iss" }
 
+          # ISCC: pass paths with forward slashes. ISCC's #define substitution
+          # treats `\` as an escape inside string literals (e.g. `\D:` is read
+          # as a "filename prefix"), so Windows-style backslash paths produce
+          # "Unknown filename prefix" compile errors. Forward slashes work
+          # everywhere Inno Setup reads a path.
+          $stagedInnerFwd = $stagedInner -replace '\\','/'
+          $stagedNodeFwd  = $stagedNode  -replace '\\','/'
+
           Write-Host "Running iscc for Founder Stack $env:VERSION ..."
           & $iscc `
             "/DFOUNDER_STACK_VERSION=$env:VERSION" `
-            "/DFOUNDER_IDE_SETUP=`"$stagedInner`"" `
-            "/DFOUNDER_NODE_SETUP=`"$stagedNode`"" `
+            "/DFOUNDER_IDE_SETUP=`"$stagedInnerFwd`"" `
+            "/DFOUNDER_NODE_SETUP=`"$stagedNodeFwd`"" `
             $iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
 

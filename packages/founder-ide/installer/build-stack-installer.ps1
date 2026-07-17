@@ -178,9 +178,12 @@ if (-not (Test-Path $iss)) {
 if (-not (Test-Path $iss)) { throw "founder-stack.iss not found." }
 
 # Run iscc with our staging paths + version. iscc resolves #define paths
-# relative to the .iss file, so pass absolute paths.
-$ideSetupAbs       = (Resolve-Path $ideSetup).Path
-$founderNodeAbs    = (Resolve-Path $founderNodeSetup).Path
+# relative to the .iss file, so pass absolute paths. Use FORWARD SLASHES in
+# the ISCC defines: ISCC's #define substitution treats `\` as an escape inside
+# string literals (e.g. `\D:` is read as a "filename prefix"), so Windows-style
+# backslash paths produce "Unknown filename prefix" compile errors.
+$ideSetupAbs    = ((Resolve-Path $ideSetup).Path)    -replace '\\','/'
+$founderNodeAbs = ((Resolve-Path $founderNodeSetup).Path) -replace '\\','/'
 
 & $IsccPath `
     "/DFOUNDER_STACK_VERSION=$Version" `
