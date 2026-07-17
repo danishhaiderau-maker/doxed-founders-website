@@ -397,6 +397,17 @@ export class FounderNodeService {
       };
     }
 
+    // Capture the token into a local BEFORE the single-use clear. Prisma's
+    // real update() returns a fresh object (doesn't mutate the row reference),
+    // so reading row.nodeToken after the await would still work in production —
+    // but capturing the local is more robust against stubs/in-memory tests that
+    // mutate in place, and makes the single-use semantics obvious to readers.
+    const issuedNodeToken = row.nodeToken;
+    const issuedNodeId = row.nodeId;
+    const issuedFounderId = row.founderId;
+    const issuedTokenExpiresAt = row.tokenExpiresAt?.toISOString();
+    const issuedInstallId = row.installId ?? undefined;
+
     await this.prisma.founderNodeDeviceCode.update({
       where: { id: row.id },
       data: { nodeToken: null },
@@ -404,11 +415,11 @@ export class FounderNodeService {
 
     return {
       status: 'authorized',
-      founderId: row.founderId,
-      nodeId: row.nodeId,
-      nodeToken: row.nodeToken,
-      tokenExpiresAt: row.tokenExpiresAt?.toISOString(),
-      installId: row.installId ?? undefined,
+      founderId: issuedFounderId,
+      nodeId: issuedNodeId,
+      nodeToken: issuedNodeToken,
+      tokenExpiresAt: issuedTokenExpiresAt,
+      installId: issuedInstallId,
     };
   }
 
