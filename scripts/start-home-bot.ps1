@@ -159,6 +159,27 @@ if ($NoWait) {
       } catch { $monitorHealthy = $false }
     }
 
+    # A fresh heartbeat file is not proof that the monitor process still
+    # exists: a manual stop can end the monitor seconds before a restart. Verify
+    # the recorded monitor PID and command line so a stale heartbeat cannot
+    # leave the canonical bot running unwatched.
+    if ($monitorHealthy) {
+      try {
+        $monitorPidFile = Join-Path $repoRoot ".home-bot-crash-monitor.pid"
+        $monitorPidRaw = if (Test-Path $monitorPidFile) {
+          (Get-Content $monitorPidFile -Raw -ErrorAction Stop).Trim()
+        } else { "" }
+        if (-not $monitorPidRaw -or $monitorPidRaw -notmatch "^\d+$") {
+          $monitorHealthy = $false
+        } else {
+          $monitorProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $monitorPidRaw" -ErrorAction Stop
+          $monitorHealthy = [bool]($monitorProcess -and $monitorProcess.CommandLine -and $monitorProcess.CommandLine -like "*bot-auto-restart.ps1*")
+        }
+      } catch {
+        $monitorHealthy = $false
+      }
+    }
+
     if ($monitorHealthy) {
       Write-Host "Auto-restart monitor already running and healthy (heartbeat fresh) - skipping respawn." -ForegroundColor DarkGray
     } else {
