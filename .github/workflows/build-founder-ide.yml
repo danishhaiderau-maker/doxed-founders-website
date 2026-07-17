@@ -451,8 +451,17 @@ jobs:
       # docs/CODE-SIGNING-GUIDE.md. If secrets are absent the step is skipped
       # (so fork PRs can still build), and a later signtool verify step fails
       # the build only on release builds.
+      # ── 16.1. Sign the inner installer (Azure Trusted Signing) ────────────
+      # Signs FounderIDESetup.exe in place BEFORE iscc bundles it, so the
+      # outer bundle contains a signed inner installer. Gated on release
+      # builds AND on Azure Trusted Signing credentials being provisioned.
+      # When the 6 AZURE_* secrets are absent (fork PRs, dev sandbox, or
+      # externally blocked per Rule 7), the step is skipped. The boolean
+      # coercion of the secret context value is the GitHub-recommended way
+      # to gate on secret presence — `secrets.X != ''` is not parseable in
+      # `if:` conditionals.
       - name: Sign inner installer (Azure Trusted Signing)
-        if: ${{ (github.event_name == 'push') && (secrets.AZURE_TENANT_ID != '') && (secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME != '') }}
+        if: ${{ (github.event_name == 'push') && secrets.AZURE_TENANT_ID && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id:             ${{ secrets.AZURE_TENANT_ID }}
@@ -622,7 +631,7 @@ jobs:
       # unsigned artifact for installer-validation work, while still refusing
       # to publish a release. See docs/CODE-SIGNING-GUIDE.md.
       - name: Sign outer installer (Azure Trusted Signing)
-        if: ${{ (github.event_name == 'push') && (secrets.AZURE_TENANT_ID != '') && (secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME != '') }}
+        if: ${{ (github.event_name == 'push') && secrets.AZURE_TENANT_ID && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id:             ${{ secrets.AZURE_TENANT_ID }}
@@ -648,13 +657,15 @@ jobs:
         shell: pwsh
         env:
           BUNDLE_PATH: ${{ steps.iscc.outputs.bundle_path }}
-          # IS_RELEASE=true only on real release pushes where Azure creds are
-          # provisioned (i.e. signing was actually expected to run). When creds
-          # are absent the signing step skips cleanly and we run verify in
-          # advisory mode — the build still produces a usable unsigned artifact
-          # for installer validation, while the release-publish step downstream
-          # separately hard-refuses to publish an unsigned release.
-          IS_RELEASE: ${{ (github.event_name == 'push') && (secrets.AZURE_TENANT_ID != '') && (secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME != '') }}
+          # IS_RELEASE mirrors the signing step's `if:`. The signing step
+          # only runs on push events AND when Azure creds are present. So
+          # if we're on a push event with creds, signing ran — and verify
+          # must hard-fail on any unsigned result. On every other trigger
+          # (workflow_dispatch, PR, no creds) signing was skipped, and we
+          # run verify in advisory mode so the pipeline still produces a
+          # clearly-marked unsigned artifact for installer-validation work.
+          # (Release publishing is separately gated downstream on tag push.)
+          IS_RELEASE: ${{ github.event_name == 'push' }}
         run: |
           $exe = $env:BUNDLE_PATH
           if (-not (Test-Path $exe)) { throw "Installer missing at $exe" }
