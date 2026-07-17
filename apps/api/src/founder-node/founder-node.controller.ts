@@ -81,6 +81,29 @@ export class FounderNodeController {
     return this.nodes.getStatus(user.id);
   }
 
+  /**
+   * Phase 3 / Workstream C — truthful runtime status (canonical shape).
+   *
+   * Returns the `FounderStackRuntimeStatus` contract (10 fields, all required,
+   * flat object). Every field is derived from live/persisted authoritative
+   * signals — see `FounderNodeService.getRuntimeStatus()` JSDoc for the
+   * per-field source + staleness rules.
+   *
+   * `latestVersion` is sourced from the manifest cache (60s TTL) so the
+   * service stays I/O-free except for DB reads.
+   *
+   * Backwards-compat: the legacy `GET /status` endpoint is unchanged. New
+   * surfaces (IDE status bar, web settings) should consume this endpoint;
+   * legacy surfaces continue to consume `/status` until they migrate.
+   */
+  @Get('runtime-status')
+  async runtimeStatus(@CurrentUser() user: AuthUser) {
+    const manifest = readManifestBody() as { latestVersion?: string } | null;
+    const latestVersion =
+      typeof manifest?.latestVersion === 'string' ? manifest.latestVersion : '';
+    return this.nodes.getRuntimeStatus(user.id, latestVersion);
+  }
+
   @Public()
   @Get('latest-release')
   async getLatestRelease() {
