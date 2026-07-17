@@ -186,7 +186,14 @@ if ($codeIssContent -notmatch "OutputBaseFilename=FounderIDESetup") {
 if ($codeIssContent -notmatch "AppPublisher=Doxxed Crypto") {
     throw "build/win32/code.iss missing 'AppPublisher=Doxxed Crypto' - overlay did not apply"
 }
-Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto" -ForegroundColor Green
+# The tools\* Source line must be wrapped in #ifexist "tools\*" so the inner
+# installer compiles even when the open-source gulp targets omit tools/
+# (the remote-tunnel CLI is only produced by VS Code's official Azure pipeline).
+# Regression check for the 0.9.2 CI fix.
+if ($codeIssContent -notmatch '#ifexist "tools\\\*"') {
+    throw "build/win32/code.iss missing #ifexist `"tools\*`" guard on the tools Source line - overlay did not apply (regression of 0.9.2 CI fix)"
+}
+Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto, #ifexist tools guard present" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64-min-ci." -ForegroundColor Green
