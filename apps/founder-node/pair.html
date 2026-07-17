@@ -3,34 +3,66 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
-  <title>Pair Founder Node</title>
+  <title>Sign in to Founder OS</title>
   <style>
-    body { font-family: system-ui, sans-serif; background: #0a0a0f; color: #e4e4e7; padding: 24px; margin: 0; }
+    body { font-family: system-ui, sans-serif; background: #0a0a0f; color: #e4e4e7; padding: 24px; margin: 0; min-height: 100vh; }
     h1 { font-size: 1.25rem; margin: 0 0 8px; }
     p { color: #a1a1aa; font-size: 0.875rem; line-height: 1.5; }
     label { display: block; font-size: 0.75rem; color: #a1a1aa; margin: 16px 0 6px; }
     input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #3f3f46; background: #18181b; color: white; }
     button { margin-top: 20px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #7c3aed; color: white; font-weight: 600; cursor: pointer; }
-    button:disabled { opacity: 0.5; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button.secondary { background: #27272a; border: 1px solid #3f3f46; }
     .err { color: #f87171; font-size: 0.8rem; margin-top: 12px; }
     .ok { color: #34d399; font-size: 0.8rem; margin-top: 12px; }
     code { background: #27272a; padding: 2px 6px; border-radius: 4px; }
-    #openWeb { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #3f3f46; background: #27272a; color: #e4e4e7; cursor: pointer; font-weight: 600; margin-top: 12px; }
+
+    /* ─── Device-code first-run screen ─── */
+    #deviceCodeScreen { display: flex; flex-direction: column; gap: 0; }
+    .userCode { font-family: 'Cascadia Code', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 2.5rem; font-weight: 700; letter-spacing: 0.15em; text-align: center; padding: 24px 0; color: #fafafa; background: #18181b; border: 1px solid #3f3f46; border-radius: 12px; margin: 16px 0; user-select: all; }
+    .status { text-align: center; font-size: 0.875rem; color: #a1a1aa; margin: 8px 0 16px; }
+    .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #fbbf24; margin-right: 6px; vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
+    .status.ok .dot { background: #34d399; animation: none; }
+    .status.err .dot { background: #f87171; animation: none; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    /* Hidden by default — toggled by pair.js based on phase */
+    #legacyPairScreen { display: none; }
+    .hidden { display: none !important; }
+    .small { font-size: 0.75rem; color: #71717a; }
   </style>
 </head>
 <body>
-  <h1>Pair this machine</h1>
-  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then paste the <strong>8-character code here</strong> (not in the browser).</p>
-  <p style="font-size:0.8rem;color:#fbbf24">If you already generated a new code after pairing once, the old link is dead — use the latest code only.</p>
-  <p><button type="button" id="openWeb">Open Builder settings in browser</button></p>
-  <label for="api">Founder OS URL</label>
-  <input id="api" autocomplete="off" />
-  <label for="code">Pairing code</label>
-  <input id="code" placeholder="8-character code" maxlength="12" autocomplete="off" />
-  <label for="label">Node label</label>
-  <input id="label" autocomplete="off" />
-  <button id="pair">Connect vault</button>
-  <div id="msg"></div>
+  <!-- ─── Device-code first-run screen (Phase 2) ─── -->
+  <div id="deviceCodeScreen">
+    <h1>Sign in with Founder ID</h1>
+    <p>Open the link below in your browser to authorize this machine. The code below is pre-filled when you click the button.</p>
+
+    <div class="userCode" id="userCode">····-····</div>
+
+    <div class="status" id="dcStatus"><span class="dot"></span><span class="msg">Requesting code…</span></div>
+
+    <button id="openBrowser" type="button">Open browser to authorize</button>
+    <button id="copyCode" type="button" class="secondary">Copy code</button>
+    <button id="restart" type="button" class="secondary hidden">Start over</button>
+
+    <p class="small" style="margin-top: 24px;">
+      Code expires in a few minutes. Keep this window open until your browser confirms authorization.
+    </p>
+
+    <details style="margin-top: 16px;">
+      <summary class="small" style="cursor: pointer;">Advanced / legacy pairing</summary>
+      <div id="legacyPairScreen" style="margin-top: 12px;">
+        <label for="api">Founder OS URL</label>
+        <input id="api" autocomplete="off" />
+        <label for="label">Node label</label>
+        <input id="label" autocomplete="off" />
+        <button id="pair" type="button" class="secondary">Use legacy 8-char code</button>
+        <div id="msg"></div>
+      </div>
+    </details>
+  </div>
+
   <script src="pair.js"></script>
 </body>
 </html>

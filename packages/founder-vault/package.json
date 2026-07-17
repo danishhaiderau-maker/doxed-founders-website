@@ -24,11 +24,16 @@
     "./vault-merge-apply": {
       "types": "./dist/vault-merge-apply.d.ts",
       "default": "./dist/vault-merge-apply.js"
+    },
+    "./status-schema": {
+      "types": "./dist/status-schema.d.ts",
+      "default": "./dist/status-schema.js"
     }
   },
   "scripts": {
     "build": "tsc",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test src/status-schema.spec.ts"
   },
   "dependencies": {
     "@dcf/utils": "*"
