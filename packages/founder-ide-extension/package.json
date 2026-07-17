@@ -162,6 +162,14 @@
       {
         "command": "founderOs.openVaultConfig",
         "title": "Founder OS: Open node-config.json"
+      },
+      {
+        "command": "founderOs.showGatewayMetadata",
+        "title": "Founder OS: Show gateway metadata output channel"
+      },
+      {
+        "command": "founderOs.recentGatewayMetadata",
+        "title": "Founder OS: Recent gateway requests"
       }
     ],
     "configuration": {
@@ -202,7 +210,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/ipc/protocol.spec.ts src/ipc/server.spec.ts"
+    "test": "tsx --test src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

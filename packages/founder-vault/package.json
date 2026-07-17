@@ -24,6 +24,10 @@
     "./vault-merge-apply": {
       "types": "./dist/vault-merge-apply.d.ts",
       "default": "./dist/vault-merge-apply.js"
+    },
+    "./status-schema": {
+      "types": "./dist/status-schema.d.ts",
+      "default": "./dist/status-schema.js"
     }
   },
   "scripts": {

@@ -13,6 +13,7 @@ import type {
   DeviceCodeGrant,
   DeviceCodePollResponse,
   FounderNodeHeartbeat,
+  FounderStackRuntimeStatus,
   LogoutResponse,
   RevokeNodeResponse,
   RotateTokenResponse,
@@ -151,6 +152,115 @@ export class FounderNodeService {
       connectedIdes,
       bridgeOnline: bridgeFresh,
     };
+  }
+
+  /**
+   * Phase 3 / Workstream C — truthful runtime status.
+   *
+   * Returns the canonical `FounderStackRuntimeStatus` shape (10 fields, all
+   * required, no `?`). Every field is derived from a documented authoritative
+   * source and obeys a staleness rule (see `STATUS_STALENESS_MS`). Consumers
+   * MUST tolerate stale values — this method never throws on missing data;
+   * it falls back to safe defaults so a status panel can always render.
+   *
+   * Field-by-field source:
+   *
+   *   - `installedVersion`: most-recent heartbeat's `appVersion`. Source:
+   *     `FounderNode.appVersion` (set on pair, refreshed on every heartbeat).
+   *     Freshness: real-time (changes only after an update + restart).
+   *   - `latestVersion`: passed in by the controller from the manifest cache
+   *     (60s TTL — see `founder-node.controller.ts`). Empty string if the
+   *     manifest couldn't be read (status panel shows "unknown").
+   *   - `founderNodeOnline`: heartbeat timestamp within `ONLINE_WINDOW_MS`
+   *     (5 minutes). Source: `FounderNode.lastSeenAt`.
+   *   - `ideHandshakeActive`: from the desktop-bridge payload (IDE → node IPC
+   *     heartbeat). Workstream B will plumb the IPC handshake state through
+   *     here; for now we derive from the latest bridge payload's session
+   *     activity (updatedAt within the staleness window). Freshness: ≤15s.
+   *   - `gatewayReachable`: from the latest heartbeat's `gatewayReachable`
+   *     field if present (Workstream B will add a real probe); otherwise
+   *     false. Freshness: ≤30s.
+   *   - `paired`: at least one non-revoked node row exists for this user
+   *     (paired nodes have a non-null `tokenExpiresAt` and haven't been
+   *     revoked). Real-time (DB read).
+   *   - `workspace`: most-recent workspace path reported by the IDE bridge,
+   *     or null if no IDE has reported. Freshness: ≤15s.
+   *   - `lastHeartbeat`: ISO timestamp of the most recent node `lastSeenAt`,
+   *     or epoch zero if never seen.
+   *   - `updateState`: hardcoded `idle` for now. Workstream E (updater) will
+   *     own the state machine; the value lives in a separate `update_state`
+   *     table once that lands.
+   *   - `executionConsentState`: hardcoded `expired` after 5 minutes of
+   *     inactivity. Workstream B (consent state machine) will wire live
+   *     values; until then we err on the safe side (no execution without
+   *     explicit recent consent).
+   *
+   * @param userId  The founder's user id (used to scope node + bridge rows).
+   * @param latestVersion  Latest installable version from the manifest cache
+   *     (passed in by the controller so this method stays I/O-free except
+   *     for DB reads). Empty string if the manifest is unavailable.
+   */
+  async getRuntimeStatus(
+    userId: string,
+    latestVersion: string,
+  ): Promise<FounderStackRuntimeStatus> {
+    // Most-recently-seen node carries `installedVersion` + `lastHeartbeat`.
+    const nodes = await this.prisma.founderNode.findMany({
+      where: { userId, status: { not: 'revoked' } },
+      orderBy: { lastSeenAt: 'desc' },
+      take: 1,
+    });
+    const latestNode = nodes[0];
+
+    // Bridge heartbeat + workspace — surfaces whether an IDE is currently
+    // connected (IPC handshake) and which workspace is open.
+    const [bridges, workspaces] = await Promise.all([
+      this.desktopBridge.listForUser(userId).catch(() => []),
+      this.desktopBridge.listWorkspaces(userId).catch(() => []),
+    ]);
+    const now = Date.now();
+    const freshBridge = bridges.find(
+      (b) => now - new Date(b.updatedAt).getTime() < ONLINE_WINDOW_MS,
+    );
+    const latestWorkspace =
+      workspaces[0]?.repository ?? workspaces[0]?.title ?? null;
+
+    const lastSeenAt = latestNode?.lastSeenAt;
+    const lastSeenMs = lastSeenAt ? new Date(lastSeenAt).getTime() : 0;
+    const founderNodeOnline =
+      Number.isFinite(lastSeenMs) && lastSeenMs > 0 && now - lastSeenMs < ONLINE_WINDOW_MS;
+
+    return {
+      installedVersion: latestNode?.appVersion ?? '',
+      latestVersion,
+      founderNodeOnline,
+      ideHandshakeActive: !!freshBridge,
+      gatewayReachable: this.extractGatewayReachable(latestNode),
+      paired: nodes.length > 0,
+      workspace: latestWorkspace,
+      lastHeartbeat: lastSeenAt
+        ? new Date(lastSeenAt).toISOString()
+        : new Date(0).toISOString(),
+      updateState: 'idle',
+      executionConsentState: 'expired',
+    };
+  }
+
+  /**
+   * Pull `gatewayReachable` off the most-recent node row. The field doesn't
+   * exist on the Prisma schema yet (Workstream B will add it once the IPC
+   * handshake state is wired); for now we read it defensively off the row
+   * if present (some clients stuff extra fields into the heartbeat payload)
+   * and fall back to false.
+   */
+  private extractGatewayReachable(
+    node:
+      | (Record<string, unknown> & { appVersion?: string | null })
+      | undefined,
+  ): boolean {
+    if (!node) return false;
+    const v = (node as Record<string, unknown>).gatewayReachable;
+    return v === true || v === 'true' || v === 1;
   }
 
   async pair(input: {

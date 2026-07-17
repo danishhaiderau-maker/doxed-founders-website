@@ -28,6 +28,7 @@ import { runCommandTool } from './tools/run-command';
 import { readWorkspaceTool } from './tools/read-workspace';
 import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
+import { GatewayMetadataUi } from './gateway-metadata-ui';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
 // Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
@@ -40,6 +41,7 @@ let registeredProvider: vscode.Disposable | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
 let costTracker: CostTracker | undefined;
+let gatewayMetadataUi: GatewayMetadataUi | undefined;
 let debugSquasherDisposable: vscode.Disposable | undefined;
 let currentCreds: FounderOsCredentials | null = null;
 /** Phase 2 — pairing-state status bar (refreshes every 15s + on config change). */
@@ -62,9 +64,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
   profileManager = new ProfileManager(context);
   costTracker = new CostTracker();
-  context.subscriptions.push(profileManager, costTracker);
+  gatewayMetadataUi = new GatewayMetadataUi();
+  context.subscriptions.push(profileManager, costTracker, gatewayMetadataUi);
   profileManager.show();
   costTracker.show();
+  gatewayMetadataUi.show();
 
   // Agentic tools (registered once; available to any chat participant / model).
   // `vscode.lm.registerTool` only exists on VS Code 1.96+ (proposed `lmTools`
@@ -108,6 +112,12 @@ export function activate(context: vscode.ExtensionContext): void {
       costTracker?.reset();
       void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
     }),
+    vscode.commands.registerCommand('founderOs.showGatewayMetadata', () =>
+      gatewayMetadataUi?.revealChannel(),
+    ),
+    vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () =>
+      gatewayMetadataUi?.showRecent(),
+    ),
   );
 
   // First-pass registration (synchronous so the model picker populates fast).
@@ -150,6 +160,7 @@ export function deactivate(): void {
   connectionStatusBar?.dispose();
   profileManager?.dispose();
   costTracker?.dispose();
+  gatewayMetadataUi?.dispose();
   debugSquasherDisposable?.dispose();
   pairingStatusBar?.dispose();
   // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
@@ -202,6 +213,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
       connectionStatusBar!.text = `$(sparkle) Founder OS: ${tier}${cost ? ` · ${cost}` : ''}`;
       connectionStatusBar!.tooltip = `Last route — tier: ${tier}, provider: ${provider2}, model: ${model}, cost: ${cost || 'n/a'}`;
       costTracker?.record(meta);
+      gatewayMetadataUi?.record(meta);
     },
     onRequestEnd: (_modelId, ok, errorMessage) => {
       if (ok) {
