@@ -28,7 +28,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test src/status-schema.spec.ts"
   },
   "dependencies": {
     "@dcf/utils": "*"

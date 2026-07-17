@@ -192,7 +192,8 @@
     "watch": "tsc -watch -p ./",
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test src/ipc/protocol.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
