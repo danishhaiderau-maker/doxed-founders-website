@@ -80,6 +80,18 @@ import {
   startAutoUpdateChecks,
 } from './update-manager';
 import {
+  bindIdeUpdateTray,
+  checkForIdeUpdates,
+  configureIdeUpdates,
+  downloadVerifyInstallAndHandshake,
+  getIdeUpdateState,
+  getIdeUpdateFailureReason,
+  getLastResolvedUpdate,
+  ideUpdateTooltipSuffix,
+  setIdeUpdateMenuRefresh,
+  startIdeAutoUpdateChecks,
+} from './ide-update-manager';
+import {
   authFailureUserMessage,
   classifySyncFailure,
   transientRetryDelayMs,
@@ -172,6 +184,7 @@ if (!gotSingleInstanceLock) {
 
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
+let ideTooltipTimer: ReturnType<typeof setInterval> | null = null;
 const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
 let syncCycleInFlight = false;
@@ -644,12 +657,38 @@ function buildTrayMenu(vaultRoot: string) {
     });
   }
 
+  const idePending = getLastResolvedUpdate();
+  const ideState = getIdeUpdateState();
+  if (ideState === 'failed') {
+    template.push({
+      label: getIdeUpdateFailureReason()
+        ? `Founder Stack update failed — retry…`
+        : `Founder Stack update failed — retry…`,
+      click: () => {
+        checkForIdeUpdates({ silent: false }).catch(console.error);
+      },
+    });
+  } else if (idePending) {
+    template.push({
+      label: `Install Founder Stack v${idePending.version}…`,
+      click: () => {
+        downloadVerifyInstallAndHandshake(idePending).catch(console.error);
+      },
+    });
+  }
+
   template.push(
     { type: 'separator' },
     {
       label: 'Check for updates…',
       click: () => {
         checkForUpdates({ silent: false }).catch(console.error);
+      },
+    },
+    {
+      label: 'Check for Founder Stack updates…',
+      click: () => {
+        checkForIdeUpdates({ silent: false }).catch(console.error);
       },
     },
     ...(isWindows() && config
@@ -786,6 +825,8 @@ app.whenReady().then(() => {
   tray.setToolTip(`Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`);
   bindUpdateTray(tray);
   setUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
+  bindIdeUpdateTray(tray);
+  setIdeUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
   refreshTrayMenu(vaultRoot);
   tray.on('click', () => tray?.popUpContextMenu());
 
@@ -811,6 +852,31 @@ app.whenReady().then(() => {
 
   configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
   startAutoUpdateChecks();
+  // Phase 5 (Workstream E) — IDE / Founder Stack updater. Mirrors the Node
+  // updater but adds SHA-256 + Authenticode + health-handshake + rollback.
+  // Channel defaults to "stable"; beta/insider can opt into allowUnsigned.
+  configureIdeUpdates({
+    apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API,
+    channel: (process.env.FOUNDER_STACK_CHANNEL as 'stable' | 'beta' | 'insider' | undefined) ?? 'stable',
+    allowUnsigned: process.env.FOUNDER_STACK_ALLOW_UNSIGNED === '1',
+    // The IPC handshake probe is wired by Workstream B's ide-ipc-client. Until
+    // that lands we treat the handshake as "always established" so the install
+    // flow completes; Workstream B will replace this no-op probe with the real
+    // IPC client. See apps/founder-node/src/ide-ipc-client.ts (B-owned).
+    handshakeProbe: () => true,
+  });
+  startIdeAutoUpdateChecks();
+  // Refresh the tray tooltip periodically so IDE-update state transitions
+  // (downloading → verifying → installing → idle) surface alongside the Node
+  // version. The menu itself refreshes via setIdeUpdateMenuRefresh above.
+  ideTooltipTimer = setInterval(() => {
+    const suffix = ideUpdateTooltipSuffix();
+    tray?.setToolTip(
+      suffix
+        ? `Founder Node v${FOUNDER_NODE_LOCAL_VERSION} — ${suffix}`
+        : `Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`,
+    );
+  }, 5_000);
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 
   // Phase 7 — start the Private-mode runtime-status endpoint on 127.0.0.1.
@@ -970,6 +1036,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBackgroundLoops(loops);
+  if (ideTooltipTimer) {
+    clearInterval(ideTooltipTimer);
+    ideTooltipTimer = null;
+  }
   deploymentStatusServer?.close();
   deploymentStatusServer = null;
   tray?.destroy();
