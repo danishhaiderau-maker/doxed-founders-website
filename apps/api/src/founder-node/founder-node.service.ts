@@ -9,7 +9,14 @@ import {
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
 import { parseFounderCloudState, type BridgeSession, type BridgeWorkspace } from '@dcf/utils';
-import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
+import type {
+  DeviceCodeGrant,
+  DeviceCodePollResponse,
+  FounderNodeHeartbeat,
+  LogoutResponse,
+  RevokeNodeResponse,
+  RotateTokenResponse,
+} from '@dcf/founder-vault';
 import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
@@ -21,6 +28,26 @@ import type { VaultMergePatch } from '@dcf/utils';
 
 const PAIRING_TTL_MS = 30 * 60 * 1000;
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+
+/** Phase 2 — device-code (RFC 8628) lifetimes and polling. */
+const DEVICE_CODE_TTL_MS = 15 * 60 * 1000;
+const DEVICE_CODE_INTERVAL_S = 5;
+const DEVICE_CODE_USER_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/**
+ * Phase 2 — node token TTL. 30 days. Founder Node auto-rotates when within
+ * ROTATION_WINDOW_MS of expiry. Historically tokens never expired (legacy
+ * rows have null `tokenExpiresAt`); new pairs and rotations set this. The
+ * 30-day window balances "revocable identity" against "user shouldn't have
+ * to re-pair every week".
+ */
+const NODE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Auto-rotate when within 7 days of expiry. */
+const TOKEN_ROTATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Phase 3 — IPC secret byte length. 32 bytes = 256 bits, well above the
+ *  128-bit brute-force floor. Encoded as 64 hex chars in node-config.json. */
+const IPC_SECRET_BYTES = 32;
 
 @Injectable()
 export class FounderNodeService {
@@ -126,25 +153,14 @@ export class FounderNodeService {
     };
   }
 
-  async revokeNode(userId: string, nodeId: string) {
-    const node = await this.prisma.founderNode.findFirst({
-      where: { userId, nodeId },
-    });
-    if (!node) throw new NotFoundException('Node not found');
-    await this.prisma.founderNodeVaultRelay.deleteMany({ where: { nodeId: node.nodeId } });
-    await this.prisma.founderNodeVaultSyncAck.deleteMany({
-      where: { OR: [{ nodeId: node.nodeId }, { sourceNodeId: node.nodeId }] },
-    });
-    await this.prisma.founderNode.delete({ where: { id: node.id } });
-    return { success: true };
-  }
-
   async pair(input: {
     code: string;
     nodeId: string;
     label: string;
     platform?: string;
     appVersion?: string;
+    installId?: string;
+    ipcSecret?: string;
   }) {
     const normalizedCode = input.code.trim().toUpperCase();
     const row = await this.prisma.founderNodePairingCode.findUnique({
@@ -157,6 +173,15 @@ export class FounderNodeService {
 
     const nodeToken = `fn_${randomBytes(32).toString('hex')}`;
     const secretHash = await bcrypt.hash(nodeToken, 10);
+    const tokenExpiresAt = new Date(Date.now() + NODE_TOKEN_TTL_MS);
+
+    // Phase 3 — bcrypt-hash the IPC secret before storing. Plaintext is only
+    // ever held in node-config.json on the device. If the caller didn't send
+    // one (legacy client), installId/ipcSecret are null and IPC is disabled
+    // until re-pair.
+    const ipcSecretHash = input.ipcSecret
+      ? await bcrypt.hash(input.ipcSecret, 10)
+      : null;
 
     const node = await this.prisma.founderNode.upsert({
       where: { nodeId: input.nodeId },
@@ -170,6 +195,13 @@ export class FounderNodeService {
         platform: input.platform ?? null,
         appVersion: input.appVersion ?? null,
         vaultHealthy: true,
+        // Phase 2 — record founderId (= userId today) + token lifecycle.
+        founderId: row.userId,
+        tokenExpiresAt,
+        tokenRotatedAt: new Date(),
+        // Phase 3 — record per-install IPC identity.
+        installId: input.installId ?? null,
+        ipcSecretHash,
       },
       update: {
         userId: row.userId,
@@ -180,6 +212,13 @@ export class FounderNodeService {
         platform: input.platform ?? null,
         appVersion: input.appVersion ?? null,
         vaultHealthy: true,
+        // Phase 2 — refresh founderId + token lifecycle on re-pair.
+        founderId: row.userId,
+        tokenExpiresAt,
+        tokenRotatedAt: new Date(),
+        // Phase 3 — refresh installId + ipcSecret on re-pair.
+        installId: input.installId ?? null,
+        ipcSecretHash,
       },
     });
 
@@ -198,6 +237,9 @@ export class FounderNodeService {
       nodeToken,
       nodeId: node.nodeId,
       userId: row.userId,
+      founderId: row.userId,
+      tokenExpiresAt: tokenExpiresAt.toISOString(),
+      installId: input.installId,
     };
   }
 
@@ -207,6 +249,342 @@ export class FounderNodeService {
     const ok = await bcrypt.compare(nodeToken, node.secretHash);
     if (!ok) throw new UnauthorizedException('Invalid Founder Node token');
     return node;
+  }
+
+  // ─── Phase 2 — device-code (RFC 8628) first-run flow ──────────────────────
+
+  /**
+   * Create a device-authorization grant. The web app calls this when a founder
+   * starts the device-code flow. Returns the RFC 8628 shape: the Founder Node
+   * tray displays `userCode` + `verificationUri` and polls /device-code/poll
+   * with `deviceCode` until status === 'authorized'.
+   *
+   * The `userCode` is `ABCD-1234` (4 chars, dash, 4 chars) — readable over the
+   * phone, hard to confuse (no 0/O/1/I). The `deviceCode` is 32 hex bytes.
+   */
+  async createDeviceCode(userId: string, opts?: { installId?: string }): Promise<DeviceCodeGrant> {
+    // Expire any prior pending device codes for this user so only one is
+    // active at a time — avoids "which code did I just generate?" confusion.
+    await this.prisma.founderNodeDeviceCode.updateMany({
+      where: { userId, status: 'pending' },
+      data: { status: 'expired' },
+    });
+
+    const deviceCode = randomBytes(32).toString('hex');
+    const userCode = this.generateUserCode();
+    const expiresAt = new Date(Date.now() + DEVICE_CODE_TTL_MS);
+    const verificationUri = this.buildVerificationUri(userCode);
+
+    await this.prisma.founderNodeDeviceCode.create({
+      data: {
+        userId,
+        deviceCode,
+        userCode,
+        verificationUri,
+        expiresAt,
+        interval: DEVICE_CODE_INTERVAL_S,
+        status: 'pending',
+        // Stash the installId so when the founder authorizes, we can pair a
+        // fresh node with the caller's installId + ipcSecret in one shot.
+        installId: opts?.installId ?? null,
+      },
+    });
+
+    return {
+      deviceCode,
+      userCode,
+      verificationUri,
+      verificationUriComplete: `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
+      expiresAt: expiresAt.toISOString(),
+      interval: DEVICE_CODE_INTERVAL_S,
+    };
+  }
+
+  /**
+   * Poll a device-authorization grant. Returns the RFC 8628 status:
+   *   - pending   — founder hasn't authorized yet; client should wait `interval`
+   *                 seconds and poll again.
+   *   - slow_down — client is polling too fast; treat like pending but back off.
+   *   - expired   — grant expired; client must start a new device-code flow.
+   *   - denied    — founder explicitly denied the request.
+   *   - authorized — founder authorized; response includes founderId/nodeId/
+   *                 nodeToken. The grant row is single-use: we clear the
+   *                 nodeToken after first successful read so a leaked deviceCode
+   *                 can't be replayed.
+   */
+  async pollDeviceCode(deviceCode: string): Promise<DeviceCodePollResponse> {
+    const row = await this.prisma.founderNodeDeviceCode.findUnique({
+      where: { deviceCode },
+    });
+    if (!row) throw new UnauthorizedException('Unknown device code');
+
+    if (row.status === 'expired' || row.expiresAt < new Date()) {
+      return { status: 'expired', error: 'Device code expired — start a new sign-in' };
+    }
+    if (row.status === 'denied') {
+      return { status: 'denied', error: 'Founder denied the sign-in request' };
+    }
+    if (row.status === 'pending') {
+      // slow_down is a soft signal — we don't actually track per-client poll
+      // rate here (that's the controller's job via Retry-After). Return pending
+      // so the client keeps waiting at the recommended interval.
+      return { status: 'pending' };
+    }
+    if (row.status !== 'authorized') {
+      // Defensive — unknown status on the column.
+      return { status: 'expired', error: `Device code in unexpected state: ${row.status}` };
+    }
+
+    // Authorized — hand over the tokens. Single-use: clear nodeToken so a
+    // leaked deviceCode can't be replayed. Keep the row until natural expiry
+    // so a duplicate poll returns expired (not 404) — matches RFC 8628.
+    if (row.nodeToken == null || row.nodeId == null || row.founderId == null) {
+      return {
+        status: 'expired',
+        error: 'Authorized device code has no token (already consumed) — start a new sign-in',
+      };
+    }
+
+    await this.prisma.founderNodeDeviceCode.update({
+      where: { id: row.id },
+      data: { nodeToken: null },
+    });
+
+    return {
+      status: 'authorized',
+      founderId: row.founderId,
+      nodeId: row.nodeId,
+      nodeToken: row.nodeToken,
+      tokenExpiresAt: row.tokenExpiresAt?.toISOString(),
+      installId: row.installId ?? undefined,
+    };
+  }
+
+  /**
+   * Web app calls this when the founder clicks "Authorize" on the verification
+   * page. Pairs a fresh node with the grant's installId, flips the grant to
+   * 'authorized', and stashes the tokens so the next poll returns them.
+   *
+   * This is the user-facing authorize endpoint — it requires a logged-in
+   * Founder OS user (CurrentUser), NOT a nodeToken. The web UI calls it.
+   */
+  async authorizeDeviceCode(
+    userId: string,
+    userCode: string,
+    opts: { nodeId: string; label: string; platform?: string; appVersion?: string },
+  ): Promise<{ authorized: true; founderId: string }> {
+    const normalized = userCode.trim().toUpperCase();
+    const row = await this.prisma.founderNodeDeviceCode.findUnique({
+      where: { userCode: normalized },
+    });
+    if (!row || row.userId !== userId) {
+      throw new NotFoundException('Device code not found');
+    }
+    if (row.status === 'expired' || row.expiresAt < new Date()) {
+      throw new BadRequestException('Device code expired — start a new sign-in');
+    }
+    if (row.status === 'authorized') {
+      throw new BadRequestException('Device code already authorized');
+    }
+    if (row.status === 'denied') {
+      throw new BadRequestException('Device code was denied — start a new sign-in');
+    }
+
+    const nodeToken = `fn_${randomBytes(32).toString('hex')}`;
+    const secretHash = await bcrypt.hash(nodeToken, 10);
+    const tokenExpiresAt = new Date(Date.now() + NODE_TOKEN_TTL_MS);
+
+    const node = await this.prisma.founderNode.upsert({
+      where: { nodeId: opts.nodeId },
+      create: {
+        userId,
+        nodeId: opts.nodeId,
+        label: opts.label.trim() || 'Founder Node',
+        secretHash,
+        status: 'online',
+        lastSeenAt: new Date(),
+        platform: opts.platform ?? null,
+        appVersion: opts.appVersion ?? null,
+        vaultHealthy: true,
+        founderId: userId,
+        tokenExpiresAt,
+        tokenRotatedAt: new Date(),
+        installId: row.installId,
+      },
+      update: {
+        userId,
+        label: opts.label.trim() || 'Founder Node',
+        secretHash,
+        status: 'online',
+        lastSeenAt: new Date(),
+        platform: opts.platform ?? null,
+        appVersion: opts.appVersion ?? null,
+        vaultHealthy: true,
+        founderId: userId,
+        tokenExpiresAt,
+        tokenRotatedAt: new Date(),
+        installId: row.installId,
+      },
+    });
+
+    await this.prisma.founderNodeDeviceCode.update({
+      where: { id: row.id },
+      data: {
+        status: 'authorized',
+        nodeToken,
+        nodeId: node.nodeId,
+        founderId: userId,
+        tokenExpiresAt,
+      },
+    });
+
+    return { authorized: true, founderId: userId };
+  }
+
+  /** Web app calls this when the founder clicks "Deny". */
+  async denyDeviceCode(userId: string, userCode: string): Promise<{ denied: true }> {
+    const normalized = userCode.trim().toUpperCase();
+    const row = await this.prisma.founderNodeDeviceCode.findUnique({
+      where: { userCode: normalized },
+    });
+    if (!row || row.userId !== userId) {
+      throw new NotFoundException('Device code not found');
+    }
+    await this.prisma.founderNodeDeviceCode.update({
+      where: { id: row.id },
+      data: { status: 'denied' },
+    });
+    return { denied: true };
+  }
+
+  // ─── Phase 2 — token lifecycle: rotate / revoke / logout ──────────────────
+
+  /**
+   * Issue a new nodeToken, invalidate the old one. Called by Founder Node
+   * proactively when within TOKEN_ROTATION_WINDOW_MS of expiry, or by the
+   * user via "Rotate token" in the tray. Requires the current valid token.
+   */
+  async rotateToken(nodeId: string): Promise<RotateTokenResponse> {
+    const node = await this.prisma.founderNode.findUnique({ where: { nodeId } });
+    if (!node) throw new NotFoundException('Node not found');
+
+    const nodeToken = `fn_${randomBytes(32).toString('hex')}`;
+    const secretHash = await bcrypt.hash(nodeToken, 10);
+    const tokenExpiresAt = new Date(Date.now() + NODE_TOKEN_TTL_MS);
+    const tokenRotatedAt = new Date();
+
+    await this.prisma.founderNode.update({
+      where: { id: node.id },
+      data: { secretHash, tokenExpiresAt, tokenRotatedAt },
+    });
+
+    return {
+      nodeId: node.nodeId,
+      nodeToken,
+      founderId: node.founderId ?? node.userId,
+      tokenExpiresAt: tokenExpiresAt.toISOString(),
+      tokenRotatedAt: tokenRotatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Invalidate the node identity entirely — server-side revocation. The node's
+   * next request will 401 and the tray will prompt re-pair. Called by the user
+   * via "Revoke this node" in Founder OS settings, or automatically on
+   * suspected compromise. Deletes the row (cascade clears relay/sync/acks).
+   *
+   * Distinct from /logout: revoke is server-side and permanent; logout is
+   * local-only (clears node-config.json) and leaves the server identity
+   * revocable separately.
+   */
+  async revokeNode(userId: string, nodeId: string): Promise<RevokeNodeResponse> {
+    const node = await this.prisma.founderNode.findFirst({
+      where: { userId, nodeId },
+    });
+    if (!node) throw new NotFoundException('Node not found');
+    const founderId = node.founderId ?? node.userId;
+    await this.prisma.founderNodeVaultRelay.deleteMany({ where: { nodeId: node.nodeId } });
+    await this.prisma.founderNodeVaultSyncAck.deleteMany({
+      where: { OR: [{ nodeId: node.nodeId }, { sourceNodeId: node.nodeId }] },
+    });
+    await this.prisma.founderNode.delete({ where: { id: node.id } });
+    return {
+      nodeId: node.nodeId,
+      founderId,
+      revokedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Logout — local-only invalidation. The server-side identity stays revocable
+   * separately. The tray calls this when the user clicks "Sign out"; the API
+   * records the timestamp so the status endpoint can show "logged out" rather
+   * than "revoked". The actual node-config.json deletion happens client-side
+   * (the tray can't reach the user's vault from the API).
+   */
+  async logout(nodeId: string): Promise<LogoutResponse> {
+    const node = await this.prisma.founderNode.findUnique({ where: { nodeId } });
+    if (!node) throw new NotFoundException('Node not found');
+    // Mark status offline + clear lastSeenAt so the status panel shows the
+    // node as "logged out" rather than "online". The row is preserved so the
+    // user can re-pair the same nodeId without a code if they choose to.
+    await this.prisma.founderNode.update({
+      where: { id: node.id },
+      data: { status: 'offline', lastSeenAt: new Date() },
+    });
+    return {
+      nodeId: node.nodeId,
+      founderId: node.founderId ?? node.userId,
+      loggedOutAt: new Date().toISOString(),
+      serverSideRevocable: true as const,
+    };
+  }
+
+  /**
+   * Phase 2 — should the node auto-rotate its token? Returns true when within
+   * TOKEN_ROTATION_WINDOW_MS of tokenExpiresAt. Called by the tray on each
+   * sync cycle. Legacy rows (null tokenExpiresAt) return false — they rotate
+   * on next 401 instead.
+   */
+  shouldAutoRotate(node: { tokenExpiresAt: Date | null }): boolean {
+    if (!node.tokenExpiresAt) return false;
+    const msUntilExpiry = node.tokenExpiresAt.getTime() - Date.now();
+    return msUntilExpiry <= TOKEN_ROTATION_WINDOW_MS;
+  }
+
+  /** Phase 3 — look up a node by installId (for IPC pipe resolution). */
+  async findNodeByInstallId(installId: string) {
+    return this.prisma.founderNode.findFirst({ where: { installId } });
+  }
+
+  /** Phase 3 — verify the IPC secret matches the stored hash. */
+  async verifyIpcSecret(nodeId: string, ipcSecret: string): Promise<boolean> {
+    const node = await this.prisma.founderNode.findUnique({ where: { nodeId } });
+    if (!node?.ipcSecretHash) return false;
+    return bcrypt.compare(ipcSecret, node.ipcSecretHash);
+  }
+
+  /** Expose the TTL constants so the tray + tests can reference them. */
+  static readonly NODE_TOKEN_TTL_MS = NODE_TOKEN_TTL_MS;
+  static readonly TOKEN_ROTATION_WINDOW_MS = TOKEN_ROTATION_WINDOW_MS;
+  static readonly DEVICE_CODE_TTL_MS = DEVICE_CODE_TTL_MS;
+  static readonly DEVICE_CODE_INTERVAL_S = DEVICE_CODE_INTERVAL_S;
+
+  private generateUserCode(): string {
+    // ABCD-1234 — 4 chars, dash, 4 chars. No 0/O/1/I to avoid phone confusion.
+    const part = (): string => {
+      let s = '';
+      for (let i = 0; i < 4; i += 1) {
+        s += DEVICE_CODE_USER_CODE_ALPHABET[randomBytes(1)[0]! % DEVICE_CODE_USER_CODE_ALPHABET.length];
+      }
+      return s;
+    };
+    return `${part()}-${part()}`;
+  }
+
+  private buildVerificationUri(userCode: string): string {
+    const base = process.env.FOUNDER_OS_WEB_URL?.replace(/\/$/, '') ?? 'https://doxxedcrypto.digital';
+    return `${base}/founder-id/authorize?user_code=${encodeURIComponent(userCode)}`;
   }
 
   async heartbeat(nodeDbId: string, input: FounderNodeHeartbeat) {
@@ -389,6 +767,10 @@ export class FounderNodeService {
     vaultHealthy: boolean;
     platform: string | null;
     appVersion: string | null;
+    founderId: string | null;
+    tokenExpiresAt: Date | null;
+    tokenRotatedAt: Date | null;
+    installId: string | null;
   }) {
     const lastSeenAt = this.toIsoOrNull(n.lastSeenAt);
     const online =
@@ -405,6 +787,14 @@ export class FounderNodeService {
       vaultHealthy: n.vaultHealthy,
       platform: n.platform,
       appVersion: n.appVersion,
+      // Phase 2 — surface founderId + token lifecycle so the status panel
+      // can show "Founder ID: <id>" and "token expires in N days".
+      founderId: n.founderId,
+      tokenExpiresAt: this.toIsoOrNull(n.tokenExpiresAt),
+      tokenRotatedAt: this.toIsoOrNull(n.tokenRotatedAt),
+      // Phase 3 — surface installId so the IDE extension can detect whether
+      // the node it's talking to has IPC enabled.
+      installId: n.installId,
     };
   }
 
@@ -428,6 +818,10 @@ export class FounderNodeService {
     vaultHealthy: boolean;
     platform: string | null;
     appVersion: string | null;
+    founderId: string | null;
+    tokenExpiresAt: Date | null;
+    tokenRotatedAt: Date | null;
+    installId: string | null;
   }) {
     try {
       return this.toStatusRow(n);
@@ -456,6 +850,10 @@ export class FounderNodeService {
         vaultHealthy: n.vaultHealthy,
         platform: n.platform,
         appVersion: n.appVersion,
+        founderId: n.founderId,
+        tokenExpiresAt: null,
+        tokenRotatedAt: null,
+        installId: n.installId,
       };
     }
   }
