@@ -86,6 +86,14 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 240
 
+    # Promote secrets to job-level env so step-level `if:` conditionals can
+    # gate on secret presence. GitHub Actions does not allow `secrets.X` in
+    # `if:` expressions — only `env.X` is valid there. The values flow
+    # through unchanged at runtime; this only affects conditional parsing.
+    env:
+      HAS_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      HAS_AZURE_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+
     steps:
       # ── 1. Checkout the monorepo (this repo) ───────────────────────────────
       - name: Checkout monorepo
@@ -461,7 +469,7 @@ jobs:
       # to gate on secret presence — `secrets.X != ''` is not parseable in
       # `if:` conditionals.
       - name: Sign inner installer (Azure Trusted Signing)
-        if: ${{ (github.event_name == 'push') && secrets.AZURE_TENANT_ID && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+        if: ${{ (github.event_name == 'push') && env.HAS_AZURE_TENANT_ID && env.HAS_AZURE_ACCOUNT_NAME }}
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id:             ${{ secrets.AZURE_TENANT_ID }}
@@ -631,7 +639,7 @@ jobs:
       # unsigned artifact for installer-validation work, while still refusing
       # to publish a release. See docs/CODE-SIGNING-GUIDE.md.
       - name: Sign outer installer (Azure Trusted Signing)
-        if: ${{ (github.event_name == 'push') && secrets.AZURE_TENANT_ID && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+        if: ${{ (github.event_name == 'push') && env.HAS_AZURE_TENANT_ID && env.HAS_AZURE_ACCOUNT_NAME }}
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id:             ${{ secrets.AZURE_TENANT_ID }}
@@ -665,7 +673,7 @@ jobs:
           # run verify in advisory mode so the pipeline still produces a
           # clearly-marked unsigned artifact for installer-validation work.
           # (Release publishing is separately gated downstream on tag push.)
-          IS_RELEASE: ${{ github.event_name == 'push' }}
+          IS_RELEASE: ${{ (github.event_name == 'push') && env.HAS_AZURE_TENANT_ID && env.HAS_AZURE_ACCOUNT_NAME }}
         run: |
           $exe = $env:BUNDLE_PATH
           if (-not (Test-Path $exe)) { throw "Installer missing at $exe" }
