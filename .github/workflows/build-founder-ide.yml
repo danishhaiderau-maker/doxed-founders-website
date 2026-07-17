@@ -691,6 +691,10 @@ jobs:
           # /pa = use Public Authenticode policy; /v = verbose.
           & $signtool.FullName verify /pa /v $exe
           $verifyExit = $LASTEXITCODE
+          # Reset $LASTEXITCODE so the pwsh shell wrapper doesn't propagate
+          # signtool's non-zero exit as the step's exit code in the advisory
+          # branch below. PowerShell does not reset $LASTEXITCODE on its own.
+          $LASTEXITCODE = 0
           if ($verifyExit -eq 0) {
             Write-Host "SIGNATURE OK: $exe is signed and trusted" -ForegroundColor Green
           } else {
