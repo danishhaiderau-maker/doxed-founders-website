@@ -1,6 +1,142 @@
-﻿# Code Signing Guide — Founder Node
+﻿# Code Signing Guide — Founder Stack / Founder Node
 
 Windows SmartScreen warns users when they run unsigned .exe files ("Windows protected your PC"). A code signing certificate makes SmartScreen trust your installer: an **EV** certificate is trusted immediately, while an **OV** certificate earns trust after a few downloads. Signed installs also show "Verified publisher: [Your Name]" instead of the scary warning.
+
+> **Recommended path for the Founder Stack project: Azure Trusted Signing**
+> (a.k.a. Azure Artifact Signing). It is the cheapest path to a signed
+> installer — no hardware token, ~$10/month, Microsoft-hosted, integrates
+> with GitHub Actions via `azure/artifact-signing-action@v2`. See
+> [§0](#0-azure-trusted-signing-recommended-for-ci) below. The Certum
+> instructions in [§1](#1-buy-a-certum-code-signing-certIFICATE)–[§5](#5-config-reference-already-in-appsfounder-nodepackagejson)
+> are kept as a fallback for local/offline signing.
+
+---
+
+## 0. Azure Trusted Signing (recommended for CI)
+
+Azure Trusted Signing (recently rebranded to **Azure Artifact Signing**) is a
+Microsoft-hosted code-signing service. You don't own a private key — Microsoft
+holds it in Azure Key Vault and signs on your behalf after OIDC-authenticating
+your GitHub Actions workflow. This is what `build-founder-ide.yml` uses.
+
+### 0.1 Account provisioning (one-time, manual gate)
+
+This step takes **hours to days** of Microsoft review. Start it early.
+
+1. Sign in to the Azure Portal (<https://portal.azure.com>) with an Azure
+   subscription. Create one if you don't have one (free tier is fine — Trusted
+   Signing itself is ~$10/month per certificate profile).
+2. Search the marketplace for **Trusted Signing Accounts** (or **Artifact
+   Signing Accounts** on the new portal UX). Create a Trusted Signing Account
+   in a supported region (e.g. `East US` — the endpoint URL must match the
+   region: `https://eus.codesigning.azure.net/`). Write the account name down;
+   it goes into the `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` secret.
+3. Inside the account, create a **Certificate Profile**. The profile name goes
+   into `AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME`. Pick **OV** (Standard)
+   unless you have an EV entitlement — OV builds SmartScreen reputation over
+   time, EV is trusted immediately but costs more and takes longer to provision.
+4. Submit the profile for **identity validation**. Microsoft reviews the
+   publisher identity (this is the slow part — hours to days). You'll get an
+   email when validation completes. The profile shows `Active` once validated.
+5. While validation is pending, you can wire the GitHub Actions secrets — the
+   workflow will fail at the signing step until validation completes, but
+   every other step (build, verify, SBOM, provenance) runs.
+
+### 0.2 App registration + federated credentials (OIDC)
+
+Trusted Signing authenticates via OpenID Connect (OIDC) federation — no
+long-lived client secret strictly required for the OIDC flow, but the
+`azure/artifact-signing-action@v2` action supports both OIDC and the older
+client-secret flow. We use the client-secret flow because it's what the action
+defaults to and what the existing repo secrets name.
+
+1. In Azure Portal, go to **Microsoft Entra ID** → **App registrations** →
+   **New registration**. Name it e.g. `founder-stack-signing`.
+2. Under **Certificates & secrets**, create a new **Client secret**. Copy the
+   *Value* (not the Secret ID) immediately — it's only shown once. This goes
+   into the `AZURE_CLIENT_SECRET` repo secret.
+3. Copy the **Application (client) ID** → `AZURE_CLIENT_ID`.
+4. Copy the **Directory (tenant) ID** → `AZURE_TENANT_ID`.
+5. Under **API permissions**, add **Azure Key Vault** → **user_impersonation**
+   (delegated). The Trusted Signing service uses Key Vault under the hood.
+6. Back on the Trusted Signing Account, go to **Access control (IAM)** →
+   **Add role assignment** → **Trusted Signing Certificate Profile Signer**
+   → assign to the App registration you just created.
+
+### 0.3 GitHub Actions secrets
+
+In the GitHub repo (Settings → Secrets and variables → Actions), add these 6
+secrets. **Never hardcode them in the workflow file or commit them to the repo.**
+
+| Secret name | Value |
+|---|---|
+| `AZURE_TENANT_ID` | Directory (tenant) ID from §0.2 step 4 |
+| `AZURE_CLIENT_ID` | Application (client) ID from §0.2 step 3 |
+| `AZURE_CLIENT_SECRET` | Client secret Value from §0.2 step 2 |
+| `AZURE_TRUSTED_SIGNING_ENDPOINT` | Region endpoint, e.g. `https://eus.codesigning.azure.net/` |
+| `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` | Trusted Signing Account name from §0.1 step 2 |
+| `AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME` | Certificate Profile name from §0.1 step 3 |
+
+### 0.4 How the workflow uses them
+
+`build-founder-ide.yml` signs **both** the inner `FounderIDESetup.exe` (step
+16.1) and the outer `Founder-Stack-Setup-<v>.exe` (step 17.5) via:
+
+```yaml
+- uses: azure/artifact-signing-action@v2
+  with:
+    azure-tenant-id:              ${{ secrets.AZURE_TENANT_ID }}
+    azure-client-id:              ${{ secrets.AZURE_CLIENT_ID }}
+    azure-client-secret:          ${{ secrets.AZURE_CLIENT_SECRET }}
+    endpoint:                     ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+    trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+    certificate-profile-name:     ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME }}
+    files-folder:                 <dir containing the .exe>
+    files-folder-filter:          exe
+    file-digest:                  SHA256
+    timestamp-rfc3161:            http://timestamp.acs.microsoft.com
+    timestamp-digest:             SHA256
+```
+
+The signing step is gated on
+`github.event_name == 'push' || !github.event.inputs.skip_release` — so
+artifact-only dev builds (`-f skip_release=true` from a workflow_dispatch)
+skip signing for faster iteration. A later `signtool verify` step
+hard-fails the build if a release build's exe is unsigned.
+
+### 0.5 Verifying a signature (signtool)
+
+`windows-2022` runners ship `signtool.exe` under
+`C:\Program Files (x86)\Windows Kits\10\bin\<sdk-version>\x64\signtool.exe`
+(the SDK version dir drifts across runner images — locate it with
+`Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe"`).
+
+```powershell
+$signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1
+& $signtool.FullName verify /pa /v 'Founder-Stack-Setup-0.9.2.exe'
+```
+
+You should see `Successfully verified` and the publisher name from your
+certificate profile.
+
+### 0.6 Build provenance + SBOM (already wired in CI)
+
+In addition to signing, the workflow:
+
+- Generates an SPDX SBOM via `anchore/sbom-action@v0` (uploaded as a release
+  asset named `founder-stack-<v>-sbom.spdx.json`).
+- Creates a sigstore build-provenance attestation via
+  `actions/attest-build-provenance@v1`, verifiable downstream with:
+  ```bash
+  gh attestation verify Founder-Stack-Setup-0.9.2.exe --repo <org>/<repo>
+  ```
+
+### 0.7 SmartScreen reputation
+
+Trusted Signing **OV** profiles start with zero SmartScreen reputation —
+users will see a soft warning for the first few hundred downloads, then it
+fades. EV profiles are trusted immediately but cost more and take longer to
+provision. There is no shortcut: you build reputation by being downloaded.
 
 ---
 
