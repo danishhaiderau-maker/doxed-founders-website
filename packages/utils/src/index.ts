@@ -125,6 +125,7 @@ export * from './copy-relay-capacity';
 export * from './trade-cycle-audit';
 export * from './trade-lifecycle-integrity';
 export * from './trade-id-match';
+export * from './relay-execution-policy';
 export * from './melbourne-time';
 export * from './conservative-btc-agent-card';
 export * from './agent-directory-submissions';

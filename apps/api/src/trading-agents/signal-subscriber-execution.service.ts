@@ -40,6 +40,7 @@ import {
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
   isMirrorableLaneTradeId,
+  shouldDryRunIntentMirror,
   type CopyRelayCapacitySnapshot,
   type VirtualLotExitReason,
 } from '@dcf/utils';
@@ -291,21 +292,15 @@ function intentMirrorKillSwitchActive(): boolean {
  * N4 (intent-mirror) — Dry-run mode. When set (any truthy value), the
  * intent-mirror entry path logs the would-be order and records an
  * `INTENT_MIRROR_ENTER_DRY` audit event WITHOUT calling submitLimitOrder.
- * Default unset = real orders (after the rollout is signed off).
- *
- * For the initial commit we DEFAULT THIS TO ON so no real intent-mirror
- * order can flow until the owner explicitly flips it off after running the
- * paper-mode integration test (plan §5.3). Override with
- * `INTENT_MIRROR_DRY_RUN=0` to enable live intent-mirror orders.
+ * The authenticated Start action must also stamp the current per-instance
+ * relay consent policy. An ops truthy value always forces dry-run; an unset
+ * or false value permits execution only for a currently consented instance.
  */
-function intentMirrorDryRunActive(): boolean {
-  const v = (process.env.INTENT_MIRROR_DRY_RUN ?? '').trim().toLowerCase();
-  // Explicit opt-out → real orders.
-  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
-  // Any other non-empty value (1/true/on/yes) → dry-run.
-  if (v !== '') return true;
-  // Default: dry-run ON until the owner flips it off after §5.3 passes.
-  return true;
+function intentMirrorDryRunActive(instance: TradingAgentInstance): boolean {
+  return shouldDryRunIntentMirror(
+    process.env.INTENT_MIRROR_DRY_RUN,
+    instance.dashboardState,
+  );
 }
 
 const TERMINAL_PARTICIPANT_STATUSES = new Set<SignalCycleStatus>([
@@ -1312,7 +1307,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     // Part B (intent-mirror) — when the legacy fill-based path placed nothing
     // this tick AND the instance is ACTIVE (not sim, not PAUSED exit-only),
-    // try to enter directly from an approved `cont-` INTENT cycle. This is the
+    // try to enter directly from an approved Continuous/Type B INTENT cycle.
     // core fix for "dashboard active, Bitfinex flat" when the showcase runs
     // paper-only. The kill switch (N3) and dry-run flag (N4) are honored
     // inside maybeEnterFromIntent. The new path ADDS guards (N6 lane
@@ -1410,6 +1405,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!tradeId || !bot) return { ready: true };
     const pending = this.showcasePendingOrder(bot, tradeId);
     if (pending?.limit_price && pending.limit_price > 0) return { ready: true };
+    const showcasePosition = (bot.positions ?? []).find(
+      (position) => String(position.trade_id ?? '') === tradeId,
+    );
+    if (showcasePosition) {
+      return {
+        ready: false,
+        reason: 'Showcase filled before copy entry; waiting for the catch-up reconciler.',
+      };
+    }
     const sig = this.showcaseSignalForTrade(bot, tradeId);
     const st = String(sig?.status ?? '').toUpperCase();
     if (
@@ -1425,7 +1429,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           'Showcase bot has not placed a limit yet (virtual defer / chase bucket) — relay waiting.',
       };
     }
-    return { ready: true };
+    return {
+      ready: false,
+      reason: sig
+        ? 'Waiting for the showcase to publish its exact resting limit.'
+        : 'Showcase trade is not present in the current canonical book.',
+    };
   }
 
   /** Showcase cancelled or blocked entry — relay must drop its resting limit too. */
@@ -2668,14 +2677,46 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
 
       let botStateForEntry: BotApiState | null = null;
-      if (tradeId && (await this.botBridge.isEnabledAsync())) {
+      if (tradeId && !(await this.botBridge.isEnabledAsync())) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: { lastError: 'Showcase bridge unavailable — exact-copy entry blocked.' },
+        });
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(() => {});
+          claimParticipantId = null;
+        }
+        return false;
+      }
+      if (tradeId) {
         botStateForEntry = await this.fetchExecutionBotState();
+        if (!botStateForEntry) {
+          await this.prisma.tradingAgentInstance.update({
+            where: { id: instance.id },
+            data: { lastError: 'Showcase state unavailable — exact-copy entry blocked.' },
+          });
+          if (claimParticipantId) {
+            await this.prisma.signalCycleParticipant
+              .delete({ where: { id: claimParticipantId } })
+              .catch(() => {});
+            claimParticipantId = null;
+          }
+          return false;
+        }
         const defer = this.showcaseCopyEntryReady(botStateForEntry, tradeId);
         if (!defer.ready) {
           await this.prisma.tradingAgentInstance.update({
             where: { id: instance.id },
             data: { lastError: defer.reason ?? 'Waiting for showcase limit.' },
           });
+          if (claimParticipantId) {
+            await this.prisma.signalCycleParticipant
+              .delete({ where: { id: claimParticipantId } })
+              .catch(() => {});
+            claimParticipantId = null;
+          }
           return false;
         }
         const botLimit = this.resolveBotLimitPrice(botStateForEntry, tradeId);
@@ -5026,13 +5067,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const tradeId = pos.trade_id!;
 
       // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only
-      // the CONTINUOUS benchmark lane (`cont-`) may ever be mirrored to real
+      // only explicitly allow-listed Continuous/Type B lanes may be mirrored
       // Bitfinex money. This inverts the legacy F6 blocklist, which silently
       // failed-open for every newly-added research lane (vc603-/szdc1-/slav1-
       // were auto-mirrored until manually blocklisted, putting real money on
       // trades that exist only in the showcase bot's paper book). Defense-in-
       // depth: the F6 paper check below is retained as a belt-and-suspenders
-      // guard in case a future bot change leaks paper trades into a `cont-*`
+      // guard in case a future bot change leaks paper trades into an allowed
       // position (it would be caught by both the lane-prefix check and the
       // paper-book check).
       if (!isMirrorableLaneTradeId(tradeId)) {
@@ -5041,7 +5082,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
         continue;
       }
-      // F6 (defense-in-depth) — even within the cont- allowlist, refuse
+      // F6 (defense-in-depth) — even within the production allowlist, refuse
       // explicit paper-lane trade_ids if a future bot change leaks them.
       if (isPaperLaneTradeId(tradeId)) {
         this.logger.warn(
@@ -5505,18 +5546,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Part B (intent-mirror) — Place a hire's copy order directly from an
-   * approved `cont-` INTENT cycle, WITHOUT requiring the showcase to have a
-   * real resting limit or open position. This is the core fix for the
-   * "dashboard says active, Bitfinex stays flat" bug (plan §1.2): when the
-   * showcase runs paper-only, its fills never persist in `botState.positions`
-   * long enough for the legacy fill-mirror path to copy. The intent itself
-   * — the approved `cont-` signal — is the copyable event.
+    * Part B (intent-mirror) — Place a hire's copy order directly from an
+   * approved `cont-` or `tbhv1-` INTENT cycle. Entry is fail-closed until
+   * canonical showcase state contains the exact matching resting limit.
+   * The intent wakes the relay; the :7002 order book supplies the authoritative
+   * price and lifecycle so a user account cannot get ahead of the showcase.
    *
    * Guards (ALL must pass; this path ADDS guards, never relaxes G1–G14):
    *   - N3: INTENT_MIRROR_KILL_SWITCH env (panic button — reverts to fill-only).
    *   - Only INTENT cycles (decision §8 #2) — NOT PENDING_ENTRY (duplicate risk).
-   *   - N6: re-affirm isMirrorableLaneTradeId (cont- only) — fail-closed.
+   *   - N6: re-affirm isMirrorableLaneTradeId (Continuous + Type B only).
    *   - G5: isPaperLaneTradeId belt-and-suspenders block.
    *   - F1: showcase-unreachable safe mode (delegated to placeEntry via the
    *     eligibility + venue guard).
@@ -5563,7 +5602,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     for (const cycle of intentCycles) {
       const tid = cycle.tradeId;
-      // N6 / G4 — re-affirm the cont- allowlist. The webhook cannot bypass it.
+      // N6 / G4 — re-affirm the Continuous + Type B allowlist.
       if (!isMirrorableLaneTradeId(tid)) {
         this.logger.warn(
           `[INTENT-MIRROR] skip non-mirrorable lane trade=${tid} user=${instance.userId}`,
@@ -5668,7 +5707,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const qty = computeQty(marginCap, leverage, limitPrice, MIN_QTY_BTC);
 
       // N4 — dry-run mode. Log the would-be order + audit row, no exchange call.
-      if (intentMirrorDryRunActive()) {
+      if (intentMirrorDryRunActive(instance)) {
         const dryPayload = {
           venue,
           source: 'hire',

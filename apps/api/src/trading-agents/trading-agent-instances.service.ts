@@ -2,10 +2,17 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import {
   TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_PROVIDER_LABELS,
+  CONSERVATIVE_BTC_LIVE_RELAY_LANES,
+  CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
   type ExchangeProvider,
   type TradingAgentAiProvider,
 } from '@dcf/utils';
-import { TradingAgentInstanceStatus, SignalCycleStatus, NotificationType } from '@prisma/client';
+import {
+  Prisma,
+  TradingAgentInstanceStatus,
+  SignalCycleStatus,
+  NotificationType,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -410,9 +417,25 @@ export class TradingAgentInstancesService {
       await this.expirePendingCopyParticipants(userId, agent.id, stopCreds ?? undefined);
     }
 
+    const realTradingConfirmedAt =
+      !paused && instance.exchangeProvider !== 'paper'
+        ? new Date().toISOString()
+        : null;
+    const relayDashboardState = {
+      ...dash,
+      relayExecutionMode:
+        paused ? 'PAUSED' : instance.exchangeProvider === 'paper' ? 'PAPER' : 'LIVE',
+      relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
+      relayMirrorLanes: [...CONSERVATIVE_BTC_LIVE_RELAY_LANES],
+      realTradingConfirmedAt,
+    };
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
-      data: { status, lastError: null },
+      data: {
+        status,
+        lastError: null,
+        dashboardState: relayDashboardState as Prisma.InputJsonValue,
+      },
     });
 
     // F8 — Wake the executor immediately so the first tick fires within
@@ -454,6 +477,10 @@ export class TradingAgentInstancesService {
       status,
       relay: relayAction,
       validated: startValidation,
+      executionMode: relayDashboardState.relayExecutionMode,
+      relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
+      mirrorLanes: [...CONSERVATIVE_BTC_LIVE_RELAY_LANES],
+      confirmedAt: realTradingConfirmedAt,
       message: paused
         ? relayAction?.cancelledOrders
           ? `Relay severed — ${relayAction.cancelledOrders} pending order(s) cancelled. No new showcase trades until you Start.`

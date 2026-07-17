@@ -70,7 +70,10 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
     if (!token) return;
     setRelayBusy(true);
     try {
-      await resumeMyAgentInstance(slug, token);
+      const res = await resumeMyAgentInstance(slug, token);
+      if (isLive && (res.executionMode !== 'LIVE' || !res.confirmedAt)) {
+        throw new Error('Relay did not return a confirmed LIVE execution state.');
+      }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Start failed');

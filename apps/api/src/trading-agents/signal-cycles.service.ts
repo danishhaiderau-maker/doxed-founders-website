@@ -232,7 +232,7 @@ export class SignalCyclesService implements OnModuleInit {
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
     // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only the
-    // CONTINUOUS benchmark lane (`cont-`) may create a live-copy intent. All
+    // Continuous (`cont-`) and Type B (`tbhv1-`) may create live-copy intents. All
     // research lanes (vc603-, szdc1-, slav1-, a160v2-, scan-, etc.) are skipped
     // — they have no real Bitfinex counterpart and would put real money on a
     // trade that exists only in the showcase bot's paper book. Replaces the
@@ -241,7 +241,7 @@ export class SignalCyclesService implements OnModuleInit {
     // still flows to the analyzer.
     if (!isMirrorableLaneTradeId(intentTradeId)) {
       this.logger.warn(
-        `Skipping non-mirrorable lane trade_id=${intentTradeId} (F7: only cont- lane mirrored to live copy)`,
+        `Skipping non-mirrorable lane trade_id=${intentTradeId} (F7: only Continuous + Type B mirrored)`,
       );
       this.lastSeenTradeId = intentTradeId;
       return false;
@@ -342,10 +342,10 @@ export class SignalCyclesService implements OnModuleInit {
       for (const t of sessionTrades) {
         const tid = String(t.trade_id);
         // F7 — never backfill non-mirrorable lanes (whitelist). Same rationale
-        // as pollBotForIntents: only `cont-` may be mirrored to live copy.
+        // as pollBotForIntents: only Continuous + Type B may be mirrored.
         if (!isMirrorableLaneTradeId(tid)) {
           this.logger.warn(
-            `Skipping backfill of non-mirrorable lane trade_id=${tid} (F7: only cont- lane mirrored)`,
+            `Skipping backfill of non-mirrorable lane trade_id=${tid} (F7: only Continuous + Type B mirrored)`,
           );
           continue;
         }
