@@ -89,7 +89,10 @@ from combo_pathway_config import (
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
 )
-from normalized_market_indicators import normalize_market_indicators
+from normalized_market_indicators import (
+    INDICATOR_NORMALIZATION_VERSION,
+    normalize_market_indicators,
+)
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -6189,6 +6192,7 @@ def tile2_policy_descriptor() -> dict:
         "adx_cap": AS_EXPLICIT_ADX_CAP,
         "short_disabled": AS_EXPLICIT_DISABLE_SHORT,
         "session_blacklist": sorted(AS_EXPLICIT_SESSION_BLACKLIST),
+        "indicator_normalization_version": INDICATOR_NORMALIZATION_VERSION,
         "thesis_fast_cut_unreal_pct": TILE2_THESIS_FAST_CUT_UNREAL_PCT,
         # entry_policy_hash: a deterministic short hash of the policy fields
         # that affect entry eligibility. Two outcomes with the same
@@ -6211,6 +6215,7 @@ def tile2_entry_policy_hash() -> str:
         f"adx_cap={AS_EXPLICIT_ADX_CAP}",
         f"short_disabled={bool(AS_EXPLICIT_DISABLE_SHORT)}",
         f"session_blacklist={','.join(sorted(AS_EXPLICIT_SESSION_BLACKLIST))}",
+        f"indicator_normalization={INDICATOR_NORMALIZATION_VERSION}",
         f"thesis_fast_cut={TILE2_THESIS_FAST_CUT_UNREAL_PCT}",
         "midpoint_buffer=0.15",
         "max_chase_dist=0.30",

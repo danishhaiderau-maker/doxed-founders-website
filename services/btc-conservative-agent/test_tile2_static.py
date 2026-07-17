@@ -142,6 +142,11 @@ check(
     tile2_policy_descriptor().get("policy_id") == TILE2_POLICY_ID,
 )
 check(
+    "tile2_policy_descriptor exposes the normalization version",
+    tile2_policy_descriptor().get("indicator_normalization_version")
+    == "normalized_adx_atr_percentile_v1",
+)
+check(
     "tile2_entry_policy_hash is a 12-char string",
     isinstance(tile2_entry_policy_hash(), str)
     and len(tile2_entry_policy_hash()) == 12,
