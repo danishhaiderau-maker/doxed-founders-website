@@ -1,4 +1,4 @@
-import { Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, Module, OnModuleInit, forwardRef } from '@nestjs/common';
 import {
   CursorAdapter,
   FilesystemAdapter,
@@ -8,6 +8,7 @@ import {
 import { ExecutionManagerController } from './execution-manager.controller';
 import { ExecutionManagerService } from './execution-manager.service';
 import type { ExecutionAdapter } from './execution-manager.types';
+import { FounderNodeModule } from '../founder-node/founder-node.module';
 
 /**
  * Internal helper that holds the adapter instances. Lives in the
@@ -33,15 +34,20 @@ class Bootstrapper {
  * Execution Manager module — kernel service #4.
  *
  * Wires the service + the read-only controller, then on init registers
- * the adapters Phase 3 ships with (terminal, filesystem, cursor + Founder IDE
- * with local-shell fallback). Later phases add more adapters here without
- * touching the service — the registry is the seam.
+ * the adapters Phase 3 ships with (terminal, filesystem, cursor + Founder IDE).
+ *
+ * Phase 3 — FounderIdeAdapter now depends on FounderNodeService to look up
+ * the install's IDE handshake state. We import FounderNodeModule with
+ * `forwardRef` because the broader dependency graph already has cycles
+ * (IdeBridge → Builder → FounderNode → IdeBridge); adding one more edge
+ * in this direction is consistent with how the rest of the kernel composes.
  *
  * No Prisma / no application-code imports: this module is stateless.
  * Decision logging goes through Flight Recorder (a separate kernel
  * module the application layer composes with), not a new table here.
  */
 @Module({
+  imports: [forwardRef(() => FounderNodeModule)],
   controllers: [ExecutionManagerController],
   providers: [
     ExecutionManagerService,

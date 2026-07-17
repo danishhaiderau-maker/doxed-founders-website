@@ -14,7 +14,8 @@
     "pack:win": "electron-builder --win",
     "pack:mac": "electron-builder --mac",
     "pack:linux": "electron-builder --linux",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test test/ide-ipc-client.spec.ts"
   },
   "dependencies": {
     "@dcf/founder-vault": "*",

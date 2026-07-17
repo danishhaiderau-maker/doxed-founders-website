@@ -769,6 +769,66 @@ export class FounderNodeService {
     return bcrypt.compare(ipcSecret, node.ipcSecretHash);
   }
 
+  // ─── Phase 3 — IDE↔node named-pipe IPC handshake state ──────────────────
+  //
+  // The Founder Node tray POSTs to /founder-node/ide-handshake whenever its
+  // local IPC client (apps/founder-node/src/ide-ipc-client.ts) emits
+  // 'connected' or 'disconnected'. We keep the latest state in memory keyed
+  // by nodeId; it is NOT persisted (it's a real-time liveness signal that
+  // resets on API restart — adapters must treat "no entry" as inactive).
+  //
+  // The FounderIdeAdapter (apps/api/src/execution-manager/adapters/) reads
+  // this to decide isConnected() — if the node reports no active handshake,
+  // the adapter fail-closes and the API refuses to dispatch commands.
+
+  /** Window after which a stale handshake entry is treated as inactive. */
+  private static readonly IDE_HANDSHAKE_STALE_MS = 30_000;
+  private readonly ideHandshakeState = new Map<
+    string,
+    { active: boolean; updatedAt: number }
+  >();
+
+  /**
+   * Record the IDE handshake state for a node. Called by the controller's
+   * /ide-handshake endpoint (which Founder Node POSTs to on connect/disconnect).
+   */
+  setIdeHandshakeState(nodeId: string, active: boolean, now = Date.now()): void {
+    this.ideHandshakeState.set(nodeId, { active, updatedAt: now });
+  }
+
+  /**
+   * Read the current IDE handshake state for a node. Returns false when:
+   *   - no entry exists (never reported)
+   *   - the entry is older than IDE_HANDSHAKE_STALE_MS (the node died without
+   *     sending a disconnect)
+   *   - the entry explicitly says active=false
+   *
+   * Fail-closed: when in doubt, treat the handshake as inactive so the
+   * adapter refuses to dispatch commands.
+   */
+  isIdeHandshakeActive(nodeId: string, now = Date.now()): boolean {
+    const entry = this.ideHandshakeState.get(nodeId);
+    if (!entry) return false;
+    if (now - entry.updatedAt > FounderNodeService.IDE_HANDSHAKE_STALE_MS) return false;
+    return entry.active;
+  }
+
+  /**
+   * Phase 3 — resolve IPC dispatch state for an install. Looks up the node
+   * by installId and returns whether the IDE handshake is currently active
+   * for that node. Used by the FounderIdeAdapter to decide isConnected().
+   */
+  async isIdeHandshakeActiveForInstall(installId: string): Promise<boolean> {
+    const node = await this.findNodeByInstallId(installId);
+    if (!node) return false;
+    return this.isIdeHandshakeActive(node.nodeId);
+  }
+
+  /** Test-only: reset the in-memory handshake state between assertions. */
+  __resetIdeHandshakeStateForTests(): void {
+    this.ideHandshakeState.clear();
+  }
+
   /** Expose the TTL constants so the tray + tests can reference them. */
   static readonly NODE_TOKEN_TTL_MS = NODE_TOKEN_TTL_MS;
   static readonly TOKEN_ROTATION_WINDOW_MS = TOKEN_ROTATION_WINDOW_MS;
