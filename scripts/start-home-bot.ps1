@@ -84,6 +84,14 @@ Get-Content $VaultEnv | ForEach-Object {
   }
 }
 
+# The :7002 process is the canonical paper showcase. Real funds are handled by
+# the per-user website relay after explicit consent; the showcase must never
+# inherit a stale live flag from a local config or parent environment.
+$env:FORCE_PAPER_MODE = "1"
+$env:LIVE_TRADING_ENABLED = "0"
+$env:BITFINEX_LIVE_ENABLED = "0"
+$env:LIVE_ARMED = "0"
+
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {
   Write-Host "Monorepo agent dir not found: $agentDir"

@@ -19719,6 +19719,10 @@ def _perform_fresh_collection_reset_locked() -> dict:
         trades.clear()
         recent_trades.clear()
     deleted, errors = reset_all_research_files()
+    # Fresh Collection is the operator boundary for every active holdout.  The
+    # file wipe alone is insufficient because Tile 2 counters also live in
+    # memory and would otherwise be written back with pre-reset/test values.
+    reset_tile2_counters_for_fresh_holdout()
     _cached_pathway_scorecard = {}
     _reset_runtime_log_handlers()
     reset_runtime_state()

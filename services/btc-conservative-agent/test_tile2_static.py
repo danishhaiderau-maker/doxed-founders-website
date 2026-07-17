@@ -7,6 +7,7 @@ placed; the paper pending_orders list is inspected directly.
 Run: cd services/btc-conservative-agent && python test_tile2_static.py
 """
 import json
+import inspect
 import os
 import sys
 import time
@@ -717,6 +718,11 @@ check(
 check(
     "cohort_id is always taken from running code after reload",
     m2.get("cohort_id") == TILE2_POLICY_ID,
+)
+check(
+    "Fresh Collection resets Tile 2 in-memory counters after archive/wipe",
+    "reset_tile2_counters_for_fresh_holdout()"
+    in inspect.getsource(bot._perform_fresh_collection_reset_locked),
 )
 
 
