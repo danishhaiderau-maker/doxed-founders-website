@@ -153,7 +153,7 @@ COMBO_LANE_SPECS = {
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: {
         "label": "S/R Micro Tile V2 Static -- resting limit (no chase)",
         "subtitle": (
-            "PROBATION ? SHADOW ONLY ? LONG@micro_support + SHORT@micro_resistance "
+            "PROBATION - PAPER ONLY - LONG@micro_support; SHORT disabled; "
             "never chase/reprice/slide"
         ),
         "combo_key": "SR_MICRO_TILE++STATIC_LIMIT_BRACKET_V2",

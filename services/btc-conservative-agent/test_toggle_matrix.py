@@ -16,6 +16,10 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+# The matrix deliberately simulates LIVE and OFF transitions. Keep all of
+# those mutations in memory so a test run cannot arm live mode or disable a
+# tile in the operator's real config-7002.json.
+bot.save_persistent_config = lambda: None
 from bot import (
     execution_mode_for_lane,
     lane_can_place_new_entry,

@@ -15,6 +15,9 @@ os.environ.setdefault("FORCE_PAPER_MODE", "1")  # ensure Bitfinex stays OFF duri
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 
 import bot
+# Unit tests must never persist their simulated live/toggle state into the
+# operator's real config-7002.json.
+bot.save_persistent_config = lambda: None
 from bot import (
     execution_mode_for_lane,
     lane_can_place_new_entry,
@@ -108,8 +111,10 @@ print("\n[Group 3] Tile ON + Bitfinex ON -> LIVE")
 reset_state()
 set_bitfinex(True)
 mode = execution_mode_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
-# Note: with no API keys in test env, block_reason will surface the gate.
-if check("Tile ON + BFX ON mode", mode, EXEC_MODE_LIVE):
+# FORCE_PAPER_MODE is deliberately active for this test process, so the live
+# executor must fail closed to PAPER even when the persisted live toggle is ON.
+expected_live_mode = EXEC_MODE_PAPER if os.environ.get("FORCE_PAPER_MODE") == "1" else EXEC_MODE_LIVE
+if check("Tile ON + BFX ON mode", mode, expected_live_mode):
     passed += 1
 else:
     failed += 1
@@ -117,7 +122,11 @@ if check("Tile ON + BFX ON can place entry", lane_can_place_new_entry(RESEARCH_L
     passed += 1
 else:
     failed += 1
-if check("Tile ON + BFX ON is live", lane_is_live(RESEARCH_LANE_TYPE_B_HUNTER_V1), True):
+if check(
+    "Tile ON + BFX ON live flag",
+    lane_is_live(RESEARCH_LANE_TYPE_B_HUNTER_V1),
+    expected_live_mode == EXEC_MODE_LIVE,
+):
     passed += 1
 else:
     failed += 1
@@ -173,8 +182,56 @@ reset_state()
 # CONTINUOUS is special -- it uses continuous_ai_research_enabled() not the
 # per-lane map. With FORCE_PAPER_MODE on, it should be PAPER.
 mode = execution_mode_for_lane(RESEARCH_LANE_CONTINUOUS)
-print(f"  [INFO] CONTINUOUS mode: {mode}")
-# Don't strictly assert -- we just want to ensure the resolver doesn't crash.
+if check("CONTINUOUS ON + BFX OFF mode", mode, EXEC_MODE_PAPER):
+    passed += 1
+else:
+    failed += 1
+if check("CONTINUOUS can place paper entry", lane_can_place_new_entry(RESEARCH_LANE_CONTINUOUS), True):
+    passed += 1
+else:
+    failed += 1
+if check("CONTINUOUS has no retired block", lane_execution_block_reason(RESEARCH_LANE_CONTINUOUS), None):
+    passed += 1
+else:
+    failed += 1
+
+# Prove the active benchmark reaches the paper pending-order lifecycle rather
+# than only returning the right resolver label.
+paper_trade_id = "cont-test-paper-route"
+paper_signal = {
+    "trade_id": paper_trade_id,
+    "research_lane": RESEARCH_LANE_CONTINUOUS,
+    "final_direction": "LONG",
+    "direction": "LONG",
+}
+original_create_limit_order = bot.create_limit_order
+try:
+    def _record_test_limit(signal):
+        order = {
+            "trade_id": signal["trade_id"],
+            "research_lane": signal["research_lane"],
+            "status": "PENDING",
+        }
+        bot.pending_orders.append(order)
+        return order
+
+    bot.create_limit_order = _record_test_limit
+    with bot.state_lock:
+        bot.state["strategy_mode"] = "RESEARCH"
+        bot.state["live_armed"] = False
+        bot.state["bitfinex_live_enabled"] = False
+        bot.state["pullback_threshold"] = 0.001
+    routed = bot.execute_order(paper_signal, {"direction": "LONG", "win_prob": 0})
+    if check("CONTINUOUS paper order reaches pending lifecycle", routed, True):
+        passed += 1
+    else:
+        failed += 1
+finally:
+    bot.create_limit_order = original_create_limit_order
+    bot.pending_orders[:] = [
+        order for order in bot.pending_orders
+        if order.get("trade_id") != paper_trade_id
+    ]
 
 print()
 print("=" * 70)

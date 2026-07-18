@@ -42,6 +42,7 @@ def run():
     check("direction-only JSON parses", parsed["direction"] == "LONG")
     check("direction-only JSON derives tier", parsed["decision"] == "STRONG_APPROVE")
     check("missing confidence stays neutral", parsed["win_prob"] == 0)
+    check("legacy confidence bands cannot block direction-only v12", not bot.dashboard_ai_band_blocks(0))
 
     captured = []
     original = bot._spawn_independent_v1_lane_after_ai
@@ -61,6 +62,36 @@ def run():
     check("shared AI is marked", shared_ai.get("shared_ai_call") is True)
     check("confidence is neutralized", shared_ai.get("win_prob") == 0)
     check("direction is preserved", shared_ai.get("direction") == "SHORT")
+
+    counterfactuals = []
+    original_lane_orders_allowed = bot.lane_orders_allowed
+    original_start_replay_buffer = bot.start_replay_buffer
+    original_append_replay_tick = bot.append_replay_tick
+    original_log_lane_opportunity_event = bot.log_lane_opportunity_event
+    try:
+        bot.lane_orders_allowed = lambda lane: True
+        bot.start_replay_buffer = lambda *args, **kwargs: counterfactuals.append((args, kwargs))
+        bot.append_replay_tick = lambda *args, **kwargs: None
+        bot.log_lane_opportunity_event = lambda *args, **kwargs: None
+        with bot.state_lock:
+            bot.state["price"] = 100.0
+        bot._spawn_lab_combo_shadow(
+            {"trade_id": "scan-counterfactual"},
+            {"direction": "LONG", "decision": "REJECT", "win_prob": 0},
+            2.0,
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            {"price": 100.0},
+            collection_mode="CALIBRATION_COUNTERFACTUAL",
+            is_counterfactual=True,
+        )
+    finally:
+        bot.lane_orders_allowed = original_lane_orders_allowed
+        bot.start_replay_buffer = original_start_replay_buffer
+        bot.append_replay_tick = original_append_replay_tick
+        bot.log_lane_opportunity_event = original_log_lane_opportunity_event
+    check("Type B ON still collects rejected counterfactual replay", len(counterfactuals) == 1)
+    check("counterfactual replay is explicitly tagged", counterfactuals[0][1].get("is_counterfactual") is True)
+
     tile = next(
         row for row in bot.build_static_pathway_lane_specs()["lanes"]
         if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
