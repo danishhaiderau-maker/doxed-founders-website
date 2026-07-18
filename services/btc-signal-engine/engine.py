@@ -93,6 +93,7 @@ from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
+from process_singleton import ProcessSingletonError, acquire_process_singleton
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -5211,7 +5212,7 @@ def fills_first_continuous_enabled(signal: dict = None) -> bool:
 
 
 def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -> tuple:
-    """Pure AI limit — zone midpoint or explicit limit_price; no micro/EMA gates."""
+    """Resolve a limit without asking the direction classifier for price planning."""
     plan = trade_planner or {}
     limit = None
     try:
@@ -5224,10 +5225,16 @@ def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -
             zhi = float(plan["entry_zone_high"])
             if zhi > zlo:
                 limit = zlo + (zhi - zlo) * 0.5
-    except (TypeError, ValueError):
-        return None, "AI_PLANNER_MISSING"
-    if limit is None or price <= 0 or direction not in ("LONG", "SHORT"):
-        return None, "AI_PLANNER_MISSING"
+    except (TypeError, ValueError, KeyError):
+        limit = None
+    if price <= 0 or direction not in ("LONG", "SHORT"):
+        return None, "INVALID_DIRECTION_OR_PRICE"
+    if limit is None:
+        pullback = max(0.0001, float(state.get("pullback_threshold", 0.001)))
+        limit = price * (1 - pullback if direction == "LONG" else 1 + pullback)
+        source = "DIRECTIONAL_PULLBACK_LIMIT"
+    else:
+        source = "LEGACY_AI_DIRECT_LIMIT"
     max_dist = AI_DIRECT_MAX_DIST_PCT
     if direction == "LONG":
         if limit >= price:
@@ -5239,7 +5246,7 @@ def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -
             limit = price * (1 + float(state.get("pullback_threshold", 0.001)))
         if (limit - price) / price > max_dist:
             limit = price * (1 + max_dist)
-    return float(limit), "AI_DIRECT_LIMIT"
+    return float(limit), source
 
 
 def compute_continuous_ai_direct_entry(signal: dict) -> dict:
@@ -5946,6 +5953,17 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
+_PROCESS_SINGLETON = None
+BOT_INSTANCE_ID = None
+
+
+def is_active_dashboard_owner() -> bool:
+    """True only for the process holding the OS-level dashboard singleton."""
+    return bool(
+        _PROCESS_SINGLETON
+        and getattr(_PROCESS_SINGLETON, "owned", False)
+        and BOT_INSTANCE_ID
+    )
 
 AGENT_HUB_PUBLIC_URL = os.getenv(
     "AGENT_HUB_PUBLIC_URL",
@@ -6361,6 +6379,10 @@ state = {
     "last_ai_ts": 0.0,
     "last_ai_fp": "",
     "ai_history": [],
+    "shared_ai_lane_counters": {
+        "CONTINUOUS": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        "TYPE_B_HUNTER_V1": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+    },
     "engine_reason": "",
     "ai_reason": "",
     "price": None,
@@ -6576,6 +6598,16 @@ _relay_push_state = {"seq": 0, "last_ts": 0.0, "last_event": None, "last_ok": No
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
 
 
+def _dashboard_owner_metadata() -> dict:
+    return {
+        "bot_instance_id": BOT_INSTANCE_ID,
+        "dashboard_owner": is_active_dashboard_owner(),
+        "dashboard_pid": os.getpid(),
+        "dashboard_port": DASHBOARD_PORT,
+        "source_git_rev": _runtime_git_rev(),
+    }
+
+
 def _estimate_token_count(text) -> int:
     if not text:
         return 0
@@ -6683,20 +6715,38 @@ def _report_showcase_inference_usage(
 
 def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
     """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
+    if not is_active_dashboard_owner():
+        logger.warning(f"[RELAY PUSH] blocked non-owner process event={event} trade={trade_id}")
+        return
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     if not url:
         return
     secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
-    payload = {"event": event, "trade_id": trade_id, "ts": utc_iso()}
+    webhook_secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    payload = {
+        "event": event,
+        "trade_id": trade_id,
+        "ts": utc_iso(),
+        **_dashboard_owner_metadata(),
+    }
     if extra and isinstance(extra, dict):
         payload.update(extra)
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     def _post():
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if secret:
                 headers["X-Bot-Control-Secret"] = secret
-            requests.post(url, json=payload, headers=headers, timeout=2.5)
+            if webhook_secret:
+                signature = hmac.new(
+                    webhook_secret.encode("utf-8"),
+                    body,
+                    hashlib.sha256,
+                ).hexdigest()
+                headers["X-Showcase-Signature"] = f"sha256={signature}"
+            response = requests.post(url, data=body, headers=headers, timeout=2.5)
+            response.raise_for_status()
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
@@ -6727,6 +6777,9 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
     is unset (don't crash the bot on misconfig). The ~2s pollBotForIntents
     backstop remains; this webhook is a latency optimization, not the only path.
     """
+    if not is_active_dashboard_owner():
+        logger.warning(f"[INTENT WEBHOOK] blocked non-owner process event={event}")
+        return
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
     if not url or not secret:
@@ -6776,6 +6829,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "pullback_pct": pullback_threshold,
         "bot_version": EXECUTION_FIX_VERSION,
         "strategy_mode": strategy_mode,
+        **_dashboard_owner_metadata(),
     }
 
     try:
@@ -6796,7 +6850,8 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
             if legacy_secret:
                 headers["X-Bot-Control-Secret"] = legacy_secret
-            requests.post(url, data=body, headers=headers, timeout=2.5)
+            response = requests.post(url, data=body, headers=headers, timeout=2.5)
+            response.raise_for_status()
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
@@ -9583,7 +9638,11 @@ def extract_ai_json_blob(text: str) -> dict:
         try:
             candidate = json.loads(text[brace:text.find("}", brace) + 1])
             if isinstance(candidate, dict) and (
-                "bull_score" in candidate or "reasons_for_trade" in candidate or "confidence" in candidate
+                "long_score" in candidate
+                or "short_score" in candidate
+                or "bull_score" in candidate
+                or "reasons_for_trade" in candidate
+                or "confidence" in candidate
             ):
                 return candidate
         except Exception:
@@ -9612,19 +9671,46 @@ def derive_research_decision_tier(win_prob: int, long_score: int, short_score: i
     return "SOFT_APPROVE"
 
 
+def derive_candidate_direction(long_score: int, short_score: int, raw_direction: str = "") -> str:
+    """Return one deterministic candidate side; NO_TRADE is never a lane gate."""
+    try:
+        long_value = int(long_score or 0)
+    except (TypeError, ValueError):
+        long_value = 0
+    try:
+        short_value = int(short_score or 0)
+    except (TypeError, ValueError):
+        short_value = 0
+    if long_value > short_value:
+        return "LONG"
+    if short_value > long_value:
+        return "SHORT"
+    raw = str(raw_direction or "").upper()
+    if raw in ("LONG", "SHORT"):
+        return raw
+    # Stable tie-break only supplies a candidate for lane evaluation. Continuous
+    # still rejects a zero score gap, while Type B applies its own feature policy.
+    return "LONG"
+
+
 def parse_ai_response_fields(text: str) -> dict:
-    """Parse direction, win_prob, decision, and factors from AI text + JSON block."""
+    """Parse one shared call and derive its candidate side from directional scores."""
     json_blob = extract_ai_json_blob(text)
     factors = parse_ai_factor_block(text)
 
     dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
-    direction = dir_match.group(1).upper() if dir_match else None
-    if direction not in ("LONG", "SHORT"):
+    raw_direction = dir_match.group(1).upper() if dir_match else None
+    if raw_direction not in ("LONG", "SHORT"):
         jd = json_blob.get("direction") or json_blob.get("preferred_direction") or factors.get("preferred_direction")
         if jd:
-            direction = str(jd).upper()
-    if direction not in ("LONG", "SHORT", "NO_TRADE"):
-        direction = "NO_TRADE"
+            raw_direction = str(jd).upper()
+    if raw_direction not in ("LONG", "SHORT", "NO_TRADE"):
+        raw_direction = "NO_TRADE"
+    direction = derive_candidate_direction(
+        factors.get("long_score", 0),
+        factors.get("short_score", 0),
+        raw_direction,
+    )
 
     match = re.search(r"Win probability:\s*(\d+)", text)
     win_prob = int(match.group(1)) if match else 0
@@ -9667,7 +9753,10 @@ def parse_ai_response_fields(text: str) -> dict:
 
     return {
         "direction": direction,
+        "candidate_direction": direction,
+        "raw_direction": raw_direction,
         "win_prob": max(0, min(100, int(win_prob or 0))),
+        "confidence_requested": False,
         "decision": decision,
         "override": override,
         "factors": factors,
@@ -9742,14 +9831,20 @@ def parse_ai_factor_block(text: str) -> dict:
         while brace >= 0:
             try:
                 candidate = json.loads(text[brace:text.find("}", brace) + 1])
-                if isinstance(candidate, dict) and ("bull_score" in candidate or "reasons_for_trade" in candidate):
+                if isinstance(candidate, dict) and (
+                    "long_score" in candidate
+                    or "short_score" in candidate
+                    or "bull_score" in candidate
+                    or "reasons_for_trade" in candidate
+                ):
                     json_blob = candidate
                     break
             except Exception:
                 pass
             brace = text.find("{", brace + 1)
     if isinstance(json_blob, dict):
-        factors["reasons_for"] = json_blob.get("reasons_for_trade") or json_blob.get("reasons_for") or []
+        reason = json_blob.get("reason")
+        factors["reasons_for"] = json_blob.get("reasons_for_trade") or json_blob.get("reasons_for") or ([reason] if reason else [])
         factors["reasons_against"] = json_blob.get("reasons_against_trade") or json_blob.get("reasons_against") or []
         factors["bull_score"] = int(json_blob.get("bull_score", 0) or 0)
         factors["bear_score"] = int(json_blob.get("bear_score", 0) or 0)
@@ -9759,7 +9854,7 @@ def parse_ai_factor_block(text: str) -> dict:
             factors["long_score"] = factors["bull_score"] * 10
         if factors["short_score"] <= 0 and factors["bear_score"] > 0:
             factors["short_score"] = factors["bear_score"] * 10
-        pref = json_blob.get("preferred_direction")
+        pref = json_blob.get("preferred_direction") or json_blob.get("direction")
         if pref:
             factors["preferred_direction"] = str(pref).upper()
         factors["factor_parse_ok"] = True
@@ -10091,7 +10186,14 @@ def log_lane_opportunity_event(
 #   ev_per_filled          - paper_pnl_usd / filled_closes
 # ---------------------------------------------------------------------------
 TILE2_COUNTERS_FILE = "tile2_counters.json"
-TILE2_COUNTERS_SCHEMA = "tile2_counters_v2"
+TILE2_COUNTERS_SCHEMA = "tile2_counters_v3"
+TILE2_COUNTERS_COMPAT_SCHEMAS = {"tile2_counters_v2", TILE2_COUNTERS_SCHEMA}
+TILE2_ORDER_TERMINAL_STATES = {
+    "FILLED",
+    "TTL_EXPIRED",
+    "CANCELLED",
+    "ORPHANED_ON_RESTART",
+}
 
 
 def _tile2_counters_bucket() -> dict:
@@ -10113,6 +10215,9 @@ def _tile2_counters_bucket() -> dict:
             "paper_order_ids": [],
             "entry_fill_trade_ids": [],
             "closed_trade_ids": [],
+            "orphaned_order_ids": [],
+            "order_lifecycle": {},
+            "restored_pending_orders": 0,
             "cohort_id": TILE2_POLICY_ID,
             "exit_profile_id": TILE2_EXIT_PROFILE_ID,
         },
@@ -10123,6 +10228,7 @@ def _tile2_counters_bucket() -> dict:
         "paper_order_ids",
         "entry_fill_trade_ids",
         "closed_trade_ids",
+        "orphaned_order_ids",
     ):
         if list_key not in bucket:
             bucket[list_key] = []
@@ -10130,7 +10236,41 @@ def _tile2_counters_bucket() -> dict:
         bucket["cohort_id"] = TILE2_POLICY_ID
     if "exit_profile_id" not in bucket:
         bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
+    if not isinstance(bucket.get("order_lifecycle"), dict):
+        bucket["order_lifecycle"] = {}
+    bucket.setdefault("restored_pending_orders", 0)
     return bucket
+
+
+def _record_tile2_order_lifecycle(
+    trade_id: str,
+    status: str,
+    reason: str = "",
+    order: dict = None,
+) -> None:
+    """Persist the latest state for every Tile 2 paper order."""
+    trade_id = str(trade_id or "")
+    status = str(status or "").upper()
+    if not trade_id or not status:
+        return
+    with state_lock:
+        bucket = _tile2_counters_bucket()
+        lifecycle = bucket.setdefault("order_lifecycle", {})
+        entry = lifecycle.setdefault(
+            trade_id,
+            {"trade_id": trade_id, "created_ts": time.time()},
+        )
+        entry["status"] = status
+        entry["reason"] = str(reason or "")
+        entry["updated_ts"] = time.time()
+        entry["terminal"] = status in TILE2_ORDER_TERMINAL_STATES
+        if order is not None:
+            entry["order"] = copy.deepcopy(order)
+        if status == "ORPHANED_ON_RESTART":
+            seen = bucket.setdefault("orphaned_order_ids", [])
+            if trade_id not in seen:
+                seen.append(trade_id)
+    _persist_tile2_counters(bucket)
 
 
 def _persist_tile2_counters(bucket: dict) -> None:
@@ -10172,20 +10312,68 @@ def _record_tile2_event(
                 if trade_id not in seen:
                     seen.append(trade_id)
                     bucket["paper_limits"] = int(bucket.get("paper_limits", 0)) + 1
+                lifecycle = bucket.setdefault("order_lifecycle", {})
+                lifecycle.setdefault(
+                    trade_id,
+                    {
+                        "trade_id": trade_id,
+                        "status": "PENDING",
+                        "terminal": False,
+                        "created_ts": time.time(),
+                        "updated_ts": time.time(),
+                    },
+                )
             elif event == "FILLED":
                 seen = bucket.setdefault("entry_fill_trade_ids", [])
                 if trade_id and trade_id not in seen:
                     seen.append(trade_id)
                     bucket["entry_fills"] = int(bucket.get("entry_fills", 0)) + 1
+                if trade_id:
+                    lifecycle = bucket.setdefault("order_lifecycle", {})
+                    entry = lifecycle.setdefault(trade_id, {"trade_id": trade_id})
+                    entry.update(
+                        status="FILLED",
+                        terminal=True,
+                        reason=block_reason or "LIMIT_TOUCHED",
+                        updated_ts=time.time(),
+                    )
             elif event == "CLOSED":
                 seen = bucket.setdefault("closed_trade_ids", [])
                 if trade_id and trade_id not in seen:
                     seen.append(trade_id)
                     bucket["filled_closes"] = int(bucket.get("filled_closes", 0)) + 1
             elif event in ("TTL_EXPIRED", "ENTRY_TTL_EXPIRED"):
-                bucket["ttl_expiries"] = int(bucket.get("ttl_expiries", 0)) + 1
+                seen = bucket.setdefault("ttl_order_ids", [])
+                if trade_id and trade_id not in seen:
+                    seen.append(trade_id)
+                    bucket["ttl_expiries"] = int(bucket.get("ttl_expiries", 0)) + 1
+                elif not trade_id:
+                    bucket["ttl_expiries"] = int(bucket.get("ttl_expiries", 0)) + 1
+                if trade_id:
+                    lifecycle = bucket.setdefault("order_lifecycle", {})
+                    entry = lifecycle.setdefault(trade_id, {"trade_id": trade_id})
+                    entry.update(
+                        status="TTL_EXPIRED",
+                        terminal=True,
+                        reason=block_reason or event,
+                        updated_ts=time.time(),
+                    )
             elif event in ("CANCELLED", "STRUCTURAL_CANCEL"):
-                bucket["cancellations"] = int(bucket.get("cancellations", 0)) + 1
+                seen = bucket.setdefault("cancelled_order_ids", [])
+                if trade_id and trade_id not in seen:
+                    seen.append(trade_id)
+                    bucket["cancellations"] = int(bucket.get("cancellations", 0)) + 1
+                elif not trade_id:
+                    bucket["cancellations"] = int(bucket.get("cancellations", 0)) + 1
+                if trade_id:
+                    lifecycle = bucket.setdefault("order_lifecycle", {})
+                    entry = lifecycle.setdefault(trade_id, {"trade_id": trade_id})
+                    entry.update(
+                        status="CANCELLED",
+                        terminal=True,
+                        reason=block_reason or event,
+                        updated_ts=time.time(),
+                    )
             # ELIGIBLE_LONG is recorded explicitly via record_tile2_eligible_long()
             # because eligibility is determined before any SPAWN_LAB event.
         _persist_tile2_counters(bucket)
@@ -10251,6 +10439,19 @@ def tile2_dashboard_metrics() -> dict:
         "filled_closes": filled,
         "ttl_expiries": int(bucket.get("ttl_expiries", 0)),
         "cancellations": int(bucket.get("cancellations", 0)),
+        "restored_pending_orders": int(bucket.get("restored_pending_orders", 0)),
+        "orphaned_orders": len(set(bucket.get("orphaned_order_ids") or [])),
+        "pending_orders": sum(
+            1
+            for item in (bucket.get("order_lifecycle") or {}).values()
+            if item.get("status") == "PENDING"
+        ),
+        "unreconciled_orders": sum(
+            1
+            for item in (bucket.get("order_lifecycle") or {}).values()
+            if item.get("status") not in TILE2_ORDER_TERMINAL_STATES
+            and item.get("status") != "PENDING"
+        ),
         "independent_episodes": len(set(bucket.get("episode_ids_seen") or [])),
         # Derived metrics.
         "fill_rate": round(fill_rate, 4),
@@ -10272,7 +10473,7 @@ def load_tile2_counters_from_disk() -> None:
         with open(TILE2_COUNTERS_FILE, encoding="utf-8") as f:
             payload = json.load(f) or {}
         if (
-            payload.get("schema") != TILE2_COUNTERS_SCHEMA
+            payload.get("schema") not in TILE2_COUNTERS_COMPAT_SCHEMAS
             or payload.get("policy_id") != TILE2_POLICY_ID
         ):
             logger.warning(
@@ -10290,6 +10491,7 @@ def load_tile2_counters_from_disk() -> None:
             for k in (
                 "bracket_evals", "eligible_long", "paper_limits", "entry_fills", "filled_closes",
                 "ttl_expiries", "cancellations",
+                "restored_pending_orders",
             ):
                 if isinstance(counters.get(k), int):
                     bucket[k] = counters[k]
@@ -10299,10 +10501,16 @@ def load_tile2_counters_from_disk() -> None:
                 "paper_order_ids",
                 "entry_fill_trade_ids",
                 "closed_trade_ids",
+                "orphaned_order_ids",
+                "ttl_order_ids",
+                "cancelled_order_ids",
             ):
                 seen = counters.get(list_key) or []
                 if isinstance(seen, list):
                     bucket[list_key] = [str(x) for x in seen][-500:]
+            lifecycle = counters.get("order_lifecycle") or {}
+            if isinstance(lifecycle, dict):
+                bucket["order_lifecycle"] = copy.deepcopy(lifecycle)
             # Cohort is determined by the running source code, not the on-disk
             # snapshot, so that a stale on-disk cohort cannot silently lie.
             bucket["cohort_id"] = TILE2_POLICY_ID
@@ -10317,6 +10525,86 @@ def load_tile2_counters_from_disk() -> None:
         )
     except Exception as e:
         logger.warning(f"[TILE2_COUNTERS] load failed: {e}")
+
+
+def reconcile_tile2_pending_orders_on_startup() -> dict:
+    """Restore valid pending limits and terminalize every unresolved order."""
+    now = time.time()
+    restored = []
+    expired = []
+    orphaned = []
+    with state_lock:
+        bucket = _tile2_counters_bucket()
+        lifecycle = copy.deepcopy(bucket.get("order_lifecycle") or {})
+        all_order_ids = [str(x) for x in bucket.get("paper_order_ids") or []]
+        filled_ids = set(str(x) for x in bucket.get("entry_fill_trade_ids") or [])
+        ttl_ids = set(str(x) for x in bucket.get("ttl_order_ids") or [])
+        cancelled_ids = set(str(x) for x in bucket.get("cancelled_order_ids") or [])
+
+    # Migrate v2 rows that had counters but no durable lifecycle snapshot.
+    for trade_id in all_order_ids:
+        if trade_id in lifecycle:
+            continue
+        if trade_id in filled_ids:
+            _record_tile2_order_lifecycle(trade_id, "FILLED", "MIGRATED_V2_FILL")
+        elif trade_id in ttl_ids:
+            _record_tile2_order_lifecycle(trade_id, "TTL_EXPIRED", "MIGRATED_V2_TTL")
+        elif trade_id in cancelled_ids:
+            _record_tile2_order_lifecycle(trade_id, "CANCELLED", "MIGRATED_V2_CANCEL")
+        else:
+            _record_tile2_order_lifecycle(
+                trade_id,
+                "ORPHANED_ON_RESTART",
+                "V2_ORDER_MISSING_DURABLE_SNAPSHOT",
+            )
+            orphaned.append(trade_id)
+
+    with state_lock:
+        lifecycle = copy.deepcopy(_tile2_counters_bucket().get("order_lifecycle") or {})
+    for trade_id, entry in lifecycle.items():
+        if str(entry.get("status") or "").upper() != "PENDING":
+            continue
+        order = entry.get("order")
+        if not isinstance(order, dict) or not order.get("trade_id") or not order.get("limit_price"):
+            _record_tile2_order_lifecycle(
+                trade_id,
+                "ORPHANED_ON_RESTART",
+                "PENDING_SNAPSHOT_INCOMPLETE",
+            )
+            orphaned.append(trade_id)
+            continue
+        expires_ts = float(
+            order.get("entry_expires_ts")
+            or (float(order.get("created_ts") or now) + TILE2_ENTRY_TTL_SEC)
+        )
+        if expires_ts <= now:
+            _record_tile2_event(
+                "ENTRY_TTL_EXPIRED",
+                order.get("dir") or order.get("direction"),
+                "EXPIRED_DURING_RESTART",
+                trade_id=trade_id,
+            )
+            expired.append(trade_id)
+            continue
+        order["status"] = "PENDING"
+        order["paper_only"] = True
+        order["exchange_submission_blocked"] = True
+        order["research_lane"] = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+        lane_register_pending_order(order)
+        with state_lock:
+            bucket = _tile2_counters_bucket()
+            bucket["restored_pending_orders"] = int(bucket.get("restored_pending_orders", 0)) + 1
+        restored.append(trade_id)
+
+    with state_lock:
+        bucket = _tile2_counters_bucket()
+    _persist_tile2_counters(bucket)
+    result = {"restored": restored, "expired": expired, "orphaned": orphaned}
+    logger.info(
+        f"[TILE2_RECONCILE] restored={len(restored)} expired={len(expired)} "
+        f"orphaned={len(orphaned)} [PIPELINE ENFORCEMENT]"
+    )
+    return result
 
 
 def reset_tile2_counters_for_fresh_holdout() -> dict:
@@ -10341,6 +10629,11 @@ def reset_tile2_counters_for_fresh_holdout() -> dict:
         bucket["paper_order_ids"] = []
         bucket["entry_fill_trade_ids"] = []
         bucket["closed_trade_ids"] = []
+        bucket["orphaned_order_ids"] = []
+        bucket["ttl_order_ids"] = []
+        bucket["cancelled_order_ids"] = []
+        bucket["order_lifecycle"] = {}
+        bucket["restored_pending_orders"] = 0
         bucket["cohort_id"] = TILE2_POLICY_ID
         bucket["exit_profile_id"] = TILE2_EXIT_PROFILE_ID
     _persist_tile2_counters(bucket)
@@ -10816,48 +11109,137 @@ def _research_log_would_block(signal, ai, reason, edge_score=None):
             reason,
         )
 
-def _append_ai_history_row(ai_result: dict) -> None:
-    """In-memory session AI history for dashboard AI History table."""
-    now_iso = utc_iso()
+def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
+    return str(
+        (ai_result or {}).get("shared_ai_call_id")
+        or (ctx or {}).get("shared_ai_call_id")
+        or (ai_result or {}).get("trade_id")
+        or (ctx or {}).get("trade_id")
+        or ""
+    )
+
+
+def _stamp_shared_ai_lane_verdict(
+    call_id: str,
+    lane: str,
+    accepted: bool,
+    reason: str,
+    score=None,
+    policy_version: str = None,
+) -> None:
+    """Attach one independent post-AI lane verdict and increment it once."""
+    call_id = str(call_id or "")
+    lane = str(lane or "").upper()
+    if not call_id or lane not in (
+        RESEARCH_LANE_CONTINUOUS,
+        RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    ):
+        return
+    verdict = {
+        "ok": bool(accepted),
+        "accepted": bool(accepted),
+        "reason": str(reason or ("ACCEPT" if accepted else "REJECT")),
+        "block_reason": None if accepted else str(reason or "REJECT"),
+        "score": score,
+        "policy_version": policy_version,
+        "stamped_at": time.time(),
+    }
     with state_lock:
-        state["ai_history"].append({
-            "time": now_iso,
-            "melbourne_time": _format_melbourne_hm(now_iso),
-            "session_ts": bot_start_time,
-            "trade_id": ai_result.get("trade_id"),
-            "ai_direction_raw": ai_result.get("direction"),
-            "final_direction": ai_result.get("direction"),
-            "inverted": False,
-            "decision": ai_result.get("decision"),
-            "win_prob": ai_result.get("win_prob"),
-            "edge_score": state.get("last_edge", 0.0),
-            "edge_threshold": get_edge_threshold(),
-            "source": ai_result.get("source", "AI"),
-            "comment": (ai_result.get("comment") or "")[:2000],
-            "ai_error": ai_result.get("ai_error", False),
-            "error_type": ai_result.get("error_type"),
-            "error_detail": (ai_result.get("error_detail") or "")[:500],
-            "final_outcome": state.get("execution_outcome", "PENDING"),
-            "bull_score": ai_result.get("bull_score", 0),
-            "bear_score": ai_result.get("bear_score", 0),
-            "research_lane": ai_result.get("research_lane"),
-            "research_model": ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane")),
-        })
+        counters = state.setdefault("shared_ai_lane_counters", {})
+        bucket = counters.setdefault(
+            lane,
+            {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        )
+        counted = bucket.setdefault("_counted_call_ids", [])
+        if call_id not in counted:
+            bucket["evaluated"] = int(bucket.get("evaluated", 0)) + 1
+            outcome_key = "accepted" if accepted else "rejected"
+            bucket[outcome_key] = int(bucket.get(outcome_key, 0)) + 1
+            reasons = bucket.setdefault("reasons", {})
+            reason_key = verdict["reason"]
+            reasons[reason_key] = int(reasons.get(reason_key, 0)) + 1
+            counted.append(call_id)
+            del counted[:-500]
+        for row in reversed(state.get("ai_history") or []):
+            if str(row.get("shared_ai_call_id") or row.get("trade_id") or "") == call_id:
+                row.setdefault("lane_verdicts", {})[lane] = verdict
+                if lane == RESEARCH_LANE_CONTINUOUS:
+                    row["continuous_verdict"] = verdict
+                else:
+                    row["type_b_verdict"] = verdict
+                state["ai_history_updated"] = time.time()
+                break
+
+
+def _append_ai_history_row(ai_result: dict) -> None:
+    """Keep exactly one dashboard row for each actual shared AI API call."""
+    now_iso = utc_iso()
+    call_id = _shared_ai_call_id(ai_result=ai_result)
+    factors = ai_result.get("factors") or {}
+    row = {
+        "time": now_iso,
+        "melbourne_time": _format_melbourne_hm(now_iso),
+        "session_ts": bot_start_time,
+        "trade_id": ai_result.get("trade_id"),
+        "shared_ai_call_id": call_id,
+        "ai_direction_raw": ai_result.get("raw_direction") or ai_result.get("direction"),
+        "candidate_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+        "final_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+        "inverted": False,
+        "decision": ai_result.get("decision"),
+        "win_prob": None,
+        "confidence_requested": False,
+        "edge_score": state.get("last_edge", 0.0),
+        "edge_threshold": get_edge_threshold(),
+        "source": ai_result.get("source", "AI"),
+        "comment": (ai_result.get("comment") or "")[:2000],
+        "reason": (ai_result.get("reason") or "")[:500],
+        "ai_error": ai_result.get("ai_error", False),
+        "error_type": ai_result.get("error_type"),
+        "error_detail": (ai_result.get("error_detail") or "")[:500],
+        "final_outcome": state.get("execution_outcome", "PENDING"),
+        "long_score": ai_result.get("long_score", factors.get("long_score", 0)),
+        "short_score": ai_result.get("short_score", factors.get("short_score", 0)),
+        "score_gap": abs(
+            int(ai_result.get("long_score", factors.get("long_score", 0)) or 0)
+            - int(ai_result.get("short_score", factors.get("short_score", 0)) or 0)
+        ),
+        "research_lane": RESEARCH_LANE_AI_SCAN,
+        "research_model": "Shared Direction Call",
+        "lane_verdicts": copy.deepcopy(ai_result.get("lane_verdicts") or {}),
+    }
+    inserted = False
+    with state_lock:
+        existing = next(
+            (
+                item
+                for item in reversed(state.get("ai_history") or [])
+                if str(item.get("shared_ai_call_id") or item.get("trade_id") or "") == call_id
+            ),
+            None,
+        )
+        if existing is None:
+            state["ai_history"].append(row)
+            inserted = True
+        else:
+            existing.setdefault("lane_verdicts", {}).update(row["lane_verdicts"])
         hist_limit = 50 if _sole_ai_research_mode() else 5
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
-    _relay_mirror(
-        "AI_DECISION",
-        {
-            "trade_id": ai_result.get("trade_id"),
-            "decision": ai_result.get("decision"),
-            "win_prob": ai_result.get("win_prob"),
-            "direction": ai_result.get("direction"),
-            "final_direction": ai_result.get("direction"),
-            "comment": ai_result.get("comment"),
-        },
-        source_ts=time.time(),
-    )
+    if inserted:
+        _relay_mirror(
+            "AI_DECISION",
+            {
+                "trade_id": ai_result.get("trade_id"),
+                "shared_ai_call_id": call_id,
+                "decision": ai_result.get("decision"),
+                "win_prob": None,
+                "direction": ai_result.get("direction"),
+                "final_direction": ai_result.get("direction"),
+                "comment": ai_result.get("comment"),
+            },
+            source_ts=time.time(),
+        )
 
 def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
     """Align top AI card + debug panel after every DeepSeek evaluation (approve or reject)."""
@@ -10865,9 +11247,14 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
     with state_lock:
         state["last_ai_ts"] = time.time()
         state["debug_state"]["last_ai_call"] = utc_iso()
-        state["debug_state"]["last_ai_score"] = ai_result.get("win_prob")
-        state["last_ai"]["win_prob"] = ai_result.get("win_prob")
+        state["debug_state"]["last_ai_score"] = None
+        state["last_ai"]["win_prob"] = None
+        state["last_ai"]["confidence_requested"] = False
         state["last_ai"]["direction"] = ai_result.get("direction")
+        state["last_ai"]["raw_direction"] = ai_result.get("raw_direction")
+        state["last_ai"]["candidate_direction"] = ai_result.get("candidate_direction") or ai_result.get("direction")
+        state["last_ai"]["long_score"] = ai_result.get("long_score")
+        state["last_ai"]["short_score"] = ai_result.get("short_score")
         state["last_ai"]["decision"] = ai_result.get("decision")
         state["last_ai"]["trade_id"] = tid
         state["last_ai"]["comment"] = (ai_result.get("comment") or "")[:500]
@@ -12024,6 +12411,12 @@ def _submit_tile2_paper_resting_limit(
         "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
     }
     lane_register_pending_order(order)
+    _record_tile2_order_lifecycle(
+        trade_id,
+        "PENDING",
+        "BRACKET_LEG_STATIC_PAPER",
+        order=order,
+    )
     _mark_tile2_episode_submitted(str(sr_episode_id or ""))
     log_lane_opportunity_event(
         RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
@@ -12420,6 +12813,23 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     spawn_ctx = copy.deepcopy(ctx or {})
     spawn_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_CONTINUOUS)
     orders_on = continuous_ai_research_enabled()
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    continuous_accept = ai_decision_should_execute(ai)
+    continuous_reason = str(
+        ai.get("execution_tier")
+        or ai.get("research_soft")
+        or ai.get("raw_decision")
+        or ai.get("decision")
+        or "NO_VERDICT"
+    )
+    _stamp_shared_ai_lane_verdict(
+        call_id,
+        RESEARCH_LANE_CONTINUOUS,
+        continuous_accept,
+        continuous_reason,
+        score=abs(int(ai.get("long_score", 0) or 0) - int(ai.get("short_score", 0) or 0)),
+        policy_version="continuous_shared_direction_gap_v1",
+    )
     logger.info(
         f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
         f"decision={ai.get('decision')} orders={'ON' if orders_on else 'OFF(data-only)'} "
@@ -12449,6 +12859,13 @@ def spawn_type_b_lane_from_shared_ai(ctx, ai, edge_score, features, source_lane:
         return
     direction = str(ai.get("direction") or "").upper()
     if direction not in ("LONG", "SHORT"):
+        _stamp_shared_ai_lane_verdict(
+            _shared_ai_call_id(ai_result=ai, ctx=ctx),
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            False,
+            "SHARED_AI_NO_CANDIDATE_DIRECTION",
+            policy_version=_type_b_policy_version(),
+        )
         log_lane_opportunity_event(
             RESEARCH_LANE_TYPE_B_HUNTER_V1,
             "SPAWN_SKIPPED",
@@ -12461,6 +12878,7 @@ def spawn_type_b_lane_from_shared_ai(ctx, ai, edge_score, features, source_lane:
         return
     shared_ai = copy.deepcopy(ai)
     shared_ai["shared_ai_call"] = True
+    shared_ai["shared_ai_call_id"] = _shared_ai_call_id(ai_result=ai, ctx=ctx)
     shared_ai["shared_ai_source_lane"] = source_lane
     shared_ai["win_prob"] = 0
     shared_ai["confidence_used_for_entry"] = False
@@ -12983,21 +13401,14 @@ def _stamp_type_b_verdict(ctx, ok: bool, score, block_reason):
         tid = (ctx or {}).get("trade_id")
         if not tid:
             return
-        verdict = {
-            "ok": bool(ok),
-            "score": score,
-            "block_reason": block_reason,
-            "policy_version": _type_b_policy_version(),
-            "stamped_at": time.time(),
-        }
-        with state_lock:
-            for row in reversed(state.get("ai_history") or []):
-                if row.get("trade_id") == tid:
-                    row["type_b_verdict"] = verdict
-                    break
-            else:
-                return
-            state["ai_history_updated"] = time.time()
+        _stamp_shared_ai_lane_verdict(
+            tid,
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            bool(ok),
+            str(block_reason or "TYPE_B_POLICY_ACCEPT"),
+            score=score,
+            policy_version=_type_b_policy_version(),
+        )
     except Exception as e:
         logger.warning(f"[TYPE_B_HUNTER_V1] verdict stamp failed: {e}")
 
@@ -13790,9 +14201,13 @@ def evaluate_signal_with_ai(
         ai_result = {
             "win_prob": win_prob,
             "direction": direction,
+            "candidate_direction": parsed.get("candidate_direction") or direction,
+            "raw_direction": parsed.get("raw_direction"),
+            "confidence_requested": False,
             "decision": decision,
             "override": override,
             "comment": text,
+            "reason": str((parsed.get("json_blob") or {}).get("reason") or ""),
             "ai_error": False,
             "factors": factors,
             "bull_score": factors.get("bull_score", 0),
@@ -13803,6 +14218,7 @@ def evaluate_signal_with_ai(
             "source": "FRESH",
             "approved": decision in AI_EXECUTE_TIERS,
             "trade_id": ctx.get("trade_id"),
+            "shared_ai_call_id": ctx.get("trade_id"),
             "latency_ms": latency_ms,
             "research_lane": research_lane,
             "research_model": research_lane_label(research_lane),
@@ -18337,6 +18753,21 @@ def _record_expired_order(source: dict, reason: str):
         source_ts=float(now),
     )
     log_expired_order(row)
+    if row.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
+        lifecycle_event = (
+            "ENTRY_TTL_EXPIRED"
+            if "TTL" in str(reason or "").upper()
+            else "CANCELLED"
+        )
+        log_lane_opportunity_event(
+            RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+            lifecycle_event,
+            tid,
+            row.get("dir"),
+            None,
+            source.get("edge_score"),
+            block_reason=reason,
+        )
     fq_row = {
         "schema": "fill_quality_v1",
         "ts": row["time"],
@@ -18467,7 +18898,11 @@ def cleanup_expired_orders():
                 _agent_dbg("H2", "cleanup_expired_orders", "bad_created_ts", {"trade_id": order.get("trade_id"), "created_ts": created})
                 continue
             age = now - created
-            if age > LIMIT_ORDER_MAX_AGE_SEC:
+            entry_deadline = float(
+                order.get("entry_expires_ts")
+                or (float(created) + LIMIT_ORDER_MAX_AGE_SEC)
+            )
+            if now >= entry_deadline:
                 if order in pending_orders:
                     lane_unregister_pending_order(order)
                 _record_expired_order(order, "TTL_EXPIRED")
@@ -19112,127 +19547,41 @@ Reason: ...
 """
 
 AI_PROMPT_TEMPLATE = """
-You are a directional classification engine for short-duration (10-40 min) BTC perpetual trades.
-Your only predictive job is to choose LONG, SHORT, or NO_TRADE from the supplied facts.
-Do not estimate win probability or confidence. Those numbers were uncalibrated in live
-research and are not used by either strategy. Long/short scores below are comparative
-evidence scores, not probabilities.
+You are a direction classifier for short-duration BTC perpetual research.
+Choose exactly one candidate side: LONG or SHORT. Never return NO_TRADE.
+Do not estimate win probability, confidence, entries, exits, targets, or order prices.
 
 Given the following market data:
 
 {context}
 
-=== TREND HIERARCHY RULES (MANDATORY) ===
+Rank the evidence in this order:
+1. multi-timeframe agreement and market structure;
+2. trend health, ADX, and EMA alignment;
+3. order flow: delta, imbalance, volume ratio, and velocity;
+4. micro structure and support/resistance as timing context only.
 
-Higher priority than support/resistance:
-1. Multi-timeframe agreement (market_context.multi_tf)
-2. Market structure bias / structure_score (market_context.market_structure)
-3. EMA stack alignment (market_context.ema_alignment)
-4. Trend health state (trend_health_state)
-5. ADX / trend strength (ADX >= 25 = trending; favor continuation)
-6. SR location (sr_state, dist_to_support/resistance) - CONTEXT ONLY
+Score LONG and SHORT independently from 0 to 100. The direction must match the
+higher score. Support alone is not a LONG reason and resistance alone is not a
+SHORT reason. Strong counter-trend candidates require confirmed structure shift
+and order-flow expansion. Use only supplied facts.
 
-Support and resistance are LOCATION context only.
-NEVER approve LONG solely because price is near support.
-NEVER approve SHORT solely because price is near resistance.
-SR becomes directional only with reversal confirmation (see below).
-
-=== CONTINUATION PRIORITY ===
-
-When MTF agreement is BEAR_ALIGNED AND structure bias is BEARISH AND EMA stack is bearish AND ADX > 25:
-- Default assumption: bear continuation.
-- SHORT is preferred; LONG requires strong reversal evidence.
-- If reversal evidence is weak, choose SHORT or REJECT (not LONG at ~50% confidence).
-
-Symmetric for BULL_ALIGNED + BULLISH structure + bullish EMA + ADX > 25: favor LONG continuation.
-
-=== VALID REVERSAL REQUIREMENTS ===
-
-A reversal is NOT: near support alone, one higher low, small bounce.
-
-A reversal SHOULD include multiple confirmations:
-- Structure shift (market_structure_shift)
-- Higher high after higher low (LONG) or lower low after lower high (SHORT)
-- Momentum expansion in reversal direction (orderflow delta/imbalance)
-- Trend health improvement
-- MTF starting to disagree with prior trend
-
-Without these, assume continuation - do not counter-trend trade.
-
-=== DIRECTIONAL SCORING (REQUIRED BEFORE DECISION) ===
-
-Before selecting direction:
-1. Build the bullish case (list reasons).
-2. Build the bearish case (list reasons).
-3. Score each side independently (0-100).
-4. Choose direction from the higher score. If the evidence gap is under 5, choose NO_TRADE.
-
-=== DECISION PRIORITY (after scoring) ===
-
-Weight for direction:
-1) MTF agreement + structure bias
-2) Trend health + ADX
-3) EMA alignment
-4) Orderflow (delta, imbalance, volume_ratio, velocity)
-5) Micro structure (higher_low, lower_high, liquidity sweeps) - timing only, not override of strong HTF trend
-6) SR location - context only
-7) edge_score - gate strength telemetry, not direction
-
-Rules:
-- APPROVE LONG only if long_score >= short_score + 5
-- APPROVE SHORT only if short_score >= long_score + 5
-- Counter-trend trades (LONG in BEAR_ALIGNED or SHORT in BULL_ALIGNED) require winning score >= opposing score + 15 AND reversal confirmations listed
-- Prefer NO_TRADE/REJECT when scores are within 5 points
-- MTF informational when mtf_informational_only=true in context
-- Do NOT infer hidden variables; use only provided data
-
-Return EXACTLY (JSON block before Direction line):
-
-```json
+Return exactly one JSON object:
 {{
-  "direction": "LONG or SHORT or NO_TRADE",
+  "direction": "LONG or SHORT",
   "long_score": 0,
   "short_score": 0,
-  "preferred_direction": "LONG or SHORT or NO_TRADE",
-  "entry_zone_low": 0,
-  "entry_zone_high": 0,
-  "limit_price": 0,
-  "expected_mfe": 0,
-  "expected_mae": 0,
-  "reversal_probability": 0,
-  "exit_style": "AGGRESSIVE or PATIENT",
-  "reasons_for_trade": ["...", "..."],
-  "reasons_against_trade": ["...", "..."],
-  "bull_score": 0,
-  "bear_score": 0
+  "reason": "One short sentence naming the decisive evidence"
 }}
-```
-
-long_score and short_score are 0-100. bull_score and bear_score are 0-10 summaries of the same cases.
-
-Direction: LONG / SHORT / NO_TRADE
-Long score: 0-100
-Short score: 0-100
-Bull score: 0-10
-Bear score: 0-10
-Reason: ...
 """
 
 RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
-- One DeepSeek call every three minutes supplies direction to both CONTINUOUS and TYPE_B_HUNTER_V1.
-- CONTINUOUS and TYPE_B_HUNTER_V1 keep separate policy gates, orders, chase state, and ledgers.
-- Do not return or infer a win probability. The bot derives its research tier only from
-  the direction and the long_score versus short_score evidence gap.
-- TREND HIERARCHY still applies: weak counter-trend APPROVEs may be downgraded to SOFT_REJECT by bot gate
-- A gap >=15 is STRONG_APPROVE, >=10 APPROVE, 5-9 SOFT_APPROVE, and <5 REJECT.
-- MTF is informational for gating - but BEAR_ALIGNED + ADX>25 means support alone is NOT a LONG signal
-- CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
-  LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
-  If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
-- Spawn lanes inherit CONTINUOUS AI_DIRECT entry unless noted (HIGH_EDGE_RUNNER uses runner exit profile)
-- Context hint (not a block): SHORT entries initiated near support historically show reduced expectancy unless strong bearish continuation is present — weigh continuation vs bounce risk in your comment.
+- This is the one shared call made on the three-minute AI_SCAN cadence.
+- CONTINUOUS and TYPE_B_HUNTER_V1 independently accept or reject the candidate afterward.
+- Do not decide either tile's verdict and do not return any field beyond direction,
+  long_score, short_score, and one short reason.
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -21586,7 +21935,7 @@ HTML = """<!DOCTYPE html>
 <h3>AI Decision (current cycle)</h3>
 <p><strong>AI Status:</strong> <span id="aiDecision">-</span> <span id="aiStatusNote" style="color:#8b949e;font-size:0.9em;"></span></p>
 <p><strong>Research Model:</strong> <span id="aiResearchModel">-</span></p>
-<p><strong>AI Win Prob:</strong> <span id="aiProb">-</span></p>
+<p><strong>AI Win Prob:</strong> <span id="aiProb">N/A — not requested</span></p>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
@@ -21671,9 +22020,9 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 AI evaluations — full log in ai_tranche_log.csv / ai_input_log.jsonl. <strong>Tile Verdict</strong> shows the deterministic Type B / SR_MICRO scorer result (separate from AI decision).</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">One row per actual shared AI call. Continuous and Type B apply separate post-AI policies.</p>
 <table>
-    <thead><tr><th>Time</th><th>Trade ID</th><th>Model</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th><th>Tile Verdict</th></tr></thead>
+    <thead><tr><th>Time</th><th>Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous verdict</th><th>Type B verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -22784,14 +23133,12 @@ DASHBOARD_JS = """(function () {
         safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
         const aiProbEl = document.getElementById('aiProb');
         if (aiProbEl) {
-          aiProbEl.innerText = aiCalled && dai.win_prob != null
-            ? dai.win_prob + '%'
-            : (aiCalled && d.last_ai?.win_prob != null ? d.last_ai.win_prob + '%' : '-');
+          aiProbEl.innerText = 'N/A — not requested';
         }
         const msym = document.getElementById('marketSymbol');
         if (msym && d.market_symbol) msym.innerText = d.market_symbol;
-        safeText('aiDirRaw', d.last_ai?.direction || '-');
-        safeText('finalDir', d.last_ai?.final_direction || '-');
+        safeText('aiDirRaw', d.last_ai?.raw_direction || d.last_ai?.direction || '-');
+        safeText('finalDir', d.last_ai?.candidate_direction || d.last_ai?.final_direction || d.last_ai?.direction || '-');
         safeText('inverted', d.last_ai?.inverted ? 'YES' : 'NO');
         const enabledBands = d.ai_execution_bands
           ? Object.keys(d.ai_execution_bands).filter(k => d.ai_execution_bands[k])
@@ -23176,43 +23523,37 @@ DASHBOARD_JS = """(function () {
           const shown = aiHist.length;
           const total = d.ai_history_total != null ? d.ai_history_total : shown;
           aiHint.innerText = total > shown
-            ? ('Showing last ' + shown + ' of ' + total + ' AI evaluations — full log: ai_tranche_log.csv')
-            : ('Last ' + shown + ' AI evaluations this session — full log: ai_tranche_log.csv');
+            ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls')
+            : ('Last ' + shown + ' actual shared AI calls this session');
         }
+        const formatLaneVerdict = (v) => {
+          if (!v) return '<span style="color:#d29922">pending</span>';
+          const accepted = v.accepted === true || v.ok === true;
+          const label = accepted ? 'ACCEPT' : (v.reason || v.block_reason || 'REJECT');
+          const score = v.score != null ? ` · score ${v.score}` : '';
+          const title = String(v.policy_version || v.reason || '').replace(/"/g, '&quot;');
+          return `<span style="color:${accepted ? '#3fb950' : '#f85149'}" title="${title}">${label}${score}</span>`;
+        };
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
-          const prob = a.win_prob != null && a.win_prob !== '' ? Number(a.win_prob) : null;
-          const c = a.comment || '';
-          const cShort = c.length > 80 ? c.substring(0, 80) + '...' : (c || '-');
-          // Tile Verdict cell: deterministic scorer result (Type B / SR_MICRO).
-          // Shows APPROVE w/ score, or REJECT w/ human-readable block reason.
-          const v = a.type_b_verdict;
-          let verdictCell = '<span style="color:#8b949e">-</span>';
-          if (v) {
-            if (v.ok) {
-              const sc = v.score != null ? ` score=${v.score}` : '';
-              verdictCell = `<span style="color:#3fb950" title="${(v.policy_version||'').replace(/"/g,'&quot;')}">APPROVE${sc}</span>`;
-            } else {
-              const br = (v.block_reason || 'REJECTED').replace(/"/g, '&quot;');
-              const sc = v.score != null ? ` (score=${v.score})` : '';
-              verdictCell = `<span style="color:#f85149" title="${br}">${br}${sc}</span>`;
-            }
-          } else if (a.research_lane && /TYPE_B|SR_MICRO/i.test(String(a.research_lane))) {
-            verdictCell = '<span style="color:#d29922" title="Scorer has not returned yet for this trade_id">pending…</span>';
-          }
+          const c = a.reason || a.comment || '';
+          const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
+          const verdicts = a.lane_verdicts || {};
+          const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
+          const typeBVerdict = a.type_b_verdict || verdicts.TYPE_B_HUNTER_V1;
           return `
           <tr>
             <td>${a.melbourne_time || formatMelbourneDateTime(a.time || a.ts)}</td>
-            <td>${a.trade_id || '-'}</td>
-            <td>${laneBadge(a.research_lane, a.research_model)}</td>
-            <td>${a.ai_direction_raw || a.dir || '-'}</td>
-            <td>${a.final_direction || a.dir || '-'}</td>
-            <td>${a.inverted ? 'YES' : 'NO'}</td>
-            <td>${a.decision || '-'}</td>
-            <td>${prob != null && !Number.isNaN(prob) ? prob.toFixed(0) + '%' : '-'}</td>
+            <td>${a.shared_ai_call_id || a.trade_id || '-'}</td>
+            <td>${a.ai_direction_raw || '-'}</td>
+            <td>${a.candidate_direction || a.final_direction || '-'}</td>
+            <td>${a.long_score != null ? a.long_score : '-'}</td>
+            <td>${a.short_score != null ? a.short_score : '-'}</td>
+            <td>${a.score_gap != null ? a.score_gap : '-'}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict)}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
-            <td style="font-size:0.85em">${verdictCell}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="10" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="10" style="color:#8b949e">No AI calls yet this session</td></tr>');
         safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
           <tr>
             <td>${k}%</td>
@@ -23250,7 +23591,6 @@ DASHBOARD_JS = """(function () {
         const ag = dbg.ai_gate || {};
         const agTxt = ag.called
           ? ('Last AI: ' + (dai.last_decision || ag.reason || '-') +
-             (dai.win_prob != null ? ' ' + dai.win_prob + '%' : '') +
              (dai.last_direction ? ' ' + dai.last_direction : '') +
              ' | Pipeline: ' + (dai.pipeline_idle || skipBlk.skip || 'between cycles'))
           : ('NOT CALLED — ' + (dai.note || ag.reason || skipBlk.skip || 'waiting for edge'));
@@ -23288,6 +23628,9 @@ DASHBOARD_JS = """(function () {
             'filled closes=' + (t2.filled_closes || 0),
             'TTL exp=' + (t2.ttl_expiries || 0),
             'cancels=' + (t2.cancellations || 0),
+            'pending=' + (t2.pending_orders || 0),
+            'restored=' + (t2.restored_pending_orders || 0),
+            'orphaned=' + (t2.orphaned_orders || 0),
             'fill%=' + ((t2.fill_rate != null) ? (t2.fill_rate * 100).toFixed(1) : '0.0'),
             'paper P&L=$' + (t2.paper_pnl_usd || 0).toFixed(2),
             'EV/elig=$' + (t2.ev_per_eligible_opportunity || 0).toFixed(3),
@@ -23498,10 +23841,16 @@ def dashboard():
 
 def _relay_mirror(event: str, payload: dict, source_ts: float | None = None) -> None:
     """Forward source-bot lifecycle events to local Bitfinex relay sim (Final Bots only)."""
+    if not is_active_dashboard_owner():
+        return
     try:
         from local_bitfinex_relay import safe_mirror
 
-        safe_mirror(event, payload or {}, source_ts=source_ts)
+        safe_mirror(
+            event,
+            {**(payload or {}), **_dashboard_owner_metadata()},
+            source_ts=source_ts,
+        )
     except Exception:
         pass
 
@@ -24146,6 +24495,7 @@ def api_ping():
     return jsonify({
         "ok": True,
         "bot_pid": os.getpid(),
+        **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
         "server_ts": utc_iso(),
     }), 200
@@ -24406,6 +24756,7 @@ def api_relay_state():
             snapshot = {
                 "price": price,
                 "bot_version": EXECUTION_FIX_VERSION,
+                **_dashboard_owner_metadata(),
                 "bot_start_time": bot_start_time,
                 "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
                 "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
@@ -24483,6 +24834,7 @@ def api_build():
         "stack_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "bot_pid": os.getpid(),
+        **_dashboard_owner_metadata(),
         "cwd": os.getcwd(),
         "dashboard_url": dashboard_public_url(),
         "agent_hub_url": AGENT_HUB_PUBLIC_URL,
@@ -24651,6 +25003,7 @@ def _build_api_state_snapshot():
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
         snapshot["deepseek_key_present"] = bool(_deepseek_api_key())
         snapshot["bot_pid"] = os.getpid()
+        snapshot.update(_dashboard_owner_metadata())
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
         # Section 1: surface the running commit + Tile 2 frozen policy so that
@@ -24908,7 +25261,9 @@ def _api_state_cache_refresher_loop():
 # golden_stack_config, research_config, signal_info internals, etc.) is omitted.
 _PUBLIC_STATE_SAFE_TOP_KEYS = {
     # bot identity / status
-    "bot_status", "bot_pid", "bot_version", "bot_start_time",
+    "bot_status", "bot_pid", "bot_instance_id", "dashboard_owner",
+    "dashboard_pid", "dashboard_port", "source_git_rev",
+    "bot_version", "bot_start_time",
     "analyzer_sync_id",
     # dashboard meta
     "dashboard_url", "dashboard_port", "display_timezone",
@@ -25068,6 +25423,7 @@ def health():
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
+        **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
         "execution_paused": paused,
@@ -27929,7 +28285,8 @@ def _ensure_flask_port_available(port: int = None):
             f"Run: taskkill /PID {others[0]} /F  then start one bot from Final Bots."
         )
 
-def run_flask():
+def _create_dashboard_server():
+    """Bind the dashboard socket synchronously so startup fails as one process."""
     _ensure_flask_port_available(DASHBOARD_PORT)
     # Thread-exhaustion OOM prevention: Flask's dev server with threaded=True
     # spawns one uncapped OS thread per request. When /api/state slowed to ~8s,
@@ -27974,6 +28331,10 @@ def run_flask():
     except Exception as e:
         logger.error(f"[FLASK] failed to bind {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT}: {e}")
         raise SystemExit(1)
+    return httpd
+
+
+def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
         f"(bounded werkzeug server, max_threads=8, backlog=64) [PIPELINE ENFORCEMENT]"
@@ -28247,6 +28608,20 @@ def apply_trade_pnl(trade_row):
 
 def main():
     global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
+    global _PROCESS_SINGLETON, BOT_INSTANCE_ID
+    try:
+        _PROCESS_SINGLETON = acquire_process_singleton(
+            f"btc-research-dashboard-{DASHBOARD_PORT}"
+        )
+    except ProcessSingletonError as exc:
+        logger.critical(f"[STARTUP] singleton refused: {exc}")
+        raise SystemExit(73) from exc
+    BOT_INSTANCE_ID = (
+        f"dashboard-{DASHBOARD_PORT}-pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    )
+    # Bind before loading state, starting market feeds, or making any AI call.
+    # A port conflict is therefore fatal to the entire bot, never just a web thread.
+    dashboard_httpd = _create_dashboard_server()
     prune_aux_logs_on_startup()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
@@ -28265,6 +28640,7 @@ def main():
     # Section 2: restore Tile 2 dashboard counters from disk so the funnel
     # metrics survive restarts without silently zeroing out mid-cohort.
     load_tile2_counters_from_disk()
+    reconcile_tile2_pending_orders_on_startup()
     update_logger_level()
     validate_startup()
     startup_hard_fix_ai_threshold()
@@ -28317,7 +28693,7 @@ def main():
     except Exception as exc:
         logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
-    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"

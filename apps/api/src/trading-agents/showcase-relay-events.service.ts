@@ -33,6 +33,11 @@ export type ShowcaseRelayEventBody = {
   research_lane?: string | null;
   pullback_pct?: number | null;
   bot_version?: string | null;
+  bot_instance_id?: string | null;
+  dashboard_owner?: boolean | null;
+  dashboard_pid?: number | null;
+  dashboard_port?: number | null;
+  source_git_rev?: string | null;
 };
 
 /**
@@ -172,6 +177,30 @@ export class ShowcaseRelayEventsService {
     }
   }
 
+  private assertActiveDashboardOwner(body: ShowcaseRelayEventBody): void {
+    const suppliedId = body.bot_instance_id?.trim();
+    if (body.dashboard_owner !== true || !suppliedId) {
+      throw new UnauthorizedException('Relay event is not from a dashboard owner');
+    }
+    const canonical = this.botBridge.getCachedDashboardOwnerIdentity();
+    if (!canonical) {
+      throw new UnauthorizedException('Active dashboard owner is not currently confirmed');
+    }
+    if (canonical.instanceId !== suppliedId) {
+      this.logger.warn(
+        `Rejected stale dashboard instance supplied=${suppliedId} active=${canonical.instanceId}`,
+      );
+      throw new UnauthorizedException('Relay event dashboard instance is stale');
+    }
+    if (
+      body.dashboard_port != null
+      && canonical.port != null
+      && body.dashboard_port !== canonical.port
+    ) {
+      throw new UnauthorizedException('Relay event dashboard port does not match owner');
+    }
+  }
+
   async ingest(
     slug: string,
     body: ShowcaseRelayEventBody,
@@ -186,6 +215,7 @@ export class ShowcaseRelayEventsService {
     // The legacy G13 bearer-secret check (assertAuthorized) is still performed
     // by the controller before calling ingest; this is the payload-level guard.
     this.verifySignature(context?.rawBody, context?.signatureHeader);
+    this.assertActiveDashboardOwner(body);
 
     this.botBridge.invalidateCache();
 

@@ -46,7 +46,10 @@ from bot import (
     TILE2_EXIT_PROFILE_ID_PROVISIONAL,
     reset_tile2_counters_for_fresh_holdout,
     load_tile2_counters_from_disk,
+    reconcile_tile2_pending_orders_on_startup,
     record_tile2_eligible_long,
+    _record_tile2_order_lifecycle,
+    _tile2_counters_bucket,
     _submit_tile2_paper_resting_limit,
     _tile2_paper_resting_limit_for_lane,
     _tile2_open_episode_ids,
@@ -796,6 +799,67 @@ check(
 # Clean up.
 with trade_lock:
     open_positions.clear()
+
+
+# ---------------------------------------------------------------------------
+# Group L: pending-order restart reconciliation and terminal lifecycle
+# ---------------------------------------------------------------------------
+print("\n[L] Pending-order restart reconciliation")
+reset_state()
+with state_lock:
+    state["price"] = 60050.0
+res_restart = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-restart"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-restart",
+)
+with trade_lock:
+    pending_before = list(pending_orders)
+restart_tid = pending_before[0]["trade_id"] if pending_before else ""
+check("restart test submitted a pending order", res_restart == "SPAWNED" and bool(restart_tid))
+with state_lock:
+    lifecycle_before = _tile2_counters_bucket().get("order_lifecycle") or {}
+check(
+    "pending order snapshot is durable",
+    lifecycle_before.get(restart_tid, {}).get("status") == "PENDING"
+    and isinstance(lifecycle_before.get(restart_tid, {}).get("order"), dict),
+)
+clear_pending()
+reconciled = reconcile_tile2_pending_orders_on_startup()
+check("unexpired pending order restores after restart", restart_tid in reconciled["restored"])
+check(
+    "restored order is back in the real pending registry",
+    _tile2_paper_resting_limit_for_lane() is not None,
+)
+
+# An order whose TTL elapsed while the process was down becomes terminal.
+restored_order = _tile2_paper_resting_limit_for_lane()
+clear_pending()
+expired_snapshot = dict(restored_order or {})
+expired_snapshot["entry_expires_ts"] = time.time() - 1
+_record_tile2_order_lifecycle(
+    restart_tid,
+    "PENDING",
+    "TEST_EXPIRE_DURING_RESTART",
+    order=expired_snapshot,
+)
+expired_reconcile = reconcile_tile2_pending_orders_on_startup()
+check("expired-during-restart order is terminalized", restart_tid in expired_reconcile["expired"])
+with state_lock:
+    expired_lifecycle = _tile2_counters_bucket()["order_lifecycle"][restart_tid]
+check("expired lifecycle status is explicit", expired_lifecycle["status"] == "TTL_EXPIRED")
+
+# A legacy/incomplete pending snapshot must never be silently discarded.
+_record_tile2_order_lifecycle("legacy-incomplete", "PENDING", "TEST_INCOMPLETE", order={})
+orphan_reconcile = reconcile_tile2_pending_orders_on_startup()
+check("incomplete pending snapshot is marked orphaned", "legacy-incomplete" in orphan_reconcile["orphaned"])
+with state_lock:
+    orphan_lifecycle = _tile2_counters_bucket()["order_lifecycle"]["legacy-incomplete"]
+check("orphan lifecycle status is explicit", orphan_lifecycle["status"] == "ORPHANED_ON_RESTART")
 
 
 # ---------------------------------------------------------------------------

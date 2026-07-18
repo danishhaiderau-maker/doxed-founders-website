@@ -14,6 +14,8 @@ const bot = join(root, 'services/btc-conservative-agent/bot.py');
 const engine = join(root, 'services/btc-signal-engine/engine.py');
 const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_config.py');
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
+const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
+const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 
 function sha256(text) {
@@ -37,6 +39,12 @@ const botSrc = readFileSync(bot, 'utf8');
 const botHash = sha256(botSrc);
 writeFileSync(engine, botSrc, 'utf8');
 console.log(`Mirrored bot.py → engine.py (${botHash})`);
+
+if (existsSync(singletonAgent)) {
+  const singletonSrc = readFileSync(singletonAgent, 'utf8');
+  writeFileSync(singletonEngine, singletonSrc, 'utf8');
+  console.log(`Mirrored process_singleton.py → signal engine (${sha256(singletonSrc)})`);
+}
 
 if (existsSync(combosAgent)) {
   const comboSrc = readFileSync(combosAgent, 'utf8');
