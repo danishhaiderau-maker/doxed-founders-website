@@ -2542,11 +2542,16 @@ def execution_mode_for_lane(lane: str = None) -> str:
     if lane_is_exit_only(lane):
         return EXEC_MODE_EXIT_ONLY
 
-    # Retired / benchmark / unknown -> no orders ever
+    # Retired / historical benchmark / unknown -> no orders ever.
+    # CONTINUOUS is the active benchmark strategy, not a retired benchmark
+    # record. Its BENCHMARK status describes its comparison role; its own
+    # dashboard toggle still controls paper/live entries.
     if is_research_lane_retired(lane):
         return EXEC_MODE_LAB_SHADOW
     status = get_pathway_lane_status(lane)
-    if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
+    if lane != RESEARCH_LANE_CONTINUOUS and status in (
+        "RETIRED", "DATA_RETIRED", "BENCHMARK"
+    ):
         return EXEC_MODE_LAB_SHADOW
 
     # Tile OFF -> LAB shadow only
@@ -2614,8 +2619,10 @@ def lane_execution_block_reason(lane: str) -> str | None:
     if mode == EXEC_MODE_EXIT_ONLY:
         return "EXIT_ONLY (bitfinex disarmed with open exposure)"
     # LAB_SHADOW
-    if is_research_lane_retired(lane) or get_pathway_lane_status(lane) in (
-        "RETIRED", "DATA_RETIRED", "BENCHMARK"
+    status = get_pathway_lane_status(lane)
+    if is_research_lane_retired(lane) or (
+        lane != RESEARCH_LANE_CONTINUOUS
+        and status in ("RETIRED", "DATA_RETIRED", "BENCHMARK")
     ):
         return "LANE_RETIRED"
     if not is_research_lane_enabled(lane):
@@ -11488,7 +11495,16 @@ def _spawn_lab_combo_shadow(
     # Belt-and-braces no-real-order guard: LAB mode must NEVER place a real order.
     # This branch only starts a replay buffer; the real order path (process_signal →
     # submit_limit/submit_stop) is never entered for OFF tiles. Assert defensively.
-    if lane_orders_allowed(target_lane):
+    # Rejected Type B controls are replay buffers only and must continue while
+    # the tile is ON; they never call an order API. The old blanket toggle
+    # guard aborted every calibration counterfactual whenever Type B was ON.
+    # Keep the fail-closed guard for ordinary OFF-tile LAB studies and allow
+    # only this explicitly tagged counterfactual path through.
+    safe_counterfactual = (
+        bool(is_counterfactual)
+        and str(collection_mode or "").upper() == "CALIBRATION_COUNTERFACTUAL"
+    )
+    if lane_orders_allowed(target_lane) and not safe_counterfactual:
         logger.error(
             f"[LAB_GUARD] lane={target_lane} unexpectedly orders-allowed in LAB spawn "
             f"— aborting LAB shadow to avoid real orders [PIPELINE ENFORCEMENT]"
@@ -21475,7 +21491,7 @@ HTML = """<!DOCTYPE html>
 <h3>Ultimate execution control</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
-<label>AI win % bands to execute (hard-wired gate — tick any combination):</label>
+<label>Legacy AI confidence bands (audit-only in v12):</label>
 <div id="aiBandControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;">
   <label><input type="checkbox" class="ai-band-cb" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
   <label><input type="checkbox" class="ai-band-cb" data-band="45-50" onchange="updateAiBands()"> 45–50</label>
@@ -21484,11 +21500,11 @@ HTML = """<!DOCTYPE html>
   <label><input type="checkbox" class="ai-band-cb" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
   <label><input type="checkbox" class="ai-band-cb" data-band="65+" onchange="updateAiBands()"> 65+</label>
 </div>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a <strong>checked</strong> band may submit a limit. Unchecked band = hard block (all lanes). Settings persist across restarts.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Direction-only v12 does not request a win percentage, so these historical bands are display/audit preferences only and never block an order. Directional score separation plus the lane, spread, chase, capacity, and safety gates control execution.</p>
 <input id="aiThreshold" type="hidden" value="50">
 <p id="aiBandGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <h3>Chase Analytics — execution buckets</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard is the only control — checked = ON for that tick/band, unchecked = OFF. No hidden defaults: 0 chases only places when its box is ticked; 40–45% only executes when that AI band is ticked.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard is the only chase control — checked = ON for that chase count, unchecked = wait or cancel. No hidden defaults: the initial limit requires the 0-chases box; subsequent replacements require their matching chase bucket.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
@@ -21861,7 +21877,7 @@ DASHBOARD_JS = """(function () {
       const chase = (gates.chase_buckets_enabled || []).join(', ') || 'none';
       el.innerHTML =
         '<div><strong>AI reviewer:</strong> ' + (gates.ai_reviewer_enabled ? 'ON' : 'OFF') + '</div>' +
-        '<div><strong>AI bands:</strong> ' + bands + '</div>' +
+        '<div><strong>Legacy confidence bands (audit-only):</strong> ' + bands + '</div>' +
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
         '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>';
@@ -21871,8 +21887,8 @@ DASHBOARD_JS = """(function () {
       if (!el || !bands) return;
       const on = Object.keys(bands).filter(k => bands[k]);
       el.innerHTML = on.length
-        ? `<strong>Active AI bands:</strong> ${on.join(', ')}`
-        : '<strong style="color:#ef4444">All AI bands OFF — no limit orders will execute</strong>';
+        ? `<strong>Audit bands selected:</strong> ${on.join(', ')} · not an execution gate in direction-only v12`
+        : '<strong>Audit bands:</strong> none selected · execution remains direction/gate driven';
     }
     function renderChaseBucketGateStatus(buckets) {
       const el = document.getElementById('chaseBucketGateStatus');
