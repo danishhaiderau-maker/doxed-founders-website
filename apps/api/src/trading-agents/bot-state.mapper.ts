@@ -3,6 +3,11 @@ import { formatMelbourneDateTime } from '@dcf/utils';
 
 /** Shape returned by the Python bot GET /api/state (subset we use). */
 export type BotApiState = {
+  bot_instance_id?: string | null;
+  dashboard_owner?: boolean;
+  dashboard_pid?: number | null;
+  dashboard_port?: number | null;
+  source_git_rev?: string | null;
   price?: number | null;
   account_balance?: number;
   equity?: number;

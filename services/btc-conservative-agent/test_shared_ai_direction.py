@@ -29,6 +29,8 @@ def run():
     check("Type B cadence offset is zero", spec.get("ai_cadence_offset_sec") == 0)
     check("shared prompt does not request win probability", "Win probability:" not in bot.AI_PROMPT_TEMPLATE)
     check("shared prompt does not request confidence JSON", '"confidence"' not in bot.AI_PROMPT_TEMPLATE)
+    for forbidden in ("entry_zone_low", "limit_price", "expected_mfe", "expected_mae", "exit_style"):
+        check(f"shared prompt omits {forbidden}", forbidden not in bot.AI_PROMPT_TEMPLATE)
 
     low_conf = bot.derive_research_decision_tier(1, 70, 50, "LONG")
     high_conf = bot.derive_research_decision_tier(99, 70, 50, "LONG")
@@ -42,7 +44,52 @@ def run():
     check("direction-only JSON parses", parsed["direction"] == "LONG")
     check("direction-only JSON derives tier", parsed["decision"] == "STRONG_APPROVE")
     check("missing confidence stays neutral", parsed["win_prob"] == 0)
+    no_trade = bot.parse_ai_response_fields(
+        '{"direction":"NO_TRADE","long_score":55,"short_score":50,'
+        '"reason":"Long evidence is marginally stronger."}'
+    )
+    check("NO_TRADE cannot suppress candidate direction", no_trade["direction"] == "LONG")
+    check("raw NO_TRADE remains auditable", no_trade["raw_direction"] == "NO_TRADE")
+    check("exact five-point gap is a Continuous soft approve", no_trade["decision"] == "SOFT_APPROVE")
     check("legacy confidence bands cannot block direction-only v12", not bot.dashboard_ai_band_blocks(0))
+    fallback_limit, fallback_reason = bot.resolve_ai_direct_limit("LONG", 100.0, {})
+    check("direction-only call gets deterministic pullback limit", 0 < fallback_limit < 100.0)
+    check("direction-only limit is labelled deterministic", fallback_reason == "DIRECTIONAL_PULLBACK_LIMIT")
+
+    with bot.state_lock:
+        bot.state["ai_history"] = []
+        bot.state["shared_ai_lane_counters"] = {
+            bot.RESEARCH_LANE_CONTINUOUS: {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+            RESEARCH_LANE_TYPE_B_HUNTER_V1: {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        }
+    history_ai = {
+        "trade_id": "scan-history-1",
+        "shared_ai_call_id": "scan-history-1",
+        "direction": "LONG",
+        "candidate_direction": "LONG",
+        "raw_direction": "NO_TRADE",
+        "decision": "APPROVE",
+        "long_score": 55,
+        "short_score": 50,
+        "factors": {"long_score": 55, "short_score": 50},
+        "comment": '{"direction":"NO_TRADE","long_score":55,"short_score":50}',
+    }
+    bot._append_ai_history_row(history_ai)
+    bot._append_ai_history_row({**history_ai, "source": "SPAWN"})
+    bot._stamp_shared_ai_lane_verdict(
+        "scan-history-1", bot.RESEARCH_LANE_CONTINUOUS, True, "SOFT_APPROVE"
+    )
+    bot._stamp_shared_ai_lane_verdict(
+        "scan-history-1", RESEARCH_LANE_TYPE_B_HUNTER_V1, False, "BULL_NEEDS_ADX_28"
+    )
+    with bot.state_lock:
+        history = list(bot.state["ai_history"])
+        counters = bot.state["shared_ai_lane_counters"]
+    check("one API call renders one history row", len(history) == 1)
+    check("Continuous verdict is separate", history[0]["continuous_verdict"]["accepted"] is True)
+    check("Type B verdict is separate", history[0]["type_b_verdict"]["accepted"] is False)
+    check("Continuous counter counted once", counters[bot.RESEARCH_LANE_CONTINUOUS]["evaluated"] == 1)
+    check("Type B counter counted once", counters[RESEARCH_LANE_TYPE_B_HUNTER_V1]["evaluated"] == 1)
 
     captured = []
     original = bot._spawn_independent_v1_lane_after_ai

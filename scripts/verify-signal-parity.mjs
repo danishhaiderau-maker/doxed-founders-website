@@ -14,6 +14,8 @@ const engine = join(root, 'services/btc-signal-engine/engine.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_config.py');
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
+const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
+const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 
@@ -46,6 +48,18 @@ if (existsSync(combosAgent) && existsSync(combosEngine)) {
   console.log(`OK  combo configs match (${ca})`);
 }
 
+if (!existsSync(singletonAgent) || !existsSync(singletonEngine)) {
+  fail('Missing process singleton dependency in canonical bot or signal engine');
+}
+const singletonAgentHash = sha256(singletonAgent);
+const singletonEngineHash = sha256(singletonEngine);
+if (singletonAgentHash !== singletonEngineHash) {
+  fail(
+    `process singleton (${singletonAgentHash}) !== signal-engine copy (${singletonEngineHash})`,
+  );
+}
+console.log(`OK  process singleton dependency matches (${singletonAgentHash})`);
+
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   if (manifest.signal_hash && manifest.signal_hash !== botHash) {
@@ -72,7 +86,18 @@ const fullProbe = process.argv.includes('--full');
 if (fullProbe) {
   console.log('\n--- Phase 2b: signal-flag probe (imports bot.py) ---\n');
   try {
-    execSync(`python "${probe}" --full`, { cwd: root, stdio: 'inherit', encoding: 'utf8', timeout: 120_000 });
+    execSync(`python "${probe}" --full`, {
+      cwd: root,
+      stdio: 'inherit',
+      encoding: 'utf8',
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        FORCE_PAPER_MODE: '1',
+        RESEARCH_DATA_COLLECTION: '1',
+        SKIP_EXCHANGE_MARKET_LOAD: '1',
+      },
+    });
   } catch {
     fail('signal_probe.py --full failed');
   }

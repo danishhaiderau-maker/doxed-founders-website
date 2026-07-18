@@ -158,6 +158,41 @@ export class BotBridgeService {
     return this.lastLiveFetchAt;
   }
 
+  /**
+   * Relay webhooks may mutate trading state only when their instance identity
+   * matches a recently fetched canonical dashboard owner.
+   */
+  getCachedDashboardOwnerIdentity(): {
+    instanceId: string;
+    pid: number | null;
+    port: number | null;
+    seenAt: number;
+  } | null {
+    const now = Date.now();
+    const candidates: Array<{ state: BotApiState | null; seenAt: number }> = [
+      { state: this.execCached, seenAt: this.execFetchAt },
+      { state: this.cached, seenAt: this.lastFetchAt },
+    ];
+    for (const candidate of candidates) {
+      const state = candidate.state;
+      const instanceId = state?.bot_instance_id?.trim();
+      if (
+        state?.dashboard_owner === true
+        && instanceId
+        && candidate.seenAt > 0
+        && now - candidate.seenAt <= 30_000
+      ) {
+        return {
+          instanceId,
+          pid: typeof state.dashboard_pid === 'number' ? state.dashboard_pid : null,
+          port: typeof state.dashboard_port === 'number' ? state.dashboard_port : null,
+          seenAt: candidate.seenAt,
+        };
+      }
+    }
+    return null;
+  }
+
   /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
    *  Never the Fly.io stale instance. Falls back to the Railway-pushed relay snapshot
    *  (up to 10m stale) when the tunnel blips. */
@@ -246,6 +281,12 @@ export class BotBridgeService {
         }
         const data = (await res.json()) as BotApiState;
         if (!data || typeof data !== 'object') continue;
+        if (data.dashboard_owner !== true || !data.bot_instance_id?.trim()) {
+          this.logger.warn(
+            `Canonical bot ${cf}${path} did not prove dashboard ownership; execution held`,
+          );
+          continue;
+        }
         this.execCached = data;
         this.execFetchAt = now;
         return data;

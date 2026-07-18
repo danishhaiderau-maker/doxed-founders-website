@@ -1,0 +1,73 @@
+"""Startup safety checks: one owner process and fatal dashboard bind."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+
+os.environ.setdefault("FORCE_PAPER_MODE", "1")
+os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
+
+import bot
+from process_singleton import acquire_process_singleton
+
+
+def run():
+    passed = 0
+
+    def check(name, condition):
+        nonlocal passed
+        if not condition:
+            raise AssertionError(name)
+        passed += 1
+
+    with tempfile.TemporaryDirectory() as td:
+        owner = acquire_process_singleton("singleton-contract", Path(td))
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from process_singleton import acquire_process_singleton, ProcessSingletonError; "
+                    f"root=Path({td!r}); "
+                    "\ntry:\n acquire_process_singleton('singleton-contract', root)\n"
+                    "except ProcessSingletonError:\n raise SystemExit(73)\n"
+                    "raise SystemExit(0)"
+                ),
+            ],
+            cwd=str(Path(__file__).parent),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        check("second process is refused by OS lock", child.returncode == 73)
+        owner.release()
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    old_port = bot.DASHBOARD_PORT
+    old_host = bot.DASHBOARD_BIND_HOST
+    bot.DASHBOARD_PORT = listener.getsockname()[1]
+    bot.DASHBOARD_BIND_HOST = "127.0.0.1"
+    fatal = False
+    try:
+        bot._create_dashboard_server()
+    except SystemExit:
+        fatal = True
+    finally:
+        bot.DASHBOARD_PORT = old_port
+        bot.DASHBOARD_BIND_HOST = old_host
+        listener.close()
+    check("dashboard bind failure is process-fatal", fatal)
+
+    print(f"PASS: {passed} singleton startup checks")
+
+
+if __name__ == "__main__":
+    run()

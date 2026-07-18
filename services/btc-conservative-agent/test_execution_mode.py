@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Boot minimal state required by the resolver without starting the bot.
 os.environ.setdefault("FORCE_PAPER_MODE", "1")  # ensure Bitfinex stays OFF during tests
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
+os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
 # Unit tests must never persist their simulated live/toggle state into the
