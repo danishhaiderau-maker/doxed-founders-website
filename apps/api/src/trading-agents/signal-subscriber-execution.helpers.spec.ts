@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  canonicalPendingIntentCycles,
   isBenignShowcaseEntryWait,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
@@ -51,3 +52,44 @@ for (const message of [
     assert.equal(isBenignShowcaseEntryWait(message), false);
   });
 }
+
+test('ignores stale intents and selects only trades resting in the canonical order book', () => {
+  const stale = { tradeId: 'cont-stale', createdAt: new Date('2026-07-19T12:00:00Z') };
+  const live = { tradeId: 'cont-live', createdAt: new Date('2026-07-19T12:05:00Z') };
+  const result = canonicalPendingIntentCycles([stale, live], {
+    orders: [
+      {
+        trade_id: 'cont-live',
+        status: 'PENDING',
+        limit_price: 64_500,
+      },
+    ],
+  });
+  assert.deepEqual(result, [live]);
+});
+
+test('rejects terminal or price-less canonical orders', () => {
+  const cycles = [
+    { tradeId: 'cont-filled', createdAt: new Date('2026-07-19T12:00:00Z') },
+    { tradeId: 'cont-no-price', createdAt: new Date('2026-07-19T12:01:00Z') },
+  ];
+  const result = canonicalPendingIntentCycles(cycles, {
+    orders: [
+      { trade_id: 'cont-filled', status: 'FILLED', limit_price: 64_500 },
+      { trade_id: 'cont-no-price', status: 'PENDING', limit_price: 0 },
+    ],
+  });
+  assert.deepEqual(result, []);
+});
+
+test('preserves canonical book order when more than one live intent is ready', () => {
+  const firstCreated = { tradeId: 'cont-a', createdAt: new Date('2026-07-19T12:00:00Z') };
+  const secondCreated = { tradeId: 'cont-b', createdAt: new Date('2026-07-19T12:01:00Z') };
+  const result = canonicalPendingIntentCycles([firstCreated, secondCreated], {
+    orders: [
+      { trade_id: 'cont-b', status: 'ORDERED', limit_price: 64_600 },
+      { trade_id: 'cont-a', status: 'PENDING', limit_price: 64_500 },
+    ],
+  });
+  assert.deepEqual(result, [secondCreated, firstCreated]);
+});
