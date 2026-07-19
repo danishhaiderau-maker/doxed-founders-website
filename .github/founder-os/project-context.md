@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix lane execution and dashboard visibility (#22)
+Fix relay showcase fetch storm (#23)
 
 ## Last Activity
 
