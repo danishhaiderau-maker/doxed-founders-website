@@ -55,6 +55,45 @@ def run():
     fallback_limit, fallback_reason = bot.resolve_ai_direct_limit("LONG", 100.0, {})
     check("direction-only call gets deterministic pullback limit", 0 < fallback_limit < 100.0)
     check("direction-only limit is labelled deterministic", fallback_reason == "DIRECTIONAL_PULLBACK_LIMIT")
+    check(
+        "shared LONG scores normalize to the legacy Type B spread",
+        bot.compute_directional_spread(
+            "LONG",
+            {"long_score": 65, "short_score": 35},
+        ) == 3,
+    )
+    check(
+        "shared SHORT scores normalize to the legacy Type B spread",
+        bot.compute_directional_spread(
+            "SHORT",
+            {"long_score": 35, "short_score": 65},
+        ) == 3,
+    )
+    check(
+        "legacy bull/bear spread remains compatible",
+        bot.compute_directional_spread(
+            "LONG",
+            {"bull_score": 7, "bear_score": 4},
+        ) == 3,
+    )
+    type_b_ok, type_b_reason = bot._apply_type_b_hunter_v1_entry_filter(
+        {"direction": "LONG", "long_score": 65, "short_score": 35},
+        {
+            "adx": 31,
+            "volume_ratio": 0.6,
+            "regime": "BULL",
+            "structure_score": 4,
+            "delta": 22,
+            "edge_score": 4,
+            "ema_slope": "up",
+        },
+        4.0,
+    )
+    check("valid shared score reaches the Type B policy", type_b_ok is True)
+    check(
+        "valid shared score is no longer rejected as zero spread",
+        "SPREAD_FLOOR" not in str(type_b_reason or ""),
+    )
 
     with bot.state_lock:
         bot.state["ai_history"] = []
@@ -144,6 +183,23 @@ def run():
         if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
     )
     check("Type B tile truthfully labels its chase entry", tile.get("entry_mode_label") == "Bounded Limit Chase")
+    check(
+        "Type B tile exposes raw and normalized score gates",
+        "Raw score gap >=20/100" in tile.get("filter_chips", [])
+        and "Normalized spread >=2" in tile.get("filter_chips", []),
+    )
+    continuous_tile = next(
+        row for row in bot.build_static_pathway_lane_specs()["lanes"]
+        if row.get("lane") == bot.RESEARCH_LANE_CONTINUOUS
+    )
+    check(
+        "Continuous tile exposes its raw score gap gate",
+        "Raw score gap >=5/100" in continuous_tile.get("filter_chips", []),
+    )
+    check(
+        "Continuous tile exposes the no-confidence contract",
+        "AI confidence not requested" in continuous_tile.get("filter_chips", []),
+    )
     print(f"PASS: {passed} shared AI contract checks")
 
 

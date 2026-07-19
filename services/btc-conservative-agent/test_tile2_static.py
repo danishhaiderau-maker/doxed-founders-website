@@ -10,6 +10,7 @@ import json
 import inspect
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +21,12 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+
+# Never let this test suite overwrite the live holdout counter file. The
+# functions below resolve TILE2_COUNTERS_FILE dynamically from the bot module.
+_TEST_RUNTIME_DIR = tempfile.mkdtemp(prefix="tile2-static-tests-")
+bot.TILE2_COUNTERS_FILE = os.path.join(_TEST_RUNTIME_DIR, "tile2_counters.json")
+
 from bot import (
     execution_mode_for_lane,
     lane_can_place_new_entry,
@@ -32,6 +39,7 @@ from bot import (
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     pending_orders,
     open_positions,
+    trades_map,
     trade_lock,
     state_lock,
     state,
@@ -54,6 +62,9 @@ from bot import (
     _tile2_paper_resting_limit_for_lane,
     _tile2_open_episode_ids,
     _cancel_tile2_paper_resting_limit,
+    _is_static_no_chase_order,
+    _apply_marketable_limit_fallback,
+    _collect_dashboard_active_signals,
 )
 from sr_micro_tile_v2 import (
     evaluate_bracket,
@@ -386,6 +397,54 @@ if pending:
     check(
         "paper limit max_chase_count is 0 (no chase/reprice/slide)",
         pending.get("max_chase_count") == 0,
+    )
+    check(
+        "paper limit stores internal direction as LONG",
+        pending.get("signal_dir") == "LONG" and pending.get("dir") == "LONG",
+        f"got signal_dir={pending.get('signal_dir')!r} dir={pending.get('dir')!r}",
+    )
+    check(
+        "paper limit retains exchange side separately as buy",
+        pending.get("side") == "buy",
+        f"got {pending.get('side')!r}",
+    )
+    check(
+        "static order is structurally excluded from all chase paths",
+        _is_static_no_chase_order(pending) is True,
+    )
+    signal_ref = trades_map.get(pending.get("trade_id"), {}).get("signal_ref")
+    check(
+        "Tile 2 order has an active signal record",
+        isinstance(signal_ref, dict)
+        and signal_ref.get("status") == "ORDERED"
+        and signal_ref.get("research_lane") == LANE,
+    )
+    active_rows, _ = _collect_dashboard_active_signals(
+        list(pending_orders),
+        list(open_positions),
+        trades_map,
+    )
+    check(
+        "Tile 2 pending order appears in dashboard Active Signals",
+        any(
+            row.get("trade_id") == pending.get("trade_id")
+            and row.get("research_lane") == LANE
+            for row in active_rows
+        ),
+    )
+    check(
+        "marketable fallback cannot move a static Tile 2 order",
+        _apply_marketable_limit_fallback(
+            pending,
+            signal_ref or {},
+            60100.0,
+            float(pending.get("created_ts") or 0) + 3600,
+        )
+        is False,
+    )
+    check(
+        "static Tile 2 limit price remains unchanged after fallback check",
+        abs(float(pending.get("limit_price")) - 59950.0) < 0.01,
     )
 
 # No chase / reprice: a second submit at the SAME level returns RESTING
@@ -860,6 +919,58 @@ check("incomplete pending snapshot is marked orphaned", "legacy-incomplete" in o
 with state_lock:
     orphan_lifecycle = _tile2_counters_bucket()["order_lifecycle"]["legacy-incomplete"]
 check("orphan lifecycle status is explicit", orphan_lifecycle["status"] == "ORPHANED_ON_RESTART")
+
+
+# ---------------------------------------------------------------------------
+# Group M: touched static limit opens a normal paper position
+# ---------------------------------------------------------------------------
+print("\n[M] Static fill direction and position lifecycle")
+reset_state()
+with state_lock:
+    state["price"] = 60050.0
+res_fill = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-fill-direction"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={"regime": "RANGE"},
+    bracket_eval=r_35,
+    sr_episode_id="ep-fill-direction",
+)
+fill_candidate = _tile2_paper_resting_limit_for_lane()
+check("fill-direction submit SPAWNED", res_fill == "SPAWNED" and fill_candidate is not None)
+_patched_names = (
+    "log_lane_opportunity_event",
+    "_emit_genome_execution_event",
+    "mark_approve_research_executed",
+    "persist_signal",
+    "save_positions",
+    "_relay_mirror",
+    "pipeline_state_sync",
+)
+_originals = {name: getattr(bot, name) for name in _patched_names}
+try:
+    for name in _patched_names:
+        setattr(bot, name, lambda *args, **kwargs: None)
+    fill_candidate["fill_price"] = fill_candidate["limit_price"]
+    fill_candidate["status"] = "FILLED"
+    bot.fill_order(fill_candidate)
+finally:
+    for name, original in _originals.items():
+        setattr(bot, name, original)
+check(
+    "touched Tile 2 order opens a LONG position without direction error",
+    any(
+        pos.get("trade_id") == fill_candidate.get("trade_id")
+        and pos.get("dir") == "LONG"
+        and pos.get("research_lane") == LANE
+        for pos in open_positions
+    ),
+)
+check(
+    "filled Tile 2 order leaves the pending registry",
+    not any(order.get("trade_id") == fill_candidate.get("trade_id") for order in pending_orders),
+)
 
 
 # ---------------------------------------------------------------------------
