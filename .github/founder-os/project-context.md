@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (21 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Prioritize canonical relay pending orders (#25)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
