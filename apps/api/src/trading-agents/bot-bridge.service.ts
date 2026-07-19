@@ -54,6 +54,22 @@ export class BotBridgeService {
   /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
   private execCached: BotApiState | null = null;
   private execFetchAt = 0;
+  /**
+   * All canonical `/api/relay-state` readers share one short-lived live fetch.
+   * The Agent Hub, relay subscriber, session sync and webhook wake path can all
+   * request a forced refresh in the same tick. Without coalescing, those calls
+   * fan out into dozens of identical tunnel requests and trigger the showcase
+   * bot's HTTP 429 guard, leaving live copy permanently stuck in safe mode.
+   */
+  private showcaseFetchInFlight: Promise<BotApiState | null> | null = null;
+  private showcaseFetchCached: BotApiState | null = null;
+  private showcaseFetchAt = 0;
+  private showcaseFetchBackoffUntil = 0;
+  private showcaseRateLimitLogAt = 0;
+  private readonly showcaseFetchMinIntervalMs = Math.max(
+    500,
+    Number(process.env.BOT_BRIDGE_FETCH_COALESCE_MS ?? 1500),
+  );
 
   constructor(
     private readonly config: ConfigService,
@@ -201,34 +217,22 @@ export class BotBridgeService {
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
     }
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
-    for (const path of ['/api/relay-state', '/api/state'] as const) {
-      const timeoutMs = path === '/api/relay-state' ? 20_000 : 30_000;
-      try {
-        const res = await fetch(`${cf}${path}`, {
-          signal: AbortSignal.timeout(timeoutMs),
-          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-showcase/1.0' },
-        });
-        if (!res.ok) {
-          this.logger.warn(`Public showcase ${cf}${path} HTTP ${res.status}`);
-          continue;
-        }
-        const data = (await res.json()) as BotApiState;
-        if (!data || typeof data !== 'object') continue;
-        this.cached = data;
-        this.lastFetchAt = now;
-        this.lastLiveFetchAt = now;
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.warn(`Public showcase ${cf}${path} fetch failed: ${msg}`);
-      }
+    const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
+      relayTimeout: 20_000,
+      stateTimeout: 30_000,
+      userAgent: 'doxxedcrypto-showcase/1.0',
+    });
+    if (data) {
+      const fetchedAt = Date.now();
+      this.cached = data;
+      this.lastFetchAt = fetchedAt;
+      this.lastLiveFetchAt = fetchedAt;
+      return data;
     }
     const cached = await this.fetchCachedRelaySnapshot(this.cumulativeStaleMs);
     if (cached) {
       this.cached = cached;
       this.lastFetchAt = now;
-        this.lastLiveFetchAt = now;
       return cached;
     }
     return null;
@@ -264,36 +268,23 @@ export class BotBridgeService {
    *  reads keep the Fly race via fetchState / fetchStateForAdmin / fetchHealth. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
     const now = Date.now();
-    if (!force && this.execCached && now - this.execFetchAt < this.execCacheMs) {
+    // `force` bypasses the display cache, not this execution cache. Otherwise
+    // every caller in the same relay tick creates an identical tunnel request.
+    if (this.execCached && now - this.execFetchAt < this.execCacheMs) {
       return this.execCached;
     }
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
-    for (const path of ['/api/relay-state', '/api/state'] as const) {
-      const timeoutMs = path === '/api/relay-state' ? 20_000 : 30_000;
-      try {
-        const res = await fetch(`${cf}${path}`, {
-          signal: AbortSignal.timeout(timeoutMs),
-          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
-        });
-        if (!res.ok) {
-          this.logger.warn(`Canonical bot ${cf}${path} HTTP ${res.status}`);
-          continue;
-        }
-        const data = (await res.json()) as BotApiState;
-        if (!data || typeof data !== 'object') continue;
-        if (data.dashboard_owner !== true || !data.bot_instance_id?.trim()) {
-          this.logger.warn(
-            `Canonical bot ${cf}${path} did not prove dashboard ownership; execution held`,
-          );
-          continue;
-        }
-        this.execCached = data;
-        this.execFetchAt = now;
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.warn(`Canonical bot ${cf}${path} fetch failed: ${msg}`);
-      }
+    const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
+      relayTimeout: 20_000,
+      stateTimeout: 30_000,
+      userAgent: 'doxxedcrypto-relay/1.0',
+    });
+    if (data?.dashboard_owner === true && data.bot_instance_id?.trim()) {
+      this.execCached = data;
+      this.execFetchAt = Date.now();
+      return data;
+    }
+    if (data) {
+      this.logger.warn('Canonical bot did not prove dashboard ownership; execution held');
     }
     // Canonical unreachable — execution must hold (no Fly fallback for money decisions).
     this.execCached = null;
@@ -401,6 +392,37 @@ export class BotBridgeService {
     paths: string[],
     opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
   ): Promise<BotApiState | null> {
+    const now = Date.now();
+    if (
+      this.showcaseFetchCached
+      && now - this.showcaseFetchAt < this.showcaseFetchMinIntervalMs
+    ) {
+      return this.showcaseFetchCached;
+    }
+    if (this.showcaseFetchInFlight) return this.showcaseFetchInFlight;
+    if (now < this.showcaseFetchBackoffUntil) return null;
+
+    const task = this.fetchShowcaseStateOnce(paths, opts);
+    this.showcaseFetchInFlight = task;
+    try {
+      const data = await task;
+      if (data) {
+        this.showcaseFetchCached = data;
+        this.showcaseFetchAt = Date.now();
+        this.showcaseFetchBackoffUntil = 0;
+      }
+      return data;
+    } finally {
+      if (this.showcaseFetchInFlight === task) {
+        this.showcaseFetchInFlight = null;
+      }
+    }
+  }
+
+  private async fetchShowcaseStateOnce(
+    paths: string[],
+    opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
+  ): Promise<BotApiState | null> {
     const base = await this.resolveShowcaseUrl();
     for (const path of paths) {
       const timeoutMs = path.includes('relay-state') ? opts.relayTimeout : opts.stateTimeout;
@@ -409,6 +431,28 @@ export class BotBridgeService {
           signal: AbortSignal.timeout(timeoutMs),
           headers: { Accept: 'application/json', 'User-Agent': opts.userAgent },
         });
+        if (res.status === 429) {
+          const retryAfterSec = Number(res.headers.get('retry-after') ?? 0);
+          const backoffMs = Math.min(
+            30_000,
+            Math.max(
+              2_000,
+              Number.isFinite(retryAfterSec) && retryAfterSec > 0
+                ? retryAfterSec * 1000
+                : 5_000,
+            ),
+          );
+          this.showcaseFetchBackoffUntil = Date.now() + backoffMs;
+          if (Date.now() - this.showcaseRateLimitLogAt >= 5_000) {
+            this.showcaseRateLimitLogAt = Date.now();
+            this.logger.warn(
+              `Showcase bot ${base}${path} HTTP 429; coalesced bridge backing off ${backoffMs}ms`,
+            );
+          }
+          // `/api/state` shares the same limiter. Falling through would double
+          // the request storm instead of giving the bot time to recover.
+          return null;
+        }
         if (!res.ok) {
           this.logger.warn(`Showcase bot ${base}${path} HTTP ${res.status}`);
           continue;
