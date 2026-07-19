@@ -100,6 +100,24 @@ test('rejects an unsigned intent-bearing payload when HMAC rollout is enabled', 
   );
 });
 
+test('rejects an unsigned legacy-shaped payload with an unknown future field', async () => {
+  const service = createService('dashboard-active', 'test-webhook-secret');
+  const body = {
+    event: 'LIMIT_UPDATED' as const,
+    trade_id: 'cont-unknown',
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+    future_entry_override: 64_000,
+  };
+  await assert.rejects(
+    service.ingest('conservative-btc', body, {
+      rawBody: Buffer.from(JSON.stringify(body)),
+    }),
+    /Missing showcase signature/,
+  );
+});
+
 test('accepts a correctly signed intent-bearing payload', async () => {
   const secret = 'test-webhook-secret';
   const service = createService('dashboard-active', secret);
