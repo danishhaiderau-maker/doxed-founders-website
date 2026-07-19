@@ -2,6 +2,13 @@ import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SignalCycleStatus } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
+import type { SignalIntentEnvelope } from '@dcf/utils';
+import {
+  DEFAULT_SUBSCRIBER_LEVERAGE,
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  SUBSCRIBER_TRAIL_LADDER,
+  normalizePullbackToOffsetPct,
+} from '@dcf/utils';
 import { BotBridgeService } from './bot-bridge.service';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
@@ -44,59 +51,110 @@ export type ShowcaseRelayEventBody = {
 };
 
 /**
- * Minimal intent envelope for showcase relay demo cycles.
+ * Build an audit-only legacy envelope or an executable signed relay envelope.
  *
  * Real cycles get a fully populated envelope built by signal-envelope.mapper's
  * buildIntentEnvelope() from live bot state. The showcase relay webhook path
- * doesn't have the full bot context for the trade_id it's announcing, so when
- * a relay event lands for a trade_id with no existing cycle (e.g. cassette
- * replay during the demo harness), we upsert a cycle with this minimal shape
- * so the event has somewhere to attach. The platform polls + backfills the
- * full envelope later if a real bot trade is observed for the same id.
+ * Legacy wake events do not have authenticated entry context, so they remain
+ * deliberately non-executable. Signed dcf-showcase-intent-v1 events carry the
+ * fields required to construct a conformant ENSE immediately.
  *
  * N2 (intent-mirror) — when a signed v1 webhook carries `intent_source` and
  * signal context, those fields are merged into the envelope so the relay's
  * intent-mirror path can read `intent_source`, `signal_price`, and
  * `pullback_pct` to place the hire order (decision §8 #4).
  */
-function minimalIntentEnvelope(
+function relayIntentEnvelope(
+  cycleId: string,
   tradeId: string,
-  direction?: string | null,
-  intentSource?: 'paper' | 'live' | null,
-  v1?: Partial<Pick<ShowcaseRelayEventBody, 'signal_price' | 'pullback_pct' | 'margin_usdt' | 'leverage' | 'win_prob' | 'edge_score' | 'effective_threshold'>> & { bot_version?: string | null },
+  body?: ShowcaseRelayEventBody,
 ) {
-  const dir = direction === 'SHORT' ? 'SHORT' : 'LONG';
-  const sigPrice = typeof v1?.signal_price === 'number' && Number.isFinite(v1.signal_price) ? v1.signal_price : null;
-  const pullbackPct = typeof v1?.pullback_pct === 'number' && Number.isFinite(v1.pullback_pct) ? v1.pullback_pct : null;
-  return {
-    cycle_id: tradeId,
+  const direction = body?.direction?.toUpperCase();
+  const isSignedIntent =
+    body?.schema === 'dcf-showcase-intent-v1'
+    && (direction === 'LONG' || direction === 'SHORT');
+
+  // Legacy owner events are wake-only. Keep their audit cycles deliberately
+  // non-executable so an unsigned payload can never inject a direction/order.
+  if (!isSignedIntent) {
+    return {
+      cycle_id: cycleId,
+      trade_id: tradeId,
+      source: 'showcase_relay_legacy_wake',
+      schema: 'showcase_relay_audit_v1',
+    };
+  }
+
+  const dir = direction as 'LONG' | 'SHORT';
+  const sigPrice =
+    typeof body?.signal_price === 'number' && Number.isFinite(body.signal_price)
+      ? body.signal_price
+      : null;
+  const pullbackPct =
+    typeof body?.pullback_pct === 'number' && Number.isFinite(body.pullback_pct)
+      ? body.pullback_pct
+      : null;
+  const offsetPct = normalizePullbackToOffsetPct(dir, {
+    botPullbackThreshold: pullbackPct,
+    signalPullback: pullbackPct,
+  });
+  const envelope: SignalIntentEnvelope & {
+    intent_source?: 'paper' | 'live';
+    trade_id: string;
+    entry: SignalIntentEnvelope['entry'] & {
+      signal_price?: number;
+      pullback_pct?: number;
+    };
+    margin_usdt?: number;
+    leverage?: number;
+    effective_threshold?: number;
+    research_lane?: string;
+  } = {
+    schema: 'dcf-signal-intent/v1',
+    cycleId,
+    signalId: tradeId,
+    version: body?.bot_version ?? 'showcase-relay-v1',
+    action: 'ENTER',
     trade_id: tradeId,
     direction: dir,
     entry: {
-      order_type: 'LIMIT',
-      // Offset % derived from the webhook's signal_price ± pullback_pct when
-      // available; otherwise the conservative legacy default. The relay's
-      // maybeEnterFromIntent reads signal_price directly for the limit (§8 #4).
-      limit_offset_pct: 0.05,
-      ttl_sec: 90,
-      margin_usd: 100,
+      type: 'LIMIT',
+      mode: 'PULLBACK_PCT',
+      offset_pct: offsetPct,
+      reference: 'SUBSCRIBER_MARK_AT_RECEIPT',
+      ttl_sec: 1800,
       ...(sigPrice != null ? { signal_price: sigPrice } : {}),
       ...(pullbackPct != null ? { pullback_pct: pullbackPct } : {}),
     },
     risk: {
       stop_loss_margin_pct: -18,
-      leverage_hint: 1,
+      take_profit_ladder: SUBSCRIBER_TRAIL_LADDER.map(
+        ([at_margin_pct, lock_margin_pct]) => ({
+          at_margin_pct,
+          close_position_pct: lock_margin_pct,
+        }),
+      ),
+      leverage_hint: DEFAULT_SUBSCRIBER_LEVERAGE,
+      max_margin_usd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     },
-    source: 'showcase_relay_webhook',
-    schema: 'signal_intent_envelope_v1',
-    ...(intentSource ? { intent_source: intentSource } : {}),
-    ...(v1?.margin_usdt != null ? { margin_usdt: v1.margin_usdt } : {}),
-    ...(v1?.leverage != null ? { leverage: v1.leverage } : {}),
-    ...(v1?.win_prob != null ? { win_prob: v1.win_prob } : {}),
-    ...(v1?.edge_score != null ? { edge_score: v1.edge_score } : {}),
-    ...(v1?.effective_threshold != null ? { effective_threshold: v1.effective_threshold } : {}),
-    ...(v1?.bot_version != null ? { bot_version: v1.bot_version } : {}),
+    context: {
+      regime: 'UNKNOWN',
+      edge: Number(body?.edge_score ?? 0),
+      ai_win_prob: Number(body?.win_prob ?? 0),
+      entry_mode_source: 'PULLBACK_PCT',
+      research_venue: 'bitfinex',
+      disclaimer:
+        'Signed showcase intent. Subscriber execution remains subject to platform and exchange safety gates.',
+    },
+    ...(body?.intent_source ? { intent_source: body.intent_source } : {}),
+    ...(body?.margin_usdt != null ? { margin_usdt: body.margin_usdt } : {}),
+    ...(body?.leverage != null ? { leverage: body.leverage } : {}),
+    ...(body?.effective_threshold != null
+      ? { effective_threshold: body.effective_threshold }
+      : {}),
+    ...(body?.research_lane ? { research_lane: body.research_lane } : {}),
   };
+  return envelope;
 }
 
 @Injectable()
@@ -273,12 +331,6 @@ export class ShowcaseRelayEventsService {
       await this.cycles.wakeFromShowcase({ intents: true, closures: true });
     }
 
-    // F7 — Pass the event trigger so the relay can tag the resulting exit
-    // mirror with SHOWCASE_CLOSED_WEBHOOK (fast path) vs SHOWCASE_CLOSED_POLL.
-    // This is purely an audit log distinction — both paths close the copy lot
-    // identically; the tag lets ops measure end-to-end exit lag.
-    await this.execution.wakeNow(event);
-
     // [SHOWCASE_RELAY_PERSIST_2026-07-08] Persist the inbound relay event as
     // a signalCycleEvent row so the cycle audit trail reflects every webhook
     // the platform received (APPROVE_PENDING -> ORDER_PLACED -> POSITION_CLOSED).
@@ -296,6 +348,13 @@ export class ShowcaseRelayEventsService {
       );
     }
 
+    // Persist (and, for a signed intent, enrich) before waking execution. A
+    // tick can run synchronously or queue behind an in-flight tick; either way
+    // it must observe the executable envelope before evaluating the cycle.
+    //
+    // F7: pass the trigger so exits retain the webhook-vs-poll audit tag.
+    await this.execution.wakeNow(event);
+
     this.logger.log(
       `Showcase relay wake ${event} trade=${body.trade_id ?? '?'} intent=${intentCreated ? 'new' : 'none'} persisted=${persisted}`,
     );
@@ -310,7 +369,7 @@ export class ShowcaseRelayEventsService {
    *
    * Visible behavior:
    *   - APPROVE_PENDING -> create INTENT cycle (if missing) + APPROVE_PENDING event
-   *   - ORDER_PLACED    -> ensure cycle exists, transition INTENT -> PENDING_ENTRY, + ORDER_PLACED event
+   *   - ORDER_PLACED    -> ensure cycle exists + ORDER_PLACED audit event
    *   - POSITION_CLOSED -> ensure cycle exists, transition to CLOSED, + POSITION_CLOSED event
    *   - LIMIT_UPDATED   -> ensure cycle exists, + LIMIT_UPDATED event (no status change)
    */
@@ -337,15 +396,13 @@ export class ShowcaseRelayEventsService {
       },
     });
 
-    const cycle = await this.prisma.signalCycle.findUnique({ where: { id: cycleId } });
-    if (!cycle) return true;
-
-    if (body.event === 'ORDER_PLACED' && cycle.status === SignalCycleStatus.INTENT) {
-      await this.prisma.signalCycle.update({
-        where: { id: cycleId },
-        data: { status: SignalCycleStatus.PENDING_ENTRY },
-      });
-    } else if (body.event === 'POSITION_CLOSED' && cycle.status !== SignalCycleStatus.CLOSED) {
+    // The showcase ORDER_PLACED event is audit evidence, not proof that this
+    // subscriber has an exchange order. Only the subscriber execution path
+    // may transition a participant/cycle to PENDING_ENTRY after Bitfinex has
+    // accepted its own order.
+    if (body.event === 'POSITION_CLOSED') {
+      const cycle = await this.prisma.signalCycle.findUnique({ where: { id: cycleId } });
+      if (!cycle || cycle.status === SignalCycleStatus.CLOSED) return true;
       await this.prisma.signalCycle.update({
         where: { id: cycleId },
         data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
@@ -368,9 +425,30 @@ export class ShowcaseRelayEventsService {
   ): Promise<string | null> {
     const existing = await this.prisma.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId, tradeId } },
-      select: { id: true },
+      select: { id: true, intentEnvelope: true },
     });
-    if (existing) return existing.id;
+    if (existing) {
+      const current = existing.intentEnvelope as { action?: unknown } | null;
+      const signedIntent =
+        body?.schema === 'dcf-showcase-intent-v1'
+        && (body.direction?.toUpperCase() === 'LONG'
+          || body.direction?.toUpperCase() === 'SHORT');
+      if (signedIntent && current?.action !== 'ENTER') {
+        await this.prisma.signalCycle.update({
+          where: { id: existing.id },
+          data: {
+            intentEnvelope: relayIntentEnvelope(
+              existing.id,
+              tradeId,
+              body,
+            ) as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            botVersion: body.bot_version ?? undefined,
+            expiresAt: new Date(Date.now() + 1_800_000),
+          },
+        });
+      }
+      return existing.id;
+    }
 
     // Stable-ish id for the cycle — derived from the trade_id so replays land
     // on the same row. Strip non-alphanumerics; pad/truncate to fit the cuid-ish shape.
@@ -383,9 +461,14 @@ export class ShowcaseRelayEventsService {
           agentId,
           tradeId,
           status: SignalCycleStatus.INTENT,
-          intentEnvelope: minimalIntentEnvelope(tradeId, direction, body?.intent_source ?? undefined, body ?? undefined) as unknown as import('@prisma/client').Prisma.InputJsonValue,
+          intentEnvelope: relayIntentEnvelope(
+            cycleId,
+            tradeId,
+            body ?? { event: 'APPROVE_PENDING', direction },
+          ) as unknown as import('@prisma/client').Prisma.InputJsonValue,
           researchVenue: 'bitfinex',
-          expiresAt: new Date(Date.now() + 300_000),
+          botVersion: body?.bot_version ?? undefined,
+          expiresAt: new Date(Date.now() + 1_800_000),
         },
       });
       return cycleId;
