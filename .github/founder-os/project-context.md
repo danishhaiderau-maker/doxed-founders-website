@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Prioritize canonical relay pending orders (#25)
 
 ## Last Activity
 
