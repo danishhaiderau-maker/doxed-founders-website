@@ -50,6 +50,7 @@ const token =
 const dbUrl = neon.DATABASE_URL || vercelCheck.DATABASE_URL;
 const jwtSecret = vercelCheck.JWT_SECRET?.trim();
 const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
+const showcaseWebhookSecret = vercelCheck.SHOWCASE_WEBHOOK_SECRET?.trim();
 const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
 const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
 const railwayToken =
@@ -89,6 +90,7 @@ const apiVars = {
   CONSERVATIVE_BTC_BOT_URL: homeBotUrl,
   ...relayEnv,
   ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
+  ...(showcaseWebhookSecret ? { SHOWCASE_WEBHOOK_SECRET: showcaseWebhookSecret } : {}),
   ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
   ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
   ...(railwayToken ? { RAILWAY_TOKEN: railwayToken } : {}),

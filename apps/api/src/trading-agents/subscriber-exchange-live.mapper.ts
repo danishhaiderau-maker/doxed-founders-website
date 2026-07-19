@@ -102,7 +102,7 @@ export function mapSubscriberExchangeLiveBook(input: {
       displayMark = 0; // fall back to entry below
     }
     positions.push({
-      leg: 'Bitfinex',
+      leg: 'Bitfinex net',
       side: p.direction,
       qty: Math.abs(p.amount),
       entry: p.basePrice,
@@ -114,7 +114,15 @@ export function mapSubscriberExchangeLiveBook(input: {
   }
 
   const exchangePending = input.orders
-    .filter((o) => Math.abs(o.amount) > 0 && o.price > 0)
+    .filter((o) => {
+      const orderType = String(o.orderType ?? '').toUpperCase();
+      return (
+        Math.abs(o.amount) > 0 &&
+        o.price > 0 &&
+        orderType.includes('LIMIT') &&
+        !orderType.includes('STOP')
+      );
+    })
     .slice(0, 10)
     .map((o) => ({
       ageMin: 0,
@@ -169,7 +177,7 @@ export function mapSubscriberExchangeLiveBook(input: {
       const side = direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG';
       const current = mark > 0 ? mark : entry;
       positions.push({
-        leg: row.cycle.tradeId.slice(0, 10),
+        leg: `Lot ${row.cycle.tradeId.slice(0, 10)}`,
         side,
         qty: legQty,
         entry,

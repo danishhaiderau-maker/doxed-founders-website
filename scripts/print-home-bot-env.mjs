@@ -85,6 +85,9 @@ const lines = [
 if (vercel.BOT_CONTROL_SECRET?.trim()) {
   lines.push(`BOT_CONTROL_SECRET=${vercel.BOT_CONTROL_SECRET.trim()}`);
 }
+if (vercel.SHOWCASE_WEBHOOK_SECRET?.trim()) {
+  lines.push(`SHOWCASE_WEBHOOK_SECRET=${vercel.SHOWCASE_WEBHOOK_SECRET.trim()}`);
+}
 
 // Preserve existing phone/remote operator token (or mint one). Never commit this file.
 {

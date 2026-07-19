@@ -33,6 +33,7 @@ export type ShowcaseRelayEventBody = {
   research_lane?: string | null;
   pullback_pct?: number | null;
   bot_version?: string | null;
+  strategy_mode?: string | null;
   bot_instance_id?: string | null;
   dashboard_owner?: boolean | null;
   dashboard_pid?: number | null;
@@ -145,12 +146,49 @@ export class ShowcaseRelayEventsService {
    * Timing-safe: the HMAC digest compare uses `timingSafeEqual` (no early
    * return on length mismatch — we hash-then-compare fixed-length digests).
    */
-  verifySignature(rawBody: Buffer | string | undefined, sigHeader: string | undefined): void {
+  private isLegacyWakeOnly(body: ShowcaseRelayEventBody | undefined): boolean {
+    if (!body) return false;
+    // Legacy owner webhooks are wake-up notifications only. They may describe
+    // the current order/close, but they must not carry any fields consumed by
+    // the intent-entry path. Those richer payloads always require HMAC.
+    return [
+      body.schema,
+      body.intent_source,
+      body.signal_price,
+      body.margin_usdt,
+      body.leverage,
+      body.win_prob,
+      body.edge_score,
+      body.effective_threshold,
+      body.research_lane,
+      body.pullback_pct,
+      body.bot_version,
+      body.strategy_mode,
+    ].every((value) => value == null);
+  }
+
+  verifySignature(
+    rawBody: Buffer | string | undefined,
+    sigHeader: string | undefined,
+    relayBody?: ShowcaseRelayEventBody,
+  ): void {
     const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET')?.trim();
     // Rollout boundary: until the operator sets the shared secret on the API,
     // the signature gate is not enforced — the legacy G13 bearer-secret check
     // (assertAuthorized) remains the sole auth. Once set, signing is required.
     if (!secret) {
+      return;
+    }
+    // Compatibility bridge for the existing home owner process: an unsigned
+    // legacy event may only wake a canonical-state poll. It still passed the
+    // independent BOT_CONTROL_SECRET check in the controller and must pass
+    // assertActiveDashboardOwner() below. It cannot create an intent from
+    // supplied price/size/risk fields. Signed dcf-showcase-intent-v1 payloads
+    // remain mandatory for direct intent entry.
+    if (!sigHeader && this.isLegacyWakeOnly(relayBody)) {
+      this.logger.warn(
+        `Accepted legacy owner wake without HMAC event=${relayBody?.event ?? '?'} trade=${relayBody?.trade_id ?? '?'}`,
+      );
       return;
     }
     if (!rawBody) {
@@ -214,7 +252,7 @@ export class ShowcaseRelayEventsService {
     // so a forged payload can never create an intent row or wake the relay.
     // The legacy G13 bearer-secret check (assertAuthorized) is still performed
     // by the controller before calling ingest; this is the payload-level guard.
-    this.verifySignature(context?.rawBody, context?.signatureHeader);
+    this.verifySignature(context?.rawBody, context?.signatureHeader, body);
     this.assertActiveDashboardOwner(body);
 
     this.botBridge.invalidateCache();

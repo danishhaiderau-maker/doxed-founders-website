@@ -64,6 +64,10 @@ function mapRow(p) {
   const intent = (p.cycle.intentEnvelope && typeof p.cycle.intentEnvelope === 'object'
     ? p.cycle.intentEnvelope
     : {}) ;
+  const executionPayload = p.events.reduce((acc, e) => {
+    if (e.payload && typeof e.payload === 'object') Object.assign(acc, e.payload);
+    return acc;
+  }, {});
   const events = p.events
     .slice()
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
@@ -81,6 +85,8 @@ function mapRow(p) {
         bitfinexOrderId:
           pl.bitfinex_order_id != null
             ? String(pl.bitfinex_order_id)
+            : pl.bitfinexOrderId != null
+              ? String(pl.bitfinexOrderId)
             : pl.order_id != null
               ? String(pl.order_id)
               : null,
@@ -93,7 +99,7 @@ function mapRow(p) {
   const orderEvent = events.find((e) => e.eventType === 'ORDER_PLACED');
   const orderPayload = orderEvent
     ? (p.events.find((e) => e.eventType === 'ORDER_PLACED')?.payload ?? {})
-    : {};
+    : executionPayload;
 
   const fillPrice = num(p.fillPrice) ?? filledEvent?.fillPrice ?? null;
   const exitPrice = num(p.exitPrice) ?? exitEvent?.exitPrice ?? null;
@@ -122,7 +128,12 @@ function mapRow(p) {
     leverage: num(intent.risk?.leverage_hint) ?? 100,
     marginUsd: num(intent.risk?.max_margin_usd) ?? num(orderPayload.margin_usd),
     qtyBtc: num(orderPayload.qty) ?? num(orderPayload.qty_btc),
-    limitPrice: num(intent.limit_price) ?? orderEvent?.limitPrice ?? null,
+    limitPrice:
+      num(intent.limit_price) ??
+      orderEvent?.limitPrice ??
+      num(executionPayload.originalLimitPrice) ??
+      num(executionPayload.limitPrice) ??
+      null,
     signalPrice: num(intent.signal_price) ?? null,
     fillPrice,
     exitPrice,
@@ -136,7 +147,13 @@ function mapRow(p) {
     closedAt,
     durationMinutes,
     bitfinexOrderId:
-      orderEvent?.bitfinexOrderId ?? events.find((e) => e.bitfinexOrderId)?.bitfinexOrderId ?? null,
+      orderEvent?.bitfinexOrderId ??
+      events.find((e) => e.bitfinexOrderId)?.bitfinexOrderId ??
+      (executionPayload.bitfinexOrderId != null
+        ? String(executionPayload.bitfinexOrderId)
+        : executionPayload.bitfinex_order_id != null
+          ? String(executionPayload.bitfinex_order_id)
+          : null),
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: p.cycle.showcaseExitReason,

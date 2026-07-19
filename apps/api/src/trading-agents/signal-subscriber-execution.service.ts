@@ -5540,8 +5540,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const qty = computeQty(marginUsd, leverage, mark, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
 
+    let marketOrderId: number;
     try {
-      await this.activeTrading.submitMarketEntry(creds, {
+      marketOrderId = await this.activeTrading.submitMarketEntry(creds, {
         direction: intent.direction,
         qty,
         leverage,
@@ -5588,6 +5589,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         limitPrice: fillPrice,
         originalLimitPrice: showcaseEntry,
         fillPrice,
+        bitfinexOrderId: marketOrderId,
+        bitfinex_order_id: marketOrderId,
+        clientOrderId,
         stopOrderId: stopOrderId ?? undefined,
         fill_price: fillPrice,
         action_match: true,
@@ -5605,6 +5609,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       limitPrice: fillPrice,
       originalLimitPrice: showcaseEntry,
       fillPrice,
+      bitfinexOrderId: marketOrderId,
+      bitfinex_order_id: marketOrderId,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,

@@ -30,8 +30,17 @@ function pickPayload(p) {
 async function main() {
   const agent = await prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
   const cheetah = await prisma.tradingAgentInstance.findFirst({
-    where: { agentId: agent.id, exchangeProvider: 'bitfinex', status: 'ACTIVE' },
+    where: {
+      agentId: agent.id,
+      exchangeProvider: 'bitfinex',
+      status: 'ACTIVE',
+      OR: [
+        { expiresAt: null },
+        { expiresAt: { gt: new Date() } },
+      ],
+    },
     include: { user: { select: { id: true, platformHandle: true, name: true } } },
+    orderBy: { updatedAt: 'desc' },
   });
   if (!cheetah) {
     console.log('No active bitfinex hire');
@@ -42,6 +51,23 @@ async function main() {
   const who = cheetah.user?.platformHandle ?? cheetah.user?.name ?? userId;
   console.log(`\n=== ${who} @ ${new Date().toISOString()} ===`);
   console.log(`instance lastError: ${cheetah.lastError ?? '(none)'}`);
+  const dashboard = cheetah.dashboardState && typeof cheetah.dashboardState === 'object'
+    ? cheetah.dashboardState
+    : {};
+  const reconcile = dashboard.copyRelayReconcile ?? null;
+  console.log(
+    `reconcile: exchange=${Number(reconcile?.exchangePositionQty ?? 0).toFixed(5)} ` +
+      `ledger=${Number(reconcile?.ledgerOpenQty ?? 0).toFixed(5)} ` +
+      `delta=${Number(reconcile?.deltaBtc ?? 0).toFixed(5)} ` +
+      `open=${reconcile?.openLots ?? 0} pending=${reconcile?.pendingLots ?? 0} ` +
+      `alert=${Boolean(reconcile?.alert)}`,
+  );
+  console.log(
+    `relay tick=${dashboard.lastTickAt ?? 'n/a'} orphanOrders=${
+      Array.isArray(dashboard.orphanOrderIds) ? dashboard.orphanOrderIds.length : 0
+    } mirrorDiff=${dashboard.mirrorDiff?.counts?.total ?? 0} ` +
+      `dynamicStops=${Boolean(dashboard.exchangeDynamicStopsEnabled)}`,
+  );
 
   const rows = await prisma.signalCycleParticipant.findMany({
     where: {
@@ -67,7 +93,16 @@ async function main() {
     const exits = row.events.filter((e) => e.eventType === 'EXIT');
     const stops = row.events.filter((e) => e.eventType === 'STOP_LOSS_ARMED');
     const placed = row.events.find((e) => e.eventType === 'ORDER_PLACED');
-    const pp = pickPayload(placed?.payload);
+    const catchup = row.events.find((e) => e.eventType === 'MIRROR_CATCHUP_ENTRY');
+    const mergedPayload = row.events.reduce(
+      (acc, event) => Object.assign(acc, pickPayload(event.payload)),
+      {},
+    );
+    const pp = {
+      ...mergedPayload,
+      ...pickPayload(placed?.payload),
+      ...pickPayload(catchup?.payload),
+    };
 
     const orderId = pp.bitfinexOrderId ?? pp.bitfinex_order_id;
     const qty = pp.qty ?? 0;
@@ -88,7 +123,10 @@ async function main() {
     console.log(`\n--- ${row.status} | ${row.cycle.tradeId.slice(0, 12)}… | cycle=${row.cycle.status}`);
     console.log(`  fillPrice=${row.fillPrice} pnlUsd=${row.pnlUsd}`);
     console.log(`  orderId=${orderId ?? '?'} qty=${qty} limit=${limit} ${dir ?? ''}`);
-    console.log(`  events: placed=${placed ? 'Y' : 'N'} filled=${filled.length} stops=${stops.length} exits=${exits.length}`);
+    console.log(
+      `  events: placed=${placed ? 'Y' : 'N'} catchup=${catchup ? 'Y' : 'N'} ` +
+        `filled=${filled.length} stops=${stops.length} exits=${exits.length}`,
+    );
     if (filled.length) {
       const fp = pickPayload(filled[filled.length - 1].payload);
       console.log(`  last FILLED: fill=${fp.fill_price} stop=${fp.stopOrderId} @ ${filled[filled.length - 1].createdAt.toISOString()}`);
