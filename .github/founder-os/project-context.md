@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix relay showcase fetch storm (#23)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
