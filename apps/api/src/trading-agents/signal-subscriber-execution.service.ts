@@ -106,6 +106,43 @@ type ExecutionPayload = {
   originTradeId?: string;
 };
 
+type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
+
+/**
+ * A catch-up entry created after the showcase has already filled may have a
+ * durable qty but no durable direction in older event rows. Persist the repair
+ * whenever either field is missing so restart reconciliation can attribute the
+ * exchange position to the OPEN virtual lot.
+ */
+export function shouldPersistLotMetaRepair(
+  stored: RepairableLotMeta,
+  resolved: RepairableLotMeta,
+): boolean {
+  const qtyMissing = !stored.qty || stored.qty <= MIN_QTY_BTC;
+  const directionMissing = !stored.direction;
+  return (
+    (!!resolved.qty && resolved.qty > MIN_QTY_BTC && qtyMissing) ||
+    (!!resolved.direction && directionMissing)
+  );
+}
+
+/**
+ * Waiting for a particular showcase order is normal strategy flow, not a
+ * service outage. These messages must not keep the Agent Hub in a red error
+ * state once the canonical bridge is healthy.
+ */
+export function isBenignShowcaseEntryWait(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return (
+    message === 'Showcase trade is not present in the current canonical book.' ||
+    message === 'Waiting for the showcase to publish its exact resting limit.' ||
+    message === 'Showcase filled before copy entry; waiting for the catch-up reconciler.' ||
+    message ===
+      'Showcase bot has not placed a limit yet (virtual defer / chase bucket) — relay waiting.' ||
+    message === 'Waiting for showcase limit.'
+  );
+}
+
 type PositionRuntime = {
   peakMarginPct: number;
   lastChaseAtMs: number;
@@ -1110,6 +1147,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     } else if (botStateForCap != null) {
       this.clearShowcaseUnreachable(instance.id);
+      if (isBenignShowcaseEntryWait(instance.lastError)) {
+        await this.prisma.tradingAgentInstance
+          .updateMany({
+            where: { id: instance.id, lastError: instance.lastError },
+            data: { lastError: null },
+          })
+          .catch(() => {});
+      }
     }
     const botMaxRaw = botStateForCap?.max_active_signals;
     const botMax =
@@ -2707,9 +2752,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
         const defer = this.showcaseCopyEntryReady(botStateForEntry, tradeId);
         if (!defer.ready) {
-          await this.prisma.tradingAgentInstance.update({
-            where: { id: instance.id },
-            data: { lastError: defer.reason ?? 'Waiting for showcase limit.' },
+          const reason = defer.reason ?? 'Waiting for showcase limit.';
+          this.cycleAudit.stage('SIGNAL', {
+            userId: instance.userId,
+            agentId,
+            cycleId,
+            tradeId,
+            detail: reason,
           });
           if (claimParticipantId) {
             await this.prisma.signalCycleParticipant
@@ -5503,6 +5552,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         mark_at_entry: mark,
         slip_usd: Math.round(slipUsd * 100) / 100,
         qty,
+        direction: intent.direction,
+        leverage,
+        margin_usd: marginUsd,
+        limitPrice: fillPrice,
+        originalLimitPrice: showcaseEntry,
+        fillPrice,
+        stopOrderId: stopOrderId ?? undefined,
         fill_price: fillPrice,
         action_match: true,
         revived_terminal: revivedTerminal,
@@ -5513,6 +5569,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       venue: 'bitfinex',
       fill_price: fillPrice,
       qty,
+      direction: intent.direction,
+      leverage,
+      margin_usd: marginUsd,
+      limitPrice: fillPrice,
+      originalLimitPrice: showcaseEntry,
+      fillPrice,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
@@ -7450,7 +7512,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (qty && qty > MIN_QTY_BTC && direction) {
-      if (!meta.qty || meta.qty <= MIN_QTY_BTC) {
+      if (shouldPersistLotMetaRepair(meta, { qty, direction })) {
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
           venue: 'bitfinex',
           event: 'META_QTY_REPAIR',
@@ -7460,7 +7522,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           source: 'hire',
         });
         this.logger.warn(
-          `Repaired missing lot meta ${userId} participant=${participantId} qty=${qty.toFixed(5)}`,
+          `Repaired missing lot meta ${userId} participant=${participantId} qty=${qty.toFixed(5)} direction=${direction}`,
         );
       }
       return { ...meta, qty, direction, margin_usd: marginUsd };
