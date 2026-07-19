@@ -10,12 +10,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { getVaultDir } from './secrets-vault-path.mjs';
 
 const GQL = 'https://backboard.railway.com/graphql/v2';
 const API_SERVICE = 'doxed-founders-website';
-const KEY = 'SHOWCASE_WEBHOOK_SECRET';
+const CONTROL_KEY = 'BOT_CONTROL_SECRET';
+const WEBHOOK_KEY = 'SHOWCASE_WEBHOOK_SECRET';
 const vault = getVaultDir();
 
 function readDotEnv(file) {
@@ -71,96 +73,164 @@ async function gql(token, query, variables = {}) {
   return json.data;
 }
 
+function railwayCliEnv() {
+  const env = { ...process.env };
+  // A stale environment token masks an otherwise valid interactive Railway
+  // CLI session. The CLI credential store remains available without it.
+  delete env.RAILWAY_TOKEN;
+  delete env.RAILWAY_API_TOKEN;
+  return env;
+}
+
+function railwayCommand(args) {
+  if (process.platform === 'win32') {
+    return {
+      file: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/s', '/c', 'railway.cmd', ...args],
+    };
+  }
+  return { file: 'railway', args };
+}
+
+function railwayCliVariables() {
+  const command = railwayCommand(['variables', '--json']);
+  const raw = execFileSync(command.file, command.args, {
+    cwd: process.cwd(),
+    env: railwayCliEnv(),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return JSON.parse(raw);
+}
+
+function railwayCliSet(key, value) {
+  const command = railwayCommand(['variables', '--set', `${key}=${value}`]);
+  execFileSync(command.file, command.args, {
+    cwd: process.cwd(),
+    env: railwayCliEnv(),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 const xSecrets = readDotEnv(join(vault, '.env.x.secrets'));
 const token =
   xSecrets.RAILWAY_TOKEN?.trim() ||
   xSecrets.RAILWAY_API_TOKEN?.trim() ||
   process.env.RAILWAY_TOKEN?.trim();
-if (!token) throw new Error('Railway token missing from the external vault');
 
-const data = await gql(
-  token,
-  `query {
-    projects { edges { node {
-      id name
-      environments { edges { node { id name } } }
-      services { edges { node { id name } } }
-    } } }
-  }`,
-);
+let railwayVariables = null;
+let graphContext = null;
 
-let project = null;
-let environment = null;
-let service = null;
-for (const candidate of data.projects?.edges?.map((edge) => edge.node) ?? []) {
-  const match = candidate.services?.edges?.find(
-    (edge) => edge.node.name === API_SERVICE,
-  )?.node;
-  if (!match) continue;
-  project = candidate;
-  service = match;
-  environment =
-    candidate.environments?.edges?.find(
-      (edge) => edge.node.name === 'production',
-    )?.node ?? candidate.environments?.edges?.[0]?.node;
-  break;
-}
-if (!project || !environment || !service) {
-  throw new Error(`Railway service ${API_SERVICE} not found`);
-}
+if (token) {
+  try {
+    const data = await gql(
+      token,
+      `query {
+        projects { edges { node {
+          id name
+          environments { edges { node { id name } } }
+          services { edges { node { id name } } }
+        } } }
+      }`,
+    );
 
-const variables = await gql(
-  token,
-  `query($projectId: String!, $environmentId: String!, $serviceId: String!) {
-    variables(
-      projectId: $projectId,
-      environmentId: $environmentId,
-      serviceId: $serviceId
-    )
-  }`,
-  {
-    projectId: project.id,
-    environmentId: environment.id,
-    serviceId: service.id,
-  },
-);
+    for (const candidate of data.projects?.edges?.map((edge) => edge.node) ?? []) {
+      const service = candidate.services?.edges?.find(
+        (edge) => edge.node.name === API_SERVICE,
+      )?.node;
+      if (!service) continue;
+      const environment =
+        candidate.environments?.edges?.find(
+          (edge) => edge.node.name === 'production',
+        )?.node ?? candidate.environments?.edges?.[0]?.node;
+      if (!environment) continue;
+      graphContext = { project: candidate, environment, service };
+      break;
+    }
 
-let secret = variables.variables?.[KEY]?.trim();
-let created = false;
-if (!secret) {
-  secret = randomBytes(32).toString('base64url');
-  created = true;
-  await gql(
-    token,
-    `mutation($input: VariableCollectionUpsertInput!) {
-      variableCollectionUpsert(input: $input)
-    }`,
-    {
-      input: {
-        projectId: project.id,
-        environmentId: environment.id,
-        serviceId: service.id,
-        variables: { [KEY]: secret },
-        replace: false,
+    if (!graphContext) {
+      throw new Error(`Railway service ${API_SERVICE} not found`);
+    }
+
+    const variables = await gql(
+      token,
+      `query($projectId: String!, $environmentId: String!, $serviceId: String!) {
+        variables(
+          projectId: $projectId,
+          environmentId: $environmentId,
+          serviceId: $serviceId
+        )
+      }`,
+      {
+        projectId: graphContext.project.id,
+        environmentId: graphContext.environment.id,
+        serviceId: graphContext.service.id,
       },
-    },
-  );
-  await gql(
-    token,
-    `mutation($serviceId: String!, $environmentId: String!) {
-      serviceInstanceRedeploy(
-        serviceId: $serviceId,
-        environmentId: $environmentId
-      )
-    }`,
-    { serviceId: service.id, environmentId: environment.id },
-  );
+    );
+    railwayVariables = variables.variables;
+  } catch {
+    console.warn('Stored Railway API token unavailable; using authenticated Railway CLI.');
+  }
 }
 
-upsertDotEnv(join(vault, '.env.vercel.check'), KEY, secret);
-upsertDotEnv(join(vault, 'home-bot.env'), KEY, secret);
+if (!railwayVariables) {
+  railwayVariables = railwayCliVariables();
+}
+
+const controlSecret = railwayVariables?.[CONTROL_KEY]?.trim();
+if (!controlSecret) {
+  throw new Error(`${CONTROL_KEY} is missing from the linked Railway service`);
+}
+
+let webhookSecret = railwayVariables?.[WEBHOOK_KEY]?.trim();
+let created = false;
+if (!webhookSecret) {
+  webhookSecret = randomBytes(32).toString('base64url');
+  created = true;
+  if (graphContext && token) {
+    await gql(
+      token,
+      `mutation($input: VariableCollectionUpsertInput!) {
+        variableCollectionUpsert(input: $input)
+      }`,
+      {
+        input: {
+          projectId: graphContext.project.id,
+          environmentId: graphContext.environment.id,
+          serviceId: graphContext.service.id,
+          variables: { [WEBHOOK_KEY]: webhookSecret },
+          replace: false,
+        },
+      },
+    );
+    await gql(
+      token,
+      `mutation($serviceId: String!, $environmentId: String!) {
+        serviceInstanceRedeploy(
+          serviceId: $serviceId,
+          environmentId: $environmentId
+        )
+      }`,
+      {
+        serviceId: graphContext.service.id,
+        environmentId: graphContext.environment.id,
+      },
+    );
+  } else {
+    railwayCliSet(WEBHOOK_KEY, webhookSecret);
+  }
+}
+
+for (const file of [
+  join(vault, '.env.vercel.check'),
+  join(vault, 'home-bot.env'),
+]) {
+  upsertDotEnv(file, CONTROL_KEY, controlSecret);
+  upsertDotEnv(file, WEBHOOK_KEY, webhookSecret);
+}
 
 console.log(
-  `${KEY} synchronized to the external vault and home-bot.env ` +
-    `(${created ? 'created on Railway; redeploy triggered' : 'matched existing Railway value'}).`,
+  `Relay control and webhook secrets synchronized without printing values ` +
+    `(${created ? 'webhook secret created on Railway' : 'matched existing Railway values'}).`,
 );
