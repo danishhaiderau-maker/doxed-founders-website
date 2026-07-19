@@ -28,8 +28,12 @@ import {
   type IpcAuthState,
   type IpcHello,
   type IpcMessage,
-} from '@dcf/founder-ide-extension/ipc';
-import { IdeIpcClient, pipePathFor } from '../src/ide-ipc-client.js';
+} from 'founder-ide-extension/ipc';
+import {
+  IdeIpcClient,
+  ensureIdeInstallIdentity,
+  pipePathFor,
+} from '../src/ide-ipc-client.js';
 
 // ---------------------------------------------------------------------------
 // Test vault setup — same shape as server.spec.ts.
@@ -183,6 +187,21 @@ function startMockServer(): Promise<MockServerHandle> {
 }
 
 // ---------------------------------------------------------------------------
+
+describe('ensureIdeInstallIdentity', () => {
+  it('creates and then reuses a stable local pipe identity', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-install-identity-'));
+    try {
+      const first = ensureIdeInstallIdentity(root);
+      const second = ensureIdeInstallIdentity(root);
+      assert.equal(first.installId, second.installId);
+      assert.equal(first.ipcSecret, second.ipcSecret);
+      assert.match(first.ipcSecret, /^[0-9a-f]{64}$/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('IdeIpcClient (Phase 3, Task 4)', () => {
   let server: MockServerHandle;

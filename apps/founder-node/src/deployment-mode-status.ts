@@ -1,7 +1,8 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 /**
  * Phase 7 — Private-mode runtime status probe + local HTTP endpoint.
@@ -19,6 +20,10 @@ import { execFileSync } from 'node:child_process';
 
 const DEFAULT_PORT = Number(process.env.FOUNDER_NODE_PORT ?? 7002);
 const FORGEJO_PROBE_URL = process.env.FORGEJO_PROBE_URL ?? 'http://127.0.0.1:3000';
+const STATUS_CACHE_MS = 5_000;
+const execFileAsync = promisify(execFile);
+let cachedStatus: { expiresAt: number; value: DeploymentRuntimeStatusResponse } | null = null;
+let statusProbeInFlight: Promise<DeploymentRuntimeStatusResponse> | null = null;
 
 export interface DeploymentRuntimeStatusResponse {
   forgejo: 'online' | 'offline' | 'not-installed';
@@ -49,6 +54,43 @@ export async function probeDeploymentRuntimeStatus(
     tailscale,
     probedAt: new Date().toISOString(),
   };
+}
+
+function fallbackDeploymentRuntimeStatus(): DeploymentRuntimeStatusResponse {
+  return {
+    forgejo: 'not-installed',
+    sqlite: { file: null, sizeBytes: null },
+    tunnel: { active: false, url: null },
+    tailscale: { reachable: false, hostname: null },
+    probedAt: new Date().toISOString(),
+  };
+}
+
+export function getDeploymentRuntimeStatus(
+  vaultRoot: string,
+): DeploymentRuntimeStatusResponse {
+  if (cachedStatus && cachedStatus.expiresAt > Date.now()) {
+    return cachedStatus.value;
+  }
+
+  if (!statusProbeInFlight) {
+    statusProbeInFlight = probeDeploymentRuntimeStatus(vaultRoot)
+      .then((value) => {
+        cachedStatus = { value, expiresAt: Date.now() + STATUS_CACHE_MS };
+        return value;
+      })
+      .catch((err) => {
+        console.warn('[deployment-mode] runtime-status refresh failed:', err);
+        return cachedStatus?.value ?? fallbackDeploymentRuntimeStatus();
+      })
+      .finally(() => {
+        statusProbeInFlight = null;
+      });
+  }
+
+  // Never make dashboard or tunnel requests wait for OS process discovery.
+  // A background refresh will replace this stale/default value for the next poll.
+  return cachedStatus?.value ?? fallbackDeploymentRuntimeStatus();
 }
 
 /** Check whether Forgejo responds on localhost:3000 (its default bind port). */
@@ -121,20 +163,27 @@ async function probeTunnel(): Promise<{ active: boolean; url: string | null }> {
   // presence of the process is the signal the panel needs for now.
   if (process.platform === 'win32') {
     try {
-      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/NH', '/FO', 'CSV'], {
-        encoding: 'utf8',
-        timeout: 2000,
-        windowsHide: true,
-      });
-      const active = out.toLowerCase().includes('cloudflared.exe');
+      const { stdout } = await execFileAsync(
+        'tasklist',
+        ['/FI', 'IMAGENAME eq cloudflared.exe', '/NH', '/FO', 'CSV'],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
+          windowsHide: true,
+        },
+      );
+      const active = stdout.toLowerCase().includes('cloudflared.exe');
       return { active, url: null };
     } catch {
       return { active: false, url: null };
     }
   }
   try {
-    const out = execFileSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf8', timeout: 2000 });
-    return { active: out.trim().length > 0, url: null };
+    const { stdout } = await execFileAsync('pgrep', ['-x', 'cloudflared'], {
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    return { active: stdout.trim().length > 0, url: null };
   } catch {
     return { active: false, url: null };
   }
@@ -143,12 +192,12 @@ async function probeTunnel(): Promise<{ active: boolean; url: string | null }> {
 /** Check Tailscale reachability + hostname via the CLI if available. */
 async function probeTailscale(): Promise<{ reachable: boolean; hostname: string | null }> {
   try {
-    const out = execFileSync('tailscale', ['status', '--json'], {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json'], {
       encoding: 'utf8',
       timeout: 2500,
       windowsHide: true,
     });
-    const parsed = JSON.parse(out) as { Self?: { HostName?: string }; BackendState?: string };
+    const parsed = JSON.parse(stdout) as { Self?: { HostName?: string }; BackendState?: string };
     const reachable = parsed.BackendState === 'Running' || Boolean(parsed.Self);
     return { reachable, hostname: parsed.Self?.HostName ?? null };
   } catch {
@@ -174,7 +223,7 @@ export function startDeploymentRuntimeStatusServer(
     }
 
     try {
-      const status = await probeDeploymentRuntimeStatus(vaultRoot);
+      const status = getDeploymentRuntimeStatus(vaultRoot);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(status));
     } catch (err) {
@@ -190,6 +239,7 @@ export function startDeploymentRuntimeStatusServer(
   server.listen(port, '127.0.0.1', () => {
     // Best-effort log; never fail the app if the port is taken.
     console.log(`[deployment-mode] runtime-status on http://127.0.0.1:${port}/api/deployment-mode/runtime-status`);
+    getDeploymentRuntimeStatus(vaultRoot);
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {

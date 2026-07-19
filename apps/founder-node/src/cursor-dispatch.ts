@@ -7,7 +7,7 @@ import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
   generateNonce,
   type IpcMessage,
-} from '@dcf/founder-ide-extension/ipc';
+} from 'founder-ide-extension/ipc';
 import {
   findComposerWithRecentUserText,
   focusComposerInWorkspaceState,

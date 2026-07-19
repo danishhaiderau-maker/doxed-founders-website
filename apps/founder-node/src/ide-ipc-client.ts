@@ -28,6 +28,7 @@ import * as net from 'node:net';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   IPC_PROTOCOL_VERSION,
   NonceTracker,
@@ -38,7 +39,7 @@ import {
   type IpcHello,
   type IpcHeartbeat,
   type IpcMessage,
-} from '@dcf/founder-ide-extension/ipc';
+} from 'founder-ide-extension/ipc';
 
 /** Heartbeat — sent every 15s. Server drops us if it doesn't see one for 60s. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -48,6 +49,30 @@ const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 /** Connect timeout — if TCP connect() doesn't complete, retry. */
 const CONNECT_TIMEOUT_MS = 5_000;
+
+/**
+ * Bootstrap a local pipe identity for vaults paired before IPC was added.
+ * The sidecar is local-only; the existing node token still gates cloud relay.
+ */
+export function ensureIdeInstallIdentity(
+  vaultRoot: string,
+): { installId: string; ipcSecret: string } {
+  const file = path.join(vaultRoot, 'install.json');
+  let install: { installId?: string; ipcSecret?: string } = {};
+  try {
+    if (fs.existsSync(file)) {
+      install = JSON.parse(fs.readFileSync(file, 'utf8')) as typeof install;
+    }
+  } catch {
+    install = {};
+  }
+
+  install.installId = install.installId ?? randomUUID();
+  install.ipcSecret = install.ipcSecret ?? randomBytes(32).toString('hex');
+  fs.mkdirSync(vaultRoot, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(install, null, 2), 'utf8');
+  return { installId: install.installId, ipcSecret: install.ipcSecret };
+}
 
 /** Capabilities the Founder Node client advertises to the IDE. */
 const FOUNDER_NODE_CAPABILITIES: IpcCapability[] = [

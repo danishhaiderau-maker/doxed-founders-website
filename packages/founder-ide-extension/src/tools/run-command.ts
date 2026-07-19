@@ -1,5 +1,5 @@
 /**
- * `founder.runCommand` — LanguageModelTool.
+ * `founder-run-command` — LanguageModelTool.
  *
  * Runs one reviewed command at a time and streams stdout/stderr into a visible
  * output channel while returning bounded output to the model.

@@ -1,5 +1,5 @@
 /**
- * `founder.editFile` — LanguageModelTool.
+ * `founder-edit-file` — LanguageModelTool.
  *
  * The model emits a `LanguageModelToolCallPart` with `{ filePath, oldText, newText }`.
  * VS Code routes it to our `invoke`, which applies the change via

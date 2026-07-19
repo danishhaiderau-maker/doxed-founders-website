@@ -135,7 +135,11 @@ import {
   pairingStateTooltip,
 } from './pairing-state';
 // Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
-import { IdeIpcClient, startIdeIpcClient } from './ide-ipc-client';
+import {
+  IdeIpcClient,
+  ensureIdeInstallIdentity,
+  startIdeIpcClient,
+} from './ide-ipc-client';
 // Phase 3 — report IDE handshake state to the API so the adapter can decide
 // isConnected() in real time. Defined inline (small) to avoid pulling a new
 // dependency for a single fetch helper.
@@ -1173,7 +1177,13 @@ app.whenReady().then(() => {
   // bridge workspace state to the API via Founder Node. The client retries
   // in the background; if no IDE is running yet, it'll connect when one
   // starts. Safe to call when not paired (resolves false immediately).
-  if (config) ensureIdeIpcClient(vaultRoot);
+  if (config) {
+    // Migrate vaults paired before authenticated IDE IPC introduced the
+    // install.json sidecar. This also lets the IDE and Node agree on a pipe
+    // identity regardless of which application starts first.
+    ensureIdeInstallIdentity(vaultRoot);
+    ensureIdeIpcClient(vaultRoot);
+  }
 
   configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
   startAutoUpdateChecks();

@@ -419,11 +419,30 @@ jobs:
           #  - The other 3 use `*.node` wildcards because build/.moduleignore
           #    itself uses wildcards for them, so we don't hardcode an exact
           #    binary name that might drift.
+          # Keep this list broad enough to cover every native binding required
+          # during a normal Windows startup. Checking only policy-watcher and
+          # keymap allowed an installer with missing spdlog/sqlite/node-pty
+          # binaries to pass CI and then crash on the target machine.
+          # The policy watcher namespace differs between Void/VSCodium builds,
+          # so that one deliberately uses an @* wildcard.
           $requiredNode = @(
-            "resources\app\node_modules\@vscode\policy-watcher\build\Release\vscode-policy-watcher.node",
-            "resources\app\node_modules\native-keymap\build\Release\*.node",
+            "resources\app\node_modules\@parcel\watcher\build\Release\*.node",
+            "resources\app\node_modules\@vscode\deviceid\build\Release\*.node",
+            "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
+            "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
+            "resources\app\node_modules\@vscode\windows-ca-certs\build\Release\*.node",
+            "resources\app\node_modules\@vscode\windows-mutex\build\Release\*.node",
+            "resources\app\node_modules\@vscode\windows-process-tree\build\Release\*.node",
             "resources\app\node_modules\@vscode\windows-registry\build\Release\*.node",
-            "resources\app\node_modules\@vscode\windows-process-tree\build\Release\*.node"
+            "resources\app\node_modules\@*\policy-watcher\build\Release\*.node",
+            "resources\app\node_modules\kerberos\build\Release\*.node",
+            "resources\app\node_modules\native-is-elevated\build\Release\*.node",
+            "resources\app\node_modules\native-keymap\build\Release\*.node",
+            "resources\app\node_modules\native-watchdog\build\Release\*.node",
+            "resources\app\node_modules\node-pty\build\Release\conpty.node",
+            "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node",
+            "resources\app\node_modules\node-pty\build\Release\pty.node",
+            "resources\app\node_modules\windows-foreground-love\build\Release\*.node"
           )
           foreach ($n in $requiredNode) {
             $p = Join-Path $root $n
@@ -450,6 +469,71 @@ jobs:
         run: |
           npx gulp vscode-win32-x64-user-setup
           if ($LASTEXITCODE -ne 0) { throw "gulp vscode-win32-x64-user-setup failed (exit $LASTEXITCODE)" }
+
+      # Verify the installer payload, not only gulp's pre-installer directory.
+      # A previous laptop build launched without most built-in language
+      # extensions and native bindings even though the unpacked build looked
+      # healthy. Install into an isolated runner directory and reject that
+      # class of artifact before signing or publishing it.
+      - name: Smoke-install inner installer
+        working-directory: ${{ steps.paths.outputs.vscode_dir }}
+        shell: pwsh
+        run: |
+          $innerDir = ".build\win32-x64\user-setup"
+          $innerExe = Get-ChildItem $innerDir -Filter "FounderIDESetup.exe" -ErrorAction Stop | Select-Object -First 1
+          if (-not $innerExe) { throw "FounderIDESetup.exe was not produced" }
+
+          $smokeDir = Join-Path $env:RUNNER_TEMP "founder-ide-installer-smoke"
+          if (Test-Path $smokeDir) { Remove-Item -LiteralPath $smokeDir -Recurse -Force }
+
+          $disabledTasks = "!desktopicon,!quicklaunchicon,!addcontextmenufiles,!addcontextmenufolders,!associatewithfiles,!addtopath,!runcode"
+          & $innerExe.FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=$smokeDir" "/MERGETASKS=$disabledTasks"
+          if ($LASTEXITCODE -ne 0) { throw "Founder IDE smoke install failed (exit $LASTEXITCODE)" }
+
+          try {
+            $launcher = Join-Path $smokeDir "Founder IDE.exe"
+            if (-not (Test-Path -LiteralPath $launcher)) {
+              throw "Smoke-installed launcher is missing: $launcher"
+            }
+
+            $extensionsDir = Join-Path $smokeDir "resources\app\extensions"
+            $extensionCount = @(Get-ChildItem -LiteralPath $extensionsDir -Directory -ErrorAction Stop).Count
+            if ($extensionCount -lt 80) {
+              throw "Smoke-installed IDE has only $extensionCount built-in extension directories; expected at least 80"
+            }
+            foreach ($name in @("typescript-basics", "typescript-language-features", "json-language-features", "git")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $extensionsDir $name))) {
+                throw "Smoke-installed built-in extension is missing: $name"
+              }
+            }
+
+            $ripgrep = Join-Path $smokeDir "resources\app\node_modules\@vscode\ripgrep\bin\rg.exe"
+            if (-not (Test-Path -LiteralPath $ripgrep)) {
+              throw "Smoke-installed ripgrep runtime is missing: $ripgrep"
+            }
+
+            $nativePatterns = @(
+              "resources\app\node_modules\@parcel\watcher\build\Release\*.node",
+              "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
+              "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
+              "resources\app\node_modules\@vscode\windows-registry\build\Release\*.node",
+              "resources\app\node_modules\@*\policy-watcher\build\Release\*.node",
+              "resources\app\node_modules\native-keymap\build\Release\*.node",
+              "resources\app\node_modules\node-pty\build\Release\pty.node"
+            )
+            foreach ($pattern in $nativePatterns) {
+              $match = Get-ChildItem -Path (Join-Path $smokeDir $pattern) -ErrorAction SilentlyContinue | Select-Object -First 1
+              if (-not $match) { throw "Smoke-installed native module is missing: $pattern" }
+            }
+            Write-Host "Smoke install OK: $extensionCount built-in extensions and all startup bindings present."
+          }
+          finally {
+            $uninstaller = Join-Path $smokeDir "unins000.exe"
+            if (Test-Path -LiteralPath $uninstaller) {
+              & $uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+              $LASTEXITCODE = 0
+            }
+          }
 
       # ── 16.1. Sign the inner installer (Azure Trusted Signing) ────────────
       # Signs FounderIDESetup.exe in place BEFORE iscc bundles it, so the

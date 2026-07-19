@@ -19,6 +19,7 @@ import {
   type GatewayToolCall,
   callGateway,
 } from './gateway-client';
+import { FOUNDER_TOOL_NAMES } from './tool-names';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -33,11 +34,6 @@ export interface ParticipantDeps {
   ) => void;
 }
 
-const FOUNDER_TOOL_NAMES = new Set([
-  'founder.editFile',
-  'founder.runCommand',
-  'founder.readWorkspace',
-]);
 const MAX_TOOL_TURNS = 8;
 
 function availableFounderTools(): readonly vscode.LanguageModelToolInformation[] {

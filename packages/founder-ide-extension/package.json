@@ -16,6 +16,12 @@
   "categories": ["Chat", "AI", "Machine Learning", "Other"],
   "keywords": ["ai", "chat", "founder-os", "openai-compatible", "llm"],
   "main": "./out/extension.js",
+  "exports": {
+    "./ipc": {
+      "types": "./src/ipc/protocol.ts",
+      "default": "./out/ipc/protocol.js"
+    }
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -35,7 +41,7 @@
     ],
     "languageModelTools": [
       {
-        "name": "founder.editFile",
+        "name": "founder-edit-file",
         "displayName": "Edit File",
         "modelDescription": "Edit a file in the workspace by replacing oldText with newText. Use absolute paths. Set createIfMissing=true to create the file if it does not exist. The change is applied via vscode.workspace.applyEdit and is reviewable in the editor.",
         "userDescription": "Edit or create a workspace file (Founder OS)",
@@ -68,7 +74,7 @@
         }
       },
       {
-        "name": "founder.runCommand",
+        "name": "founder-run-command",
         "displayName": "Run Command",
         "modelDescription": "Run a shell command in a VS Code terminal and return its combined stdout+stderr output. The command runs in the workspace root by default. Use for build, test, lint, and inspection commands. Confirm with the user before destructive commands.",
         "userDescription": "Run a terminal command and capture output (Founder OS)",
@@ -97,7 +103,7 @@
         }
       },
       {
-        "name": "founder.readWorkspace",
+        "name": "founder-read-workspace",
         "displayName": "Read Workspace",
         "modelDescription": "Walk the current workspace file tree and return a compact summary (respecting common ignore patterns like node_modules and .git). Optionally include the full contents of a small set of files via readFiles. Use this to ground yourself in the repo structure before editing.",
         "userDescription": "Read the workspace file tree (Founder OS)",
@@ -210,7 +216,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/manifest.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

@@ -195,7 +195,7 @@ describe('gateway-client — SSE happy path', () => {
           {
             type: 'function',
             function: {
-              name: 'founder.editFile',
+              name: 'founder-edit-file',
               description: 'Edit a workspace file',
               parameters: { type: 'object' },
             },
@@ -211,7 +211,7 @@ describe('gateway-client — SSE happy path', () => {
       tools?: Array<{ function?: { name?: string } }>;
       tool_choice?: string;
     };
-    assert.equal(body.tools?.[0]?.function?.name, 'founder.editFile');
+    assert.equal(body.tools?.[0]?.function?.name, 'founder-edit-file');
     assert.equal(body.tool_choice, 'auto');
   });
 });

@@ -1,5 +1,5 @@
 /**
- * `founder.readWorkspace` — LanguageModelTool.
+ * `founder-read-workspace` — LanguageModelTool.
  *
  * Walks the current workspace file tree and returns a compact summary the model
  * can reason about: the tree (respecting common ignore patterns) plus optional

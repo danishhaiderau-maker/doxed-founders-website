@@ -31,9 +31,13 @@ import { GatewayMetadataUi } from './gateway-metadata-ui';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
 // Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
-import { runDeviceCodeSignIn } from './device-code-sign-in';
+import {
+  ensureInstallIdentity,
+  runDeviceCodeSignIn,
+} from './device-code-sign-in';
 import { PairingStatusBar } from './pairing-status-bar';
 import { startIpcServer, stopIpcServer } from './ipc/server';
+import { FOUNDER_TOOL_IDS } from './tool-names';
 
 let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
@@ -76,9 +80,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // point isn't processed (proposed-gated on 1.93.1), so we swallow that case.
   if (typeof vscode.lm.registerTool === 'function') {
     const tools: ReadonlyArray<readonly [string, vscode.LanguageModelTool<unknown>]> = [
-      ['founder.editFile', editFileTool as vscode.LanguageModelTool<unknown>],
-      ['founder.runCommand', runCommandTool as vscode.LanguageModelTool<unknown>],
-      ['founder.readWorkspace', readWorkspaceTool as vscode.LanguageModelTool<unknown>],
+      [FOUNDER_TOOL_IDS.editFile, editFileTool as vscode.LanguageModelTool<unknown>],
+      [FOUNDER_TOOL_IDS.runCommand, runCommandTool as vscode.LanguageModelTool<unknown>],
+      [
+        FOUNDER_TOOL_IDS.readWorkspace,
+        readWorkspaceTool as vscode.LanguageModelTool<unknown>,
+      ],
     ];
     for (const [name, tool] of tools) {
       try {
@@ -125,6 +132,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // with an installId (otherwise it's a no-op until the user signs in).
   // Best-effort: failure to start (e.g. another IDE instance already bound)
   // logs a warning but does not crash activation.
+  if (vaultFileExists()) {
+    // Legacy paired vaults predate install.json. Mint the local pipe identity
+    // before starting the server so either the IDE or Founder Node may launch
+    // first and both converge on the same authenticated endpoint.
+    ensureInstallIdentity();
+  }
   startIpcServer().catch((err) => {
     console.warn('Founder OS IPC server failed to start:', err);
   });
