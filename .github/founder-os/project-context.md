@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix signed relay wake ordering and executable intent handoff (#30)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
