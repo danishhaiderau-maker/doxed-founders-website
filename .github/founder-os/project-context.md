@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Harden legacy relay wake envelope (#27)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
