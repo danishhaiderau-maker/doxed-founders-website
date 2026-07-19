@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Synchronize relay secrets through Railway CLI (#28)
+Fix signed relay wake ordering and executable intent handoff (#30)
 
 ## Last Activity
 
