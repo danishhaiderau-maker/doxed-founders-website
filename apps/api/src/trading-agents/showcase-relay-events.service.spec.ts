@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import { ShowcaseRelayEventsService } from './showcase-relay-events.service';
 
-function createService(activeInstance: string | null) {
-  const config = { get: () => undefined };
+function createService(activeInstance: string | null, webhookSecret?: string) {
+  const config = {
+    get: (key: string) => key === 'SHOWCASE_WEBHOOK_SECRET' ? webhookSecret : undefined,
+  };
   const botBridge = {
     getCachedDashboardOwnerIdentity: () =>
       activeInstance
@@ -61,6 +64,60 @@ test('accepts the currently cached dashboard owner', async () => {
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
+  });
+  assert.equal(result.ok, true);
+});
+
+test('accepts an unsigned legacy wake from the active owner when HMAC rollout is enabled', async () => {
+  const service = createService('dashboard-active', 'test-webhook-secret');
+  const result = await service.ingest('conservative-btc', {
+    event: 'ORDER_PLACED',
+    trade_id: 'cont-legacy',
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  });
+  assert.equal(result.ok, true);
+});
+
+test('rejects an unsigned intent-bearing payload when HMAC rollout is enabled', async () => {
+  const service = createService('dashboard-active', 'test-webhook-secret');
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'APPROVE_PENDING' as const,
+    trade_id: 'cont-intent',
+    signal_price: 64_000,
+    margin_usdt: 20,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  await assert.rejects(
+    service.ingest('conservative-btc', body, {
+      rawBody: Buffer.from(JSON.stringify(body)),
+    }),
+    /Missing showcase signature/,
+  );
+});
+
+test('accepts a correctly signed intent-bearing payload', async () => {
+  const secret = 'test-webhook-secret';
+  const service = createService('dashboard-active', secret);
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'APPROVE_PENDING' as const,
+    trade_id: 'cont-signed',
+    signal_price: 64_000,
+    margin_usdt: 20,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
   });
   assert.equal(result.ok, true);
 });

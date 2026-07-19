@@ -141,6 +141,9 @@ if (!token) {
     if (vercel.BOT_CONTROL_SECRET?.trim()) {
       apiVars.BOT_CONTROL_SECRET = vercel.BOT_CONTROL_SECRET.trim();
     }
+    if (vercel.SHOWCASE_WEBHOOK_SECRET?.trim()) {
+      apiVars.SHOWCASE_WEBHOOK_SECRET = vercel.SHOWCASE_WEBHOOK_SECRET.trim();
+    }
     await gql(token, `mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }`, {
       input: {
         projectId: project.id,

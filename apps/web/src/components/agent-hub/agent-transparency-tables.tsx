@@ -91,7 +91,7 @@ export function AgentTransparencyTables({
   const signalRows = book.activeSignals.slice(0, cap).map((s) => [
     displayMelbourneTime(s.time),
     s.direction,
-    `${s.confidence}%`,
+    s.confidence > 0 ? `${s.confidence}%` : 'N/A',
     s.regime,
     s.strategy,
     s.trigger,

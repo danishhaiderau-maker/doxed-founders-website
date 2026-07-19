@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { formatPercent, formatUsd } from '@dcf/utils';
+import { computeLiveCopyEquityPnl, formatPercent, formatUsd } from '@dcf/utils';
 import type { CopyRelaySimState, TradingAgentDashboardState } from '@dcf/utils';
 import type { TradingAgentSummary } from '@/lib/api';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
@@ -232,21 +232,24 @@ export function AgentDeskMetricsBar({
       (sum, t) => sum + (Number.isFinite(t.netUsd) ? t.netUsd : 0),
       0,
     );
-    const backendSessionPnl = userAgent.sessionPnlUsd ?? 0;
-    const usedBookFallback = backendSessionPnl === 0 && Math.abs(realizedFromBook) > 0.0001;
-    const sessionPnl = usedBookFallback ? realizedFromBook : backendSessionPnl;
     const unrealized = userAgent.unrealizedPnlUsd ?? 0;
+    const {
+      sessionPnlUsd: sessionPnl,
+      equityPnlUsd: liveEquityPnl,
+      usedBookFallback,
+    } = computeLiveCopyEquityPnl({
+      backendSessionPnlUsd: userAgent.sessionPnlUsd ?? 0,
+      bookRealizedPnlUsd: realizedFromBook,
+      unrealizedPnlUsd: unrealized,
+    });
     // Drift = showcase session P&L (since the user's explicit live-copy arm)
     // − live copy P&L, on the SAME equity basis. The showcase side
     // (`showcaseDeltaSinceLiveStart`) is the bot's equity-based session P&L
-    // delta (realized + unrealized, since the bot reports session P&L that
-    // way). The live side must match that basis, so we add unrealized P&L of
-    // the user's open exchange position to the realized-only `sessionPnlUsd`
-    // — otherwise drift swings purely from the showcase's unrealized while
-    // the live copy is flat. `null` when no arm is active (PAUSED or no
-    // baseline yet) → the cell renders "—".
+    // delta. `computeLiveCopyEquityPnl` keeps the live side on that same basis:
+    // the backend session value already includes open unrealized P&L, while
+    // the closed-trade fallback adds unrealized exactly once. `null` when no
+    // arm is active (PAUSED or no baseline yet) → the cell renders "—".
     const showcaseDelta = showcaseDeltaSinceLiveStart;
-    const liveEquityPnl = sessionPnl + unrealized;
     const drift = showcaseDelta == null ? null : showcaseDelta - liveEquityPnl;
     const sessionHint = paused
       ? 'Paused — open positions remain'

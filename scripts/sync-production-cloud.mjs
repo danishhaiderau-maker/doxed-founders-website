@@ -139,6 +139,7 @@ async function main() {
   const jwtSecret = vercelCheck.JWT_SECRET?.trim();
   const nextAuthSecret = vercelCheck.NEXTAUTH_SECRET?.trim() || jwtSecret;
   const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
+  const showcaseWebhookSecret = vercelCheck.SHOWCASE_WEBHOOK_SECRET?.trim();
   const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
   const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
   const internalAuthSecret = vercelCheck.INTERNAL_AUTH_SECRET?.trim();
@@ -245,6 +246,9 @@ async function main() {
       ...(cdpKeyId ? { CDP_API_KEY_ID: cdpKeyId } : {}),
       ...(cdpKeySecret ? { CDP_API_KEY_SECRET: cdpKeySecret } : {}),
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
+      ...(showcaseWebhookSecret
+        ? { SHOWCASE_WEBHOOK_SECRET: showcaseWebhookSecret }
+        : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
       ...(internalAuthSecret ? { INTERNAL_AUTH_SECRET: internalAuthSecret } : {}),

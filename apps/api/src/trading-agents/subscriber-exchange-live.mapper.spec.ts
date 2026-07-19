@@ -1,0 +1,78 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { SignalCycleStatus } from '@prisma/client';
+import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
+
+test('does not render a protective stop as a pending entry order', () => {
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [
+      {
+        id: 1,
+        symbol: 'tBTCF0:USTF0',
+        amount: 0.031,
+        amountOrig: 0.031,
+        price: 64_681,
+        status: 'ACTIVE',
+        orderType: 'STOP',
+      },
+      {
+        id: 2,
+        symbol: 'tBTCF0:USTF0',
+        amount: -0.031,
+        amountOrig: -0.031,
+        price: 64_424,
+        status: 'ACTIVE',
+        orderType: 'LIMIT',
+      },
+    ],
+    position: null,
+    participants: [],
+  });
+
+  assert.equal(book.pendingOrders.length, 1);
+  assert.equal(book.pendingOrders[0]?.side, 'SHORT');
+  assert.equal(book.pendingOrders[0]?.limitPrice, 64_424);
+});
+
+test('labels the exchange net position separately from its virtual lot', () => {
+  const now = new Date('2026-07-19T12:51:04Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: {
+      symbol: 'tBTCF0:USTF0',
+      amount: -0.031,
+      basePrice: 64_424,
+      pnlUsd: 0.81,
+      pnlPct: 0.1,
+      direction: 'SHORT',
+    },
+    markPrice: 64_400,
+    participants: [
+      {
+        status: SignalCycleStatus.OPEN,
+        fillPrice: 64_424,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 64_424,
+        qty: 0.031,
+        stopLoss: 64_681,
+        takeProfit: null,
+        createdAt: now,
+        updatedAt: now,
+        cycle: {
+          tradeId: 'cont-ccf411542b21',
+          status: SignalCycleStatus.OPEN,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    book.positions.map((position) => position.leg),
+    ['Bitfinex net', 'Lot cont-ccf41'],
+  );
+});

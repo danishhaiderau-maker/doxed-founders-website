@@ -112,6 +112,9 @@ const vars = {
 if (vercel.BOT_CONTROL_SECRET?.trim()) {
   vars.BOT_CONTROL_SECRET = vercel.BOT_CONTROL_SECRET.trim();
 }
+if (vercel.SHOWCASE_WEBHOOK_SECRET?.trim()) {
+  vars.SHOWCASE_WEBHOOK_SECRET = vercel.SHOWCASE_WEBHOOK_SECRET.trim();
+}
 const ex = JSON.parse(decryptSecret(row.showcaseExchangeCredentialEnc, jwtSecret));
 const provider = row.showcaseExchangeProvider ?? 'bybit';
 Object.assign(vars, exchangeCredentialsToEnvVars(provider, {

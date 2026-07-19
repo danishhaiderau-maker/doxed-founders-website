@@ -6612,7 +6612,13 @@ def get_dynamic_flat_momentum_floor(base: float = None) -> float:
     t = (base - FLAT_MOMENTUM_FLOOR_LOW_EDGE) / span
     return round(FLAT_MOMENTUM_FLOOR_LOW_EDGE + t * (FLAT_MOMENTUM_EDGE_FLOOR - FLAT_MOMENTUM_FLOOR_LOW_EDGE), 1)
 
-_relay_push_state = {"seq": 0, "last_ts": 0.0, "last_event": None, "last_ok": None}
+_relay_push_state = {
+    "seq": 0,
+    "last_ts": 0.0,
+    "last_event": None,
+    "last_ok": None,
+    "last_error": None,
+}
 
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
 
@@ -6770,11 +6776,13 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = True
+            _relay_push_state["last_error"] = None
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = False
-            logger.debug(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
+            _relay_push_state["last_error"] = str(exc)[:240]
+            logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -6801,7 +6809,13 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         return
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
-    if not url or not secret:
+    if not url:
+        return
+    if not secret:
+        _relay_push_state["last_ts"] = time.time()
+        _relay_push_state["last_event"] = f"INTENT_{event}"
+        _relay_push_state["last_ok"] = False
+        _relay_push_state["last_error"] = "SHOWCASE_WEBHOOK_SECRET_MISSING"
         return
 
     sig = signal or {}
@@ -6875,11 +6889,13 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = True
+            _relay_push_state["last_error"] = None
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = False
-            logger.debug(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
+            _relay_push_state["last_error"] = str(exc)[:240]
+            logger.warning(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -16460,6 +16476,11 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         "urgent_marketable": True,
         "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
     })
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -16517,6 +16538,11 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         "direction": direction,
         "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
     })
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -16578,6 +16604,11 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] marketable limit log failed: {_fe}")
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -24928,6 +24959,7 @@ def build_state_integrity() -> dict:
         "seq": _relay_push_state["seq"],
         "last_event": _relay_push_state["last_event"],
         "last_ok": _relay_push_state["last_ok"],
+        "last_error": _relay_push_state["last_error"],
         "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
     }
     bx_live = None
