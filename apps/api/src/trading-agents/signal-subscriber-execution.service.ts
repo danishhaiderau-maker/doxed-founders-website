@@ -143,6 +143,36 @@ export function isBenignShowcaseEntryWait(message: string | null | undefined): b
   );
 }
 
+/**
+ * Only intents with a currently resting canonical showcase limit are eligible
+ * for pending-order mirroring. Older unfilled INTENT rows must not block a
+ * newer order that is actually present in the live book.
+ */
+export function canonicalPendingIntentCycles<
+  T extends { tradeId: string; createdAt: Date },
+>(
+  cycles: T[],
+  bot: Pick<BotApiState, 'orders'> | null,
+): T[] {
+  if (!bot) return [];
+  const canonicalRank = new Map<string, number>();
+  for (const [index, order] of (bot.orders ?? []).entries()) {
+    if (
+      order.trade_id &&
+      (order.status === 'PENDING' || order.status === 'ORDERED') &&
+      (order.limit_price ?? 0) > 0
+    ) {
+      canonicalRank.set(order.trade_id, index);
+    }
+  }
+  return cycles
+    .filter((cycle) => canonicalRank.has(cycle.tradeId))
+    .sort((a, b) => {
+      const rankDelta = canonicalRank.get(a.tradeId)! - canonicalRank.get(b.tradeId)!;
+      return rankDelta !== 0 ? rankDelta : a.createdAt.getTime() - b.createdAt.getTime();
+    });
+}
+
 type PositionRuntime = {
   peakMarginPct: number;
   lastChaseAtMs: number;
@@ -1226,9 +1256,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
-    const intentCycles = cycles
-      .filter((c) => c.status === SignalCycleStatus.INTENT)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const canonicalEntryBook = await this.fetchExecutionBotState();
+    const intentCycles = canonicalPendingIntentCycles(
+      cycles.filter((c) => c.status === SignalCycleStatus.INTENT),
+      canonicalEntryBook,
+    );
     let entriesThisTick = 0;
     for (const cycle of intentCycles) {
       if (cycle.expiresAt && cycle.expiresAt < new Date()) continue;
@@ -1263,9 +1295,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           continue;
         }
       }
-      if (!this.botBridge.isEnabled()) continue;
-      if (!(await this.botBridge.isReachable(true))) continue;
-
       const intent = cycle.intentEnvelope as SignalIntentEnvelope;
       if (!intent?.direction) continue;
 
@@ -1317,7 +1346,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         cycle.tradeId,
         venue,
       );
-      if (!placed) break;
+      if (!placed) continue;
       entriesThisTick += 1;
     }
 
@@ -1374,6 +1403,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           marginCap,
           maxConcurrent,
           venue,
+          botStateForCap,
         );
         if (intentEntries > 0) {
           await this.prisma.tradingAgentInstance.update({
@@ -5651,16 +5681,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
     maxConcurrent: number,
     venue: string,
+    botState: BotApiState | null,
   ): Promise<number> {
     // N3 — panic button.
     if (intentMirrorKillSwitchActive()) return 0;
 
     // §8 #2 — only INTENT cycles. PENDING_ENTRY means a hire limit is already
     // resting; re-entering risks a duplicate order on top of it.
-    const intentCycles = cycles
-      .filter((c) => c.status === SignalCycleStatus.INTENT)
-      .filter((c) => !c.expiresAt || c.expiresAt.getTime() > Date.now())
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const intentCycles = canonicalPendingIntentCycles(
+      cycles
+        .filter((c) => c.status === SignalCycleStatus.INTENT)
+        .filter((c) => !c.expiresAt || c.expiresAt.getTime() > Date.now()),
+      botState,
+    );
 
     for (const cycle of intentCycles) {
       const tid = cycle.tradeId;
@@ -5856,7 +5889,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
         return 1;
       }
-      return 0;
+      continue;
     }
     return 0;
   }
