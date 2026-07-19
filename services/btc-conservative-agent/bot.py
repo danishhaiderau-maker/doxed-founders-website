@@ -6618,6 +6618,8 @@ _relay_push_state = {
     "last_event": None,
     "last_ok": None,
     "last_error": None,
+    "last_latency_ms": None,
+    "last_platform_received_at": None,
 }
 
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
@@ -6756,9 +6758,28 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
+    # Exact chase updates are safe to consume without a Cloudflare callback
+    # only when this canonical owner also HMAC-signs the payload.
+    if (
+        webhook_secret
+        and event in ("LIMIT_UPDATED", "POSITION_CLOSED")
+        and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
+        and (
+            (
+                event == "LIMIT_UPDATED"
+                and isinstance(payload.get("limit_price"), (int, float))
+            )
+            or (
+                event == "POSITION_CLOSED"
+                and isinstance(payload.get("exit_price"), (int, float))
+            )
+        )
+    ):
+        payload["schema"] = "dcf-showcase-intent-v1"
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     def _post():
+        started = time.perf_counter()
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if secret:
@@ -6772,16 +6793,28 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 headers["X-Showcase-Signature"] = f"sha256={signature}"
             response = requests.post(url, data=body, headers=headers, timeout=2.5)
             response.raise_for_status()
+            response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = True
             _relay_push_state["last_error"] = None
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            _relay_push_state["last_platform_received_at"] = (
+                response_payload.get("platform_received_at")
+                if isinstance(response_payload, dict)
+                else None
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = False
             _relay_push_state["last_error"] = str(exc)[:240]
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
             logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
@@ -6844,6 +6877,11 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
     edge_score = sig.get("edge_score_at_entry")
     eff_thr = sig.get("effective_threshold_at_entry")
     research_lane = str(sig.get("research_lane") or "CONTINUOUS").upper()
+    limit_price = sig.get("limit_price") or sig.get("planned_limit_price")
+    try:
+        limit_price = float(limit_price) if limit_price is not None else None
+    except (TypeError, ValueError):
+        limit_price = None
 
     payload = {
         "schema": "dcf-showcase-intent-v1",
@@ -6853,6 +6891,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "intent_source": intent_source,
         "direction": direction or None,
         "signal_price": signal_price if signal_price > 0 else None,
+        "limit_price": limit_price if limit_price and limit_price > 0 else None,
         "margin_usdt": margin_usdt,
         "leverage": leverage,
         "win_prob": win_prob,
@@ -6873,6 +6912,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         return
 
     def _post():
+        started = time.perf_counter()
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -6885,16 +6925,28 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
                 headers["X-Bot-Control-Secret"] = legacy_secret
             response = requests.post(url, data=body, headers=headers, timeout=2.5)
             response.raise_for_status()
+            response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = True
             _relay_push_state["last_error"] = None
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            _relay_push_state["last_platform_received_at"] = (
+                response_payload.get("platform_received_at")
+                if isinstance(response_payload, dict)
+                else None
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = False
             _relay_push_state["last_error"] = str(exc)[:240]
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
             logger.warning(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
@@ -6913,14 +6965,16 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
     if status == "PENDING" and trade_id:
-        _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
+            _push_showcase_relay_event("APPROVE_PENDING", trade_id)
         # Intent-Mirror (plan §4 bot checklist item 8) — also fire the signed
         # v1 intent webhook so the relay can copy this approved `cont-` signal
         # to ACTIVE hires even when the showcase is paper-only. Legacy call
         # above stays for backward compat during rollout.
         emit_signal_webhook("APPROVE_PENDING", signal, ai)
     elif status == "EXECUTED" and trade_id:
-        _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
+            _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
         emit_signal_webhook("ORDER_PLACED", signal, ai)
         _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
@@ -11819,6 +11873,12 @@ def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict
         out["session_bucket"] = _research_session_bucket()
     out.setdefault("ts_utc", utc_iso())
     return out
+
+
+def _prepare_shared_lane_spawn_features(event: dict = None, features: dict = None, ctx: dict = None) -> dict:
+    """Build inherited-lane features before the downstream signal object exists."""
+    event_features = (event or {}).get("features") if isinstance(event, dict) else None
+    return _enrich_combo_lane_features(event_features or features, ctx)
 
 
 def _lane_sized_margin_usdt(lane: str, features: dict = None) -> tuple:
@@ -17205,10 +17265,8 @@ def process_signal(event: dict):
                             spawn_dir = "SHORT"
                         elif spawn_dir == "SHORT":
                             spawn_dir = "LONG"
-                    spawn_feats = _enrich_combo_lane_features(
-                        signal.get("features") or features, ctx,
-                    )
-                    signal["features"] = spawn_feats
+                    spawn_feats = _prepare_shared_lane_spawn_features(event, features, ctx)
+                    features = spawn_feats
                     match = combo_lane_match_detail(
                         research_lane, ai, spawn_dir, features=spawn_feats,
                     )
@@ -17219,7 +17277,7 @@ def process_signal(event: dict):
                             f"reason={br} [PIPELINE ENFORCEMENT]"
                         )
                         log_lane_opportunity_event(
-                            research_lane, "SPAWN_FILTERED", trade_id,
+                            research_lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
                             spawn_dir, ai.get("win_prob"), edge_score,
                             block_reason=br,
                         )
@@ -24960,6 +25018,8 @@ def build_state_integrity() -> dict:
         "last_event": _relay_push_state["last_event"],
         "last_ok": _relay_push_state["last_ok"],
         "last_error": _relay_push_state["last_error"],
+        "last_latency_ms": _relay_push_state["last_latency_ms"],
+        "last_platform_received_at": _relay_push_state["last_platform_received_at"],
         "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
     }
     bx_live = None

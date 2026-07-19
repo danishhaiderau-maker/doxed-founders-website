@@ -70,6 +70,7 @@ const MIN_QTY_BTC = 0.00004;
 const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
+const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
 
 type ExecutionPayload = {
   bitfinexOrderId?: number;
@@ -171,6 +172,102 @@ export function canonicalPendingIntentCycles<
       const rankDelta = canonicalRank.get(a.tradeId)! - canonicalRank.get(b.tradeId)!;
       return rankDelta !== 0 ? rankDelta : a.createdAt.getTime() - b.createdAt.getTime();
     });
+}
+
+type SignedShowcaseExactLimit = {
+  tradeId: string;
+  direction: 'LONG' | 'SHORT';
+  limitPrice: number;
+  receivedAtMs: number;
+};
+
+type SignedShowcaseEnvelope = SignalIntentEnvelope & {
+  trade_id?: string;
+  entry: SignalIntentEnvelope['entry'] & {
+    exact_limit_price?: number;
+  };
+  context: SignalIntentEnvelope['context'] & {
+    signed_showcase_event?: boolean;
+    showcase_event?: string;
+    platform_received_at?: string;
+  };
+};
+
+export function readFreshSignedShowcaseExactLimit(
+  tradeId: string,
+  envelopeJson: unknown,
+  nowMs = Date.now(),
+): SignedShowcaseExactLimit | null {
+  const intent = envelopeJson as SignedShowcaseEnvelope | null;
+  const receivedAtMs = Date.parse(String(intent?.context?.platform_received_at ?? ''));
+  const limitPrice = Number(intent?.entry?.exact_limit_price ?? 0);
+  const direction = intent?.direction;
+  const event = String(intent?.context?.showcase_event ?? '');
+  if (
+    intent?.action !== 'ENTER'
+    || intent?.context?.signed_showcase_event !== true
+    || (event !== 'ORDER_PLACED' && event !== 'LIMIT_UPDATED')
+    || (direction !== 'LONG' && direction !== 'SHORT')
+    || !Number.isFinite(limitPrice)
+    || limitPrice <= 0
+    || !Number.isFinite(receivedAtMs)
+    || receivedAtMs > nowMs + 5_000
+    || nowMs - receivedAtMs > SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS
+  ) {
+    return null;
+  }
+  return { tradeId, direction, limitPrice, receivedAtMs };
+}
+
+export function readSignedShowcaseClose(envelopeJson: unknown): {
+  exitPrice?: number;
+  exitReason?: string;
+} | null {
+  const context = (
+    envelopeJson as {
+      context?: {
+        signed_showcase_event?: boolean;
+        showcase_event?: string;
+        showcase_exit_price?: number;
+        showcase_exit_reason?: string;
+      };
+    } | null
+  )?.context;
+  if (
+    context?.signed_showcase_event !== true
+    || context.showcase_event !== 'POSITION_CLOSED'
+  ) {
+    return null;
+  }
+  const rawExitPrice = Number(context.showcase_exit_price ?? 0);
+  return {
+    ...(Number.isFinite(rawExitPrice) && rawExitPrice > 0
+      ? { exitPrice: rawExitPrice }
+      : {}),
+    ...(context.showcase_exit_reason
+      ? { exitReason: context.showcase_exit_reason }
+      : {}),
+  };
+}
+
+function mergeSignedShowcaseOrders(
+  bot: BotApiState | null,
+  signedOrders: SignedShowcaseExactLimit[],
+): BotApiState | null {
+  if (!signedOrders.length) return bot;
+  const signedIds = new Set(signedOrders.map((order) => order.tradeId));
+  return {
+    ...(bot ?? {}),
+    orders: [
+      ...signedOrders.map((order) => ({
+        trade_id: order.tradeId,
+        status: 'PENDING',
+        limit_price: order.limitPrice,
+        side: order.direction,
+      })),
+      ...(bot?.orders ?? []).filter((order) => !order.trade_id || !signedIds.has(order.trade_id)),
+    ],
+  };
 }
 
 type PositionRuntime = {
@@ -935,6 +1032,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
       take: 20,
     });
+    const signedFastOrders = cycles
+      .filter((cycle) => cycle.status === SignalCycleStatus.INTENT)
+      .map((cycle) =>
+        readFreshSignedShowcaseExactLimit(cycle.tradeId, cycle.intentEnvelope),
+      )
+      .filter((order): order is SignedShowcaseExactLimit => order != null);
 
     const userManagedCycles = await this.prisma.signalCycle.findMany({
       where: {
@@ -1149,8 +1252,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       foreignOrphanOrders,
     );
 
-    const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
-    const botStateForCap = await this.fetchExecutionBotState();
+    const signedCachedState = signedFastOrders.length
+      ? this.botBridge.getCachedExecutionState()
+      : null;
+    const maxConcurrent = simActive
+      ? 1
+      : signedFastOrders.length
+        ? resolveMaxConcurrentCopySignals({
+            botMaxActiveSignals: signedCachedState?.max_active_signals,
+            envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
+          })
+        : await this.resolveMaxConcurrentSignals();
+    // A fresh HMAC-authenticated ORDER_PLACED carries the exact canonical
+    // limit. Do not hold it behind a 20-30s tunnel request. Reuse a recent
+    // canonical cache for caps/observability and refresh the tunnel in the
+    // background; unsigned or stale intents retain the fail-closed fetch.
+    const botStateForCap = signedFastOrders.length
+      ? signedCachedState
+      : await this.fetchExecutionBotState();
+    if (signedFastOrders.length) {
+      void this.fetchExecutionBotState().catch((err) => {
+        this.logger.warn(
+          `[SIGNED-FAST] canonical refresh failed: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+    }
+    const canonicalSignedBook = mergeSignedShowcaseOrders(
+      botStateForCap,
+      signedFastOrders,
+    );
 
     // F1/F2/F3 — Showcase-unreachable safe mode (2026-07-07 incident hardening),
     // F8 debounced-clear (2026-07-08 hotfix).
@@ -1161,7 +1291,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // force-close OPEN orphans (F2). When the streak passes ENTRY_BLOCK_MS we
     // also surface a user-visible lastError (F3) so the dashboard explains
     // why live copy has halted.
-    if (!simActive && botStateForCap == null) {
+    if (!simActive && botStateForCap == null && signedFastOrders.length === 0) {
       const elapsed = this.markShowcaseUnreachable(instance.id);
       const blocked = elapsed >= SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS;
       if (blocked && showcaseUnreachableSafeModeEnabled()) {
@@ -1175,7 +1305,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             .catch(() => {});
         }
       }
-    } else if (botStateForCap != null) {
+    } else if (botStateForCap != null || signedFastOrders.length > 0) {
       this.clearShowcaseUnreachable(instance.id);
       if (isBenignShowcaseEntryWait(instance.lastError)) {
         await this.prisma.tradingAgentInstance
@@ -1200,7 +1330,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.recordMirrorDiff(
       agentId,
       instance,
-      botStateForCap,
+      canonicalSignedBook,
       openParticipantAfter,
       execMetaById,
     ).catch((err) => {
@@ -1256,7 +1386,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
-    const canonicalEntryBook = await this.fetchExecutionBotState();
+    const canonicalEntryBook = canonicalSignedBook;
     const intentCycles = canonicalPendingIntentCycles(
       cycles.filter((c) => c.status === SignalCycleStatus.INTENT),
       canonicalEntryBook,
@@ -1403,7 +1533,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           marginCap,
           maxConcurrent,
           venue,
-          botStateForCap,
+          canonicalSignedBook,
         );
         if (intentEntries > 0) {
           await this.prisma.tradingAgentInstance.update({
@@ -2632,6 +2762,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
     if (!intent?.direction || intent.action !== 'ENTER') return false;
+    const signedExactLimit = tradeId
+      ? readFreshSignedShowcaseExactLimit(tradeId, envelopeJson)
+      : null;
 
     // F1 — Showcase-unreachable safe mode. Refuse new entries while the
     // showcase has been unreachable past ENTRY_BLOCK_MS. The 2026-07-07
@@ -2639,7 +2772,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // intent while the operator's tunnel was down, producing orphan fills
     // with no showcase counterpart to mirror the exit. Fail closed for new
     // money; F2 separately handles OPEN lots past ORPHAN_KILL_MS.
-    if (showcaseUnreachableSafeModeEnabled()) {
+    if (showcaseUnreachableSafeModeEnabled() && !signedExactLimit) {
       const block = this.entryBlockedByShowcaseOutage(instance.id);
       if (block.blocked) {
         this.logger.warn(
@@ -2736,10 +2869,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       throw err;
     }
     const mark = await this.activeTrading.getMarkPrice();
-      const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
-      let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
-      if (limitPrice == null) {
-        this.logger.error(
+    const rawLimit =
+      signedExactLimit?.limitPrice
+      ?? computeLimitFromMark(mark, intent.entry.offset_pct);
+    let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
+    if (limitPrice == null) {
+      this.logger.error(
           `Hire reject ${instance.userId} cycle=${cycleId}: absurd limit ${rawLimit.toFixed(2)} vs mark ${mark.toFixed(2)} offset=${intent.entry.offset_pct}%`,
         );
         await this.prisma.tradingAgentInstance.update({
@@ -2749,10 +2884,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           },
         });
         return false;
-      }
+    }
 
       let botStateForEntry: BotApiState | null = null;
-      if (tradeId && !(await this.botBridge.isEnabledAsync())) {
+      if (tradeId && !signedExactLimit && !(await this.botBridge.isEnabledAsync())) {
         await this.prisma.tradingAgentInstance.update({
           where: { id: instance.id },
           data: { lastError: 'Showcase bridge unavailable — exact-copy entry blocked.' },
@@ -2765,7 +2900,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
         return false;
       }
-      if (tradeId) {
+      if (tradeId && !signedExactLimit) {
         botStateForEntry = await this.fetchExecutionBotState();
         if (!botStateForEntry) {
           await this.prisma.tradingAgentInstance.update({
@@ -2803,6 +2938,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
           if (anchored != null) limitPrice = anchored;
         }
+      } else if (signedExactLimit) {
+        botStateForEntry = mergeSignedShowcaseOrders(null, [signedExactLimit]);
+        this.logger.log(
+          `[SIGNED-FAST] exact showcase limit accepted trade=${tradeId} limit=${signedExactLimit.limitPrice.toFixed(2)} ageMs=${Date.now() - signedExactLimit.receivedAtMs}`,
+        );
       }
 
       // Phase 1 — book-state dedupe (flag-gated). If the copy already has a
@@ -3351,7 +3491,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     await this.cancelAbsurdPendingOrders(creds, userId);
 
-    if (this.botBridge.isEnabled() && cycle.tradeId) {
+    const freshSignedLimit = cycle.tradeId
+      ? readFreshSignedShowcaseExactLimit(cycle.tradeId, cycle.intentEnvelope)
+      : null;
+    if (this.botBridge.isEnabled() && cycle.tradeId && !freshSignedLimit) {
       const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
@@ -4454,8 +4597,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const now = Date.now();
     const mark = await this.activeTrading.getMarkPrice();
     const nearFill = isNearChaseFillZone(meta.direction, meta.limitPrice, mark);
-    const botState = await this.fetchExecutionBotState();
-    const botLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
+    const signedLimit = tradeId
+      ? readFreshSignedShowcaseExactLimit(tradeId, intent, now)
+      : null;
+    const botState = signedLimit ? null : await this.fetchExecutionBotState();
+    const botLimit =
+      signedLimit?.limitPrice
+      ?? (tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null);
     // Phase 1 chase convergence (flag-gated): converge to the showcase's
     // CURRENT pending limit every tick, but clamp cancel+replace churn to max
     // 1 replacement per order per second. Legacy path keeps the raw
@@ -4737,6 +4885,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     let showcaseExitPrice: number | undefined;
     let showcaseExitReason: string | undefined;
     let mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
+    const signedClose = readSignedShowcaseClose(cycle.intentEnvelope);
+    if (closed && signedClose) {
+      showcaseExitPrice = signedClose.exitPrice;
+      showcaseExitReason = signedClose.exitReason;
+      mirrorTrigger = mirrorRelinked
+        ? 'ORIGIN_SHOWCASE_CLOSED_WEBHOOK'
+        : 'SHOWCASE_CLOSED_WEBHOOK';
+    }
 
     if (!closed && showcaseTradeId) {
       const bot = await this.fetchExecutionBotState();
@@ -4790,7 +4946,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (!closed) return false;
 
-    if (showcaseExitPrice == null && showcaseTradeId) {
+    if (showcaseExitPrice == null && showcaseTradeId && signedClose == null) {
       const bot = await this.fetchExecutionBotState();
       const det = this.detectShowcaseTradeClosed(bot, showcaseTradeId);
       showcaseExitPrice = det.exitPrice;

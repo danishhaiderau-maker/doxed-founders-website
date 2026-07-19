@@ -1,5 +1,6 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
+import inspect
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
@@ -129,6 +130,19 @@ def run():
     check("Type B verdict is separate", history[0]["type_b_verdict"]["accepted"] is False)
     check("Continuous counter counted once", counters[bot.RESEARCH_LANE_CONTINUOUS]["evaluated"] == 1)
     check("Type B counter counted once", counters[RESEARCH_LANE_TYPE_B_HUNTER_V1]["evaluated"] == 1)
+
+    inherited_features = bot._prepare_shared_lane_spawn_features(
+        {"features": {"adx": 31, "volume_ratio": 0.6}},
+        {"adx": 10, "volume_ratio": 2.5},
+        {"market_context": {}},
+    )
+    check("shared-lane spawn uses event features", inherited_features["adx"] == 31)
+    check("shared-lane spawn keeps event volume", inherited_features["volume_ratio"] == 0.6)
+    pre_signal_source = inspect.getsource(bot.process_signal).split("signal = {", 1)[0]
+    check(
+        "shared-lane pre-signal branch cannot read future signal object",
+        'signal.get("features")' not in pre_signal_source,
+    )
 
     captured = []
     original = bot._spawn_independent_v1_lane_after_ai

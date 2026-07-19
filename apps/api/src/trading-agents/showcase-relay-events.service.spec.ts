@@ -173,6 +173,7 @@ test('persists and enriches before waking subscriber execution', async () => {
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
   });
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(trace, ['cycles', 'persist', 'execution']);
 });
 
@@ -269,7 +270,171 @@ test('signed intent enriches a legacy audit cycle before subscriber execution wa
     signatureHeader: signature,
   });
   assert.equal(result.ok, true);
+  assert.deepEqual(trace, ['enrich']);
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(trace, ['enrich', 'execution']);
   assert.equal((storedEnvelope.entry as { offset_pct: number }).offset_pct, -0.1);
   assert.equal((storedEnvelope.risk as { leverage_hint: number }).leverage_hint, 100);
+});
+
+test('signed ORDER_PLACED persists the exact limit before non-blocking execution wake', async () => {
+  const secret = 'test-webhook-secret';
+  let storedEnvelope: Record<string, unknown> = {
+    schema: 'showcase_relay_audit_v1',
+  };
+  const trace: string[] = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async (args: { where: Record<string, unknown> }) => {
+        if ('agentId_tradeId' in args.where) {
+          return { id: 'cycle-existing', intentEnvelope: storedEnvelope };
+        }
+        return null;
+      },
+      update: async (args: { data: { intentEnvelope?: Record<string, unknown> } }) => {
+        if (args.data.intentEnvelope) {
+          storedEnvelope = args.data.intentEnvelope;
+          trace.push('persist');
+        }
+        return {};
+      },
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async () => ({}),
+    },
+  };
+  const cycles = {
+    wakeFromShowcase: async () => {
+      trace.push('canonical');
+      return false;
+    },
+  };
+  const execution = {
+    wakeNow: async () => {
+      trace.push('execution');
+      const entry = storedEnvelope.entry as { exact_limit_price?: number };
+      assert.equal(entry.exact_limit_price, 64_555.25);
+      const context = storedEnvelope.context as {
+        signed_showcase_event?: boolean;
+        platform_received_at?: string;
+      };
+      assert.equal(context.signed_showcase_event, true);
+      assert.equal(Number.isFinite(Date.parse(context.platform_received_at ?? '')), true);
+    },
+  };
+  const service = createService('dashboard-active', secret, {
+    prisma,
+    cycles,
+    execution,
+  });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_PLACED' as const,
+    trade_id: 'cont-exact-limit',
+    direction: 'SHORT',
+    signal_price: 64_540,
+    limit_price: 64_555.25,
+    margin_usdt: 20,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.persisted, true);
+  assert.deepEqual(trace, ['persist']);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(trace, ['persist', 'execution', 'canonical']);
+});
+
+test('signed POSITION_CLOSED durably carries exit evidence into the immediate wake', async () => {
+  const secret = 'test-webhook-secret';
+  let storedEnvelope: Record<string, unknown> = {
+    schema: 'dcf-signal-intent/v1',
+    action: 'ENTER',
+    direction: 'LONG',
+    entry: { exact_limit_price: 64_500 },
+    context: {},
+  };
+  const trace: string[] = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async (args: { where: Record<string, unknown> }) => {
+        if ('agentId_tradeId' in args.where) {
+          return {
+            id: 'cycle-existing',
+            status: 'OPEN',
+            intentEnvelope: storedEnvelope,
+          };
+        }
+        return { id: 'cycle-existing', status: 'OPEN' };
+      },
+      update: async (args: {
+        data: {
+          intentEnvelope?: Record<string, unknown>;
+          status?: string;
+        };
+      }) => {
+        if (args.data.intentEnvelope) {
+          storedEnvelope = args.data.intentEnvelope;
+          trace.push('persist');
+        }
+        if (args.data.status === 'CLOSED') trace.push('closed');
+        return {};
+      },
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async () => ({}),
+    },
+  };
+  const execution = {
+    wakeNow: async () => {
+      trace.push('execution');
+      const context = storedEnvelope.context as {
+        showcase_event?: string;
+        showcase_exit_price?: number;
+        showcase_exit_reason?: string;
+      };
+      assert.equal(context.showcase_event, 'POSITION_CLOSED');
+      assert.equal(context.showcase_exit_price, 64_620.5);
+      assert.equal(context.showcase_exit_reason, 'PROFIT_LOCK_LADDER');
+    },
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_CLOSED' as const,
+    trade_id: 'cont-close-fast',
+    direction: 'LONG',
+    signal_price: 64_500,
+    exit_price: 64_620.5,
+    exit_reason: 'PROFIT_LOCK_LADDER',
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(typeof result.platform_received_at, 'string');
+  assert.deepEqual(trace, ['persist', 'closed']);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(trace.includes('execution'), true);
 });

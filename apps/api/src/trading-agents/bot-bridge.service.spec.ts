@@ -58,7 +58,7 @@ test('coalesces concurrent forced execution fetches into one tunnel request', as
   }
 });
 
-test('shares one canonical fetch between Agent Hub and execution consumers', async () => {
+test('keeps slow Agent Hub fetches from blocking the execution lane', async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
@@ -76,9 +76,31 @@ test('shares one canonical fetch between Agent Hub and execution consumers', asy
       bridge.fetchPublicShowcaseState(true),
       bridge.fetchStateForExecution(true),
     ]);
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
     assert.equal(publicState?.bot_instance_id, canonicalState.bot_instance_id);
     assert.equal(executionState?.bot_instance_id, canonicalState.bot_instance_id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('returns only a fresh canonical owner from the synchronous execution cache', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(canonicalState), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  try {
+    const bridge = makeBridge();
+    assert.equal(bridge.getCachedExecutionState(), null);
+    await bridge.fetchStateForExecution(true);
+    assert.equal(
+      bridge.getCachedExecutionState()?.bot_instance_id,
+      canonicalState.bot_instance_id,
+    );
+    assert.equal(bridge.getCachedExecutionState(-1), null);
   } finally {
     globalThis.fetch = originalFetch;
   }

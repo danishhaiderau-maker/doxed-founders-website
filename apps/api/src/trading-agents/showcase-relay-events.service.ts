@@ -48,6 +48,8 @@ export type ShowcaseRelayEventBody = {
   dashboard_pid?: number | null;
   dashboard_port?: number | null;
   source_git_rev?: string | null;
+  /** Internal receipt timestamp added only after HMAC verification. */
+  platform_received_at?: string | null;
 };
 
 /**
@@ -94,6 +96,13 @@ function relayIntentEnvelope(
     typeof body?.pullback_pct === 'number' && Number.isFinite(body.pullback_pct)
       ? body.pullback_pct
       : null;
+  const exactLimitPrice =
+    (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
+    && typeof body?.limit_price === 'number'
+    && Number.isFinite(body.limit_price)
+    && body.limit_price > 0
+      ? body.limit_price
+      : null;
   const offsetPct = normalizePullbackToOffsetPct(dir, {
     botPullbackThreshold: pullbackPct,
     signalPullback: pullbackPct,
@@ -104,6 +113,16 @@ function relayIntentEnvelope(
     entry: SignalIntentEnvelope['entry'] & {
       signal_price?: number;
       pullback_pct?: number;
+      exact_limit_price?: number;
+    };
+    context: SignalIntentEnvelope['context'] & {
+      signed_showcase_event?: boolean;
+      showcase_event?: ShowcaseRelayEventType;
+      showcase_event_at?: string;
+      platform_received_at?: string;
+      bot_instance_id?: string;
+      showcase_exit_price?: number;
+      showcase_exit_reason?: string;
     };
     margin_usdt?: number;
     leverage?: number;
@@ -125,6 +144,7 @@ function relayIntentEnvelope(
       ttl_sec: 1800,
       ...(sigPrice != null ? { signal_price: sigPrice } : {}),
       ...(pullbackPct != null ? { pullback_pct: pullbackPct } : {}),
+      ...(exactLimitPrice != null ? { exact_limit_price: exactLimitPrice } : {}),
     },
     risk: {
       stop_loss_margin_pct: -18,
@@ -145,6 +165,22 @@ function relayIntentEnvelope(
       research_venue: 'bitfinex',
       disclaimer:
         'Signed showcase intent. Subscriber execution remains subject to platform and exchange safety gates.',
+      signed_showcase_event: Boolean(body?.platform_received_at),
+      ...(body?.event ? { showcase_event: body.event } : {}),
+      ...(body?.ts ? { showcase_event_at: body.ts } : {}),
+      ...(body?.platform_received_at
+        ? { platform_received_at: body.platform_received_at }
+        : {}),
+      ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
+      ...(body?.event === 'POSITION_CLOSED'
+        && typeof body.exit_price === 'number'
+        && Number.isFinite(body.exit_price)
+        && body.exit_price > 0
+        ? { showcase_exit_price: body.exit_price }
+        : {}),
+      ...(body?.event === 'POSITION_CLOSED' && body.exit_reason
+        ? { showcase_exit_reason: body.exit_reason }
+        : {}),
     },
     ...(body?.intent_source ? { intent_source: body.intent_source } : {}),
     ...(body?.margin_usdt != null ? { margin_usdt: body.margin_usdt } : {}),
@@ -234,13 +270,13 @@ export class ShowcaseRelayEventsService {
     rawBody: Buffer | string | undefined,
     sigHeader: string | undefined,
     relayBody?: ShowcaseRelayEventBody,
-  ): void {
+  ): boolean {
     const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET')?.trim();
     // Rollout boundary: until the operator sets the shared secret on the API,
     // the signature gate is not enforced — the legacy G13 bearer-secret check
     // (assertAuthorized) remains the sole auth. Once set, signing is required.
     if (!secret) {
-      return;
+      return false;
     }
     // Compatibility bridge for the existing home owner process: an unsigned
     // legacy event may only wake a canonical-state poll. It still passed the
@@ -252,7 +288,7 @@ export class ShowcaseRelayEventsService {
       this.logger.warn(
         `Accepted legacy owner wake without HMAC event=${relayBody?.event ?? '?'} trade=${relayBody?.trade_id ?? '?'}`,
       );
-      return;
+      return false;
     }
     if (!rawBody) {
       throw new UnauthorizedException('Showcase signature verify requires raw body');
@@ -276,6 +312,35 @@ export class ShowcaseRelayEventsService {
     if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       throw new UnauthorizedException('Invalid showcase signature');
     }
+    return true;
+  }
+
+  private queueExecutionWake(event: ShowcaseRelayEventType): void {
+    setImmediate(() => {
+      void this.execution.wakeNow(event).catch((err) => {
+        this.logger.error(
+          `Showcase execution wake ${event} failed: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+    });
+  }
+
+  private queueCanonicalReconcile(event: ShowcaseRelayEventType): void {
+    setImmediate(() => {
+      const work =
+        event === 'APPROVE_PENDING' || event === 'ORDER_PLACED'
+          ? this.cycles.wakeFromShowcase({ intents: true, closures: false })
+          : event === 'POSITION_CLOSED'
+            ? this.cycles.wakeFromShowcase({ intents: false, closures: true })
+            : this.cycles.wakeFromShowcase({ intents: true, closures: true });
+      void work.catch((err) => {
+        this.logger.warn(
+          `Showcase canonical reconcile ${event} failed (fast path remains durable): ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      });
+    });
   }
 
   private assertActiveDashboardOwner(body: ShowcaseRelayEventBody): void {
@@ -307,6 +372,7 @@ export class ShowcaseRelayEventsService {
     body: ShowcaseRelayEventBody,
     context?: { rawBody?: Buffer | string; signatureHeader?: string },
   ) {
+    const ingestStartedAt = Date.now();
     if (slug !== 'conservative-btc') {
       return { ok: false, reason: 'unsupported_agent' };
     }
@@ -315,20 +381,43 @@ export class ShowcaseRelayEventsService {
     // so a forged payload can never create an intent row or wake the relay.
     // The legacy G13 bearer-secret check (assertAuthorized) is still performed
     // by the controller before calling ingest; this is the payload-level guard.
-    this.verifySignature(context?.rawBody, context?.signatureHeader, body);
+    const verifiedSignedPayload = this.verifySignature(
+      context?.rawBody,
+      context?.signatureHeader,
+      body,
+    );
     this.assertActiveDashboardOwner(body);
 
     this.botBridge.invalidateCache();
 
     const event = body.event;
+    const persistBody: ShowcaseRelayEventBody = verifiedSignedPayload
+      ? { ...body, platform_received_at: new Date().toISOString() }
+      : body;
     let intentCreated = false;
 
-    if (event === 'APPROVE_PENDING' || event === 'ORDER_PLACED') {
-      intentCreated = await this.cycles.wakeFromShowcase({ intents: true, closures: false });
-    } else if (event === 'POSITION_CLOSED') {
-      await this.cycles.wakeFromShowcase({ intents: false, closures: true });
-    } else {
-      await this.cycles.wakeFromShowcase({ intents: true, closures: true });
+    // A verified v1 payload already contains authenticated direction, price,
+    // owner identity and (for ORDER_PLACED/LIMIT_UPDATED) the exact resting
+    // limit. Persist it directly; never make the money path wait for a
+    // 20-30s Cloudflare callback. Canonical state reconciliation still runs
+    // immediately, but only as an asynchronous audit/backstop.
+    const directSignedIntent =
+      verifiedSignedPayload
+      && body.schema === 'dcf-showcase-intent-v1'
+      && (body.direction?.toUpperCase() === 'LONG'
+        || body.direction?.toUpperCase() === 'SHORT');
+
+    if (!directSignedIntent) {
+      if (event === 'APPROVE_PENDING' || event === 'ORDER_PLACED') {
+        intentCreated = await this.cycles.wakeFromShowcase({
+          intents: true,
+          closures: false,
+        });
+      } else if (event === 'POSITION_CLOSED') {
+        await this.cycles.wakeFromShowcase({ intents: false, closures: true });
+      } else {
+        await this.cycles.wakeFromShowcase({ intents: true, closures: true });
+      }
     }
 
     // [SHOWCASE_RELAY_PERSIST_2026-07-08] Persist the inbound relay event as
@@ -341,25 +430,38 @@ export class ShowcaseRelayEventsService {
     // the relay wake (the wake is the critical side-effect).
     let persisted = false;
     try {
-      persisted = await this.persistRelayEvent(slug, body);
+      persisted = await this.persistRelayEvent(slug, persistBody);
     } catch (err) {
-      this.logger.warn(
-        `Showcase relay persist failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+      this.logger.error(
+        `Showcase relay persist failed: ${err instanceof Error ? err.message : err}`,
       );
+      // Signed fast-path execution is only safe after the durable cycle exists.
+      // Let the sender receive a 5xx and retry the idempotent event.
+      if (directSignedIntent) throw err;
     }
 
-    // Persist (and, for a signed intent, enrich) before waking execution. A
-    // tick can run synchronously or queue behind an in-flight tick; either way
-    // it must observe the executable envelope before evaluating the cycle.
-    //
-    // F7: pass the trigger so exits retain the webhook-vs-poll audit tag.
-    await this.execution.wakeNow(event);
+    // Return the webhook response without waiting for exchange reconciliation.
+    // The durable cycle plus the normal 2s runner remain the crash backstop.
+    this.queueExecutionWake(event);
+    if (directSignedIntent) {
+      this.queueCanonicalReconcile(event);
+      intentCreated =
+        persisted && (event === 'APPROVE_PENDING' || event === 'ORDER_PLACED');
+    }
 
     this.logger.log(
-      `Showcase relay wake ${event} trade=${body.trade_id ?? '?'} intent=${intentCreated ? 'new' : 'none'} persisted=${persisted}`,
+      `Showcase relay queued ${event} trade=${body.trade_id ?? '?'} signedFast=${directSignedIntent ? 'yes' : 'no'} intent=${intentCreated ? 'ready' : 'none'} persisted=${persisted}`,
     );
 
-    return { ok: true, event, trade_id: body.trade_id ?? null, intentCreated, persisted };
+    return {
+      ok: true,
+      event,
+      trade_id: body.trade_id ?? null,
+      intentCreated,
+      persisted,
+      platform_received_at: persistBody.platform_received_at ?? null,
+      ingest_ms: Date.now() - ingestStartedAt,
+    };
   }
 
   /**
@@ -428,20 +530,51 @@ export class ShowcaseRelayEventsService {
       select: { id: true, intentEnvelope: true },
     });
     if (existing) {
-      const current = existing.intentEnvelope as { action?: unknown } | null;
+      const current = existing.intentEnvelope as
+        | (Record<string, unknown> & {
+            action?: unknown;
+            entry?: Record<string, unknown>;
+            context?: Record<string, unknown>;
+          })
+        | null;
       const signedIntent =
         body?.schema === 'dcf-showcase-intent-v1'
         && (body.direction?.toUpperCase() === 'LONG'
           || body.direction?.toUpperCase() === 'SHORT');
-      if (signedIntent && current?.action !== 'ENTER') {
+      const carriesExactLimit =
+        (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
+        && typeof body?.limit_price === 'number'
+        && Number.isFinite(body.limit_price)
+        && body.limit_price > 0;
+      const carriesSignedClose =
+        body?.event === 'POSITION_CLOSED'
+        && Boolean(body.platform_received_at);
+      if (
+        signedIntent
+        && (current?.action !== 'ENTER' || carriesExactLimit || carriesSignedClose)
+      ) {
+        const incoming = relayIntentEnvelope(existing.id, tradeId, body) as Record<
+          string,
+          unknown
+        > & {
+          entry?: Record<string, unknown>;
+          context?: Record<string, unknown>;
+        };
+        const intentEnvelope =
+          current?.action === 'ENTER' && (carriesExactLimit || carriesSignedClose)
+            ? {
+                ...current,
+                direction: incoming.direction,
+                version: incoming.version,
+                entry: { ...current.entry, ...incoming.entry },
+                context: { ...current.context, ...incoming.context },
+              }
+            : incoming;
         await this.prisma.signalCycle.update({
           where: { id: existing.id },
           data: {
-            intentEnvelope: relayIntentEnvelope(
-              existing.id,
-              tradeId,
-              body,
-            ) as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            intentEnvelope:
+              intentEnvelope as unknown as import('@prisma/client').Prisma.InputJsonValue,
             botVersion: body.bot_version ?? undefined,
             expiresAt: new Date(Date.now() + 1_800_000),
           },

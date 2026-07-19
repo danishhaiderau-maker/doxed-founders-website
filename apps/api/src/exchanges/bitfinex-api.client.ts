@@ -54,6 +54,22 @@ export type BitfinexLiveAccountMetrics = {
   fundsInWrongWallet: boolean;
 };
 
+export function calculateBitfinexSessionPnl(input: {
+  realizedPnlUsd: number;
+  unrealizedPnlUsd: number;
+  tradingFeesUsd: number;
+  fundingFeesUsd: number;
+}): number {
+  return Number(
+    (
+      input.realizedPnlUsd +
+      input.unrealizedPnlUsd -
+      input.tradingFeesUsd -
+      input.fundingFeesUsd
+    ).toFixed(2),
+  );
+}
+
 export type EnsureDerivativesResult = {
   derivativesUsd: number;
   transferredUsd: number;
@@ -647,13 +663,20 @@ export class BitfinexTradingClient {
     return null;
   }
 
-  /** Sum trading + funding fees from margin wallet ledgers since session start. */
+  /** Sum fees and exchange-realized position P&L from one margin-ledger request. */
   async getLedgerFeesSince(
     creds: ExchangeCredentials,
     sinceMs: number,
-  ): Promise<{ tradingFeesUsd: number; fundingFeesUsd: number }> {
+  ): Promise<{
+    tradingFeesUsd: number;
+    fundingFeesUsd: number;
+    realizedPnlUsd: number;
+    positionCloseRows: number;
+  }> {
     let tradingFeesUsd = 0;
     let fundingFeesUsd = 0;
+    let realizedPnlUsd = 0;
+    let positionCloseRows = 0;
     try {
       const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/ledgers/hist', {
         wallet: 'margin',
@@ -661,11 +684,22 @@ export class BitfinexTradingClient {
         end: Date.now(),
         limit: 250,
       });
-      if (!Array.isArray(rows)) return { tradingFeesUsd, fundingFeesUsd };
+      if (!Array.isArray(rows)) {
+        return { tradingFeesUsd, fundingFeesUsd, realizedPnlUsd, positionCloseRows };
+      }
       for (const row of rows) {
         if (!Array.isArray(row) || row.length < 8) continue;
         const amount = Number(row[4] ?? 0);
         const description = String(row[7] ?? '').toLowerCase();
+        if (
+          Number.isFinite(amount) &&
+          amount !== 0 &&
+          description.includes('position') &&
+          !/fee|funding|transfer|commission|margin funding/i.test(description)
+        ) {
+          realizedPnlUsd += amount;
+          positionCloseRows += 1;
+        }
         if (amount >= 0) continue;
         const fee = Math.abs(amount);
         if (description.includes('funding') || description.includes('margin funding')) {
@@ -684,6 +718,8 @@ export class BitfinexTradingClient {
     return {
       tradingFeesUsd: Number(tradingFeesUsd.toFixed(4)),
       fundingFeesUsd: Number(fundingFeesUsd.toFixed(4)),
+      realizedPnlUsd: Number(realizedPnlUsd.toFixed(4)),
+      positionCloseRows,
     };
   }
 
@@ -766,10 +802,22 @@ export class BitfinexTradingClient {
     const equityUsd = Number((derivativesTotalUsd + unrealizedPnlUsd).toFixed(2));
     const sinceMs = opts?.sessionStartedAt?.getTime() ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
     const fees = await this.getLedgerFeesSince(creds, sinceMs);
-    const realizedPnlUsd = opts?.realizedPnlUsd ?? 0;
-    const sessionPnlUsd = Number(
-      (realizedPnlUsd + unrealizedPnlUsd - fees.tradingFeesUsd - fees.fundingFeesUsd).toFixed(2),
-    );
+    // The participant ledger reconstructs P&L per virtual showcase lot. Bitfinex,
+    // however, merges same-symbol positions and realizes a partial close from the
+    // exchange net basis. Session P&L must therefore prefer the exchange position-close
+    // ledger; otherwise a remaining lot can show a profit while the actual net position
+    // shows a loss and the headline mixes the two accounting bases. The participant sum
+    // remains a fallback only when the exchange ledger is temporarily unavailable/empty.
+    const realizedPnlUsd =
+      fees.positionCloseRows > 0
+        ? fees.realizedPnlUsd
+        : (opts?.realizedPnlUsd ?? 0);
+    const sessionPnlUsd = calculateBitfinexSessionPnl({
+      realizedPnlUsd,
+      unrealizedPnlUsd,
+      tradingFeesUsd: fees.tradingFeesUsd,
+      fundingFeesUsd: fees.fundingFeesUsd,
+    });
     const fundsInWrongWallet =
       !position &&
       derivativesAvailableUsd < 5 &&

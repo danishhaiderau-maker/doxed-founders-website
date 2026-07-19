@@ -102,7 +102,7 @@ export function mapSubscriberExchangeLiveBook(input: {
       displayMark = 0; // fall back to entry below
     }
     positions.push({
-      leg: 'Bitfinex net',
+      leg: 'Exchange net (actual)',
       side: p.direction,
       qty: Math.abs(p.amount),
       entry: p.basePrice,
@@ -177,7 +177,7 @@ export function mapSubscriberExchangeLiveBook(input: {
       const side = direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG';
       const current = mark > 0 ? mark : entry;
       positions.push({
-        leg: `Lot ${row.cycle.tradeId.slice(0, 10)}`,
+        leg: `Tracked lot ${row.cycle.tradeId.slice(0, 10)}`,
         side,
         qty: legQty,
         entry,
