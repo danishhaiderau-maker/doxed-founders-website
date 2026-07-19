@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Synchronize relay secrets through Railway CLI (#28)
 
 ## Last Activity
 
