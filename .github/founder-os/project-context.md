@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix live relay lifecycle fidelity (#26)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
