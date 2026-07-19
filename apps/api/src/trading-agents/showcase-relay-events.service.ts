@@ -18,6 +18,8 @@ export type ShowcaseRelayEventBody = {
   trade_id?: string | null;
   ts?: string | null;
   limit_price?: number | null;
+  exit_price?: number | null;
+  reason?: string | null;
   exit_reason?: string | null;
   direction?: string | null;
   /** N2 (intent-mirror) — paper/live provenance tag from the showcase bot. */
@@ -150,21 +152,24 @@ export class ShowcaseRelayEventsService {
     if (!body) return false;
     // Legacy owner webhooks are wake-up notifications only. They may describe
     // the current order/close, but they must not carry any fields consumed by
-    // the intent-entry path. Those richer payloads always require HMAC.
-    return [
-      body.schema,
-      body.intent_source,
-      body.signal_price,
-      body.margin_usdt,
-      body.leverage,
-      body.win_prob,
-      body.edge_score,
-      body.effective_threshold,
-      body.research_lane,
-      body.pullback_pct,
-      body.bot_version,
-      body.strategy_mode,
-    ].every((value) => value == null);
+    // the intent-entry path. Fail closed on unknown future fields as well:
+    // anything outside this explicit wake-only envelope requires HMAC.
+    const allowedKeys = new Set([
+      'event',
+      'trade_id',
+      'ts',
+      'limit_price',
+      'exit_price',
+      'reason',
+      'exit_reason',
+      'direction',
+      'bot_instance_id',
+      'dashboard_owner',
+      'dashboard_pid',
+      'dashboard_port',
+      'source_git_rev',
+    ]);
+    return Object.keys(body).every((key) => allowedKeys.has(key));
   }
 
   verifySignature(
