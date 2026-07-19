@@ -2003,8 +2003,27 @@ def evaluate_entry_location_filter(direction: str, ctx: dict, ai: dict):
     return False, None
 
 def compute_directional_spread(direction: str, ai: dict) -> int:
-    bull = int(ai.get("bull_score", 0) or 0)
-    bear = int(ai.get("bear_score", 0) or 0)
+    """Return conviction spread on the legacy 0-10 dashboard scale.
+
+    The shared direction-only prompt emits LONG/SHORT scores on a 0-100
+    scale.  Older callers emitted bull/bear scores on a 0-10 scale.  Normalize
+    the new score gap by ten so existing spread gates (2, 3-5, 5+) retain
+    their original meaning instead of silently receiving zero.
+    """
+    ai = ai or {}
+    factors = ai.get("factors") if isinstance(ai.get("factors"), dict) else {}
+    long_score = int(ai.get("long_score") or factors.get("long_score") or 0)
+    short_score = int(ai.get("short_score") or factors.get("short_score") or 0)
+    if long_score > 0 or short_score > 0:
+        raw_gap = (
+            long_score - short_score
+            if str(direction or "").upper() == "LONG"
+            else short_score - long_score
+        )
+        sign = -1 if raw_gap < 0 else 1
+        return sign * (abs(raw_gap) // 10)
+    bull = int(ai.get("bull_score") or factors.get("bull_score") or 0)
+    bear = int(ai.get("bear_score") or factors.get("bear_score") or 0)
     if direction == "LONG":
         return bull - bear
     return bear - bull
@@ -10590,6 +10609,11 @@ def reconcile_tile2_pending_orders_on_startup() -> dict:
         order["paper_only"] = True
         order["exchange_submission_blocked"] = True
         order["research_lane"] = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+        order["signal_dir"] = _normalize_order_side_to_dir(
+            order.get("signal_dir") or order.get("dir") or order.get("side")
+        )
+        order["dir"] = order["signal_dir"]
+        _register_tile2_active_signal(order)
         lane_register_pending_order(order)
         with state_lock:
             bucket = _tile2_counters_bucket()
@@ -12236,6 +12260,64 @@ def _mark_tile2_episode_submitted(episode_id: str) -> None:
     _persist_tile2_counters(bucket)
 
 
+def _register_tile2_active_signal(order: dict, ctx: dict = None, features: dict = None) -> dict:
+    """Give a deterministic Tile 2 order the same visible signal lifecycle as AI lanes."""
+    order = order or {}
+    ctx = ctx or {}
+    trade_id = str(order.get("trade_id") or "")
+    direction = _normalize_order_side_to_dir(
+        order.get("signal_dir") or order.get("dir") or order.get("side")
+    )
+    if not trade_id or direction not in ("LONG", "SHORT"):
+        return {}
+    created_ts = float(order.get("created_ts") or time.time())
+    signal = {
+        "trade_id": trade_id,
+        "status": "ORDERED",
+        "outcome": "PENDING",
+        "order_placed": True,
+        "research_lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+        "research_model": RESEARCH_LANE_LABELS.get(
+            RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+            "S/R Micro Tile V2 Static",
+        ),
+        "final_direction": direction,
+        "dir": direction,
+        "signal_price": float(order.get("signal_price") or state.get("price") or 0),
+        "planned_limit_price": float(order.get("planned_limit_price") or order.get("limit_price") or 0),
+        "original_limit_price": float(order.get("original_limit_price") or order.get("limit_price") or 0),
+        "limit_price": float(order.get("limit_price") or 0),
+        "created_ts": utc_iso(datetime.fromtimestamp(created_ts, tz=timezone.utc)),
+        "created_ts_ts": created_ts,
+        "expires_ts": float(order.get("entry_expires_ts") or 0),
+        "order_created_ts": created_ts,
+        "entry_mode": "BRACKET_LIMIT_STATIC",
+        "entry_path": "STATIC_MICRO_SUPPORT",
+        "trigger": "MICRO_SUPPORT",
+        "strategy": "SR_MICRO_STATIC",
+        "regime": state.get("regime", "UNKNOWN"),
+        "ai_win_prob": None,
+        "ai_decision": "NOT_USED",
+        "limit_chase_count": 0,
+        "chase_mode": "STATIC",
+        "margin_usdt": float(order.get("margin_usdt") or FIXED_MARGIN_USDT),
+        "edge_score_at_entry": order.get("edge_score"),
+        "features": copy.deepcopy(features or {}),
+        "context": copy.deepcopy(ctx),
+        "policy_version": TILE2_POLICY_ID,
+        "exit_config": copy.deepcopy(order.get("exit_config") or {}),
+        "sr_episode_id": order.get("sr_episode_id"),
+    }
+    with trade_lock:
+        existing = trades_map.get(trade_id)
+        if isinstance(existing, dict) and isinstance(existing.get("signal_ref"), dict):
+            existing["signal_ref"].update(signal)
+            existing.setdefault("ai", {})
+            return existing["signal_ref"]
+        trades_map[trade_id] = {"signal_ref": signal, "ai": {}}
+    return signal
+
+
 def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
     """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
     existing = _tile2_paper_resting_limit_for_lane()
@@ -12246,6 +12328,7 @@ def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
         existing["exit_reason"] = reason
         existing["cancelled_ts"] = time.time()
         lane_unregister_pending_order(existing)
+        expire_signal_for_order(existing, reason)
         log_lane_opportunity_event(
             RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
             "CANCELLED",
@@ -12374,10 +12457,14 @@ def _submit_tile2_paper_resting_limit(
     order = {
         "trade_id": trade_id,
         "bitfinex_order_id": "",  # paper-only: never has a real exchange id
-        "signal_dir": "buy",
+        # Internal direction is always LONG/SHORT. Exchange side stays buy/sell.
+        # The old "buy" value crashed fill_order before Tile 2 could open a
+        # position or receive ledger credit.
+        "signal_dir": direction,
         "side": "buy",
         "dir": direction,
         "direction": direction,
+        "signal_price": market_price,
         "limit_price": float(limit_price),
         "original_limit_price": float(limit_price),
         "planned_limit_price": float(limit_price),
@@ -12410,6 +12497,7 @@ def _submit_tile2_paper_resting_limit(
         "session_bucket_at_entry": str((bracket_eval or {}).get("session_bucket") or ""),
         "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
     }
+    _register_tile2_active_signal(order, ctx=ctx, features=enriched)
     lane_register_pending_order(order)
     _record_tile2_order_lifecycle(
         trade_id,
@@ -16203,6 +16291,19 @@ def _limit_chase_market_gap(direction: str, limit_price: float, market_price: fl
     return 0.0
 
 
+def _is_static_no_chase_order(order: dict) -> bool:
+    """True when an order must rest at its original price until touch or TTL."""
+    order = order or {}
+    return bool(
+        str(order.get("chase_mode") or "").upper() == "STATIC"
+        or order.get("fill_at_limit") is True
+        or (
+            order.get("max_chase_count") is not None
+            and int(order.get("max_chase_count") or 0) == 0
+        )
+    )
+
+
 def _limit_chase_near_fill_zone(direction: str, limit_price: float, market_price: float) -> bool:
     gap = _limit_chase_market_gap(direction, limit_price, market_price)
     if gap <= LIMIT_CHASE_NEAR_FILL_USD:
@@ -16423,6 +16524,8 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     """After patient chase, set marketable limit at ask/bid when structure still valid."""
     if order.get("status") != "PENDING":
         return False
+    if _is_static_no_chase_order(order):
+        return False
     created = float(order.get("created_ts") or 0)
     if not created or (now - created) < MARKETABLE_CHASE_SEC:
         return False
@@ -16489,6 +16592,8 @@ def process_limit_chase(price: float):
     with trade_lock:
         pending = [o for o in pending_orders if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
+        if _is_static_no_chase_order(order):
+            continue
         if not lane_orders_allowed(order.get("research_lane")):
             continue
         tid = order.get("trade_id")
@@ -16521,6 +16626,8 @@ def process_limit_chase(price: float):
         if _apply_limit_chase(order, signal, price, now):
             chased += 1
     for order in pending:
+        if _is_static_no_chase_order(order):
+            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
         if _apply_marketable_limit_fallback(order, signal, price, now):
@@ -16632,6 +16739,11 @@ def process_pending_orders():
         fill_order(order)
 
 def fill_order(order):
+    direction = _normalize_order_side_to_dir(
+        order.get("signal_dir") or order.get("dir") or order.get("side")
+    )
+    order["signal_dir"] = direction
+    order["dir"] = direction
     if not order.get("fill_price"):
         is_taker = (
             order.get("fee_type") == "TAKER"
@@ -16663,7 +16775,7 @@ def fill_order(order):
     meta = trades_map.get(order["trade_id"], {})
     signal = meta.get("signal_ref", {})
     ai = meta.get("ai", {}) or signal.get("ai", {})
-    if order["signal_dir"] not in ["LONG", "SHORT"]:
+    if direction not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     with trade_lock:
         # C4 guard: never open a second position for the same trade_id. A race or double
@@ -20262,6 +20374,26 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
     return "LAB SHADOW — no new orders"
 
 
+def _shared_lane_gate_runtime_summary(lane: str) -> str:
+    """Compact live acceptance funnel for the tile transparency block."""
+    with state_lock:
+        bucket = copy.deepcopy(
+            (state.get("shared_ai_lane_counters") or {}).get(lane) or {}
+        )
+    evaluated = int(bucket.get("evaluated") or 0)
+    accepted = int(bucket.get("accepted") or 0)
+    rejected = int(bucket.get("rejected") or 0)
+    reasons = bucket.get("reasons") if isinstance(bucket.get("reasons"), dict) else {}
+    top_reason = "none yet"
+    if reasons:
+        reason, count = max(reasons.items(), key=lambda item: int(item[1] or 0))
+        top_reason = f"{reason} ({int(count or 0)})"
+    return (
+        f"Live gate funnel: evaluated {evaluated}; accepted {accepted}; "
+        f"rejected {rejected}; top result {top_reason}"
+    )
+
+
 def build_static_pathway_lane_specs() -> dict:
     """Combo Pathway Lab v2 — tile specs for dashboard (architecture frozen; change tiles only)."""
     shared = _pathway_shared_execution_spec()
@@ -20368,13 +20500,37 @@ def build_static_pathway_lane_specs() -> dict:
                 ("STATIC no chase" if static_bracket else "FULL_CHASE baseline"),
                 f"Ladder {lane_ladder_label}",
             ]
+            if static_bracket:
+                filter_chips = [
+                    "No AI",
+                    "LONG at exact micro-support",
+                    "ADX present and <=40",
+                    "ATR volatility present and <=80",
+                    "Not LONDON 08:00-12:59 UTC",
+                    "Levels inside swing envelope",
+                    "Price inside swing envelope",
+                    "Outside midpoint +/-15%",
+                    "Within 60% of S/R range from support",
+                    "One order per S/R episode",
+                    "30m unfilled TTL",
+                    "STATIC max chases=0",
+                    f"Ladder {lane_ladder_label}",
+                ]
             hypothesis = spec.get("hypothesis") or (
                 "Deterministic micro S/R bracket captures range-bound mean-reversion without AI."
             )
             research_q = spec.get("research_question") or (
                 "Does deterministic V2 bracket beat V1 AI tile and CONTINUOUS on EV/close?"
             )
+            _tile2_live = tile2_dashboard_metrics() if static_bracket else {}
             strategy_extra = [
+                "Entry decision order:",
+                "  - Complete micro-support/resistance and swing levels; micro levels must remain inside the swing envelope",
+                "  - Normalized ADX and ATR volatility must be present; ADX<=40 and volatility percentile<=80",
+                "  - Reject LONDON 08:00-12:59 UTC; price must remain inside the swing envelope",
+                "  - LONG only above support, outside midpoint +/-15%, and within 60% of the S/R range from support",
+                "  - Submit one resting limit at exact micro-support; limit must remain below market; one order per episode",
+                "  - No chase, reprice, slide, or marketable fallback; an unfilled limit expires after 30 minutes",
                 "Tile OFF: LAB shadow replay + counterfactual outcome (no paper limit)",
                 (
                     "Tile ON (PAPER, PROBATION): local paper resting limit at exact micro-support · Scenario C"
@@ -20388,6 +20544,13 @@ def build_static_pathway_lane_specs() -> dict:
                     + TILE2_POLICY_ID
                     if static_bracket
                     else "Historical bracket collector; data archived"
+                ),
+                (
+                    f"Live funnel: bracket evals {_tile2_live.get('bracket_evals', 0)}; "
+                    f"eligible {_tile2_live.get('eligible_long', 0)}; limits {_tile2_live.get('paper_limits', 0)}; "
+                    f"fills {_tile2_live.get('entry_fills', 0)}; closes {_tile2_live.get('filled_closes', 0)}; "
+                    f"pending {_tile2_live.get('pending_orders', 0)}"
+                    if static_bracket else "Historical bracket collector; data archived"
                 ),
                 f"Independence: {shared['independence']}",
             ]
@@ -20460,9 +20623,31 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Peak ≥{_tb_min_peak:.0f}% → floor {_tb_floor:.0f}%",
                 f"Ladder {lane_ladder_label}",
             ]
+            filter_chips = [
+                "Direction only",
+                "Higher LONG/SHORT score picks side",
+                f"Raw score gap >={_TB_MIN_SPREAD * 10}/100",
+                f"Normalized spread >={_TB_MIN_SPREAD}",
+                f"ADX >={_TB_ADX_FLOOR:.0f} hard floor",
+                "ADX 30-35 OPTIMAL (+1.5)",
+                f"BULL -> ADX >={_TB_BULL_ADX_FLOOR:.0f}",
+                "Volume <0.80 = accumulation",
+                f"Volume >{_TB_VOL_DANGER:.1f} = danger",
+                "AI confidence not requested",
+                f"Composite score >={_TB_MIN_SCORE:.1f}",
+                f"{_tb_policy}",
+                f"Peak >={_tb_min_peak:.0f}% -> floor {_tb_floor:.0f}%",
+                f"Ladder {lane_ladder_label}",
+            ]
             hypothesis = spec.get("hypothesis") or "Fixed pre-entry Type B scoring is evaluated only on walk-forward outcomes."
             research_q = spec.get("research_question") or "Does the fixed Type B policy beat CONTINUOUS out of sample?"
             strategy_extra = [
+                "Entry decision order:",
+                "  - One shared AI call returns LONG/SHORT scores; the higher score is the candidate direction",
+                f"  - Normalize the raw score gap to the legacy 0-10 spread scale; require gap>={_TB_MIN_SPREAD * 10}/100 (spread>={_TB_MIN_SPREAD})",
+                "  - Apply hard rejects first: complete features, permitted regime, ADX, volume, structure and danger combinations",
+                f"  - Require composite score>={_TB_MIN_SCORE:.1f}, tile ON, available capacity and healthy paper execution",
+                "  - Submit its own paper limit; Type B keeps a separate bounded chase path and ledger from Continuous",
                 f"Scorer: {_tb_policy} — fixed feature gates, no outcome-label tuning",
                 "Scoring rubric (sum must clear threshold):",
                 f"  • ADX 30-35 = +1.5 (OPTIMAL) · 25-30 = +1.2 · >35 = +0.75 · 20-25 = +0.5",
@@ -20470,11 +20655,12 @@ def build_static_pathway_lane_specs() -> dict:
                 "  • Regime BEAR = +0.5 · RANGE = +0.25",
                 "  • Structure aligned w/ direction (≥3 abs) = +1.0 · neutral = +0.25",
                 "  • Delta aligned w/ direction (≥18 abs) = +0.75",
-                "  • Spread 3-5 = +0.5 · Edge 3-5 = +0.5 · EMA slope aligned = +0.25",
+                "  • Normalized spread 3-5 = +0.5 · Edge 3-5 = +0.5 · EMA slope aligned = +0.25",
                 f"Hard rejects (override score): ADX <{_TB_ADX_FLOOR:.0f} · BULL+ADX<{_TB_BULL_ADX_FLOOR:.0f} · "
                 f"vol>{_TB_VOL_DANGER:.1f} · spread<{_TB_MIN_SPREAD} · counter-structure · triple-danger",
                 "AI confidence: not requested; stored as 0 only for legacy schema compatibility",
                 "Shared AI: one three-minute direction call also feeds CONTINUOUS",
+                _shared_lane_gate_runtime_summary(RESEARCH_LANE_TYPE_B_HUNTER_V1),
                 "Tile OFF: collect calibration + counterfactual shadows; no paper limits",
                 f"Tile ON routing: {execution}",
                 "Logs: lane_opportunity_capture.jsonl + shadow_lane_outcome.jsonl + lane_lab_pnl_ledger.json",
@@ -20493,6 +20679,8 @@ def build_static_pathway_lane_specs() -> dict:
                 "volume_danger_above": float(_TB_VOL_DANGER),
                 "min_score_to_enter": float(_TB_MIN_SCORE),
                 "min_spread": int(_TB_MIN_SPREAD),
+                "raw_directional_score_gap_min": int(_TB_MIN_SPREAD * 10),
+                "spread_normalization": "abs(LONG score - SHORT score) // 10",
                 "ai_weight": 0.0,
                 "calibration": "walk-forward only; rejected signals collect counterfactual shadows",
             }
@@ -20764,10 +20952,30 @@ def build_static_pathway_lane_specs() -> dict:
             ),
         })
     scenario_c_continuous = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
+    _continuous_policy_id = "continuous_shared_direction_gap_v1"
+    _continuous_entry_filters = {
+        "ai_probability_bucket": "not requested; not an entry gate",
+        "entry_mode": "SHARED_DIRECTION_IMMEDIATE_LIMIT",
+        "policy_version": _continuous_policy_id,
+        "candidate_direction": "higher of LONG score and SHORT score",
+        "raw_score_gap_min": 5,
+        "execution_tiers": {
+            "REJECT": "gap <5",
+            "SOFT_APPROVE": "gap 5-9",
+            "APPROVE": "gap 10-14",
+            "STRONG_APPROVE": "gap >=15",
+        },
+        "confidence_weight": 0.0,
+        "limit_entry": "deterministic pullback limit, then bounded 25% chase",
+        "shared_call_consumers": [
+            RESEARCH_LANE_CONTINUOUS,
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        ],
+    }
     lanes.append({
         "lane": RESEARCH_LANE_CONTINUOUS,
         "label": RESEARCH_LANE_LABELS.get(RESEARCH_LANE_CONTINUOUS, "Continuous AI Research"),
-        "subtitle": "BENCHMARK · beat this lane on EV/appr · toggle ON = limits + chase",
+        "subtitle": "BENCHMARK · one shared direction call · independent Continuous verdict and orders",
         "role": "continuous_direct_benchmark",
         "status": "BENCHMARK",
         "is_benchmark": True,
@@ -20776,28 +20984,34 @@ def build_static_pathway_lane_specs() -> dict:
         "tile_number": len(COMBO_TILE_DISPLAY_ORDER) + 1,
         "entry_mode_label": "Continuous",
         "filter_chips": [
-            f"AI ~{shared['ai_scan_cadence_sec']}s",
-            "AI_SCAN mirror",
+            f"One AI call ~{shared['ai_scan_cadence_sec']}s",
+            "Higher LONG/SHORT score picks side",
+            "Raw score gap >=5/100",
+            "Gap 5-9 SOFT APPROVE",
+            "Gap 10-14 APPROVE",
+            "Gap >=15 STRONG APPROVE",
+            "AI confidence not requested",
+            "Deterministic pullback limit",
             f"Ladder {get_lane_ladder(RESEARCH_LANE_CONTINUOUS)[1]}",
             "25% chase",
-            "Toggle orders",
+            _continuous_policy_id,
         ],
         "toggle_key": "continuous_ai_research_enabled",
         "hypothesis": "Yardstick lane — every tile must beat CONTINUOUS on EV/appr vs approves.",
         "research_question": "Does each combo/experimental tile beat CONTINUOUS benchmark?",
         "entry": {
-            "spawn": "Spawn on every AI_SCAN DeepSeek result (APPROVE + REJECT logged)",
-            "trigger": "CONTINUOUS_FROM_AI_SCAN after each AI_SCAN call",
+            "spawn": "Evaluate every shared AI_SCAN direction result; accepted gap tiers may create an order",
+            "trigger": "Higher LONG/SHORT score + raw score gap >=5",
             "entry_path": "AI_DIRECT",
             "fill_path": "AI_DIRECT_CHASE",
-            "ai_path": "AI_SCAN mirror (same AI decision, no second DeepSeek)",
+            "ai_path": "One shared direction-only AI call; no separate Continuous or Type B call",
             "ai_cadence": ai_cadence,
             "chase_detail": chase_detail,
-            "post_ai_gates": shared["post_ai_gates"],
+            "post_ai_gates": "Continuous raw-score-gap tier only; Type B applies a separate fixed policy",
             "margin_usd": shared["margin_usd"],
             "execution": "Immediate AI-direct limit + 25% chase + Scenario C (toggle ON)",
             "orders": "Toggle ON → limit orders; OFF → shadow/data only (no limits)",
-            "filters": {"spawn": "AI_SCAN_MIRROR", "entry_mode": "IMMEDIATE"},
+            "filters": _continuous_entry_filters,
         },
         "exit": scenario_c_continuous,
         "exit_path": "Scenario C frozen — ladder + thesis + MFE (see strategy block)",
@@ -20809,15 +21023,25 @@ def build_static_pathway_lane_specs() -> dict:
         "diff_vs_benchmark": [],
         "strategy_detail": _strategy_detail_lines(
             {
-                "spawn": "Spawn on every AI_SCAN DeepSeek result (APPROVE + REJECT logged)",
+                "spawn": "Evaluate every shared direction call; Continuous and Type B record separate verdicts",
                 "execution": "Immediate AI-direct limit + 25% chase + Scenario C when toggle ON",
-                "ai_path": "AI_SCAN mirror (same AI decision, no second DeepSeek)",
+                "ai_path": "One shared direction-only call; higher score supplies the candidate side",
                 "ai_cadence": ai_cadence,
                 "chase_detail": chase_detail,
                 "margin_usd": shared["margin_usd"],
+                "post_ai_gates": "gap <5 REJECT · 5-9 SOFT APPROVE · 10-14 APPROVE · >=15 STRONG APPROVE",
             },
             scenario_c_continuous,
             [
+                "Entry decision order:",
+                "  - One shared API call returns LONG score, SHORT score and short reasoning only",
+                "  - The higher score deterministically selects LONG or SHORT; raw NO_TRADE cannot suppress evaluation",
+                "  - Reject gap<5; execute SOFT_APPROVE 5-9, APPROVE 10-14, STRONG_APPROVE >=15",
+                "  - AI confidence/win probability is not requested and has zero entry weight",
+                "  - Tile ON and capacity available: submit its own deterministic pullback limit",
+                "  - Chase the pending limit by the bounded 25% shared chase policy; manage its own exit and ledger",
+                f"Policy: {_continuous_policy_id} (introduced 2026-07-19)",
+                _shared_lane_gate_runtime_summary(RESEARCH_LANE_CONTINUOUS),
                 "Orders: dashboard toggle ON → limits; OFF → shadow replay only",
                 f"Independence: {shared['independence']}",
             ],

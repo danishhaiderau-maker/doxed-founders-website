@@ -1,9 +1,9 @@
 {
   "engine_version": "v12-shared-direction-tile2-normalized",
-  "combo_version": "2026-07-18",
+  "combo_version": "2026-07-19",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "caed1f1d4f6f",
+  "signal_hash": "9b6c0fe4b596",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-07-18T20:23:36.135Z"
+  "updated_at": "2026-07-19T09:18:43.864Z"
 }
