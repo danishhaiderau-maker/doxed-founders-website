@@ -173,7 +173,6 @@ export interface IdeUpdateManagerOptions {
 
 let updateState: FounderStackUpdateState = 'idle';
 let lastFailureReason: string | null = null;
-let lastAppliedManifest: IdeUpdateManifest | null = null;
 let lastResolvedUpdate: IdeUpdateInfo | null = null;
 let cachedManifest: { at: number; body: IdeUpdateManifest | null } | null = null;
 const MANIFEST_CACHE_TTL_MS = 60_000;
@@ -312,14 +311,12 @@ export async function fetchManifestCached(): Promise<IdeUpdateManifest | null> {
   if (!configuredApiBaseUrl) return null;
   const body = await configuredManifestFetcher(configuredApiBaseUrl);
   cachedManifest = { at: now, body };
-  lastAppliedManifest = body;
   return body;
 }
 
 /** Test-only hook to drop the manifest cache. */
 export function __resetIdeManifestCacheForTests(): void {
   cachedManifest = null;
-  lastAppliedManifest = null;
 }
 
 // ─── Version resolution ───────────────────────────────────────────────────
@@ -942,7 +939,6 @@ export function ideUpdateTooltipSuffix(): string {
 export function __resetIdeUpdaterForTests(): void {
   updateState = 'idle';
   lastFailureReason = null;
-  lastAppliedManifest = null;
   lastResolvedUpdate = null;
   cachedManifest = null;
   checkInFlight = false;

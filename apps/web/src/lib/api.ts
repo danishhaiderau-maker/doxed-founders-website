@@ -5947,6 +5947,25 @@ export function fetchFounderNodeStatus(token: string) {
   return apiFetch<{ nodes: FounderNodeStatusRow[] }>('/founder-node/status', undefined, token);
 }
 
+export function authorizeFounderNodeDevice(
+  token: string,
+  input: { userCode: string; label?: string; platform?: string },
+) {
+  return apiFetch<{ authorized: true; founderId: string; nodeId: string }>(
+    '/founder-node/device-code/authorize',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function denyFounderNodeDevice(token: string, userCode: string) {
+  return apiFetch<{ denied: true }>(
+    '/founder-node/device-code/deny',
+    { method: 'POST', body: JSON.stringify({ userCode }) },
+    token,
+  );
+}
+
 export function revokeFounderNode(nodeId: string, token: string) {
   return apiFetch<{ success: boolean }>(`/founder-node/${nodeId}`, { method: 'DELETE' }, token);
 }

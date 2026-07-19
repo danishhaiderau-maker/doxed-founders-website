@@ -11,7 +11,7 @@
     "directory": "packages/founder-ide-extension"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.99.0"
   },
   "categories": ["Chat", "AI", "Machine Learning", "Other"],
   "keywords": ["ai", "chat", "founder-os", "openai-compatible", "llm"],
@@ -133,7 +133,7 @@
       },
       {
         "command": "founderOs.signIn",
-        "title": "Founder OS: Sign in with Founder ID"
+        "title": "Founder OS: Sign in with X"
       },
       {
         "command": "founderOs.pair",
@@ -141,7 +141,7 @@
       },
       {
         "command": "founderOs.connectFounderOs",
-        "title": "Founder OS: Connect Founder OS (Twitter)"
+        "title": "Founder OS: Reconnect Founder OS"
       },
       {
         "command": "founderOs.selectModel",
@@ -214,7 +214,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "@types/vscode": "^1.104.0",
+    "@types/vscode": "1.99.1",
     "@vscode/vsce": "^3.2.0",
     "typescript": "^5.8.3"
   }

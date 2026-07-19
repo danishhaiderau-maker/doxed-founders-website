@@ -9,6 +9,7 @@ import { ExecutionManagerController } from './execution-manager.controller';
 import { ExecutionManagerService } from './execution-manager.service';
 import type { ExecutionAdapter } from './execution-manager.types';
 import { FounderNodeModule } from '../founder-node/founder-node.module';
+import { IdeBridgeModule } from '../ide-bridge/ide-bridge.module';
 
 /**
  * Internal helper that holds the adapter instances. Lives in the
@@ -47,7 +48,10 @@ class Bootstrapper {
  * module the application layer composes with), not a new table here.
  */
 @Module({
-  imports: [forwardRef(() => FounderNodeModule)],
+  imports: [
+    forwardRef(() => FounderNodeModule),
+    forwardRef(() => IdeBridgeModule),
+  ],
   controllers: [ExecutionManagerController],
   providers: [
     ExecutionManagerService,

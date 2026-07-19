@@ -25,12 +25,31 @@ export type PendingIdeDispatchRow = {
 };
 
 const DISPATCH_DEDUPE_MS = 60_000;
+const FOUNDER_IDE_PROVIDERS = [
+  'founder-ide',
+  'founder_ide',
+  'void',
+  'vscode',
+] as const;
 const DISPATCH_ATTACH_RE =
   /<!--founder-attach:image:[\s\S]*?-->/g;
 
 /** Strip attachment blocks for duplicate detection — user-visible text only. */
 function normalizeDispatchPromptForDedupe(prompt: string): string {
   return prompt.replace(DISPATCH_ATTACH_RE, '').replace(/\s+/g, ' ').trim();
+}
+
+function dispatchScopeForNode(nodeId?: string): Record<string, unknown> {
+  if (!nodeId) return {};
+  return {
+    OR: [
+      { ideProvider: { notIn: [...FOUNDER_IDE_PROVIDERS] } },
+      {
+        ideProvider: { in: [...FOUNDER_IDE_PROVIDERS] },
+        sessionId: `founder-ide:${nodeId}`,
+      },
+    ],
+  };
 }
 
 export type RecentAgentMessage = {
@@ -418,7 +437,12 @@ export class IdeBridgeService {
   ) {
     const trimmed = prompt?.trim();
     if (!trimmed) throw new Error('Prompt required');
-    const attributed = withFounderOsDispatchAttribution(trimmed);
+    const normalizedProvider = (ideProvider || 'cursor').toLowerCase();
+    const attributed = FOUNDER_IDE_PROVIDERS.includes(
+      normalizedProvider as (typeof FOUNDER_IDE_PROVIDERS)[number],
+    )
+      ? trimmed
+      : withFounderOsDispatchAttribution(trimmed);
     const dedupeKey = normalizeDispatchPromptForDedupe(attributed);
 
     // One row per user action — ignore duplicate POSTs within 60s (normalized text).
@@ -453,7 +477,7 @@ export class IdeBridgeService {
         userId,
         sessionId,
         prompt: attributed,
-        ideProvider: ideProvider || 'cursor',
+        ideProvider: normalizedProvider,
         status: 'PENDING',
       },
     });
@@ -463,9 +487,17 @@ export class IdeBridgeService {
    * Return up to `take` PENDING dispatches for a user, oldest first.
    * Called by Founder Node on each sync cycle.
    */
-  async getPendingDispatches(userId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
+  async getPendingDispatches(
+    userId: string,
+    nodeId?: string,
+    take = 10,
+  ): Promise<PendingIdeDispatchRow[]> {
     return this.dispatchModel.findMany({
-      where: { userId, status: 'PENDING' },
+      where: {
+        userId,
+        status: 'PENDING',
+        ...dispatchScopeForNode(nodeId),
+      },
       orderBy: { createdAt: 'asc' },
       take,
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
@@ -476,14 +508,24 @@ export class IdeBridgeService {
    * Atomically claim a dispatch for execution. Flips PENDING → DISPATCHING
    * only when the row is still pending for this user (compare-and-swap).
    */
-  async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
+  async claimDispatch(
+    userId: string,
+    dispatchId: string,
+    nodeId?: string,
+  ): Promise<PendingIdeDispatchRow | null> {
+    const nodeScope = dispatchScopeForNode(nodeId);
     const existing = await this.dispatchModel.findFirst({
-      where: { id: dispatchId, userId, status: 'PENDING' },
+      where: { id: dispatchId, userId, status: 'PENDING', ...nodeScope },
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
     });
     if (!existing) return null;
     const claimed = await this.dispatchModel.updateMany({
-      where: { id: dispatchId, userId, status: 'PENDING' },
+      where: {
+        id: dispatchId,
+        userId,
+        status: 'PENDING',
+        ...nodeScope,
+      },
       data: { status: 'DISPATCHING' },
     });
     if (claimed.count === 0) return null;
@@ -519,13 +561,23 @@ export class IdeBridgeService {
     return existing;
   }
 
-  async markDispatched(id: string, result?: string): Promise<void> {
+  async markDispatched(
+    id: string,
+    result?: string,
+    userId?: string,
+    nodeId?: string,
+  ): Promise<void> {
     await this.dispatchModel.updateMany({
-      where: { id, status: { in: ['PENDING', 'DISPATCHING'] } },
+      where: {
+        id,
+        ...(userId ? { userId } : {}),
+        ...dispatchScopeForNode(nodeId),
+        status: { in: ['PENDING', 'DISPATCHING'] },
+      },
       data: {
         status: 'DISPATCHED',
         dispatchedAt: new Date(),
-        ...(result ? { result: result.slice(0, 4000) } : {}),
+        ...(result ? { result: result.slice(0, 64_000) } : {}),
       },
     });
   }
@@ -552,14 +604,30 @@ export class IdeBridgeService {
     } | null;
     if (!row) throw new NotFoundException('Dispatch not found');
     const resultText = row.result ?? '';
-    const delivered = row.status === 'DISPATCHED' && /^dispatched\s*\(/i.test(resultText);
+    type StructuredDispatchResult = {
+      kind?: string;
+      delivered?: boolean;
+      approved?: boolean;
+      exitCode?: number;
+      error?: string;
+    };
+    let structured: StructuredDispatchResult | null = null;
+    try {
+      structured = JSON.parse(resultText) as StructuredDispatchResult;
+    } catch {
+      structured = null;
+    }
     const failed =
       row.status === 'DISPATCHED' &&
-      !delivered &&
       (/^error:/i.test(resultText) ||
+        Boolean(structured?.error) ||
+        structured?.delivered === false ||
+        structured?.approved === false ||
+        (structured?.kind === 'command' && structured.exitCode !== 0) ||
         /Command failed|SendKeys.*failed|paste failed|refusing SendKeys|Could not focus/i.test(
           resultText,
         ));
+    const delivered = row.status === 'DISPATCHED' && !failed;
     return {
       id: row.id,
       status: row.status,

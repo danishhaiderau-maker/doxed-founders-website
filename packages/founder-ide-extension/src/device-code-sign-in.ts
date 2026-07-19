@@ -263,7 +263,7 @@ export async function runDeviceCodeSignIn(
 ): Promise<WrittenCredentials | null> {
   const confirm = await vscode.window.showQuickPick(
     [
-      { label: 'Sign in with Founder ID', description: 'open browser to authorize this device' },
+      { label: 'Continue with X', description: 'authorize this IDE on Founder OS' },
       { label: 'Cancel', description: 'do not pair' },
     ],
     { placeHolder: 'Founder OS — sign in' },

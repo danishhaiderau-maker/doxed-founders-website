@@ -8,6 +8,7 @@ import type {
   WorkspaceNode,
 } from '../execution-manager.types';
 import type { FounderNodeService } from '../../founder-node/founder-node.service';
+import type { IdeBridgeService } from '../../ide-bridge/ide-bridge.service';
 
 /**
  * FounderIdeAdapter — the `vscode` execution target (Founder IDE / VS Code /
@@ -54,11 +55,9 @@ import type { FounderNodeService } from '../../founder-node/founder-node.service
  *      actual wire format is FounderNodeService's responsibility; this
  *      adapter awaits the outcome with a per-call timeout.
  *
- * The HTTPS-to-IPC bridge on Founder Node (translating /ide-dispatch
- * requests into IPC messages and back) lands in a follow-up. Until then,
- * the adapter reports the dispatch as unsupported ('ipc_dispatch_not_wired')
- * while still respecting the fail-closed invariant. This is intentional —
- * the security boundary lands before the throughput path.
+ * The HTTPS relay uses the same PendingIdeDispatch queue as the web remote.
+ * Founder Node claims the user-scoped row and forwards the structured action
+ * over its authenticated local IPC connection.
  */
 @Injectable()
 export class FounderIdeAdapter implements ExecutionAdapter {
@@ -66,9 +65,12 @@ export class FounderIdeAdapter implements ExecutionAdapter {
   private readonly logger = new Logger(FounderIdeAdapter.name);
 
   /** Default per-call dispatch timeout. Overrides via RunCommandOpts.timeoutMs. */
-  private static readonly DEFAULT_DISPATCH_TIMEOUT_MS = 30_000;
+  private static readonly DEFAULT_DISPATCH_TIMEOUT_MS = 10 * 60_000;
 
-  constructor(@Optional() private readonly nodes?: FounderNodeService) {}
+  constructor(
+    @Optional() private readonly nodes?: FounderNodeService,
+    @Optional() private readonly ideBridge?: IdeBridgeService,
+  ) {}
 
   /**
    * No-op. isConnected() is a real-time check, not a cached flag, so
@@ -110,34 +112,60 @@ export class FounderIdeAdapter implements ExecutionAdapter {
 
   async readWorkspace(path?: string): Promise<WorkspaceNode[]> {
     if (!this.failClosedGuard()) return [];
-    // Fail-closed when the dispatch isn't yet wired on the node side. The
-    // HTTPS-to-IPC relay lands in a follow-up; until then, the adapter
-    // surfaces 'ipc_dispatch_not_wired' so callers can tell this apart from
-    // a genuine "no files in workspace" empty array.
-    this.logger.debug(`readWorkspace(path=${path ?? '<root>'}) — dispatch not yet wired`);
-    return [];
+    try {
+      const result = await this.dispatchAction(
+        { type: 'workspaceReadRequest', path, maxEntries: 500 },
+        30_000,
+      );
+      return result.kind === 'workspace' && Array.isArray(result.nodes)
+        ? (result.nodes as WorkspaceNode[])
+        : [];
+    } catch (error) {
+      this.logger.warn(`Founder IDE workspace read failed: ${this.errorMessage(error)}`);
+      return [];
+    }
   }
 
   async applyEdits(edits: FileEdit[]): Promise<EditOutcome[]> {
     if (!this.failClosedGuard()) {
       return edits.map((e) => ({ path: e.path, ok: false, error: 'ipc_not_connected' }));
     }
-    // Dispatch proposedEdit messages via IPC in parallel, each with its own
-    // timeout. The relay-side implementation lands in a follow-up; until
-    // then, fail-closed per edit.
-    const timeoutMs = FounderIdeAdapter.DEFAULT_DISPATCH_TIMEOUT_MS;
-    return edits.map((e) => ({
-      path: e.path,
-      ok: false,
-      error: 'ipc_dispatch_not_wired',
-      bytesWritten: 0,
-    }));
-    // Note: when the relay lands, this becomes
-    //   return Promise.all(edits.map((e) => this.dispatchProposedEdit(e, timeoutMs)));
-    // with each edit waiting for an editReviewResult. If the user denies,
-    // the result is { ok: false, error: 'user_denied' }. If the call
-    // times out, { ok: false, error: 'ipc_timeout' }.
-    void timeoutMs;
+    const outcomes: EditOutcome[] = [];
+    for (const edit of edits) {
+      try {
+        const result = await this.dispatchAction(
+          {
+            type: 'proposedEdit',
+            path: edit.path,
+            diff: '',
+            creates: edit.kind === 'create',
+            edit: {
+              kind: edit.kind,
+              content: edit.content,
+              ...(edit.anchor ? { anchor: edit.anchor } : {}),
+            },
+          },
+          FounderIdeAdapter.DEFAULT_DISPATCH_TIMEOUT_MS,
+        );
+        const approved = result.kind === 'edit' && result.approved === true;
+        outcomes.push({
+          path: edit.path,
+          ok: approved,
+          bytesWritten: approved ? Buffer.byteLength(edit.content, 'utf8') : 0,
+          ...(!approved
+            ? { error: String(result.reason ?? 'user_denied') }
+            : {}),
+        });
+      } catch (error) {
+        outcomes.push({
+          path: edit.path,
+          ok: false,
+          bytesWritten: 0,
+          error: this.errorMessage(error),
+        });
+      }
+    }
+    return outcomes;
   }
 
   async runCommand(command: string, opts?: RunCommandOpts): Promise<CommandResult> {
@@ -150,20 +178,42 @@ export class FounderIdeAdapter implements ExecutionAdapter {
         durationMs: 0,
       };
     }
-    // Dispatch a commandRequest via IPC and stream commandOutput until done.
-    // Relay lands in a follow-up; until then, return 126 with a clear stderr
-    // so callers can tell this apart from a real command-exit 126.
-    return {
-      command,
-      exitCode: 126,
-      stdout: '',
-      stderr: 'ipc_dispatch_not_wired',
-      durationMs: 0,
-    };
-    // Note: when the relay lands, this awaits a commandReviewResult. If
-    // denied, return exitCode 126 with stderr 'user_denied'. If approved,
-    // stream commandOutput events until exitCode arrives.
-    void opts;
+    const startedAt = Date.now();
+    try {
+      const result = await this.dispatchAction(
+        {
+          type: 'commandRequest',
+          command,
+          ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+          risk: this.commandRisk(command),
+          timeoutMs: opts?.timeoutMs,
+        },
+        Math.max(
+          30_000,
+          Math.min(
+            (opts?.timeoutMs ?? FounderIdeAdapter.DEFAULT_DISPATCH_TIMEOUT_MS) + 30_000,
+            FounderIdeAdapter.DEFAULT_DISPATCH_TIMEOUT_MS,
+          ),
+        ),
+      );
+      return {
+        command,
+        exitCode: typeof result.exitCode === 'number' ? result.exitCode : 1,
+        stdout: typeof result.stdout === 'string' ? result.stdout : '',
+        stderr: typeof result.stderr === 'string' ? result.stderr : '',
+        durationMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      const message = this.errorMessage(error);
+      return {
+        command,
+        exitCode: message === 'ipc_timeout' ? 124 : 126,
+        stdout: '',
+        stderr: message,
+        durationMs: Date.now() - startedAt,
+        ...(message === 'ipc_timeout' ? { signal: 'timeout' as const } : {}),
+      };
+    }
   }
 
   // ─── Internals ────────────────────────────────────────────────────────
@@ -177,6 +227,63 @@ export class FounderIdeAdapter implements ExecutionAdapter {
     if (this.isConnected()) return true;
     this.logger.warn('FounderIdeAdapter dispatch refused — IDE IPC not connected (fail-closed).');
     return false;
+  }
+
+  private async dispatchAction(
+    action: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<Record<string, unknown>> {
+    const userId = this.nodeIdCacheUserId;
+    const nodeId = this.nodeIdCacheValue;
+    if (!this.ideBridge || !userId || !nodeId) {
+      throw new Error('ipc_relay_unavailable');
+    }
+    const created = await this.ideBridge.createDispatch(
+      userId,
+      `founder-ide:${nodeId}`,
+      JSON.stringify({ founderIdeAction: action }),
+      'founder-ide',
+    );
+    const dispatchId = String((created as { id?: string }).id ?? '');
+    if (!dispatchId) throw new Error('ipc_relay_create_failed');
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const status = await this.ideBridge.getDispatchStatus(userId, dispatchId);
+      if (status.status === 'DISPATCHED') {
+        if (!status.result) throw new Error('ipc_empty_result');
+        if (/^error:/i.test(status.result)) {
+          throw new Error(status.result.replace(/^error:\s*/i, '') || 'ipc_dispatch_failed');
+        }
+        try {
+          const parsed = JSON.parse(status.result) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed as Record<string, unknown>;
+          }
+        } catch {
+          if (status.failed) {
+            throw new Error(status.result);
+          }
+          throw new Error('ipc_invalid_result');
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error('ipc_timeout');
+  }
+
+  private commandRisk(command: string): 'readonly' | 'mutation' | 'destructive' {
+    if (/\b(rm|rmdir|del|drop|format|shutdown)\b|--force|reset\s+--hard/i.test(command)) {
+      return 'destructive';
+    }
+    if (/^(git\s+(status|diff|log)|ls\b|dir\b|pwd\b|type\b|cat\b|rg\b)/i.test(command.trim())) {
+      return 'readonly';
+    }
+    return 'mutation';
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**
@@ -207,6 +314,8 @@ export class FounderIdeAdapter implements ExecutionAdapter {
         .then((node) => {
           if (node?.nodeId) {
             this.nodeIdCacheValue = node.nodeId;
+            this.nodeIdCacheUserId =
+              typeof node.userId === 'string' ? node.userId : null;
             this.nodeIdCacheInstall = installId;
           }
         })
@@ -220,5 +329,6 @@ export class FounderIdeAdapter implements ExecutionAdapter {
 
   private nodeIdCacheInstall: string | null = null;
   private nodeIdCacheValue: string | null = null;
+  private nodeIdCacheUserId: string | null = null;
   private nodeIdCacheInFlight = false;
 }

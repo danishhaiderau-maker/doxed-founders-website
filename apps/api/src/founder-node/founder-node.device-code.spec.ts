@@ -357,6 +357,20 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
   });
 
   describe('authorizeDeviceCode', () => {
+    it('mints nodeId when the browser flow does not provide one', async () => {
+      const grant = await svc.createDeviceCode({ installId: 'install-browser' });
+      const result = await svc.authorizeDeviceCode('user-browser', grant.userCode, {
+        label: 'Founder IDE on Windows',
+      });
+      assert.match(result.nodeId, /^fn_[0-9a-f]{64}$/);
+      const polled = await svc.pollDeviceCode(grant.deviceCode);
+      assert.equal(polled.status, 'authorized');
+      assert.equal(
+        (polled as { nodeId: string }).nodeId,
+        result.nodeId,
+      );
+    });
+
     it('binds the founder userId + mints founderId/nodeId/nodeToken', async () => {
       const grant = await svc.createDeviceCode();
       const userId = 'founder-1';
@@ -377,6 +391,26 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       assert.equal(row.nodeId, nodeId);
       assert.equal(row.founderId, userId);
       assert.ok(row.nodeToken, 'nodeToken must be stashed for the next poll');
+    });
+
+    it('does not let a legacy client reassign another founder nodeId', async () => {
+      const nodeId = `fn_${'c'.repeat(64)}`;
+      const ownerGrant = await svc.createDeviceCode();
+      await svc.authorizeDeviceCode('owner-user', ownerGrant.userCode, {
+        nodeId,
+        label: 'Owner laptop',
+      });
+      const attackerGrant = await svc.createDeviceCode();
+
+      await assert.rejects(
+        () =>
+          svc.authorizeDeviceCode('other-user', attackerGrant.userCode, {
+            nodeId,
+            label: 'Other laptop',
+          }),
+        /not available/i,
+      );
+      assert.equal(prisma._nodes.find((node) => node.nodeId === nodeId)?.userId, 'owner-user');
     });
 
     it('rejects an already-authorized grant', async () => {

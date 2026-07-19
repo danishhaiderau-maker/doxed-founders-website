@@ -193,22 +193,42 @@ describe('FounderNodeService.getRuntimeStatus — field sources', () => {
     assert.equal(result.founderNodeOnline, false);
   });
 
-  it('ideHandshakeActive is true when a fresh desktop bridge exists', async () => {
-    const { svc } = makeService(
-      [],
-      [{ updatedAt: new Date(Date.now() - 30_000).toISOString() }], // 30s ago
-      [],
-    );
+  it('ideHandshakeActive is true when the latest node reports a fresh handshake', async () => {
+    const node = {
+      id: 'row-1',
+      userId: 'user-1',
+      nodeId: 'fn_1',
+      label: 'node 1',
+      status: 'online',
+      lastSeenAt: new Date(),
+      appVersion: '0.9.0',
+      founderId: 'user-1',
+      tokenExpiresAt: null,
+      tokenRotatedAt: null,
+      installId: null,
+    };
+    const { svc } = makeService([node]);
+    svc.setIdeHandshakeState(node.nodeId, true);
     const result = await svc.getRuntimeStatus('user-1', '');
     assert.equal(result.ideHandshakeActive, true);
   });
 
-  it('ideHandshakeActive is false when no fresh bridge', async () => {
-    const { svc } = makeService(
-      [],
-      [{ updatedAt: new Date(Date.now() - 10 * 60_000).toISOString() }], // 10 min ago
-      [],
-    );
+  it('ideHandshakeActive is false when the handshake report is stale', async () => {
+    const node = {
+      id: 'row-1',
+      userId: 'user-1',
+      nodeId: 'fn_1',
+      label: 'node 1',
+      status: 'online',
+      lastSeenAt: new Date(),
+      appVersion: '0.9.0',
+      founderId: 'user-1',
+      tokenExpiresAt: null,
+      tokenRotatedAt: null,
+      installId: null,
+    };
+    const { svc } = makeService([node]);
+    svc.setIdeHandshakeState(node.nodeId, true, Date.now() - 31_000);
     const result = await svc.getRuntimeStatus('user-1', '');
     assert.equal(result.ideHandshakeActive, false);
   });

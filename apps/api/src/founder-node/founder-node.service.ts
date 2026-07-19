@@ -173,10 +173,8 @@ export class FounderNodeService {
    *     manifest couldn't be read (status panel shows "unknown").
    *   - `founderNodeOnline`: heartbeat timestamp within `ONLINE_WINDOW_MS`
    *     (5 minutes). Source: `FounderNode.lastSeenAt`.
-   *   - `ideHandshakeActive`: from the desktop-bridge payload (IDE → node IPC
-   *     heartbeat). Workstream B will plumb the IPC handshake state through
-   *     here; for now we derive from the latest bridge payload's session
-   *     activity (updatedAt within the staleness window). Freshness: ≤15s.
+   *   - `ideHandshakeActive`: from the authenticated Founder Node handshake
+   *     report, refreshed every 15 seconds and failed closed after 30 seconds.
    *   - `gatewayReachable`: from the latest heartbeat's `gatewayReachable`
    *     field if present (Workstream B will add a real probe); otherwise
    *     false. Freshness: ≤30s.
@@ -214,14 +212,10 @@ export class FounderNodeService {
 
     // Bridge heartbeat + workspace — surfaces whether an IDE is currently
     // connected (IPC handshake) and which workspace is open.
-    const [bridges, workspaces] = await Promise.all([
-      this.desktopBridge.listForUser(userId).catch(() => []),
-      this.desktopBridge.listWorkspaces(userId).catch(() => []),
-    ]);
+    const workspaces = await this.desktopBridge
+      .listWorkspaces(userId)
+      .catch(() => []);
     const now = Date.now();
-    const freshBridge = bridges.find(
-      (b) => now - new Date(b.updatedAt).getTime() < ONLINE_WINDOW_MS,
-    );
     const latestWorkspace =
       workspaces[0]?.repository ?? workspaces[0]?.title ?? null;
 
@@ -234,7 +228,9 @@ export class FounderNodeService {
       installedVersion: latestNode?.appVersion ?? '',
       latestVersion,
       founderNodeOnline,
-      ideHandshakeActive: !!freshBridge,
+      ideHandshakeActive: latestNode
+        ? this.isIdeHandshakeActive(latestNode.nodeId, now)
+        : false,
       gatewayReachable: this.extractGatewayReachable(latestNode),
       paired: nodes.length > 0,
       workspace: latestWorkspace,
@@ -398,7 +394,7 @@ export class FounderNodeService {
     const deviceCode = randomBytes(32).toString('hex');
     const userCode = this.generateUserCode();
     const expiresAt = new Date(Date.now() + DEVICE_CODE_TTL_MS);
-    const verificationUri = this.buildVerificationUri(userCode);
+    const verificationUri = this.buildVerificationUri();
 
     await this.prisma.founderNodeDeviceCode.create({
       data: {
@@ -562,8 +558,8 @@ export class FounderNodeService {
   async authorizeDeviceCode(
     userId: string,
     userCode: string,
-    opts: { nodeId: string; label: string; platform?: string; appVersion?: string },
-  ): Promise<{ authorized: true; founderId: string }> {
+    opts: { nodeId?: string; label: string; platform?: string; appVersion?: string },
+  ): Promise<{ authorized: true; founderId: string; nodeId: string }> {
     const normalized = userCode.trim().toUpperCase();
     const row = await this.prisma.founderNodeDeviceCode.findUnique({
       where: { userCode: normalized },
@@ -587,14 +583,25 @@ export class FounderNodeService {
     }
 
     const nodeToken = `fn_${randomBytes(32).toString('hex')}`;
+    const requestedNodeId = opts.nodeId?.trim();
+    if (requestedNodeId) {
+      const existingNode = await this.prisma.founderNode.findUnique({
+        where: { nodeId: requestedNodeId },
+        select: { userId: true },
+      });
+      if (existingNode && existingNode.userId !== userId) {
+        throw new BadRequestException('Node identity is not available');
+      }
+    }
+    const nodeId = requestedNodeId || `fn_${randomBytes(32).toString('hex')}`;
     const secretHash = await bcrypt.hash(nodeToken, 10);
     const tokenExpiresAt = new Date(Date.now() + NODE_TOKEN_TTL_MS);
 
     const node = await this.prisma.founderNode.upsert({
-      where: { nodeId: opts.nodeId },
+      where: { nodeId },
       create: {
         userId,
-        nodeId: opts.nodeId,
+        nodeId,
         label: opts.label.trim() || 'Founder Node',
         secretHash,
         status: 'online',
@@ -638,7 +645,7 @@ export class FounderNodeService {
       },
     });
 
-    return { authorized: true, founderId: userId };
+    return { authorized: true, founderId: userId, nodeId: node.nodeId };
   }
 
   /**
@@ -847,9 +854,9 @@ export class FounderNodeService {
     return `${part()}-${part()}`;
   }
 
-  private buildVerificationUri(userCode: string): string {
+  private buildVerificationUri(): string {
     const base = process.env.FOUNDER_OS_WEB_URL?.replace(/\/$/, '') ?? 'https://doxxedcrypto.digital';
-    return `${base}/founder-id/authorize?user_code=${encodeURIComponent(userCode)}`;
+    return `${base}/founder-id/authorize`;
   }
 
   async heartbeat(nodeDbId: string, input: FounderNodeHeartbeat) {

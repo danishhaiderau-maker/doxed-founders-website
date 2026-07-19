@@ -48,6 +48,10 @@ export type IpcCapability =
   | 'openFiles'
   | 'selection'
   | 'taskState'
+  | 'chatPrompt'
+  | 'chatPromptResult'
+  | 'workspaceReadRequest'
+  | 'workspaceReadResult'
   | 'proposedEdit'
   | 'editReviewResult'
   | 'commandRequest'
@@ -162,6 +166,47 @@ export interface IpcTaskState extends IpcEnvelope {
 }
 
 /**
+ * Prompt sent from Founder OS on another device to the paired Founder IDE.
+ * The extension opens the built-in chat surface and submits the prompt to the
+ * FounderOS participant, so the user can watch the agent work locally.
+ */
+import { randomBytes } from 'node:crypto';
+export interface IpcChatPrompt extends IpcEnvelope {
+  type: 'chatPrompt';
+  requestId: string;
+  prompt: string;
+  /** Optional remote session id for attribution and deduplication. */
+  sessionId?: string;
+}
+
+export interface IpcChatPromptResult extends IpcEnvelope {
+  type: 'chatPromptResult';
+  requestId: string;
+  delivered: boolean;
+  error?: string;
+}
+
+export interface IpcWorkspaceReadRequest extends IpcEnvelope {
+  type: 'workspaceReadRequest';
+  requestId: string;
+  path?: string;
+  maxEntries?: number;
+}
+
+export interface IpcWorkspaceReadResult extends IpcEnvelope {
+  type: 'workspaceReadResult';
+  requestId: string;
+  nodes: Array<{
+    path: string;
+    name: string;
+    type: 'file' | 'directory';
+    sizeBytes?: number;
+    modifiedAt?: string;
+  }>;
+  error?: string;
+}
+
+/**
  * Proposed file edit sent for human review BEFORE being applied. The
  * extension renders a diff view and asks the user to approve/reject. The
  * adapter awaits `editReviewResult` before progressing the task.
@@ -175,6 +220,12 @@ export interface IpcProposedEdit extends IpcEnvelope {
   diff: string;
   /** Whether the edit creates the file. */
   creates: boolean;
+  /** Structured edit payload. New peers should prefer this over parsing diff. */
+  edit?: {
+    kind: 'create' | 'overwrite' | 'append' | 'patch';
+    content: string;
+    anchor?: string;
+  };
 }
 
 /** Response to a `proposedEdit`. `approved=false` halts the task. */
@@ -288,6 +339,10 @@ export type IpcMessage =
   | IpcOpenFiles
   | IpcSelection
   | IpcTaskState
+  | IpcChatPrompt
+  | IpcChatPromptResult
+  | IpcWorkspaceReadRequest
+  | IpcWorkspaceReadResult
   | IpcProposedEdit
   | IpcEditReviewResult
   | IpcCommandRequest
@@ -306,7 +361,12 @@ export type IpcMessage =
  * commandRequest (expects commandReviewResult), hello (expects authState or
  * pipe close). Everything else is fire-and-forget.
  */
-export type IpcRequest = IpcHello | IpcProposedEdit | IpcCommandRequest;
+export type IpcRequest =
+  | IpcHello
+  | IpcChatPrompt
+  | IpcWorkspaceReadRequest
+  | IpcProposedEdit
+  | IpcCommandRequest;
 
 /**
  * Messages that respond to a request. `editReviewResult` answers
@@ -314,7 +374,12 @@ export type IpcRequest = IpcHello | IpcProposedEdit | IpcCommandRequest;
  * answered implicitly by `authState` (the adapter emits authState once it
  * has verified the secret).
  */
-export type IpcResponse = IpcAuthState | IpcEditReviewResult | IpcCommandReviewResult;
+export type IpcResponse =
+  | IpcAuthState
+  | IpcChatPromptResult
+  | IpcWorkspaceReadResult
+  | IpcEditReviewResult
+  | IpcCommandReviewResult;
 
 /**
  * Fire-and-forget events. Neither side awaits a response. This is the
@@ -402,17 +467,6 @@ export class NonceTracker {
  * collision by rejecting the second occurrence.
  */
 export function generateNonce(): string {
-  // Use Web Crypto when available (extension host + Node 20+). Falls back to
-  // node:crypto for older runtimes. Both return 16 bytes.
-  if (typeof globalThis.crypto?.randomBytes === 'function') {
-    return globalThis.crypto.randomBytes(16).toString('hex');
-  }
-  // node:crypto path — required in the extension host which exposes Web Crypto
-  // without randomBytes on the global.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { randomBytes } = require('node:crypto') as {
-    randomBytes: (n: number) => { toString: (enc: 'hex') => string };
-  };
   return randomBytes(16).toString('hex');
 }
 
@@ -434,6 +488,10 @@ export function isIpcMessage(value: unknown): value is IpcMessage {
     'openFiles',
     'selection',
     'taskState',
+    'chatPrompt',
+    'chatPromptResult',
+    'workspaceReadRequest',
+    'workspaceReadResult',
     'proposedEdit',
     'editReviewResult',
     'commandRequest',

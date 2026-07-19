@@ -280,11 +280,63 @@ function handleMessage(socket: Socket, raw: unknown, helloTimer: NodeJS.Timeout)
     return;
   }
 
-  // Other message types: future implementations will dispatch these to the
-  // chat provider, edit review UI, terminal approval flow, etc. The server
-  // surface is intentionally narrow in Phase 3 — only the handshake + auth
-  // state + heartbeat. The adapter in Task 5 sends proposedEdit /
-  // commandRequest; the extension renders review UI in a future task.
+  if (
+    msg.type !== 'chatPrompt' &&
+    msg.type !== 'workspaceReadRequest' &&
+    msg.type !== 'proposedEdit' &&
+    msg.type !== 'commandRequest' &&
+    msg.type !== 'cancel'
+  ) {
+    return;
+  }
+
+  // Keep vscode out of the transport-only test process. The action module is
+  // loaded only after a peer has passed the install identity + nonce checks.
+  void import('./action-handlers.js')
+    .then(({ handleAuthenticatedAction }) =>
+      handleAuthenticatedAction(msg, (response) => send(socket, response)),
+    )
+    .catch((error) => {
+      console.error('Founder OS IPC action failed:', error);
+      const reason = error instanceof Error ? error.message : String(error);
+      const failure =
+        msg.type === 'chatPrompt'
+          ? {
+              type: 'chatPromptResult' as const,
+              requestId: msg.requestId,
+              delivered: false,
+              error: reason,
+            }
+          : msg.type === 'workspaceReadRequest'
+            ? {
+                type: 'workspaceReadResult' as const,
+                requestId: msg.requestId,
+                nodes: [],
+                error: reason,
+              }
+            : msg.type === 'proposedEdit'
+              ? {
+                  type: 'editReviewResult' as const,
+                  requestId: msg.requestId,
+                  approved: false,
+                  reason,
+                }
+              : msg.type === 'commandRequest'
+                ? {
+                    type: 'commandReviewResult' as const,
+                    requestId: msg.requestId,
+                    approved: false,
+                    reason,
+                  }
+                : null;
+      if (failure) {
+        send(socket, {
+          ...failure,
+          nonce: generateNonce(),
+          ts: new Date().toISOString(),
+        });
+      }
+    });
 }
 
 function handleHello(socket: Socket, hello: IpcHello): void {

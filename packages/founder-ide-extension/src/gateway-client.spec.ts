@@ -183,6 +183,37 @@ describe('gateway-client — SSE happy path', () => {
       ddollarCost: 0.012,
     });
   });
+
+  it('forwards tool definitions and tool choice to the gateway', async () => {
+    const res = sseResponse(['data: [DONE]\n\n']);
+    const { fetchImpl, calls } = makeFetchSequence([res]);
+    await callGateway(
+      CLIENT,
+      {
+        ...DEFAULT_OPTS,
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'founder.editFile',
+              description: 'Edit a workspace file',
+              parameters: { type: 'object' },
+            },
+          },
+        ],
+        toolChoice: 'auto',
+      },
+      callbacks(),
+      makeToken(),
+      { fetchImpl, sleepImpl: noopSleep },
+    );
+    const body = JSON.parse(String(calls[0]?.init?.body)) as {
+      tools?: Array<{ function?: { name?: string } }>;
+      tool_choice?: string;
+    };
+    assert.equal(body.tools?.[0]?.function?.name, 'founder.editFile');
+    assert.equal(body.tool_choice, 'auto');
+  });
 });
 
 describe('gateway-client — chunk boundary handling', () => {

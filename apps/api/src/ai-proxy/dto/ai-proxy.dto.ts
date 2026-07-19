@@ -1,6 +1,7 @@
 import {
   IsArray,
   IsBoolean,
+  IsIn,
   IsNumber,
   IsObject,
   IsOptional,
@@ -21,6 +22,14 @@ export class ChatCompletionMessageDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
+  tool_call_id?: string;
+
+  @IsOptional()
+  @IsArray()
+  tool_calls?: Array<Record<string, unknown>>;
 }
 
 export class FimCompletionRequestDto {
@@ -89,6 +98,14 @@ export class ChatCompletionRequestDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsArray()
+  tools?: Array<Record<string, unknown>>;
+
+  @IsOptional()
+  @IsIn(['auto', 'required'])
+  tool_choice?: 'auto' | 'required';
 
   /**
    * Non-standard, opt-in. When true, the streaming response emits a leading

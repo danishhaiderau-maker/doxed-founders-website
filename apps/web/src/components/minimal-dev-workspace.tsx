@@ -894,6 +894,7 @@ export function MinimalDevWorkspace({
     (
       dispatchId: string,
       nodeOnline: boolean,
+      targetLabel: string,
       onDone: (outcome: 'delivered' | 'queued' | 'failed', detail?: string) => void,
     ) => {
       stopDispatchPoll();
@@ -914,14 +915,15 @@ export function MinimalDevWorkspace({
           if (status.status === 'DISPATCHED' && !status.delivered) {
             onDone(
               'failed',
-              status.result?.replace(/^error:\s*/i, '') ?? 'Cursor delivery did not complete on your PC',
+              status.result?.replace(/^error:\s*/i, '') ??
+                `${targetLabel} delivery did not complete on your PC`,
             );
             return;
           }
           if (status.status === 'DISPATCHING') {
-            setDispatchNotice('Delivering to Cursor on your PC…');
+            setDispatchNotice(`Delivering to ${targetLabel} on your PC...`);
           } else if (status.status === 'PENDING' && nodeOnline) {
-            setDispatchNotice('Delivering to Cursor on your PC…');
+            setDispatchNotice(`Delivering to ${targetLabel} on your PC...`);
           } else if (status.status === 'PENDING' && !nodeOnline) {
             onDone('queued');
             return;
@@ -1046,6 +1048,11 @@ export function MinimalDevWorkspace({
         },
       ]);
       const ideProvider = sessionForDispatch.ideProvider || 'cursor';
+      const dispatchTarget = ['founder-ide', 'founder_ide', 'void', 'vscode'].includes(
+        ideProvider.toLowerCase(),
+      )
+        ? 'Founder IDE'
+        : 'Cursor';
       try {
         const created = await dispatchToIdeSession(
           accessToken,
@@ -1058,20 +1065,20 @@ export function MinimalDevWorkspace({
         if (!founderNodeHeartbeating) {
           if (accountHasPairedNode) {
             setDispatchNotice(
-              'Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to Cursor.',
+              `Queued on server - Founder Node offline on your PC. Open Founder Node on your desktop to deliver to ${dispatchTarget}.`,
             );
           } else {
             setDispatchNotice(
-              'Queued on server — install and pair Founder Node on your PC to deliver to Cursor.',
+              `Queued on server - install and pair Founder Node on your PC to deliver to ${dispatchTarget}.`,
             );
           }
           setTimeout(() => setDispatchNotice(null), 20_000);
         } else {
-          setDispatchNotice('Delivering to Cursor on your PC…');
-          pollDispatchDelivery(created.id, true, (outcome, detail) => {
+          setDispatchNotice(`Delivering to ${dispatchTarget} on your PC...`);
+          pollDispatchDelivery(created.id, true, dispatchTarget, (outcome, detail) => {
             if (outcome === 'delivered') {
               setOptimisticAgentTyping(true);
-              setDispatchNotice('Delivered to Cursor — agent is working…');
+              setDispatchNotice(`Delivered to ${dispatchTarget} - agent is working...`);
               setTimeout(() => setOptimisticAgentTyping(false), 45_000);
               setTimeout(() => setDispatchNotice(null), 12_000);
             } else if (outcome === 'queued') {
@@ -1081,16 +1088,16 @@ export function MinimalDevWorkspace({
               setTimeout(() => setDispatchNotice(null), 20_000);
             } else {
               setDispatchNotice(
-                `Cursor delivery failed on your PC${detail ? `: ${detail.slice(0, 160)}` : ''}. Check Founder Node tray and that Cursor is open.`,
+                `${dispatchTarget} delivery failed on your PC${detail ? `: ${detail.slice(0, 160)}` : ''}. Check Founder Node tray and that ${dispatchTarget} is open.`,
               );
-              setError(detail ?? 'Cursor delivery failed on your PC');
+              setError(detail ?? `${dispatchTarget} delivery failed on your PC`);
               setTimeout(() => setDispatchNotice(null), 16_000);
             }
           });
         }
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
-        setDispatchNotice(`Cursor dispatch failed: ${msg}`);
+        const msg = e instanceof Error ? e.message : `Failed to dispatch to ${dispatchTarget}`;
+        setDispatchNotice(`${dispatchTarget} dispatch failed: ${msg}`);
         setError(msg);
         setTimeout(() => setDispatchNotice(null), 8000);
       } finally {

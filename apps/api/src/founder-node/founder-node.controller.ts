@@ -22,22 +22,35 @@ import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
 import type { Response } from 'express';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const MANIFEST_PATH =
-  process.env.FOUNDER_IDE_MANIFEST_PATH?.trim() ||
-  join(process.cwd(), '..', '..', 'packages', 'founder-ide', 'updates', 'founder-stack-updates.json');
+const MANIFEST_RELATIVE_PATH = [
+  'packages',
+  'founder-ide',
+  'updates',
+  'founder-stack-updates.json',
+];
 
 const MANIFEST_CACHE_TTL_MS = 60_000;
 let manifestCache: { at: number; body: unknown } | null = null;
+
+function resolveManifestPath(): string {
+  const configured = process.env.FOUNDER_IDE_MANIFEST_PATH?.trim();
+  if (configured) return configured;
+
+  const repoRootCandidate = join(process.cwd(), ...MANIFEST_RELATIVE_PATH);
+  if (existsSync(repoRootCandidate)) return repoRootCandidate;
+
+  return join(process.cwd(), '..', '..', ...MANIFEST_RELATIVE_PATH);
+}
 
 function readManifestBody(): unknown {
   const now = Date.now();
   if (manifestCache && now - manifestCache.at < MANIFEST_CACHE_TTL_MS) {
     return manifestCache.body;
   }
-  const raw = readFileSync(MANIFEST_PATH, 'utf8');
+  const raw = readFileSync(resolveManifestPath(), 'utf8');
   const body = JSON.parse(raw);
   manifestCache = { at: now, body };
   return body;
@@ -265,19 +278,20 @@ export class FounderNodeController {
    *
    * The web UI (apps/web/) is Worker 1's territory if it lives there; this is
    * just the API. The web page calls POST /founder-node/device-code/authorize
-   * with { userCode, nodeId, label }.
+   * with { userCode, label }. The API mints nodeId when older clients do not
+   * supply one, keeping the browser flow free of local secrets.
    */
   @Post('device-code/authorize')
   authorizeDeviceCode(
     @CurrentUser() user: AuthUser,
-    @Body() body: { userCode: string; nodeId: string; label: string; platform?: string; appVersion?: string },
+    @Body() body: { userCode: string; nodeId?: string; label?: string; platform?: string; appVersion?: string },
   ) {
-    if (!body.userCode?.trim() || !body.nodeId?.trim()) {
-      throw new BadRequestException('userCode and nodeId required');
+    if (!body.userCode?.trim()) {
+      throw new BadRequestException('userCode required');
     }
     return this.nodes.authorizeDeviceCode(user.id, body.userCode, {
       nodeId: body.nodeId,
-      label: body.label,
+      label: body.label ?? 'Founder IDE',
       platform: body.platform,
       appVersion: body.appVersion,
     });
@@ -493,7 +507,10 @@ export class FounderNodeController {
   @UseGuards(FounderNodeGuard)
   @Get('pending-dispatches')
   pendingDispatches(@Req() req: { founderNode: FounderNodeRequestUser }) {
-    return this.ideBridge.getPendingDispatches(req.founderNode.userId);
+    return this.ideBridge.getPendingDispatches(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
   }
 
   /** Claim one pending dispatch before executing — prevents double paste races. */
@@ -503,7 +520,11 @@ export class FounderNodeController {
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('id') id: string,
   ) {
-    return this.ideBridge.claimDispatch(req.founderNode.userId, id);
+    return this.ideBridge.claimDispatch(
+      req.founderNode.userId,
+      id,
+      req.founderNode.nodeId,
+    );
   }
 
   /**
@@ -519,6 +540,11 @@ export class FounderNodeController {
     @Body() body: { result?: string; error?: string },
   ) {
     const result = body.error ? `error: ${body.error}` : body.result;
-    return this.ideBridge.markDispatched(id, result);
+    return this.ideBridge.markDispatched(
+      id,
+      result,
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
   }
 }

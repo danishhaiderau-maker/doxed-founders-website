@@ -66,7 +66,12 @@ import {
   disconnectFounderIde,
   type ConnectResult,
 } from './connect-ide';
-import { CLAUDE_CODE_CAPABILITIES, CURSOR_CAPABILITIES } from '@dcf/utils';
+import {
+  CLAUDE_CODE_CAPABILITIES,
+  CURSOR_CAPABILITIES,
+  type BridgeCapabilityReport,
+  type BridgeSession,
+} from '@dcf/utils';
 import { FOUNDER_NODE_LOCAL_VERSION } from './app-version';
 import type { FounderNodeHeartbeatExt } from './sync-client';
 import {
@@ -153,6 +158,7 @@ const SYNC_INTERVAL_MS = 30_000;
 const SESSION_MESSAGE_SYNC_MS = 3_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
+const IDE_HANDSHAKE_REPORT_MS = 15_000;
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
 
 // ─── File logging bootstrap ────────────────────────────────────────────────
@@ -219,6 +225,8 @@ if (!gotSingleInstanceLock) {
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let ideTooltipTimer: ReturnType<typeof setInterval> | null = null;
+let ideHandshakeReportTimer: ReturnType<typeof setInterval> | null = null;
+let nodeConfigWatchPath: string | null = null;
 const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
 let syncCycleInFlight = false;
@@ -252,6 +260,131 @@ let pairingInProgress = false;
  * Owned here so the heartbeat loop can read ideHandshakeActive from it.
  */
 let ideIpcClient: IdeIpcClient | null = null;
+
+function ensureIdeIpcClient(vaultRoot: string): boolean {
+  if (ideIpcClient || !readNodeConfig(vaultRoot)) return false;
+
+  ideIpcClient = startIdeIpcClient();
+  ideIpcClient.on('connected', () => {
+    const config = readNodeConfig(vaultRoot);
+    if (config) {
+      reportIdeHandshake(
+        config.apiBaseUrl,
+        config.nodeId,
+        config.nodeToken,
+        true,
+      );
+    }
+  });
+  ideIpcClient.on('disconnected', () => {
+    const config = readNodeConfig(vaultRoot);
+    if (config) {
+      reportIdeHandshake(
+        config.apiBaseUrl,
+        config.nodeId,
+        config.nodeToken,
+        false,
+      );
+    }
+  });
+  return true;
+}
+
+function reportCurrentIdeHandshake(vaultRoot: string): void {
+  const config = readNodeConfig(vaultRoot);
+  if (!config) return;
+  reportIdeHandshake(
+    config.apiBaseUrl,
+    config.nodeId,
+    config.nodeToken,
+    ideIpcClient?.isHandshakeActive() ?? false,
+  );
+}
+
+function startIdeHandshakeReporting(vaultRoot: string): void {
+  if (ideHandshakeReportTimer) return;
+  reportCurrentIdeHandshake(vaultRoot);
+  ideHandshakeReportTimer = setInterval(
+    () => reportCurrentIdeHandshake(vaultRoot),
+    IDE_HANDSHAKE_REPORT_MS,
+  );
+}
+
+function disconnectIdeIpcClient(vaultRoot: string): void {
+  const config = readNodeConfig(vaultRoot);
+  if (config) {
+    reportIdeHandshake(
+      config.apiBaseUrl,
+      config.nodeId,
+      config.nodeToken,
+      false,
+    );
+  }
+  ideIpcClient?.disconnect();
+  ideIpcClient = null;
+}
+
+function watchForNodeConfig(vaultRoot: string): void {
+  if (nodeConfigWatchPath) return;
+
+  nodeConfigWatchPath = path.join(vaultRoot, 'node-config.json');
+  fs.watchFile(
+    nodeConfigWatchPath,
+    { interval: 2_000, persistent: false },
+    () => {
+      const config = readNodeConfig(vaultRoot);
+      if (!config || !ensureIdeIpcClient(vaultRoot)) return;
+
+      pairingInProgress = false;
+      pairWindow?.close();
+      refreshTrayMenu(vaultRoot);
+      startSyncLoop(vaultRoot);
+      configureUpdateChecks({ apiBaseUrl: config.apiBaseUrl });
+      configureIdeUpdates({
+        apiBaseUrl: config.apiBaseUrl,
+        channel:
+          (process.env.FOUNDER_STACK_CHANNEL as
+            | 'stable'
+            | 'beta'
+            | 'insider'
+            | undefined) ?? 'stable',
+        allowUnsigned: process.env.FOUNDER_STACK_ALLOW_UNSIGNED === '1',
+        handshakeProbe: () => ideIpcClient?.isHandshakeActive() ?? false,
+      });
+      notifyDesktop(
+        'Founder Node connected',
+        'Your Founder IDE is now available for secure remote control.',
+      );
+    },
+  );
+}
+
+const FOUNDER_IDE_CAPABILITIES: BridgeCapabilityReport = {
+  discoverWorkspaces: false,
+  listRecentSessions: true,
+  resumeSession: true,
+  sendPrompt: true,
+  streamEvents: true,
+  getGitState: false,
+  getTerminal: true,
+  getDeployments: false,
+  getAgents: true,
+};
+
+function discoverFounderIdeSessions(nodeId: string): BridgeSession[] {
+  if (!ideIpcClient?.isHandshakeActive()) return [];
+  return [
+    {
+      id: `founder-ide:${nodeId}`,
+      workspaceId: `founder-ide:${nodeId}`,
+      title: 'Founder IDE',
+      subtitle: 'Connected through Founder Node',
+      ideProvider: 'founder-ide',
+      restorable: true,
+      lastActiveAt: new Date().toISOString(),
+    },
+  ];
+}
 
 const inferenceUsageReporter = new InferenceUsageReporter();
 
@@ -334,6 +467,7 @@ function handleAuthFailure(vaultRoot: string): void {
 
   lastSyncError = authFailureUserMessage();
   stopBackgroundLoops(loops);
+  disconnectIdeIpcClient(vaultRoot);
   clearNodeConfig(vaultRoot);
   syncCycleInFlight = false;
   syncJobInFlight = false;
@@ -491,7 +625,11 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
   try {
     const cursorSessions = discoverCursorSessions();
     const claudeSessions = discoverClaudeCodeSessions();
-    const sessions = [...cursorSessions, ...claudeSessions];
+    const sessions = [
+      ...discoverFounderIdeSessions(config.nodeId),
+      ...cursorSessions,
+      ...claudeSessions,
+    ];
 
     await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
       ...lastCachedHeartbeat,
@@ -501,7 +639,7 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
 
     // Claim IDE dispatches on the fast loop so a Send from Founder OS reaches
     // Cursor within a few seconds, not only on the 30s full sync.
-    await processPendingDispatches(vaultRoot);
+    await processPendingDispatches(vaultRoot, ideIpcClient);
   } catch (err) {
     console.warn('Session message sync failed:', err);
   } finally {
@@ -542,7 +680,11 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     const claudeSessions = discoverClaudeCodeSessions();
     const workspaces = [...cursorWorkspaces, ...claudeWorkspaces];
     const agents = [...cursorAgents, ...claudeAgents];
-    const sessions = [...cursorSessions, ...claudeSessions];
+    const sessions = [
+      ...discoverFounderIdeSessions(config.nodeId),
+      ...cursorSessions,
+      ...claudeSessions,
+    ];
     const activeWorkspace = workspaces[0];
 
     // The cloud persists `desktopBridge` and exposes it via
@@ -578,7 +720,11 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
           : enrichedDesktopBridge.openFilePaths,
       },
       capabilities: CURSOR_CAPABILITIES,
-      ideCapabilities: { cursor: CURSOR_CAPABILITIES, claude_code: CLAUDE_CODE_CAPABILITIES },
+      ideCapabilities: {
+        cursor: CURSOR_CAPABILITIES,
+        claude_code: CLAUDE_CODE_CAPABILITIES,
+        founder_ide: FOUNDER_IDE_CAPABILITIES,
+      },
       desktop: {
         online: true,
         platform: process.platform,
@@ -781,6 +927,7 @@ function buildTrayMenu(vaultRoot: string) {
       click: () => {
         void (async () => {
           await postLogout(config.apiBaseUrl, config.nodeId, config.nodeToken);
+          disconnectIdeIpcClient(vaultRoot);
           clearNodeConfig(vaultRoot);
           authRecoveryHandled = false;
           pairingInProgress = false;
@@ -808,6 +955,7 @@ function buildTrayMenu(vaultRoot: string) {
           });
           if (choice.response !== 0) return;
           await postRevoke(config.apiBaseUrl, config.nodeId);
+          disconnectIdeIpcClient(vaultRoot);
           clearNodeConfig(vaultRoot);
           authRecoveryHandled = false;
           pairingInProgress = false;
@@ -1002,6 +1150,8 @@ app.whenReady().then(() => {
   ensureOnlyOneFounderNodeProcess();
 
   const config = readNodeConfig(vaultRoot);
+  watchForNodeConfig(vaultRoot);
+  startIdeHandshakeReporting(vaultRoot);
   if (!config) {
     if (isWindows() && app.isPackaged) {
       void tryAddWindowsFirewallRules().catch(console.warn);
@@ -1023,19 +1173,7 @@ app.whenReady().then(() => {
   // bridge workspace state to the API via Founder Node. The client retries
   // in the background; if no IDE is running yet, it'll connect when one
   // starts. Safe to call when not paired (resolves false immediately).
-  if (config) {
-    ideIpcClient = startIdeIpcClient();
-    // Forward handshake events to the API so FounderIdeAdapter can decide
-    // isConnected() in real time.
-    ideIpcClient.on('connected', () => {
-      const c = readNodeConfig(vaultRoot);
-      if (c) reportIdeHandshake(c.apiBaseUrl, c.nodeId, c.nodeToken, true);
-    });
-    ideIpcClient.on('disconnected', () => {
-      const c = readNodeConfig(vaultRoot);
-      if (c) reportIdeHandshake(c.apiBaseUrl, c.nodeId, c.nodeToken, false);
-    });
-  }
+  if (config) ensureIdeIpcClient(vaultRoot);
 
   configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
   startAutoUpdateChecks();
@@ -1046,11 +1184,9 @@ app.whenReady().then(() => {
     apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API,
     channel: (process.env.FOUNDER_STACK_CHANNEL as 'stable' | 'beta' | 'insider' | undefined) ?? 'stable',
     allowUnsigned: process.env.FOUNDER_STACK_ALLOW_UNSIGNED === '1',
-    // The IPC handshake probe is wired by Workstream B's ide-ipc-client. Until
-    // that lands we treat the handshake as "always established" so the install
-    // flow completes; Workstream B will replace this no-op probe with the real
-    // IPC client. See apps/founder-node/src/ide-ipc-client.ts (B-owned).
-    handshakeProbe: () => true,
+    // An IDE update is healthy only after Founder Node completes the
+    // authenticated named-pipe handshake with the installed extension.
+    handshakeProbe: () => ideIpcClient?.isHandshakeActive() ?? false,
   });
   startIdeAutoUpdateChecks();
   // Refresh the tray tooltip periodically so IDE-update state transitions
@@ -1215,9 +1351,7 @@ app.whenReady().then(() => {
       }
 
       // Phase 3 — start the IPC client on legacy pair too.
-      if (!ideIpcClient) {
-        ideIpcClient = startIdeIpcClient();
-      }
+      ensureIdeIpcClient(vaultRoot);
     },
   );
 
@@ -1334,15 +1468,7 @@ app.whenReady().then(() => {
         // Phase 3 — start the IPC client now that we have credentials +
         // install identity. If the IDE isn't running yet, the client will
         // retry in the background until it is.
-        if (!ideIpcClient) {
-          ideIpcClient = startIdeIpcClient();
-          ideIpcClient.on('connected', () => {
-            reportIdeHandshake(apiBaseUrl, pair.nodeId, pair.nodeToken, true);
-          });
-          ideIpcClient.on('disconnected', () => {
-            reportIdeHandshake(apiBaseUrl, pair.nodeId, pair.nodeToken, false);
-          });
-        }
+        ensureIdeIpcClient(vaultRoot);
 
         notifyDesktop(
           'Founder Node connected',
@@ -1377,8 +1503,15 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBackgroundLoops(loops);
-  ideIpcClient?.disconnect();
-  ideIpcClient = null;
+  if (ideHandshakeReportTimer) {
+    clearInterval(ideHandshakeReportTimer);
+    ideHandshakeReportTimer = null;
+  }
+  if (nodeConfigWatchPath) {
+    fs.unwatchFile(nodeConfigWatchPath);
+    nodeConfigWatchPath = null;
+  }
+  disconnectIdeIpcClient(defaultVaultRoot());
   if (ideTooltipTimer) {
     clearInterval(ideTooltipTimer);
     ideTooltipTimer = null;

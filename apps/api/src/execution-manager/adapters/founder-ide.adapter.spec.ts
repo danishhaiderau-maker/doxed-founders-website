@@ -8,8 +8,7 @@
  *   - readWorkspace() returns [] when disconnected
  *   - applyEdits() returns 'ipc_not_connected' per edit when disconnected
  *   - runCommand() returns exitCode 126 when disconnected
- *   - applyEdits() / runCommand() surface 'ipc_dispatch_not_wired' when
- *     connected (the HTTPS-to-IPC relay is a follow-up)
+ *   - connected reads, edits, and commands traverse the user-scoped relay
  *
  * Uses a stub FounderNodeService so the tests run offline (no Prisma).
  *
@@ -49,9 +48,38 @@ class StubFounderNodeService {
     return entry.active;
   }
 
-  async findNodeByInstallId(installId: string): Promise<{ nodeId: string } | null> {
+  async findNodeByInstallId(
+    installId: string,
+  ): Promise<{ nodeId: string; userId: string } | null> {
     if (this.findNodeError) throw this.findNodeError;
-    return this.installMap.has(installId) ? { nodeId: this.installMap.get(installId)! } : null;
+    return this.installMap.has(installId)
+      ? { nodeId: this.installMap.get(installId)!, userId: 'user-1' }
+      : null;
+  }
+}
+
+class StubIdeBridgeService {
+  result = JSON.stringify({ kind: 'chat', delivered: true });
+  readonly prompts: string[] = [];
+
+  async createDispatch(
+    _userId: string,
+    _sessionId: string,
+    prompt: string,
+    _provider: string,
+  ) {
+    this.prompts.push(prompt);
+    return { id: `dispatch-${this.prompts.length}`, status: 'PENDING' };
+  }
+
+  async getDispatchStatus(_userId: string, id: string) {
+    return {
+      id,
+      status: 'DISPATCHED',
+      result: this.result,
+      failed: false,
+      delivered: true,
+    };
   }
 }
 
@@ -150,16 +178,23 @@ describe('FounderIdeAdapter (Phase 3 fail-closed IPC dispatch)', () => {
       assert.deepEqual(result, []);
     });
 
-    it('returns [] when connected (relay not yet wired)', async () => {
+    it('returns workspace nodes from the authenticated relay', async () => {
       process.env.FOUNDER_IDE_INSTALL_ID = 'install-abc';
       const nodes = new StubFounderNodeService();
       nodes.installMap.set('install-abc', 'node-1');
       nodes.setHandshake('node-1', true);
-      const adapter = new FounderIdeAdapter(nodes as never);
+      const bridge = new StubIdeBridgeService();
+      bridge.result = JSON.stringify({
+        kind: 'workspace',
+        nodes: [{ path: 'src', name: 'src', type: 'directory' }],
+      });
+      const adapter = new FounderIdeAdapter(nodes as never, bridge as never);
       await waitFor(() => adapter.isConnected(), 200);
       assert.equal(adapter.isConnected(), true);
       const result = await adapter.readWorkspace();
-      assert.deepEqual(result, []);
+      assert.equal(result.length, 1);
+      assert.equal(result[0]?.path, 'src');
+      assert.match(bridge.prompts[0] ?? '', /workspaceReadRequest/);
     });
   });
 
@@ -178,19 +213,22 @@ describe('FounderIdeAdapter (Phase 3 fail-closed IPC dispatch)', () => {
       assert.equal(result[1].error, 'ipc_not_connected');
     });
 
-    it('returns ipc_dispatch_not_wired per edit when connected', async () => {
+    it('returns an approved edit outcome from the authenticated relay', async () => {
       process.env.FOUNDER_IDE_INSTALL_ID = 'install-abc';
       const nodes = new StubFounderNodeService();
       nodes.installMap.set('install-abc', 'node-1');
       nodes.setHandshake('node-1', true);
-      const adapter = new FounderIdeAdapter(nodes as never);
+      const bridge = new StubIdeBridgeService();
+      bridge.result = JSON.stringify({ kind: 'edit', approved: true });
+      const adapter = new FounderIdeAdapter(nodes as never, bridge as never);
       await waitFor(() => adapter.isConnected(), 500);
       const result = await adapter.applyEdits([
         { path: '/a.txt', kind: 'overwrite', content: 'x' },
       ]);
       assert.equal(result.length, 1);
-      assert.equal(result[0].ok, false);
-      assert.equal(result[0].error, 'ipc_dispatch_not_wired');
+      assert.equal(result[0].ok, true);
+      assert.equal(result[0].bytesWritten, 1);
+      assert.match(bridge.prompts[0] ?? '', /proposedEdit/);
     });
   });
 
@@ -204,16 +242,25 @@ describe('FounderIdeAdapter (Phase 3 fail-closed IPC dispatch)', () => {
       assert.equal(result.stdout, '');
     });
 
-    it('returns exitCode 126 + ipc_dispatch_not_wired when connected', async () => {
+    it('returns command output from the authenticated relay', async () => {
       process.env.FOUNDER_IDE_INSTALL_ID = 'install-abc';
       const nodes = new StubFounderNodeService();
       nodes.installMap.set('install-abc', 'node-1');
       nodes.setHandshake('node-1', true);
-      const adapter = new FounderIdeAdapter(nodes as never);
+      const bridge = new StubIdeBridgeService();
+      bridge.result = JSON.stringify({
+        kind: 'command',
+        approved: true,
+        exitCode: 0,
+        stdout: 'ok\n',
+        stderr: '',
+      });
+      const adapter = new FounderIdeAdapter(nodes as never, bridge as never);
       await waitFor(() => adapter.isConnected(), 500);
       const result = await adapter.runCommand('npm test');
-      assert.equal(result.exitCode, 126);
-      assert.equal(result.stderr, 'ipc_dispatch_not_wired');
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.stdout, 'ok\n');
+      assert.match(bridge.prompts[0] ?? '', /commandRequest/);
     });
   });
 

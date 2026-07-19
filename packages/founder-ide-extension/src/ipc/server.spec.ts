@@ -100,7 +100,7 @@ function connectAndHello(opts: {
         type: 'hello',
         nonce: generateNonce(),
         ts: new Date().toISOString(),
-        protocolVersion,
+        protocolVersion: protocolVersion as typeof IPC_PROTOCOL_VERSION,
         installId,
         ipcSecret,
         capabilities: ['workspace', 'heartbeat'],

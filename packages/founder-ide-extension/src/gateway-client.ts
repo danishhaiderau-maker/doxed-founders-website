@@ -34,14 +34,32 @@
  *   - `redactSecrets()` strips `Authorization`, `nodeToken`, `api_key` from
  *     every log line so the output channel never leaks credentials.
  */
-import type { CancellationToken } from 'vscode';
+export interface GatewayCancellationToken {
+  readonly isCancellationRequested: boolean;
+  onCancellationRequested(listener: () => unknown): { dispose(): unknown };
+}
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
 export interface GatewayMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   name?: string;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+}
+
+export interface GatewayToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters?: object;
+  };
 }
 
 export interface GatewayCallOptions {
@@ -57,6 +75,9 @@ export interface GatewayCallOptions {
   timeoutMs?: number;
   /** Override the 3-attempt retry cap. Set to 0 to disable retries. */
   maxRetries?: number;
+  /** OpenAI-compatible tools made available to the routed model. */
+  tools?: GatewayToolDefinition[];
+  toolChoice?: 'auto' | 'required';
 }
 
 export interface GatewayFounderOsMetadata {
@@ -235,7 +256,7 @@ export async function callGateway(
   client: GatewayClient,
   options: GatewayCallOptions,
   callbacks: StreamCallbacks,
-  token: CancellationToken,
+  token: GatewayCancellationToken,
   extra: CallGatewayExtraOptions = {},
 ): Promise<void> {
   const url = `${client.baseUrl}/chat/completions`;
@@ -279,6 +300,8 @@ export async function callGateway(
       if (typeof options.temperature === 'number') body.temperature = options.temperature;
       if (typeof options.maxTokens === 'number') body.max_tokens = options.maxTokens;
       if (options.founderOsMetadata) body.founder_os_metadata = true;
+      if (options.tools?.length) body.tools = options.tools;
+      if (options.tools?.length && options.toolChoice) body.tool_choice = options.toolChoice;
 
       log('info', `→ POST ${url} (attempt ${attempt + 1}/${maxRetries + 1})`);
 
@@ -701,7 +724,7 @@ export function validateFimResponse(body: unknown): asserts body is {
 export async function callFim(
   client: GatewayClient,
   req: FimRequest,
-  token: CancellationToken,
+  token: GatewayCancellationToken,
   extra: CallGatewayExtraOptions = {},
 ): Promise<FimResponse> {
   validateFimRequest(req);
@@ -761,7 +784,7 @@ export async function gatewayJson<T = unknown>(
   method: 'GET' | 'POST',
   path: string,
   body?: unknown,
-  token?: CancellationToken,
+  token?: GatewayCancellationToken,
 ): Promise<T> {
   const url = `${client.baseUrl}${path}`;
   const controller = new AbortController();
