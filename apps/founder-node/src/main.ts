@@ -116,6 +116,7 @@ import {
   runFounderLocalAsync,
 } from './founder-cloud';
 import { startDeploymentRuntimeStatusServer } from './deployment-mode-status';
+import { isEmbeddedRelayMode } from './runtime-mode';
 // Phase 2 — device-code first-run + pairing state machine.
 import {
   newInstallId,
@@ -163,6 +164,7 @@ const SESSION_MESSAGE_SYNC_MS = 3_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 const IDE_HANDSHAKE_REPORT_MS = 15_000;
+const EMBEDDED_RELAY_MODE = isEmbeddedRelayMode();
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
 
 // ─── File logging bootstrap ────────────────────────────────────────────────
@@ -343,7 +345,9 @@ function watchForNodeConfig(vaultRoot: string): void {
       pairWindow?.close();
       refreshTrayMenu(vaultRoot);
       startSyncLoop(vaultRoot);
-      configureUpdateChecks({ apiBaseUrl: config.apiBaseUrl });
+      if (!EMBEDDED_RELAY_MODE) {
+        configureUpdateChecks({ apiBaseUrl: config.apiBaseUrl });
+      }
       configureIdeUpdates({
         apiBaseUrl: config.apiBaseUrl,
         channel:
@@ -356,7 +360,7 @@ function watchForNodeConfig(vaultRoot: string): void {
         handshakeProbe: () => ideIpcClient?.isHandshakeActive() ?? false,
       });
       notifyDesktop(
-        'Founder Node connected',
+        EMBEDDED_RELAY_MODE ? 'Founder IDE connected' : 'Founder Node connected',
         'Your Founder IDE is now available for secure remote control.',
       );
     },
@@ -478,7 +482,9 @@ function handleAuthFailure(vaultRoot: string): void {
   refreshTrayMenu(vaultRoot);
 
   const showDialog =
-    app.isPackaged && Date.now() - lastAuthDialogAt >= AUTH_DIALOG_COOLDOWN_MS;
+    !EMBEDDED_RELAY_MODE &&
+    app.isPackaged &&
+    Date.now() - lastAuthDialogAt >= AUTH_DIALOG_COOLDOWN_MS;
 
   void (async () => {
     if (showDialog) {
@@ -498,7 +504,14 @@ function handleAuthFailure(vaultRoot: string): void {
     } else if (!app.isPackaged) {
       notifyDesktop('Founder Node needs pairing', lastSyncError);
     }
-    openPairWindow();
+    if (EMBEDDED_RELAY_MODE) {
+      notifyDesktop(
+        'Founder IDE sign-in required',
+        'Open Founder IDE and choose Connect this Founder IDE.',
+      );
+    } else {
+      openPairWindow();
+    }
   })();
 }
 
@@ -979,15 +992,15 @@ function buildTrayMenu(vaultRoot: string) {
   if (ideState === 'failed') {
     template.push({
       label: getIdeUpdateFailureReason()
-        ? `Founder Stack update failed — retry…`
-        : `Founder Stack update failed — retry…`,
+        ? `Founder IDE update failed — retry…`
+        : `Founder IDE update failed — retry…`,
       click: () => {
         checkForIdeUpdates({ silent: false }).catch(console.error);
       },
     });
   } else if (idePending) {
     template.push({
-      label: `Install Founder Stack v${idePending.version}…`,
+      label: `Install Founder IDE v${idePending.version}…`,
       click: () => {
         downloadVerifyInstallAndHandshake(idePending).catch(console.error);
       },
@@ -1003,7 +1016,7 @@ function buildTrayMenu(vaultRoot: string) {
       },
     },
     {
-      label: 'Check for Founder Stack updates…',
+      label: 'Check for Founder IDE updates…',
       click: () => {
         checkForIdeUpdates({ silent: false }).catch(console.error);
       },
@@ -1120,6 +1133,7 @@ function refreshTrayMenu(vaultRoot: string): void {
 if (gotSingleInstanceLock) {
   app.on('second-instance', () => {
     ensureOnlyOneFounderNodeProcess();
+    if (EMBEDDED_RELAY_MODE) return;
     if (pairWindow && !pairWindow.isDestroyed()) {
       pairWindow.show();
       pairWindow.focus();
@@ -1141,15 +1155,19 @@ app.whenReady().then(() => {
   const nodeId = loadOrCreateNodeId(vaultRoot);
   ensureVault(vaultRoot, nodeId);
 
-  const icon = loadAppIcon();
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
-  tray.setToolTip(`Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`);
-  bindUpdateTray(tray);
-  setUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
-  bindIdeUpdateTray(tray);
-  setIdeUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
-  refreshTrayMenu(vaultRoot);
-  tray.on('click', () => tray?.popUpContextMenu());
+  if (!EMBEDDED_RELAY_MODE) {
+    const icon = loadAppIcon();
+    tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
+    tray.setToolTip(`Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`);
+    bindUpdateTray(tray);
+    setUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
+    bindIdeUpdateTray(tray);
+    setIdeUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
+    refreshTrayMenu(vaultRoot);
+    tray.on('click', () => tray?.popUpContextMenu());
+  } else {
+    console.log('[embedded] Founder IDE owns the background relay UI and updates');
+  }
 
   ensureOnlyOneFounderNodeProcess();
 
@@ -1160,7 +1178,7 @@ app.whenReady().then(() => {
     if (isWindows() && app.isPackaged) {
       void tryAddWindowsFirewallRules().catch(console.warn);
     }
-    openPairWindow();
+    if (!EMBEDDED_RELAY_MODE) openPairWindow();
   } else {
     startSyncLoop(vaultRoot);
   }
@@ -1169,7 +1187,8 @@ app.whenReady().then(() => {
     app.setLoginItemSettings({
       openAtLogin: true,
       openAsHidden: true,
-      name: 'Founder Node',
+      name: EMBEDDED_RELAY_MODE ? 'Founder IDE' : 'Founder Node',
+      ...(EMBEDDED_RELAY_MODE ? { args: ['--embedded-founder-ide'] } : {}),
     });
   }
 
@@ -1185,9 +1204,11 @@ app.whenReady().then(() => {
     ensureIdeIpcClient(vaultRoot);
   }
 
-  configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
-  startAutoUpdateChecks();
-  // Phase 5 (Workstream E) — IDE / Founder Stack updater. Mirrors the Node
+  if (!EMBEDDED_RELAY_MODE) {
+    configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
+    startAutoUpdateChecks();
+  }
+  // Phase 5 (Workstream E) — Founder IDE updater. Mirrors the Node
   // updater but adds SHA-256 + Authenticode + health-handshake + rollback.
   // Channel defaults to "stable"; beta/insider can opt into allowUnsigned.
   configureIdeUpdates({
@@ -1202,15 +1223,17 @@ app.whenReady().then(() => {
   // Refresh the tray tooltip periodically so IDE-update state transitions
   // (downloading → verifying → installing → idle) surface alongside the Node
   // version. The menu itself refreshes via setIdeUpdateMenuRefresh above.
-  ideTooltipTimer = setInterval(() => {
-    const suffix = ideUpdateTooltipSuffix();
-    tray?.setToolTip(
-      suffix
-        ? `Founder Node v${FOUNDER_NODE_LOCAL_VERSION} — ${suffix}`
-        : `Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`,
-    );
-  }, 5_000);
-  setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
+  if (tray) {
+    ideTooltipTimer = setInterval(() => {
+      const suffix = ideUpdateTooltipSuffix();
+      tray?.setToolTip(
+        suffix
+          ? `Founder Node v${FOUNDER_NODE_LOCAL_VERSION} — ${suffix}`
+          : `Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`,
+      );
+    }, 5_000);
+    setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
+  }
 
   // Phase 7 — start the Private-mode runtime-status endpoint on 127.0.0.1.
   // Best-effort: if the port is busy (dev server already on :7002) it logs a
@@ -1230,7 +1253,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('get-pair-defaults', async () => ({
     apiBaseUrl: DEFAULT_API,
-    label: `${os.hostname()} Founder Node`,
+    label: `${os.hostname()} ${EMBEDDED_RELAY_MODE ? 'Founder IDE' : 'Founder Node'}`,
   }));
 
   // ─── Founder OS AI Proxy — IDE connect/disconnect ────────────────────────

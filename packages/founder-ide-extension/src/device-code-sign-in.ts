@@ -218,7 +218,7 @@ export function writeAuthorizedConfig(
   const label =
     typeof existing.label === 'string' && existing.label
       ? existing.label
-      : `${os.hostname()} Founder Node`;
+      : `${os.hostname()} Founder IDE`;
   const merged = {
     ...existing,
     version: 1 as const,

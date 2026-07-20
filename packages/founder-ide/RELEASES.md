@@ -1,5 +1,56 @@
 # Founder IDE — releases
 
+## 0.9.3 (Void fork) — ONE-APP TEST CANDIDATE
+
+> **Status: locally verified, pending CI/signing/production deployment.**
+> Founder IDE is now the only user-facing application. The existing Founder
+> Node runtime is embedded under `resources/founder-relay` and runs hidden as
+> the IDE's website and local-infrastructure connector.
+
+### What changed
+
+- **One installed app.** The Windows pipeline packages the unpacked relay into
+  Founder IDE before creating the IDE installer. There is no second Node
+  sub-installer, Apps entry, Start Menu item, tray, or updater.
+- **Automatic background relay.** The IDE extension starts the embedded
+  runtime before its chat UI initializes, strips the extension host's
+  `ELECTRON_RUN_AS_NODE` flag, and records a secret-free startup trace.
+- **Shared Founder ID connection.** X/device-code authorization writes the
+  shared `FounderVault` identity used by chat, website sync, IPC, and the
+  background relay.
+- **Upgrade cleanup.** The bootstrapper uninstalls legacy standalone Founder
+  Node builds, removes obsolete Founder Stack files/shortcuts/startup entries,
+  and preserves `FounderVault` and IDE settings.
+- **One update/uninstall owner.** Founder IDE owns relay updates and removes
+  both the embedded payload and its login entry on uninstall.
+- **Installer truthfulness retained.** Public/Hybrid/Private selection still
+  fails closed when optional Private-mode binaries are not bundled.
+
+### Verification
+
+- Extension: 71 tests passing.
+- Embedded relay: 33 tests passing.
+- API/dispatch/auth: 169 tests passing.
+- Authenticated live named-pipe read returned 25 entries from the open
+  workspace.
+- Local status endpoint and embedded IDE handshake verified.
+- Inno Setup one-app bootstrapper syntax compile verified.
+
+### Expected artifacts
+
+- `Founder-IDE-Setup-0.9.3.exe`
+- `Founder-IDE-Setup-0.9.3.exe.sha256`
+- `founder-ide-0.9.3-sbom.spdx.json`
+
+### External gates
+
+- Azure Trusted Signing credentials/account validation.
+- Green clean-runner Windows installer build and clean-VM install.
+- Production API/Railway rollout for the X/device-code routes.
+- Production website-to-laptop staging smoke and soak test.
+
+---
+
 ## 0.9.2 (Void fork) — RC — PENDING CI GREEN + SIGNING
 
 > **Status: Release Candidate.** Re-bundles Founder Node (which 0.9.1

@@ -38,6 +38,10 @@ import {
 import { PairingStatusBar } from './pairing-status-bar';
 import { startIpcServer, stopIpcServer } from './ipc/server';
 import { FOUNDER_TOOL_IDS } from './tool-names';
+import {
+  embeddedRelayExecutable,
+  launchEmbeddedRelay,
+} from './embedded-relay';
 
 let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
@@ -50,6 +54,8 @@ let currentCreds: FounderOsCredentials | null = null;
 let pairingStatusBar: PairingStatusBar | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  startEmbeddedRelay();
+
   // Status bar (connection state) ----------------------------------------------------
   connectionStatusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -127,14 +133,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // First-pass registration (synchronous so the model picker populates fast).
   registerOrNotify(context);
 
-  // Phase 3 — start the named-pipe IPC server so the Founder Node tray can
+  // Phase 3 — start the named-pipe IPC server so the embedded relay can
   // connect to this IDE instance. The server only starts if we have a config
   // with an installId (otherwise it's a no-op until the user signs in).
   // Best-effort: failure to start (e.g. another IDE instance already bound)
   // logs a warning but does not crash activation.
   if (vaultFileExists()) {
     // Legacy paired vaults predate install.json. Mint the local pipe identity
-    // before starting the server so either the IDE or Founder Node may launch
+    // before starting the server so either the IDE or relay may launch
     // first and both converge on the same authenticated endpoint.
     ensureInstallIdentity();
   }
@@ -170,6 +176,36 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     });
   });
+}
+
+function startEmbeddedRelay(): void {
+  // Stock VS Code/Cursor installs of this extension simply skip this step.
+  const relayRuntime = { runtimeExecutable: process.execPath };
+  const embeddedRelay = embeddedRelayExecutable(
+    vscode.env.appRoot,
+    process.platform,
+    relayRuntime.runtimeExecutable,
+  );
+  const relayExists = Boolean(embeddedRelay && fs.existsSync(embeddedRelay));
+  logRelayStartup(
+    `candidate=${embeddedRelay ?? 'unsupported'} exists=${relayExists} appRoot=${vscode.env.appRoot} execPath=${process.execPath}`,
+  );
+  if (!relayExists) return;
+
+  try {
+    ensureInstallIdentity();
+    const relay = launchEmbeddedRelay(
+      vscode.env.appRoot,
+      process.platform,
+      relayRuntime,
+    );
+    logRelayStartup(`state=${relay.state} pid=${relay.pid ?? 'none'}`);
+    console.log(`Founder IDE relay: ${relay.state}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    logRelayStartup(`error=${message}`);
+    console.warn('Founder IDE relay failed to start:', error);
+  }
 }
 
 export function deactivate(): void {
@@ -263,7 +299,7 @@ function setStatusNotPaired(): void {
   if (!connectionStatusBar) return;
   connectionStatusBar.text = '$(warning) Founder OS: Not Paired';
   connectionStatusBar.tooltip =
-    'Founder Node credentials not found. Pair Founder Node, or set founderOs.apiBaseUrl / nodeId / nodeToken.';
+    'Founder IDE is not connected to your account. Sign in, or configure founderOs.apiBaseUrl / nodeId / nodeToken.';
   connectionStatusBar.show();
 }
 
@@ -328,11 +364,11 @@ async function manageConnection(context: vscode.ExtensionContext): Promise<void>
   const items: (vscode.QuickPickItem & { action: () => unknown })[] = [
     {
       label: 'Sign in with X to Founder OS…',
-      description: 'connect this IDE and Founder Node to your account',
+      description: 'connect this Founder IDE and its background relay',
       action: () => signInWithFounderId(context),
     },
     {
-      label: 'Load Founder Node from vault…',
+      label: 'Load existing connection from vault…',
       description: vaultFileExists() ? 'vault file present — no pairing code needed' : 'vault file missing',
       action: () => pairWithFounderNode(context),
     },
@@ -374,13 +410,13 @@ async function manageConnection(context: vscode.ExtensionContext): Promise<void>
 async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<void> {
   const file = nodeConfigPath();
 
-  // Prefer vault auto-load — Founder Node writes this on pair / Connect IDE.
+  // Prefer vault auto-load — the embedded relay shares this connection file.
   if (vaultFileExists()) {
     const synced = await syncVaultIntoSettings();
     if (synced) {
       registerOrNotify(context);
       const open = await vscode.window.showInformationMessage(
-        `Loaded Founder Node credentials from:\n${file}\n\napiBaseUrl=${synced.apiBaseUrl}\nnodeId=${synced.nodeId}`,
+        `Loaded Founder IDE connection from:\n${file}\n\napiBaseUrl=${synced.apiBaseUrl}\nnodeId=${synced.nodeId}`,
         'Reload window',
         'Open file',
         'OK',
@@ -392,16 +428,17 @@ async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<vo
     }
   }
 
-  // Optional: paste a Twitter-auth session JWT + API base for cloud-only pairing
-  // when Founder Node isn't installed yet (thin slice — nodeId/token still preferred).
+  // Optional manual credentials remain available for development and recovery.
   const choice = await vscode.window.showInformationMessage(
-    'Founder OS chat needs a paired Founder Node.\n\nOpen Founder Node on this machine and click "Connect IDE / Pair". This writes ~/FounderVault/node-config.json, which the extension loads automatically.',
+    'Founder IDE is not connected yet. Sign in with X from Founder OS: Connect this Founder IDE, or provide local relay credentials manually.',
+    'Sign in with X',
     'Open Founder OS settings',
     'Paste API + node credentials',
-    'Open docs',
     'Cancel',
   );
-  if (choice === 'Open Founder OS settings') {
+  if (choice === 'Sign in with X') {
+    await signInWithFounderId(context);
+  } else if (choice === 'Open Founder OS settings') {
     void vscode.commands.executeCommand(
       'workbench.action.openSettings',
       'founderOs',
@@ -414,12 +451,12 @@ async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<vo
     });
     if (!apiBaseUrl) return;
     const nodeId = await vscode.window.showInputBox({
-      prompt: 'Founder Node ID (from Settings → Founder Stack after pairing)',
+      prompt: 'Local relay ID',
       placeHolder: 'fn_…',
     });
     if (!nodeId) return;
     const nodeToken = await vscode.window.showInputBox({
-      prompt: 'Founder Node token (shown once at pair time, or from node-config.json)',
+      prompt: 'Local relay token',
       password: true,
     });
     if (!nodeToken) return;
@@ -429,10 +466,20 @@ async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<vo
     await cfg.update('nodeToken', nodeToken.trim(), vscode.ConfigurationTarget.Global);
     registerOrNotify(context);
     void vscode.window.showInformationMessage('Founder OS credentials saved to User settings.');
-  } else if (choice === 'Open docs') {
-    void vscode.env.openExternal(
-      vscode.Uri.parse('https://doxxedcrypto.digital/downloads#founder-node'),
+  }
+}
+
+function logRelayStartup(message: string): void {
+  try {
+    const logDir = path.join(os.homedir(), 'FounderVault', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(
+      path.join(logDir, 'founder-ide-extension.log'),
+      `[${new Date().toISOString()}] ${message}\n`,
+      'utf8',
     );
+  } catch {
+    // Startup tracing is best-effort and never blocks the editor.
   }
 }
 
@@ -440,12 +487,12 @@ async function openVaultConfig(): Promise<void> {
   const file = nodeConfigPath();
   if (!fs.existsSync(file)) {
     const choice = await vscode.window.showWarningMessage(
-      `No node-config.json at ${file}. Pair Founder Node first.`,
-      'Pair Founder Node',
+      `No Founder IDE connection exists at ${file}.`,
+      'Sign in with X',
       'Cancel',
     );
-    if (choice === 'Pair Founder Node') {
-      void vscode.commands.executeCommand('founderOs.pair');
+    if (choice === 'Sign in with X') {
+      void vscode.commands.executeCommand('founderOs.signIn');
     }
     return;
   }

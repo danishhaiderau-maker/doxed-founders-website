@@ -1,18 +1,17 @@
 # build-stack-installer.ps1
 #
-# Orchestrates the full Founder Stack build:
+# Orchestrates the complete Founder IDE build:
 #   1. Build the Founder OS chat extension .vsix (packages/founder-ide-extension)
-#   2. Build Founder IDE (build/build-founder-ide.sh -> VSCodium dev/build.sh)
-#   3. Build Founder Node (apps/founder-node electron-builder --win)
-#   4. Compose it into Founder-Stack-Setup-<v>.exe via Inno Setup (iscc)
+#   2. Build the Founder IDE application payload
+#   3. Build and embed the Founder relay, then create the IDE installer
+#   4. Compose the mode-aware Founder-IDE-Setup-<v>.exe bootstrapper
 #
-# As of 0.9.2 the bundle includes Founder Node again: the IDE Gateway client
-# requires ~/FounderVault/node-config.json, which only Founder Node creates on
-# first pairing. Founder Node is installed in every deployment mode (it is
-# required, not optional).
+# Founder Node is an internal runtime of Founder IDE. Its unpacked Electron
+# payload is copied under resources/founder-relay before the IDE installer is
+# created. Users install, launch, update, and uninstall one application.
 #
 # This script is the entry point for producing a downloadable installer. It
-# does NOT clone VSCodium (one-time setup on the build machine — see
+# does NOT clone VSCodium (one-time setup on the build machine - see
 # RELEASES.md). It expects to be run from a VSCodium downstream checkout that
 # has the monorepo's packages/founder-ide/ layered in.
 #
@@ -23,10 +22,10 @@
 # Env / params:
 #   -MonorepoRoot        - path to the Founder OS monorepo (default: detected up from this script)
 #   -VscodiumCheckout    - path to the VSCodium downstream checkout (default: current dir)
-#   -Version             - Founder Stack version (default: 0.1.0)
+#   -Version             - Founder IDE version (default: 0.1.0)
 #   -SkipExtensionBuild  - skip step 1 (you already built the .vsix)
 #   -SkipIdeBuild        - skip step 2 (you already built Founder IDE)
-#   -SkipFounderNodeBuild - skip step 3 (you already built Founder Node)
+#   -SkipFounderNodeBuild - reuse apps/founder-node/release/win-unpacked
 #   -IsccPath            - path to iscc.exe (default: auto-detect)
 
 [CmdletBinding()]
@@ -79,7 +78,7 @@ Write-Host "[stack] staging: $staging"
 
 # --- Step 1: build the chat extension .vsix ---------------------------------
 if (-not $SkipExtensionBuild) {
-    Write-Host "`n[stack] STEP 1/4 — building Founder OS chat extension .vsix" -ForegroundColor Cyan
+    Write-Host "`n[stack] STEP 1/4 - building Founder OS chat extension .vsix" -ForegroundColor Cyan
     $extDir = Join-Path $MonorepoRoot "packages\founder-ide-extension"
     if (-not (Test-Path (Join-Path $extDir "package.json"))) {
         throw "Extension not found at $extDir"
@@ -101,15 +100,16 @@ if (-not $SkipExtensionBuild) {
         Write-Host "[stack]   -> $vsixDest"
     } finally { Pop-Location }
 } else {
-    Write-Host "`n[stack] STEP 1/4 — SKIPPED (SkipExtensionBuild)" -ForegroundColor DarkGray
+    Write-Host "`n[stack] STEP 1/4 - SKIPPED (SkipExtensionBuild)" -ForegroundColor DarkGray
     $vsixDest = Join-Path $staging "founder-ide-extension.vsix"
     if (-not (Test-Path $vsixDest)) { throw "SkipExtensionBuild set but $vsixDest not staged." }
 }
 
-# --- Step 2: build Founder IDE -----------------------------------------------
+# --- Step 2: build Founder IDE application payload ---------------------------
 $ideSetup = Join-Path $staging "Founder-IDE-Setup-x64.exe"
+$ideRoot = Join-Path $VscodiumCheckout "VSCode-win32-x64"
 if (-not $SkipIdeBuild) {
-    Write-Host "`n[stack] STEP 2/4 — building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
+    Write-Host "`n[stack] STEP 2/4 - building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
     $buildPs1 = Join-Path $VscodiumCheckout "build\build-founder-ide.ps1"
     if (-not (Test-Path $buildPs1)) {
         throw "build-founder-ide.ps1 not found at $buildPs1 (is VscodiumCheckout correct?)"
@@ -117,25 +117,18 @@ if (-not $SkipIdeBuild) {
     & $buildPs1 -ExtensionVsix $vsixDest
     if ($LASTEXITCODE -ne 0) { throw "build-founder-ide.ps1 failed (exit $LASTEXITCODE)" }
 
-    # Find the produced installer and copy it to staging with a stable name.
-    $candidate = Get-ChildItem -Path (Join-Path $VscodiumCheckout "VSCode") -Recurse -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $candidate) { throw "Founder IDE setup .exe not found in VSCode\... after build." }
-    Copy-Item $candidate.FullName $ideSetup -Force
-    Write-Host "[stack]   -> $ideSetup"
 } else {
-    Write-Host "`n[stack] STEP 2/4 — SKIPPED (SkipIdeBuild)" -ForegroundColor DarkGray
-    if (-not (Test-Path $ideSetup)) { throw "SkipIdeBuild set but $ideSetup not staged." }
+    Write-Host "`n[stack] STEP 2/4 - SKIPPED (SkipIdeBuild)" -ForegroundColor DarkGray
+}
+if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
+    throw "Founder IDE application payload not found at $ideRoot"
 }
 
-# --- Step 3: build Founder Node ---------------------------------------------
-# Founder Node is required by the IDE Gateway client (it creates
-# ~/FounderVault/node-config.json on first pairing). Built via electron-builder
-# into apps/founder-node/release/, then staged with a stable name.
-$founderNodeSetup = Join-Path $staging "Founder-Node-win-x64.exe"
+# --- Step 3: build and embed the Founder relay -------------------------------
+$nodeDir = Join-Path $MonorepoRoot "apps\founder-node"
+$relayRoot = Join-Path $nodeDir "release\win-unpacked"
 if (-not $SkipFounderNodeBuild) {
-    Write-Host "`n[stack] STEP 3/4 — building Founder Node (electron-builder --win)" -ForegroundColor Cyan
-    $nodeDir = Join-Path $MonorepoRoot "apps\founder-node"
+    Write-Host "`n[stack] STEP 3/4 - building and embedding Founder relay" -ForegroundColor Cyan
     if (-not (Test-Path (Join-Path $nodeDir "package.json"))) {
         throw "Founder Node not found at $nodeDir"
     }
@@ -153,23 +146,37 @@ if (-not $SkipFounderNodeBuild) {
         # with a cert that isn't present in CI. Signing is done by a later
         # dedicated step (Azure Trusted Signing) on the outer bundle.
         $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
-        Write-Host "[stack]   electron-builder --win"
-        npx electron-builder --win --x64 --publish never
+        Write-Host "[stack]   electron-builder --win --dir"
+        npx electron-builder --win --x64 --dir --publish never
         if ($LASTEXITCODE -ne 0) { throw "electron-builder --win failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
-
-    $nodeCandidate = Get-ChildItem -Path (Join-Path $nodeDir "release") -Filter "Founder-Node-*.exe" -ErrorAction SilentlyContinue |
-                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $nodeCandidate) { throw "Founder Node setup .exe not found in $nodeDir\release after build." }
-    Copy-Item $nodeCandidate.FullName $founderNodeSetup -Force
-    Write-Host "[stack]   -> $founderNodeSetup"
 } else {
-    Write-Host "`n[stack] STEP 3/4 — SKIPPED (SkipFounderNodeBuild)" -ForegroundColor DarkGray
-    if (-not (Test-Path $founderNodeSetup)) { throw "SkipFounderNodeBuild set but $founderNodeSetup not staged." }
+    Write-Host "`n[stack] STEP 3/4 - SKIPPED (SkipFounderNodeBuild)" -ForegroundColor DarkGray
 }
 
-# --- Step 4: compose the Founder Stack installer via Inno Setup ---------------
-Write-Host "`n[stack] STEP 4/4 — composing Founder Stack installer via Inno Setup" -ForegroundColor Cyan
+if (-not (Test-Path (Join-Path $relayRoot "Founder Node.exe"))) {
+    throw "Founder relay payload not found at $relayRoot"
+}
+$embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-founder-relay.ps1"
+& $embedScript -IdeRoot $ideRoot -RelayRoot $relayRoot
+
+# The relay must be embedded before gulp packages the inner installer.
+$vscodeSource = Join-Path $VscodiumCheckout "VSCode"
+Push-Location $vscodeSource
+try {
+    npx gulp vscode-win32-x64-user-setup
+    if ($LASTEXITCODE -ne 0) { throw "Founder IDE installer packaging failed (exit $LASTEXITCODE)" }
+} finally { Pop-Location }
+
+$innerDir = Join-Path $vscodeSource ".build\win32-x64\user-setup"
+$candidate = Get-ChildItem -Path $innerDir -Filter "FounderIDESetup.exe" -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $candidate) { throw "Founder IDE setup .exe not found in $innerDir after packaging." }
+Copy-Item $candidate.FullName $ideSetup -Force
+Write-Host "[stack]   one-app installer payload -> $ideSetup"
+
+# --- Step 4: compose the mode-aware Founder IDE bootstrapper ------------------
+Write-Host "`n[stack] STEP 4/4 - composing Founder IDE installer via Inno Setup" -ForegroundColor Cyan
 $iss = Join-Path $VscodiumCheckout "installer\founder-stack.iss"
 if (-not (Test-Path $iss)) {
     # Fall back to the monorepo copy if the checkout doesn't have it.
@@ -182,26 +189,24 @@ if (-not (Test-Path $iss)) { throw "founder-stack.iss not found." }
 # the ISCC defines: ISCC's #define substitution treats `\` as an escape inside
 # string literals (e.g. `\D:` is read as a "filename prefix"), so Windows-style
 # backslash paths produce "Unknown filename prefix" compile errors.
-$ideSetupAbs    = ((Resolve-Path $ideSetup).Path)    -replace '\\','/'
-$founderNodeAbs = ((Resolve-Path $founderNodeSetup).Path) -replace '\\','/'
+$ideSetupAbs = ((Resolve-Path $ideSetup).Path) -replace '\\','/'
 
 & $IsccPath `
     "/DFOUNDER_STACK_VERSION=$Version" `
     "/DFOUNDER_IDE_SETUP=`"$ideSetupAbs`"" `
-    "/DFOUNDER_NODE_SETUP=`"$founderNodeAbs`"" `
     $iss
 if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
 
 # Locate the produced bundle.
 $bundleDir = Join-Path $VscodiumCheckout "dist"
 if (-not (Test-Path $bundleDir)) { $bundleDir = (Split-Path -Parent $iss) }
-$bundle = Get-ChildItem -Path $bundleDir -Filter "Founder-Stack-Setup-*.exe" -ErrorAction SilentlyContinue |
+$bundle = Get-ChildItem -Path $bundleDir -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $bundle) { throw "Founder Stack installer not found in $bundleDir after iscc." }
+if (-not $bundle) { throw "Founder IDE installer not found in $bundleDir after iscc." }
 
-Write-Host "`n[stack] DONE — Founder Stack installer:" -ForegroundColor Green
+Write-Host "`n[stack] DONE - one Founder IDE installer:" -ForegroundColor Green
 Write-Host "        $($bundle.FullName)" -ForegroundColor Green
 Write-Host "        size: $([math]::Round($bundle.Length / 1MB, 1)) MB"
 Write-Host ""
 Write-Host "[stack] Next: smoke-test on a clean Windows VM, then publish:" -ForegroundColor Cyan
-Write-Host "        gh release create v$Version `"$($bundle.FullName)`" --repo danishhaiderau-maker/doxed-founders-website --title `"Founder Stack $Version`""
+Write-Host "        gh release create founder-stack-v$Version `"$($bundle.FullName)`" --repo danishhaiderau-maker/doxed-founders-website --title `"Founder IDE $Version`""

@@ -142,7 +142,7 @@ function openInBrowser(getCredentials: () => FounderOsCredentials | null): void 
   const creds = getCredentials();
   if (!creds) {
     void vscode.window.showWarningMessage(
-      'Founder OS chat: pair a Founder Node first to view Debug Squasher results.',
+      'Connect Founder IDE to Founder OS before viewing Debug Squasher results.',
     );
     return;
   }

@@ -1,5 +1,5 @@
 /**
- * Founder Stack IDE updater (Phase 5 — Workstream E).
+ * Founder IDE updater (Phase 5 — Workstream E).
  *
  * Mirrors `update-manager.ts` (the Founder Node updater) but adds the four
  * integrity gates the brief requires:
@@ -30,7 +30,7 @@
  *                         ─▶ failed   ─▶ failed
  *
  * `failed` is terminal until the user explicitly retries via the tray menu
- * ("Check for Founder Stack updates…").
+ * ("Check for Founder IDE updates…").
  *
  * Yanked releases: the manifest validator already enforces that
  * `latestVersion` is never yanked, but the updater double-checks at runtime
@@ -574,7 +574,7 @@ function isReady(): boolean {
 }
 
 /**
- * Public entry point — check the manifest for a newer Founder Stack release.
+ * Public entry point — check the manifest for a newer Founder IDE release.
  *
  * @param opts.silent When true, suppresses dialogs (used by the periodic
  *   background check). When false (user-invoked from the tray), shows a
@@ -604,7 +604,7 @@ export async function checkForIdeUpdates(
       if (!opts.silent) {
         await showDialogSafe({
           type: 'error',
-          title: 'Founder Stack update refused',
+          title: 'Founder IDE update refused',
           message: `Latest published release (${manifest.latestVersion}) is yanked.`,
           detail:
             'The manifest advertises a yanked release as latest. Refusing to update. Open the releases page to download manually.',
@@ -622,8 +622,8 @@ export async function checkForIdeUpdates(
       if (!opts.silent) {
         await showDialogSafe({
           type: 'info',
-          title: 'Founder Stack',
-          message: `You're on the latest Founder Stack (v${installed}).`,
+          title: 'Founder IDE',
+          message: `You're on the latest Founder IDE (v${installed}).`,
         });
       }
       return null;
@@ -631,16 +631,16 @@ export async function checkForIdeUpdates(
 
     if (opts.silent) {
       await displayBalloonSafe(
-        'Founder Stack update available',
-        `v${update.version} ready — tray menu → Install Founder Stack update`,
+        'Founder IDE update available',
+        `v${update.version} ready — tray menu → Install Founder IDE update`,
       );
       return update;
     }
 
     const { response } = await showDialogSafe({
       type: 'info',
-      title: 'Founder Stack update available',
-      message: `Founder Stack v${update.version} is available (you have v${installed}).`,
+      title: 'Founder IDE update available',
+      message: `Founder IDE v${update.version} is available (you have v${installed}).`,
       detail:
         'Download and install now? The installer will verify SHA-256 + Authenticode before running. Your ~/FounderVault and workspaces are preserved.',
       buttons: ['Download and install', 'Later', 'View release notes'],
@@ -660,7 +660,7 @@ export async function checkForIdeUpdates(
     if (!opts.silent) {
       await showDialogSafe({
         type: 'error',
-        title: 'Founder Stack update check failed',
+        title: 'Founder IDE update check failed',
         message: err instanceof Error ? err.message : String(err),
       });
     }
@@ -824,7 +824,7 @@ export async function downloadVerifyInstallAndHandshake(
   );
   if (ok) {
     setState('idle');
-    await displayBalloonSafe('Founder Stack updated', `Now running v${info.version}.`);
+    await displayBalloonSafe('Founder IDE updated', `Now running v${info.version}.`);
     return;
   }
 
@@ -860,7 +860,7 @@ export async function downloadVerifyInstallAndHandshake(
     await showDialogSafe({
       type: 'warning',
       title: 'Update rolled back',
-      message: `Founder Stack v${info.version} failed its post-install health check.`,
+      message: `Founder IDE v${info.version} failed its post-install health check.`,
       detail: `Rolled back to v${previousVersion}. Your ~/FounderVault and workspaces are intact.`,
       buttons: ['OK'],
     });
@@ -878,7 +878,7 @@ async function notifyFailure(message: string): Promise<void> {
   try {
     await showDialogSafe({
       type: 'error',
-      title: 'Founder Stack update failed',
+      title: 'Founder IDE update failed',
       message,
     });
   } catch {
@@ -917,17 +917,17 @@ export function stopIdeAutoUpdateChecks(): void {
 export function ideUpdateTooltipSuffix(): string {
   switch (updateState) {
     case 'idle':
-      return lastResolvedUpdate ? `Founder Stack update available: v${lastResolvedUpdate.version}` : '';
+      return lastResolvedUpdate ? `Founder IDE update available: v${lastResolvedUpdate.version}` : '';
     case 'downloading':
-      return lastResolvedUpdate ? `Downloading Founder Stack v${lastResolvedUpdate.version}…` : 'Downloading Founder Stack update…';
+      return lastResolvedUpdate ? `Downloading Founder IDE v${lastResolvedUpdate.version}…` : 'Downloading Founder IDE update…';
     case 'verifying':
-      return 'Verifying Founder Stack update…';
+      return 'Verifying Founder IDE update…';
     case 'installing':
-      return lastResolvedUpdate ? `Installing Founder Stack v${lastResolvedUpdate.version}…` : 'Installing Founder Stack update…';
+      return lastResolvedUpdate ? `Installing Founder IDE v${lastResolvedUpdate.version}…` : 'Installing Founder IDE update…';
     case 'rolling_back':
-      return 'Rolling back Founder Stack…';
+      return 'Rolling back Founder IDE…';
     case 'failed':
-      return 'Founder Stack update failed — click "Check for Founder Stack updates…" to retry';
+      return 'Founder IDE update failed — click "Check for Founder IDE updates…" to retry';
     default:
       return '';
   }

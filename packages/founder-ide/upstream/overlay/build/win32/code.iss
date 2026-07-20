@@ -79,6 +79,7 @@ Type: files; Name: "{app}\resources\app\Credits_45.0.2454.85.html"; Check: IsNot
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_"
+Type: filesandordirs; Name: "{app}\resources\founder-relay"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -1595,6 +1596,7 @@ begin
   if not CurUninstallStep = usUninstall then begin
     exit;
   end;
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Founder IDE');
   if not RegQueryStringValue({#EnvironmentRootKey}, '{#EnvironmentKey}', 'Path', Path)
   then begin
     exit;
