@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Include Tile 2 in live relay consent policy (#32)
+Merge pull request #34 from danishhaiderau-maker/codex/founder-node-port-reservation
 
 ## Last Activity
 
