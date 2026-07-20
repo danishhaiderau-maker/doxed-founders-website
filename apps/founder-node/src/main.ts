@@ -814,7 +814,7 @@ app.whenReady().then(() => {
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 
   // Phase 7 — start the Private-mode runtime-status endpoint on 127.0.0.1.
-  // Best-effort: if the port is busy (dev server already on :7002) it logs a
+  // Best-effort: if the port is busy (default :7012) it logs a
   // warning and continues; the cloud API degrades to "unknown" for the panel.
   if (!deploymentStatusServer) {
     deploymentStatusServer = startDeploymentRuntimeStatusServer(vaultRoot);

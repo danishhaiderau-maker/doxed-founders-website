@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
  * Phase 7 — Private-mode runtime status probe + local HTTP endpoint.
  *
  * Serves `GET /api/deployment-mode/runtime-status` on the Founder Node's local
- * port (default 7002) so the cloud API / dashboard panel can reach the laptop
+ * port (default 7012) so the cloud API / dashboard panel can reach the laptop
  * to render the "What's running right now" block. See docs/DEPLOYMENT-MODES-UX.md
  * §3 (mode panel) and §6 (phone remote per mode).
  *
@@ -17,7 +17,11 @@ import { execFileSync } from 'node:child_process';
  * that are alive.
  */
 
-const DEFAULT_PORT = Number(process.env.FOUNDER_NODE_PORT ?? 7002);
+// Port 7002 is reserved for the canonical BTC showcase bot. Keeping Founder
+// Node on a distinct loopback port prevents Windows from accepting both the
+// bot's 0.0.0.0:7002 listener and this 127.0.0.1 listener, which otherwise
+// makes a localhost Cloudflare origin intermittently reach the wrong service.
+const DEFAULT_PORT = Number(process.env.FOUNDER_NODE_PORT ?? 7012);
 const FORGEJO_PROBE_URL = process.env.FORGEJO_PROBE_URL ?? 'http://127.0.0.1:3000';
 
 export interface DeploymentRuntimeStatusResponse {
