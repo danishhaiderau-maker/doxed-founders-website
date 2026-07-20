@@ -22380,40 +22380,40 @@ HTML = """<!DOCTYPE html>
 
 <h2>Active Signals</h2>
 <table>
-    <thead><tr><th>Time</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
+    <thead><tr><th>Signal Time (Melbourne)</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
 </table>
 
 <h2>Positions</h2>
 <table>
-    <thead><tr><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
     <tbody id="positionsTable"></tbody>
 </table>
 
 <h2>Pending Orders</h2>
 <table>
-    <thead><tr><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th></tr></thead>
+    <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th></tr></thead>
     <tbody id="ordersTable"></tbody>
 </table>
 
 <h2>Expired Orders</h2>
 <p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv.</p>
 <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
+    <thead><tr><th>Expired Time (Melbourne)</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
 </table>
 
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Time</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">One row per actual shared AI call. Continuous and Type B apply separate post-AI policies.</p>
 <table>
-    <thead><tr><th>Time</th><th>Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous verdict</th><th>Type B verdict</th><th>Reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous verdict</th><th>Type B verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -23851,6 +23851,7 @@ DASHBOARD_JS = """(function () {
           const chaseCell = chaseN > 0 ? (chaseN + '×') : (st.indexOf('PENDING') >= 0 ? '0' : '-');
           return `
           <tr${o.limit_touched ? ' style="color:#3fb950;"' : ''}>
+            <td>${o.created_ts_melbourne || formatMelbourneDateTime(o.created_ts)}</td>
             <td>${o.age_min?.toFixed(1)||'-'}</td>
             <td>${laneBadge(o.research_lane, o.research_model)}</td>
             <td>${o.side || '-'}</td>
@@ -23864,6 +23865,7 @@ DASHBOARD_JS = """(function () {
         }).join(''));
         safeHTML('positionsTable', (d.positions||[]).map(l => `
           <tr>
+            <td>${l.entry_ts_melbourne || formatMelbourneDateTime(l.entry_ts || l.fill_ts || l.open_ts)}</td>
             <td>${l.leg || '-'}</td>
             <td>${laneBadge(l.research_lane, l.research_model)}</td>
             <td>${l.side || '-'}</td>
@@ -25498,6 +25500,10 @@ def _build_api_state_snapshot():
         funding_snap = snapshot.get("funding") or {}
         for pos in positions_copy:
             pos_copy = copy.deepcopy(pos)
+            entry_ts = pos_copy.get("entry_ts") or pos_copy.get("fill_ts") or pos_copy.get("open_ts")
+            pos_copy["entry_ts_melbourne"] = (
+                _timestamp_to_melbourne_display(entry_ts) if entry_ts else "-"
+            )
             mark = get_executable_mark_price(pos, fallback=snapshot.get("price"))
             pos_copy["current_price"] = mark
             pos_copy["mark_side"] = "depth_vwap" if float(pos.get("qty") or 0) > 0 else ("bid" if pos.get("dir") == "LONG" else "ask")
@@ -25527,6 +25533,11 @@ def _build_api_state_snapshot():
             age = (time.time() - o["created_ts"]) / 60 if o["created_ts"] else 0
             oc = copy.deepcopy(o)
             oc["age_min"] = age
+            oc["created_ts_melbourne"] = (
+                _timestamp_to_melbourne_display(oc.get("created_ts"))
+                if oc.get("created_ts")
+                else "-"
+            )
             if tick_px and tick_px > 0:
                 oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
             orders.append(oc)
