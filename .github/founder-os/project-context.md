@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge pull request #34 from danishhaiderau-maker/codex/founder-node-port-reservation
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
