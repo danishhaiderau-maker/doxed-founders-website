@@ -261,6 +261,14 @@ check(
     "startup reset preserves ADMIN_MANUAL priority",
     bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"],
 )
+bot.reset_session_risk_state()
+check("session reset preserves manual pause flag", bot.state.get("manual_admin_pause") is True)
+check("session reset preserves execution pause", bot.state.get("execution_paused") is True)
+check("session reset preserves ADMIN_MANUAL reason", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check(
+    "session reset preserves ADMIN_MANUAL priority",
+    bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"],
+)
 bot.get_config_file = original_get_config_file
 bot._resolve_config_file_for_load = original_resolve_config_file
 
