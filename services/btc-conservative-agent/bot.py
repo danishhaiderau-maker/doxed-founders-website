@@ -3757,9 +3757,11 @@ CIRCUIT_BREAKER_REASONS = frozenset({
     "STALE_DATA_HARD_STOP", "THREAD_CRASH", "WS_STALE", "PRICE_STALE_OR_MISSING",
     "ENGINE_FAILURE", "CSV_FAILURE", "PRELOAD_FAILED",
 })
-# Brief WS blips should not wipe pending limit orders — only hard infra failures cancel.
+# Brief WS blips should not wipe pending limits. Hard infra failures and the
+# operator's explicit manual pause cancel every unfilled executable order.
 CIRCUIT_BREAKER_CANCEL_REASONS = frozenset({
     "STALE_DATA_HARD_STOP", "ENGINE_FAILURE", "CSV_FAILURE", "PRELOAD_FAILED",
+    "ADMIN_MANUAL",
 })
 
 
@@ -3817,6 +3819,31 @@ def set_execution_paused(reason: str):
             logger.warning(f"[EXECUTION] paused: {reason} [PIPELINE ENFORCEMENT]")
             circuit_breaker_cancel_pending(reason)
             return
+
+
+def manual_admin_pause_active() -> bool:
+    """Return True while the operator has explicitly stopped new execution."""
+    return bool(state.get("manual_admin_pause")) or bool(
+        state.get("execution_paused")
+        and state.get("execution_reason") == "ADMIN_MANUAL"
+    )
+
+
+def _manual_pause_block_entry(source: dict = None, stage: str = "ENTRY") -> bool:
+    """Fail closed before any new paper/live order or position mutation."""
+    if not manual_admin_pause_active():
+        return False
+    payload = source if isinstance(source, dict) else {}
+    payload["status"] = "BLOCKED"
+    payload["outcome"] = "ADMIN_MANUAL_PAUSE"
+    payload["exit_reason"] = "ADMIN_MANUAL_PAUSE"
+    logger.warning(
+        f"[ADMIN PAUSE] blocked new entry stage={stage} "
+        f"trade_id={payload.get('trade_id')} lane={payload.get('research_lane')} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return True
+
 
 def get_execution_status() -> str:
     system_health_check()
@@ -12573,6 +12600,8 @@ def _submit_tile2_paper_resting_limit(
     simultaneously. A pending order or open position blocks only its own
     direction until that lifecycle expires or closes.
     """
+    if _manual_pause_block_entry(ctx, "TILE2_PAPER_LIMIT"):
+        return "REFUSED_ADMIN_PAUSE"
     direction = str(side or "LONG").upper()
     if direction not in ("LONG", "SHORT"):
         return "REFUSED_BAD_SIDE"
@@ -15942,6 +15971,8 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
 
 def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str, smart_meta: dict = None) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
+    if _manual_pause_block_entry(signal, "SIM_LIMIT_CREATE"):
+        return False
     smart_meta = smart_meta or {}
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
     meta = trades_map.get(signal.get("trade_id"), {})
@@ -16263,6 +16294,8 @@ def process_awaiting_5m_entries():
 
 def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = False) -> bool:
     """Resolve limit at submit time (smart submit), then place or defer to micro/5m."""
+    if _manual_pause_block_entry(signal, "SIGNAL_PROMOTE"):
+        return False
     price = state.get("price")
     if not price or price <= 0:
         return False
@@ -16371,6 +16404,8 @@ def process_awaiting_min_age_entries():
 
 
 def execute_simulated_order(signal):
+    if _manual_pause_block_entry(signal, "SIM_EXECUTE"):
+        return False
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
     meta = trades_map.get(signal.get("trade_id"), {})
     ai = meta.get("ai") or signal.get("ai") or {}
@@ -16765,6 +16800,9 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
 
 def process_limit_chase(price: float):
     """Gradually move unfilled sim limits toward market after patient wait."""
+    if manual_admin_pause_active():
+        circuit_breaker_cancel_pending("ADMIN_MANUAL")
+        return
     if not limit_chase_enabled() or price is None or price <= 0:
         return
     enforce_dashboard_chase_gates_on_pending()
@@ -16879,6 +16917,9 @@ def _pending_limit_touched(order: dict, price: float) -> bool:
     return False
 
 def process_pending_orders():
+    if manual_admin_pause_active():
+        circuit_breaker_cancel_pending("ADMIN_MANUAL")
+        return
     refresh_bbo_state()
     refresh_order_book_state()
     price = state.get("price")
@@ -16921,6 +16962,17 @@ def process_pending_orders():
         fill_order(order)
 
 def fill_order(order):
+    if manual_admin_pause_active():
+        lane_unregister_pending_order(order)
+        order["status"] = "CANCELLED"
+        _record_expired_order(order, "ADMIN_MANUAL_PAUSE")
+        expire_signal_for_order(order, "ADMIN_MANUAL_PAUSE")
+        logger.warning(
+            f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        pipeline_state_sync()
+        return None
     direction = _normalize_order_side_to_dir(
         order.get("signal_dir") or order.get("dir") or order.get("side")
     )
@@ -17170,6 +17222,8 @@ def log_near_edge(candidate, edge_score):
 def process_signal(event: dict):
     global last_signal_create_ts, last_ai_call_ts, last_signal_key, last_ai_signal_key, last_processed_candle_ts, last_ai_call_ts, last_price_for_debounce, last_signal_process_ts, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_pipeline_run, last_edge_compute
     event = event or {}
+    if _manual_pause_block_entry(event, "SIGNAL_PIPELINE"):
+        return
     research_lane = event.get("research_lane", RESEARCH_LANE_AI_SCAN)
     skip_ai = bool(event.get("skip_ai"))
     pre_ai = event.get("pre_ai")
@@ -18741,6 +18795,8 @@ def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     return signal
 
 def execute_order(signal, ai=None):
+    if _manual_pause_block_entry(signal, "EXECUTE_ORDER"):
+        return False
     lane = signal.get("research_lane")
     if not guard_retired_lane_execution(lane, "execute_order", signal.get("trade_id")):
         return False
@@ -18811,6 +18867,8 @@ def execute_order(signal, ai=None):
         return False
 
 def execute_market_order(signal):
+    if _manual_pause_block_entry(signal, "MARKET_EXECUTE"):
+        return False
     if not guard_retired_lane_execution(signal.get("research_lane"), "execute_market_order", signal.get("trade_id")):
         return
     logger.info(f"[ORDER] MARKET EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
@@ -18865,6 +18923,8 @@ def execute_market_order(signal):
     pipeline_state_sync()
 
 def create_limit_order(signal):
+    if _manual_pause_block_entry(signal, "LIMIT_CREATE"):
+        return None
     if not guard_retired_lane_execution(signal.get("research_lane"), "create_limit_order", signal.get("trade_id")):
         return None
     logger.info(f"[ORDER] LIMIT EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
