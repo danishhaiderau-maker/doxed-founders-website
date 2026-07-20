@@ -26877,6 +26877,7 @@ def reset_transient_runtime_state():
     """Clear volatile runtime fields on startup without wiping showcase trades or balance."""
     logger.info("[STARTUP] Transient runtime reset — preserving showcase trade history [PIPELINE ENFORCEMENT]")
     with state_lock:
+        manual_admin_pause = bool(state.get("manual_admin_pause", False))
         state.update({
             "daily_pnl_usd": 0.0,
             "consecutive_losses": 0,
@@ -26894,9 +26895,11 @@ def reset_transient_runtime_state():
             "last_block_time": 0.0,
             "last_setup_time": 0.0,
             "last_engine_error": "None",
-            "execution_paused": False,
-            "execution_reason": "",
-            "_pause_priority": 0,
+            # load_persistent_config() runs before this reset. Preserve the
+            # operator's fail-closed pause across the transient-state cleanup.
+            "execution_paused": manual_admin_pause,
+            "execution_reason": "ADMIN_MANUAL" if manual_admin_pause else "",
+            "_pause_priority": PAUSE_PRIORITIES["ADMIN_MANUAL"] if manual_admin_pause else 0,
             "last_event_ts": 0.0,
             "bootstrap_done": False,
             "edge_prev": 0.0,
