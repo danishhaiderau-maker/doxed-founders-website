@@ -38,17 +38,9 @@ exports.registerFounderOsChatParticipant = registerFounderOsChatParticipant;
 /**
  * `@Founder OS` chat participant — VS Code 1.93+ stable ChatParticipant API.
  *
- * On VS Code 1.104+ this extension also registers a `LanguageModelChatProvider`
- * so Founder OS models appear in the built-in model picker. That provider API
- * does not exist in VS Code 1.93.1, so on older builds the participant is the
- * primary surface: it streams responses straight from the Founder OS gateway
- * into the Chat view via `stream.markdown()`, using the OpenAI-compatible SSE
- * client in `gateway-client.ts`.
- *
- * The handler is intentionally tolerant: if `vscode.lm.selectChatModels` returns
- * Founder OS models (newer VS Code), it forwards through the model API; otherwise
- * it falls back to a direct gateway call. Either way the user sees streamed text
- * in the Chat box.
+ * It streams responses directly from the Founder OS gateway into the Chat view
+ * and uses VS Code's native tool confirmation flow for workspace reads,
+ * reviewed edits, and visible commands.
  */
 const vscode = __importStar(require("vscode"));
 const models_1 = require("./models");
@@ -56,6 +48,44 @@ Object.defineProperty(exports, "findModelAlias", { enumerable: true, get: functi
 const memory_1 = require("./memory");
 const credentials_1 = require("./credentials");
 const gateway_client_1 = require("./gateway-client");
+const tool_names_1 = require("./tool-names");
+const MAX_TOOL_TURNS = 8;
+function availableFounderTools() {
+    const tools = vscode.lm.tools;
+    return (tools ?? []).filter((tool) => tool_names_1.FOUNDER_TOOL_NAMES.has(tool.name));
+}
+function toolResultText(result) {
+    const parts = [];
+    for (const part of result.content) {
+        if (part &&
+            typeof part === 'object' &&
+            'value' in part &&
+            typeof part.value === 'string') {
+            parts.push(part.value);
+        }
+        else {
+            try {
+                parts.push(JSON.stringify(part));
+            }
+            catch {
+                parts.push(String(part));
+            }
+        }
+    }
+    return parts.join('\n').slice(0, 40_000);
+}
+function parseToolInput(argumentsJson) {
+    try {
+        const parsed = JSON.parse(argumentsJson);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed;
+        }
+    }
+    catch {
+        // The tool receives a visible error result below.
+    }
+    return { rawArguments: argumentsJson };
+}
 function registerFounderOsChatParticipant(context, deps) {
     let participant;
     try {
@@ -83,6 +113,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         if (codeModel)
             alias = codeModel;
     }
+    deps.onRequestStart?.(alias.id);
     // Build the system prompt with Memory Engine context.
     let memoryText = '';
     try {
@@ -94,41 +125,99 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         /* memory must never block chat */
     }
     const systemContent = memoryText.length > 0
-        ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Be concise and direct.`
-        : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Be concise and direct.';
+        ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.`
+        : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
     const gatewayMessages = [
         { role: 'system', content: systemContent },
         { role: 'user', content: prompt },
     ];
     const client = {
         baseUrl: (0, credentials_1.proxyBaseUrl)(deps.creds.apiBaseUrl),
-        bearer: (0, credentials_1.bearerFromCredentials)(deps.creds),
+        bearer: (0, credentials_1.authorizationHeaderFromCredentials)(deps.creds),
     };
     const cfg = vscode.workspace.getConfiguration('founderOs');
     const timeoutMs = cfg.get('requestTimeoutMs') ?? 120_000;
     let ok = false;
     let errorMessage;
     try {
-        await (0, gateway_client_1.callGateway)(client, {
-            model: alias.id,
-            messages: gatewayMessages,
-            executionProfile: alias.executionProfile,
-            founderOsMetadata: true,
-            timeoutMs,
-        }, {
-            onToken: (delta) => {
-                if (token.isCancellationRequested)
-                    return;
-                stream.markdown(delta);
-            },
-            onMetadata: (meta) => {
-                deps.costTracker?.record(meta);
-            },
-            onError: (_status, body) => {
-                errorMessage = body.slice(0, 300);
-            },
-        }, token);
-        ok = !token.isCancellationRequested;
+        const tools = availableFounderTools();
+        let completed = false;
+        for (let turn = 0; turn < MAX_TOOL_TURNS && !token.isCancellationRequested; turn += 1) {
+            const toolCalls = [];
+            let assistantText = '';
+            await (0, gateway_client_1.callGateway)(client, {
+                model: alias.id,
+                messages: gatewayMessages,
+                executionProfile: alias.executionProfile,
+                founderOsMetadata: true,
+                timeoutMs,
+                tools: tools.map((tool) => ({
+                    type: 'function',
+                    function: {
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: tool.inputSchema,
+                    },
+                })),
+                toolChoice: 'auto',
+            }, {
+                onToken: (delta) => {
+                    if (token.isCancellationRequested)
+                        return;
+                    assistantText += delta;
+                    stream.markdown(delta);
+                },
+                onToolCall: (call) => toolCalls.push(call),
+                onMetadata: (meta) => {
+                    deps.onMetadata?.(meta);
+                },
+                onError: (_status, body) => {
+                    errorMessage = body.slice(0, 300);
+                },
+            }, token);
+            if (toolCalls.length === 0) {
+                completed = true;
+                break;
+            }
+            gatewayMessages.push({
+                role: 'assistant',
+                content: assistantText,
+                tool_calls: toolCalls.map((call) => ({
+                    id: call.id,
+                    type: 'function',
+                    function: { name: call.name, arguments: call.arguments },
+                })),
+            });
+            for (const call of toolCalls) {
+                let resultText;
+                if (!tool_names_1.FOUNDER_TOOL_NAMES.has(call.name)) {
+                    resultText = `Error: tool "${call.name}" is not available.`;
+                }
+                else {
+                    stream.progress(`Founder OS: ${call.name}`);
+                    try {
+                        const result = await vscode.lm.invokeTool(call.name, {
+                            input: parseToolInput(call.arguments),
+                            toolInvocationToken: request.toolInvocationToken,
+                        }, token);
+                        resultText = toolResultText(result);
+                    }
+                    catch (error) {
+                        resultText = `Error: ${error instanceof Error ? error.message : String(error)}`;
+                    }
+                }
+                gatewayMessages.push({
+                    role: 'tool',
+                    name: call.name,
+                    tool_call_id: call.id,
+                    content: resultText,
+                });
+            }
+        }
+        if (!completed && !token.isCancellationRequested) {
+            stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
+        }
+        ok = completed && !token.isCancellationRequested;
     }
     catch (err) {
         errorMessage = err instanceof Error ? err.message : String(err);
@@ -136,6 +225,9 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
             stream.markdown(`\n\n_Founder OS gateway error: ${errorMessage}_`);
         }
         return;
+    }
+    finally {
+        deps.onRequestEnd?.(alias.id, ok, errorMessage);
     }
     if (!ok && errorMessage) {
         stream.markdown(`\n\n_Founder OS request failed: ${errorMessage}_`);

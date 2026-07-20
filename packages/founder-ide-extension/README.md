@@ -1,6 +1,6 @@
-# Founder OS Chat — VS Code Extension
+# Founder — IDE Control Surface
 
-Registers the [Founder OS](https://doxxedcrypto.digital) AI Gateway as a **first-class chat model provider** in any VS Code-based editor, using the stable `LanguageModelChatProvider` API finalized in VS Code 1.104 (Aug 2025).
+Adds the Founder control center, account sign-in, embedded Node connection, and [Founder OS](https://doxxedcrypto.digital) AI Gateway to Founder IDE and compatible VS Code-based editors.
 
 Works in **Cursor, VSCodium, stock VS Code, and Windsurf** — no editor fork required.
 
@@ -9,6 +9,8 @@ Works in **Cursor, VSCodium, stock VS Code, and Windsurf** — no editor fork re
 ## What it does
 
 - Registers the `founder-os` vendor in VS Code's Chat view model picker.
+- Adds a Founder Activity Bar hub with Local, Hybrid, and Founder Cloud modes.
+- Registers Founder as an IDE account provider with the X device-code sign-in.
 - Calls our OpenAI-compatible endpoint `/api/v1/chat/completions` with `stream: true`.
 - Streams tokens in real time to the built-in Chat view via `progress.report(new LanguageModelTextPart(delta))`.
 - Authenticates with Founder Node credentials (`Bearer fos_{nodeId}:{nodeToken}`).
@@ -25,12 +27,12 @@ Works in **Cursor, VSCodium, stock VS Code, and Windsurf** — no editor fork re
 
 ## Auth / credentials
 
-Resolution order (first non-empty wins per field):
+The node credential is read from `~/FounderVault/node-config.json`, written by
+the secure X device-code flow. It is not copied into ordinary IDE settings.
+Non-secret API and node identifiers can still be overridden for development.
 
-1. VS Code settings: `founderOs.apiBaseUrl`, `founderOs.nodeId`, `founderOs.nodeToken`
-2. `~/FounderVault/node-config.json` — written by Founder Node when you click **Connect IDE / Pair**
-
-If neither is present, the extension shows a "Founder OS: Not Paired" status bar item and a one-time prompt to pair.
+If no vault session is present, the Founder Activity Bar opens on first run and
+offers the account sign-in.
 
 ## Build
 
@@ -58,10 +60,10 @@ Reload the window after installing (`Developer: Reload Window`).
 
 ## Use
 
-1. Ensure Founder Node is paired and `~/FounderVault/node-config.json` exists on this machine (or set the `founderOs.*` settings manually).
-2. Open the Chat view (`Ctrl+L` in Cursor / `Ctrl+Alt+I` in VS Code).
-3. Pick a model from the dropdown — `Founder OS Auto`, `Founder OS Code`, `Founder OS Reasoning`, or `Founder OS Fast`.
-4. Type a message. Tokens should stream in real time from your Founder OS gateway.
+1. Open Founder from the Activity Bar and choose Local, Hybrid, or Founder Cloud.
+2. Select **Sign in** to connect this computer through the X device-code flow.
+3. Open Founder Chat and choose a Founder model.
+4. Type a message. Tokens stream from the Founder gateway.
 
 ## Architecture
 
@@ -70,7 +72,9 @@ VS Code Chat view
    │  vscode.lm.registerLanguageModelChatProvider('founder-os', provider)
    ▼
 founder-ide-extension (this package)
-   - credentials.ts      -> reads ~/FounderVault/node-config.json or settings
+   - founder-hub.ts      -> Founder Activity Bar control center
+   - founder-authentication.ts -> IDE Accounts integration
+   - credentials.ts      -> reads ~/FounderVault/node-config.json
    - models.ts           -> 4 aliases map to X-Execution-Profile headers
    - gateway-client.ts   -> POST /api/v1/chat/completions, SSE parser
    - chat-provider.ts    -> LanguageModelChatProvider impl, progress.report()
@@ -89,6 +93,9 @@ The gateway owns routing, DDollar metering, and Flight Recorder logging. This ex
 
 | Command | Title |
 |--|--|
+| `founderOs.openHub` | Founder: Open control center |
+| `founderOs.signIn` | Founder: Sign in with X |
+| `founderOs.signOut` | Founder: Sign out |
 | `founderOs.manage` | Founder OS: Manage connection |
 | `founderOs.pair` | Founder OS: Pair with Founder Node |
 | `founderOs.selectModel` | Founder OS: Select model alias |
@@ -97,7 +104,7 @@ The gateway owns routing, DDollar metering, and Flight Recorder logging. This ex
 ## Test plan
 
 1. **Install** the `.vsix` in Cursor: `cursor --install-extension founder-ide-extension-0.0.1.vsix`. Reload the window.
-2. **Pair** Founder Node and confirm `~/FounderVault/node-config.json` exists (or set `founderOs.apiBaseUrl` / `founderOs.nodeId` / `founderOs.nodeToken` in settings).
+2. **Sign in** from the Founder Activity Bar and confirm `~/FounderVault/node-config.json` exists.
 3. **Status bar**: should read `Founder OS: Connected`. If not, click it → "Pair with Founder Node".
 4. **Open Chat** view. The model dropdown should list `Founder OS Auto / Code / Reasoning / Fast`.
 5. **Send a message** with `Founder OS Auto` selected.
@@ -107,7 +114,7 @@ The gateway owns routing, DDollar metering, and Flight Recorder logging. This ex
 7. **Cancellation**: while streaming, hit the cancel button on the chat message. The fetch should abort (status bar returns to `Connected`).
 8. **Unpaired state**: rename `~/FounderVault/node-config.json` temporarily and reload. Status bar should show `Not Paired` and the model picker should not list Founder OS models (or list them but error gracefully on use). Restore the file and reload to recover.
 9. **Credential override**: set `founderOs.apiBaseUrl` in settings to a staging URL; reload; confirm requests go to staging (check Flight Recorder / network).
-10. **Wrong token**: set `founderOs.nodeToken` to garbage; send a message; expect an inline `_Founder OS gateway error: 401…_` message and status bar `Error`.
+10. **Expired session**: use an expired test vault; expect a safe sign-in message with no raw response body or credential fragment.
 
 ## Notes / limitations
 

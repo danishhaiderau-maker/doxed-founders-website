@@ -98,6 +98,27 @@ function bearerFromVault(cfg: NodeConfigFile): string {
 	return `fos_${cfg.nodeId}:${cfg.nodeToken}`;
 }
 
+function gatewayErrorMessage(status: number, responseBody: string): string {
+	const normalized = responseBody.toLowerCase();
+	const providerCredentialFailed =
+		normalized.includes('api key') &&
+		(normalized.includes('invalid') || normalized.includes('authentication'));
+
+	if (providerCredentialFailed) {
+		return 'The selected AI provider is unavailable. Open Founder Connections to repair it or choose another model.';
+	}
+	if (status === 401 || status === 403) {
+		return 'Your Founder session needs to be renewed. Open the Founder panel and sign in again.';
+	}
+	if (status === 429) {
+		return 'Your Founder AI allowance is temporarily unavailable. Check Founder Connections for usage and provider options.';
+	}
+	if (status >= 500) {
+		return 'Founder AI is temporarily unavailable. Your workspace and local files are unaffected.';
+	}
+	return 'Founder could not send this request. Check the active model in Founder Connections.';
+}
+
 // ---------------------------------------------------------------------------
 // Feature -> model alias mapping (design report section 4.3).
 // loggingName values come from the callers:
@@ -310,13 +331,18 @@ async function gatewayFetch(
 		});
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
-			onError({ message: `Founder OS gateway returned ${res.status}: ${text.slice(0, 500)}`, fullError: null });
+			onError({
+				message: gatewayErrorMessage(res.status, text),
+				fullError: null,
+			});
 			return null;
 		}
 		return { res, controller };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		onError({ message: `Founder OS gateway network error: ${message}`, fullError: err instanceof Error ? err : null });
+		onError({
+			message: 'Founder could not reach the AI gateway. Check your connection from the Founder panel.',
+			fullError: err instanceof Error ? err : null,
+		});
 		return null;
 	}
 }

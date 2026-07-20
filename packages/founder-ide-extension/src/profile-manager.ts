@@ -90,9 +90,14 @@ export function profileForAlias(aliasId: FounderOsModelAliasId): ExecutionProfil
 
 export class ProfileManager {
   private readonly bar: vscode.StatusBarItem;
+  private readonly showStatusBar: boolean;
   private current: ExecutionProfile;
 
-  constructor(private readonly context: vscode.ExtensionContext) {
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    options: { showStatusBar?: boolean } = {},
+  ) {
+    this.showStatusBar = options.showStatusBar ?? true;
     this.bar = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
       99,
@@ -117,7 +122,8 @@ export class ProfileManager {
   show(): void {
     this.bar.text = `${this.current.icon} ${this.current.label}`;
     this.bar.tooltip = `Founder OS execution profile: ${this.current.label}.\nModel: ${this.alias.id}.\nClick to change.`;
-    this.bar.show();
+    if (this.showStatusBar) this.bar.show();
+    else this.bar.hide();
   }
 
   /** Open the QuickPick and apply the selection. */

@@ -55,7 +55,9 @@ let consentPromptShownThisSession = false;
 export function createDebugSquasherStatus(
   context: vscode.ExtensionContext,
   getCredentials: () => FounderOsCredentials | null,
+  options: { showStatusBar?: boolean } = {},
 ): vscode.Disposable {
+  const showStatusBar = options.showStatusBar ?? true;
   const status = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     90,
@@ -65,11 +67,11 @@ export function createDebugSquasherStatus(
   context.subscriptions.push(status);
 
   const interval = setInterval(() => {
-    void poll(getCredentials, status, context);
+    void poll(getCredentials, status, context, showStatusBar);
   }, POLL_INTERVAL_MS);
 
   // First poll immediately so the bar shows real data on activation.
-  void poll(getCredentials, status, context);
+  void poll(getCredentials, status, context, showStatusBar);
 
   const commandDisposable = vscode.commands.registerCommand(
     'founderOs.openDebugSquasher',
@@ -88,6 +90,7 @@ async function poll(
   getCredentials: () => FounderOsCredentials | null,
   status: vscode.StatusBarItem,
   context: vscode.ExtensionContext,
+  showStatusBar: boolean,
 ): Promise<void> {
   const creds = getCredentials();
   if (!creds) {
@@ -98,6 +101,8 @@ async function poll(
     const latest = await fetchLatest(creds);
     if (latest) {
       renderStatus(status, latest);
+      if (showStatusBar) status.show();
+      else status.hide();
       // One-shot consent prompt per session.
       if (!consentPromptShownThisSession) {
         consentPromptShownThisSession = true;
@@ -105,12 +110,14 @@ async function poll(
       }
     } else {
       status.text = '$(question) Founder OS: No health check yet';
-      status.show();
+      if (showStatusBar) status.show();
+      else status.hide();
     }
   } catch {
     status.text = '$(circle-slash) Founder OS: health check unavailable';
     status.tooltip = 'Could not reach /api/debug-squasher/latest';
-    status.show();
+    if (showStatusBar) status.show();
+    else status.hide();
   }
 }
 
@@ -125,7 +132,6 @@ function renderStatus(status: vscode.StatusBarItem, run: LatestRun): void {
     status.tooltip = `Debug Squasher: ${run.overall} — ${failed} check(s) failed. Click to open diagnoses.`;
     status.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
   }
-  status.show();
 }
 
 async function fetchLatest(creds: FounderOsCredentials): Promise<LatestRun | null> {

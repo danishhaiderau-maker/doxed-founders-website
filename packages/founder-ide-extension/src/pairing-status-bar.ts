@@ -58,6 +58,9 @@ export class PairingStatusBar {
   private lastOkAt: Date | null = null;
   private lastWasUnauthorized = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private requestModel: string | null = null;
+  private lastRoute: string | null = null;
+  private lastError: string | null = null;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
@@ -103,6 +106,36 @@ export class PairingStatusBar {
     this.refresh();
   }
 
+  setRequestInFlight(modelId: string): void {
+    this.requestModel = modelId;
+    this.lastError = null;
+    this.refresh();
+  }
+
+  setRouteDetails(details: {
+    tier?: string;
+    provider?: string;
+    model?: string;
+    cost?: number;
+  }): void {
+    const route = [details.tier, details.provider, details.model]
+      .filter(Boolean)
+      .join(' / ');
+    const cost = typeof details.cost === 'number' ? ` / ${details.cost} D$` : '';
+    this.lastRoute = `${route || 'Founder managed route'}${cost}`;
+    this.refresh();
+  }
+
+  setRequestResult(ok: boolean, errorMessage?: string): void {
+    this.requestModel = null;
+    this.lastError = ok ? null : errorMessage || 'The last Founder request failed.';
+    if (ok) {
+      this.lastOkAt = new Date();
+      this.lastWasUnauthorized = false;
+    }
+    this.refresh();
+  }
+
   /** Recompute the state and update the status bar text/tooltip. */
   refresh(): void {
     const summary = readConfigSummary();
@@ -114,9 +147,19 @@ export class PairingStatusBar {
       lastWasUnauthorized: this.lastWasUnauthorized,
     };
     const state = computeIdePairingState(inputs);
-    const { text, tooltip } = pairingStateStatusBar(state);
-    this.item.text = text;
-    this.item.tooltip = tooltip;
+    const base = pairingStateStatusBar(state);
+    if (this.requestModel) {
+      this.item.text = '$(sync~spin) Founder';
+      this.item.tooltip = `Founder is responding with ${this.requestModel}.`;
+    } else if (this.lastError) {
+      this.item.text = '$(error) Founder';
+      this.item.tooltip = `${this.lastError}\n\nClick to manage Founder.`;
+    } else {
+      this.item.text = base.text;
+      this.item.tooltip = this.lastRoute
+        ? `${base.tooltip}\n\nLast route: ${this.lastRoute}`
+        : base.tooltip;
+    }
     this.item.show();
   }
 

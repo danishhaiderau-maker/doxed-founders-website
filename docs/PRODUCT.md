@@ -1,5 +1,7 @@
 # Founder OS — Product Constitution
 
+> **Direction notice (2026-07-21):** The statements below that Founder OS is not an IDE and never accepts BYOK no longer describe the complete desktop product direction. Founder IDE is now a first-party Founder surface, and a persistent multi-provider vault is proposed alongside Founder Managed AI. See [`FOUNDER-PRODUCT-DIRECTION-2026-07.md`](./FOUNDER-PRODUCT-DIRECTION-2026-07.md) before implementing product or pricing decisions.
+
 | Field | Value |
 |-------|-------|
 | **Status** | DRAFT |

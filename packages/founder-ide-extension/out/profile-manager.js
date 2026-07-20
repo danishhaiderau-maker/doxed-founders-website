@@ -107,9 +107,11 @@ function profileForAlias(aliasId) {
 class ProfileManager {
     context;
     bar;
+    showStatusBar;
     current;
-    constructor(context) {
+    constructor(context, options = {}) {
         this.context = context;
+        this.showStatusBar = options.showStatusBar ?? true;
         this.bar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
         this.bar.command = 'founderOs.selectProfile';
         context.subscriptions.push(this.bar);
@@ -127,7 +129,10 @@ class ProfileManager {
     show() {
         this.bar.text = `${this.current.icon} ${this.current.label}`;
         this.bar.tooltip = `Founder OS execution profile: ${this.current.label}.\nModel: ${this.alias.id}.\nClick to change.`;
-        this.bar.show();
+        if (this.showStatusBar)
+            this.bar.show();
+        else
+            this.bar.hide();
     }
     /** Open the QuickPick and apply the selection. */
     async selectProfile() {

@@ -1,8 +1,8 @@
 {
   "name": "founder-ide-extension",
-  "displayName": "Founder OS Chat",
-  "description": "Registers the Founder OS AI Gateway as a first-class VS Code chat model provider. Streams tokens from your own routing layer into the built-in Chat view. Works in Cursor, VSCodium, stock VS Code, and Windsurf.",
-  "version": "0.1.0",
+  "displayName": "Founder",
+  "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
+  "version": "0.2.0",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -26,6 +26,24 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "founderOs",
+          "title": "Founder",
+          "icon": "resources/founder.svg"
+        }
+      ]
+    },
+    "views": {
+      "founderOs": [
+        {
+          "id": "founderOs.hub",
+          "name": "Founder",
+          "type": "webview"
+        }
+      ]
+    },
     "chatParticipants": [
       {
         "id": "founder-os.chat",
@@ -139,7 +157,11 @@
       },
       {
         "command": "founderOs.signIn",
-        "title": "Founder OS: Sign in with X"
+        "title": "Founder: Sign in with X"
+      },
+      {
+        "command": "founderOs.signOut",
+        "title": "Founder: Sign out"
       },
       {
         "command": "founderOs.pair",
@@ -176,11 +198,56 @@
       {
         "command": "founderOs.recentGatewayMetadata",
         "title": "Founder OS: Recent gateway requests"
+      },
+      {
+        "command": "founderOs.openHub",
+        "title": "Founder: Open control center"
+      },
+      {
+        "command": "founderOs.openChat",
+        "title": "Founder: Open chat"
+      },
+      {
+        "command": "founderOs.openConnections",
+        "title": "Founder: Manage connections"
+      },
+      {
+        "command": "founderOs.openSettings",
+        "title": "Founder: Open settings"
+      },
+      {
+        "command": "founderOs.refreshHub",
+        "title": "Refresh Founder",
+        "icon": "$(refresh)"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "founderOs.refreshHub",
+          "when": "view == founderOs.hub",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Founder OS",
       "properties": {
+        "founderOs.workspaceMode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hybrid",
+            "cloud"
+          ],
+          "enumItemLabels": [
+            "Local",
+            "Hybrid",
+            "Founder Cloud"
+          ],
+          "default": "hybrid",
+          "description": "Where this workspace runs and which connected services it may use."
+        },
         "founderOs.apiBaseUrl": {
           "type": "string",
           "default": "",
@@ -191,20 +258,10 @@
           "default": "",
           "markdownDescription": "Optional override for the local relay ID. If empty, Founder IDE reads `nodeId` from `~/FounderVault/node-config.json`."
         },
-        "founderOs.nodeToken": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Optional override for the local relay token. If empty, Founder IDE reads `nodeToken` from `~/FounderVault/node-config.json`."
-        },
         "founderOs.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
           "markdownDescription": "Per-request timeout in milliseconds for gateway calls (including streaming)."
-        },
-        "founderOs.byoFallbackEnabled": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Opt-in BYO-provider fallback. When `true`, the chat provider can be configured with arbitrary `founderOs.apiBaseUrl` / `nodeId` / `nodeToken` overrides without the device-code (Founder ID) sign-in. **Not recommended** — bypasses the authed IPC + audit trail. Defaults to `false`; only enable if you understand the security implications."
         }
       }
     }
@@ -216,7 +273,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/embedded-relay.spec.ts src/manifest.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/embedded-relay.spec.ts src/founder-hub-state.spec.ts src/manifest.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
