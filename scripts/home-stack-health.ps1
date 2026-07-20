@@ -21,12 +21,66 @@ function Test-BotHealthyQuick {
   return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 2)
 }
 
+function Get-ExpectedRepoRevision {
+  try {
+    $rev = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $rev) { return ([string]$rev).Trim() }
+  } catch { }
+  try {
+    $gitDir = Join-Path $repoRoot ".git"
+    $headPath = Join-Path $gitDir "HEAD"
+    if (-not (Test-Path -LiteralPath $headPath)) { return $null }
+    $head = (Get-Content -LiteralPath $headPath -Raw).Trim()
+    if ($head.StartsWith("ref:")) {
+      $refName = $head.Substring(4).Trim()
+      $refPath = Join-Path $gitDir ($refName -replace '/', '\')
+      if (Test-Path -LiteralPath $refPath) {
+        return (Get-Content -LiteralPath $refPath -Raw).Trim()
+      }
+      $packed = Join-Path $gitDir "packed-refs"
+      if (Test-Path -LiteralPath $packed) {
+        foreach ($line in Get-Content -LiteralPath $packed) {
+          if ($line -match '^([0-9a-fA-F]+)\s+(.+)$' -and $matches[2] -eq $refName) {
+            return $matches[1]
+          }
+        }
+      }
+      return $null
+    }
+    return $head
+  } catch {
+    return $null
+  }
+}
+
+function Test-BotRevisionMatches([object]$Ping) {
+  $expected = [string](Get-ExpectedRepoRevision)
+  if (-not $expected) { return $true }
+  $actual = [string]$Ping.source_git_rev
+  if (-not $actual -or $actual -eq "unknown") { return $false }
+  return $expected.StartsWith($actual, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-BotHealthy {
   if (-not (Test-PortOpen $BotPort)) { return $false }
-  if (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 12) { return $true }
+  try {
+    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/ping" -TimeoutSec 12
+    if ($ping.ok -and $ping.dashboard_owner -eq $true -and (Test-BotRevisionMatches $ping)) {
+      return $true
+    }
+  } catch { }
   # One retry — slow laptops often miss the first probe under load.
   Start-Sleep -Milliseconds 800
-  return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 15)
+  try {
+    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/ping" -TimeoutSec 15
+    return (
+      $ping.ok -and
+      $ping.dashboard_owner -eq $true -and
+      (Test-BotRevisionMatches $ping)
+    )
+  } catch {
+    return $false
+  }
 }
 
 function Test-AnalyzerHealthyQuick {
@@ -39,16 +93,18 @@ function Test-AnalyzerHealthy {
   try {
     $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
     if (-not $s.ok) { return $false }
-    if ($s.generated_at) { return $true }
-    if ($s.analyzer_sync_match -eq $true) { return $true }
-    $manifestMtime = $null
-    if ($s.last_files -and $s.last_files.manifest) {
-      $manifestMtime = $s.last_files.manifest
-    }
-    if ($manifestMtime) { return $true }
-    # Stale dashboard-only listener at agent root (no manifest, wrong cwd).
+    # The correct embedded dashboard must be running from research/ and must
+    # identify itself as the version expected by the current checkout.
     $cwd = [string]$s.cwd
     if ($cwd -and $cwd -notmatch '[\\/]research$') { return $false }
+    if ($s.runtime_sync_match -ne $true) { return $false }
+    if ([string]$s.runtime_analyzer_sync_id -ne [string]$s.expected_analyzer_sync_id) { return $false }
+
+    # A completed current-version report is ideal.  Immediately after Start,
+    # allow a current-version pass that is actively replacing an older
+    # manifest.  /api/status limits this grace to 45 minutes.
+    if ($s.report_sync_match -eq $true) { return $true }
+    if ($s.report_sync_pending -eq $true -and $s.analysis_in_progress -eq $true) { return $true }
     return $false
   } catch {
     return $false

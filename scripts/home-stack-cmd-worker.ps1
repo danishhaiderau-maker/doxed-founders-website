@@ -24,6 +24,23 @@ if ($AnalyzerPort -le 0 -or ($AnalyzerPort -eq 9500 -and $StackMode -eq "product
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
+function Get-BotAdminHeaders {
+  $token = (Get-Item -Path "env:BOT_ADMIN_TOKEN" -ErrorAction SilentlyContinue).Value
+  if (-not $token) {
+    $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
+    if (Test-Path -LiteralPath $vaultEnv) {
+      foreach ($line in Get-Content -LiteralPath $vaultEnv -ErrorAction SilentlyContinue) {
+        if ($line -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
+          $token = [string]$matches[1].Trim().Trim('"').Trim("'")
+          break
+        }
+      }
+    }
+  }
+  if ($token) { return @{ "X-Bot-Admin-Token" = [string]$token } }
+  return @{}
+}
+
 $isLocal = $StackMode -eq "local-collection"
 $botTitle = if ($isLocal) { "Local Collection Bot :$BotPort" } else { "Doxed Bot :$BotPort" }
 $analyzerTitle = if ($isLocal) { "Local Collection Analyzer :$AnalyzerPort" } else { "Doxed Analyzer" }
@@ -64,22 +81,28 @@ switch ($Action) {
   }
   "stop-bot" {
     Set-HomeStackUserStopped
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq $botTitle" 2>$null | Out-Null
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq Doxed Bot :7002" 2>$null | Out-Null
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq Local Collection Bot :7002" 2>$null | Out-Null
     Stop-BotPidFile | Out-Null
     Stop-ListenPortFast $BotPort | Out-Null
-    Stop-PythonMatching "btc_conservative_agent" | Out-Null
-    Stop-PythonMatching "bot.py" | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq $botTitle" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7002" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Bot :7002" 2>$null | Out-Null
     Start-Sleep -Seconds 1
     Stop-ListenPortFast $BotPort | Out-Null
   }
   "stop-analyzer" {
-    Stop-PythonMatching "analyzer_research_engine" | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq $analyzerTitle" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer (once)" 2>$null | Out-Null
-    & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Analyzer :9500" 2>$null | Out-Null
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq $analyzerTitle" 2>$null | Out-Null
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq Doxed Analyzer*" 2>$null | Out-Null
+    & taskkill.exe /F /T /FI "WINDOWTITLE eq Local Collection Analyzer :9500" 2>$null | Out-Null
+    $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
+    if (Test-Path -LiteralPath $analyzerPidFile) {
+      try {
+        $analyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
+        if ($analyzerPid -gt 0) {
+          Stop-Process -Id $analyzerPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+      Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+    }
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $repoRoot ".local-collection-analyzer.lock") -Force -ErrorAction SilentlyContinue
@@ -124,12 +147,12 @@ switch ($Action) {
   }
   "pause-trading" {
     if (Test-PortOpen $BotPort) {
-      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/pause" -Method POST -UseBasicParsing -TimeoutSec 30 | Out-Null
+      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/pause" -Method POST -Headers (Get-BotAdminHeaders) -UseBasicParsing -TimeoutSec 30 | Out-Null
     }
   }
   "resume-trading" {
     if (Test-PortOpen $BotPort) {
-      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/resume" -Method POST -UseBasicParsing -TimeoutSec 30 | Out-Null
+      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/resume" -Method POST -Headers (Get-BotAdminHeaders) -UseBasicParsing -TimeoutSec 30 | Out-Null
     }
   }
 }

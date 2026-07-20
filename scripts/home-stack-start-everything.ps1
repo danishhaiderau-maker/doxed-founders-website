@@ -52,17 +52,18 @@ Write-Host ""
 
 Clear-HomeStackUserStopped
 
-$exclude = @($PID)
+$startLockPath = Join-Path $repoRoot ".home-start-everything.lock"
+$startLockHandle = $null
 try {
-  $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
-  if ($parent -gt 0) { $exclude += $parent }
-} catch { }
-Get-Process cmd, powershell -ErrorAction SilentlyContinue | Where-Object {
-  if ($exclude -contains $_.Id) { return $false }
-  $t = $_.MainWindowTitle
-  return ($t -like "Doxed Start Everything*" -or $t -like "Doxed Stop Everything*")
-} | ForEach-Object {
-  Stop-ProcessTree $_.Id
+  $startLockHandle = [System.IO.File]::Open(
+    $startLockPath,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+} catch {
+  Write-Host "Start Showcase is already running - not launching a duplicate." -ForegroundColor Yellow
+  exit 0
 }
 
 $messages = [System.Collections.Generic.List[string]]::new()
@@ -94,35 +95,47 @@ if (-not $SkipBridgeRestart) {
 }
 
 # Step 1 — bot (kill duplicates before start)
-$botDupes = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -like "*btc_conservative_agent*" })
-if ($botDupes.Count -gt 1) {
-  Write-Step "[1/4] Clearing $($botDupes.Count) duplicate bot processes..."
-  Stop-PythonMatching "btc_conservative_agent" | Out-Null
-  Stop-ListenPortFast $BotPort | Out-Null
-  Start-Sleep -Seconds 2
-}
 if (-not (Test-BotHealthy)) {
   if (Test-BotHung) {
     Write-Step "[1/4] Clearing hung bot on :$BotPort..."
-    Stop-PythonMatching "btc_conservative_agent" | Out-Null
+    Stop-BotPidFile | Out-Null
     Stop-ListenPortFast $BotPort | Out-Null
     Start-Sleep -Seconds 2
   }
   Write-Step "[1/4] Opening bot console (Doxed Bot :$BotPort)..."
   Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
   $messages.Add("[1/4] Bot window opened on :$BotPort")
-  Start-Sleep -Seconds 12
+  $botDeadline = (Get-Date).AddSeconds(90)
+  while ((Get-Date) -lt $botDeadline) {
+    if (Test-BotHealthy) { break }
+    Start-Sleep -Seconds 3
+  }
+  if (Test-BotHealthy) {
+    Write-Step "[1/4] Bot verified on :$BotPort (owner + canonical source revision)"
+    $messages.Add("[1/4] Bot verified")
+  } else {
+    Write-Step "[1/4] Bot FAILED canonical verification on :$BotPort"
+    $messages.Add("[1/4] Bot verification FAILED - keep relay paused")
+  }
 } else {
-  Write-Step "[1/4] Bot already healthy on :$BotPort"
-  $messages.Add("[1/4] Bot already healthy on :$BotPort")
+  Write-Step "[1/4] Bot already verified on :$BotPort"
+  $messages.Add("[1/4] Bot already verified on :$BotPort")
 }
 
 # Step 2 — analyzer
 if (-not (Test-AnalyzerHealthy)) {
   if (Test-AnalyzerHung) {
     Write-Step "[2/4] Clearing hung analyzer on :$AnalyzerPort..."
-    Stop-PythonMatching "analyzer_research_engine" | Out-Null
+    $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
+    if (Test-Path -LiteralPath $analyzerPidFile) {
+      try {
+        $analyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
+        if ($analyzerPid -gt 0) {
+          Stop-Process -Id $analyzerPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+      Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+    }
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
@@ -130,10 +143,21 @@ if (-not (Test-AnalyzerHealthy)) {
   Write-Step "[2/4] Opening analyzer console (Doxed Analyzer :$AnalyzerPort)..."
   Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
   $messages.Add("[2/4] Analyzer window opened on :$AnalyzerPort")
-  Start-Sleep -Seconds 12
+  $analyzerDeadline = (Get-Date).AddSeconds(90)
+  while ((Get-Date) -lt $analyzerDeadline) {
+    if (Test-AnalyzerHealthy) { break }
+    Start-Sleep -Seconds 3
+  }
+  if (Test-AnalyzerHealthy) {
+    Write-Step "[2/4] Analyzer verified on :$AnalyzerPort (runtime sync + fresh/current pass)"
+    $messages.Add("[2/4] Analyzer verified")
+  } else {
+    Write-Step "[2/4] Analyzer FAILED verification on :$AnalyzerPort"
+    $messages.Add("[2/4] Analyzer verification FAILED - keep relay paused")
+  }
 } else {
-  Write-Step "[2/4] Analyzer already healthy on :$AnalyzerPort"
-  $messages.Add("[2/4] Analyzer already healthy")
+  Write-Step "[2/4] Analyzer already verified on :$AnalyzerPort"
+  $messages.Add("[2/4] Analyzer already verified")
 }
 
 # Step 3 — tunnel (named = hidden background; quick = visible console)
@@ -198,4 +222,6 @@ Write-Host "Refresh Agent Hub status in 30s, 60s, and 90s (/api/ping is fast; fu
 $logLine = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $summary
 Add-Content -Path (Join-Path $repoRoot ".home-start-all.log") -Value $logLine
 
+$startLockHandle.Dispose()
+Remove-Item -LiteralPath $startLockPath -Force -ErrorAction SilentlyContinue
 if (-not $NoWait) { Wait-ForKey }

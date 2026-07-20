@@ -460,11 +460,16 @@ def _ascii_fold_csv_text(s: str) -> str:
 def _console_log_stream():
     """UTF-8 console stream on Windows so StreamHandler never hits cp1252 encode errors."""
     if sys.platform == "win32":
-        buf = getattr(sys.stdout, "buffer", None)
-        if buf is not None:
-            return io.TextIOWrapper(
-                buf, encoding="utf-8", errors="replace", line_buffering=True,
-            )
+        # Do not construct another TextIOWrapper around sys.stdout.buffer.
+        # When a recovery/test reloads this module, garbage-collecting the old
+        # wrapper closes the shared underlying console buffer and all later
+        # logging/prints fail with "I/O operation on closed file".
+        try:
+            reconfigure = getattr(sys.stdout, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except Exception:
+            pass
     return sys.stdout
 
 
@@ -6249,31 +6254,99 @@ EXECUTION_FIX_VERSION = COMBO_EXECUTION_FIX_VERSION
 _RUNTIME_GIT_REV_CACHE = {"value": None}
 
 
+def _read_git_revision_without_cli(start_dir: str) -> str:
+    """Read HEAD directly when the bot service account cannot execute git.
+
+    The home-stack launcher can start Python with a narrower PATH than the
+    interactive shell.  In that case ``git rev-parse`` fails even though the
+    checkout and its .git metadata are present.  Walking upward and reading
+    HEAD keeps the runtime identity available without making git a runtime
+    dependency.
+    """
+    current = os.path.abspath(start_dir)
+    while True:
+        git_dir = os.path.join(current, ".git")
+        if os.path.isdir(git_dir):
+            try:
+                with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as handle:
+                    head = handle.read().strip()
+                if head.startswith("ref:"):
+                    ref_name = head.split(":", 1)[1].strip().replace("/", os.sep)
+                    ref_path = os.path.join(git_dir, ref_name)
+                    if os.path.isfile(ref_path):
+                        with open(ref_path, encoding="utf-8") as handle:
+                            return handle.read().strip()
+                    packed_path = os.path.join(git_dir, "packed-refs")
+                    if os.path.isfile(packed_path):
+                        with open(packed_path, encoding="utf-8") as packed:
+                            wanted = head.split(":", 1)[1].strip()
+                            for line in packed:
+                                line = line.strip()
+                                if not line or line.startswith(("#", "^")):
+                                    continue
+                                sha, _, name = line.partition(" ")
+                                if name == wanted:
+                                    return sha.strip()
+                    return ""
+                return head
+            except Exception:
+                return ""
+        parent = os.path.dirname(current)
+        if parent == current:
+            return ""
+        current = parent
+
+
 def _runtime_git_rev() -> str:
     """Return the short git SHA this process was started from, or 'unknown'.
 
-    Cached after first successful read. Best-effort: returns 'unknown' if git
-    is unavailable (e.g. deployed without .git). Never raises.
+    Cached after first successful read. Best-effort: uses deployment metadata,
+    the git CLI, then direct .git metadata.  An unsuccessful probe is not
+    cached so a transient startup PATH/filesystem race can recover. Never
+    raises.
     """
     if _RUNTIME_GIT_REV_CACHE["value"]:
         return _RUNTIME_GIT_REV_CACHE["value"]
-    rev = "unknown"
+    rev = ""
+    try:
+        for env_name in (
+            "SOURCE_GIT_REV",
+            "GIT_COMMIT",
+            "GITHUB_SHA",
+            "RAILWAY_GIT_COMMIT_SHA",
+        ):
+            candidate = str(os.getenv(env_name) or "").strip()
+            if len(candidate) >= 7 and all(ch in "0123456789abcdefABCDEF" for ch in candidate):
+                rev = candidate
+                break
+    except Exception:
+        rev = ""
     try:
         import subprocess
         here = os.path.dirname(os.path.abspath(__file__))
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=here,
-            capture_output=True,
-            text=True,
-            timeout=4,
-        )
-        if out.returncode == 0:
-            rev = (out.stdout or "").strip() or "unknown"
+        if not rev:
+            out = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=here,
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            if out.returncode == 0:
+                rev = (out.stdout or "").strip()
+        if not rev:
+            rev = _read_git_revision_without_cli(here)
     except Exception:
-        rev = "unknown"
-    _RUNTIME_GIT_REV_CACHE["value"] = rev
-    return rev
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            rev = _read_git_revision_without_cli(here)
+        except Exception:
+            rev = ""
+    if rev:
+        rev = rev[:12]
+        _RUNTIME_GIT_REV_CACHE["value"] = rev
+        return rev
+    return "unknown"
 
 
 def tile2_policy_descriptor() -> dict:
@@ -20031,6 +20104,19 @@ def _trusted_dashboard_operator(ip: str) -> bool:
     return False
 
 
+def _is_direct_local_control(ip: str) -> bool:
+    """Trust a direct loopback control call, never a proxied tunnel call."""
+    if not _is_local_operator(ip):
+        return False
+    forwarded_headers = (
+        "X-Forwarded-For",
+        "CF-Connecting-IP",
+        "True-Client-IP",
+        "Forwarded",
+    )
+    return not any((request.headers.get(name) or "").strip() for name in forwarded_headers)
+
+
 def _rate_check(log: dict, key: str, window_s: int, limit: int) -> bool:
     """Sliding-window per-key rate check. True = allowed, False = over limit."""
     now = _now()
@@ -20105,6 +20191,16 @@ def _emergency_api_guard():
         return None
     if method == "OPTIONS":
         return None  # CORS preflight — let route handlers respond
+
+    # The home bridge is a direct 127.0.0.1 caller. Allow only its narrow
+    # pause/resume path during secret rotation. Cloudflare/proxy requests carry
+    # forwarding headers and therefore remain protected by BOT_ADMIN_TOKEN.
+    if (
+        method == "POST"
+        and path in ("/api/pause", "/api/resume")
+        and _is_direct_local_control(ip)
+    ):
+        return None
 
     # Everything else (POST/PUT/DELETE, or GETs not in the safe list) requires
     # the admin token when BOT_ADMIN_TOKEN is configured.

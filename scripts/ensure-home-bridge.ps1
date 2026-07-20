@@ -29,7 +29,7 @@ function Test-BridgeHealthy {
   }
 }
 
-if (Test-BridgeHealthy -and -not $Force) {
+if ((Test-BridgeHealthy) -and -not $Force) {
   Log "Bridge already healthy on :$Port"
   exit 0
 }
@@ -49,13 +49,26 @@ if (Test-Path $supervisorPidFile) {
   Remove-Item $supervisorPidFile -Force -ErrorAction SilentlyContinue
 }
 Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
-Close-WindowsByTitlePrefix @("Doxed Home Bridge :$Port", "TEST Bridge") | Out-Null
 
-Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='cmd.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -like "*home-stack-launcher.ps1*" } |
+# Bridge reload must not depend on WMI/CIM. Win32_Process queries can hang for
+# minutes on this home PC, leaving :7810 down after the old bridge exits. The
+# launcher records its own PID, so a direct Stop-Process is deterministic.
+$bridgePidFile = Join-Path $repoRoot ".home-bridge.pid"
+if (Test-Path -LiteralPath $bridgePidFile) {
+  try {
+    $bridgePid = [int](Get-Content -LiteralPath $bridgePidFile -ErrorAction Stop)
+    if ($bridgePid -gt 0 -and $bridgePid -ne $PID) {
+      Log "  stop launcher pid $bridgePid"
+      Stop-Process -Id $bridgePid -Force -ErrorAction SilentlyContinue
+    }
+  } catch { }
+  Remove-Item -LiteralPath $bridgePidFile -Force -ErrorAction SilentlyContinue
+}
+# Clean up a visible orphan console by title without recursive WMI traversal.
+Get-Process powershell, pwsh -ErrorAction SilentlyContinue |
+  Where-Object { $_.MainWindowTitle -like "Doxed Home Bridge :$Port*" -or $_.MainWindowTitle -like "TEST Bridge*" } |
   ForEach-Object {
-    Log "  stop launcher pid $($_.ProcessId)"
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    if ($_.Id -ne $PID) { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
   }
 Stop-ListenPortFast $Port | Out-Null
 Start-Sleep -Seconds 3

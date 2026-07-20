@@ -55,22 +55,22 @@ function Test-AnalyzerMonitorCommandLine([int]$ProcId) {
   if ($ProcId -le 0) { return $false }
   try {
     $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
-    if (-not $p -or $p.ProcessName -ne "powershell") { return $false }
-    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue).CommandLine
-    return ($cmd -and $cmd -like "*analyzer-auto-restart.ps1*")
+    return [bool]($p -and $p.ProcessName -in @("powershell", "pwsh"))
   } catch { return $false }
 }
 
 function Stop-StaleAnalyzerCrashMonitors([int]$ExceptPid = 0) {
   $killed = @()
-  Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.CommandLine -and $_.CommandLine -like "*analyzer-auto-restart.ps1*" -and
-      ($ExceptPid -le 0 -or $_.ProcessId -ne $ExceptPid)
-    } | ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      $killed += $_.ProcessId
-    }
+  $monitorPidFile = Join-Path $repoRoot ".home-analyzer-crash-monitor.pid"
+  if (Test-Path -LiteralPath $monitorPidFile) {
+    try {
+      $oldPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
+      if ($oldPid -gt 0 -and ($ExceptPid -le 0 -or $oldPid -ne $ExceptPid)) {
+        Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+        $killed += $oldPid
+      }
+    } catch { }
+  }
   return $killed
 }
 

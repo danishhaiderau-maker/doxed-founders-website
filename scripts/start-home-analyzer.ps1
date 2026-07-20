@@ -93,8 +93,16 @@ if (Test-PortOpen $AnalyzerPort) {
     exit 0
   }
   Write-Host "Port $AnalyzerPort has stale dashboard-only listener - clearing and starting full analyzer..." -ForegroundColor Yellow
-  Stop-PythonMatching "research_dashboard" | Out-Null
-  Stop-PythonMatching "analyzer_research_engine" | Out-Null
+  $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
+  if (Test-Path -LiteralPath $analyzerPidFile) {
+    try {
+      $staleAnalyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
+      if ($staleAnalyzerPid -gt 0) {
+        Stop-Process -Id $staleAnalyzerPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch { }
+    Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+  }
   Stop-ListenPortFast $AnalyzerPort | Out-Null
   Start-Sleep -Seconds 2
 }
@@ -124,9 +132,16 @@ if ($NoWait) {
   # the space in the repo path ("Final Bots") - array form splits the path and the
   # monitor never starts.
   if ($analyzerProc -and $analyzerProc.Id -gt 0 -and -not $Once) {
-    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer-auto-restart.ps1*" } |
-      ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $monitorPidFile = Join-Path $repoRoot ".home-analyzer-crash-monitor.pid"
+    if (Test-Path -LiteralPath $monitorPidFile) {
+      try {
+        $oldMonitorPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
+        if ($oldMonitorPid -gt 0) {
+          Stop-Process -Id $oldMonitorPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+      Remove-Item -LiteralPath $monitorPidFile -Force -ErrorAction SilentlyContinue
+    }
     Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") -Value "$($analyzerProc.Id)" -NoNewline -Encoding UTF8
     $monitorScript = Join-Path $scriptDir "analyzer-auto-restart.ps1"
     $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -AnalyzerPid $($analyzerProc.Id) -Port $AnalyzerPort"

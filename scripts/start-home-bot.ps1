@@ -100,11 +100,17 @@ if (-not (Test-Path $agentDir)) {
 }
 
 # Always kill duplicate bot processes before a fresh start (common cause of :7002 slowness).
-$existing = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -like "*btc_conservative_agent*" })
-if ($existing.Count -gt 0) {
-  Write-Host "Stopping $($existing.Count) existing bot process(es) before start..." -ForegroundColor Yellow
-  Stop-PythonMatching "btc_conservative_agent" | Out-Null
+$recordedBotRunning = $false
+$botPidFile = Join-Path $repoRoot ".home-bot.pid"
+if (Test-Path -LiteralPath $botPidFile) {
+  try {
+    $recordedBotPid = [int](Get-Content -LiteralPath $botPidFile -Raw)
+    $recordedBotRunning = $null -ne (Get-Process -Id $recordedBotPid -ErrorAction SilentlyContinue)
+  } catch { }
+}
+if ($recordedBotRunning) {
+  Write-Host "Stopping recorded bot owner before fresh start..." -ForegroundColor Yellow
+  Stop-BotPidFile | Out-Null
   Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 2
 } elseif (Test-PortOpen $BotListenPort) {
@@ -172,8 +178,11 @@ if ($NoWait) {
         if (-not $monitorPidRaw -or $monitorPidRaw -notmatch "^\d+$") {
           $monitorHealthy = $false
         } else {
-          $monitorProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $monitorPidRaw" -ErrorAction Stop
-          $monitorHealthy = [bool]($monitorProcess -and $monitorProcess.CommandLine -and $monitorProcess.CommandLine -like "*bot-auto-restart.ps1*")
+          $monitorProcess = Get-Process -Id ([int]$monitorPidRaw) -ErrorAction Stop
+          $monitorHealthy = [bool](
+            $monitorProcess -and
+            $monitorProcess.ProcessName -in @("powershell", "pwsh")
+          )
         }
       } catch {
         $monitorHealthy = $false
@@ -187,11 +196,14 @@ if ($NoWait) {
       # script name, then start a fresh one. Also clear the stale lock so the new
       # monitor's single-instance check does not exit silently.
       try {
-        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-          Where-Object { $_.CommandLine -and $_.CommandLine -like "*bot-auto-restart*" } |
-          ForEach-Object {
-            try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+        $monitorPidFile = Join-Path $repoRoot ".home-bot-crash-monitor.pid"
+        if (Test-Path -LiteralPath $monitorPidFile) {
+          $staleMonitorPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
+          if ($staleMonitorPid -gt 0) {
+            Stop-Process -Id $staleMonitorPid -Force -ErrorAction SilentlyContinue
           }
+          Remove-Item -LiteralPath $monitorPidFile -Force -ErrorAction SilentlyContinue
+        }
       } catch { }
       if (Test-Path $lockFile) {
         try { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue } catch { }

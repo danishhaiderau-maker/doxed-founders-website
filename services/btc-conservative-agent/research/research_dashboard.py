@@ -9,6 +9,7 @@ if _PARENT_ not in _sys.path:
 import io
 import json
 import os
+import re
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -193,6 +194,61 @@ BUNDLE_FILES = (
 )
 
 app = Flask("research_dashboard")
+_DASHBOARD_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _analyzer_run_state() -> dict:
+    """Describe the live analyzer pass independently of the last report.
+
+    A fresh analyzer process starts the dashboard before a full report pass is
+    complete.  During that window the previous manifest may legitimately have
+    an older sync id.  Exposing the live run header lets stack health accept a
+    correctly-versioned in-progress pass without accepting a permanently stale
+    dashboard.
+    """
+    path = ROOT / ANALYZER_LOG_FILE
+    if not path.is_file():
+        return {
+            "in_progress": False,
+            "sync_id": None,
+            "started_at": None,
+            "updated_at": None,
+            "age_seconds": None,
+        }
+    header = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            header = handle.readline().strip()
+    except Exception:
+        pass
+    match = re.search(r"\bsync=([^|\s]+)", header)
+    run_sync = match.group(1).strip() if match else None
+    started_at = None
+    match = re.search(r"# analyzer run ([^|]+)", header)
+    if match:
+        started_at = match.group(1).strip()
+    try:
+        updated_dt = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        updated_at = updated_dt.isoformat()
+        age_seconds = max(0, int((datetime.now(timezone.utc) - updated_dt).total_seconds()))
+    except Exception:
+        updated_at = None
+        age_seconds = None
+    # A full pass can take several minutes on the home PC.  The engine rewrites
+    # this log for every pass, so a current-version log updated within 45 min is
+    # reliable evidence that the analyzer is alive and producing the new set.
+    in_progress = bool(
+        run_sync == EXPECTED_ANALYZER_SYNC_ID
+        and age_seconds is not None
+        and age_seconds <= 45 * 60
+    )
+    return {
+        "in_progress": in_progress,
+        "sync_id": run_sync,
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "age_seconds": age_seconds,
+    }
 
 
 def _load_bot_session():
@@ -1201,18 +1257,33 @@ def api_status():
     manifest = _read_json(REPORT_MANIFEST_FILE)
     compact = _read_json(COMPACT_SUMMARY_FILE)
     manifest_sync = manifest.get("analyzer_sync_id") or compact.get("analyzer_sync_id")
-    sync_ok = manifest_sync == EXPECTED_ANALYZER_SYNC_ID if manifest_sync else None
+    report_sync_ok = manifest_sync == EXPECTED_ANALYZER_SYNC_ID if manifest_sync else None
+    run_state = _analyzer_run_state()
+    runtime_sync_ok = RESEARCH_DASHBOARD_VERSION == EXPECTED_ANALYZER_SYNC_ID
+    report_pending = bool(
+        report_sync_ok is not True
+        and run_state.get("in_progress")
+        and run_state.get("sync_id") == EXPECTED_ANALYZER_SYNC_ID
+    )
     return jsonify({
-        "ok": True,
+        "ok": bool(runtime_sync_ok and (report_sync_ok is True or report_pending)),
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
+        "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
+        "runtime_sync_match": runtime_sync_ok,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "benchmark_lane": BENCHMARK_LANE,
-        "analyzer_sync_match": sync_ok,
+        "analyzer_sync_match": report_sync_ok,
+        "report_sync_match": report_sync_ok,
+        "report_sync_pending": report_pending,
+        "analysis_in_progress": run_state.get("in_progress"),
+        "analysis_run": run_state,
+        "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),
         "cwd": str(ROOT),
         "public_url": PUBLIC_URL,
-        "analyzer_sync_id": manifest_sync,
+        "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
+        "report_analyzer_sync_id": manifest_sync,
         "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
         "generated_at_melbourne": format_melbourne_dt(manifest.get("generated_at") or compact.get("generated_at")),
         "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),

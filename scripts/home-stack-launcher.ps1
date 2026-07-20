@@ -19,6 +19,21 @@ if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-health.ps1")
 $prefix = "http://127.0.0.1:$Port/"
 
+function Import-BotAdminToken {
+  $token = (Get-Item -Path "env:BOT_ADMIN_TOKEN" -ErrorAction SilentlyContinue).Value
+  if ($token) { return [string]$token }
+  $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
+  if (-not (Test-Path -LiteralPath $vaultEnv)) { return "" }
+  foreach ($line in Get-Content -LiteralPath $vaultEnv -ErrorAction SilentlyContinue) {
+    if ($line -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
+      return [string]$matches[1].Trim().Trim('"').Trim("'")
+    }
+  }
+  return ""
+}
+
+$script:BotAdminToken = Import-BotAdminToken
+
 # Defense-in-depth: if another launcher instance already has :$Port bound and
 # healthy, skip the bind instead of crashing on http.sys prefix conflict. This
 # handles duplicate launches (e.g. user runs Start Everything again, or opens a
@@ -163,6 +178,45 @@ function Invoke-HomeCommandBackground([string]$Action) {
     "-AnalyzerPort", "$AnalyzerPort",
     "-StackMode", $modeArg
   )
+}
+
+function Invoke-TradingControl([ValidateSet("pause", "resume")][string]$Action) {
+  if (-not (Test-PortOpen $BotPort)) {
+    return @{ ok = $false; error = "Bot not running on :$BotPort - click Start showcase first" }
+  }
+  try {
+    $headers = @{}
+    if ($script:BotAdminToken) {
+      $headers["X-Bot-Admin-Token"] = $script:BotAdminToken
+    }
+    $result = Invoke-RestMethod `
+      -Uri "http://127.0.0.1:$BotPort/api/$Action" `
+      -Method POST `
+      -Headers $headers `
+      -TimeoutSec 12
+    $status = Invoke-RestMethod `
+      -Uri "http://127.0.0.1:$BotPort/api/status" `
+      -TimeoutSec 12
+    $wantPaused = $Action -eq "pause"
+    $confirmed = [bool]$status.execution_paused -eq $wantPaused
+    if (-not $confirmed) {
+      return @{
+        ok = $false
+        error = "Bot answered, but $Action was not confirmed by /api/status. No state assumption was made."
+        execution_paused = [bool]$status.execution_paused
+        execution_reason = [string]$status.execution_reason
+      }
+    }
+    return @{
+      ok = $true
+      message = if ($wantPaused) { "Trading paused and confirmed." } else { "Trading resumed and confirmed." }
+      execution_paused = [bool]$status.execution_paused
+      execution_reason = [string]$status.execution_reason
+      bot_response = $result
+    }
+  } catch {
+    return @{ ok = $false; error = "Could not confirm $Action`: $($_.Exception.Message)" }
+  }
 }
 
 function Invoke-StartAllGlobal {
@@ -313,18 +367,10 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Wiring $url to Neon + Railway (see wire window / .home-wire.log)" }
     }
     "resume-trading" {
-      if (-not (Test-PortOpen $BotPort)) {
-        return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
-      }
-      Invoke-HomeCommandBackground "resume-trading"
-      return @{ ok = $true; message = "Resume trading queued." }
+      return (Invoke-TradingControl "resume")
     }
     "pause-trading" {
-      if (-not (Test-PortOpen $BotPort)) {
-        return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
-      }
-      Invoke-HomeCommandBackground "pause-trading"
-      return @{ ok = $true; message = "Pause trading queued." }
+      return (Invoke-TradingControl "pause")
     }
     "wipe-research" {
       if (-not (Test-PortOpen $BotPort)) {
@@ -456,6 +502,9 @@ try {
   exit 1
 }
 
+$bridgePidFile = Join-Path $repoRoot ".home-bridge.pid"
+Set-Content -LiteralPath $bridgePidFile -Value "$PID" -NoNewline -Encoding UTF8
+
 try {
   # Synchronous request handling in the main runspace. The earlier runspace-pool +
   # Task.Run approach had two PowerShell-specific bugs: Task.Run(ScriptBlock) is an
@@ -477,4 +526,12 @@ try {
   }
 } finally {
   $listener.Stop()
+  try {
+    if (Test-Path -LiteralPath $bridgePidFile) {
+      $recordedPid = [int](Get-Content -LiteralPath $bridgePidFile -ErrorAction SilentlyContinue)
+      if ($recordedPid -eq $PID) {
+        Remove-Item -LiteralPath $bridgePidFile -Force -ErrorAction SilentlyContinue
+      }
+    }
+  } catch { }
 }
