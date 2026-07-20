@@ -75,6 +75,40 @@ def _seed_shadow(bot, n_filled, policy_v):
             f.write(json.dumps(row) + "\n")
 
 
+def case_counterfactuals_are_not_trades():
+    """Rejected calibration controls must never inflate the Type B trade count."""
+    def setup(bot):
+        pv = bot._type_b_policy_version()
+        _seed_ledger(bot, 0)
+        lane = bot.RESEARCH_LANE_TYPE_B_HUNTER_V1
+        with open(bot.SHADOW_LANE_OUTCOME_FILE, "w", encoding="utf-8") as f:
+            for i, pnl in enumerate((1.25, 0.0, -2.4)):
+                f.write(json.dumps({
+                    "research_lane": lane,
+                    "trade_id": f"tb_cf_{i}",
+                    "filled": True,
+                    "policy_version": pv,
+                    "collection_mode": "CALIBRATION_COUNTERFACTUAL",
+                    "is_counterfactual": True,
+                    "policy_entered": False,
+                    "net_pnl_usd": pnl,
+                }) + "\n")
+    return _run_case(
+        "counterfactual controls stay separate from Type B trades",
+        setup,
+        {
+            "consistent": True,
+            "paper_closes": 0,
+            "shadow_closes": 0,
+            "counterfactual_closes": 3,
+            "counterfactual_wins": 1,
+            "counterfactual_losses": 1,
+            "counterfactual_breakevens": 1,
+            "counterfactual_pnl_usd": -1.15,
+        },
+    )
+
+
 def case_consistent():
     def setup(bot):
         pv = bot._type_b_policy_version()
@@ -181,6 +215,7 @@ def main():
     print("=" * 78)
     cases = [
         case_empty,
+        case_counterfactuals_are_not_trades,
         case_consistent,
         case_shadow_exceeds_paper,
         case_paper_exceeds_shadow,

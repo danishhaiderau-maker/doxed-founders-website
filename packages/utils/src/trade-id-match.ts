@@ -86,8 +86,9 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
 
 /**
  * F7 (2026-07-08 real-money hotfix) — Lane prefixes explicitly approved for
- * live-copy mirroring. Continuous and Type B are separate strategies that
- * consume one shared direction call; both are explicitly approved here.
+ * live-copy mirroring. Continuous, Type B, and the static S/R Tile 2 are
+ * separate showcase lanes explicitly approved here. Tile 2 remains a local
+ * paper source; the platform relay is its only path to live money.
  *
  * Fail-closed: any prefix not in this set is treated as research/paper and
  * never mirrored to real money. This inverts the legacy {@link isPaperLaneTradeId}
@@ -95,11 +96,11 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  * remembered to add it to the deny list (the exact bug that caused the
  * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
  */
-const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'tbhv1']);
+const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'tbhv1', 'srmv2s']);
 
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly
- * allow-listed production mirror lane (`cont-` or `tbhv1-`). Everything
+ * allow-listed production mirror lane (`cont-`, `tbhv1-`, or `srmv2s-`). Everything
  * else (research lanes like vc603-/szdc1-/slav1-, paper lanes a160v2-,
  * bare-uuids, unknown prefixes) returns false.
  *

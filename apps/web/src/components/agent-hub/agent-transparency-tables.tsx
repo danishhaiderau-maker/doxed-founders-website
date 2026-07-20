@@ -113,6 +113,14 @@ export function AgentTransparencyTables({
     fmtPrice(p.takeProfit),
     formatUsd(p.pnlUsd),
   ]);
+  const hasExchangeNet = book.positions.some(
+    (position) =>
+      position.leg === 'Exchange net (actual)' ||
+      position.leg === 'Bitfinex net',
+  );
+  const positionSubtitle = hasExchangeNet
+    ? 'Exchange net is the one real Bitfinex position. Tracked lots are virtual showcase allocations for independent exits — do not add their P&L to exchange P&L.'
+    : undefined;
 
   const pendingRows = book.pendingOrders.slice(0, cap).map((o) => [
     String(o.ageMin),
@@ -160,6 +168,7 @@ export function AgentTransparencyTables({
       <div className="space-y-4">
         <MiniTable
           title="Open positions"
+          subtitle={positionSubtitle}
           headers={['Leg', 'Side', 'Qty', 'Entry', 'Current', 'SL', 'TP', 'PnL']}
           rows={positionRows}
           emptyMessage="No open positions."
@@ -215,6 +224,7 @@ export function AgentTransparencyTables({
       />
       <MiniTable
         title="Positions"
+        subtitle={positionSubtitle}
         headers={['Leg', 'Side', 'Qty', 'Entry', 'Current', 'SL', 'TP', 'PnL']}
         rows={positionRows}
         emptyMessage="No open positions."

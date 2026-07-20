@@ -516,7 +516,7 @@ check(
 
 
 # ---------------------------------------------------------------------------
-# Group F: toggle routing (OFF=LAB, ON=paper, PROBATION blocks Bitfinex)
+# Group F: toggle routing (OFF=LAB, ON=local paper, platform relay is separate)
 # ---------------------------------------------------------------------------
 print("\n[F] Toggle routing")
 reset_state()
@@ -548,21 +548,37 @@ check(
     "Tile ON + Bitfinex OFF -> can place new entry",
     lane_can_place_new_entry(LANE) is True,
 )
+check(
+    "Tile 2 is explicitly eligible for the separate platform relay",
+    bot.relay_publishes_approve_outcome(LANE) is True,
+)
+tile2_spec = next(
+    row for row in bot.build_static_pathway_lane_specs()["lanes"]
+    if row.get("lane") == LANE
+)
+check(
+    "Tile 2 dashboard spec exposes the relay-gated operational contract",
+    tile2_spec.get("platform_relay_eligible") is True
+    and tile2_spec.get("exec_mode") == EXEC_MODE_PAPER,
+    f"got {tile2_spec.get('exec_mode')!r} / {tile2_spec.get('platform_relay_eligible')!r}",
+)
+check(
+    "dashboard tile renders lane pending/open counters",
+    "d.lane_position_counts" in bot.DASHBOARD_JS
+    and "statRow('Pending'" in bot.DASHBOARD_JS
+    and "statRow('Open'" in bot.DASHBOARD_JS,
+)
 
-# ON + Bitfinex ON -> PAPER (because FORCE_PAPER_MODE forces it). In a
-# non-paper env this would be LIVE; the operator must explicitly promote.
-# Either way, the lane must never submit Bitfinex orders while PROBATION.
+# ON stays a local PAPER lifecycle even if the bot's legacy direct-Bitfinex
+# toggle is set. The platform relay is the only live-money path for Tile 2.
 set_bx(True)
 mode_live_attempt = execution_mode_for_lane(LANE)
-# Under FORCE_PAPER_MODE the mode stays PAPER; in production this branch
-# is what would have to refuse LIVE while PROBATION. The point of this
-# assertion is that the paper-limit submit path itself refuses LIVE.
 check(
-    "Tile ON + Bitfinex ON under FORCE_PAPER_MODE stays safe",
-    mode_live_attempt in (EXEC_MODE_PAPER, EXEC_MODE_LIVE),
+    "Tile ON + legacy direct Bitfinex flag still uses local PAPER",
+    mode_live_attempt == EXEC_MODE_PAPER,
     f"got {mode_live_attempt!r}",
 )
-# Force the LIVE path through _submit and verify refusal.
+# Submit still creates the same local dashboard order.
 with state_lock:
     state["price"] = 60050.0
 res_live = _submit_tile2_paper_resting_limit(
@@ -574,16 +590,15 @@ res_live = _submit_tile2_paper_resting_limit(
     bracket_eval=r_35,
     sr_episode_id="ep-live",
 )
-# In paper mode the submit will succeed; in true LIVE it would refuse.
-# Either outcome is acceptable; what is NOT acceptable is a real Bitfinex
-# submission, which the paper_only / exchange_submission_blocked fields guard.
-if res_live == "SPAWNED":
-    p = _tile2_paper_resting_limit_for_lane()
-    check(
-        "even in LIVE attempt, no exchange submission (paper_only=True)",
-        p is not None and p.get("paper_only") is True,
-    )
-    clear_pending()
+p = _tile2_paper_resting_limit_for_lane()
+check(
+    "Tile ON creates local pending order while direct exchange stays blocked",
+    res_live == "SPAWNED"
+    and p is not None
+    and p.get("paper_only") is True
+    and p.get("exchange_submission_blocked") is True,
+)
+clear_pending()
 
 
 # ---------------------------------------------------------------------------

@@ -61,7 +61,10 @@ export class BotBridgeService {
    * fan out into dozens of identical tunnel requests and trigger the showcase
    * bot's HTTP 429 guard, leaving live copy permanently stuck in safe mode.
    */
-  private showcaseFetchInFlight: Promise<BotApiState | null> | null = null;
+  private readonly showcaseFetchInFlight = new Map<
+    'shared' | 'execution',
+    Promise<BotApiState | null>
+  >();
   private showcaseFetchCached: BotApiState | null = null;
   private showcaseFetchAt = 0;
   private showcaseFetchBackoffUntil = 0;
@@ -209,6 +212,27 @@ export class BotBridgeService {
     return null;
   }
 
+  /**
+   * Read the last canonical execution snapshot without starting a tunnel
+   * request. Signed owner webhooks use this only for non-authoritative caps
+   * and observability while their exact HMAC-authenticated limit takes the
+   * entry fast path. A stale/foreign/Fly snapshot is never returned.
+   */
+  getCachedExecutionState(maxAgeMs = 10_000): BotApiState | null {
+    const ageMs = Date.now() - this.execFetchAt;
+    const instanceId = this.execCached?.bot_instance_id?.trim();
+    if (
+      !this.execCached
+      || this.execCached.dashboard_owner !== true
+      || !instanceId
+      || ageMs < 0
+      || ageMs > maxAgeMs
+    ) {
+      return null;
+    }
+    return this.execCached;
+  }
+
   /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
    *  Never the Fly.io stale instance. Falls back to the Railway-pushed relay snapshot
    *  (up to 10m stale) when the tunnel blips. */
@@ -274,9 +298,13 @@ export class BotBridgeService {
       return this.execCached;
     }
     const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
-      relayTimeout: 20_000,
-      stateTimeout: 30_000,
+      // The signed webhook is the primary money-path transport. Canonical
+      // polling is its fail-closed backstop and must never monopolise the
+      // single execution tick for tens of seconds.
+      relayTimeout: 800,
+      stateTimeout: 1_200,
       userAgent: 'doxxedcrypto-relay/1.0',
+      lane: 'execution',
     });
     if (data?.dashboard_owner === true && data.bot_instance_id?.trim()) {
       this.execCached = data;
@@ -390,7 +418,12 @@ export class BotBridgeService {
   /** Fetch state from the canonical showcase tunnel only — never Fly (split-brain guard). */
   private async fetchShowcaseState(
     paths: string[],
-    opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
+    opts: {
+      relayTimeout: number;
+      stateTimeout: number;
+      userAgent: string;
+      lane?: 'shared' | 'execution';
+    },
   ): Promise<BotApiState | null> {
     const now = Date.now();
     if (
@@ -399,11 +432,13 @@ export class BotBridgeService {
     ) {
       return this.showcaseFetchCached;
     }
-    if (this.showcaseFetchInFlight) return this.showcaseFetchInFlight;
+    const lane = opts.lane ?? 'shared';
+    const inFlight = this.showcaseFetchInFlight.get(lane);
+    if (inFlight) return inFlight;
     if (now < this.showcaseFetchBackoffUntil) return null;
 
     const task = this.fetchShowcaseStateOnce(paths, opts);
-    this.showcaseFetchInFlight = task;
+    this.showcaseFetchInFlight.set(lane, task);
     try {
       const data = await task;
       if (data) {
@@ -413,8 +448,8 @@ export class BotBridgeService {
       }
       return data;
     } finally {
-      if (this.showcaseFetchInFlight === task) {
-        this.showcaseFetchInFlight = null;
+      if (this.showcaseFetchInFlight.get(lane) === task) {
+        this.showcaseFetchInFlight.delete(lane);
       }
     }
   }

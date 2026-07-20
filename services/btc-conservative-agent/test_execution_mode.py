@@ -107,15 +107,12 @@ if check("Tile ON + BFX OFF not live", lane_is_live(RESEARCH_LANE_TYPE_B_HUNTER_
 else:
     failed += 1
 
-# === Group 3: Tile ON + Bitfinex ON -> LIVE (subject to keys at submit) ===
-print("\n[Group 3] Tile ON + Bitfinex ON -> LIVE")
+# === Group 3: legacy source Bitfinex flags do not bypass platform relay ===
+print("\n[Group 3] Tile ON + legacy source Bitfinex ON -> local PAPER")
 reset_state()
 set_bitfinex(True)
 mode = execution_mode_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1)
-# FORCE_PAPER_MODE is deliberately active for this test process, so the live
-# executor must fail closed to PAPER even when the persisted live toggle is ON.
-expected_live_mode = EXEC_MODE_PAPER if os.environ.get("FORCE_PAPER_MODE") == "1" else EXEC_MODE_LIVE
-if check("Tile ON + BFX ON mode", mode, expected_live_mode):
+if check("Tile ON remains local PAPER", mode, EXEC_MODE_PAPER):
     passed += 1
 else:
     failed += 1
@@ -124,16 +121,18 @@ if check("Tile ON + BFX ON can place entry", lane_can_place_new_entry(RESEARCH_L
 else:
     failed += 1
 if check(
-    "Tile ON + BFX ON live flag",
+    "legacy source flags cannot make lane direct-live",
     lane_is_live(RESEARCH_LANE_TYPE_B_HUNTER_V1),
-    expected_live_mode == EXEC_MODE_LIVE,
+    False,
 ):
     passed += 1
 else:
     failed += 1
-# Block reason should surface missing keys (test env has no keys)
 br = lane_execution_block_reason(RESEARCH_LANE_TYPE_B_HUNTER_V1)
-print(f"  [INFO] Live-mode block reason in test env (no keys): {br}")
+if check("local paper lane has no local entry block", br, None):
+    passed += 1
+else:
+    failed += 1
 set_bitfinex(False)  # reset
 
 # === Group 4: EXIT_ONLY precedence ===
@@ -233,6 +232,63 @@ finally:
         order for order in bot.pending_orders
         if order.get("trade_id") != paper_trade_id
     ]
+
+# Prove the candidate tile reaches the real global pending-order table and
+# preserves its lane ownership. This is the operator-visible contract: ON
+# means the lane can create a global order; relay state is a separate gate.
+type_b_trade_id = "tbhv1-test-global-pending"
+type_b_signal = {
+    "trade_id": type_b_trade_id,
+    "research_lane": RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    "final_direction": "LONG",
+    "direction": "LONG",
+    "signal_price": 64000.0,
+    "pullback_pct": 0.001,
+}
+original_maybe_bitfinex_limit_entry = bot._maybe_bitfinex_limit_entry
+original_relay_mirror = bot._relay_mirror
+try:
+    bot._maybe_bitfinex_limit_entry = lambda *args, **kwargs: None
+    bot._relay_mirror = lambda *args, **kwargs: None
+    with bot.state_lock:
+        bot.state["strategy_mode"] = "RESEARCH"
+        bot.state["live_armed"] = False
+        bot.state["bitfinex_live_enabled"] = False
+        bot.state["price"] = 64000.0
+        bot.state["account_balance"] = 500.0
+        bot.state["pullback_threshold"] = 0.001
+        bot.state["allow_compression"] = True
+    routed = bot.execute_order(
+        type_b_signal,
+        {"direction": "LONG", "decision": "APPROVE", "win_prob": 0},
+    )
+    matching = [
+        order for order in bot.pending_orders
+        if order.get("trade_id") == type_b_trade_id
+    ]
+    if check("Type B ON reaches global pending lifecycle", routed, True):
+        passed += 1
+    else:
+        failed += 1
+    if check("Type B global order is lane-owned", len(matching), 1):
+        passed += 1
+    else:
+        failed += 1
+    if check(
+        "Type B global order keeps TYPE_B provenance",
+        (matching[0].get("research_lane") if matching else None),
+        RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    ):
+        passed += 1
+    else:
+        failed += 1
+finally:
+    bot._maybe_bitfinex_limit_entry = original_maybe_bitfinex_limit_entry
+    bot._relay_mirror = original_relay_mirror
+    with bot.trade_lock:
+        for order in list(bot.pending_orders):
+            if order.get("trade_id") == type_b_trade_id:
+                bot.lane_unregister_pending_order(order)
 
 print()
 print("=" * 70)

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SignalCycleStatus } from '@prisma/client';
+import { calculateBitfinexSessionPnl } from '../exchanges/bitfinex-api.client';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
 
 test('does not render a protective stop as a pending entry order', () => {
@@ -34,7 +35,7 @@ test('does not render a protective stop as a pending entry order', () => {
   assert.equal(book.pendingOrders[0]?.limitPrice, 64_424);
 });
 
-test('labels the exchange net position separately from its virtual lot', () => {
+test('labels the actual exchange net separately from its virtual tracked lot', () => {
   const now = new Date('2026-07-19T12:51:04Z');
   const book = mapSubscriberExchangeLiveBook({
     orders: [],
@@ -73,6 +74,20 @@ test('labels the exchange net position separately from its virtual lot', () => {
 
   assert.deepEqual(
     book.positions.map((position) => position.leg),
-    ['Bitfinex net', 'Lot cont-ccf41'],
+    ['Exchange net (actual)', 'Tracked lot cont-ccf41'],
+  );
+  assert.equal(book.positions[0]?.pnlUsd, 0.81);
+  assert.equal(book.positions[1]?.pnlUsd, 0.744);
+});
+
+test('session P&L uses one exchange accounting basis without virtual-lot double counting', () => {
+  assert.equal(
+    calculateBitfinexSessionPnl({
+      realizedPnlUsd: -3.91,
+      unrealizedPnlUsd: -0.47,
+      tradingFeesUsd: 0.2,
+      fundingFeesUsd: 0.01,
+    }),
+    -4.59,
   );
 });

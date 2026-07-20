@@ -106,26 +106,47 @@ check("mode == PAPER", execution_mode_for_lane(LANE) == EXEC_MODE_PAPER,
 check("can place entry", lane_can_place_new_entry(LANE))
 check("not live", not lane_is_live(LANE))
 
-# === 4. Tile ON + Bitfinex ON with all gates passing -> LIVE
-print("\n[4] Tile ON + Bitfinex ON -> LIVE (subject to keys at submit)")
+# === 4. Legacy source live flags cannot bypass the platform relay
+print("\n[4] Tile ON + legacy source Bitfinex ON -> local PAPER")
 reset()
 set_bx(True)
-check("mode == LIVE", execution_mode_for_lane(LANE) == EXEC_MODE_LIVE,
+check("mode == PAPER", execution_mode_for_lane(LANE) == EXEC_MODE_PAPER,
       execution_mode_for_lane(LANE))
 check("can place entry", lane_can_place_new_entry(LANE))
-check("is live", lane_is_live(LANE))
-# In test env (no keys), block_reason should surface the gate
+check("is not direct-live", not lane_is_live(LANE))
 br = lane_execution_block_reason(LANE)
-check("block reason surfaces missing keys", br == "BITFINEX_KEYS_MISSING", br)
+check("local paper lane has no local entry block", br is None, br)
 set_bx(False)
 
-# === 5. Tile ON + Bitfinex ON with failed gate: no exchange submission
-print("\n[5] Tile ON + Bitfinex ON + failed gate -> block reason explicit")
+# === 5. Legacy source keys/flags still cannot submit an eligible entry
+print("\n[5] Platform-relay lanes never enter through the legacy source executor")
 reset()
 set_bx(True)
-br = lane_execution_block_reason(LANE)
-check("explicit block reason present", br is not None and "BITFINEX_KEYS" in str(br), br)
-check("would still report LIVE mode", execution_mode_for_lane(LANE) == EXEC_MODE_LIVE)
+called = []
+original_submit = bx.submit_limit_entry
+original_keys = bot._private_api_keys_ok
+try:
+    bx.submit_limit_entry = lambda *args, **kwargs: called.append((args, kwargs))
+    bot._private_api_keys_ok = lambda: True
+    bot._maybe_bitfinex_limit_entry(
+        {
+            "trade_id": "tbhv1-no-direct-entry",
+            "research_lane": LANE,
+            "signal_dir": "LONG",
+            "qty": 0.001,
+            "limit_price": 64000.0,
+        },
+        {
+            "trade_id": "tbhv1-no-direct-entry",
+            "research_lane": LANE,
+            "final_direction": "LONG",
+        },
+    )
+finally:
+    bx.submit_limit_entry = original_submit
+    bot._private_api_keys_ok = original_keys
+check("legacy direct submit was not called", called == [], f"calls={called}")
+check("source execution remains PAPER", execution_mode_for_lane(LANE) == EXEC_MODE_PAPER)
 set_bx(False)
 
 # === 6. Turn Tile OFF with a live pending order: local removal + Bitfinex cancel

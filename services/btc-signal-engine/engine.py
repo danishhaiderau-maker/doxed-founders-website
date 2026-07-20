@@ -284,6 +284,19 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 }
+
+# The showcase tile toggle and the platform relay switch are deliberately
+# separate protections:
+#   tile OFF -> LAB/shadow only
+#   tile ON  -> a real local paper order/position lifecycle
+#   relay ON -> the platform may copy only these explicitly allow-listed lanes
+#
+# Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
+PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
+    RESEARCH_LANE_CONTINUOUS,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+})
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
@@ -2470,10 +2483,12 @@ def lane_blocks_live_orders(lane: str) -> bool:
 #   LAB_SHADOW  -- Tile OFF (or retired): no new orders of any kind.
 #                  LAB shadows + counterfactuals still collected for research.
 #                  Already-filled positions are still managed to exit.
-#   PAPER       -- Tile ON + Bitfinex OFF: local paper limit orders only.
-#                  Zero contact with Bitfinex private order API.
-#   LIVE        -- Tile ON + Bitfinex ON: real Bitfinex limit orders.
-#                  Still subject to keys, DDollar gate, execution gates.
+#   PAPER       -- Tile ON: local paper limit orders. Platform-relay lanes
+#                  remain PAPER even when the separate relay is ON; signed
+#                  lifecycle events are their only live-money route.
+#   LIVE        -- Legacy non-relay lane using the source bot's direct
+#                  Bitfinex executor. Current operator-visible production
+#                  lanes are not allowed to use this route.
 #   EXIT_ONLY   -- Special mode set after Bitfinex ON->OFF with open exposure:
 #                  no new entries, but exits for filled positions continue.
 #
@@ -2581,6 +2596,19 @@ def execution_mode_for_lane(lane: str = None) -> str:
     # Shadow-only / shadow-collecting lanes never place orders
     if is_shadow_only_lane(lane) or is_shadow_collecting_lane(lane):
         return EXEC_MODE_LAB_SHADOW
+
+    # Every platform-relay lane is always a LOCAL paper source. It must never
+    # use the bot's legacy direct-Bitfinex executor. When the separate platform
+    # relay is ON, its signed local order lifecycle is copied by the platform
+    # allowlist. This makes the contract unambiguous:
+    #
+    #   tile ON  -> global local pending/open lifecycle
+    #   relay ON -> that lifecycle may be copied to Bitfinex
+    #
+    # Keeping these lanes PAPER here also prevents the legacy source executor
+    # and the platform relay from submitting the same trade twice.
+    if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
+        return EXEC_MODE_PAPER
 
     # Tile ON. Now decide PAPER vs LIVE based on Bitfinex state.
     # Bitfinex arming is global (env-gated + relay-controlled); dashboard
@@ -6612,7 +6640,15 @@ def get_dynamic_flat_momentum_floor(base: float = None) -> float:
     t = (base - FLAT_MOMENTUM_FLOOR_LOW_EDGE) / span
     return round(FLAT_MOMENTUM_FLOOR_LOW_EDGE + t * (FLAT_MOMENTUM_EDGE_FLOOR - FLAT_MOMENTUM_FLOOR_LOW_EDGE), 1)
 
-_relay_push_state = {"seq": 0, "last_ts": 0.0, "last_event": None, "last_ok": None}
+_relay_push_state = {
+    "seq": 0,
+    "last_ts": 0.0,
+    "last_event": None,
+    "last_ok": None,
+    "last_error": None,
+    "last_latency_ms": None,
+    "last_platform_received_at": None,
+}
 
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
 
@@ -6750,9 +6786,28 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
+    # Exact chase updates are safe to consume without a Cloudflare callback
+    # only when this canonical owner also HMAC-signs the payload.
+    if (
+        webhook_secret
+        and event in ("LIMIT_UPDATED", "POSITION_CLOSED")
+        and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
+        and (
+            (
+                event == "LIMIT_UPDATED"
+                and isinstance(payload.get("limit_price"), (int, float))
+            )
+            or (
+                event == "POSITION_CLOSED"
+                and isinstance(payload.get("exit_price"), (int, float))
+            )
+        )
+    ):
+        payload["schema"] = "dcf-showcase-intent-v1"
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     def _post():
+        started = time.perf_counter()
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if secret:
@@ -6766,15 +6821,29 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 headers["X-Showcase-Signature"] = f"sha256={signature}"
             response = requests.post(url, data=body, headers=headers, timeout=2.5)
             response.raise_for_status()
+            response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = True
+            _relay_push_state["last_error"] = None
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            _relay_push_state["last_platform_received_at"] = (
+                response_payload.get("platform_received_at")
+                if isinstance(response_payload, dict)
+                else None
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
             _relay_push_state["last_ok"] = False
-            logger.debug(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
+            _relay_push_state["last_error"] = str(exc)[:240]
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -6801,7 +6870,13 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         return
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
-    if not url or not secret:
+    if not url:
+        return
+    if not secret:
+        _relay_push_state["last_ts"] = time.time()
+        _relay_push_state["last_event"] = f"INTENT_{event}"
+        _relay_push_state["last_ok"] = False
+        _relay_push_state["last_error"] = "SHOWCASE_WEBHOOK_SECRET_MISSING"
         return
 
     sig = signal or {}
@@ -6830,6 +6905,20 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
     edge_score = sig.get("edge_score_at_entry")
     eff_thr = sig.get("effective_threshold_at_entry")
     research_lane = str(sig.get("research_lane") or "CONTINUOUS").upper()
+    if (
+        event in ("APPROVE_PENDING", "ORDER_PLACED")
+        and research_lane not in PLATFORM_RELAY_ELIGIBLE_LANES
+    ):
+        logger.warning(
+            f"[INTENT WEBHOOK] blocked non-relay lane={research_lane} "
+            f"event={event} trade={trade_id}"
+        )
+        return
+    limit_price = sig.get("limit_price") or sig.get("planned_limit_price")
+    try:
+        limit_price = float(limit_price) if limit_price is not None else None
+    except (TypeError, ValueError):
+        limit_price = None
 
     payload = {
         "schema": "dcf-showcase-intent-v1",
@@ -6839,6 +6928,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "intent_source": intent_source,
         "direction": direction or None,
         "signal_price": signal_price if signal_price > 0 else None,
+        "limit_price": limit_price if limit_price and limit_price > 0 else None,
         "margin_usdt": margin_usdt,
         "leverage": leverage,
         "win_prob": win_prob,
@@ -6859,6 +6949,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         return
 
     def _post():
+        started = time.perf_counter()
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -6871,15 +6962,29 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
                 headers["X-Bot-Control-Secret"] = legacy_secret
             response = requests.post(url, data=body, headers=headers, timeout=2.5)
             response.raise_for_status()
+            response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = True
+            _relay_push_state["last_error"] = None
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            _relay_push_state["last_platform_received_at"] = (
+                response_payload.get("platform_received_at")
+                if isinstance(response_payload, dict)
+                else None
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
             _relay_push_state["last_ok"] = False
-            logger.debug(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
+            _relay_push_state["last_error"] = str(exc)[:240]
+            _relay_push_state["last_latency_ms"] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+            logger.warning(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -6897,14 +7002,16 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
     if status == "PENDING" and trade_id:
-        _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
+            _push_showcase_relay_event("APPROVE_PENDING", trade_id)
         # Intent-Mirror (plan §4 bot checklist item 8) — also fire the signed
         # v1 intent webhook so the relay can copy this approved `cont-` signal
         # to ACTIVE hires even when the showcase is paper-only. Legacy call
         # above stays for backward compat during rollout.
         emit_signal_webhook("APPROVE_PENDING", signal, ai)
     elif status == "EXECUTED" and trade_id:
-        _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
+            _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
         emit_signal_webhook("ORDER_PLACED", signal, ai)
         _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
@@ -11662,8 +11769,8 @@ def allocate_lane_trade_id(research_lane: str) -> str:
 
 
 def relay_publishes_approve_outcome(research_lane: str) -> bool:
-    """AI_SCAN routes to spawn lanes only — must not overwrite relay-facing approve snapshot."""
-    return not is_ai_scan_lane(str(research_lane or "").upper())
+    """Publish entry intent only for explicitly platform-relay-eligible lanes."""
+    return str(research_lane or "").upper() in PLATFORM_RELAY_ELIGIBLE_LANES
 
 
 SHADOW_RUNNER_HORIZON_SECS = {
@@ -11803,6 +11910,12 @@ def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict
         out["session_bucket"] = _research_session_bucket()
     out.setdefault("ts_utc", utc_iso())
     return out
+
+
+def _prepare_shared_lane_spawn_features(event: dict = None, features: dict = None, ctx: dict = None) -> dict:
+    """Build inherited-lane features before the downstream signal object exists."""
+    event_features = (event or {}).get("features") if isinstance(event, dict) else None
+    return _enrich_combo_lane_features(event_features or features, ctx)
 
 
 def _lane_sized_margin_usdt(lane: str, features: dict = None) -> tuple:
@@ -12361,8 +12474,9 @@ def _submit_tile2_paper_resting_limit(
 
     This is the PAPER-mode replacement for _spawn_lab_bracket_shadow when the
     tile is ON. The limit is a *real pending_orders* entry (so the existing
-    fill/exit machinery manages it) but is marked paper_only=True and never
-    submitted to Bitfinex.
+    fill/exit machinery manages it) and is marked paper_only=True so the bot
+    never submits it directly to Bitfinex. The separate platform relay may
+    copy it only when that relay is ON.
 
     LONG-only by policy. SHORT must never reach this function (caller guards).
     Section 4: refuses to spawn a second paper limit on the same S/R episode
@@ -12424,15 +12538,15 @@ def _submit_tile2_paper_resting_limit(
         )
         return "REFUSED_WOULD_CROSS"
 
-    # Bitfinex submission is forbidden while the lane is PROBATION.
+    # This function owns only the local showcase paper book. Direct Bitfinex
+    # submission is always forbidden; platform relay eligibility is separate.
     mode = execution_mode_for_lane(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
     if mode == EXEC_MODE_LIVE:
         logger.error(
-            f"[TILE2] LIVE mode reached while lane is PROBATION — refusing exchange "
-            f"submission (operator must explicitly promote) [PIPELINE ENFORCEMENT]"
+            f"[TILE2] unexpected direct LIVE mode; retaining local-paper lifecycle "
+            f"[PIPELINE ENFORCEMENT]"
         )
-        return "REFUSED_LIVE_BLOCKED_PROBATION"
-    if mode not in (EXEC_MODE_PAPER,):
+    if mode not in (EXEC_MODE_PAPER, EXEC_MODE_LIVE):
         logger.info(
             f"[TILE2] paper limit not submitted — execution_mode={mode} "
             f"[PIPELINE ENFORCEMENT]"
@@ -12497,8 +12611,27 @@ def _submit_tile2_paper_resting_limit(
         "session_bucket_at_entry": str((bracket_eval or {}).get("session_bucket") or ""),
         "bracket_eval_zone": str((bracket_eval or {}).get("zone") or ""),
     }
-    _register_tile2_active_signal(order, ctx=ctx, features=enriched)
+    active_signal = _register_tile2_active_signal(order, ctx=ctx, features=enriched)
     lane_register_pending_order(order)
+    # Tile 2 publishes the same signed pending/order lifecycle as Continuous
+    # and Type B. It remains a local paper book; only the separate platform
+    # relay switch can turn this intent into a Bitfinex copy.
+    if active_signal and relay_publishes_approve_outcome(
+        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    ):
+        relay_ai = {"direction": direction}
+        record_approve_outcome(
+            "PENDING", None, None, trade_id, edge_score, relay_ai, active_signal
+        )
+        record_approve_outcome(
+            "EXECUTED",
+            "ORDER_PLACED",
+            None,
+            trade_id,
+            edge_score,
+            relay_ai,
+            active_signal,
+        )
     _record_tile2_order_lifecycle(
         trade_id,
         "PENDING",
@@ -12519,7 +12652,7 @@ def _submit_tile2_paper_resting_limit(
         f"[TILE2] paper resting limit submitted trade_id={trade_id} dir={direction} "
         f"limit={limit_price:.2f} market={market_price:.2f} qty={qty:.6f} "
         f"entry_ttl={TILE2_ENTRY_TTL_SEC}s mode={mode} policy={TILE2_POLICY_ID} "
-        f"— paper only, Bitfinex BLOCKED [PIPELINE ENFORCEMENT]"
+        f"— local paper; platform live copy remains RELAY-GATED [PIPELINE ENFORCEMENT]"
     )
     return "SPAWNED"
 
@@ -13984,7 +14117,8 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
         # dropping the spawn. Now we route explicitly:
         #   LAB_SHADOW -> _spawn_lab_bracket_shadow (no order)
         #   PAPER      -> _submit_tile2_paper_resting_limit (local paper limit)
-        #   LIVE       -> BLOCKED (lane is PROBATION; operator must promote)
+        #   LIVE       -> same local paper lifecycle; platform relay remains
+        #                 the only live-money path
         #   EXIT_ONLY  -> no new entries
         exec_mode = execution_mode_for_lane(lane)
         legs_spawned = 0
@@ -14021,8 +14155,8 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                 if side == "LONG"
                 else eval_result.get("short_limit")
             )
-            if exec_mode == EXEC_MODE_PAPER:
-                # ON + Bitfinex OFF: local paper resting limit at exact support.
+            if exec_mode in (EXEC_MODE_PAPER, EXEC_MODE_LIVE):
+                # Tile ON: local paper resting limit at exact support.
                 # Section 4: pass the derived episode_id so the one-trade-
                 # per-episode guard can refuse clone trades.
                 spawn_result = _submit_tile2_paper_resting_limit(
@@ -14058,30 +14192,6 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                 if spawn_result == "SPAWNED":
                     _mark_tile2_episode_submitted(sr_episode_id)
                     legs_spawned += 1
-            elif exec_mode == EXEC_MODE_LIVE:
-                # Lane is PROBATION — Bitfinex exchange entry is forbidden.
-                logger.error(
-                    f"[{lane}] LIVE mode refused while PROBATION — operator must explicitly "
-                    f"promote the lane; collecting LAB shadow only [PIPELINE ENFORCEMENT]"
-                )
-                log_lane_opportunity_event(
-                    lane,
-                    "SPAWN_FILTERED",
-                    bracket_id,
-                    side,
-                    None,
-                    edge_score,
-                    block_reason="LIVE_BLOCKED_PROBATION",
-                )
-                spawn_result = _spawn_lab_bracket_shadow(
-                    ctx, side, limit, edge_score, lane, enriched, eval_result,
-                    chase_mode=CHASE_MODE_STATIC,
-                    id_prefix=STATIC_LANE_ID_PREFIX,
-                    max_chases=STATIC_MAX_CHASES,
-                    fill_at_limit=True,
-                )
-                if spawn_result == "SPAWNED":
-                    _mark_tile2_episode_submitted(sr_episode_id)
             else:
                 logger.warning(
                     f"[{lane}] unknown exec_mode={exec_mode} — defaulting to LAB shadow "
@@ -16460,6 +16570,11 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         "urgent_marketable": True,
         "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
     })
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -16517,6 +16632,11 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         "direction": direction,
         "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
     })
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -16578,6 +16698,11 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] marketable limit log failed: {_fe}")
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        {"limit_price": new_limit, "direction": direction},
+    )
     return True
 
 
@@ -17174,10 +17299,8 @@ def process_signal(event: dict):
                             spawn_dir = "SHORT"
                         elif spawn_dir == "SHORT":
                             spawn_dir = "LONG"
-                    spawn_feats = _enrich_combo_lane_features(
-                        signal.get("features") or features, ctx,
-                    )
-                    signal["features"] = spawn_feats
+                    spawn_feats = _prepare_shared_lane_spawn_features(event, features, ctx)
+                    features = spawn_feats
                     match = combo_lane_match_detail(
                         research_lane, ai, spawn_dir, features=spawn_feats,
                     )
@@ -17188,7 +17311,7 @@ def process_signal(event: dict):
                             f"reason={br} [PIPELINE ENFORCEMENT]"
                         )
                         log_lane_opportunity_event(
-                            research_lane, "SPAWN_FILTERED", trade_id,
+                            research_lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
                             spawn_dir, ai.get("win_prob"), edge_score,
                             block_reason=br,
                         )
@@ -18709,6 +18832,9 @@ def create_limit_order(signal):
     assert limit_price > 0, "INVALID LIMIT PRICE"
     order = {
         "trade_id": signal["trade_id"],
+        "research_lane": str(
+            signal.get("research_lane") or RESEARCH_LANE_CONTINUOUS
+        ).upper(),
         "side": map_signal_to_exchange_side(signal["final_direction"]),
         "signal_dir": signal["final_direction"],
         "limit_price": limit_price,
@@ -20352,6 +20478,14 @@ def _annotate_lanes_with_exec_mode(lanes: list) -> list:
             spec["exec_mode"] = mode
             spec["exec_block_reason"] = block
             spec["exec_banner"] = _exec_mode_banner_text(mode, block, lane_id)
+            spec["platform_relay_eligible"] = (
+                lane_id in PLATFORM_RELAY_ELIGIBLE_LANES
+            )
+            spec["platform_relay_gate"] = (
+                "Tile ON + platform relay ON"
+                if spec["platform_relay_eligible"]
+                else "Not relay eligible"
+            )
             out.append(spec)
         except Exception:
             out.append(spec)
@@ -20363,7 +20497,9 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
     if mode == EXEC_MODE_LIVE:
         return "LIVE BITFINEX LIMIT ORDERS ENABLED"
     if mode == EXEC_MODE_PAPER:
-        return "PAPER ORDERS ENABLED — no Bitfinex submission"
+        if lane_id in PLATFORM_RELAY_ELIGIBLE_LANES:
+            return "LOCAL PAPER ORDERS ENABLED — live copy requires platform relay ON"
+        return "PAPER ORDERS ENABLED — not eligible for live copy"
     if mode == EXEC_MODE_EXIT_ONLY:
         return "OFF — no new entries; existing positions still managed"
     # LAB_SHADOW
@@ -20533,11 +20669,11 @@ def build_static_pathway_lane_specs() -> dict:
                 "  - No chase, reprice, slide, or marketable fallback; an unfilled limit expires after 30 minutes",
                 "Tile OFF: LAB shadow replay + counterfactual outcome (no paper limit)",
                 (
-                    "Tile ON (PAPER, PROBATION): local paper resting limit at exact micro-support · Scenario C"
+                    "Tile ON: local paper resting limit at exact micro-support · Scenario C · platform relay eligible"
                     if static_bracket else
                     "Tile ON: local paper limit at micro S/R · Scenario C"
                 ),
-                "Bitfinex exchange entry BLOCKED while lane is PROBATION (PAPER_ONLY)",
+                "Direct Bitfinex submission is blocked; live copy is allowed only through the separate platform relay",
                 "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger + tile2_counters.json",
                 (
                     "Outcomes: FILLED / TTL_EXPIRED (30m) / CANCELLED · ids srmv2s-* · cohort="
@@ -20589,7 +20725,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "margin_usd": shared["margin_usd"],
                 "execution": execution,
                 "orders": (
-                    "OFF=LAB only · ON=paper limit at micro-support · Bitfinex BLOCKED while PROBATION"
+                    "OFF=LAB only · ON=local paper limit at micro-support · live copy is platform-relay gated"
                     if static_bracket else
                     "Phase 1 shadow only (toggle OFF default)"
                 ),
@@ -20770,7 +20906,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "entry_mode": spec["entry_mode"],
             }
             v2_entry = None
-        badge = "PROBATION - PAPER ONLY" if lane_status == "PROBATION" else (RESEARCH_CANDIDATE_ROLE if is_candidate else "")
+        badge = "PROBATION - OPERATIONAL WHEN ON" if lane_status == "PROBATION" else (RESEARCH_CANDIDATE_ROLE if is_candidate else "")
         if deterministic_bracket:
             entry_block = bracket_entry
         elif type_b_hunter:
@@ -21166,10 +21302,17 @@ def _load_lane_metrics_from_disk() -> dict:
         wins = int(lb.get("wins") or bm.get("wins") or 0)
         losses = int(lb.get("losses") or bm.get("losses") or 0)
         win_rate = round(100.0 * wins / fills, 1) if fills else float(bm.get("win_rate_pct") or 0)
-        lab_closes = int(lab.get("closes") or 0)
-        lab_pnl = float(lab.get("net_pnl_usd") or 0)
-        lab_wins = int(lab.get("wins") or 0)
-        lab_losses = int(lab.get("losses") or 0)
+        # The analyzer also emits policy-filtered LAB metrics from immutable
+        # shadow_lane_outcome rows. Prefer the live convenience ledger when
+        # present, but do not lose valid LAB results when that cache is absent.
+        lab_closes = int(lab.get("closes") or bm.get("lab_closes") or 0)
+        lab_pnl = float(
+            lab.get("net_pnl_usd")
+            if lab.get("net_pnl_usd") is not None
+            else (bm.get("lab_net_pnl") or 0)
+        )
+        lab_wins = int(lab.get("wins") or bm.get("lab_wins") or 0)
+        lab_losses = int(lab.get("losses") or bm.get("lab_losses") or 0)
         out[lane] = {
             "approves": approves,
             "real_fills": fills,
@@ -21294,6 +21437,11 @@ def _reconcile_type_b_trade_count() -> dict:
         "policy_version": policy_v,
         "paper_closes": 0,
         "shadow_closes": 0,
+        "counterfactual_closes": 0,
+        "counterfactual_wins": 0,
+        "counterfactual_losses": 0,
+        "counterfactual_breakevens": 0,
+        "counterfactual_pnl_usd": 0.0,
         "live_open": 0,
         "live_closed": 0,
         "consistent": True,
@@ -21328,10 +21476,29 @@ def _reconcile_type_b_trade_count() -> dict:
                     if not tid or tid in seen:
                         continue
                     seen.add(tid)
-                    if bool(r.get("filled")):
-                        out["shadow_closes"] += 1
+                    if not bool(r.get("filled")):
+                        continue
+                    mode = str(r.get("collection_mode") or "").upper()
+                    is_counterfactual = bool(r.get("is_counterfactual")) or (
+                        r.get("policy_entered") is False
+                    ) or mode == "CALIBRATION_COUNTERFACTUAL"
+                    if is_counterfactual:
+                        pnl = float(r.get("net_pnl_usd") or 0.0)
+                        out["counterfactual_closes"] += 1
+                        out["counterfactual_pnl_usd"] += pnl
+                        if pnl > 0:
+                            out["counterfactual_wins"] += 1
+                        elif pnl < 0:
+                            out["counterfactual_losses"] += 1
+                        else:
+                            out["counterfactual_breakevens"] += 1
+                        continue
+                    out["shadow_closes"] += 1
     except Exception as e:
         logger.debug(f"[TYPE_B_RECONCILE] shadow read failed: {e}")
+    out["counterfactual_pnl_usd"] = round(
+        float(out["counterfactual_pnl_usd"]), 4
+    )
 
     # Live open positions for the lane
     try:
@@ -22899,6 +23066,17 @@ DASHBOARD_JS = """(function () {
           const labPrimaryTrades = labCloses > 0 ? labCloses : (labOpen > 0 ? ('⏳' + labOpen) : 0);
           const labPrimaryPnl = labCloses > 0 ? ('$' + Number(labPnl).toFixed(2)) : (labOpen > 0 ? 'collecting' : '$0.00');
           const labPrimaryEv = labCloses > 0 ? ('$' + Number(labEv).toFixed(2)) : (labOpen > 0 ? '—' : '$0.00');
+          const activeCounts = ((d.lane_position_counts || {})[spec.lane]) || {};
+          const activePending = Number(activeCounts.pending || 0);
+          const activeOpen = Number(activeCounts.open || 0);
+          const activeGrid = (on || activePending > 0 || activeOpen > 0)
+            ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#101820;border:1px solid #30363d;border-radius:8px;">'
+              + statRow('Pending', activePending, activePending > 0 ? '#f0c14b' : '#8b949e')
+              + statRow('Open', activeOpen, activeOpen > 0 ? '#3fb950' : '#8b949e')
+              + statRow('Local book', on ? 'ACTIVE' : 'EXIT ONLY', on ? '#3fb950' : '#f0c14b')
+              + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
+              + '</div>')
+            : '';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + (v2Shadow
@@ -22922,6 +23100,7 @@ DASHBOARD_JS = """(function () {
               + statRow('Rej PnL', '$' + Number(v2RejectPnl).toFixed(2), v2RejectPnlCol)
               + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
               + '</div>') : '')
+            + activeGrid
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
               + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
@@ -24090,6 +24269,11 @@ def _bitfinex_live_active() -> bool:
 
 
 def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
+    lane = _normalize_lane_key(signal or order or {})
+    if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
+        # These lanes are canonical local-paper sources. Their only live-money
+        # route is the separately controlled platform relay.
+        return
     if not _bitfinex_live_active() or not _private_api_keys_ok():
         return
     meta = trades_map.get((signal or {}).get("trade_id") or (order or {}).get("trade_id"), {})
@@ -24121,6 +24305,10 @@ def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
 
 
 def _maybe_bitfinex_market_entry(signal: dict, qty: float) -> None:
+    lane = _normalize_lane_key(signal or {})
+    if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
+        # Never let the source bot race the platform relay with a second entry.
+        return
     if not _bitfinex_live_active() or not _private_api_keys_ok():
         return
     try:
@@ -24140,6 +24328,18 @@ def _maybe_bitfinex_market_entry(signal: dict, qty: float) -> None:
 
 
 def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> None:
+    lane = _normalize_lane_key(pos or {})
+    if (
+        lane in PLATFORM_RELAY_ELIGIBLE_LANES
+        and not (
+            (pos or {}).get("bitfinex_position_id")
+            or (pos or {}).get("bitfinex_order_id")
+        )
+    ):
+        # A normal local-paper position is closed by its signed lifecycle on
+        # the platform relay. Preserve direct close only for old/adopted source
+        # positions carrying explicit exchange provenance.
+        return
     if not _bitfinex_live_active() or not _private_api_keys_ok():
         return
     try:
@@ -24928,6 +25128,9 @@ def build_state_integrity() -> dict:
         "seq": _relay_push_state["seq"],
         "last_event": _relay_push_state["last_event"],
         "last_ok": _relay_push_state["last_ok"],
+        "last_error": _relay_push_state["last_error"],
+        "last_latency_ms": _relay_push_state["last_latency_ms"],
+        "last_platform_received_at": _relay_push_state["last_platform_received_at"],
         "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
     }
     bx_live = None
@@ -26209,14 +26412,27 @@ def export_debug():
 def export_csv():
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file in [
+        # Include both legacy 3-factor files and the authoritative per-lane
+        # research lifecycle. The old export omitted these newer files, so a
+        # downloaded ZIP could show replay buffers but could not prove whether
+        # Tile 2 / Type B filled, expired, closed, or remained counterfactual.
+        export_files = [
             CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
             CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
             SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
             EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
-        ]:
+            SHADOW_LANE_OUTCOME_FILE,
+            LANE_OPPORTUNITY_CAPTURE_FILE,
+            LANE_PNL_LEDGER_FILE,
+            LANE_LAB_PNL_LEDGER_FILE,
+            TILE2_COUNTERS_FILE,
+            PATHWAY_LANE_SPECS_FILE,
+            "benchmark_vs_lanes_report.json",
+            "pathway_scorecard.json",
+        ]
+        for file in dict.fromkeys(export_files):
             if os.path.exists(file):
-                zip_file.write(file)
+                zip_file.write(file, arcname=os.path.basename(file))
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
 

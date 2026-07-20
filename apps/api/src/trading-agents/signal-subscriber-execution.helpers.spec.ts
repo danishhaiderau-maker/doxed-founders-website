@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   canonicalPendingIntentCycles,
   isBenignShowcaseEntryWait,
+  readFreshSignedShowcaseExactLimit,
+  readSignedShowcaseClose,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
 
@@ -92,4 +94,96 @@ test('preserves canonical book order when more than one live intent is ready', (
     ],
   });
   assert.deepEqual(result, [secondCreated, firstCreated]);
+});
+
+test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
+  const now = Date.parse('2026-07-20T01:02:03.000Z');
+  assert.deepEqual(
+    readFreshSignedShowcaseExactLimit(
+      'cont-fast',
+      {
+        schema: 'dcf-signal-intent/v1',
+        action: 'ENTER',
+        direction: 'SHORT',
+        entry: { exact_limit_price: 64_555.25 },
+        context: {
+          signed_showcase_event: true,
+          showcase_event: 'ORDER_PLACED',
+          platform_received_at: '2026-07-20T01:02:02.250Z',
+        },
+      },
+      now,
+    ),
+    {
+      tradeId: 'cont-fast',
+      direction: 'SHORT',
+      limitPrice: 64_555.25,
+      receivedAtMs: Date.parse('2026-07-20T01:02:02.250Z'),
+    },
+  );
+});
+
+test('rejects unsigned, stale, and non-resting exact-limit events', () => {
+  const now = Date.parse('2026-07-20T01:02:30.000Z');
+  const base = {
+    schema: 'dcf-signal-intent/v1',
+    action: 'ENTER',
+    direction: 'LONG',
+    entry: { exact_limit_price: 64_500 },
+    context: {
+      signed_showcase_event: true,
+      showcase_event: 'ORDER_PLACED',
+      platform_received_at: '2026-07-20T01:02:29.000Z',
+    },
+  };
+  assert.equal(
+    readFreshSignedShowcaseExactLimit('cont-unsigned', {
+      ...base,
+      context: { ...base.context, signed_showcase_event: false },
+    }, now),
+    null,
+  );
+  assert.equal(
+    readFreshSignedShowcaseExactLimit('cont-stale', {
+      ...base,
+      context: {
+        ...base.context,
+        platform_received_at: '2026-07-20T01:02:00.000Z',
+      },
+    }, now),
+    null,
+  );
+  assert.equal(
+    readFreshSignedShowcaseExactLimit('cont-approve', {
+      ...base,
+      context: { ...base.context, showcase_event: 'APPROVE_PENDING' },
+    }, now),
+    null,
+  );
+});
+
+test('reads a signed showcase close without another canonical-state fetch', () => {
+  assert.deepEqual(
+    readSignedShowcaseClose({
+      context: {
+        signed_showcase_event: true,
+        showcase_event: 'POSITION_CLOSED',
+        showcase_exit_price: 64_444.25,
+        showcase_exit_reason: 'PROFIT_LOCK_LADDER',
+      },
+    }),
+    {
+      exitPrice: 64_444.25,
+      exitReason: 'PROFIT_LOCK_LADDER',
+    },
+  );
+  assert.equal(
+    readSignedShowcaseClose({
+      context: {
+        signed_showcase_event: false,
+        showcase_event: 'POSITION_CLOSED',
+      },
+    }),
+    null,
+  );
 });

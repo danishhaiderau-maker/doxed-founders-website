@@ -1,5 +1,6 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
+import inspect
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
@@ -130,6 +131,19 @@ def run():
     check("Continuous counter counted once", counters[bot.RESEARCH_LANE_CONTINUOUS]["evaluated"] == 1)
     check("Type B counter counted once", counters[RESEARCH_LANE_TYPE_B_HUNTER_V1]["evaluated"] == 1)
 
+    inherited_features = bot._prepare_shared_lane_spawn_features(
+        {"features": {"adx": 31, "volume_ratio": 0.6}},
+        {"adx": 10, "volume_ratio": 2.5},
+        {"market_context": {}},
+    )
+    check("shared-lane spawn uses event features", inherited_features["adx"] == 31)
+    check("shared-lane spawn keeps event volume", inherited_features["volume_ratio"] == 0.6)
+    pre_signal_source = inspect.getsource(bot.process_signal).split("signal = {", 1)[0]
+    check(
+        "shared-lane pre-signal branch cannot read future signal object",
+        'signal.get("features")' not in pre_signal_source,
+    )
+
     captured = []
     original = bot._spawn_independent_v1_lane_after_ai
     try:
@@ -183,6 +197,7 @@ def run():
         if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
     )
     check("Type B tile truthfully labels its chase entry", tile.get("entry_mode_label") == "Bounded Limit Chase")
+    check("Type B tile is platform-relay eligible when ON", tile.get("platform_relay_eligible") is True)
     check(
         "Type B tile exposes raw and normalized score gates",
         "Raw score gap >=20/100" in tile.get("filter_chips", [])
