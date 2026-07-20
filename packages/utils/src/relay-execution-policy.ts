@@ -1,6 +1,10 @@
 /** User-controlled live relay policy for the Conservative BTC agent. */
-export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_typeb_v1';
-export const CONSERVATIVE_BTC_LIVE_RELAY_LANES = ['CONTINUOUS', 'TYPE_B_HUNTER_V1'] as const;
+export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_typeb_tile2_v2';
+export const CONSERVATIVE_BTC_LIVE_RELAY_LANES = [
+  'CONTINUOUS',
+  'TYPE_B_HUNTER_V1',
+  'SR_MICRO_TILE_V2_STATIC',
+] as const;
 
 export function hasActiveLiveRelayConsent(dashboardState: unknown): boolean {
   if (!dashboardState || typeof dashboardState !== 'object') return false;

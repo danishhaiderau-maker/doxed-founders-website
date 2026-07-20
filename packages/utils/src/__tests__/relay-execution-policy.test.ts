@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CONSERVATIVE_BTC_LIVE_RELAY_LANES,
   CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
   hasActiveLiveRelayConsent,
   shouldDryRunIntentMirror,
@@ -15,6 +16,14 @@ const consent = {
 test('relay is dry-run without explicit user consent', () => {
   assert.equal(shouldDryRunIntentMirror(undefined, {}), true);
   assert.equal(shouldDryRunIntentMirror('0', {}), true);
+});
+
+test('live relay consent advertises every authoritative dashboard lane', () => {
+  assert.deepEqual(CONSERVATIVE_BTC_LIVE_RELAY_LANES, [
+    'CONTINUOUS',
+    'TYPE_B_HUNTER_V1',
+    'SR_MICRO_TILE_V2_STATIC',
+  ]);
 });
 
 test('current consent enables execution when ops has not forced dry-run', () => {
