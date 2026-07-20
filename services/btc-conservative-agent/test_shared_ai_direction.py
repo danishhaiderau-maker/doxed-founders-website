@@ -197,6 +197,7 @@ def run():
         if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
     )
     check("Type B tile truthfully labels its chase entry", tile.get("entry_mode_label") == "Bounded Limit Chase")
+    check("Type B tile is platform-relay eligible when ON", tile.get("platform_relay_eligible") is True)
     check(
         "Type B tile exposes raw and normalized score gates",
         "Raw score gap >=20/100" in tile.get("filter_chips", [])

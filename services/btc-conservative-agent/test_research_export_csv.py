@@ -1,0 +1,52 @@
+"""Research ZIP export contract.
+
+Run: cd services/btc-conservative-agent && python test_research_export_csv.py
+"""
+import io
+import os
+import sys
+import tempfile
+import zipfile
+
+os.environ["FORCE_PAPER_MODE"] = "1"
+os.environ["SKIP_EXCHANGE_MARKET_LOAD"] = "1"
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import bot
+
+
+def main():
+    required = {
+        bot.SHADOW_LANE_OUTCOME_FILE,
+        bot.LANE_OPPORTUNITY_CAPTURE_FILE,
+        bot.LANE_PNL_LEDGER_FILE,
+        bot.LANE_LAB_PNL_LEDGER_FILE,
+        bot.TILE2_COUNTERS_FILE,
+        bot.PATHWAY_LANE_SPECS_FILE,
+    }
+    previous = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="research_export_") as tmp:
+        try:
+            os.chdir(tmp)
+            for name in required:
+                with open(name, "w", encoding="utf-8") as f:
+                    f.write("{}\n")
+            response = bot.app.test_client().get("/api/export_csv")
+            if response.status_code != 200:
+                print(f"[FAIL] export returned HTTP {response.status_code}")
+                return 1
+            with zipfile.ZipFile(io.BytesIO(response.data), "r") as archive:
+                names = set(archive.namelist())
+            missing = sorted(required - names)
+            if missing:
+                print(f"[FAIL] research export missing: {missing}")
+                return 1
+            print(f"[PASS] research export includes {len(required)} authoritative lane files")
+            return 0
+        finally:
+            os.chdir(previous)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

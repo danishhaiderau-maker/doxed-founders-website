@@ -1511,7 +1511,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     // Part B (intent-mirror) — when the legacy fill-based path placed nothing
     // this tick AND the instance is ACTIVE (not sim, not PAUSED exit-only),
-    // try to enter directly from an approved Continuous/Type B INTENT cycle.
+    // try to enter directly from an approved showcase-lane INTENT cycle.
     // core fix for "dashboard active, Bitfinex flat" when the showcase runs
     // paper-only. The kill switch (N3) and dry-run flag (N4) are honored
     // inside maybeEnterFromIntent. The new path ADDS guards (N6 lane
@@ -5302,7 +5302,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const tradeId = pos.trade_id!;
 
       // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only
-      // only explicitly allow-listed Continuous/Type B lanes may be mirrored
+      // only explicitly allow-listed showcase lanes may be mirrored
       // Bitfinex money. This inverts the legacy F6 blocklist, which silently
       // failed-open for every newly-added research lane (vc603-/szdc1-/slav1-
       // were auto-mirrored until manually blocklisted, putting real money on
@@ -5801,7 +5801,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   /**
     * Part B (intent-mirror) — Place a hire's copy order directly from an
-   * approved `cont-` or `tbhv1-` INTENT cycle. Entry is fail-closed until
+   * approved `cont-`, `tbhv1-`, or `srmv2s-` INTENT cycle. Entry is fail-closed until
    * canonical showcase state contains the exact matching resting limit.
    * The intent wakes the relay; the :7002 order book supplies the authoritative
    * price and lifecycle so a user account cannot get ahead of the showcase.
@@ -5809,7 +5809,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * Guards (ALL must pass; this path ADDS guards, never relaxes G1–G14):
    *   - N3: INTENT_MIRROR_KILL_SWITCH env (panic button — reverts to fill-only).
    *   - Only INTENT cycles (decision §8 #2) — NOT PENDING_ENTRY (duplicate risk).
-   *   - N6: re-affirm isMirrorableLaneTradeId (Continuous + Type B only).
+   *   - N6: re-affirm isMirrorableLaneTradeId (explicit showcase allowlist).
    *   - G5: isPaperLaneTradeId belt-and-suspenders block.
    *   - F1: showcase-unreachable safe mode (delegated to placeEntry via the
    *     eligibility + venue guard).
@@ -5859,7 +5859,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     for (const cycle of intentCycles) {
       const tid = cycle.tradeId;
-      // N6 / G4 — re-affirm the Continuous + Type B allowlist.
+      // N6 / G4 — re-affirm the explicit showcase lane allowlist.
       if (!isMirrorableLaneTradeId(tid)) {
         this.logger.warn(
           `[INTENT-MIRROR] skip non-mirrorable lane trade=${tid} user=${instance.userId}`,

@@ -2126,6 +2126,121 @@ def _load_shadow_lane_outcome_df(session: dict = None):
     return df
 
 
+def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
+    """Keep LAB trades and rejected counterfactual controls in separate cohorts."""
+    empty = {
+        "lab_mode": False,
+        "lab_rows": 0,
+        "lab_closes": 0,
+        "lab_net_pnl": 0.0,
+        "lab_wins": 0,
+        "lab_losses": 0,
+        "lab_breakevens": 0,
+        "lab_win_rate": 0.0,
+        "lab_per_close_ev": 0.0,
+        "counterfactual_closes": 0,
+        "counterfactual_wins": 0,
+        "counterfactual_losses": 0,
+        "counterfactual_breakevens": 0,
+        "counterfactual_pnl_usd": 0.0,
+    }
+    if (
+        shadow_lane_df is None
+        or shadow_lane_df.empty
+        or "research_lane" not in shadow_lane_df.columns
+    ):
+        return empty
+    work = shadow_lane_df[
+        shadow_lane_df["research_lane"].astype(str).str.upper() == str(lane or "").upper()
+    ].copy()
+    if work.empty:
+        return empty
+
+    lane_u = str(lane or "").upper()
+    if lane_u == "TYPE_B_HUNTER_V1" and "policy_version" in work.columns:
+        try:
+            from type_b_hunter_v1 import POLICY_VERSION as active_policy
+            work = work[work["policy_version"].astype(str) == str(active_policy)]
+        except Exception:
+            pass
+    elif lane_u == "SR_MICRO_TILE_V2_STATIC":
+        try:
+            from sr_micro_tile_v2 import POLICY_ID as active_policy
+            policy_col = "policy_id" if "policy_id" in work.columns else "policy_version"
+            if policy_col in work.columns:
+                work = work[work[policy_col].astype(str) == str(active_policy)]
+        except Exception:
+            pass
+    if work.empty:
+        return empty
+
+    if "trade_id" in work.columns:
+        work["_outcome_id"] = work["trade_id"].astype(str)
+    elif "study_id" in work.columns:
+        work["_outcome_id"] = work["study_id"].astype(str)
+    else:
+        work["_outcome_id"] = work.index.astype(str)
+    work = work.drop_duplicates(subset=["_outcome_id"], keep="last")
+
+    mode = (
+        work["collection_mode"].astype(str).str.upper()
+        if "collection_mode" in work.columns
+        else pd.Series("", index=work.index)
+    )
+    is_counterfactual = (
+        work["is_counterfactual"].apply(_truthy)
+        if "is_counterfactual" in work.columns
+        else pd.Series(False, index=work.index)
+    )
+    if "policy_entered" in work.columns:
+        is_counterfactual = is_counterfactual | work["policy_entered"].apply(
+            lambda value: False if pd.isna(value) else not _truthy(value)
+        )
+    is_counterfactual = is_counterfactual | (mode == "CALIBRATION_COUNTERFACTUAL")
+    filled = (
+        work["filled"].apply(_truthy)
+        if "filled" in work.columns
+        else pd.Series(False, index=work.index)
+    )
+
+    lab_rows = work[(mode == "LAB") & ~is_counterfactual]
+    lab_filled = lab_rows[
+        filled.reindex(lab_rows.index, fill_value=False)
+    ].copy()
+    lab_pnl = pd.to_numeric(
+        lab_filled.get("net_pnl_usd"), errors="coerce"
+    ).fillna(0.0) if not lab_filled.empty else pd.Series(dtype=float)
+    lab_wins = int((lab_pnl > 0).sum())
+    lab_losses = int((lab_pnl < 0).sum())
+    lab_breakevens = int((lab_pnl == 0).sum())
+    lab_closes = len(lab_filled)
+    lab_net = round(float(lab_pnl.sum()), 4) if lab_closes else 0.0
+
+    cf_filled = work[
+        is_counterfactual & filled
+    ].copy()
+    cf_pnl = pd.to_numeric(
+        cf_filled.get("net_pnl_usd"), errors="coerce"
+    ).fillna(0.0) if not cf_filled.empty else pd.Series(dtype=float)
+    return {
+        "lab_mode": bool(len(lab_rows)),
+        "lab_rows": len(lab_rows),
+        "lab_closes": lab_closes,
+        "lab_net_pnl": lab_net,
+        "lab_wins": lab_wins,
+        "lab_losses": lab_losses,
+        "lab_breakevens": lab_breakevens,
+        "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
+        "lab_per_close_ev": round(lab_net / lab_closes, 4) if lab_closes else 0.0,
+        "lab_pnl_source": "policy_filtered_shadow_lane_outcomes",
+        "counterfactual_closes": len(cf_filled),
+        "counterfactual_wins": int((cf_pnl > 0).sum()),
+        "counterfactual_losses": int((cf_pnl < 0).sum()),
+        "counterfactual_breakevens": int((cf_pnl == 0).sum()),
+        "counterfactual_pnl_usd": round(float(cf_pnl.sum()), 4) if len(cf_filled) else 0.0,
+    }
+
+
 def _shadow_scope_label(session: dict = None) -> str:
     if session and _session_start_ts(session) is not None:
         if session.get("fresh_collection_mode"):
@@ -7871,6 +7986,9 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             lane_trades = pd.DataFrame()
         real_fills = len(lane_trades)
         net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
+        lane_research_metrics = _policy_filtered_research_lane_metrics(
+            shadow_lane_df, lane
+        )
 
         v2_lane_extra = {}
         if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
@@ -7928,15 +8046,34 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 opp_spawn = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "SPAWN_LAB")
                 approves_n = max(approves_n, opp_appr, opp_orders, opp_spawn)
             lab_path = _agent_data_path("lane_lab_pnl_ledger.json")
-            if real_fills == 0 and os.path.isfile(lab_path):
+            if not int(lane_research_metrics.get("lab_closes") or 0) and os.path.isfile(lab_path):
                 try:
                     with open(lab_path, encoding="utf-8") as _lf:
                         _lab = (json.load(_lf) or {}).get("lanes") or {}
                     _lab_row = _lab.get(lane) or {}
                     _lab_closes = int(_lab_row.get("closes") or 0)
                     if _lab_closes:
-                        real_fills = _lab_closes
-                        net_pnl_real = round(float(_lab_row.get("net_pnl_usd") or 0), 2)
+                        _lab_wins = int(_lab_row.get("wins") or 0)
+                        _lab_losses = int(_lab_row.get("losses") or 0)
+                        _lab_pnl = round(float(_lab_row.get("net_pnl_usd") or 0), 4)
+                        lane_research_metrics.update({
+                            "lab_mode": True,
+                            "lab_rows": _lab_closes,
+                            "lab_closes": _lab_closes,
+                            "lab_net_pnl": _lab_pnl,
+                            "lab_wins": _lab_wins,
+                            "lab_losses": _lab_losses,
+                            "lab_breakevens": max(
+                                0, _lab_closes - _lab_wins - _lab_losses
+                            ),
+                            "lab_win_rate": round(
+                                100.0 * _lab_wins / _lab_closes, 1
+                            ),
+                            "lab_per_close_ev": round(
+                                _lab_pnl / _lab_closes, 4
+                            ),
+                            "lab_pnl_source": "lane_lab_pnl_ledger",
+                        })
                 except Exception:
                     pass
 
@@ -7983,6 +8120,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "per_approve_ev": per_approve_ev,
             "costly_blocks_usd": costly_blocks_usd,
             "good_blocks_saved_usd": good_blocks_saved_usd,
+            **lane_research_metrics,
             **v2_lane_extra,
         }
         if all_trade_df is not None:
