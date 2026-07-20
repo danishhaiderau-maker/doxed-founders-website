@@ -120,24 +120,34 @@ Token launch is contextual:
 
 The DEX is part of the long-term revenue loop, but it is not the first screen of Founder OS.
 
-Current later-stage design direction in `REVERSE-TOKENOMICS-SPEC.md`:
+Latest founder direction, with security interpretation in `DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`:
 
 - Raise Room graduates launch on the platform bonding curve.
-- **1% pre-graduation fee:** 0.5% founder revenue + 0.5% platform-token buyback/burn.
+- **1% pre-graduation fee:** 0.5% founder revenue. The other 0.5% still needs one arithmetic confirmation: all buyback/burn, or half platform USDC treasury and half buyback/burn.
 - Graduated liquidity moves to the platform AMM.
-- **0.25% post-graduation fee:** 0.125% founder revenue + 0.125% buyback/burn.
+- **0.25% post-graduation founder benefit:** all of this benefit goes to the launching founder; the platform takes 0% of it. It must be implemented as a disclosed creator fee or LP-fee claim without silently removing LP compensation.
 - Founder payout is in USDC or the relevant native asset.
+- Founders use self-custody wallets or transferable fee-claim authorities; the platform never stores their private keys.
+- Platform treasury changes, conversions, buybacks, burns, and authority rotation use proposal, simulation, multisig approval, on-chain execution, and immutable receipts.
 - Launch rights require Doxxed Builder status and product/trust gates.
 
-This later design conflicts with older screens and `BILLING.md`, which still say 0.1%. Treat the fee schedule as unresolved in user-facing copy until the founder locks it and legal/security review is complete. Smart contracts, custody assumptions, geofencing, audits, liquidity migration, and rollback/incident plans are mandatory release gates.
+This design conflicts with older screens and `BILLING.md`, which still say 0.1%. Treat the schedule as unavailable in user-facing production copy until the two mechanics above, legal/security review, contracts, and audits are complete. Smart contracts, custody assumptions, geofencing, liquidity migration, and rollback/incident plans are mandatory release gates.
 
-## 7. Next engineering milestone
+## 7. Next engineering milestones
 
-Build **Provider Vault and Routing** before redesigning the whole website:
+The desktop now needs a Founder-owned shell before a broad website redesign. Follow [`FOUNDER-IDE-COMPLETION-BLUEPRINT-2026-07.md`](./FOUNDER-IDE-COMPLETION-BLUEPRINT-2026-07.md):
+
+1. Replace the stock startup experience with Founder Home and the Build, Agents, and Ship desks.
+2. Remove visible Void wording, duplicate chat/settings entry points, and default upstream empty states.
+3. Introduce shared Founder design tokens and deliberate light/dark workbench themes.
+4. Keep the existing editor, inline edit, autocomplete, diff, extension host, terminal, and Open VSX engine underneath.
+5. Reuse the current upstream checkout during development and make one installer build at the milestone gate; do not re-fork/recompile for each extension or webview iteration.
+
+Then complete **Provider Vault and Routing** inside that shell:
 
 1. Add an authenticated provider-connections endpoint for the IDE that returns capability, connection, health, entitlement, and masked credential state.
 2. Add configurable entitlements for plan, managed allowance, and active provider slots.
-3. Replace the IDE’s external Connections launcher with a native Founder Connections panel.
+3. Replace the IDE's external Connections launcher with a native Founder Connections panel.
 4. Keep Founder Auto selected by default; show personal providers and Local beneath it.
 5. Support connect, verify, rename, enable per workspace, preferred route, fallback order, and revoke.
 6. Never place raw keys in VS Code settings, logs, webview state, or IPC messages.
@@ -152,6 +162,7 @@ After this contract is stable, both the IDE and redesigned website can consume t
 2. Confirm **five** active personal cloud providers for Pro.
 3. Decide whether Free includes one personal cloud provider or unlimited BYOK with fewer managed features.
 4. Define the monthly/daily Founder Managed allowance by plan and for Launch Partners.
-5. Confirm whether the latest 1% / 0.25% DEX schedule supersedes every older 0.1% reference.
-6. Confirm the 50% founder / 50% buyback-and-burn split.
-7. Obtain legal and security approval before presenting launch/DEX economics as available production functionality.
+5. Confirm whether the platform-side 0.5% of bonding volume is all buyback/burn, or 0.25% platform USDC treasury plus 0.25% buyback/burn.
+6. Confirm whether the founder's post-graduation 0.25% is a separate creator fee or an LP-fee claim.
+7. Choose the Solana v1 graduation venue after a Raydium LaunchLab versus Meteora DBC proof of concept.
+8. Obtain legal and security approval before presenting launch/DEX economics as available production functionality.

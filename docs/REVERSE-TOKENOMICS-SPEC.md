@@ -9,6 +9,8 @@
 | **Pairs with** | [`RAISE_ROOM_LAUNCH_FLOW.md`](./RAISE_ROOM_LAUNCH_FLOW.md), [`RAISE-ROOM-VALIDATION-VISION-SPEC.md`](./RAISE-ROOM-VALIDATION-VISION-SPEC.md), [`FOUNDER_OS_NORTH_STAR.md`](./FOUNDER_OS_NORTH_STAR.md) |
 | **Review audience** | ChatGPT, fintech counsel (AU/US/EU), smart-contract auditor |
 
+> **2026-07-21 amendment:** The founder has superseded the post-graduation split. The intended post-graduation founder benefit is 0.25% and the platform takes 0% of that benefit. The 1% bonding-curve total and 0.5% founder share remain. The destination of the remaining 0.5% is arithmetically ambiguous: it was described both as entirely buyback/burn and as a 50/50 split between platform USDC treasury and buyback/burn. No contract should encode that half until confirmed. The post-graduation 0.25% must also be defined as either a separate creator fee or an LP-fee claim; it cannot silently replace all LP compensation. See [`DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`](./DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md). This amendment controls over conflicting fee tables, formulas, projections, and open-question answers below.
+
 > This document captures every locked decision, its reasoning, the concrete formulas, the attack vectors considered, and the open legal questions for the platform's own token ("reverse tokenomics") + the multi-chain launchpad/DEX that funds it. It is a decision-capture document, not a build ticket. Authored for external review before any contract is written.
 
 ---
