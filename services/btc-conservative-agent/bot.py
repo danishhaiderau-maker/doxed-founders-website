@@ -28630,6 +28630,7 @@ def _persistent_config_keys():
         "limit_chase_step_pct",
         "duplicate_limit_block_enabled",
         "exit_only_lanes",
+        "manual_admin_pause",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -28717,6 +28718,10 @@ def load_persistent_config():
                 state["research_lane_enabled"] = merged_lanes
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
+                if bool(state.get("manual_admin_pause")):
+                    state["execution_paused"] = True
+                    state["execution_reason"] = "ADMIN_MANUAL"
+                    state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"]
         with state_lock:
             lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE) or DEFAULT_RESEARCH_LEVERAGE)
             leverage_raised = False
