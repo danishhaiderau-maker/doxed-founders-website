@@ -3,10 +3,50 @@ import test from 'node:test';
 import {
   canonicalPendingIntentCycles,
   isBenignShowcaseEntryWait,
+  isCycleFreshForRelayArm,
+  mergedDirectionCompatible,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
+  relayArmTimestampMs,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
+
+test('live relay accepts only cycles created after the latest explicit Start', () => {
+  const dashboardState = { relayArmedAt: '2026-07-20T01:02:03.000Z' };
+  assert.equal(relayArmTimestampMs(dashboardState), Date.parse(dashboardState.relayArmedAt));
+  assert.equal(
+    isCycleFreshForRelayArm(dashboardState, new Date('2026-07-20T01:02:02.999Z')),
+    false,
+  );
+  assert.equal(
+    isCycleFreshForRelayArm(dashboardState, new Date('2026-07-20T01:02:03.000Z')),
+    false,
+  );
+  assert.equal(
+    isCycleFreshForRelayArm(dashboardState, new Date('2026-07-20T01:02:03.001Z')),
+    true,
+  );
+});
+
+test('relay arming falls back to legacy confirmation and fails closed when missing', () => {
+  assert.equal(
+    isCycleFreshForRelayArm(
+      { realTradingConfirmedAt: '2026-07-20T01:00:00.000Z' },
+      new Date('2026-07-20T01:00:01.000Z'),
+    ),
+    true,
+  );
+  assert.equal(isCycleFreshForRelayArm({}, new Date()), false);
+  assert.equal(isCycleFreshForRelayArm({ relayArmedAt: 'invalid' }, new Date()), false);
+});
+
+test('merged-position tick gate allows same direction and rejects an opposing pair', () => {
+  assert.equal(mergedDirectionCompatible(null, 'LONG'), true);
+  assert.equal(mergedDirectionCompatible('LONG', 'LONG'), true);
+  assert.equal(mergedDirectionCompatible('SHORT', 'SHORT'), true);
+  assert.equal(mergedDirectionCompatible('LONG', 'SHORT'), false);
+  assert.equal(mergedDirectionCompatible('SHORT', 'LONG'), false);
+});
 
 test('repairs a legacy catch-up lot that has qty but no direction', () => {
   assert.equal(

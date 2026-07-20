@@ -56,10 +56,12 @@ from bot import (
     load_tile2_counters_from_disk,
     reconcile_tile2_pending_orders_on_startup,
     record_tile2_eligible_long,
+    record_tile2_eligible_side,
     _record_tile2_order_lifecycle,
     _tile2_counters_bucket,
     _submit_tile2_paper_resting_limit,
     _tile2_paper_resting_limit_for_lane,
+    _tile2_active_trade_for_side,
     _tile2_open_episode_ids,
     _cancel_tile2_paper_resting_limit,
     _is_static_no_chase_order,
@@ -138,7 +140,7 @@ print("=" * 78)
 print("\n[A] Frozen policy identifiers")
 check(
     "POLICY_ID matches the frozen Tile 2 identifier",
-    POLICY_ID == "sr_micro_static_normalized_adx_vol_v1_20260718",
+    POLICY_ID == "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720",
     f"got {POLICY_ID!r}",
 )
 check(
@@ -146,7 +148,7 @@ check(
     STATIC_ADX_TRENDING_THRESHOLD == 40,
     f"got {STATIC_ADX_TRENDING_THRESHOLD!r}",
 )
-check("SHORT is disabled in the frozen policy", STATIC_DISABLE_SHORT_LEG is True)
+check("SHORT is enabled in the dual-leg policy", STATIC_DISABLE_SHORT_LEG is False)
 check(
     "LONDON is in the session blacklist",
     "LONDON" in STATIC_SESSION_BLACKLIST,
@@ -173,12 +175,12 @@ check(
 
 
 # ---------------------------------------------------------------------------
-# Group B: SHORT is always blocked
+# Group B: simultaneous independent LONG and SHORT direction slots
 # ---------------------------------------------------------------------------
-print("\n[B] SHORT disabled from execution")
+print("\n[B] Dual independent LONG/SHORT slots")
 reset_state()
 
-# evaluate_bracket must NEVER arm the SHORT leg for STATIC.
+# A qualified STATIC edge observation arms both resting opportunities.
 r = evaluate_bracket(
     price=60000,
     micro_support=59950,
@@ -190,15 +192,17 @@ r = evaluate_bracket(
     lane=LANE,
     session_bucket="ASIA",
 )
-check("STATIC bracket never arms SHORT", r.get("short_armed") is False)
+check("STATIC bracket arms SHORT at resistance", r.get("short_armed") is True)
 check(
     "STATIC bracket arms LONG at support",
     r.get("long_armed") is True,
     f"result={r}",
 )
 
-# _submit_tile2_paper_resting_limit must refuse SHORT explicitly.
-res = _submit_tile2_paper_resting_limit(
+# SHORT is a valid, non-marketable sell limit above market.
+with state_lock:
+    state["price"] = 60000.0
+res_short = _submit_tile2_paper_resting_limit(
     ctx={"trade_id": "t-short"},
     side="SHORT",
     limit_price=60100.0,
@@ -207,9 +211,37 @@ res = _submit_tile2_paper_resting_limit(
     bracket_eval=r,
 )
 check(
-    "paper limit submit refuses SHORT",
-    res == "REFUSED_SHORT_DISABLED",
-    f"got {res!r}",
+    "SHORT resistance limit is submitted",
+    res_short == "SPAWNED",
+    f"got {res_short!r}",
+)
+res_long = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-long"},
+    side="LONG",
+    limit_price=59950.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r,
+)
+check("LONG support limit is also submitted", res_long == "SPAWNED", f"got {res_long!r}")
+with trade_lock:
+    dual_pending = [
+        order for order in pending_orders
+        if order.get("research_lane") == LANE and order.get("status") == "PENDING"
+    ]
+check("exactly two Tile 2 pending limits coexist", len(dual_pending) == 2)
+check(
+    "dual slots contain one LONG and one SHORT",
+    {order.get("signal_dir") for order in dual_pending} == {"LONG", "SHORT"},
+)
+check(
+    "SHORT keeps exchange side sell and exact resistance",
+    any(
+        order.get("signal_dir") == "SHORT"
+        and order.get("side") == "sell"
+        and abs(float(order.get("limit_price")) - 60100.0) < 0.01
+        for order in dual_pending
+    ),
 )
 
 
@@ -447,10 +479,8 @@ if pending:
         abs(float(pending.get("limit_price")) - 59950.0) < 0.01,
     )
 
-# No chase / reprice: a second submit at the SAME level returns RESTING
-# or the more specific REFUSED_EPISODE_HAS_OPEN_TRADE / REFUSED_ANOTHER_PENDING
-# (all of which mean "we did not spawn a duplicate"). The more specific
-# reason is preferred, but RESTING is also acceptable.
+# No chase / reprice: a second same-direction submit at the same level keeps
+# the existing lifecycle and returns RESTING.
 res2 = _submit_tile2_paper_resting_limit(
     ctx={"trade_id": "t-long-2"},
     side="LONG",
@@ -462,7 +492,7 @@ res2 = _submit_tile2_paper_resting_limit(
 )
 check(
     "second submit at same level refused (no respawn)",
-    res2 in ("RESTING", "REFUSED_EPISODE_HAS_OPEN_TRADE", "REFUSED_ANOTHER_PENDING"),
+    res2 == "RESTING",
     f"got {res2!r}",
 )
 _with_trade = 0
@@ -602,9 +632,9 @@ clear_pending()
 
 
 # ---------------------------------------------------------------------------
-# Group G: one order per S/R episode (no clones)
+# Group G: one active lifecycle per direction; opposite direction may coexist
 # ---------------------------------------------------------------------------
-print("\n[G] One order per S/R episode (no clones)")
+print("\n[G] One active lifecycle per direction")
 reset_state()
 with state_lock:
     state["price"] = 60050.0
@@ -627,7 +657,7 @@ res1 = _submit_tile2_paper_resting_limit(
 )
 check("first paper limit on episode SPAWNED", res1 == "SPAWNED", f"got {res1!r}")
 
-# Second paper limit on the SAME episode -> REFUSED_EPISODE_HAS_OPEN_TRADE.
+# Second LONG on the same level remains the same working lifecycle.
 res2 = _submit_tile2_paper_resting_limit(
     ctx={"trade_id": "t-ep-2"},
     side="LONG",
@@ -638,9 +668,30 @@ res2 = _submit_tile2_paper_resting_limit(
     sr_episode_id=ep_id,
 )
 check(
-    "second paper limit on same episode refused",
-    res2 in ("REFUSED_EPISODE_HAS_OPEN_TRADE", "RESTING", "REFUSED_ANOTHER_PENDING"),
+    "second same-direction paper limit does not clone",
+    res2 == "RESTING",
     f"got {res2!r}",
+)
+
+# The opposite SHORT slot is independent and may coexist on the same episode.
+res_short = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-ep-short"},
+    side="SHORT",
+    limit_price=60100.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id=ep_id,
+)
+check(
+    "opposite-direction paper limit coexists on the same episode",
+    res_short == "SPAWNED",
+    f"got {res_short!r}",
+)
+check(
+    "one LONG and one SHORT direction slot are occupied",
+    _tile2_active_trade_for_side("LONG") is not None
+    and _tile2_active_trade_for_side("SHORT") is not None,
 )
 
 # Distinct episode -> not in open set.
@@ -725,9 +776,10 @@ check(
 # ---------------------------------------------------------------------------
 print("\n[J] Dashboard metrics + restart survival")
 reset_state()
-# Record 5 eligible, 3 paper limits, 2 entry fills, 2 closes, 1 expiry, 1 cancel.
+# Record 5 eligible LONG plus 5 eligible SHORT direction slots.
 for _ in range(5):
     record_tile2_eligible_long(episode_id=f"ep-{_}")
+    record_tile2_eligible_side("SHORT", episode_id=f"ep-{_}")
 # Simulate the real order lifecycle via the counter folder.
 from bot import _record_tile2_event
 for _ in range(3):
@@ -747,6 +799,11 @@ check(
     "metrics report eligible_long == 5",
     m.get("eligible_long") == 5,
     f"got {m.get('eligible_long')}",
+)
+check(
+    "metrics report eligible_short == 5 and total == 10",
+    m.get("eligible_short") == 5 and m.get("eligible_total") == 10,
+    f"got short={m.get('eligible_short')} total={m.get('eligible_total')}",
 )
 check(
     "metrics report paper_limits == 3",
@@ -788,9 +845,9 @@ check(
 load_tile2_counters_from_disk()
 m2 = tile2_dashboard_metrics()
 check(
-    "counters survive reload (eligible_long preserved)",
-    m2.get("eligible_long") == 5,
-    f"got {m2.get('eligible_long')}",
+    "counters survive reload (both eligible directions preserved)",
+    m2.get("eligible_long") == 5 and m2.get("eligible_short") == 5,
+    f"got long={m2.get('eligible_long')} short={m2.get('eligible_short')}",
 )
 check(
     "cohort_id is always taken from running code after reload",
@@ -866,9 +923,23 @@ res_clone = _submit_tile2_paper_resting_limit(
     sr_episode_id="ep-filled-survives",
 )
 check(
-    "no clone trade while a filled position is open on the episode",
-    res_clone == "REFUSED_EPISODE_HAS_OPEN_TRADE",
+    "no same-direction clone while a filled LONG position is open",
+    res_clone == "REFUSED_DIRECTION_ACTIVE",
     f"got {res_clone!r}",
+)
+res_opposite = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-opposite-slot"},
+    side="SHORT",
+    limit_price=60100.0,
+    edge_score=4.0,
+    features={},
+    bracket_eval=r_35,
+    sr_episode_id="ep-filled-survives",
+)
+check(
+    "open LONG does not suppress the independent SHORT slot",
+    res_opposite == "SPAWNED",
+    f"got {res_opposite!r}",
 )
 # Clean up.
 with trade_lock:
@@ -985,6 +1056,56 @@ check(
 check(
     "filled Tile 2 order leaves the pending registry",
     not any(order.get("trade_id") == fill_candidate.get("trade_id") for order in pending_orders),
+)
+
+# The opposite slot must preserve SHORT through the same fill lifecycle even
+# while the LONG position remains open in the showcase paper book.
+with state_lock:
+    state["price"] = 60050.0
+res_short_fill = _submit_tile2_paper_resting_limit(
+    ctx={"trade_id": "t-short-fill-direction"},
+    side="SHORT",
+    limit_price=60100.0,
+    edge_score=4.0,
+    features={"regime": "RANGE"},
+    bracket_eval=r_35,
+    sr_episode_id="ep-short-fill-direction",
+)
+short_fill_candidate = _tile2_paper_resting_limit_for_lane("SHORT")
+check(
+    "SHORT fill-direction submit SPAWNED",
+    res_short_fill == "SPAWNED" and short_fill_candidate is not None,
+)
+_originals = {name: getattr(bot, name) for name in _patched_names}
+try:
+    for name in _patched_names:
+        setattr(bot, name, lambda *args, **kwargs: None)
+    short_fill_candidate["fill_price"] = short_fill_candidate["limit_price"]
+    short_fill_candidate["status"] = "FILLED"
+    bot.fill_order(short_fill_candidate)
+finally:
+    for name, original in _originals.items():
+        setattr(bot, name, original)
+check(
+    "touched resistance order opens a SHORT position beside the LONG",
+    any(
+        pos.get("trade_id") == short_fill_candidate.get("trade_id")
+        and pos.get("dir") == "SHORT"
+        and pos.get("research_lane") == LANE
+        for pos in open_positions
+    ),
+)
+check(
+    "showcase paper book holds one LONG and one SHORT position",
+    {pos.get("dir") for pos in open_positions if pos.get("research_lane") == LANE}
+    == {"LONG", "SHORT"},
+)
+check(
+    "filled SHORT leaves the pending registry",
+    not any(
+        order.get("trade_id") == short_fill_candidate.get("trade_id")
+        for order in pending_orders
+    ),
 )
 
 

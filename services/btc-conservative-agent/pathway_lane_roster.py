@@ -1,11 +1,11 @@
 """
-Quality pathway roster -- v12-shared-direction-tile2-normalized (2026-07-18).
+Quality pathway roster -- v13-shared-direction-tile2-dual-leg (2026-07-20).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)
   - TYPE_B_HUNTER_V1 (research candidate, shared 3-minute direction AI)
     shared AI direction; ADX-flipped, volume-inverted, regime-aware fixed policy.
-  - SR_MICRO_TILE_V2_STATIC (A/B resting limit, no chase, shadow)
+  - SR_MICRO_TILE_V2_STATIC (dual $20 resting limits, one per direction)
   + AI_SCAN (internal scanner, no orders)
 
 Retired 2026-07-16 (v12 overhaul):
@@ -48,10 +48,10 @@ DATA_RETIRED_PATHWAY_LANES = frozenset((
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v12-type-b-overhaul"
+ROSTER_PHASE = "v13-tile2-dual-leg"
 ROSTER_NOTES = (
-    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (v12 fixed policy) + "
-    "SR_MICRO_TILE_V2_STATIC. SR_MICRO_TILE_V1 retired 2026-07-16 (47% WR, "
+    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (fixed policy) + "
+    "SR_MICRO_TILE_V2_STATIC dual-leg. SR_MICRO_TILE_V1 retired 2026-07-16 (47% WR, "
     "negative PnL); code preserved. Full-chase S/R V2 historical-only."
 )
 

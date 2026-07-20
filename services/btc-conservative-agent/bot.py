@@ -10297,7 +10297,7 @@ def log_lane_opportunity_event(
 #
 # Counters tracked (Section 2 spec):
 #   bracket_evals          - every evaluate_bracket() invocation
-#   eligible_long          - LONG leg qualified (post-midpoint, post-structure)
+#   eligible_long/short    - qualified direction slots (one each per episode)
 #   paper_limits           - local paper resting limits actually submitted
 #   filled_closes          - filled positions that closed
 #   ttl_expiries           - 30m resting limit expired unfilled
@@ -10308,12 +10308,12 @@ def log_lane_opportunity_event(
 # Derived metrics (computed lazily in tile2_dashboard_metrics()):
 #   fill_rate              - filled_closes / paper_limits
 #   paper_pnl_usd          - sum of closed LAB PnL for Tile 2 lane
-#   ev_per_eligible        - paper_pnl_usd / eligible_long
+#   ev_per_eligible        - paper_pnl_usd / (eligible_long + eligible_short)
 #   ev_per_filled          - paper_pnl_usd / filled_closes
 # ---------------------------------------------------------------------------
 TILE2_COUNTERS_FILE = "tile2_counters.json"
-TILE2_COUNTERS_SCHEMA = "tile2_counters_v3"
-TILE2_COUNTERS_COMPAT_SCHEMAS = {"tile2_counters_v2", TILE2_COUNTERS_SCHEMA}
+TILE2_COUNTERS_SCHEMA = "tile2_counters_v4"
+TILE2_COUNTERS_COMPAT_SCHEMAS = {TILE2_COUNTERS_SCHEMA}
 TILE2_ORDER_TERMINAL_STATES = {
     "FILLED",
     "TTL_EXPIRED",
@@ -10331,12 +10331,14 @@ def _tile2_counters_bucket() -> dict:
             "lane": RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
             "bracket_evals": 0,
             "eligible_long": 0,
+            "eligible_short": 0,
             "paper_limits": 0,
             "entry_fills": 0,
             "filled_closes": 0,
             "ttl_expiries": 0,
             "cancellations": 0,
             "episode_ids_seen": [],
+            "eligible_leg_ids_seen": [],
             "submitted_episode_ids": [],
             "paper_order_ids": [],
             "entry_fill_trade_ids": [],
@@ -10350,6 +10352,7 @@ def _tile2_counters_bucket() -> dict:
     )
     for list_key in (
         "episode_ids_seen",
+        "eligible_leg_ids_seen",
         "submitted_episode_ids",
         "paper_order_ids",
         "entry_fill_trade_ids",
@@ -10358,6 +10361,8 @@ def _tile2_counters_bucket() -> dict:
     ):
         if list_key not in bucket:
             bucket[list_key] = []
+    bucket.setdefault("eligible_long", 0)
+    bucket.setdefault("eligible_short", 0)
     if "cohort_id" not in bucket:
         bucket["cohort_id"] = TILE2_POLICY_ID
     if "exit_profile_id" not in bucket:
@@ -10500,35 +10505,44 @@ def _record_tile2_event(
                         reason=block_reason or event,
                         updated_ts=time.time(),
                     )
-            # ELIGIBLE_LONG is recorded explicitly via record_tile2_eligible_long()
-            # because eligibility is determined before any SPAWN_LAB event.
+            # Eligible direction slots are recorded explicitly before spawn.
         _persist_tile2_counters(bucket)
     except Exception as e:
         logger.error(f"[TILE2_COUNTERS] record event failed: {e}")
 
 
-def record_tile2_eligible_long(episode_id: str = None) -> None:
-    """Mark a Tile 2 LONG opportunity as eligible for entry.
-
-    Called from the bracket tick when evaluate_bracket() returns long_armed=True
-    for the STATIC lane. Optionally tracks distinct S/R episodes (Section 4).
-    """
+def record_tile2_eligible_side(side: str, episode_id: str = None) -> None:
+    """Mark one LONG/SHORT direction slot eligible once per S/R episode."""
+    direction = str(side or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return
     try:
         with state_lock:
             bucket = _tile2_counters_bucket()
             if episode_id:
-                seen = bucket.setdefault("episode_ids_seen", [])
-                if episode_id in seen:
+                episode_key = str(episode_id)
+                leg_key = f"{episode_key}:{direction}"
+                eligible_legs = bucket.setdefault("eligible_leg_ids_seen", [])
+                if leg_key in eligible_legs:
                     return
-                seen.append(episode_id)
-                bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
-                if len(seen) > 500:
-                    del seen[: len(seen) - 500]
-            else:
-                bucket["eligible_long"] = int(bucket.get("eligible_long", 0)) + 1
+                eligible_legs.append(leg_key)
+                episodes = bucket.setdefault("episode_ids_seen", [])
+                if episode_key not in episodes:
+                    episodes.append(episode_key)
+                if len(eligible_legs) > 1000:
+                    del eligible_legs[: len(eligible_legs) - 1000]
+                if len(episodes) > 500:
+                    del episodes[: len(episodes) - 500]
+            counter_key = "eligible_long" if direction == "LONG" else "eligible_short"
+            bucket[counter_key] = int(bucket.get(counter_key, 0)) + 1
         _persist_tile2_counters(bucket)
     except Exception as e:
         logger.error(f"[TILE2_COUNTERS] record eligible failed: {e}")
+
+
+def record_tile2_eligible_long(episode_id: str = None) -> None:
+    """Backward-compatible wrapper for existing diagnostics."""
+    record_tile2_eligible_side("LONG", episode_id=episode_id)
 
 
 def tile2_dashboard_metrics() -> dict:
@@ -10544,7 +10558,9 @@ def tile2_dashboard_metrics() -> dict:
     # consistent with the closed-trade ledger (no parallel accounting).
     lab = get_lane_lab_pnl_ledger(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC) or {}
     paper_pnl = round(float(lab.get("net_pnl_usd") or 0.0), 2)
-    eligible = int(bucket.get("eligible_long", 0))
+    eligible_long = int(bucket.get("eligible_long", 0))
+    eligible_short = int(bucket.get("eligible_short", 0))
+    eligible = eligible_long + eligible_short
     filled = int(bucket.get("filled_closes", 0))
     entry_fills = int(bucket.get("entry_fills", 0))
     paper_limits = int(bucket.get("paper_limits", 0))
@@ -10559,7 +10575,9 @@ def tile2_dashboard_metrics() -> dict:
         "cohort_id": bucket.get("cohort_id") or TILE2_POLICY_ID,
         # Raw counters (Section 2 spec).
         "bracket_evals": int(bucket.get("bracket_evals", 0)),
-        "eligible_long": eligible,
+        "eligible_long": eligible_long,
+        "eligible_short": eligible_short,
+        "eligible_total": eligible,
         "paper_limits": paper_limits,
         "entry_fills": entry_fills,
         "filled_closes": filled,
@@ -10615,7 +10633,7 @@ def load_tile2_counters_from_disk() -> None:
         with state_lock:
             bucket = _tile2_counters_bucket()
             for k in (
-                "bracket_evals", "eligible_long", "paper_limits", "entry_fills", "filled_closes",
+                "bracket_evals", "eligible_long", "eligible_short", "paper_limits", "entry_fills", "filled_closes",
                 "ttl_expiries", "cancellations",
                 "restored_pending_orders",
             ):
@@ -10623,6 +10641,7 @@ def load_tile2_counters_from_disk() -> None:
                     bucket[k] = counters[k]
             for list_key in (
                 "episode_ids_seen",
+                "eligible_leg_ids_seen",
                 "submitted_episode_ids",
                 "paper_order_ids",
                 "entry_fill_trade_ids",
@@ -10645,6 +10664,7 @@ def load_tile2_counters_from_disk() -> None:
             f"[TILE2_COUNTERS] restored from disk: "
             f"bracket_evals={bucket.get('bracket_evals', 0)} "
             f"eligible_long={bucket.get('eligible_long', 0)} "
+            f"eligible_short={bucket.get('eligible_short', 0)} "
             f"paper_limits={bucket.get('paper_limits', 0)} "
             f"filled_closes={bucket.get('filled_closes', 0)} "
             f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
@@ -10750,12 +10770,14 @@ def reset_tile2_counters_for_fresh_holdout() -> dict:
         bucket = _tile2_counters_bucket()
         bucket["bracket_evals"] = 0
         bucket["eligible_long"] = 0
+        bucket["eligible_short"] = 0
         bucket["paper_limits"] = 0
         bucket["entry_fills"] = 0
         bucket["filled_closes"] = 0
         bucket["ttl_expiries"] = 0
         bucket["cancellations"] = 0
         bucket["episode_ids_seen"] = []
+        bucket["eligible_leg_ids_seen"] = []
         bucket["submitted_episode_ids"] = []
         bucket["paper_order_ids"] = []
         bucket["entry_fill_trade_ids"] = []
@@ -12309,24 +12331,60 @@ def _spawn_lab_bracket_shadow(
 TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
 
 
-def _tile2_paper_resting_limit_for_lane() -> dict | None:
-    """Return the current Tile 2 paper resting limit (PENDING), or None.
+def _tile2_paper_resting_limit_for_lane(side: str = None) -> dict | None:
+    """Return a Tile 2 paper resting limit, optionally restricted by side.
 
     A Tile 2 paper limit is uniquely keyed by research_lane == SR_MICRO_TILE_V2_STATIC
-    AND status == PENDING. Used by Section 4 (one order per S/R episode).
+    AND status == PENDING. The operational dual-leg policy permits at most one
+    LONG and one SHORT, so callers that enforce occupancy must pass a side.
     """
+    side_u = str(side or "").upper() or None
     with trade_lock:
         for o in pending_orders:
             if (
                 isinstance(o, dict)
                 and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
                 and o.get("status") == "PENDING"
+                and (
+                    side_u is None
+                    or _normalize_order_side_to_dir(
+                        o.get("signal_dir") or o.get("direction") or o.get("dir") or o.get("side")
+                    ) == side_u
+                )
             ):
                 return o
     return None
 
 
-def _tile2_open_episode_ids() -> set:
+def _tile2_active_trade_for_side(side: str) -> dict | None:
+    """Return the pending/open Tile 2 trade occupying one direction slot."""
+    side_u = str(side or "").upper()
+    if side_u not in ("LONG", "SHORT"):
+        return None
+    with trade_lock:
+        for collection in (pending_orders, open_positions):
+            for item in collection:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("research_lane") != RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
+                    continue
+                status = str(item.get("status") or "").upper()
+                if collection is pending_orders and status != "PENDING":
+                    continue
+                if collection is open_positions and status not in ("OPEN", "FILLED", "ACTIVE"):
+                    continue
+                item_side = _normalize_order_side_to_dir(
+                    item.get("signal_dir")
+                    or item.get("direction")
+                    or item.get("dir")
+                    or item.get("side")
+                )
+                if item_side == side_u:
+                    return item
+    return None
+
+
+def _tile2_open_episode_ids(side: str = None) -> set:
     """Section 4: episode IDs currently attached to open/pending Tile 2 trades.
 
     Includes both pending paper limits and open positions. The bracket tick
@@ -12334,6 +12392,7 @@ def _tile2_open_episode_ids() -> set:
     Tile 2 trades running on the same S/R episode.
     """
     seen = set()
+    side_u = str(side or "").upper() or None
     with trade_lock:
         for o in pending_orders:
             if (
@@ -12341,14 +12400,26 @@ def _tile2_open_episode_ids() -> set:
                 and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
                 and o.get("status") == "PENDING"
                 and o.get("sr_episode_id")
+                and (
+                    side_u is None
+                    or _normalize_order_side_to_dir(
+                        o.get("signal_dir") or o.get("direction") or o.get("dir") or o.get("side")
+                    ) == side_u
+                )
             ):
                 seen.add(str(o.get("sr_episode_id")))
         for p in open_positions:
             if (
                 isinstance(p, dict)
                 and p.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
-                and p.get("status") == "OPEN"
+                and str(p.get("status") or "").upper() in ("OPEN", "FILLED", "ACTIVE")
                 and p.get("sr_episode_id")
+                and (
+                    side_u is None
+                    or _normalize_order_side_to_dir(
+                        p.get("signal_dir") or p.get("direction") or p.get("dir") or p.get("side")
+                    ) == side_u
+                )
             ):
                 seen.add(str(p.get("sr_episode_id")))
     return seen
@@ -12405,8 +12476,10 @@ def _register_tile2_active_signal(order: dict, ctx: dict = None, features: dict 
         "expires_ts": float(order.get("entry_expires_ts") or 0),
         "order_created_ts": created_ts,
         "entry_mode": "BRACKET_LIMIT_STATIC",
-        "entry_path": "STATIC_MICRO_SUPPORT",
-        "trigger": "MICRO_SUPPORT",
+        "entry_path": (
+            "STATIC_MICRO_SUPPORT" if direction == "LONG" else "STATIC_MICRO_RESISTANCE"
+        ),
+        "trigger": "MICRO_SUPPORT" if direction == "LONG" else "MICRO_RESISTANCE",
         "strategy": "SR_MICRO_STATIC",
         "regime": state.get("regime", "UNKNOWN"),
         "ai_win_prob": None,
@@ -12431,34 +12504,52 @@ def _register_tile2_active_signal(order: dict, ctx: dict = None, features: dict 
     return signal
 
 
-def _cancel_tile2_paper_resting_limit(reason: str = "CANCELLED") -> bool:
-    """Cancel the current Tile 2 paper resting limit (if any). Returns True if cancelled."""
-    existing = _tile2_paper_resting_limit_for_lane()
-    if not existing:
-        return False
-    try:
-        existing["status"] = "CANCELLED"
-        existing["exit_reason"] = reason
-        existing["cancelled_ts"] = time.time()
-        lane_unregister_pending_order(existing)
-        expire_signal_for_order(existing, reason)
-        log_lane_opportunity_event(
-            RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
-            "CANCELLED",
-            existing.get("trade_id"),
-            existing.get("signal_dir") or existing.get("dir"),
-            None,
-            float(existing.get("edge_score") or 0),
-            block_reason=reason,
-        )
-        logger.info(
-            f"[{RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC}] paper resting limit CANCELLED "
-            f"trade_id={existing.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]"
-        )
-        return True
-    except Exception as e:
-        logger.error(f"[TILE2] cancel paper limit failed: {e}")
-        return False
+def _cancel_tile2_paper_resting_limit(
+    reason: str = "CANCELLED",
+    side: str = None,
+) -> bool:
+    """Cancel Tile 2 resting limits, optionally only one direction."""
+    side_u = str(side or "").upper() or None
+    with trade_lock:
+        matches = [
+            o for o in list(pending_orders)
+            if (
+                isinstance(o, dict)
+                and o.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+                and o.get("status") == "PENDING"
+                and (
+                    side_u is None
+                    or _normalize_order_side_to_dir(
+                        o.get("signal_dir") or o.get("direction") or o.get("dir") or o.get("side")
+                    ) == side_u
+                )
+            )
+        ]
+    cancelled = False
+    for existing in matches:
+        try:
+            existing["status"] = "CANCELLED"
+            existing["exit_reason"] = reason
+            existing["cancelled_ts"] = time.time()
+            lane_unregister_pending_order(existing)
+            expire_signal_for_order(existing, reason)
+            log_lane_opportunity_event(
+                RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
+                "CANCELLED",
+                existing.get("trade_id"),
+                existing.get("signal_dir") or existing.get("dir"),
+                None,
+                float(existing.get("edge_score") or 0),
+                block_reason=reason,
+            )
+            logger.info(
+                f"[{RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC}] paper resting limit CANCELLED "
+                f"trade_id={existing.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+            cancelled = True
+        except Exception as e:
+            logger.error(f"[TILE2] cancel paper limit failed: {e}")
+    return cancelled
 
 
 def _submit_tile2_paper_resting_limit(
@@ -12470,7 +12561,7 @@ def _submit_tile2_paper_resting_limit(
     bracket_eval: dict = None,
     sr_episode_id: str = "",
 ) -> str:
-    """Section 3 ON path: submit a local paper resting limit at exact micro-support.
+    """Submit one local paper resting limit for a Tile 2 direction slot.
 
     This is the PAPER-mode replacement for _spawn_lab_bracket_shadow when the
     tile is ON. The limit is a *real pending_orders* entry (so the existing
@@ -12478,62 +12569,47 @@ def _submit_tile2_paper_resting_limit(
     never submits it directly to Bitfinex. The separate platform relay may
     copy it only when that relay is ON.
 
-    LONG-only by policy. SHORT must never reach this function (caller guards).
-    Section 4: refuses to spawn a second paper limit on the same S/R episode
-    while one is already pending or open.
+    Tile 2 may hold one LONG slot at support and one SHORT slot at resistance
+    simultaneously. A pending order or open position blocks only its own
+    direction until that lifecycle expires or closes.
     """
     direction = str(side or "LONG").upper()
-    if direction == "SHORT":
-        logger.error(
-            f"[TILE2] SHORT paper limit refused — SHORT is disabled by policy "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-        return "REFUSED_SHORT_DISABLED"
-    if direction != "LONG":
+    if direction not in ("LONG", "SHORT"):
         return "REFUSED_BAD_SIDE"
 
-    # Section 4: one-trade-per-episode guard. If we already have a pending or
-    # open Tile 2 trade on this same S/R episode, refuse the spawn. The
-    # episode_id is derived in the bracket tick from support + resistance +
-    # UTC bucket; without an episode_id we conservatively allow at most one
-    # pending Tile 2 limit at a time.
-    open_episodes = _tile2_open_episode_ids()
-    submitted_episodes = _tile2_submitted_episode_ids()
-    if sr_episode_id and (
-        sr_episode_id in open_episodes or sr_episode_id in submitted_episodes
-    ):
-        logger.info(
-            f"[TILE2] paper limit refused — episode {sr_episode_id} already has "
-            f"an open/pending Tile 2 trade [PIPELINE ENFORCEMENT]"
-        )
-        return "REFUSED_EPISODE_HAS_OPEN_TRADE"
-    existing_pending = _tile2_paper_resting_limit_for_lane()
-    if existing_pending:
-        # Conservative guard: even without an episode_id match, we never want
-        # two simultaneous Tile 2 paper limits. If the existing pending limit
-        # is at the SAME support level, leave it alone. If it's at a different
-        # level, the structural-cancel path above should already have killed
-        # it; we still refuse here as a belt-and-braces safety.
-        _existing_lim = float(existing_pending.get("limit_price") or 0)
-        _new_lim = float(limit_price or 0)
-        if _existing_lim > 0 and _new_lim > 0 and abs(_existing_lim - _new_lim) < 0.01:
+    active_same_side = _tile2_active_trade_for_side(direction)
+    if active_same_side:
+        existing_limit = float(active_same_side.get("limit_price") or 0)
+        requested_limit = float(limit_price or 0)
+        if (
+            str(active_same_side.get("status") or "").upper() == "PENDING"
+            and existing_limit > 0
+            and requested_limit > 0
+            and abs(existing_limit - requested_limit) < 0.01
+        ):
             return "RESTING"
         logger.info(
-            f"[TILE2] paper limit refused — another Tile 2 limit already pending "
-            f"(existing={_existing_lim:.2f} new={_new_lim:.2f}) [PIPELINE ENFORCEMENT]"
+            f"[TILE2] {direction} paper limit refused — direction slot occupied "
+            f"trade_id={active_same_side.get('trade_id')} "
+            f"status={active_same_side.get('status')} [PIPELINE ENFORCEMENT]"
         )
-        return "REFUSED_ANOTHER_PENDING"
+        return "REFUSED_DIRECTION_ACTIVE"
 
     market_price = float(nz(state.get("price")) or 0)
     limit_price = float(limit_price or 0)
     if market_price <= 0 or limit_price <= 0:
         return "REFUSED_BAD_PRICE"
-    # Frozen policy: STATIC resting limit must be at exact micro-support.
-    # Reject if the requested limit is above the current market (would cross).
     if direction == "LONG" and limit_price >= market_price:
         logger.warning(
             f"[TILE2] LONG paper limit refused — limit {limit_price:.2f} >= market "
             f"{market_price:.2f} (would cross, not resting at support) "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_WOULD_CROSS"
+    if direction == "SHORT" and limit_price <= market_price:
+        logger.warning(
+            f"[TILE2] SHORT paper limit refused — limit {limit_price:.2f} <= market "
+            f"{market_price:.2f} (would cross, not resting at resistance) "
             f"[PIPELINE ENFORCEMENT]"
         )
         return "REFUSED_WOULD_CROSS"
@@ -12554,9 +12630,9 @@ def _submit_tile2_paper_resting_limit(
         return f"REFUSED_MODE_{mode}"
 
     enriched = _enrich_combo_lane_features(features, ctx)
-    margin_usdt, size_mult = _lane_sized_margin_usdt(
-        RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC, enriched
-    )
+    # Operator policy: exactly $20 margin per direction ($40 only when both
+    # independent slots are concurrently working).
+    margin_usdt, size_mult = float(FIXED_MARGIN_USDT), 1.0
     leverage = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
     qty = (float(margin_usdt) * leverage) / limit_price if limit_price > 0 else 0.0
     trade_id = allocate_lane_trade_id(RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC)
@@ -12575,7 +12651,7 @@ def _submit_tile2_paper_resting_limit(
         # The old "buy" value crashed fill_order before Tile 2 could open a
         # position or receive ledger credit.
         "signal_dir": direction,
-        "side": "buy",
+        "side": "buy" if direction == "LONG" else "sell",
         "dir": direction,
         "direction": direction,
         "signal_price": market_price,
@@ -12605,7 +12681,7 @@ def _submit_tile2_paper_resting_limit(
         "chase_mode": "STATIC",
         "fill_at_limit": True,
         # Audit fields (Section 8 outcome schema).
-        "micro_support": float(bracket_eval.get("micro_support") or limit_price) if bracket_eval else float(limit_price),
+        "micro_support": float((bracket_eval or {}).get("micro_support") or 0),
         "micro_resistance": float((bracket_eval or {}).get("micro_resistance") or 0),
         "adx_at_entry": float((bracket_eval or {}).get("adx") or 0) or None,
         "session_bucket_at_entry": str((bracket_eval or {}).get("session_bucket") or ""),
@@ -14082,19 +14158,15 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
             block_reason=eval_result.get("block_reason") or eval_result.get("zone"),
         )
 
-        # Section 2: count a distinct eligible-LONG opportunity when the LONG
-        # leg actually qualified (post-midpoint, post-structure, post-ADX).
-        # This is the denominator for EV-per-eligible-opportunity. We count
-        # at most one eligible per bracket tick (the LONG leg) so the metric
-        # is not inflated by tick frequency.
-        if (
-            eval_result.get("armed")
-            and not eval_result.get("in_midpoint_zone")
-            and should_enter_bracket_leg("LONG", eval_result)
-        ):
-            # sr_episode_id was derived above (Section 4) so both the eligible
-            # counter and the outcome record use the same identifier.
-            record_tile2_eligible_long(episode_id=sr_episode_id)
+        # Count each direction once per S/R episode. The dual-leg policy keeps
+        # LONG-at-support and SHORT-at-resistance as independent opportunities.
+        if eval_result.get("armed") and not eval_result.get("in_midpoint_zone"):
+            for eligible_side in ("LONG", "SHORT"):
+                if should_enter_bracket_leg(eligible_side, eval_result):
+                    record_tile2_eligible_side(
+                        eligible_side,
+                        episode_id=sr_episode_id,
+                    )
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
             # Structural idle/suspend — cancel any resting STATIC shadows (CANCELLED).
@@ -14103,6 +14175,7 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                 "ADX_TRENDING", "VOLATILITY_SPIKE", "PRICE_OUTSIDE_ENVELOPE", "MICRO_OUTSIDE_SWING",
             ) or _br.startswith("SESSION_BLACKLISTED"):
                 _cancel_open_bracket_lab_shadows(lane, reason="CANCELLED")
+                _cancel_tile2_paper_resting_limit(reason=_br or "STRUCTURAL_CANCEL")
             logger.info(
                 f"[{lane}] bracket idle zone={eval_result.get('zone')} "
                 f"reason={eval_result.get('block_reason')} pivot_changed={pivot_changed} "
@@ -14134,22 +14207,6 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                     block_reason=f"LEG_NOT_ARMED_{side}",
                 )
                 continue
-            # SHORT is fully disabled by the frozen Tile 2 policy.
-            if side == "SHORT":
-                log_lane_opportunity_event(
-                    lane,
-                    "SPAWN_FILTERED",
-                    bracket_id,
-                    side,
-                    None,
-                    edge_score,
-                    block_reason="SHORT_DISABLED_POLICY",
-                )
-                logger.info(
-                    f"[{lane}] SHORT spawn refused — disabled by frozen Tile 2 policy "
-                    f"[PIPELINE ENFORCEMENT]"
-                )
-                continue
             limit = (
                 eval_result.get("long_limit")
                 if side == "LONG"
@@ -14165,7 +14222,7 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                 )
                 if spawn_result == "SPAWNED":
                     legs_spawned += 1
-                elif spawn_result == "REFUSED_EPISODE_HAS_OPEN_TRADE":
+                elif spawn_result == "REFUSED_DIRECTION_ACTIVE":
                     log_lane_opportunity_event(
                         lane,
                         "SPAWN_FILTERED",
@@ -14173,7 +14230,7 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
                         side,
                         None,
                         edge_score,
-                        block_reason="EPISODE_HAS_OPEN_TRADE",
+                        block_reason=f"{side}_DIRECTION_ACTIVE",
                     )
             elif exec_mode in (EXEC_MODE_LAB_SHADOW, EXEC_MODE_EXIT_ONLY):
                 # OFF, retired, or post-disarm EXIT_ONLY: LAB shadow + counterfactual.
@@ -20639,15 +20696,16 @@ def build_static_pathway_lane_specs() -> dict:
             if static_bracket:
                 filter_chips = [
                     "No AI",
-                    "LONG at exact micro-support",
+                    "LONG at support + SHORT at resistance",
                     "ADX present and <=40",
                     "ATR volatility present and <=80",
                     "Not LONDON 08:00-12:59 UTC",
                     "Levels inside swing envelope",
                     "Price inside swing envelope",
                     "Outside midpoint +/-15%",
-                    "Within 60% of S/R range from support",
-                    "One order per S/R episode",
+                    "Signal may arm from either edge zone",
+                    "One active slot per direction",
+                    "$20 margin per direction",
                     "30m unfilled TTL",
                     "STATIC max chases=0",
                     f"Ladder {lane_ladder_label}",
@@ -20664,16 +20722,17 @@ def build_static_pathway_lane_specs() -> dict:
                 "  - Complete micro-support/resistance and swing levels; micro levels must remain inside the swing envelope",
                 "  - Normalized ADX and ATR volatility must be present; ADX<=40 and volatility percentile<=80",
                 "  - Reject LONDON 08:00-12:59 UTC; price must remain inside the swing envelope",
-                "  - LONG only above support, outside midpoint +/-15%, and within 60% of the S/R range from support",
-                "  - Submit one resting limit at exact micro-support; limit must remain below market; one order per episode",
+                "  - An edge-zone signal arms both independent slots: LONG at support and SHORT at resistance",
+                "  - Keep at most one pending/open lifecycle per direction; the opposite direction remains available",
                 "  - No chase, reprice, slide, or marketable fallback; an unfilled limit expires after 30 minutes",
                 "Tile OFF: LAB shadow replay + counterfactual outcome (no paper limit)",
                 (
-                    "Tile ON: local paper resting limit at exact micro-support · Scenario C · platform relay eligible"
+                    "Tile ON: two local $20 paper slots (LONG support + SHORT resistance) · Scenario C"
                     if static_bracket else
                     "Tile ON: local paper limit at micro S/R · Scenario C"
                 ),
                 "Direct Bitfinex submission is blocked; live copy is allowed only through the separate platform relay",
+                "Single-account Bitfinex safety: only one direction may be copied until flat; exact two-sided live coverage requires separate subaccounts",
                 "Logs: lane_opportunity_capture + shadow_lane_outcome + lane_lab_pnl_ledger + tile2_counters.json",
                 (
                     "Outcomes: FILLED / TTL_EXPIRED (30m) / CANCELLED · ids srmv2s-* · cohort="
@@ -20683,7 +20742,8 @@ def build_static_pathway_lane_specs() -> dict:
                 ),
                 (
                     f"Live funnel: bracket evals {_tile2_live.get('bracket_evals', 0)}; "
-                    f"eligible {_tile2_live.get('eligible_long', 0)}; limits {_tile2_live.get('paper_limits', 0)}; "
+                    f"eligible L/S {_tile2_live.get('eligible_long', 0)}/{_tile2_live.get('eligible_short', 0)}; "
+                    f"limits {_tile2_live.get('paper_limits', 0)}; "
                     f"fills {_tile2_live.get('entry_fills', 0)}; closes {_tile2_live.get('filled_closes', 0)}; "
                     f"pending {_tile2_live.get('pending_orders', 0)}"
                     if static_bracket else "Historical bracket collector; data archived"
@@ -20696,7 +20756,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "midpoint_buffer_pct": 0.15,
                 "chase_mode": "STATIC" if static_bracket else "FULL_CHASE",
                 "max_chases": 0 if static_bracket else None,
-                "short_disabled_v12": bool(static_bracket and _STATIC_DISABLE_SHORT),
+                "short_disabled": bool(static_bracket and _STATIC_DISABLE_SHORT),
                 "session_blacklist_v12": sorted(_STATIC_SESS_BL) if (static_bracket and _STATIC_SESS_BL) else [],
                 # Section 2/8: explicit cohort identifier on the tile so the
                 # dashboard cannot silently conflate frozen Tile 2 with the
@@ -20717,7 +20777,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "ai_path": "None (deterministic evaluator)",
                 "ai_cadence": "No AI · bracket tick every 10–30s or SR pivot change",
                 "chase_detail": (
-                    "STATIC: never chase/reprice/slide · fill exactly at micro_support (LONG only)"
+                    "STATIC: never chase/reprice/slide · LONG fills at support; SHORT fills at resistance"
                     if static_bracket
                     else "Historical FULL_CHASE dual-leg collector (data archived)"
                 ),
@@ -20725,7 +20785,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "margin_usd": shared["margin_usd"],
                 "execution": execution,
                 "orders": (
-                    "OFF=LAB only · ON=local paper limit at micro-support · live copy is platform-relay gated"
+                    "OFF=LAB only · ON=one local paper slot per direction · live copy remains safety-gated"
                     if static_bracket else
                     "Phase 1 shadow only (toggle OFF default)"
                 ),
@@ -21005,7 +21065,7 @@ def build_static_pathway_lane_specs() -> dict:
                         "Never chase/reprice/slide (max_chases=0)",
                         "Outcomes: FILLED / TTL_EXPIRED / CANCELLED",
                         "Own trade IDs (srmv2s-long-* / srmv2s-short-*)",
-                        "Paper-only until at least 75 reconciled filled outcomes and positive holdout EV",
+                        "Operational showcase paper orders when ON; Bitfinex copy remains separately armed and safety-gated",
                     ]
                     if static_bracket
                     else [
@@ -24028,7 +24088,7 @@ DASHBOARD_JS = """(function () {
         if (t2 && t2.lane) {
           const t2Txt = [
             'bracket evals=' + (t2.bracket_evals || 0),
-            'eligible LONG=' + (t2.eligible_long || 0),
+            'eligible L/S=' + (t2.eligible_long || 0) + '/' + (t2.eligible_short || 0),
             'paper limits=' + (t2.paper_limits || 0),
             'filled closes=' + (t2.filled_closes || 0),
             'TTL exp=' + (t2.ttl_expiries || 0),

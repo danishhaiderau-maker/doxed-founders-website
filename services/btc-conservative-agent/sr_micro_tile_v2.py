@@ -2,29 +2,30 @@
 SR_MICRO_TILE_V2 — Deterministic micro S/R bracket tile (no AI).
 
 Legacy collector lane (RESEARCH_LANE_SR_MICRO_TILE_V2): historical FULL_CHASE
-dual-leg bracket. SHORT leg now disabled by default; only LONG@micro_support
-remains as a research data point. This module owns both the V2 (full-chase)
-and V2_STATIC (resting limit) tunings; the FROZEN policy for promotion-track
-collection is the V2_STATIC LONG-only lane under POLICY_ID below.
+dual-leg bracket. This module owns both the V2 (full-chase) and V2_STATIC
+(resting limit) tunings. The operational V2_STATIC policy arms one LONG at
+micro-support and one SHORT at micro-resistance, with one active slot per
+direction.
 
   V2 (legacy lane)   = FULL_CHASE baseline — historical data only.
-  V2_STATIC (frozen) = resting limit at exact micro S/R, never chase/reprice,
-                       LONG-only, ADX<=40, LONDON blacklisted, $20 paper margin.
+  V2_STATIC          = resting limits at exact micro S/R, never chase/reprice,
+                       dual-leg, ADX<=40, LONDON blacklisted, $20 per leg.
 
 Tile 2 normalized holdout policy:
   - No AI
-  - LONG at micro_support only (SHORT fully disabled from execution + dashboard)
+  - one LONG at micro_support + one SHORT at micro_resistance
   - London bucket blacklisted (08:00-12:59 UTC)
   - ADX must be present and <= 40 (fail-closed on missing ADX)
-  - STATIC resting limit at exact micro_support
+  - STATIC resting limits at exact micro_support and micro_resistance
   - No chase, reprice, or slide
   - Midpoint guard retained unchanged
-  - $20 paper margin
+  - $20 paper margin per leg
   - Entry TTL: 30 minutes (UNFILLED resting limit expiry only)
   - Thesis fast cut remains -12% (semantics fixed, threshold unchanged)
   - Scenario C 12->10 ladder PROVISIONAL (separate exit-profile cohort)
 
-The legacy "places LONG + SHORT" wording is OBSOLETE. Use POLICY_LABEL.
+The two legs are independent in the showcase paper book. Bitfinex's merged
+BTC-PERP account must still enforce opposing-direction safety.
 """
 from __future__ import annotations
 
@@ -35,10 +36,10 @@ from __future__ import annotations
 # the independent holdout cohort can never be silently confused with the
 # archived historical 346-row training sample.
 # ---------------------------------------------------------------------------
-POLICY_ID = "sr_micro_static_normalized_adx_vol_v1_20260718"
+POLICY_ID = "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720"
 POLICY_LABEL = (
-    "Tile 2: normalized ADX/ATR-volatility, LONG@micro-support only "
-    "(ADX<=40, no LONDON, paper)"
+    "Tile 2: normalized ADX/ATR-volatility, LONG@micro-support + "
+    "SHORT@micro-resistance (one active slot per side, ADX<=40, no LONDON, paper)"
 )
 # Exit-profile ID for the canonical Scenario C 12->10 ladder used by Tile 2.
 # A separate EXIT_PROFILE_*_PROVISIONAL tag tracks the 12->10 ladder cohort
@@ -81,11 +82,13 @@ VOLATILITY_PCT_THRESHOLD = 80
 # second-best in the dataset (+$0.47/close, 50% win), so capping at 35 was
 # killing profitable trades. Original cap 40 retained.
 #
-# Data: SHORT lost -$0.26/close, LONG made +$0.38/close -> SHORT leg disabled.
+# The prior v1 cohort disabled SHORT after its historical sample lost
+# -$0.26/close. v2 deliberately starts a separate dual-leg cohort so the old
+# and new policies cannot be silently mixed.
 # Data: LONDON session = -$0.54/close, ASIA = +$0.49/close -> blacklist LONDON.
 # Data: Real bleed is THESIS_FAST_CUT (-$165.60 / 69 stops = -$2.40 each), not ADX.
 STATIC_ADX_TRENDING_THRESHOLD = 40
-STATIC_DISABLE_SHORT_LEG = True
+STATIC_DISABLE_SHORT_LEG = False
 STATIC_SESSION_BLACKLIST = frozenset({"LONDON"})
 
 BRACKET_TICK_MIN_SEC = 10
@@ -296,15 +299,23 @@ def evaluate_bracket(
     long_too_far = long_dist > sr * MAX_CHASE_DIST_PCT * 2
     short_too_far = short_dist > sr * MAX_CHASE_DIST_PCT * 2
 
-    result["long_armed"] = bool(px > ms and not long_mid_block and not long_too_far)
+    long_qualifies = bool(px > ms and not long_mid_block and not long_too_far)
     short_qualifies = bool(px < mr and not short_mid_block and not short_too_far)
-    # v12 STATIC-only: SHORT leg historically loses (-$0.26/close vs LONG +$0.38).
-    # Disable it for STATIC lane; V2 full-chase baseline keeps dual-leg behavior.
-    if is_static and STATIC_DISABLE_SHORT_LEG:
-        result["short_armed"] = False
-        if short_qualifies:
-            result["short_leg_disabled_v12"] = True
+    if is_static:
+        # A qualified edge-zone observation arms both resting opportunities.
+        # Both prices remain non-marketable because px is strictly between the
+        # S/R levels. Engine-level occupancy then enforces one active slot per
+        # direction, without one side suppressing the other.
+        dual_arm_qualifies = bool(
+            ms < px < mr and (long_qualifies or short_qualifies)
+        )
+        result["long_armed"] = dual_arm_qualifies
+        result["short_armed"] = dual_arm_qualifies
+        result["dual_arm_trigger_side"] = (
+            "LONG" if long_qualifies else "SHORT" if short_qualifies else None
+        )
     else:
+        result["long_armed"] = long_qualifies
         result["short_armed"] = short_qualifies
     result["armed"] = bool(result["long_armed"] or result["short_armed"])
 
@@ -365,12 +376,13 @@ def _sf(val):
 # ---------------------------------------------------------------------------
 # Section 4 of Tile 2 static integrity repair.
 #
-# Episode ID + one-trade-per-episode guard.
+# Episode ID + per-direction lifecycle guard.
 #
 # The historical sample inflated fills because a new bracket tick every ~20s
 # could spawn a new shadow / paper limit on the same support level while the
 # previous trade on that thesis was still active. The frozen Tile 2 policy
-# requires at most ONE pending or open Tile 2 LONG per S/R episode.
+# requires at most one pending/open lifecycle per direction; LONG and SHORT
+# are independent slots and may coexist for the same S/R episode.
 #
 # Episode ID derivation:
 #   - micro_support (the level we're trying to buy)
@@ -380,8 +392,8 @@ def _sf(val):
 #     very different times of day even if the level is identical)
 #
 # The resulting string is short, stable, and human-auditable. It is stamped
-# on every outcome record (Section 8) and used as the dedup key for the
-# one-trade-per-episode guard.
+# on every outcome record (Section 8); combined with direction, it is the
+# eligible-opportunity dedup key.
 # ---------------------------------------------------------------------------
 
 # How much the support/resistance levels must move (in absolute price units)
@@ -397,7 +409,7 @@ def derive_sr_episode_id(
     session_bucket_start_ts: float = 0.0,
     pivot_band_usd: float = EPISODE_PIVOT_BAND_USD,
 ) -> str:
-    """Stable S/R episode ID for one-trade-per-episode dedup (Section 4).
+    """Stable S/R episode ID for per-direction lifecycle dedup (Section 4).
 
     Buckets the support level to the nearest `pivot_band_usd` so that
     micro-noise on the support level does not inflate the episode count.

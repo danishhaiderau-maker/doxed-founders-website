@@ -10,6 +10,7 @@ import bot
 from combo_pathway_config import (
     COMBO_LANE_SPECS,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    combo_lane_match_detail,
     is_independent_ai_lane,
     is_shared_ai_direction_lane,
 )
@@ -76,6 +77,18 @@ def run():
             "LONG",
             {"bull_score": 7, "bear_score": 4},
         ) == 3,
+    )
+    type_b_combo_detail = combo_lane_match_detail(
+        RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        {"direction": "SHORT", "long_score": 20, "short_score": 80},
+        "SHORT",
+        spread=6,
+        features={},
+    )
+    check(
+        "generic Type B matcher reads shared LONG/SHORT scores",
+        type_b_combo_detail.get("passes") is True
+        and type_b_combo_detail.get("directional_spread") == 6,
     )
     type_b_ok, type_b_reason = bot._apply_type_b_hunter_v1_entry_filter(
         {"direction": "LONG", "long_score": 65, "short_score": 35},
