@@ -10,7 +10,11 @@ import { getVaultDir } from './secrets-vault-path.mjs';
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const LOCAL_BOT = (process.env.SHOWCASE_BOT_LOCAL_URL || 'http://127.0.0.1:7002').replace(/\/$/, '');
+const LOCAL_BOT = (
+  process.env.SHOWCASE_OWNER_URL
+  || process.env.SHOWCASE_BOT_LOCAL_URL
+  || 'http://10.0.0.102:7002'
+).replace(/\/$/, '');
 const FALLBACK_BOT = resolveHomeBotPublicUrl(undefined, REPO);
 const INSTANCE_ID = process.env.LIVE_COPY_INSTANCE_ID || 'cmq6cfwv4001jli0dqx5r31ve';
 const OPEN_PART = new Set(['INTENT', 'PENDING_ENTRY', 'OPEN']);
