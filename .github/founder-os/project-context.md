@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (13 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Merge PR #36: fix Tile 2 and fresh-only relay
 
 ## Last Activity
 
