@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Include Tile 2 in live relay consent policy (#32)
 
 ## Last Activity
 
