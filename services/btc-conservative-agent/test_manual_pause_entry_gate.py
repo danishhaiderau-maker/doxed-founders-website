@@ -253,6 +253,14 @@ bot.load_persistent_config()
 check("manual pause restored", bot.state.get("manual_admin_pause") is True)
 check("restored process is execution-paused", bot.state.get("execution_paused") is True)
 check("restored reason is ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+bot.reset_transient_runtime_state()
+check("startup reset preserves manual pause flag", bot.state.get("manual_admin_pause") is True)
+check("startup reset preserves execution pause", bot.state.get("execution_paused") is True)
+check("startup reset preserves ADMIN_MANUAL reason", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check(
+    "startup reset preserves ADMIN_MANUAL priority",
+    bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"],
+)
 bot.get_config_file = original_get_config_file
 bot._resolve_config_file_for_load = original_resolve_config_file
 
