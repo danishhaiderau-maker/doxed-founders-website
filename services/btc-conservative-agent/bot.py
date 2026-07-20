@@ -26822,12 +26822,15 @@ def trend_info():
 def reset_session_risk_state():
     """Research: each process start forgets prior session PnL and loss-streak pauses."""
     with state_lock:
+        manual_admin_pause = bool(state.get("manual_admin_pause", False))
         state["daily_pnl_usd"] = 0.0
         state["consecutive_losses"] = 0
         state["loss_pause_until"] = 0.0
-        state["execution_paused"] = False
-        state["execution_reason"] = ""
-        state["_pause_priority"] = 0
+        # Session-risk state is transient, but the operator's manual pause is
+        # persistent and must remain authoritative through the full boot order.
+        state["execution_paused"] = manual_admin_pause
+        state["execution_reason"] = "ADMIN_MANUAL" if manual_admin_pause else ""
+        state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"] if manual_admin_pause else 0
         state["current_trading_day"] = datetime.now(timezone.utc).date()
     logger.info("[STARTUP] Session risk reset - daily PnL and loss streak cleared [PIPELINE ENFORCEMENT]")
 
