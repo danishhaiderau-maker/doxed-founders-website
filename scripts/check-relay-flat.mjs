@@ -9,8 +9,11 @@ import { PrismaClient } from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
-const envFile = path.join(getVaultDir(), '.env.neon');
-if (fs.existsSync(envFile)) {
+for (const envFile of [
+  path.join(getVaultDir(), '.env.neon'),
+  path.join(getVaultDir(), 'home-bot.env'),
+]) {
+  if (!fs.existsSync(envFile)) continue;
   for (const raw of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
@@ -41,6 +44,9 @@ async function fetchOwnerState() {
   for (const baseUrl of [...new Set(botUrls)]) {
     try {
       const bot = await fetch(`${baseUrl}/api/state`, {
+        headers: process.env.BOT_CONTROL_SECRET
+          ? { 'X-Bot-Admin-Token': process.env.BOT_CONTROL_SECRET }
+          : undefined,
         signal: AbortSignal.timeout(10_000),
       }).then((response) => {
         if (!response.ok) throw new Error(`showcase HTTP ${response.status}`);
@@ -59,6 +65,13 @@ async function fetchOwnerState() {
 
 async function main() {
   const { bot, baseUrl: botUrl } = await fetchOwnerState();
+  const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
+    (order) =>
+      order
+      && !['FILLED', 'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED'].includes(
+        String(order.status ?? '').toUpperCase(),
+      ),
+  );
 
   const agent = await prisma.tradingAgent.findUnique({
     where: { slug: 'conservative-btc' },
@@ -109,7 +122,7 @@ async function main() {
       url: botUrl,
       dashboardOwner: bot.dashboard_owner === true,
       positions: Array.isArray(bot.positions) ? bot.positions.length : null,
-      pendingOrders: Array.isArray(bot.orders) ? bot.orders.length : null,
+      pendingOrders: pendingOrders.length,
     },
     instances: rows,
   };
