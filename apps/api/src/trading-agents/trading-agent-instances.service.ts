@@ -428,6 +428,8 @@ export class TradingAgentInstancesService {
       relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
       relayMirrorLanes: [...CONSERVATIVE_BTC_LIVE_RELAY_LANES],
       realTradingConfirmedAt,
+      relayArmedAt: realTradingConfirmedAt,
+      relayEntryPolicy: 'NEXT_FRESH_ONLY',
     };
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
@@ -467,7 +469,8 @@ export class TradingAgentInstancesService {
       await this.notifications.notifyUser(userId, {
         type: NotificationType.TRADING_AGENT_UPDATE,
         title: `${agent.name} relay resumed`,
-        body: 'Live copy trading active again — mirroring admin showcase signals on your exchange.',
+        body:
+          'Live copy armed — it will copy only the next fresh showcase trade created after Start. Existing orders and positions are excluded.',
         link: `/agent-hub/${agent.slug}`,
       });
     }
@@ -481,11 +484,13 @@ export class TradingAgentInstancesService {
       relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
       mirrorLanes: [...CONSERVATIVE_BTC_LIVE_RELAY_LANES],
       confirmedAt: realTradingConfirmedAt,
+      relayArmedAt: realTradingConfirmedAt,
+      relayEntryPolicy: 'NEXT_FRESH_ONLY',
       message: paused
         ? relayAction?.cancelledOrders
           ? `Relay severed — ${relayAction.cancelledOrders} pending order(s) cancelled. No new showcase trades until you Start.`
           : 'Relay severed — no new showcase trades until you Start.'
-        : 'Relay resumed — copying admin showcase signals on your exchange again.',
+        : 'Relay armed — waiting for the next fresh showcase trade. Existing showcase orders and positions will not be caught up.',
     };
   }
 

@@ -72,6 +72,43 @@ const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 25
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
 
+/**
+ * Live relay arming boundary. `relayArmedAt` is written on every explicit
+ * Start; `realTradingConfirmedAt` is retained as a migration fallback.
+ */
+export function relayArmTimestampMs(dashboardState: unknown): number | null {
+  const state =
+    dashboardState && typeof dashboardState === 'object'
+      ? (dashboardState as Record<string, unknown>)
+      : {};
+  for (const value of [state.relayArmedAt, state.realTradingConfirmedAt]) {
+    if (typeof value !== 'string' || !value) continue;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+/**
+ * A live relay may copy only cycles born after its most recent explicit Start.
+ * Missing/invalid arm state fails closed; paper simulation bypasses this helper.
+ */
+export function isCycleFreshForRelayArm(
+  dashboardState: unknown,
+  createdAt: Date,
+): boolean {
+  const armedAtMs = relayArmTimestampMs(dashboardState);
+  return armedAtMs != null && createdAt.getTime() > armedAtMs;
+}
+
+/** Prevent two opposing limits from being submitted into one merged position in a tick. */
+export function mergedDirectionCompatible(
+  submittedDirection: 'LONG' | 'SHORT' | null,
+  candidateDirection: 'LONG' | 'SHORT',
+): boolean {
+  return submittedDirection == null || submittedDirection === candidateDirection;
+}
+
 type ExecutionPayload = {
   bitfinexOrderId?: number;
   stopOrderId?: number;
@@ -1032,7 +1069,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
       take: 20,
     });
-    const signedFastOrders = cycles
+    const entryCycles =
+      simActive || instance.exchangeProvider === 'paper'
+        ? cycles
+        : cycles.filter((cycle) =>
+            isCycleFreshForRelayArm(instance.dashboardState, cycle.createdAt),
+          );
+    const signedFastOrders = entryCycles
       .filter((cycle) => cycle.status === SignalCycleStatus.INTENT)
       .map((cycle) =>
         readFreshSignedShowcaseExactLimit(cycle.tradeId, cycle.intentEnvelope),
@@ -1388,10 +1431,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
     const canonicalEntryBook = canonicalSignedBook;
     const intentCycles = canonicalPendingIntentCycles(
-      cycles.filter((c) => c.status === SignalCycleStatus.INTENT),
+      entryCycles.filter((c) => c.status === SignalCycleStatus.INTENT),
       canonicalEntryBook,
     );
     let entriesThisTick = 0;
+    let entryDirectionThisTick: 'LONG' | 'SHORT' | null = null;
     for (const cycle of intentCycles) {
       if (cycle.expiresAt && cycle.expiresAt < new Date()) continue;
       if (
@@ -1427,6 +1471,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const intent = cycle.intentEnvelope as SignalIntentEnvelope;
       if (!intent?.direction) continue;
+      if (!mergedDirectionCompatible(entryDirectionThisTick, intent.direction)) {
+        this.logger.warn(
+          `[MERGED-POSITION-GATE] skipped opposing ${intent.direction} trade=${cycle.tradeId}; ` +
+            `${entryDirectionThisTick} was already submitted in this tick.`,
+        );
+        continue;
+      }
 
       const eligibility = await this.evaluateEntryEligibility(
         creds,
@@ -1478,6 +1529,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
       if (!placed) continue;
       entriesThisTick += 1;
+      entryDirectionThisTick = intent.direction;
     }
 
     if (entriesThisTick > 0) {
@@ -1527,7 +1579,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           agentId,
           instance,
           creds,
-          cycles,
+          entryCycles,
           lotSummary,
           managedOrderIds,
           marginCap,
@@ -5326,6 +5378,48 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         continue;
       }
 
+      // Resolve and freshness-check the source cycle before touching any
+      // existing participant/order. Start is a strict arming watermark:
+      // pre-existing showcase positions must never be caught up.
+      const liveCycles = await this.prisma.signalCycle.findMany({
+        where: {
+          agentId,
+          status: {
+            in: [
+              SignalCycleStatus.INTENT,
+              SignalCycleStatus.PENDING_ENTRY,
+              SignalCycleStatus.OPEN,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      let matchedCycle = liveCycles.find((c) => tradeIdsMatch(c.tradeId, tradeId)) ?? null;
+      if (!matchedCycle) {
+        matchedCycle = await this.prisma.signalCycle.findFirst({
+          where: { agentId, tradeId },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
+      if (!matchedCycle) {
+        this.logger.warn(
+          `[ACTION-MISS] ENTRY no Neon cycle for showcase OPEN trade=${tradeId} user=${instance.userId}`,
+        );
+        await this.recordActionMissEntry(agentId, instance.userId, null, tradeId, 'NO_CYCLE', {
+          showcase_entry: typeof pos.entry === 'number' ? pos.entry : null,
+          mark,
+        });
+        continue;
+      }
+      if (!isCycleFreshForRelayArm(instance.dashboardState, matchedCycle.createdAt)) {
+        this.logger.log(
+          `[NEXT-FRESH-ONLY] skipped pre-arm showcase position trade=${tradeId} ` +
+            `cycle_created=${matchedCycle.createdAt.toISOString()}`,
+        );
+        continue;
+      }
+
       const matching = openParticipants.filter(
         (p) => p.cycle?.tradeId && tradeIdsMatch(p.cycle.tradeId, tradeId),
       );
@@ -5359,54 +5453,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         continue;
       }
 
-      // Direct tradeId lookup — do not rely on a recent-50 scan (action miss risk).
-      const liveCycles = await this.prisma.signalCycle.findMany({
-        where: {
-          agentId,
-          status: {
-            in: [
-              SignalCycleStatus.INTENT,
-              SignalCycleStatus.PENDING_ENTRY,
-              SignalCycleStatus.OPEN,
-            ],
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 100,
-      });
-      let matchedCycle = liveCycles.find((c) => tradeIdsMatch(c.tradeId, tradeId)) ?? null;
-      if (!matchedCycle) {
-        // Fallback: exact tradeId match even if status drifted (rare desync).
-        matchedCycle = await this.prisma.signalCycle.findFirst({
-          where: { agentId, tradeId },
-          orderBy: { createdAt: 'desc' },
+      if (
+        matchedCycle.status !== SignalCycleStatus.INTENT &&
+        matchedCycle.status !== SignalCycleStatus.PENDING_ENTRY &&
+        matchedCycle.status !== SignalCycleStatus.OPEN
+      ) {
+        // A fresh post-arm cycle may have terminal status drift while the
+        // canonical showcase position remains OPEN; reopen only that cycle.
+        matchedCycle = await this.prisma.signalCycle.update({
+          where: { id: matchedCycle.id },
+          data: { status: SignalCycleStatus.OPEN, closedAt: null },
         });
-        if (
-          matchedCycle &&
-          matchedCycle.status !== SignalCycleStatus.INTENT &&
-          matchedCycle.status !== SignalCycleStatus.PENDING_ENTRY &&
-          matchedCycle.status !== SignalCycleStatus.OPEN
-        ) {
-          // Cycle terminal but showcase still OPEN — reopen cycle for catch-up.
-          matchedCycle = await this.prisma.signalCycle.update({
-            where: { id: matchedCycle.id },
-            data: { status: SignalCycleStatus.OPEN, closedAt: null },
-          });
-          this.logger.warn(
-            `[MIRROR-CATCHUP] reopened terminal cycle ${matchedCycle.id} trade=${tradeId} for action-match entry`,
-          );
-        }
-      }
-
-      if (!matchedCycle) {
         this.logger.warn(
-          `[ACTION-MISS] ENTRY no Neon cycle for showcase OPEN trade=${tradeId} user=${instance.userId}`,
+          `[MIRROR-CATCHUP] reopened terminal cycle ${matchedCycle.id} trade=${tradeId} for action-match entry`,
         );
-        await this.recordActionMissEntry(agentId, instance.userId, null, tradeId, 'NO_CYCLE', {
-          showcase_entry: showcaseEntry,
-          mark,
-        });
-        continue;
       }
 
       const intent = matchedCycle.intentEnvelope as SignalIntentEnvelope;

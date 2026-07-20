@@ -2138,6 +2138,12 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
         "lab_breakevens": 0,
         "lab_win_rate": 0.0,
         "lab_per_close_ev": 0.0,
+        "lab_long_closes": 0,
+        "lab_long_net_pnl": 0.0,
+        "lab_long_win_rate": 0.0,
+        "lab_short_closes": 0,
+        "lab_short_net_pnl": 0.0,
+        "lab_short_win_rate": 0.0,
         "counterfactual_closes": 0,
         "counterfactual_wins": 0,
         "counterfactual_losses": 0,
@@ -2215,6 +2221,34 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
     lab_breakevens = int((lab_pnl == 0).sum())
     lab_closes = len(lab_filled)
     lab_net = round(float(lab_pnl.sum()), 4) if lab_closes else 0.0
+    direction_col = next(
+        (
+            column
+            for column in ("direction", "final_direction", "dir")
+            if column in lab_filled.columns
+        ),
+        None,
+    )
+
+    def _side_metrics(side: str) -> tuple[int, float, float]:
+        if not direction_col or lab_filled.empty:
+            return 0, 0.0, 0.0
+        side_rows = lab_filled[
+            lab_filled[direction_col].astype(str).str.upper() == side
+        ]
+        if side_rows.empty:
+            return 0, 0.0, 0.0
+        side_pnl = pd.to_numeric(
+            side_rows.get("net_pnl_usd"),
+            errors="coerce",
+        ).fillna(0.0)
+        closes = len(side_rows)
+        net = round(float(side_pnl.sum()), 4)
+        win_rate = round(100.0 * float((side_pnl > 0).sum()) / closes, 1)
+        return closes, net, win_rate
+
+    lab_long_closes, lab_long_net, lab_long_wr = _side_metrics("LONG")
+    lab_short_closes, lab_short_net, lab_short_wr = _side_metrics("SHORT")
 
     cf_filled = work[
         is_counterfactual & filled
@@ -2232,6 +2266,12 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
         "lab_breakevens": lab_breakevens,
         "lab_win_rate": round(100.0 * lab_wins / lab_closes, 1) if lab_closes else 0.0,
         "lab_per_close_ev": round(lab_net / lab_closes, 4) if lab_closes else 0.0,
+        "lab_long_closes": lab_long_closes,
+        "lab_long_net_pnl": lab_long_net,
+        "lab_long_win_rate": lab_long_wr,
+        "lab_short_closes": lab_short_closes,
+        "lab_short_net_pnl": lab_short_net,
+        "lab_short_win_rate": lab_short_wr,
         "lab_pnl_source": "policy_filtered_shadow_lane_outcomes",
         "counterfactual_closes": len(cf_filled),
         "counterfactual_wins": int((cf_pnl > 0).sum()),

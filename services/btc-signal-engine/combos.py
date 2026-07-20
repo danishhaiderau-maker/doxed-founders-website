@@ -153,8 +153,8 @@ COMBO_LANE_SPECS = {
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: {
         "label": "S/R Micro Tile V2 Static -- resting limit (no chase)",
         "subtitle": (
-            "PROBATION - PAPER ONLY - LONG@micro_support; SHORT disabled; "
-            "never chase/reprice/slide"
+            "PROBATION - OPERATIONAL WHEN ON - one $20 LONG@support and "
+            "one $20 SHORT@resistance; never chase/reprice/slide"
         ),
         "combo_key": "SR_MICRO_TILE++STATIC_LIMIT_BRACKET_V2",
         "ai_min": 0,
@@ -174,8 +174,8 @@ COMBO_LANE_SPECS = {
         "bracket_tick_max_sec": 30,
         "extra_filters": {"adx_max": 40},
         "promotion_criteria": (
-            "PAPER ONLY until >=75 reconciled filled closes, positive holdout EV, "
-            "and no material degradation versus CONTINUOUS in the same window"
+            "Dual-leg paper cohort requires >=75 reconciled filled closes, positive "
+            "holdout EV, and no material degradation versus CONTINUOUS"
         ),
         "kill_criteria": (
             "ANY after >=50 reconciled filled closes: negative holdout EV or fill rate <25pct"
@@ -212,14 +212,14 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v12-shared-direction-tile2-normalized"
+RESEARCH_STACK_VERSION = "v13-shared-direction-tile2-dual-leg"
 RESEARCH_STACK_FEATURES = (
     "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
     "SR_MICRO_TILE_V2_STATIC "
     "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
     "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
-    "v12 toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 normalized policy "
-    "sr_micro_static_normalized_adx_vol_v1_20260718"
+    "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 dual-leg policy "
+    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -465,6 +465,32 @@ def _apply_extra_filters(lane: str, ai: dict, final_direction: str, spread: int,
     return True, ""
 
 
+def _normalized_directional_spread(ai: dict, final_direction: str) -> int:
+    """Return the legacy 0-10 spread from either shared or legacy scores.
+
+    The direction-only shared prompt emits LONG/SHORT scores on 0-100. The
+    older combo matcher only inspected bull/bear, so a Type B candidate could
+    pass its authoritative >=2 policy gate and then be contradicted here as
+    SPREAD_UNDER_MIN (0 < 2). Keep one normalization contract at this boundary.
+    """
+    ai = ai or {}
+    factors = ai.get("factors") if isinstance(ai.get("factors"), dict) else {}
+    long_score = int(ai.get("long_score") or factors.get("long_score") or 0)
+    short_score = int(ai.get("short_score") or factors.get("short_score") or 0)
+    direction = str(final_direction or "").upper()
+    if long_score > 0 or short_score > 0:
+        raw_gap = (
+            long_score - short_score
+            if direction == "LONG"
+            else short_score - long_score
+        )
+        sign = -1 if raw_gap < 0 else 1
+        return sign * (abs(raw_gap) // 10)
+    bull = int(ai.get("bull_score") or factors.get("bull_score") or 0)
+    bear = int(ai.get("bear_score") or factors.get("bear_score") or 0)
+    return bull - bear if direction == "LONG" else bear - bull
+
+
 def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = None,
                        features: dict = None, signal_age_sec: float = None) -> bool:
     """Match AI_SCAN-inherited combo tiles. Independent-AI lanes always return False here.
@@ -485,10 +511,7 @@ def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = 
     if prob < spec["ai_min"] or prob >= spec["ai_max"]:
         return False
     if spread is None:
-        bull = int(ai.get("bull_score") or 0)
-        bear = int(ai.get("bear_score") or 0)
-        direction = str(final_direction or "").upper()
-        spread = bull - bear if direction == "LONG" else bear - bull
+        spread = _normalized_directional_spread(ai, final_direction)
     spread = int(spread or 0)
     if not (spec["spread_min"] <= spread <= spec["spread_max"]):
         return False
@@ -524,19 +547,28 @@ def combo_lane_match_detail(lane: str, ai: dict, final_direction: str, spread: i
     if prob >= spec["ai_max"]:
         return {"passes": False, "block_reason": f"AI_OVER_MAX ({prob} >= {spec['ai_max']})"}
     if spread is None:
-        bull = int(ai.get("bull_score") or 0)
-        bear = int(ai.get("bear_score") or 0)
-        direction = str(final_direction or "").upper()
-        spread = bull - bear if direction == "LONG" else bear - bull
+        spread = _normalized_directional_spread(ai, final_direction)
     spread = int(spread or 0)
     if spread < spec["spread_min"]:
-        return {"passes": False, "block_reason": f"SPREAD_UNDER_MIN ({spread} < {spec['spread_min']})"}
+        return {
+            "passes": False,
+            "block_reason": f"SPREAD_UNDER_MIN ({spread} < {spec['spread_min']})",
+            "directional_spread": spread,
+        }
     if spread > spec["spread_max"]:
-        return {"passes": False, "block_reason": f"SPREAD_OVER_MAX ({spread} > {spec['spread_max']})"}
+        return {
+            "passes": False,
+            "block_reason": f"SPREAD_OVER_MAX ({spread} > {spec['spread_max']})",
+            "directional_spread": spread,
+        }
     passes, block_reason = _apply_extra_filters(
         lane_u, ai, final_direction, spread, features, signal_age_sec
     )
-    return {"passes": passes, "block_reason": block_reason}
+    return {
+        "passes": passes,
+        "block_reason": block_reason,
+        "directional_spread": spread,
+    }
 
 
 def is_shadow_only_lane(lane: str) -> bool:
