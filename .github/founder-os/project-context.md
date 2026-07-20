@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Merge PR #36: fix Tile 2 and fresh-only relay
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
