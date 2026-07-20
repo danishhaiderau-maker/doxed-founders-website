@@ -5,8 +5,10 @@ can create a new global order/position. Existing positions must keep receiving
 normal exit management so the bot can reach a natural flat boundary.
 """
 
+import json
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,6 +45,8 @@ def reset_state():
         for values in bot.lane_open_positions.values():
             values.clear()
     with bot.state_lock:
+        for key in bot._persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]:
+            bot.state.setdefault(key, None)
         bot.state["manual_admin_pause"] = False
         bot.state["execution_paused"] = False
         bot.state["execution_reason"] = ""
@@ -60,6 +64,7 @@ def reset_state():
 
 
 # Keep this unit test isolated from runtime CSV/config persistence.
+_original_save_persistent_config = bot.save_persistent_config
 bot.save_persistent_config = lambda: None
 bot._record_expired_order = lambda order, reason: expired.append(
     (order.get("trade_id"), reason)
@@ -220,6 +225,36 @@ bot.process_funding_accrual = original_funding
 bot.get_executable_mark_price = original_mark
 bot._apply_position_exits = original_exits
 check("existing position still managed", managed == [("pause-existing-position-1", 64_000.0)])
+
+
+print("\n[6] Manual pause survives a process restart")
+reset_state()
+config_dir = tempfile.mkdtemp(prefix="manual-pause-config-")
+config_path = os.path.join(config_dir, "config-7002.json")
+original_get_config_file = bot.get_config_file
+original_resolve_config_file = bot._resolve_config_file_for_load
+bot.get_config_file = lambda: config_path
+bot._resolve_config_file_for_load = lambda: config_path
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = True
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
+    bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
+_original_save_persistent_config()
+with open(config_path, "r", encoding="utf-8") as handle:
+    saved_config = json.load(handle)
+check("manual pause written to config", saved_config.get("manual_admin_pause") is True)
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = False
+    bot.state["execution_paused"] = False
+    bot.state["execution_reason"] = ""
+    bot.state["_pause_priority"] = 0
+bot.load_persistent_config()
+check("manual pause restored", bot.state.get("manual_admin_pause") is True)
+check("restored process is execution-paused", bot.state.get("execution_paused") is True)
+check("restored reason is ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+bot.get_config_file = original_get_config_file
+bot._resolve_config_file_for_load = original_resolve_config_file
 
 
 print("\n" + "=" * 72)
