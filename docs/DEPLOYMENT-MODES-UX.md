@@ -303,7 +303,7 @@ If the founder wants to *unpublish* (go back to Private after going Public), the
 
 | Mode | How the phone reaches the laptop |
 |--|--|
-| **Private** | Tailscale mesh. Phone opens `http://founder-laptop.tailnet.ts.net:7002/phone`. Direct WireGuard, no cloud in the path. Works from anywhere on earth. |
+| **Private** | Tailscale mesh. Phone opens `http://founder-laptop.tailnet.ts.net:7012/phone`. Direct WireGuard, no cloud in the path. Works from anywhere on earth. |
 | **Public** | Phone opens the public Vercel URL's `/phone` route. Auth via the cloud JWT. |
 | **Hybrid** | Tailscale now (same as Private). After publish, both routes work — phone can use either. |
 
