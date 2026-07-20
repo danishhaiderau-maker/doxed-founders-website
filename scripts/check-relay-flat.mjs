@@ -32,6 +32,10 @@ for (const envFile of [
 }
 
 const prisma = new PrismaClient();
+const adminToken =
+  process.env.BOT_ADMIN_TOKEN?.trim()
+  || process.env.BOT_CONTROL_SECRET?.trim()
+  || '';
 const botUrls = [
   process.env.SHOWCASE_OWNER_URL?.trim(),
   'http://10.0.0.102:7002',
@@ -44,8 +48,8 @@ async function fetchOwnerState() {
   for (const baseUrl of [...new Set(botUrls)]) {
     try {
       const bot = await fetch(`${baseUrl}/api/state`, {
-        headers: process.env.BOT_CONTROL_SECRET
-          ? { 'X-Bot-Admin-Token': process.env.BOT_CONTROL_SECRET }
+        headers: adminToken
+          ? { 'X-Bot-Admin-Token': adminToken }
           : undefined,
         signal: AbortSignal.timeout(10_000),
       }).then((response) => {

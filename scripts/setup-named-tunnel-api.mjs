@@ -29,6 +29,13 @@ const ZONE_ID = (process.env.CLOUDFLARE_ZONE_ID || 'e5b41e1d9809507e75ecd826d8d6
 const TUNNEL_NAME = (process.env.CLOUDFLARE_TUNNEL_NAME || 'doxed-btc-bot').trim();
 const HOSTNAME = (process.env.CLOUDFLARE_TUNNEL_HOSTNAME || 'bot.doxxedcrypto.digital').trim();
 const BOT_PORT = Number(process.env.HOME_BOT_PORT || readShowcaseBotPort() || 7002);
+const BOT_ORIGIN_URL = (
+  process.env.HOME_BOT_ORIGIN_URL || `http://127.0.0.1:${BOT_PORT}`
+).replace(/\/$/, '');
+
+if (!/^https?:\/\/[^/\s]+(?::\d+)?$/i.test(BOT_ORIGIN_URL)) {
+  throw new Error(`Invalid HOME_BOT_ORIGIN_URL: ${BOT_ORIGIN_URL}`);
+}
 
 function readShowcaseBotPort() {
   try {
@@ -99,13 +106,13 @@ async function findOrCreateTunnel() {
 }
 
 async function configureIngress(tunnelId) {
-  console.log(`Configuring ingress ${HOSTNAME} -> http://127.0.0.1:${BOT_PORT}`);
+  console.log(`Configuring ingress ${HOSTNAME} -> ${BOT_ORIGIN_URL}`);
   await cf(`/accounts/${ACCOUNT_ID}/cfd_tunnel/${tunnelId}/configurations`, {
     method: 'PUT',
     body: {
       config: {
         ingress: [
-          { hostname: HOSTNAME, service: `http://127.0.0.1:${BOT_PORT}` },
+          { hostname: HOSTNAME, service: BOT_ORIGIN_URL },
           { service: 'http_status:404' },
         ],
       },
