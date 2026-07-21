@@ -106,6 +106,9 @@ try {
   $env:RESEARCH_DASHBOARD_PORT = "$Port"
   $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$Port/"
   $env:BTC_AGENT_DATA_DIR = $agentDir
+  # A long-lived bridge/console can carry the legacy research/ path. Keep the
+  # dashboard and analyzer on the same canonical report root after recovery.
+  $env:BTC_AGENT_REPORT_DIR = $agentDir
 
   # --- Crash report (mirrors start-home-analyzer.ps1 crash logging) ------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {

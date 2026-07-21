@@ -79,6 +79,10 @@ $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
 $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
 $env:BTC_AGENT_DATA_DIR = $agentDir
+# Pin report discovery as well as raw-data discovery. The bridge and desktop
+# launcher are long-lived and can otherwise pass an obsolete report directory
+# into a freshly restarted dashboard.
+$env:BTC_AGENT_REPORT_DIR = $agentDir
 
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
