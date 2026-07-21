@@ -317,10 +317,26 @@ function Close-WindowsByTitlePrefix {
 
 function Close-StaleOrchestratorConsoles {
   param([int[]]$ExcludeProcessIds = @())
-  return @(Close-WindowsByTitlePrefix @(
-    "Doxed Start Everything",
-    "Doxed Stop Everything"
-  ) -ExcludeProcessIds $ExcludeProcessIds)
+  # Start/Stop orchestration consoles deliberately spawn the long-lived bot,
+  # analyzer, bridge and tunnel processes.  Closing the whole process tree here
+  # therefore kills healthy services several minutes after a successful start.
+  # Close only the stale orchestrator shell; its detached component children
+  # must remain alive and continue to be supervised independently.
+  $closed = @()
+  $exclude = @{}
+  foreach ($id in $ExcludeProcessIds) {
+    if ($id -gt 0) { $exclude[$id] = $true }
+  }
+  Get-Process cmd, powershell, pwsh -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($exclude.ContainsKey($_.Id)) { return }
+    $title = $_.MainWindowTitle
+    if (-not $title) { return }
+    if ($title -like "Doxed Start Everything*" -or $title -like "Doxed Stop Everything*") {
+      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      $closed += "title:$title"
+    }
+  }
+  return @($closed)
 }
 
 function Invoke-HomeTerminalHygiene {
@@ -350,8 +366,6 @@ function Invoke-HomeTerminalHygiene {
   }
 
   foreach ($t in (Close-WindowsByTitlePrefix @(
-    "Doxed Start Everything",
-    "Doxed Stop Everything",
     "Doxed Wire to Site",
     "Doxed Auto-Wire"
   ))) {

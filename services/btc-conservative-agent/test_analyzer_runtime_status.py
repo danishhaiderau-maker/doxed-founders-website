@@ -32,6 +32,12 @@ restart_analyzer = (
 local_analyzer = (
     Path(__file__).parents[2] / "scripts" / "start-local-collection-analyzer.ps1"
 ).read_text(encoding="utf-8")
+stack_common = (
+    Path(__file__).parents[2] / "scripts" / "home-stack-common.ps1"
+).read_text(encoding="utf-8")
+analyzer_engine = (
+    Path(__file__).parent / "analyzer_research_engine_v62.py"
+).read_text(encoding="utf-8")
 
 checks = {
     "status exposes live analyzer identity": '"runtime_analyzer_sync_id"' in source,
@@ -75,6 +81,15 @@ checks = {
     ),
     "empty chase isolation is collecting": (
         '"verdict": rep.get("verdict") if has_evidence else "COLLECTING"' in source
+    ),
+    "executive summary retains expected-vs-actual calibration": (
+        'eva = ai_cal.get("expected_vs_actual") or {}' in analyzer_engine
+        and '"expected_vs_actual": eva' in analyzer_engine
+    ),
+    "terminal hygiene preserves launched services": (
+        "function Close-StaleOrchestratorConsoles" in stack_common
+        and "Stop-Process -Id $_.Id -Force" in stack_common
+        and '"Doxed Wire to Site",\n    "Doxed Auto-Wire"' in stack_common
     ),
     "MFE cohort cannot be confused with the Type B tile": (
         "MFE Type-B outcome cohort" in source

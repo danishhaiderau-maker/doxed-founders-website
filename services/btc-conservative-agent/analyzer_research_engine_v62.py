@@ -16781,6 +16781,10 @@ def build_executive_summary_payload(
         or conf_band.get("confidence_bands")
         or []
     )
+    # Keep the raw calibration evidence available in the executive payload.
+    # The verdict helper intentionally replaced the old inline comparison, but
+    # the payload still publishes expected_vs_actual for downstream dashboards.
+    eva = ai_cal.get("expected_vs_actual") or {}
     ai_verdict = _ai_calibration_verdict(ai_cal)
 
     pathway_specs = _load_json_report(PATHWAY_LANE_SPECS_FILE) or {}
