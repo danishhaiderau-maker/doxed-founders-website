@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-fix(research): protect bot startup from supervisor races
+fix(research): keep canonical analyzer healthy
 
 ## Last Activity
 
