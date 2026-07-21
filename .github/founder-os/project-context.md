@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-fix(research): keep canonical analyzer healthy
+fix(research): isolate analyzer dashboard lifecycle
 
 ## Last Activity
 
