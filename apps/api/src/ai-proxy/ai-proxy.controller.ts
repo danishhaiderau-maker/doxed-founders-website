@@ -25,9 +25,8 @@ import {
   ChatCompletionRequestDto,
   FimCompletionRequestDto,
 } from './dto/ai-proxy.dto';
-import { AI_PROXY_DDOLLAR_COST } from '@dcf/utils';
 import type { Response, Request } from 'express';
-import { Readable } from 'node:stream';
+import { pipeAiProxySseResponse } from './ai-proxy-response-stream';
 
 type AuthedRequest = Request & {
   user?: { id?: string; sub?: string; userId?: string };
@@ -105,8 +104,8 @@ export class AiProxyController {
   async chatCompletions(
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Body() body: ChatCompletionRequestDto,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<unknown> {
+    @Res() res: Response,
+  ): Promise<void> {
     const auth: ProxyAuth = {
       userId: req.founderNode.userId,
       nodeId: req.founderNode.nodeId,
@@ -132,8 +131,8 @@ export class AiProxyController {
   async chatPhoneCompletions(
     @Req() req: AuthedRequest,
     @Body() body: ChatCompletionRequestDto,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<unknown> {
+    @Res() res: Response,
+  ): Promise<void> {
     const userId = req.user?.id ?? req.user?.sub ?? req.user?.userId;
     if (!userId) {
       throw new HttpException(
@@ -165,8 +164,8 @@ export class AiProxyController {
   async fimCompletions(
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Body() body: FimCompletionRequestDto,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<unknown> {
+    @Res() res: Response,
+  ): Promise<void> {
     const auth: ProxyAuth = {
       userId: req.founderNode.userId,
       nodeId: req.founderNode.nodeId,
@@ -200,7 +199,7 @@ export class AiProxyController {
     res: Response,
     auth: ProxyAuth,
     body: ChatCompletionRequestDto,
-  ): Promise<unknown> {
+  ): Promise<void> {
     const route = await this.runtimeService.decideRoute(auth, body);
     const result = await this.runtimeService.invoke(auth, body, route);
 
@@ -221,36 +220,20 @@ export class AiProxyController {
 
     if (typeof result.body === 'string') {
       res.setHeader('Content-Type', 'application/json');
-      return JSON.parse(result.body);
+      res.status(result.status).json(JSON.parse(result.body));
+      return;
     }
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    await pipeAiProxySseResponse({
+      res,
+      upstreamBody: result.body,
+      includeMetadata: Boolean(body.founder_os_metadata),
+      requestId: route.requestId,
+      status: result.status,
+      tier: result.tier,
+      provider: result.provider,
+      model: result.model,
+    });
 
-    // Optional non-standard metadata pre-line for the Founder IDE extension
-    // and the Phone Remote UI. Emitted before the upstream SSE chunks so the
-    // client can show the route + per-request DDollar cost. Standard OpenAI
-    // clients ignore this line (they only parse `choices[0].delta`). See
-    // docs/FOUNDER-IDE-FORK-PLAN.md §5.3 / §8.2.
-    if (body.founder_os_metadata) {
-      const ddollarCost = AI_PROXY_DDOLLAR_COST[result.tier] ?? 0;
-      const metaLine = `data: ${JSON.stringify({
-        founderOs: {
-          requestId: route.requestId,
-          tier: result.tier,
-          provider: result.provider,
-          model: result.model,
-          ddollarCost,
-        },
-      })}\n\n`;
-      res.write(metaLine);
-    }
-
-    const nodeStream = Readable.fromWeb(result.body as unknown as Parameters<typeof Readable.fromWeb>[0]);
-    nodeStream.pipe(res);
-    // passthrough mode means Nest won't try to send a body after we pipe;
-    // returning null keeps the response flowing.
-    return null;
   }
 }
