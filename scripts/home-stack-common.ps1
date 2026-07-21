@@ -939,6 +939,24 @@ function Start-CloudflaredNamedHidden {
       }
     } catch { }
   }
+
+  # Some launchers (including the desktop automation host) inherit both
+  # `Path` and `PATH`. Windows treats those names as the same variable, but
+  # Start-Process builds a case-insensitive environment dictionary and throws
+  # before cloudflared can start when both spellings are present. Canonicalize
+  # the process-local copy before spawning the detached connector.
+  $pathKeys = @(
+    [Environment]::GetEnvironmentVariables().Keys |
+      Where-Object { "$_" -ieq "Path" }
+  )
+  if ($pathKeys.Count -gt 1) {
+    $pathValue = [Environment]::GetEnvironmentVariable("Path", "Process")
+    foreach ($pathKey in $pathKeys) {
+      [Environment]::SetEnvironmentVariable([string]$pathKey, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
+  }
+
   Start-Process -FilePath "cloudflared" -ArgumentList $args -WindowStyle Hidden `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WorkingDirectory $repoRoot
 }

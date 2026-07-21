@@ -309,15 +309,18 @@ export class BotBridgeService {
     if (this.execCached && now - this.execFetchAt < this.execCacheMs) {
       return this.execCached;
     }
-    const data = await this.fetchShowcaseState(['/api/relay-state'], {
-      // The signed webhook is the primary money-path transport. Canonical
-      // polling is its fail-closed backstop. Use one lightweight request with
-      // enough cross-region budget; never fall through to the full state dump.
-      relayTimeout: this.executionRelayTimeoutMs,
-      stateTimeout: this.executionRelayTimeoutMs,
-      userAgent: 'doxxedcrypto-relay/1.0',
-      lane: 'execution',
-    });
+    const data = await this.fetchShowcaseState(
+      ['/api/relay-execution-state', '/api/relay-state'],
+      {
+        // The signed webhook is the primary money-path transport. Canonical
+        // polling is its fail-closed backstop. Prefer the bounded execution
+        // snapshot; retain /api/relay-state only as a rolling-deploy fallback.
+        relayTimeout: this.executionRelayTimeoutMs,
+        stateTimeout: this.executionRelayTimeoutMs,
+        userAgent: 'doxxedcrypto-relay/1.0',
+        lane: 'execution',
+      },
+    );
     if (data?.dashboard_owner === true && data.bot_instance_id?.trim()) {
       this.execCached = data;
       this.execFetchAt = Date.now();

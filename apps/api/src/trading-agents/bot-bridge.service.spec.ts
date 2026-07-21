@@ -132,7 +132,7 @@ test('backs off after HTTP 429 instead of falling through into another request',
   }
 });
 
-test('execution polling fails closed without falling through to the heavy state endpoint', async () => {
+test('execution polling fails closed after bounded execution and rolling-deploy relay fallbacks', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
   globalThis.fetch = async (input) => {
@@ -143,7 +143,10 @@ test('execution polling fails closed without falling through to the heavy state 
   try {
     const bridge = makeBridge();
     assert.equal(await bridge.fetchStateForExecution(true), null);
-    assert.deepEqual(urls, ['https://showcase.test/api/relay-state']);
+    assert.deepEqual(urls, [
+      'https://showcase.test/api/relay-execution-state',
+      'https://showcase.test/api/relay-state',
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

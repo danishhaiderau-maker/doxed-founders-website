@@ -72,6 +72,13 @@ async function main() {
     } mirrorDiff=${dashboard.mirrorDiff?.counts?.total ?? 0} ` +
       `dynamicStops=${Boolean(dashboard.exchangeDynamicStopsEnabled)}`,
   );
+  const executor = dashboard.relayExecutor ?? dashboard.executorHealth ?? null;
+  console.log(
+    `executor: role=${executor?.serviceRole ?? 'n/a'} status=${executor?.status ?? 'n/a'} ` +
+      `healthy=${Boolean(executor?.healthy)} durationMs=${executor?.lastTickDurationMs ?? 'n/a'} ` +
+      `revision=${executor?.sourceRevision ? String(executor.sourceRevision).slice(0, 12) : 'n/a'} ` +
+      `observed=${executor?.observedAt ?? 'n/a'}`,
+  );
 
   const rows = await prisma.signalCycleParticipant.findMany({
     where: {
@@ -193,6 +200,13 @@ async function main() {
           `cancelled=${payload.cancelledOrderId ?? payload.cancelled_order_id ?? ''} ` +
           `limit=${payload.limit_price ?? payload.limitPrice ?? ''} qty=${payload.qty ?? ''}`,
       );
+      if (event.eventType === 'ORDER_PLACED' && payload.platformToExchangeAckMs != null) {
+        console.log(
+          `      latency source->platform=${payload.sourceToPlatformMs ?? 'n/a'}ms ` +
+            `platform->exchangeAck=${payload.platformToExchangeAckMs}ms ` +
+            `source->exchangeAck=${payload.sourceToExchangeAckMs ?? 'n/a'}ms`,
+        );
+      }
     }
   }
   await prisma.$disconnect();

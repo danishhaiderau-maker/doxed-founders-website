@@ -4,6 +4,7 @@ import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
+  flatSignedFastPathPreflight,
   readPersistedRelayExecutorHealth,
   isBenignShowcaseEntryWait,
   isRecoveredShowcaseOutageError,
@@ -14,6 +15,7 @@ import {
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   relayArmTimestampMs,
+  reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
 
@@ -147,6 +149,36 @@ test('merged-position tick gate allows same direction and rejects an opposing pa
   assert.equal(mergedDirectionCompatible('SHORT', 'LONG'), false);
 });
 
+test('paused relay suppresses expected source-only mirror gaps but keeps exposure risks', () => {
+  const diffs = [
+    { type: 'SHOWCASE_ORDER_NOT_MIRRORED', tradeId: 'cont-new' },
+    { type: 'SHOWCASE_POSITION_NOT_MIRRORED', tradeId: 'cont-filled' },
+    { type: 'COPY_ORDER_NO_SHOWCASE', tradeId: 'cont-orphan-order' },
+    { type: 'COPY_POSITION_NO_SHOWCASE', tradeId: 'cont-orphan-position' },
+  ];
+  assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, false), diffs.slice(2));
+  assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true), diffs);
+});
+
+test('signed flat fast path requires an armed and exchange-proven flat hire', () => {
+  const safe = {
+    status: 'ACTIVE' as const,
+    simActive: false,
+    hireExpired: false,
+    relayArmed: true,
+    virtualOpenOrPending: 0,
+    exchangeActiveOrders: 0,
+    exchangePositionQty: 0,
+  };
+  assert.equal(flatSignedFastPathPreflight(safe), true);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, status: 'PAUSED' }), false);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, relayArmed: false }), false);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, virtualOpenOrPending: 1 }), false);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, exchangeActiveOrders: 1 }), false);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, exchangePositionQty: 0.000001 }), false);
+  assert.equal(flatSignedFastPathPreflight({ ...safe, exchangePositionQty: 0.01 }), false);
+});
+
 test('showcase fill cap permits improvement but never a worse copied entry', () => {
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 64_010, 64_000), 64_000);
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 63_900, 64_000), 63_900);
@@ -269,6 +301,7 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
         context: {
           signed_showcase_event: true,
           showcase_event: 'ORDER_PLACED',
+          showcase_event_at: '2026-07-20T01:02:01.750Z',
           platform_received_at: '2026-07-20T01:02:02.250Z',
         },
       },
@@ -279,6 +312,7 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
       direction: 'SHORT',
       limitPrice: 64_555.25,
       receivedAtMs: Date.parse('2026-07-20T01:02:02.250Z'),
+      sourceEventAtMs: Date.parse('2026-07-20T01:02:01.750Z'),
     },
   );
 });

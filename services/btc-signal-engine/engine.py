@@ -6766,6 +6766,60 @@ _relay_push_state = {
     "last_latency_ms": None,
     "last_platform_received_at": None,
 }
+_relay_push_history = deque(maxlen=20)
+_relay_push_history_lock = threading.Lock()
+_relay_http_session = requests.Session()
+_relay_http_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=4,
+    pool_maxsize=8,
+    max_retries=0,
+    pool_block=False,
+)
+_relay_http_session.mount("https://", _relay_http_adapter)
+_relay_http_session.mount("http://", _relay_http_adapter)
+
+
+def _relay_delivery_lag_ms(source_ts, platform_received_at):
+    try:
+        source_dt = datetime.fromisoformat(str(source_ts).replace("Z", "+00:00"))
+        platform_dt = datetime.fromisoformat(
+            str(platform_received_at).replace("Z", "+00:00")
+        )
+        return round((platform_dt - source_dt).total_seconds() * 1000, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_relay_delivery(
+    event,
+    trade_id,
+    source_ts,
+    *,
+    ok,
+    http_latency_ms,
+    platform_received_at=None,
+    error=None,
+):
+    row = {
+        "event": str(event),
+        "trade_id": str(trade_id) if trade_id else None,
+        "source_event_at": source_ts,
+        "platform_received_at": platform_received_at,
+        "source_to_platform_ms": _relay_delivery_lag_ms(
+            source_ts, platform_received_at
+        ),
+        "http_round_trip_ms": round(float(http_latency_ms), 1),
+        "delivery_completed_at": utc_iso(),
+        "ok": bool(ok),
+        "error": str(error)[:240] if error else None,
+    }
+    with _relay_push_history_lock:
+        _relay_push_history.append(row)
+
+
+def _relay_delivery_history_snapshot(limit=10):
+    with _relay_push_history_lock:
+        return list(_relay_push_history)[-max(1, int(limit)):]
 
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
 
@@ -6936,7 +6990,9 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                     hashlib.sha256,
                 ).hexdigest()
                 headers["X-Showcase-Signature"] = f"sha256={signature}"
-            response = requests.post(url, data=body, headers=headers, timeout=2.5)
+            response = _relay_http_session.post(
+                url, data=body, headers=headers, timeout=2.5
+            )
             response.raise_for_status()
             response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
@@ -6952,6 +7008,14 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 if isinstance(response_payload, dict)
                 else None
             )
+            _record_relay_delivery(
+                event,
+                trade_id,
+                payload.get("ts"),
+                ok=True,
+                http_latency_ms=_relay_push_state["last_latency_ms"],
+                platform_received_at=_relay_push_state["last_platform_received_at"],
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
@@ -6959,6 +7023,14 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             _relay_push_state["last_error"] = str(exc)[:240]
             _relay_push_state["last_latency_ms"] = round(
                 (time.perf_counter() - started) * 1000, 1
+            )
+            _record_relay_delivery(
+                event,
+                trade_id,
+                payload.get("ts"),
+                ok=False,
+                http_latency_ms=_relay_push_state["last_latency_ms"],
+                error=exc,
             )
             logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
 
@@ -7077,7 +7149,9 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
             if legacy_secret:
                 headers["X-Bot-Control-Secret"] = legacy_secret
-            response = requests.post(url, data=body, headers=headers, timeout=2.5)
+            response = _relay_http_session.post(
+                url, data=body, headers=headers, timeout=2.5
+            )
             response.raise_for_status()
             response_payload = response.json() if response.content else {}
             _relay_push_state["seq"] += 1
@@ -7093,6 +7167,14 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
                 if isinstance(response_payload, dict)
                 else None
             )
+            _record_relay_delivery(
+                f"INTENT_{event}",
+                trade_id,
+                payload.get("ts"),
+                ok=True,
+                http_latency_ms=_relay_push_state["last_latency_ms"],
+                platform_received_at=_relay_push_state["last_platform_received_at"],
+            )
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = f"INTENT_{event}"
@@ -7100,6 +7182,14 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             _relay_push_state["last_error"] = str(exc)[:240]
             _relay_push_state["last_latency_ms"] = round(
                 (time.perf_counter() - started) * 1000, 1
+            )
+            _record_relay_delivery(
+                f"INTENT_{event}",
+                trade_id,
+                payload.get("ts"),
+                ok=False,
+                http_latency_ms=_relay_push_state["last_latency_ms"],
+                error=exc,
             )
             logger.warning(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
 
@@ -20380,7 +20470,7 @@ _AI_DRAIN_POST_PATHS = {
 # leave open (still rate-limited) so the public dashboard / health checks work.
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
-    "/api/build", "/api/relay-state", "/api/analyzer/summary",
+    "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
     "/api/analyzer/genome", "/api/download_debug_config", "/api/export_csv",
     "/api/export_debug", "/debug_state", "/static/dashboard.js",
 }
@@ -25841,8 +25931,8 @@ _RELAY_STATE_CACHE_LOCK = threading.Lock()
 _RELAY_STATE_REFRESH_LOCK = threading.Lock()
 _RELAY_STATE_CACHE_TTL_SEC = max(0.25, float(os.getenv("RELAY_STATE_CACHE_TTL_SEC", "1.0")))
 _RELAY_STATE_REFRESH_INTERVAL_SEC = max(
-    0.25,
-    float(os.getenv("RELAY_STATE_REFRESH_INTERVAL_SEC", "0.8")),
+    2.0,
+    float(os.getenv("RELAY_STATE_REFRESH_INTERVAL_SEC", "5.0")),
 )
 _RELAY_STATE_MAX_STALE_SEC = max(
     _RELAY_STATE_CACHE_TTL_SEC,
@@ -25899,7 +25989,7 @@ def _last_fill_ts() -> float:
         return 0.0
 
 
-def build_paper_order_book() -> dict:
+def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
     """Per-leg paper order book — the accounting ledger that Bitfinex live cannot
     give us once it merges multiple small orders into one netted position.
 
@@ -25918,7 +26008,7 @@ def build_paper_order_book() -> dict:
     with trade_lock:
         open_copy = copy.deepcopy(open_positions)
         pending_copy = copy.deepcopy(pending_orders)
-        closed_recent = list(reversed(trades))[:50]
+        closed_recent = list(reversed(trades))[:max(0, int(closed_limit))]
     for p in open_copy:
         if not isinstance(p, dict):
             continue
@@ -26077,6 +26167,7 @@ def build_state_integrity() -> dict:
         "last_latency_ms": _relay_push_state["last_latency_ms"],
         "last_platform_received_at": _relay_push_state["last_platform_received_at"],
         "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
+        "recent_deliveries": _relay_delivery_history_snapshot(10),
     }
     bx_live = None
     try:
@@ -26114,6 +26205,193 @@ def build_state_integrity() -> dict:
         "analyzer_url": research_dashboard_public_url(),
         "last_fresh_reset_ts": last_fresh_reset_ts,
     }
+
+
+def _relay_trade_row_lite(row: dict) -> dict:
+    """Execution/closure fields only; never ship the bulky research context."""
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "ts": row.get("ts") or row.get("close_ts") or row.get("closed_ts"),
+        "trade_id": row.get("trade_id"),
+        "dir": row.get("dir") or row.get("final_direction"),
+        "final_direction": row.get("final_direction") or row.get("dir"),
+        "entry": row.get("entry"),
+        "exit": row.get("exit"),
+        "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
+        "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
+        "created_ts_ts": row.get("created_ts_ts"),
+        "pnl": row.get("pnl"),
+        "net_pnl_usd": row.get("net_pnl_usd") if row.get("net_pnl_usd") is not None else row.get("net"),
+        "gross_pnl_usd": row.get("gross_pnl_usd"),
+        "trading_fees_usd": row.get("trading_fees_usd"),
+        "funding_fees_usd": row.get("funding_fees_usd"),
+        "dur_min": row.get("dur_min") if row.get("dur_min") is not None else row.get("duration_min"),
+        "ai_band": row.get("ai_band"),
+        "exit_reason": row.get("exit_reason"),
+        "research_lane": row.get("research_lane"),
+    }
+
+
+def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
+    """Exact resting-limit state needed for copy, chase, and abandon checks."""
+    if not isinstance(row, dict):
+        return {}
+    out = {
+        "trade_id": row.get("trade_id"),
+        "status": row.get("status"),
+        "side": row.get("side") or row.get("signal_dir") or row.get("dir"),
+        "signal_dir": row.get("signal_dir") or row.get("dir") or row.get("side"),
+        "dir": row.get("dir") or row.get("signal_dir") or row.get("side"),
+        "qty": row.get("qty"),
+        "limit_price": row.get("limit_price"),
+        "original_limit_price": row.get("original_limit_price") or row.get("planned_limit_price"),
+        "signal_price": row.get("signal_price"),
+        "created_ts": row.get("created_ts"),
+        "age_min": (now_ts - row["created_ts"]) / 60 if row.get("created_ts") else 0,
+        "limit_chase_count": row.get("limit_chase_count") or 0,
+        "chase_3plus_virtual_chase_count": row.get("chase_3plus_virtual_chase_count"),
+        "research_lane": row.get("research_lane"),
+        "research_model": row.get("research_model"),
+        "ttl_sec": row.get("ttl_sec"),
+        "expires_ts": row.get("expires_ts"),
+    }
+    if tick_px and float(tick_px) > 0:
+        out["limit_touched"] = _pending_limit_touched(row, float(tick_px))
+    return out
+
+
+def _relay_position_row_lite(row: dict, tick_px) -> dict:
+    """Open position truth required by flatness, mirror, and exit checks."""
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "trade_id": row.get("trade_id"),
+        "status": row.get("status"),
+        "dir": row.get("dir") or row.get("side"),
+        "side": row.get("side") or row.get("dir"),
+        "entry": row.get("entry"),
+        "qty": row.get("qty"),
+        "sl": row.get("sl"),
+        "tp": row.get("tp"),
+        "leverage": row.get("leverage"),
+        "funding_fees": row.get("funding_fees"),
+        "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
+        "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
+        "current_price": tick_px,
+        "research_lane": row.get("research_lane"),
+        "research_model": row.get("research_model"),
+    }
+
+
+def _build_relay_execution_state_snapshot() -> dict:
+    """Small canonical money-path snapshot built directly from in-memory truth.
+
+    The public relay/dashboard snapshot contains research history and presentation
+    ledgers and can take seconds to rebuild on the home PC.  Live execution must
+    never queue behind that work.  This endpoint deliberately contains only the
+    exact limit/order/position/closure fields consumed by the isolated executor.
+    """
+    now_ts = time.time()
+    session_start = _showcase_trade_session_start()
+    with state_lock:
+        debug_state = state.get("debug_state") or {}
+        tick_px = state.get("price")
+        price_ts = float(state.get("price_ts") or 0)
+        snapshot = {
+            "price": tick_px,
+            "bot_version": EXECUTION_FIX_VERSION,
+            **_dashboard_owner_metadata(),
+            "bot_start_time": bot_start_time,
+            "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
+            "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
+            "execution_paused": bool(state.get("execution_paused", False)),
+            "execution_reason": state.get("execution_reason"),
+            "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
+            "strategy_mode": state.get("strategy_mode"),
+            "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
+            "last_ai": copy.deepcopy(state.get("last_ai")),
+            "pullback_threshold": state.get("pullback_threshold"),
+            "last_edge": state.get("last_edge"),
+            "leverage": state.get("leverage"),
+            "regime": state.get("regime"),
+            "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
+            "live_armed": bool(state.get("live_armed", False)),
+            "server_ts": utc_iso(),
+        }
+    with trade_lock:
+        pending_copy = copy.deepcopy(pending_orders)
+        positions_copy = copy.deepcopy(open_positions)
+        recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
+        recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
+        active_list, _ = _collect_dashboard_active_signals(
+            pending_copy,
+            positions_copy,
+            trades_map,
+            default_strategy=snapshot.get("strategy_mode", "-"),
+            default_regime=snapshot.get("regime", "-"),
+        )
+        trades_map_lite = _relay_trades_map_lite()
+    snapshot["orders"] = [
+        _relay_order_row_lite(row, now_ts, tick_px)
+        for row in pending_copy
+        if isinstance(row, dict)
+    ]
+    snapshot["positions"] = [
+        _relay_position_row_lite(row, tick_px)
+        for row in positions_copy
+        if isinstance(row, dict)
+    ]
+    snapshot["trades"] = [
+        _relay_trade_row_lite(row)
+        for row in recent_trades
+        if isinstance(row, dict)
+    ]
+    snapshot["expired_orders"] = [
+        _expired_order_api_row(row)
+        for row in recent_expired
+        if isinstance(row, dict)
+    ]
+    snapshot["signal_info"] = {
+        "active": bool(active_list),
+        "count": len(active_list),
+        "signals": active_list,
+    }
+    snapshot["trades_map"] = trades_map_lite
+    snapshot["snapshot_age_sec"] = 0
+    snapshot["relay_cache"] = {"mode": "EXECUTION_DIRECT", "age_sec": 0}
+    snapshot["state_integrity"] = {
+        "snapshot_ts": snapshot["server_ts"],
+        "snapshot_age_sec": 0,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "execution_paused": snapshot["execution_paused"],
+        "live_armed": snapshot["live_armed"],
+        "rest_healthy": bool(price_ts and now_ts - price_ts < 30),
+        "price_age_sec": (now_ts - price_ts) if price_ts else None,
+        "orders_synced": True,
+        "positions_synced": True,
+        "trades_synced": True,
+    }
+    return snapshot
+
+
+@app.route('/api/relay-execution-state')
+def api_relay_execution_state():
+    """Canonical execution-only state; bounded and independent of dashboard history."""
+    started = time.perf_counter()
+    try:
+        payload = _build_relay_execution_state_snapshot()
+        payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["X-Relay-State-Cache"] = "EXECUTION_DIRECT"
+        return response
+    except Exception as exc:
+        logger.error(f"/api/relay-execution-state error: {exc}")
+        return jsonify({
+            "api_state_error": str(exc)[:500],
+            "bot_version": EXECUTION_FIX_VERSION,
+        }), 503
 
 
 @app.route('/api/relay-state')
@@ -26170,7 +26448,11 @@ def api_relay_state(force_rebuild: bool = False):
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
-            trades_for_relay = _snapshot_trades_for_api(session_start)
+            trades_for_relay = [
+                _relay_trade_row_lite(copy.deepcopy(row))
+                for row in _snapshot_trades_for_api(session_start)
+                if isinstance(row, dict)
+            ]
             active_list, _exposure = _collect_dashboard_active_signals(
                 pending_orders_copy,
                 positions_copy,
@@ -26186,7 +26468,7 @@ def api_relay_state(force_rebuild: bool = False):
                 if tick_px and tick_px > 0:
                     oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
                 orders.append(oc)
-            expired_orders_copy = copy.deepcopy(expired_orders)
+            expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
         snapshot["trades"] = trades_for_relay
@@ -26202,7 +26484,7 @@ def api_relay_state(force_rebuild: bool = False):
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         _enrich_orders_for_relay(snapshot)
         snapshot["trades_map"] = _relay_trades_map_lite()
-        snapshot["paper_book"] = build_paper_order_book()
+        snapshot["paper_book"] = build_paper_order_book(_DASHBOARD_TRADES_MAX)
         snapshot["server_ts"] = utc_iso()
         bridge = get_genome_bridge()
         if bridge:

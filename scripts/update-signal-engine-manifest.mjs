@@ -6,8 +6,14 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bot = readFileSync(join(root, 'services/btc-conservative-agent/bot.py'), 'utf8');
 const combo = readFileSync(join(root, 'services/btc-conservative-agent/combo_pathway_config.py'), 'utf8');
-const hash = createHash('sha256').update(bot, 'utf8').digest('hex').slice(0, 12);
-const version = combo.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/)?.[1] ?? 'unknown';
+// Match verify-signal-parity.mjs exactly on Windows: Git may expose CRLF in the
+// worktree while CI checks normalized LF bytes.
+const normalizedBot = bot.replace(/\r\n/g, '\n');
+const hash = createHash('sha256').update(normalizedBot, 'utf8').digest('hex').slice(0, 12);
+const version =
+  combo.match(/RESEARCH_STACK_VERSION\s*=\s*"([^"]+)"/)?.[1]
+  ?? combo.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/)?.[1]
+  ?? 'unknown';
 const manifest = {
   engine_version: version,
   combo_version: new Date().toISOString().slice(0, 10),

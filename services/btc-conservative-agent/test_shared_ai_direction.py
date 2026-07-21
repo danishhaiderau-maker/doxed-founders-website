@@ -243,6 +243,20 @@ def run():
         "api_relay_state" not in inspect.getsource(bot._api_state_cache_refresher_loop)
         and "_build_api_state_snapshot" not in inspect.getsource(bot._relay_state_cache_refresher_loop),
     )
+    execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
+    check(
+        "execution relay snapshot excludes presentation ledgers",
+        "build_paper_order_book" not in execution_source
+        and "build_state_integrity" not in execution_source,
+    )
+    with bot.app.test_client() as client:
+        execution_response = client.get("/api/relay-execution-state")
+        check("execution relay endpoint returns canonical JSON", execution_response.status_code == 200)
+        check(
+            "execution relay endpoint proves direct bounded source",
+            execution_response.headers.get("X-Relay-State-Cache") == "EXECUTION_DIRECT"
+            and execution_response.get_json().get("relay_cache", {}).get("mode") == "EXECUTION_DIRECT",
+        )
     check(
         "cache reads never wait on the expensive relay rebuild lock",
         "with _RELAY_STATE_CACHE_LOCK" in inspect.getsource(bot._cached_relay_state_response)

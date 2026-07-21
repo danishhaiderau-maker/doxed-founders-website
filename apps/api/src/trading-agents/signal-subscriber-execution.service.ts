@@ -231,6 +231,11 @@ type ExecutionPayload = {
   fillPrice?: number;
   leverage?: number;
   stopLossMarginPct?: number;
+  sourceEventAt?: string;
+  platformReceivedAt?: string;
+  sourceToPlatformMs?: number;
+  platformToExchangeAckMs?: number;
+  sourceToExchangeAckMs?: number;
   /**
    * Bitfinex client order id (`cid`) — int32. Set on every limit submit
    * (placeEntry + applyLimitChase replacement orders) as a deterministic
@@ -325,6 +330,7 @@ type SignedShowcaseExactLimit = {
   direction: 'LONG' | 'SHORT';
   limitPrice: number;
   receivedAtMs: number;
+  sourceEventAtMs?: number;
 };
 
 type SignedShowcaseEnvelope = SignalIntentEnvelope & {
@@ -335,6 +341,7 @@ type SignedShowcaseEnvelope = SignalIntentEnvelope & {
   context: SignalIntentEnvelope['context'] & {
     signed_showcase_event?: boolean;
     showcase_event?: string;
+    showcase_event_at?: string;
     platform_received_at?: string;
   };
 };
@@ -346,6 +353,7 @@ export function readFreshSignedShowcaseExactLimit(
 ): SignedShowcaseExactLimit | null {
   const intent = envelopeJson as SignedShowcaseEnvelope | null;
   const receivedAtMs = Date.parse(String(intent?.context?.platform_received_at ?? ''));
+  const sourceEventAtMs = Date.parse(String(intent?.context?.showcase_event_at ?? ''));
   const limitPrice = Number(intent?.entry?.exact_limit_price ?? 0);
   const direction = intent?.direction;
   const event = String(intent?.context?.showcase_event ?? '');
@@ -362,7 +370,13 @@ export function readFreshSignedShowcaseExactLimit(
   ) {
     return null;
   }
-  return { tradeId, direction, limitPrice, receivedAtMs };
+  return {
+    tradeId,
+    direction,
+    limitPrice,
+    receivedAtMs,
+    ...(Number.isFinite(sourceEventAtMs) ? { sourceEventAtMs } : {}),
+  };
 }
 
 export function readSignedShowcaseClose(envelopeJson: unknown): {
@@ -567,6 +581,44 @@ function mirrorConvergenceEnabled(): boolean {
  */
 function mirrorDiffEnabled(): boolean {
   return process.env.MIRROR_DIFF_ENABLED !== '0';
+}
+
+/**
+ * Source-only gaps are expected while a relay is explicitly stopped.  Keep
+ * copy-side exposure mismatches visible in exit-only mode, but do not present
+ * a fresh showcase order/position as a relay failure when entries are
+ * intentionally disabled.
+ */
+export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
+  divergences: T[],
+  entryEnabled: boolean,
+): T[] {
+  if (entryEnabled) return divergences;
+  return divergences.filter(
+    (d) =>
+      d.type !== 'SHOWCASE_ORDER_NOT_MIRRORED' &&
+      d.type !== 'SHOWCASE_POSITION_NOT_MIRRORED',
+  );
+}
+
+export function flatSignedFastPathPreflight(input: {
+  status: TradingAgentInstanceStatus;
+  simActive: boolean;
+  hireExpired: boolean;
+  relayArmed: boolean;
+  virtualOpenOrPending: number;
+  exchangeActiveOrders: number;
+  exchangePositionQty: number;
+}): boolean {
+  return (
+    input.status === TradingAgentInstanceStatus.ACTIVE &&
+    !input.simActive &&
+    !input.hireExpired &&
+    input.relayArmed &&
+    input.virtualOpenOrPending === 0 &&
+    input.exchangeActiveOrders === 0 &&
+    Math.abs(input.exchangePositionQty) === 0
+  );
 }
 
 /**
@@ -1265,6 +1317,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
         try {
           this.activeTrading = this.bitfinex;
+          this.currentStage = 'FAST_SIGNED_FLAT_PREFLIGHT';
+          await this.tryFreshSignedFlatEntry(agent.id, instance).catch((err) => {
+            this.logger.warn(
+              `[SIGNED-FLAT-FAST] preflight failed closed ${instance.userId}: ${
+                err instanceof Error ? err.message : err
+              }`,
+            );
+          });
           this.currentStage = 'PROCESS_LIVE_INSTANCE';
           await this.processInstance(agent.id, instance, false);
         } catch (err) {
@@ -1336,6 +1396,123 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           /* notification is best-effort */
         });
     }
+  }
+
+  /**
+   * Low-latency entry path for the only state that can be proven safe cheaply:
+   * an ACTIVE, armed hire with no exchange position/order and no virtual lot,
+   * consuming a fresh HMAC-verified exact showcase limit. Any ambiguity returns
+   * false and the unchanged full reconciliation path runs immediately after.
+   */
+  private async tryFreshSignedFlatEntry(
+    agentId: string,
+    instance: TradingAgentInstance,
+  ): Promise<boolean> {
+    const armedAt = relayArmTimestampMs(instance.dashboardState);
+    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
+    if (isCopyRelaySimActive(instance.dashboardState)) return false;
+    if (instance.expiresAt && instance.expiresAt.getTime() <= Date.now()) return false;
+    if (armedAt == null) return false;
+    if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return false;
+
+    const cycles = await this.prisma.signalCycle.findMany({
+      where: {
+        agentId,
+        status: SignalCycleStatus.INTENT,
+        createdAt: { gt: new Date(armedAt) },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+    const cycle = cycles.find((candidate) => {
+      if (!isMirrorableLaneTradeId(candidate.tradeId)) return false;
+      if (isPaperLaneTradeId(candidate.tradeId)) return false;
+      if (candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now()) return false;
+      return readFreshSignedShowcaseExactLimit(
+        candidate.tradeId,
+        candidate.intentEnvelope,
+      ) != null;
+    });
+    if (!cycle) return false;
+
+    const creds = await this.exchanges.getUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!creds) return false;
+
+    const [activeOrders, exchangePosition, virtualLots, freshInstance] = await Promise.all([
+      this.activeTrading.listActiveOrders(creds),
+      this.activeTrading.getOpenPositionDetail(creds),
+      this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId: instance.userId,
+          status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+          cycle: { agentId },
+        },
+        select: { id: true },
+      }),
+      this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
+    ]);
+    if (!freshInstance) return false;
+    if (!isCycleFreshForRelayArm(freshInstance.dashboardState, cycle.createdAt)) {
+      return false;
+    }
+
+    if (
+      !flatSignedFastPathPreflight({
+        status: freshInstance.status,
+        simActive: isCopyRelaySimActive(freshInstance.dashboardState),
+        hireExpired: Boolean(
+          freshInstance.expiresAt && freshInstance.expiresAt.getTime() <= Date.now(),
+        ),
+        relayArmed: relayArmTimestampMs(freshInstance.dashboardState) != null,
+        virtualOpenOrPending: virtualLots.length,
+        exchangeActiveOrders: activeOrders.length,
+        exchangePositionQty: exchangePosition?.amount ?? 0,
+      })
+    ) {
+      return false;
+    }
+
+    // The live exchange book above is authoritative; clear only a stale cached
+    // orphan warning before the normal eligibility gate reads dashboardState.
+    await this.clearOrphanOrderIds(freshInstance.id).catch(() => {});
+    const cleanInstance = {
+      ...freshInstance,
+      dashboardState: applyDashboardPatch(
+        (freshInstance.dashboardState ?? {}) as Record<string, unknown>,
+        { orphanOrderIds: [] },
+      ) as TradingAgentInstance['dashboardState'],
+    };
+    const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
+    const eligibility = await this.evaluateEntryEligibility(
+      creds,
+      { open: 0, pending: 0, direction: null },
+      new Set<number>(),
+      marginCap,
+      1,
+      (cycle.intentEnvelope as SignalIntentEnvelope).direction,
+      cleanInstance,
+    );
+    if (!eligibility.canEnter) return false;
+
+    const placed = await this.placeEntry(
+      agentId,
+      cleanInstance,
+      cycle.id,
+      cycle.intentEnvelope,
+      creds,
+      marginCap,
+      cycle.tradeId,
+      'bitfinex',
+    );
+    if (placed) {
+      this.logger.log(
+        `[SIGNED-FLAT-FAST] placed trade=${cycle.tradeId} user=${instance.userId}`,
+      );
+    }
+    return placed;
   }
 
   private async processInstance(
@@ -1777,6 +1954,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       canonicalSignedBook,
       openParticipantAfter,
       execMetaById,
+      !exitOnly,
     ).catch((err) => {
       this.logger.warn(
         `[MIRROR-DIFF] snapshot failed ${instance.userId}: ${err instanceof Error ? err.message : err}`,
@@ -2176,6 +2354,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       cycle?: { tradeId: string | null } | null;
     }>,
     metaById: Map<string, ExecutionPayload>,
+    entryEnabled: boolean,
   ) {
     if (!mirrorDiffEnabled() || !botState) return;
     const now = Date.now();
@@ -2330,6 +2509,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
 
+    const reportableDivergences = reportableMirrorDiffsForRelayMode(
+      divergences,
+      entryEnabled,
+    );
+
     // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instance.id },
@@ -2350,9 +2534,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     };
     const rolling = {
       ticks: (prev.rolling?.ticks ?? 0) + 1,
-      divergentTicks: (prev.rolling?.divergentTicks ?? 0) + (divergences.length > 0 ? 1 : 0),
+      divergentTicks:
+        (prev.rolling?.divergentTicks ?? 0) +
+        (reportableDivergences.length > 0 ? 1 : 0),
       lastDivergenceAt:
-        divergences.length > 0
+        reportableDivergences.length > 0
           ? new Date(now).toISOString()
           : (prev.rolling?.lastDivergenceAt ?? null),
       showcaseFillsSeen: prev.rolling?.showcaseFillsSeen ?? 0,
@@ -2378,7 +2564,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // closed contribute a lag sample (first-divergence → convergence).
     for (const [pid, since] of [...this.mirrorDivergenceSince.entries()]) {
       const stillPending = copyPending.some((p) => p.id === pid);
-      const stillDiverged = divergences.some(
+      const stillDiverged = reportableDivergences.some(
         (d) => d.type === 'PRICE_DELTA' && d.participantId === pid,
       );
       if (stillDiverged) continue;
@@ -2395,7 +2581,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const byType: Record<string, number> = {};
-    for (const d of divergences) byType[d.type] = (byType[d.type] ?? 0) + 1;
+    for (const d of reportableDivergences) {
+      byType[d.type] = (byType[d.type] ?? 0) + 1;
+    }
 
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
@@ -2408,8 +2596,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             showcaseOpenPositions: showcasePositions.length,
             copyPendingOrders: copyPending.length,
             copyOpenLots: copyOpen.length,
-            divergences: divergences.slice(0, 20),
-            counts: { total: divergences.length, byType },
+            entryPolicy: entryEnabled ? 'ACTIVE' : 'EXIT_ONLY',
+            suppressedExpectedSourceOnly:
+              divergences.length - reportableDivergences.length,
+            divergences: reportableDivergences.slice(0, 20),
+            counts: { total: reportableDivergences.length, byType },
             rolling,
           },
         }) as unknown as Prisma.InputJsonValue,
@@ -2417,7 +2608,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
 
     // Throttled MIRROR_DIFF event per diverged participant (max 1/60s each).
-    for (const d of divergences) {
+    for (const d of reportableDivergences) {
       if (!d.participantId || !d.cycleId) continue;
       const lastAt = this.mirrorDiffEventAt.get(d.participantId) ?? 0;
       if (now - lastAt < MIRROR_DIFF_EVENT_THROTTLE_MS) continue;
@@ -3439,8 +3630,58 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const leverage = resolveSubscriberLeverage(intent);
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
-    const prePosition = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
+    try {
+      prePosition = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch (err) {
+      if (claimParticipantId) {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {});
+        claimParticipantId = null;
+      }
+      this.logger.warn(
+        `Hire entry blocked ${instance.userId} cycle=${cycleId}: exchange position preflight failed — ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return false;
+    }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
+
+    // Re-read the account-holder gate immediately before the exchange write.
+    // A Stop click racing an already-running executor tick must win; the
+    // atomic participant claim is released so a later explicit Start can
+    // consume only a newly-created post-arm cycle.
+    if (venue === 'bitfinex') {
+      const [latestGate, latestCycle] = await Promise.all([
+        this.prisma.tradingAgentInstance.findUnique({
+          where: { id: instance.id },
+          select: { status: true, dashboardState: true },
+        }),
+        this.prisma.signalCycle.findUnique({
+          where: { id: cycleId },
+          select: { createdAt: true },
+        }),
+      ]);
+      if (
+        !latestGate ||
+        !latestCycle ||
+        latestGate.status !== TradingAgentInstanceStatus.ACTIVE ||
+        !isCycleFreshForRelayArm(latestGate.dashboardState, latestCycle.createdAt)
+      ) {
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(() => {});
+          claimParticipantId = null;
+        }
+        this.logger.warn(
+          `Hire entry stopped before submit ${instance.userId} cycle=${cycleId}: relay no longer armed`,
+        );
+        return false;
+      }
+    }
 
     // Phase 2: deterministic Bitfinex `cid` so a future reconcile-adopt pass
     // can match this order even if bitfinexOrderId was not persisted in the
@@ -3457,6 +3698,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         leverage,
       ...(clientOrderId != null ? { clientOrderId } : {}),
     });
+    const exchangeAckAtMs = Date.now();
 
     const payload: ExecutionPayload = {
       bitfinexOrderId: orderId,
@@ -3469,7 +3711,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       margin_usd: marginUsd,
       source: 'hire',
         lastChaseAtMs: 0,
-        limitChaseCount: 0,
+      limitChaseCount: 0,
+      ...(signedExactLimit
+        ? {
+            platformReceivedAt: new Date(signedExactLimit.receivedAtMs).toISOString(),
+            platformToExchangeAckMs: Math.max(
+              0,
+              exchangeAckAtMs - signedExactLimit.receivedAtMs,
+            ),
+            ...(signedExactLimit.sourceEventAtMs != null
+              ? {
+                  sourceEventAt: new Date(
+                    signedExactLimit.sourceEventAtMs,
+                  ).toISOString(),
+                  sourceToPlatformMs: Math.max(
+                    0,
+                    signedExactLimit.receivedAtMs - signedExactLimit.sourceEventAtMs,
+                  ),
+                  sourceToExchangeAckMs: Math.max(
+                    0,
+                    exchangeAckAtMs - signedExactLimit.sourceEventAtMs,
+                  ),
+                }
+              : {}),
+          }
+        : {}),
       ...(clientOrderId != null ? { clientOrderId } : {}),
     };
 

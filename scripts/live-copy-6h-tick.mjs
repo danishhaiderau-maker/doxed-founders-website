@@ -198,7 +198,8 @@ try {
       open: [...copyOpen],
       pending: copyPending,
       reconcile: dash.copyRelayReconcile ?? null,
-      executorHealth: dash.executorHealth ?? dash.relayExecutorHealth ?? null,
+      executorHealth:
+        dash.relayExecutor ?? dash.executorHealth ?? dash.relayExecutorHealth ?? null,
       signedWebhook: dash.signedWebhook ?? dash.webhookSequence ?? null,
     },
     bitfinex: book
