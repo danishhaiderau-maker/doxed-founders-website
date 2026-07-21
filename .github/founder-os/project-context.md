@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Remove minute-scale relay capacity fetch
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
