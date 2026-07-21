@@ -37,7 +37,11 @@ import {
 } from './instance-view.mapper';
 import { emptyCopyRelaySimState, readCopyRelaySimState, isCopyRelaySimActive } from '@dcf/utils';
 import { CopyRelaySimService } from './copy-relay-sim.service';
-import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
+import {
+  SignalSubscriberExecutionService,
+  readPersistedRelayExecutorHealth,
+  type RelayExecutorHealthSnapshot,
+} from './signal-subscriber-execution.service';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 @Injectable()
@@ -203,7 +207,7 @@ export class TradingAgentInstancesService {
           },
         });
 
-    const executionLive = process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
+    const executionLive = readPersistedRelayExecutorHealth(instance.dashboardState).healthy;
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
     const relaySimActive = isCopyRelaySimActive(dashState);
@@ -374,8 +378,13 @@ export class TradingAgentInstancesService {
       );
     }
 
+    let executorHealthAtArm: RelayExecutorHealthSnapshot | null = null;
     if (!paused && instance.exchangeProvider !== 'paper') {
-      const executorHealth = this.execution.getHealthSnapshot();
+      const freshInstance = await this.prisma.tradingAgentInstance.findUnique({
+        where: { id: instance.id },
+        select: { dashboardState: true },
+      });
+      const executorHealth = readPersistedRelayExecutorHealth(freshInstance?.dashboardState);
       if (!executorHealth.healthy) {
         throw new ServiceUnavailableException(
           `Bitfinex relay executor is ${executorHealth.status.toLowerCase()} ` +
@@ -383,6 +392,7 @@ export class TradingAgentInstancesService {
             'Live copy remains OFF; wait for a healthy executor heartbeat or restart the platform service.',
         );
       }
+      executorHealthAtArm = executorHealth;
     }
 
     // F8 (2026-07-07 follow-up) — Validate Start pre-conditions BEFORE flipping
@@ -447,7 +457,8 @@ export class TradingAgentInstancesService {
       realTradingConfirmedAt,
       relayArmedAt: realTradingConfirmedAt,
       relayEntryPolicy: 'NEXT_FRESH_ONLY',
-      relayExecutorAtArm: this.execution.getHealthSnapshot(),
+      relayExecutorAtArm:
+        executorHealthAtArm ?? readPersistedRelayExecutorHealth(instance.dashboardState),
     };
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },

@@ -100,6 +100,10 @@ export class SignalCyclesService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
+      this.logger.log('Signal-cycle ingress disabled in isolated executor worker');
+      return;
+    }
     void this.bootstrapLastTradeId();
     this.logger.log(`Signal cycle bridge polling every ${SIGNAL_POLL_MS / 1000}s`);
     setInterval(() => void this.pollBotForIntents(), SIGNAL_POLL_MS);

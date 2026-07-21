@@ -87,6 +87,11 @@ export type RelayExecutorHealthSnapshot = {
   runningForMs: number | null;
   timeoutMs: number;
   timeoutCount: number;
+  serviceRole?: 'executor-worker' | 'public-api';
+  ownerId?: string | null;
+  observedAt?: string;
+  sourceRevision?: string | null;
+  executionEnabled?: boolean;
 };
 
 /** Pure liveness calculation shared by runtime health and focused tests. */
@@ -194,6 +199,18 @@ export function mergedDirectionCompatible(
   return submittedDirection == null || submittedDirection === candidateDirection;
 }
 
+/** A copied entry may improve on the showcase fill, but never pay worse. */
+export function capRelayLimitAtShowcaseFill(
+  direction: 'LONG' | 'SHORT',
+  currentLimit: number,
+  showcaseFill: number,
+): number {
+  if (!(currentLimit > 0) || !(showcaseFill > 0)) return currentLimit;
+  return direction === 'LONG'
+    ? Math.min(currentLimit, showcaseFill)
+    : Math.max(currentLimit, showcaseFill);
+}
+
 type ExecutionPayload = {
   bitfinexOrderId?: number;
   stopOrderId?: number;
@@ -259,7 +276,7 @@ export function isBenignShowcaseEntryWait(message: string | null | undefined): b
   return (
     message === 'Showcase trade is not present in the current canonical book.' ||
     message === 'Waiting for the showcase to publish its exact resting limit.' ||
-    message === 'Showcase filled before copy entry; waiting for the catch-up reconciler.' ||
+    message === 'Showcase filled before copy entry; market catch-up is prohibited.' ||
     message ===
       'Showcase bot has not placed a limit yet (virtual defer / chase bucket) — relay waiting.' ||
     message === 'Waiting for showcase limit.'
@@ -413,7 +430,63 @@ type PositionRuntime = {
 };
 
 function executionEnabled(): boolean {
-  return process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
+  // The public API must never own the money path. Both flags are required so
+  // missing/copied environment configuration fails closed.
+  return (
+    process.env.SUBSCRIBER_EXECUTION_ENABLED === 'true' &&
+    process.env.RELAY_EXECUTOR_WORKER === 'true'
+  );
+}
+
+/** Validate the heartbeat persisted by the isolated executor worker. */
+export function readPersistedRelayExecutorHealth(
+  dashboardState: unknown,
+  nowMs = Date.now(),
+  maxAgeMs = DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS,
+): RelayExecutorHealthSnapshot {
+  const dash =
+    dashboardState && typeof dashboardState === 'object' && !Array.isArray(dashboardState)
+      ? (dashboardState as Record<string, unknown>)
+      : {};
+  const raw =
+    dash.relayExecutor && typeof dash.relayExecutor === 'object' && !Array.isArray(dash.relayExecutor)
+      ? (dash.relayExecutor as Record<string, unknown>)
+      : {};
+  const lastTickAt = typeof dash.lastTickAt === 'string' ? Date.parse(dash.lastTickAt) : NaN;
+  const observedAt = typeof raw.observedAt === 'string' ? Date.parse(raw.observedAt) : NaN;
+  const evidenceAt = Number.isFinite(observedAt) ? observedAt : lastTickAt;
+  const heartbeatAgeMs = Number.isFinite(evidenceAt) ? Math.max(0, nowMs - evidenceAt) : null;
+  const roleOk = raw.serviceRole === 'executor-worker';
+  const enabled = raw.executionEnabled === true;
+  const fresh = heartbeatAgeMs != null && heartbeatAgeMs <= maxAgeMs;
+  const workerHealthy = raw.healthy === true && raw.status !== 'STUCK';
+  const status: RelayExecutorHealthSnapshot['status'] =
+    raw.status === 'RUNNING' || raw.status === 'IDLE' || raw.status === 'STUCK'
+      ? raw.status
+      : 'STARTING';
+  return {
+    healthy: roleOk && enabled && fresh && workerHealthy,
+    status,
+    running: raw.running === true,
+    tickStartedAt: typeof raw.tickStartedAt === 'string' ? raw.tickStartedAt : null,
+    lastTickCompletedAt:
+      typeof raw.lastTickCompletedAt === 'string' ? raw.lastTickCompletedAt : null,
+    lastTickDurationMs:
+      typeof raw.lastTickDurationMs === 'number' ? raw.lastTickDurationMs : null,
+    currentInstanceId:
+      typeof raw.currentInstanceId === 'string' ? raw.currentInstanceId : null,
+    currentStage: typeof raw.currentStage === 'string' ? raw.currentStage : null,
+    heartbeatAgeMs,
+    runningForMs: typeof raw.runningForMs === 'number' ? raw.runningForMs : null,
+    timeoutMs:
+      typeof raw.timeoutMs === 'number' ? raw.timeoutMs : DEFAULT_EXECUTOR_TICK_TIMEOUT_MS,
+    timeoutCount: typeof raw.timeoutCount === 'number' ? raw.timeoutCount : 0,
+    serviceRole: roleOk ? 'executor-worker' : 'public-api',
+    ownerId: typeof raw.ownerId === 'string' ? raw.ownerId : null,
+    observedAt: Number.isFinite(evidenceAt) ? new Date(evidenceAt).toISOString() : undefined,
+    sourceRevision: typeof raw.sourceRevision === 'string' ? raw.sourceRevision : null,
+    executionEnabled: enabled,
+  };
 }
 
 /**
@@ -530,11 +603,11 @@ function exchangeDynamicStopsEnabled(): boolean {
  *  any successful replace or on the next FILLED event. */
 const STOP_MANAGER_CIRCUIT_THRESHOLD = 3;
 
-/** Phase 3 — catch-up market entry when showcase is OPEN but copy missed fill. Default ON. */
+/** Exact-copy entries never use the legacy market catch-up path. */
 function mirrorCatchupEnabled(): boolean {
-  const v = (process.env.MIRROR_CATCHUP_ENABLED ?? '').trim().toLowerCase();
-  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
-  return true;
+  // Exact-mirror policy: never cross the book after the showcase has filled.
+  // A missed entry stays missed; a resting limit may only fill no-worse.
+  return false;
 }
 
 /**
@@ -778,6 +851,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private currentStage: string | null = null;
   private executorTimeoutCount = 0;
   private watchdogHandling = false;
+  private readonly executorOwnerId = [
+    process.env.RAILWAY_SERVICE_ID ?? 'local',
+    process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? 'single',
+  ].join(':');
   /** Phase 1 — 1s showcase-state memo for the execution path (flag-gated). */
   private execStateMemo: { at: number; state: BotApiState | null } | null = null;
   /** Phase 0 — MIRROR_DIFF event throttle: participantId → last event ms. */
@@ -874,8 +951,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const replicaCountRaw = process.env.RAILWAY_REPLICA_COUNT ?? process.env.RAILWAY_REPLICAS;
     const replicaCount = Number(replicaCountRaw ?? 1);
     if (Number.isFinite(replicaCount) && replicaCount > 1) {
-      this.logger.error(
-        `MULTIPLE REPLICAS DETECTED (count=${replicaCount}) — live-copy executor is NOT replica-safe; scale back to 1 immediately`,
+      throw new Error(
+        `MULTIPLE RELAY EXECUTOR REPLICAS DETECTED (count=${replicaCount}); refusing to start the money path`,
       );
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
@@ -897,7 +974,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       POLL_MS * 4,
       Number(this.config.get('SUBSCRIBER_EXECUTOR_HEALTH_MAX_AGE_MS') ?? DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS),
     );
-    return buildRelayExecutorHealth({
+    const health = buildRelayExecutorHealth({
       nowMs,
       running: this.running,
       tickStartedAtMs: this.tickStartedAtMs,
@@ -909,6 +986,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       healthMaxAgeMs,
       timeoutCount: this.executorTimeoutCount,
     });
+    return {
+      ...health,
+      serviceRole: process.env.RELAY_EXECUTOR_WORKER === 'true' ? 'executor-worker' : 'public-api',
+      ownerId: this.executorOwnerId,
+      observedAt: new Date(nowMs).toISOString(),
+      sourceRevision:
+        process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_REVISION ?? process.env.SOURCE_GIT_REV ?? null,
+      executionEnabled: executionEnabled(),
+    };
   }
 
   private async watchExecutorLiveness() {
@@ -1946,7 +2032,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (showcasePosition) {
       return {
         ready: false,
-        reason: 'Showcase filled before copy entry; waiting for the catch-up reconciler.',
+        reason: 'Showcase filled before copy entry; market catch-up is prohibited.',
       };
     }
     const sig = this.showcaseSignalForTrade(bot, tradeId);
@@ -3822,10 +3908,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     await this.cancelAbsurdPendingOrders(creds, userId);
 
-    const freshSignedLimit = cycle.tradeId
-      ? readFreshSignedShowcaseExactLimit(cycle.tradeId, cycle.intentEnvelope)
-      : null;
-    if (this.botBridge.isEnabled() && cycle.tradeId && !freshSignedLimit) {
+    if (this.botBridge.isEnabled() && cycle.tradeId) {
       const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
@@ -4931,10 +5014,49 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const signedLimit = tradeId
       ? readFreshSignedShowcaseExactLimit(tradeId, intent, now)
       : null;
-    const botState = signedLimit ? null : await this.fetchExecutionBotState();
-    const botLimit =
-      signedLimit?.limitPrice
-      ?? (tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null);
+    // Signed events keep the initial/reprice path fast, but canonical state is
+    // still required every tick to detect a showcase fill and enforce its
+    // no-worse price boundary.
+    const botState = await this.fetchExecutionBotState();
+    const showcasePosition = tradeId
+      ? (botState?.positions ?? []).find(
+          (position) => position.trade_id && tradeIdsMatch(position.trade_id, tradeId),
+        )
+      : null;
+    const showcaseDetails = tradeId && showcasePosition
+      ? resolveShowcaseTradeDetails(botState, tradeId)
+      : null;
+    const showcaseFill = Number(showcaseDetails?.entry ?? showcasePosition?.entry ?? 0);
+    if (showcasePosition && Number.isFinite(showcaseFill) && showcaseFill > 0) {
+      const cappedLimit = capRelayLimitAtShowcaseFill(
+        meta.direction,
+        meta.limitPrice,
+        showcaseFill,
+      );
+      if (Math.abs(cappedLimit - meta.limitPrice) >= 0.01) {
+        await this.replaceRestingLimit(
+          agentId,
+          userId,
+          cycleId,
+          participantId,
+          meta,
+          creds,
+          intent,
+          {
+            newLimit: cappedLimit,
+            mark,
+            now,
+            chaseLabel: `showcase-fill-cap=${showcaseFill.toFixed(2)}`,
+            event: 'BOT_ANCHOR_CHASE',
+            tradeId,
+          },
+        );
+      }
+      // Freeze here. Signal TTL or showcase exit owns cancellation.
+      return;
+    }
+    const canonicalLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
+    const botLimit = canonicalLimit ?? (botState == null ? signedLimit?.limitPrice : null);
     // Phase 1 chase convergence (flag-gated): converge to the showcase's
     // CURRENT pending limit every tick, but clamp cancel+replace churn to max
     // 1 replacement per order per second. Legacy path keeps the raw

@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
+  capRelayLimitAtShowcaseFill,
+  readPersistedRelayExecutorHealth,
   isBenignShowcaseEntryWait,
   isCycleFreshForRelayArm,
   mergedDirectionCompatible,
@@ -64,6 +66,43 @@ test('relay executor health fails closed while starting, stale, or stuck', () =>
   assert.equal(stuck.healthy, false);
 });
 
+test('persisted executor health accepts only fresh isolated-worker evidence', () => {
+  const now = Date.parse('2026-07-21T11:00:00.000Z');
+  const dashboardState = {
+    lastTickAt: '2026-07-21T10:59:58.000Z',
+    relayExecutor: {
+      healthy: true,
+      status: 'IDLE',
+      running: false,
+      observedAt: '2026-07-21T10:59:58.000Z',
+      serviceRole: 'executor-worker',
+      executionEnabled: true,
+      ownerId: 'service:replica',
+    },
+  };
+  const healthy = readPersistedRelayExecutorHealth(dashboardState, now);
+  assert.equal(healthy.healthy, true);
+  assert.equal(healthy.heartbeatAgeMs, 2_000);
+
+  assert.equal(
+    readPersistedRelayExecutorHealth({
+      ...dashboardState,
+      relayExecutor: { ...dashboardState.relayExecutor, serviceRole: 'public-api' },
+    }, now).healthy,
+    false,
+  );
+  assert.equal(
+    readPersistedRelayExecutorHealth({
+      lastTickAt: '2026-07-21T10:58:00.000Z',
+      relayExecutor: {
+        ...dashboardState.relayExecutor,
+        observedAt: '2026-07-21T10:58:00.000Z',
+      },
+    }, now).healthy,
+    false,
+  );
+});
+
 test('watchdog keeps the API online when no live Bitfinex relay is active', () => {
   assert.equal(relayWatchdogShouldRestart(0), false);
   assert.equal(relayWatchdogShouldRestart(1), true);
@@ -107,6 +146,13 @@ test('merged-position tick gate allows same direction and rejects an opposing pa
   assert.equal(mergedDirectionCompatible('SHORT', 'LONG'), false);
 });
 
+test('showcase fill cap permits improvement but never a worse copied entry', () => {
+  assert.equal(capRelayLimitAtShowcaseFill('LONG', 64_010, 64_000), 64_000);
+  assert.equal(capRelayLimitAtShowcaseFill('LONG', 63_900, 64_000), 63_900);
+  assert.equal(capRelayLimitAtShowcaseFill('SHORT', 63_990, 64_000), 64_000);
+  assert.equal(capRelayLimitAtShowcaseFill('SHORT', 64_100, 64_000), 64_100);
+});
+
 test('repairs a legacy catch-up lot that has qty but no direction', () => {
   assert.equal(
     shouldPersistLotMetaRepair({ qty: 0.03104 }, { qty: 0.03104, direction: 'SHORT' }),
@@ -134,7 +180,7 @@ test('does not append duplicate repair events for complete metadata', () => {
 for (const message of [
   'Showcase trade is not present in the current canonical book.',
   'Waiting for the showcase to publish its exact resting limit.',
-  'Showcase filled before copy entry; waiting for the catch-up reconciler.',
+  'Showcase filled before copy entry; market catch-up is prohibited.',
   'Showcase bot has not placed a limit yet (virtual defer / chase bucket) — relay waiting.',
   'Waiting for showcase limit.',
 ]) {

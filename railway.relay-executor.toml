@@ -1,0 +1,21 @@
+[build]
+builder = "DOCKERFILE"
+watchPatterns = [
+  "apps/api/**",
+  "packages/**",
+  "prisma/**",
+  "Dockerfile",
+  "railway.relay-executor.toml",
+  "tsconfig.base.json",
+  "package.json",
+  "package-lock.json",
+]
+
+[deploy]
+# This service is the sole real-money executor. The public API deliberately
+# uses a different start command and keeps subscriber execution disabled.
+startCommand = "node apps/api/dist/relay-executor-worker.js"
+healthcheckPath = "/api/health/live"
+healthcheckTimeout = 180
+restartPolicyType = "ON_FAILURE"
+numReplicas = 1
