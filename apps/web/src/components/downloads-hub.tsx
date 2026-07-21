@@ -17,7 +17,7 @@ export function DownloadsHub() {
         <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Install hub</p>
         <h1 className="mt-2 text-3xl font-bold tracking-tight">All downloads</h1>
         <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-          Everything you install lives here — mobile apps, desktop Founder Stack, and pairing steps. Connect AI
+          Everything you install lives here — mobile apps and Founder IDE. Connect AI
           brains and deployment stack separately in{' '}
           <Link href="/settings/builder?tab=ai" className="font-semibold text-violet-300 underline hover:text-violet-200">
             AI Providers
@@ -42,7 +42,7 @@ export function DownloadsHub() {
             href="#founder-node"
             className="rounded-full border border-cyan-500/30 bg-cyan-950/20 px-3 py-1.5 font-semibold text-cyan-200 hover:border-cyan-400/50"
           >
-            Founder Stack &amp; Founder Node
+            Founder IDE
           </a>
         </nav>
       </section>
@@ -119,15 +119,12 @@ export function DownloadsHub() {
 
       <section id="founder-node" className="scroll-mt-24 space-y-8 border-t border-zinc-800/80 pt-12">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">Desktop vault + IDE</p>
-          <h2 className="mt-2 text-2xl font-bold tracking-tight">Founder Stack — one desktop kit</h2>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">Desktop application</p>
+          <h2 className="mt-2 text-2xl font-bold tracking-tight">Founder IDE — one application</h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            <strong className="text-emerald-200">Founder Stack</strong> is the primary desktop install: Founder IDE
-            (VS Code-based editor with Founder OS AI) plus the Founder Node tray (vault sync, pairing, local Ollama).
-            On Windows, use the single <strong className="text-emerald-200">Founder Stack</strong> Desktop launcher —
-            it starts the Node tray (if needed) then the IDE.{" "}
-            <strong className="text-cyan-200">Founder Node</strong> standalone remains available for vault-only setups
-            (no IDE). Pair once with the same Founder OS account you use in the browser or mobile app.
+            <strong className="text-emerald-200">Founder IDE</strong> is the desktop product. Its background Founder
+            Node handles vault sync, pairing, local models, and remote sessions inside the same installation. Open one
+            launcher and pair it with the same Founder ID used on the website or mobile app.
           </p>
           <p className="mt-2 text-sm text-zinc-500">
             Current release: <strong className="text-zinc-300">v{FOUNDER_NODE_MIN_VERSION}</strong> ·{' '}
@@ -156,18 +153,17 @@ export function DownloadsHub() {
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Pairing (about 2 minutes)</p>
           <h3 className="mt-2 text-xl font-bold">Connect desktop to Founder OS</h3>
           <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-zinc-400">
-            <li>Install Founder Stack (or Founder Node standalone) from the buttons above (Windows auto-updates from the tray menu).</li>
+            <li>Install and open Founder IDE. Its background Node starts automatically.</li>
             <li>
               In{' '}
               <Link href="/settings/builder?tab=downloads" className="text-violet-300 underline">
                 Settings → Downloads &amp; pairing
               </Link>
-              , choose <strong className="text-zinc-200">Founder Vault (Founder Node)</strong> and generate a pairing
+              , choose <strong className="text-zinc-200">Founder IDE</strong> and generate a pairing
               code.
             </li>
             <li>
-              Tray icon → <strong className="text-zinc-200">Pair with Founder OS</strong> → paste the 8-character
-              code in the tray app.
+              In Founder IDE, open <strong className="text-zinc-200">Founder</strong> → <strong className="text-zinc-200">Connect Founder ID</strong> and paste the 8-character code.
             </li>
             <li>
               Click <strong className="text-zinc-200">Rebuild vector index</strong> once — then IDE workspaces unlock.

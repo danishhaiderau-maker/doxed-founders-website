@@ -70,6 +70,8 @@ const embedded_relay_1 = require("./embedded-relay");
 const founder_authentication_1 = require("./founder-authentication");
 const founder_hub_1 = require("./founder-hub");
 const founder_settings_1 = require("./founder-settings");
+const founder_shortcuts_1 = require("./founder-shortcuts");
+const founder_companion_1 = require("./founder-companion");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -81,6 +83,8 @@ let pairingStatusBar;
 let founderAuthenticationProvider;
 let founderHub;
 let founderSettings;
+let founderShortcuts;
+let founderCompanion;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -92,6 +96,19 @@ function activate(context) {
     context.subscriptions.push(founderHub, vscode.window.registerWebviewViewProvider(founder_hub_1.FounderHubProvider.viewId, founderHub, {
         webviewOptions: { retainContextWhenHidden: true },
     }));
+    founderShortcuts = new founder_shortcuts_1.FounderShortcutRegistry();
+    context.subscriptions.push(founderShortcuts);
+    founderCompanion = new founder_companion_1.FounderCompanionViewProvider();
+    context.subscriptions.push(founderCompanion, vscode.window.registerWebviewViewProvider(founder_companion_1.FounderCompanionViewProvider.viewId, founderCompanion, { webviewOptions: { retainContextWhenHidden: true } }), vscode.tasks.onDidStartTask((event) => {
+        founderCompanion?.setWorking(`Running ${event.execution.task.name}`, 'Local workspace task');
+    }), vscode.tasks.onDidEndTaskProcess((event) => {
+        if (event.exitCode === 0) {
+            founderCompanion?.setSuccess(event.execution.task.name, 'Task completed with exit code 0');
+        }
+        else {
+            founderCompanion?.setError(event.execution.task.name, event.exitCode == null ? 'Task ended without a result' : `Task exited with code ${event.exitCode}`);
+        }
+    }));
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
         onDidSignIn: async () => {
             await (0, credentials_1.syncVaultIntoSettings)();
@@ -100,12 +117,16 @@ function activate(context) {
             pairingStatusBar?.setGatewayResult('ok');
             founderHub?.refresh();
             founderSettings?.refresh();
+            founderShortcuts?.refresh();
+            founderCompanion?.setSuccess('Founder connected', 'Identity, Node, and remote control are ready');
         },
         onDidSignOut: () => {
             registerOrNotify(context);
             pairingStatusBar?.refresh();
             founderHub?.refresh();
             founderSettings?.refresh();
+            founderShortcuts?.refresh();
+            founderCompanion?.setAttention('Sign in required', 'Connect Founder to use managed AI and remote control');
         },
     });
     context.subscriptions.push(founderAuthenticationProvider, vscode.authentication.registerAuthenticationProvider(founder_authentication_1.FOUNDER_AUTH_PROVIDER_ID, 'Founder', founderAuthenticationProvider, { supportsMultipleAccounts: false }));
@@ -153,7 +174,17 @@ function activate(context) {
     }), vscode.commands.registerCommand('founderOs.connectFounderOs', () => signInWithFounderId(context)), vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig), vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias), vscode.commands.registerCommand('founderOs.selectProfile', () => profileManager?.selectProfile()), vscode.commands.registerCommand('founderOs.showCostBreakdown', () => costTracker?.showBreakdown()), vscode.commands.registerCommand('founderOs.resetCost', () => {
         costTracker?.reset();
         void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
-    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openChat', () => vscode.commands.executeCommand('workbench.action.chat.open')), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()));
+    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openCompanion', () => revealFounderView('founderWork', founder_companion_1.FounderCompanionViewProvider.viewId)), vscode.commands.registerCommand('founderOs.openAgents', async () => {
+        await revealFounderView('founderWork', founder_companion_1.FounderCompanionViewProvider.viewId);
+        await revealFounderView('founderWork', 'founderOs.agents');
+    }), vscode.commands.registerCommand('founderOs.openShip', () => revealFounderView('founderWork', 'founderOs.ship')), vscode.commands.registerCommand('founderOs.openNodeView', () => revealFounderView('founderConnect', 'founderOs.node')), vscode.commands.registerCommand('founderOs.openConnectionsView', () => revealFounderView('founderConnect', 'founderOs.connections')), vscode.commands.registerCommand('founderOs.openRemoteView', () => revealFounderView('founderConnect', 'founderOs.remote')), vscode.commands.registerCommand('founderOs.openRemoteControl', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/founder-den?onboard=sovereign'))), vscode.commands.registerCommand('founderOs.openChat', async () => {
+        try {
+            await vscode.commands.executeCommand('void.sidebar.open');
+        }
+        catch {
+            await vscode.commands.executeCommand('workbench.action.chat.open');
+        }
+    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()));
     // First-pass registration (synchronous so the model picker populates fast).
     registerOrNotify(context);
     // Phase 3 — start the named-pipe IPC server so the embedded relay can
@@ -180,6 +211,7 @@ function activate(context) {
         founderAuthenticationProvider?.refresh();
         founderHub?.refresh();
         founderSettings?.refresh();
+        founderShortcuts?.refresh();
     });
     // Re-resolve when relevant settings change.
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
@@ -187,6 +219,7 @@ function activate(context) {
             registerOrNotify(context);
             founderHub?.refresh();
             founderSettings?.refresh();
+            founderShortcuts?.refresh();
         }
     }));
     // Re-resolve when the vault file appears / changes (pairing completed while
@@ -200,8 +233,13 @@ function activate(context) {
             founderAuthenticationProvider?.refresh();
             founderHub?.refresh();
             founderSettings?.refresh();
+            founderShortcuts?.refresh();
         });
     });
+}
+async function revealFounderView(containerId, viewId) {
+    await vscode.commands.executeCommand(`workbench.view.extension.${containerId}`);
+    await vscode.commands.executeCommand(`${viewId}.focus`);
 }
 function startEmbeddedRelay() {
     // Stock VS Code/Cursor installs of this extension simply skip this step.
@@ -233,6 +271,7 @@ function deactivate() {
     founderAuthenticationProvider?.dispose();
     founderHub?.dispose();
     founderSettings?.dispose();
+    founderShortcuts?.dispose();
     // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
     (0, server_1.stopIpcServer)();
 }
@@ -248,6 +287,7 @@ function registerOrNotify(context) {
         pairingStatusBar?.refresh();
         founderHub?.refresh();
         founderSettings?.refresh();
+        founderShortcuts?.refresh();
         void showPairPrompt(context);
         return;
     }
@@ -256,6 +296,7 @@ function registerOrNotify(context) {
         currentCreds.nodeId === creds.nodeId &&
         currentCreds.nodeToken === creds.nodeToken) {
         pairingStatusBar?.refresh();
+        founderShortcuts?.refresh();
         return;
     }
     // Credentials changed — re-register.
@@ -267,6 +308,7 @@ function registerOrNotify(context) {
         costTracker: costTracker,
         onRequestStart: (modelId) => {
             pairingStatusBar?.setRequestInFlight(modelId);
+            founderCompanion?.setWorking('Flying to Founder AI', modelId);
         },
         onMetadata: (meta) => {
             const tier = meta.tier ?? '?';
@@ -280,9 +322,16 @@ function registerOrNotify(context) {
             });
             costTracker?.record(meta);
             gatewayMetadataUi?.record(meta);
+            founderCompanion?.setWorking(`Reaching ${provider2 || 'the selected provider'}`, model || tier);
         },
         onRequestEnd: (_modelId, ok, errorMessage) => {
             pairingStatusBar?.setRequestResult(ok, errorMessage);
+            if (ok) {
+                founderCompanion?.setSuccess('Response delivered', 'Founder AI reached the workspace');
+            }
+            else {
+                founderCompanion?.setError('Founder AI was blocked', errorMessage || 'Open evidence for details');
+            }
         },
     });
     // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
@@ -292,6 +341,7 @@ function registerOrNotify(context) {
     pairingStatusBar?.refresh();
     founderHub?.refresh();
     founderSettings?.refresh();
+    founderShortcuts?.refresh();
 }
 let pairPromptShownThisSession = false;
 async function showPairPrompt(context) {

@@ -18,6 +18,7 @@ import {
   type GatewayFounderOsMetadata,
   type GatewayToolCall,
   callGateway,
+  gatewayUserMessage,
 } from './gateway-client';
 import { FOUNDER_TOOL_NAMES } from './tool-names';
 
@@ -181,8 +182,8 @@ async function handleParticipantRequest(
           onMetadata: (meta) => {
             deps.onMetadata?.(meta);
           },
-          onError: (_status, body) => {
-            errorMessage = body.slice(0, 300);
+          onError: (status, body) => {
+            errorMessage = gatewayUserMessage(status, body);
           },
         },
         token,
@@ -241,7 +242,7 @@ async function handleParticipantRequest(
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
     if (!token.isCancellationRequested) {
-      stream.markdown(`\n\n_Founder OS gateway error: ${errorMessage}_`);
+      stream.markdown(`\n\n_${errorMessage}_`);
     }
     return;
   } finally {

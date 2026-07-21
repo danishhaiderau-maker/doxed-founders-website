@@ -25,6 +25,7 @@ import {
   callGateway,
   callFim,
   computeBackoffMs,
+  gatewayUserMessage,
   parseRetryAfter,
   redactSecrets,
   validateFimRequest,
@@ -320,6 +321,30 @@ describe('gateway-client — non-2xx errors', () => {
     assert.equal(cb.errors.length, 1);
     assert.equal(cb.errors[0].status, 400);
   });
+
+  it('never exposes an HTML 502 page in chat errors', async () => {
+    const html = '<!DOCTYPE html><html><head><title>Bad gateway</title></head><body>cloud proxy trace</body></html>';
+    const { fetchImpl } = makeFetchSequence([
+      sseResponse([html], { status: 502 }),
+    ]);
+    const cb = callbacks();
+    await assert.rejects(
+      callGateway(
+        CLIENT,
+        { ...DEFAULT_OPTS, maxRetries: 0 },
+        cb,
+        makeToken(),
+        { fetchImpl, sleepImpl: noopSleep },
+      ),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /temporarily unavailable/);
+        assert.match(message, /local files are safe/i);
+        assert.doesNotMatch(message, /<!DOCTYPE|<html|proxy trace/i);
+        return true;
+      },
+    );
+  });
 });
 
 describe('gateway-client — cancellation via AbortSignal', () => {
@@ -482,6 +507,22 @@ describe('gateway-client — 401/403 auth expired', () => {
     );
     assert.equal(calls.length, 1);
     assert.deepEqual(cb.authExpired, [401]);
+  });
+
+  it('does not mark the Founder connection expired when the upstream provider key fails', async () => {
+    const { fetchImpl } = makeFetchSequence([
+      new Response(
+        JSON.stringify({ error: { message: 'Authentication Fails, Your api key is invalid' } }),
+        { status: 401 },
+      ),
+    ]);
+    const cb = callbacks();
+    await assert.rejects(
+      callGateway(CLIENT, DEFAULT_OPTS, cb, makeToken(), { fetchImpl, sleepImpl: noopSleep }),
+      /selected AI provider is unavailable/i,
+    );
+    assert.equal(cb.authExpired.length, 0);
+    assert.equal(cb.providerErrors.length, 1);
   });
 });
 
@@ -722,6 +763,27 @@ describe('gateway-client — secret redaction', () => {
 });
 
 describe('gateway-client — helpers', () => {
+  describe('gatewayUserMessage', () => {
+    it('turns auth failures into a reconnect action', () => {
+      assert.match(gatewayUserMessage(401, '<html>ignored</html>'), /sign in again/i);
+    });
+
+    it('distinguishes an upstream provider key failure from Founder sign-in', () => {
+      const body = JSON.stringify({
+        error: { message: 'Authentication Fails, Your api key: ****trol is invalid' },
+      });
+      const message = gatewayUserMessage(401, body);
+      assert.match(message, /selected AI provider is unavailable/i);
+      assert.doesNotMatch(message, /sign in again|trol/i);
+    });
+
+    it('keeps a safe JSON message for deterministic 4xx failures', () => {
+      const message = gatewayUserMessage(422, '{"error":{"message":"Model is not enabled"}}');
+      assert.match(message, /Model is not enabled/);
+      assert.doesNotMatch(message, /\{"error/);
+    });
+  });
+
   describe('parseRetryAfter', () => {
     it('parses integer seconds', () => {
       assert.equal(parseRetryAfter('30'), 30_000);

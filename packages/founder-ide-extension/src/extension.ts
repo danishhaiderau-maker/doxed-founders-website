@@ -47,6 +47,8 @@ import {
 } from './founder-authentication';
 import { FounderHubProvider } from './founder-hub';
 import { FounderSettingsPanel } from './founder-settings';
+import { FounderShortcutRegistry } from './founder-shortcuts';
+import { FounderCompanionViewProvider } from './founder-companion';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -59,6 +61,8 @@ let pairingStatusBar: PairingStatusBar | undefined;
 let founderAuthenticationProvider: FounderAuthenticationProvider | undefined;
 let founderHub: FounderHubProvider | undefined;
 let founderSettings: FounderSettingsPanel | undefined;
+let founderShortcuts: FounderShortcutRegistry | undefined;
+let founderCompanion: FounderCompanionViewProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -76,6 +80,30 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true },
     }),
   );
+  founderShortcuts = new FounderShortcutRegistry();
+  context.subscriptions.push(founderShortcuts);
+  founderCompanion = new FounderCompanionViewProvider();
+  context.subscriptions.push(
+    founderCompanion,
+    vscode.window.registerWebviewViewProvider(
+      FounderCompanionViewProvider.viewId,
+      founderCompanion,
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
+    vscode.tasks.onDidStartTask((event) => {
+      founderCompanion?.setWorking(`Running ${event.execution.task.name}`, 'Local workspace task');
+    }),
+    vscode.tasks.onDidEndTaskProcess((event) => {
+      if (event.exitCode === 0) {
+        founderCompanion?.setSuccess(event.execution.task.name, 'Task completed with exit code 0');
+      } else {
+        founderCompanion?.setError(
+          event.execution.task.name,
+          event.exitCode == null ? 'Task ended without a result' : `Task exited with code ${event.exitCode}`,
+        );
+      }
+    }),
+  );
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
     onDidSignIn: async () => {
@@ -85,12 +113,16 @@ export function activate(context: vscode.ExtensionContext): void {
       pairingStatusBar?.setGatewayResult('ok');
       founderHub?.refresh();
       founderSettings?.refresh();
+      founderShortcuts?.refresh();
+      founderCompanion?.setSuccess('Founder connected', 'Identity, Node, and remote control are ready');
     },
     onDidSignOut: () => {
       registerOrNotify(context);
       pairingStatusBar?.refresh();
       founderHub?.refresh();
       founderSettings?.refresh();
+      founderShortcuts?.refresh();
+      founderCompanion?.setAttention('Sign in required', 'Connect Founder to use managed AI and remote control');
     },
   });
   context.subscriptions.push(
@@ -174,9 +206,37 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.openHub', () =>
       vscode.commands.executeCommand('workbench.view.extension.founderOs'),
     ),
-    vscode.commands.registerCommand('founderOs.openChat', () =>
-      vscode.commands.executeCommand('workbench.action.chat.open'),
+    vscode.commands.registerCommand('founderOs.openCompanion', () =>
+      revealFounderView('founderWork', FounderCompanionViewProvider.viewId),
     ),
+    vscode.commands.registerCommand('founderOs.openAgents', async () => {
+      await revealFounderView('founderWork', FounderCompanionViewProvider.viewId);
+      await revealFounderView('founderWork', 'founderOs.agents');
+    }),
+    vscode.commands.registerCommand('founderOs.openShip', () =>
+      revealFounderView('founderWork', 'founderOs.ship'),
+    ),
+    vscode.commands.registerCommand('founderOs.openNodeView', () =>
+      revealFounderView('founderConnect', 'founderOs.node'),
+    ),
+    vscode.commands.registerCommand('founderOs.openConnectionsView', () =>
+      revealFounderView('founderConnect', 'founderOs.connections'),
+    ),
+    vscode.commands.registerCommand('founderOs.openRemoteView', () =>
+      revealFounderView('founderConnect', 'founderOs.remote'),
+    ),
+    vscode.commands.registerCommand('founderOs.openRemoteControl', () =>
+      vscode.env.openExternal(
+        vscode.Uri.parse('https://doxxedcrypto.digital/founder-den?onboard=sovereign'),
+      ),
+    ),
+    vscode.commands.registerCommand('founderOs.openChat', async () => {
+      try {
+        await vscode.commands.executeCommand('void.sidebar.open');
+      } catch {
+        await vscode.commands.executeCommand('workbench.action.chat.open');
+      }
+    }),
     vscode.commands.registerCommand('founderOs.openConnections', () =>
       vscode.env.openExternal(
         vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
@@ -187,6 +247,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('founderOs.refreshHub', () =>
       founderHub?.refresh(),
+    ),
+    vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
+      founderShortcuts?.refresh(),
     ),
   );
 
@@ -218,6 +281,7 @@ export function activate(context: vscode.ExtensionContext): void {
     founderAuthenticationProvider?.refresh();
     founderHub?.refresh();
     founderSettings?.refresh();
+    founderShortcuts?.refresh();
   });
 
   // Re-resolve when relevant settings change.
@@ -227,6 +291,7 @@ export function activate(context: vscode.ExtensionContext): void {
         registerOrNotify(context);
         founderHub?.refresh();
         founderSettings?.refresh();
+        founderShortcuts?.refresh();
       }
     }),
   );
@@ -242,8 +307,14 @@ export function activate(context: vscode.ExtensionContext): void {
       founderAuthenticationProvider?.refresh();
       founderHub?.refresh();
       founderSettings?.refresh();
+      founderShortcuts?.refresh();
     });
   });
+}
+
+async function revealFounderView(containerId: string, viewId: string): Promise<void> {
+  await vscode.commands.executeCommand(`workbench.view.extension.${containerId}`);
+  await vscode.commands.executeCommand(`${viewId}.focus`);
 }
 
 function startEmbeddedRelay(): void {
@@ -286,6 +357,7 @@ export function deactivate(): void {
   founderAuthenticationProvider?.dispose();
   founderHub?.dispose();
   founderSettings?.dispose();
+  founderShortcuts?.dispose();
   // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
   stopIpcServer();
 }
@@ -302,6 +374,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     pairingStatusBar?.refresh();
     founderHub?.refresh();
     founderSettings?.refresh();
+    founderShortcuts?.refresh();
     void showPairPrompt(context);
     return;
   }
@@ -313,6 +386,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     currentCreds.nodeToken === creds.nodeToken
   ) {
     pairingStatusBar?.refresh();
+    founderShortcuts?.refresh();
     return;
   }
 
@@ -326,6 +400,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     costTracker: costTracker!,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
+      founderCompanion?.setWorking('Flying to Founder AI', modelId);
     },
     onMetadata: (meta) => {
       const tier = meta.tier ?? '?';
@@ -339,9 +414,18 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
       });
       costTracker?.record(meta);
       gatewayMetadataUi?.record(meta);
+      founderCompanion?.setWorking(
+        `Reaching ${provider2 || 'the selected provider'}`,
+        model || tier,
+      );
     },
     onRequestEnd: (_modelId, ok, errorMessage) => {
       pairingStatusBar?.setRequestResult(ok, errorMessage);
+      if (ok) {
+        founderCompanion?.setSuccess('Response delivered', 'Founder AI reached the workspace');
+      } else {
+        founderCompanion?.setError('Founder AI was blocked', errorMessage || 'Open evidence for details');
+      }
     },
   });
 
@@ -357,6 +441,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
   pairingStatusBar?.refresh();
   founderHub?.refresh();
   founderSettings?.refresh();
+  founderShortcuts?.refresh();
 }
 
 let pairPromptShownThisSession = false;

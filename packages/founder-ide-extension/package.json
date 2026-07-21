@@ -2,7 +2,7 @@
   "name": "founder-ide-extension",
   "displayName": "Founder",
   "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -26,12 +26,28 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "authentication": [
+      {
+        "id": "founderOs",
+        "label": "Founder"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "founderOs",
           "title": "Founder",
           "icon": "resources/founder.svg"
+        },
+        {
+          "id": "founderWork",
+          "title": "Founder Work",
+          "icon": "resources/agents.svg"
+        },
+        {
+          "id": "founderConnect",
+          "title": "Founder Connect",
+          "icon": "resources/connections.svg"
         }
       ]
     },
@@ -41,6 +57,35 @@
           "id": "founderOs.hub",
           "name": "Founder",
           "type": "webview"
+        }
+      ],
+      "founderWork": [
+        {
+          "id": "founderOs.companion",
+          "name": "Founder Dragon",
+          "type": "webview"
+        },
+        {
+          "id": "founderOs.agents",
+          "name": "Agents"
+        },
+        {
+          "id": "founderOs.ship",
+          "name": "Ship"
+        }
+      ],
+      "founderConnect": [
+        {
+          "id": "founderOs.node",
+          "name": "Founder Node"
+        },
+        {
+          "id": "founderOs.connections",
+          "name": "Connections"
+        },
+        {
+          "id": "founderOs.remote",
+          "name": "Remote Sessions"
         }
       ]
     },
@@ -204,6 +249,34 @@
         "title": "Founder: Open control center"
       },
       {
+        "command": "founderOs.openAgents",
+        "title": "Founder: Open Agents"
+      },
+      {
+        "command": "founderOs.openCompanion",
+        "title": "Founder: Open Dragon"
+      },
+      {
+        "command": "founderOs.openShip",
+        "title": "Founder: Open Ship"
+      },
+      {
+        "command": "founderOs.openNodeView",
+        "title": "Founder: Open Founder Node"
+      },
+      {
+        "command": "founderOs.openConnectionsView",
+        "title": "Founder: Open Connections"
+      },
+      {
+        "command": "founderOs.openRemoteView",
+        "title": "Founder: Open Remote Sessions"
+      },
+      {
+        "command": "founderOs.openRemoteControl",
+        "title": "Founder: Open web remote control"
+      },
+      {
         "command": "founderOs.openChat",
         "title": "Founder: Open chat"
       },
@@ -219,6 +292,11 @@
         "command": "founderOs.refreshHub",
         "title": "Refresh Founder",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "founderOs.refreshShortcuts",
+        "title": "Refresh Founder shortcuts",
+        "icon": "$(refresh)"
       }
     ],
     "menus": {
@@ -227,6 +305,17 @@
           "command": "founderOs.refreshHub",
           "when": "view == founderOs.hub",
           "group": "navigation"
+        },
+        {
+          "command": "founderOs.refreshShortcuts",
+          "when": "view == founderOs.agents || view == founderOs.ship || view == founderOs.node || view == founderOs.connections || view == founderOs.remote",
+          "group": "navigation"
+        }
+      ],
+      "menubar/preferences": [
+        {
+          "command": "founderOs.openSettings",
+          "group": "1_founder@1"
         }
       ]
     },
@@ -273,7 +362,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/embedded-relay.spec.ts src/founder-hub-state.spec.ts src/manifest.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/embedded-relay.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/manifest.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

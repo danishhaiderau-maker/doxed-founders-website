@@ -7,10 +7,8 @@ const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
 
 /**
- * Founder Stack installer download — bundles Founder IDE (a VS Code-based
- * editor with built-in AI chat, routing, and memory injection through the
- * Founder OS AI Gateway) + Founder Node tray app in one download from GitHub
- * Releases.
+ * Founder IDE installer download. The local Founder Node relay is an embedded
+ * background capability of the same application.
  */
 export const FOUNDER_STACK_RELEASES_URL = `https://github.com/${REPO}/releases`;
 
@@ -31,28 +29,26 @@ export function FounderNodeInstallGuide() {
     <div className="text-xs text-zinc-300">
       <ol className="list-decimal space-y-2 pl-5">
         <li>
-          Download the installer for your OS above. On <strong className="text-white">Windows</strong>, if
-          sync fails the tray app will prompt you to{' '}
+          Download Founder IDE for your OS. On <strong className="text-white">Windows</strong>, if
+          local sync is blocked Founder IDE will prompt you to{' '}
           <strong className="text-white">Allow Founder Node</strong> through the firewall (one UAC click).
         </li>
         <li>
-          Launch from Start Menu / Applications / run the AppImage. Updates appear in the tray menu — no
-          manual re-download on Windows.
+          Launch Founder IDE from Start Menu / Applications / the AppImage. Its embedded Node starts in the
+          background and updates are managed by the same application.
         </li>
         <li>
-          In <strong className="text-white">Pair your device</strong> below, select{' '}
-          <strong className="text-white">Founder Vault (Founder Node)</strong> and click{' '}
-          <strong className="text-white">Code for desktop</strong>.
+          In <strong className="text-white">Pair your device</strong>, choose{' '}
+          <strong className="text-white">Founder IDE</strong> and request a desktop code.
         </li>
         <li>
-          Tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code. The pairing
-          window can close — keep the tray app running. Pairing writes{' '}
+          Open Founder in the IDE, choose <strong className="text-white">Connect Founder ID</strong>, and paste the
+          code. The embedded Node stores the device identity in{' '}
           <code className="text-zinc-400">~/FounderVault/node-config.json</code>.
         </li>
         <li>
-          Open <strong className="text-white">Founder IDE</strong> — it auto-loads the vault token and routes{' '}
-          <strong className="text-white">@Founder OS</strong> chat through the AI Gateway (no GitHub/Google/Apple
-          login inside the IDE). Or use tray <strong className="text-white">Connect Founder IDE</strong>.
+          Founder IDE now uses the same Founder ID as the website and routes Founder chat through the selected
+          local, personal-provider, or Founder-managed path.
         </li>
         <li>
           Complete <strong className="text-white">Sync, index & search</strong> —{' '}
@@ -124,25 +120,25 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
   const versionLabel = releaseVersion ?? FOUNDER_NODE_MIN_VERSION;
   const primary =
     os === 'windows'
-      ? { label: 'Download Founder Stack — Windows', href: winUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+      ? { label: 'Download Founder IDE — Windows', href: FOUNDER_STACK_RELEASES_URL, highlight: true }
       : os === 'mac'
-        ? { label: 'Download Founder Stack — macOS', href: macUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+        ? { label: 'Download Founder IDE — macOS', href: FOUNDER_STACK_RELEASES_URL, highlight: true }
         : os === 'linux'
-          ? { label: 'Download Founder Stack — Linux', href: linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
+          ? { label: 'Download Founder IDE — Linux', href: FOUNDER_STACK_RELEASES_URL, highlight: true }
           : null;
 
   return (
     <div id={sectionId} className="scroll-mt-24 space-y-4">
-      {/* Founder Stack — the bundled installer (Founder IDE + Founder Node). */}
+      {/* Founder IDE is the standard desktop product; Node runs inside it. */}
       <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-emerald-100">Founder Stack</p>
+            <p className="text-sm font-semibold text-emerald-100">Founder IDE</p>
             <p className="mt-0.5 text-xs text-zinc-400">
-              Founder IDE + Founder Node in one install — the full desktop kit for building with Founder OS AI.
+              One application for coding, Founder AI, local infrastructure, connections, and remote control.
             </p>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Founder Stack bundles Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) + Founder Node tray app — one download, one install.
+              The Founder Node relay is embedded and starts in the background. There is no second app to install or pair.
             </p>
           </div>
           <a
@@ -151,12 +147,12 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400"
           >
-            Download Founder Stack
+            Download Founder IDE
           </a>
         </div>
       </div>
 
-      {/* Founder Stack primary (auto-detected OS) — from GitHub releases. */}
+      {/* Founder IDE primary (auto-detected OS) — from GitHub releases. */}
       {primary && (
         <a
           href={FOUNDER_STACK_RELEASES_URL}
@@ -169,15 +165,15 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
       )}
 
       <p className="text-[11px] font-medium text-zinc-500">
-        Founder Stack bundles the new Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) together with the Founder Node tray app — one download, one install.
+        Founder IDE includes its local relay, vault access, AI routing, and remote-session bridge in the same installation.
       </p>
 
-      <div className="pt-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
-          Also available: Founder Node standalone
+      <details className="max-w-2xl border-t border-zinc-800 pt-3 text-xs text-zinc-500">
+        <summary className="cursor-pointer font-medium text-zinc-400">Advanced: headless relay only</summary>
+        <p className="mt-2">
+          Server and vault-only installations can use the standalone relay. Normal desktop users do not need it.
         </p>
-      </div>
-      <div className="flex flex-wrap gap-3">
+        <div className="mt-3 flex flex-wrap gap-3">
         <a
           href={winUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
           target="_blank"
@@ -214,13 +210,14 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
         >
           Linux / Ubuntu (.AppImage)
         </a>
-      </div>
+        </div>
+      </details>
 
       <p className="text-xs text-zinc-500">
         {loading
           ? 'Checking latest release…'
           : winUrl || macUrl || linuxUrl
-            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows ${FOUNDER_NODE_MIN_VERSION_LABEL} recommended.`
+            ? `v${versionLabel} — Founder IDE manages background relay updates. Windows ${FOUNDER_NODE_MIN_VERSION_LABEL} recommended.`
             : `Installers on GitHub — ${FOUNDER_NODE_GITHUB_RELEASES}`}
       </p>
 

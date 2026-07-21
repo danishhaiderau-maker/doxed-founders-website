@@ -171,8 +171,8 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
                 onMetadata: (meta) => {
                     deps.onMetadata?.(meta);
                 },
-                onError: (_status, body) => {
-                    errorMessage = body.slice(0, 300);
+                onError: (status, body) => {
+                    errorMessage = (0, gateway_client_1.gatewayUserMessage)(status, body);
                 },
             }, token);
             if (toolCalls.length === 0) {
@@ -222,7 +222,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     catch (err) {
         errorMessage = err instanceof Error ? err.message : String(err);
         if (!token.isCancellationRequested) {
-            stream.markdown(`\n\n_Founder OS gateway error: ${errorMessage}_`);
+            stream.markdown(`\n\n_${errorMessage}_`);
         }
         return;
     }

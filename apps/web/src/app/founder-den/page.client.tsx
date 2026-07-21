@@ -282,9 +282,9 @@ export default function FounderDenPageClient() {
 
         {session?.accessToken && initialPath === 'SOVEREIGN' && (
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/10 p-5">
-            <h2 className="text-lg font-semibold text-white">Founder Stack — download & pair</h2>
+            <h2 className="text-lg font-semibold text-white">Founder IDE — download and connect</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Install {FOUNDER_NODE_MIN_VERSION_LABEL} on your laptop, pair once, then your IDE workspaces appear in Development Workspace.
+              Install one Founder IDE application on your laptop, connect Founder ID once, and your approved workspaces become available remotely. {FOUNDER_NODE_MIN_VERSION_LABEL} runs in the background.
             </p>
             <div className="mt-4">
               <FounderNodeDownloads />
@@ -292,11 +292,11 @@ export default function FounderDenPageClient() {
             <p className="mt-3 text-xs text-zinc-500">
               Full pairing, AI brain, and vault settings are in{' '}
               <a href="/settings/builder" className="text-emerald-400 underline">
-                Settings → Founder Stack
+                Settings → Founder IDE
               </a>
               . Downloads:{' '}
               <a href="/downloads#founder-node" className="text-emerald-400 underline">
-                Founder Stack desktop page
+                Founder IDE download page
               </a>
               .
             </p>

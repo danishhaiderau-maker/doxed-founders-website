@@ -124,6 +124,17 @@ if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
     throw "Founder IDE application payload not found at $ideRoot"
 }
 
+# Patch the compiled shell after the downstream build and before installer
+# packaging. Both scripts fail closed if an upstream minified signature moves.
+$ideAppRoot = Join-Path $ideRoot "resources\app"
+foreach ($patchName in @("patch-founder-settings-entry.py", "patch-founder-native-ai.py")) {
+    $patchScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\$patchName"
+    if (-not (Test-Path $patchScript)) { throw "Founder IDE shell patch not found: $patchScript" }
+    Write-Host "[stack]   applying $patchName"
+    python $patchScript --app $ideAppRoot
+    if ($LASTEXITCODE -ne 0) { throw "$patchName failed (exit $LASTEXITCODE)" }
+}
+
 # --- Step 3: build and embed the Founder relay -------------------------------
 $nodeDir = Join-Path $MonorepoRoot "apps\founder-node"
 $relayRoot = Join-Path $nodeDir "release\win-unpacked"

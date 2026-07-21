@@ -124,9 +124,10 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 - Founder startup/home editor with recent workspaces, current/recent tasks, Node/identity health, and one primary action.
 - Three desks: Build, Agents, Ship.
-- Use the currently empty lower Activity Bar space as a compact Founder shortcut dock. From top to bottom: Founder Home/Build, Agents, Ship, Founder Node, Connections, and Remote Sessions. Keep Account and Settings anchored at the bottom.
-- Every shortcut uses a familiar icon, tooltip, active indicator, and small status badge where useful. Node shows health, Agents shows active-task count, Ship shows failing/pending checks, and Remote shows an active-session indicator.
-- The rail adapts to short windows: preserve Build, Agents, and Ship, then move lower-priority Founder shortcuts into a single overflow menu. Do not leave a large dead strip or allow icons to overlap Account/Settings.
+- Use the currently empty lower Activity Bar space for three stable Founder destinations: **Founder**, **Work**, and **Connect**. Keep Account and Settings anchored at the bottom.
+- **Work** contains Agents and Ship. **Connect** contains Founder Node, AI/code/deploy/data/communication connections, and Remote Sessions. Commands deep-link to the intended subsection.
+- Every destination uses a familiar icon, tooltip, active indicator, and small status badge where useful. This grouping must remain visible at the tested Windows scaling instead of pushing Founder features behind the native `...` overflow.
+- A later core-shell overlay may hide redundant upstream destinations or support a fourth dedicated desk icon, but an extension-only build must not attempt to resize native Activity Bar icons.
 - Clicking a shortcut opens its real workspace surface, not an external documentation page or a duplicate settings page.
 - Unified command palette entries and deep links for every primary state.
 - Responsive behavior for laptop, wide monitor, narrow window, high DPI, and screen zoom.
@@ -159,6 +160,7 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 ### E. Build desk and Cursor-like live editing
 
 - One conversation with plan, tool calls, progress, and final result in chronological order.
+- Label the primary chat action **New chat**. Keep Projects, Agents, Connections, and History nearby; use icon-only controls only after their meaning is established and always provide tooltips.
 - Stream the active step and show files as they are read or edited.
 - Open affected code beside chat automatically; reveal live edits with stable decorations.
 - Proposed changes appear as an editable diff with accept file, accept hunk, reject, and restore.
@@ -169,11 +171,16 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 ### F. Agents desk
 
+- Keep one truthful Founder Dragon companion above the Work desk: idle when no work is observed, in flight while a real task is active, fire only after verified delivery, amber for an approval, and smoke/error for a blocked task. Clicking it opens the supporting evidence; reduced-motion mode removes animation.
 - Active and recent tasks with objective, status, current step, branch/worktree, elapsed time, cost, and changed files.
 - Expand a task into its timeline, logs, approvals, checkpoints, and artifacts.
 - Pause, resume, cancel, retry, hand off, and open the exact file/diff/terminal.
 - Bounded parallel agents with explicit file ownership and worktree isolation.
 - Budget and permission controls at task level; destructive/network/deploy actions remain approval-aware.
+- Automatic coordination follows `FOUNDER-MULTI-AGENT-COORDINATION-SPEC-2026-07-21.md`: every task publishes intent, paths, system contracts, runtime ownership, dependencies, and evidence before editing.
+- Detect overlap beyond filenames, including API routes, schemas, model aliases, deployment targets, ports, wallets, and user journeys. Select one owner and record the interface automatically instead of relying on the founder to introduce agents manually.
+- Offer three understandable modes: **Focus** (one primary agent), **Team** (two to six bounded specialists), and **Scale** (adaptive parallelism limited by independence, provider limits, budget, and machine pressure).
+- Use isolated worktrees, exclusive write leases, heartbeat fencing, a dependency-aware merge queue, and independent completion review. Agent count is never a success metric.
 
 ### G. Ship desk
 
@@ -206,6 +213,17 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 - Crash recovery restores unsent prompts, task timeline, open diffs, and terminal state where possible.
 - Health screen diagnoses identity, Node, gateway, provider, IPC, extension, updater, GitHub, and deployment connections.
 - Redacted diagnostic export and one-click copy of a support bundle manifest.
+- A completion receipt after every AI task re-checks the request, changed files, tests, rendered UI, relevant links, integrations, and release evidence.
+- A quiet 24-hour Founder Review checks local health, Node/IPC, identity, gateway, website/deep links, provider/deploy health, update state, and unresolved failures. It runs locally where possible, respects Local mode, and never performs provider writes, deployments, wallet actions, or authority changes without the configured approval.
+
+### M. Project intelligence and acquisition interest
+
+- Project profiles show source-labelled market, liquidity, volume, holder distribution, concentration, founder vesting, authority, security, product, and trust data without requiring a separate DEX analytics tab.
+- Calculate transparent 30/90/180-day holder cohorts from indexed transfers and historical balances. Label limitations; do not call wallets believers merely from a current balance.
+- Founders opt into acquisition inquiries and control when verified buyers receive private contact or data-room access.
+- Offers are non-binding until company, legal, governance, and funding conditions are complete.
+- A legally approved Acquisition Settlement Vault may use a fixed snapshot and burn/surrender proof to distribute escrowed stablecoin automatically. Token-to-share conversion remains a separate regulated workflow.
+- The implementation and data contracts are specified in `FOUNDER-END-TO-END-UX-AUDIT-2026-07-21.md`.
 
 ### K. Accessibility and performance
 
@@ -242,8 +260,9 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 ### Milestone 3: Live Build and Agents
 
 - Unify inherited chat, inline edit, autocomplete, task timeline, diffs, approvals, terminal/tests, checkpoints, errors, bounded parallel tasks, and agent controls.
+- Add the Shared Work Ledger, worktree allocator, semantic overlap detector, automatic owner negotiation, coordination map, concurrency governor, merge queue, and independent evidence gate.
 
-**Exit:** the user watches code change beside the conversation, reviews the diff, runs tests, accepts or rolls back, and can inspect/pause/cancel every active task without switching mental models.
+**Exit:** the user watches code change beside the conversation, reviews the diff, runs tests, accepts or rolls back, and can inspect/pause/cancel every active task without switching mental models. When two workers approach the same file or system contract, Founder resolves ownership and merge order automatically before either can create conflicting work.
 
 ### Milestone 4: Ship, integrations, and remote control
 
@@ -253,7 +272,7 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 ### Milestone 5: Launch economics and production trust
 
-- Implement the audited quote-asset-only bonding curve, automatic graduation, founder fee claims, locked liquidity, multisig treasury, wallet rotation, and no-project-token-sale rule.
+- Implement the legally approved launch template, automatic graduation, founder fee claims, continuous founder vesting where selected, locked liquidity, multisig treasury, wallet rotation, holder intelligence, and Acquisition Settlement Vault.
 - Complete signing, updater rollback, clean install/uninstall, accessibility, performance, security audit, soak, and release support.
 
 **Exit:** launch/graduation/rotation/recovery pass adversarial testnet and external review, and signed clean-machine IDE builds pass the complete acceptance suite on supported Windows versions; macOS/Linux follow their declared support plan.
@@ -297,5 +316,9 @@ Current ideas to preserve:
 - Live code edits beside the conversation, with understandable checkpoints.
 - Website/mobile remote control through the embedded Node.
 - Launch Partner workflows that connect building, deployment, trust review, and token-launch readiness.
+- A launch Conviction Vault dashboard that makes allocation, vested/unvested balance, price source, liquidity, monthly checkpoint, expiry, proposals, and receipts visible without enabling automatic selling.
 - Provider connection recipes for GitHub, Vercel, Railway, Neon, and later infrastructure without exposing secrets.
 - A calm Apple-like flow: progressive disclosure, one dominant action, polished motion, and fewer decisions per screen.
+- A truthful animated Founder Dragon that makes progress legible without becoming decoration or claiming work that is not actually running.
+- Automatic agent awareness: parallel workers discover related work through the Shared Work Ledger, negotiate ownership before editing, and share typed handoff artifacts instead of duplicating implementation or relying on the founder to introduce them.
+- Separate chats may keep independent context and file scopes, while event-driven checks and a 10-15 minute reconciliation heartbeat keep every active goal aware of nearby or overlapping work.

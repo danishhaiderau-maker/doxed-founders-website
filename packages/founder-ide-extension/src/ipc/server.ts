@@ -152,17 +152,26 @@ export async function startIpcServer(): Promise<net.Server | null> {
 
   return new Promise((resolve, reject) => {
     const srv = net.createServer((socket) => onClientConnected(socket));
-    srv.on('error', (err) => {
-      console.error('Founder OS IPC server error:', err);
-    });
+    const onStartupError = (err: NodeJS.ErrnoException) => {
+      if (process.platform === 'win32' && err.code === 'EADDRINUSE') {
+        console.info('Founder OS IPC is already served by another Founder IDE window.');
+        resolve(null);
+        return;
+      }
+      reject(err);
+    };
+    srv.once('error', onStartupError);
     srv.listen(pipePath, () => {
+      srv.off('error', onStartupError);
+      srv.on('error', (err) => {
+        console.error('Founder OS IPC server error:', err);
+      });
       server = srv;
       console.log(`Founder OS IPC server listening on ${pipePath}`);
       // Heartbeat sweep — drop dead clients every 15s.
       heartbeatTimer = setInterval(() => sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
       resolve(srv);
     });
-    srv.once('error', reject);
   });
 }
 

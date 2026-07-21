@@ -16,6 +16,7 @@ import {
 type FounderSettingsAction =
   | 'openChat'
   | 'openConnections'
+  | 'selectModel'
   | 'openAdvancedSettings'
   | 'openNodeConfig'
   | 'manageConnection'
@@ -109,6 +110,9 @@ export class FounderSettingsPanel implements vscode.Disposable {
       case 'openConnections':
         await vscode.commands.executeCommand('founderOs.openConnections');
         break;
+      case 'selectModel':
+        await vscode.commands.executeCommand('founderOs.selectModel');
+        break;
       case 'openAdvancedSettings':
         await vscode.commands.executeCommand(
           'workbench.action.openSettings',
@@ -179,6 +183,23 @@ export class FounderSettingsPanel implements vscode.Disposable {
       )
       .join('');
 
+    const providerRows = [
+      ['OpenAI', 'GPT and o-series models'],
+      ['Anthropic', 'Claude models'],
+      ['Google', 'Gemini models'],
+      ['DeepSeek', 'Chat and reasoning models'],
+      ['OpenRouter', 'One connection for many providers'],
+      ['Ollama', 'Models running on this computer'],
+    ]
+      .map(
+        ([name, detail]) => `
+          <div class="connection-row">
+            <div><strong>${name}</strong><span>${detail}</span></div>
+            <button class="link-button" type="button" data-action="openConnections">Connect</button>
+          </div>`,
+      )
+      .join('');
+
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -189,7 +210,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
   <style nonce="${nonce}">
     :root {
       color-scheme: light dark;
-      --accent: #2ea66d;
+      --accent: #2f80ed;
       --positive: #35b779;
       --warning: #e4a853;
       --border: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
@@ -208,8 +229,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
     }
     button { color: inherit; font: inherit; letter-spacing: 0; }
     button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
-    .page { width: min(860px, calc(100% - 48px)); margin: 0 auto; padding: 40px 0 72px; }
-    .header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 28px; }
+    .page { width: min(860px, calc(100% - 40px)); margin: 0 auto; padding: 30px 0 64px; }
+    .header { display: grid; gap: 18px; padding-bottom: 24px; }
     .identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
     .mark {
       display: grid; width: 38px; height: 38px; place-items: center;
@@ -217,20 +238,21 @@ export class FounderSettingsPanel implements vscode.Disposable {
       color: var(--positive); font-size: 20px; font-weight: 650;
     }
     h1, h2, p { margin: 0; }
-    h1 { font-size: 24px; font-weight: 650; }
+    h1 { font-size: 22px; font-weight: 650; }
     .subtitle, .section-copy, .choice span, .connection-row span, .note { color: var(--muted); }
     .subtitle { padding-top: 4px; font-size: 12px; }
     .tabs {
       display: flex; gap: 3px; padding: 3px; border: 1px solid var(--border);
-      border-radius: 7px; background: var(--surface); overflow-x: auto;
+      width: 100%; border-radius: 7px; background: var(--surface); overflow: hidden;
     }
     .tab, .segment {
       min-height: 30px; border: 0; border-radius: 5px; background: transparent;
-      color: var(--muted); cursor: pointer; padding: 0 12px; white-space: nowrap;
+      flex: 1 1 0; min-width: 0; color: var(--muted); cursor: pointer;
+      padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .tab.selected, .segment.selected { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
     .panel { display: none; }
-    .panel.selected { display: block; }
+    .panel.selected { display: block; animation: panel-in 160ms ease-out; }
     .section { padding: 28px 0; border-top: 1px solid var(--border); }
     .section:first-child { border-top: 0; }
     h2 { font-size: 15px; font-weight: 650; }
@@ -265,12 +287,25 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .secondary:hover { background: var(--surface-hover); }
     .link-button { border: 0; background: transparent; color: var(--vscode-textLink-foreground); }
     .note { padding-top: 14px; font-size: 11px; line-height: 1.55; }
+    .managed-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 20px;
+      margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 7px;
+      background: var(--surface);
+    }
+    .managed-row > div { display: grid; gap: 4px; }
+    .managed-row span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+    @keyframes panel-in {
+      from { opacity: 0; transform: translateY(3px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .panel.selected { animation: none; }
+    }
     @media (max-width: 680px) {
       .page { width: min(100% - 28px, 860px); padding-top: 24px; }
-      .header { align-items: flex-start; flex-direction: column; }
       .status-grid, .choices { grid-template-columns: 1fr; }
-      .tabs { width: 100%; }
-      .tab { flex: 1 0 auto; }
+      .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .tab { width: 100%; }
     }
   </style>
 </head>
@@ -282,14 +317,15 @@ export class FounderSettingsPanel implements vscode.Disposable {
         <div><h1>Founder Settings</h1><p class="subtitle">One workspace. Local when you want it, connected when you need it.</p></div>
       </div>
       <nav class="tabs" aria-label="Founder Settings sections">
-        <button class="tab selected" type="button" data-tab="general">General</button>
+        <button class="tab selected" type="button" data-tab="account">Account</button>
         <button class="tab" type="button" data-tab="ai">AI</button>
+        <button class="tab" type="button" data-tab="infrastructure">Local &amp; Cloud</button>
         <button class="tab" type="button" data-tab="connections">Connections</button>
-        <button class="tab" type="button" data-tab="privacy">Privacy</button>
+        <button class="tab" type="button" data-tab="advanced">Advanced</button>
       </nav>
     </header>
 
-    <div class="panel selected" data-panel="general">
+    <div class="panel selected" data-panel="account">
       <section class="section">
         <h2>Identity and Node</h2>
         <p class="section-copy">Your Doxxed account and the background Founder Node share one secure connection.</p>
@@ -313,10 +349,32 @@ export class FounderSettingsPanel implements vscode.Disposable {
 
     <div class="panel" data-panel="ai">
       <section class="section">
-        <h2>How Founder should work</h2>
-        <p class="section-copy">Choose an intent. Founder handles model routing behind the scenes, so you do not need to manage a wall of provider model names.</p>
+        <h2>Founder AI</h2>
+        <p class="section-copy">Managed routing is the default and stays available when no personal provider is selected.</p>
+        <div class="managed-row">
+          <div><strong>Founder managed</strong><span>${escapeHtml(profile.label)} &middot; ${escapeHtml(profile.aliasId)}</span></div>
+          <button class="secondary" type="button" data-action="selectModel">Choose route</button>
+        </div>
         <div class="choices">${profileButtons}</div>
-        <p class="note">Current route: ${escapeHtml(profile.label)} via ${escapeHtml(profile.aliasId)}.</p>
+      </section>
+      <section class="section">
+        <h2>Bring your own key</h2>
+        <p class="section-copy">Personal providers are encrypted in the Founder Provider Vault and remain separate from the managed allowance.</p>
+        <div class="connections">${providerRows}</div>
+      </section>
+    </div>
+
+    <div class="panel" data-panel="infrastructure">
+      <section class="section">
+        <h2>Infrastructure mode</h2>
+        <p class="section-copy">Choose where work runs and which connected services this workspace may use.</p>
+        <div class="segments" role="group" aria-label="Infrastructure mode">${modeButtons}</div>
+        <div class="mode-detail"><strong>${escapeHtml(modeDefinition.summary)}</strong><span>${escapeHtml(modeDefinition.services)}</span></div>
+      </section>
+      <section class="section">
+        <h2>Local models</h2>
+        <p class="section-copy">Ollama can run through the embedded Founder Node without sending prompts to a cloud model.</p>
+        <div class="button-row"><button class="primary" type="button" data-action="openConnections">Manage local AI</button></div>
       </section>
     </div>
 
@@ -329,16 +387,10 @@ export class FounderSettingsPanel implements vscode.Disposable {
       </section>
     </div>
 
-    <div class="panel" data-panel="privacy">
-      <section class="section">
-        <h2>Infrastructure mode</h2>
-        <p class="section-copy">Choose where work runs and which connected services this workspace may use.</p>
-        <div class="segments" role="group" aria-label="Infrastructure mode">${modeButtons}</div>
-        <div class="mode-detail"><strong>${escapeHtml(modeDefinition.summary)}</strong><span>${escapeHtml(modeDefinition.services)}</span></div>
-      </section>
+    <div class="panel" data-panel="advanced">
       <section class="section">
         <h2>Advanced controls</h2>
-        <p class="section-copy">Raw connection overrides and the local Node configuration are available for development and support.</p>
+        <p class="section-copy">Editor preferences, raw connection overrides, and the local Node configuration.</p>
         <div class="button-row"><button class="secondary" type="button" data-action="openAdvancedSettings">Advanced settings</button><button class="secondary" type="button" data-action="openNodeConfig">Node configuration</button></div>
       </section>
     </div>

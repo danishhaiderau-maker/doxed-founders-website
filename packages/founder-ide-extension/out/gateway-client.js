@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_MAX_RETRIES = exports.DEFAULT_FIM_TIMEOUT_MS = exports.DEFAULT_CHAT_TIMEOUT_MS = void 0;
 exports.redactSecrets = redactSecrets;
+exports.gatewayUserMessage = gatewayUserMessage;
 exports.parseRetryAfter = parseRetryAfter;
 exports.computeBackoffMs = computeBackoffMs;
 exports.callGateway = callGateway;
@@ -53,6 +54,61 @@ function redactSecrets(input) {
     text = text.replace(/("api_key"\s*:\s*)"[^"]*"/gi, '$1"***"');
     text = text.replace(/(api_key=)[^&\s"]+/gi, '$1***');
     return text;
+}
+function responseMessage(body) {
+    const trimmed = body.trim();
+    if (!trimmed || /<\/?(?:html|body|head|title|!doctype)\b/i.test(trimmed)) {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(trimmed);
+        const nested = typeof parsed.error === 'object' && parsed.error !== null
+            ? parsed.error.message
+            : undefined;
+        const candidate = nested ?? parsed.message ?? parsed.error;
+        if (typeof candidate === 'string' && candidate.trim()) {
+            return redactSecrets(candidate.trim()).slice(0, 240);
+        }
+    }
+    catch {
+        if (/^[\w\s.,:;!?()'"/@+-]+$/.test(trimmed)) {
+            return redactSecrets(trimmed).slice(0, 240);
+        }
+    }
+    return null;
+}
+function isProviderCredentialFailure(body) {
+    const detail = responseMessage(body);
+    return Boolean(detail &&
+        /(?:authentication\s+fails?|invalid[^.]{0,40}api\s*key|api\s*key[^.]{0,40}invalid)/i.test(detail));
+}
+/** Convert an HTTP/gateway failure into safe, actionable chat copy. */
+function gatewayUserMessage(status, body = '', retryAfterMs = null) {
+    const detail = responseMessage(body);
+    if (status === 0) {
+        return 'Founder AI could not reach Founder OS. Check your connection, then try again or switch to Local mode.';
+    }
+    if (isProviderCredentialFailure(body)) {
+        return 'The selected AI provider is unavailable. Open Founder Connect to repair it or choose another model.';
+    }
+    if (status === 401 || status === 403) {
+        return `Your Founder connection has expired (auth expired, ${status}). Open Founder Connect and sign in again.`;
+    }
+    if (status === 429) {
+        const wait = retryAfterMs && retryAfterMs > 0
+            ? ` Try again in about ${Math.max(1, Math.ceil(retryAfterMs / 1000))} seconds.`
+            : ' Try again shortly.';
+        return `Founder AI is rate limited and busy.${wait}`;
+    }
+    if (status >= 500) {
+        return `Founder AI is temporarily unavailable (gateway ${status}). Your local files are safe. Try again shortly or switch to Local mode.`;
+    }
+    if (status >= 400) {
+        return detail
+            ? `Founder OS rejected this request (${status}): ${detail}`
+            : `Founder OS rejected this request (${status}). Review Founder Connect and try again.`;
+    }
+    return 'Founder AI could not complete this request. Try again or open Founder Connect.';
 }
 /**
  * Parse a `Retry-After` header value to milliseconds. Returns null if the
@@ -184,10 +240,16 @@ async function callGateway(client, options, callbacks, token, extra = {}) {
             // 401/403 — auth expired. Never retry; surface + bail.
             if (res.status === 401 || res.status === 403) {
                 const text = await res.text().catch(() => '');
+                if (isProviderCredentialFailure(text)) {
+                    log('warn', 'upstream AI provider credentials were rejected');
+                    callbacks.onProviderError?.(res.status, text);
+                    callbacks.onError?.(res.status, text);
+                    throw new Error(gatewayUserMessage(res.status, text));
+                }
                 log('warn', redactSecrets(`auth expired (${res.status}): ${text.slice(0, 200)}`));
                 callbacks.onAuthExpired?.(res.status);
                 callbacks.onError?.(res.status, text);
-                throw new Error(`Founder OS gateway auth expired (${res.status})`);
+                throw new Error(gatewayUserMessage(res.status, text));
             }
             // 429 — rate limited. Read Retry-After, surface, no retry.
             if (res.status === 429) {
@@ -196,14 +258,14 @@ async function callGateway(client, options, callbacks, token, extra = {}) {
                 log('warn', redactSecrets(`rate limited (429); retry-after=${res.headers.get('retry-after') ?? 'absent'} (${retryAfterMs}ms)`));
                 callbacks.onRateLimited?.(retryAfterMs);
                 callbacks.onError?.(res.status, text);
-                throw new Error(`Founder OS gateway rate limited (429)`);
+                throw new Error(gatewayUserMessage(res.status, text, retryAfterMs));
             }
             // 4xx (non-401/403/429) — deterministic, do not retry.
             if (res.status >= 400 && res.status < 500) {
                 const text = await res.text().catch(() => '');
                 log('warn', redactSecrets(`client error (${res.status}): ${text.slice(0, 200)}`));
                 callbacks.onError?.(res.status, text);
-                throw new Error(`Founder OS gateway returned ${res.status}: ${text.slice(0, 500)}`);
+                throw new Error(gatewayUserMessage(res.status, text));
             }
             // 5xx — retry up to cap; surface provider error if exhausted.
             if (res.status >= 500) {
@@ -216,14 +278,14 @@ async function callGateway(client, options, callbacks, token, extra = {}) {
                 log('error', redactSecrets(`upstream ${res.status} (no retries left)`));
                 callbacks.onProviderError?.(res.status, text);
                 callbacks.onError?.(res.status, text);
-                throw new Error(`Founder OS gateway upstream ${res.status}: ${text.slice(0, 500)}`);
+                throw new Error(gatewayUserMessage(res.status, text));
             }
             // 2xx with body — stream it. (No retry on stream-time errors; partial
             // tokens are lost and the user-visible message will be partial.)
             if (!res.ok || !res.body) {
                 const text = await res.text().catch(() => '');
                 callbacks.onError?.(res.status, text);
-                throw new Error(`Founder OS gateway returned ${res.status}: ${text.slice(0, 500)}`);
+                throw new Error(gatewayUserMessage(res.status, text));
             }
             try {
                 await pumpSseStream(res.body, callbacks, attemptController.signal, makeToolCallAggregator());
@@ -536,7 +598,7 @@ async function callFim(client, req, token, extra = {}) {
         });
         if (!res.ok) {
             const text = await res.text().catch(() => '');
-            throw new Error(`Founder OS gateway FIM returned ${res.status}: ${text.slice(0, 500)}`);
+            throw new Error(gatewayUserMessage(res.status, text));
         }
         const json = await res.json();
         validateFimResponse(json);
@@ -568,7 +630,7 @@ async function gatewayJson(client, method, path, body, token) {
         });
         if (!res.ok) {
             const text = await res.text().catch(() => '');
-            throw new Error(`Founder OS gateway ${method} ${path} -> ${res.status}: ${text.slice(0, 500)}`);
+            throw new Error(gatewayUserMessage(res.status, text));
         }
         return (await res.json());
     }

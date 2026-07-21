@@ -359,9 +359,12 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 }
 
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
-	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, separateSystemMessage, chatMode } = params;
+	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode } = params;
 
-	const model = aliasForFeature(loggingName, 'chatMessages', chatMode);
+	const requestedModel = modelSelection?.modelName;
+	const model = typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
+		? requestedModel
+		: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
 
 	const body: Record<string, unknown> = {
