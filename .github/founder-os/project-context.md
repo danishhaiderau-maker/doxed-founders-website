@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Isolate relay executor and enforce no-worse limit entries
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
