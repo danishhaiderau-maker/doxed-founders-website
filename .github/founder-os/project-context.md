@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-fix(research): preserve stack children and analyzer summary
+fix(ai): constrain Founder aliases to healthy routes
 
 ## Last Activity
 
