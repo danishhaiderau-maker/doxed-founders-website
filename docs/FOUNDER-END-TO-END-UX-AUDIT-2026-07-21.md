@@ -15,7 +15,8 @@
 - **Work** contains the truthful Founder Dragon companion, Agents, and Ship. **Connect** contains Founder Node, provider connections, remote sessions, and later communication/calendar services.
 - The installed chat gear now opens one responsive **Founder Settings** surface with Account, AI, Local & Cloud, Connections, and Advanced sections. User-facing `Void's Settings` copy and the inherited settings action are redirected with a rollback-backed post-build patch.
 - The Founder Dragon is verified in the installed Work view. It is quiet while idle, flies only during observed extension chat/task work, breathes fire on verified delivery, and uses attention/error states rather than pretending to be busy. Native core-chat events still need a first-class bridge before the companion covers every inherited chat request.
-- Founder Chat opens the native right sidebar and shows `founder-os-auto`. A real authenticated request reached the production gateway on 2026-07-21, but the active DeepSeek route translated the alias to obsolete `deepseek-coder-v2`; production rejected it with 400. The API workstream owns that routing repair and four-alias smoke. This is **implemented but not yet end-to-end verified**, not done.
+- Founder Chat opens the native right sidebar and shows `founder-os-auto`. The production alias and streaming repairs are live at `d004cf3d` and `49bf5b5e`. On 2026-07-21, paired-node unique-nonce smokes proved HTTP 200, Founder metadata, non-empty content, and terminal `[DONE]` for Auto, Fast, Reasoning, and Code. Auto/Reasoning/Code routed to DeepSeek `deepseek-v4-pro`; Fast routed to `deepseek-v4-flash`. The native installed-window response remains **pending visual proof** because unrelated local bot/analyzer windows repeatedly stole focus and the fresh Electron window exited during the final automation pass.
+- Production chat is currently fail-closed to the verified DeepSeek v4 capabilities. GLM 5.2 remains an intended managed route for implementation/reasoning, but it must stay ineligible until its real credential and supported model endpoint pass the same authenticated completion test.
 - The server credential store can remember multiple sealed provider credentials, but the native entitlement-aware BYOK list, health state, selection, and failover are not fully wired into chat. The current Settings provider rows lead to the existing web connection surface.
 - Debug Squasher already exposes platform health and a daily server run. It is not yet the complete local, website, integration, visual, and release evidence loop requested by the founder.
 
@@ -45,6 +46,8 @@ Users see one product and five consistent concepts:
 | Trade | Contextual launch readiness only | DCF Swap, portfolio, market and settlement |
 
 The website gets only **Build**, **Discover**, and **Trade** as top-level intents. Account, Connect, notifications, plan, security, downloads, and admin controls live behind the appropriate user or admin control.
+
+The detailed website, Founder account, Admin, Founder Brain routing, capacity, keep/merge/remove inventory, and Apple-style interaction contract are maintained in [`FOUNDER-WEB-ACCOUNT-APPLE-REDESIGN-BRIEF-2026-07-21.md`](./FOUNDER-WEB-ACCOUNT-APPLE-REDESIGN-BRIEF-2026-07-21.md).
 
 ## 3. Founder Connect contract
 
