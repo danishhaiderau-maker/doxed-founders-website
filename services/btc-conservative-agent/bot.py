@@ -10353,6 +10353,7 @@ def log_lane_opportunity_event(
     edge_score: float = None,
     block_reason: str = None,
     shadow_pnl: float = None,
+    details: dict = None,
 ):
     """Per-lane opportunity capture — APPROVE → ORDER → FILL attribution for Pathway Lab."""
     try:
@@ -10368,6 +10369,7 @@ def log_lane_opportunity_event(
             "edge_score": edge_score,
             "block_reason": block_reason,
             "shadow_pnl_usd": shadow_pnl,
+            "details": copy.deepcopy(details or {}),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
@@ -10399,7 +10401,13 @@ def log_lane_opportunity_event(
         # dashboard tile can render the full Section 2 metric set without
         # re-deriving it from raw opportunity events each poll.
         if lane == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
-            _record_tile2_event(event, direction, block_reason, trade_id=trade_id)
+            _record_tile2_event(
+                event,
+                direction,
+                block_reason,
+                trade_id=trade_id,
+                details=details,
+            )
     except Exception as e:
         logger.error(f"[LANE_OPPORTUNITY] log failed: {e}")
 
@@ -10544,6 +10552,7 @@ def _record_tile2_event(
     direction: str = None,
     block_reason: str = None,
     trade_id: str = None,
+    details: dict = None,
 ) -> None:
     """Increment Tile 2 counters based on a lane opportunity event.
 
@@ -10553,8 +10562,19 @@ def _record_tile2_event(
     try:
         with state_lock:
             bucket = _tile2_counters_bucket()
+            observed_ts = time.time()
+            event_snapshot = {
+                "event": str(event or ""),
+                "trade_id": str(trade_id or ""),
+                "direction": str(direction or ""),
+                "block_reason": str(block_reason or ""),
+                "observed_ts": observed_ts,
+                "details": copy.deepcopy(details or {}),
+            }
+            bucket["last_event"] = event_snapshot
             if event == "BRACKET_EVAL":
                 bucket["bracket_evals"] = int(bucket.get("bracket_evals", 0)) + 1
+                bucket["last_evaluation"] = event_snapshot
             elif event == "ORDER_SUBMITTED" and trade_id:
                 seen = bucket.setdefault("paper_order_ids", [])
                 if trade_id not in seen:
@@ -10719,6 +10739,7 @@ def tile2_dashboard_metrics() -> dict:
         "paper_pnl_usd": paper_pnl,
         "ev_per_eligible_opportunity": round(ev_per_eligible, 4),
         "ev_per_filled_close": round(ev_per_filled, 4),
+        "last_evaluation": copy.deepcopy(bucket.get("last_evaluation") or {}),
         # Cohort marker for the dashboard tile footer.
         "cohort_label": (
             f"{TILE2_POLICY_ID} · exit={TILE2_EXIT_PROFILE_ID}"
@@ -10773,6 +10794,10 @@ def load_tile2_counters_from_disk() -> None:
             lifecycle = counters.get("order_lifecycle") or {}
             if isinstance(lifecycle, dict):
                 bucket["order_lifecycle"] = copy.deepcopy(lifecycle)
+            for snapshot_key in ("last_event", "last_evaluation"):
+                snapshot = counters.get(snapshot_key) or {}
+                if isinstance(snapshot, dict) and snapshot:
+                    bucket[snapshot_key] = copy.deepcopy(snapshot)
             # Cohort is determined by the running source code, not the on-disk
             # snapshot, so that a stale on-disk cohort cannot silently lie.
             bucket["cohort_id"] = TILE2_POLICY_ID
@@ -14283,6 +14308,21 @@ def maybe_tick_sr_micro_tile_v2_bracket():
             None,
             edge_score,
             block_reason=eval_result.get("block_reason") or eval_result.get("zone"),
+            details={
+                "adx_normalized": adx,
+                "volatility_percentile": vol_pct,
+                "price": price,
+                "micro_support": ms.get("micro_support"),
+                "micro_resistance": ms.get("micro_resistance"),
+                "swing_low": swing_low,
+                "swing_high": swing_high,
+                "armed": bool(eval_result.get("armed")),
+                "in_midpoint_zone": bool(eval_result.get("in_midpoint_zone")),
+                "zone": eval_result.get("zone"),
+                "session_bucket": sess_bucket,
+                "tile_on": bool(is_research_lane_enabled(lane)),
+                "sr_episode_id": sr_episode_id,
+            },
         )
 
         if not eval_result.get("armed") or eval_result.get("in_midpoint_zone"):
@@ -23192,7 +23232,8 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">One row per actual shared AI call. Continuous and Type B apply separate post-AI policies.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">One row per actual shared AI call. Continuous and Type B apply separate post-AI policies. Tile 2 uses no AI; its independent deterministic gate is shown below.</p>
+<div id="tile2DecisionSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;">Tile 2 deterministic gate · collecting…</div>
 <table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous verdict</th><th>Type B verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -24887,8 +24928,26 @@ DASHBOARD_JS = """(function () {
             'cohort=' + (t2.cohort_label || '-')
           ].join(' · ');
           safeText('tile2Metrics', t2Txt);
+          const t2Eval = t2.last_evaluation || {};
+          const t2Details = t2Eval.details || {};
+          const t2Reason = t2Eval.block_reason || 'NO_EVALUATION';
+          const t2Adx = Number(t2Details.adx_normalized);
+          const t2Vol = Number(t2Details.volatility_percentile);
+          const t2Cap = Number((d.tile2_policy || {}).adx_cap || 40);
+          const t2State = t2Details.armed && !t2Details.in_midpoint_zone ? 'ELIGIBLE' : 'WAITING';
+          const t2When = t2Eval.observed_ts ? formatMelbourneDateTime(t2Eval.observed_ts) : '-';
+          const t2AdxText = Number.isFinite(t2Adx)
+            ? ('ADX ' + t2Adx.toFixed(2) + (t2Adx > t2Cap ? ' > ' : ' ≤ ') + t2Cap)
+            : 'ADX unavailable';
+          const t2VolText = Number.isFinite(t2Vol) ? ('volatility ' + t2Vol.toFixed(1)) : 'volatility unavailable';
+          safeText(
+            'tile2DecisionSummary',
+            'Tile 2 deterministic gate · ' + t2State + ' · ' + t2Reason +
+              ' · ' + t2AdxText + ' · ' + t2VolText + ' · checked ' + t2When
+          );
         } else {
           safeText('tile2Metrics', 'Tile 2 counters not yet collected');
+          safeText('tile2DecisionSummary', 'Tile 2 deterministic gate · collecting…');
         }
         safeText('lastAICall', dbg.last_ai_call || '-');
         safeText('aiScore', dbg.last_ai_score || '-');

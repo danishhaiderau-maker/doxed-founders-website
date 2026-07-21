@@ -58,6 +58,7 @@ from bot import (
     record_tile2_eligible_long,
     record_tile2_eligible_side,
     _record_tile2_order_lifecycle,
+    _record_tile2_event,
     _tile2_counters_bucket,
     _submit_tile2_paper_resting_limit,
     _tile2_paper_resting_limit_for_lane,
@@ -172,6 +173,17 @@ check(
     "EXIT_PROFILE_ID_PROVISIONAL is the 12->10 ladder cohort",
     EXIT_PROFILE_ID_PROVISIONAL.endswith("_provisional"),
 )
+
+reset_state()
+_record_tile2_event(
+    "BRACKET_EVAL",
+    block_reason="ADX_TRENDING",
+    trade_id="srmv2s-bracket-observability",
+    details={"adx_normalized": 54.3, "volatility_percentile": 61.0, "armed": False},
+)
+last_eval = tile2_dashboard_metrics().get("last_evaluation") or {}
+check("latest deterministic gate reason is dashboard-visible", last_eval.get("block_reason") == "ADX_TRENDING")
+check("latest deterministic ADX is dashboard-visible", (last_eval.get("details") or {}).get("adx_normalized") == 54.3)
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +801,11 @@ for _ in range(2):
     _record_tile2_event("CLOSED", direction="LONG", trade_id=f"order-{_}")
 _record_tile2_event("TTL_EXPIRED")
 _record_tile2_event("CANCELLED")
+_record_tile2_event(
+    "BRACKET_EVAL",
+    block_reason="ADX_TRENDING",
+    details={"adx_normalized": 54.3, "armed": False},
+)
 
 m = tile2_dashboard_metrics()
 check(
@@ -841,7 +858,9 @@ check(
     f"got {m.get('fill_rate')}",
 )
 
-# Restart simulation: counters persisted + reload preserves them.
+# Restart simulation: remove the in-memory bucket, then restore from disk.
+with state_lock:
+    state.pop("tile2_counters", None)
 load_tile2_counters_from_disk()
 m2 = tile2_dashboard_metrics()
 check(
@@ -852,6 +871,10 @@ check(
 check(
     "cohort_id is always taken from running code after reload",
     m2.get("cohort_id") == TILE2_POLICY_ID,
+)
+check(
+    "latest deterministic evaluation survives restart",
+    (m2.get("last_evaluation") or {}).get("block_reason") == "ADX_TRENDING",
 )
 check(
     "Fresh Collection resets Tile 2 in-memory counters after archive/wipe",

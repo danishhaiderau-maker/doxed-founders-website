@@ -57,6 +57,16 @@ checks = [
         "<th>Shared Call ID</th>" in SOURCE
         and "shared_ai_call_id" in SOURCE,
     ),
+    (
+        "AI history explains that Tile 2 is deterministic",
+        "Tile 2 uses no AI; its independent deterministic gate is shown below." in SOURCE,
+    ),
+    (
+        "Tile 2 latest gate reason and check time are visible",
+        'id="tile2DecisionSummary"' in SOURCE
+        and "t2Eval.block_reason" in SOURCE
+        and "t2Eval.observed_ts" in SOURCE,
+    ),
 ]
 
 passed = sum(check(name, condition) for name, condition in checks)

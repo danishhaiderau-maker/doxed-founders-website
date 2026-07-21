@@ -192,10 +192,14 @@ try {
       : { ok: false },
     copy: {
       instanceStatus: inst?.status ?? null,
+      relayArmedAt: dash.relayArmedAt ?? dash.realTradingConfirmedAt ?? null,
       lastTickAt: dash.lastTickAt ?? null,
       lastError: inst?.lastError ?? null,
       open: [...copyOpen],
       pending: copyPending,
+      reconcile: dash.copyRelayReconcile ?? null,
+      executorHealth: dash.executorHealth ?? dash.relayExecutorHealth ?? null,
+      signedWebhook: dash.signedWebhook ?? dash.webhookSequence ?? null,
     },
     bitfinex: book
       ? {

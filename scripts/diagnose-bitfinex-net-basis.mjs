@@ -223,7 +223,7 @@ async function main() {
     where: {
       agentId: agent.id,
       exchangeProvider: 'bitfinex',
-      status: 'ACTIVE',
+      status: { in: ['ACTIVE', 'PAUSED'] },
     },
     include: {
       user: { select: { platformHandle: true, name: true } },
@@ -236,7 +236,7 @@ async function main() {
         .filter(Boolean)
         .some((value) => String(value).trim().toLowerCase() === handle),
     ) ?? instances[0];
-  if (!instance) throw new Error('No active Bitfinex live-copy instance found');
+  if (!instance) throw new Error('No Bitfinex live-copy instance found');
 
   const dashboard = asPayload(instance.dashboardState);
   const lastRelayTickMs = Date.parse(String(dashboard.lastTickAt ?? ''));

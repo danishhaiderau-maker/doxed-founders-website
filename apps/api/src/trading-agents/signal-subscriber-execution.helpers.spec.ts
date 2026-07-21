@@ -6,6 +6,7 @@ import {
   capRelayLimitAtShowcaseFill,
   readPersistedRelayExecutorHealth,
   isBenignShowcaseEntryWait,
+  isRecoveredShowcaseOutageError,
   isCycleFreshForRelayArm,
   mergedDirectionCompatible,
   relayEntryOrderIsCompletelyUnfilled,
@@ -188,6 +189,20 @@ for (const message of [
     assert.equal(isBenignShowcaseEntryWait(message), true);
   });
 }
+
+test('recognizes only historical F1 outage text for recovery clearing', () => {
+  assert.equal(
+    isRecoveredShowcaseOutageError(
+      'Showcase unreachable for 62s — live copy in safe mode: no new entries (F1); open lots will be closed past 120s (F2).',
+    ),
+    true,
+  );
+  assert.equal(
+    isRecoveredShowcaseOutageError('RECONCILE ALERT: exchange 0.03 BTC ≠ ledger 0 BTC'),
+    false,
+  );
+  assert.equal(isRecoveredShowcaseOutageError(null), false);
+});
 
 for (const message of [
   'Showcase bridge unavailable — exact-copy entry blocked.',

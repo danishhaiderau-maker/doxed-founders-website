@@ -250,22 +250,24 @@ function Stop-ListenPortFast([int]$ListenPort) {
     $owners += @(Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
       Select-Object -ExpandProperty OwningProcess -Unique)
   } catch { }
-  # Get-NetTCPConnection intermittently returns nothing on restricted Windows
-  # sessions.  Native netstat is read-only and reliably exposes every listener,
-  # including duplicate SO_REUSEADDR owners on the same port.
-  if ($owners.Count -eq 0) {
-    try {
-      & netstat.exe -ano -p TCP 2>$null | ForEach-Object {
-        if ($_ -match "^\s*TCP\s+\S+:$ListenPort\s+\S+\s+LISTENING\s+(\d+)\s*$") {
-          $owners += [int]$matches[1]
-        }
+  # Always merge native netstat results. Get-NetTCPConnection can return only
+  # one of multiple SO_REUSEADDR listeners, which previously left an orphan
+  # owner alive and let Start create a second :7002 bot.
+  try {
+    & netstat.exe -ano -p TCP 2>$null | ForEach-Object {
+      if ($_ -match "^\s*TCP\s+\S+:$ListenPort\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+        $owners += [int]$matches[1]
       }
-    } catch { }
-  }
+    }
+  } catch { }
   $owners | Select-Object -Unique | ForEach-Object {
     $procId = [int]$_
     if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
       Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 100
+      if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+        & taskkill.exe /PID $procId /T /F 2>$null | Out-Null
+      }
       $killed += $procId
     }
   }

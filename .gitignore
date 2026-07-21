@@ -288,6 +288,12 @@ services/btc-conservative-agent/trade_outcome.jsonl*
 services/btc-conservative-agent/research_archive/
 services/btc-conservative-agent/research_accumulator/
 services/btc-conservative-agent/research/downloads/
+services/btc-conservative-agent/research/backups/
+services/btc-conservative-agent/research_retention/
+/artifacts/
+/exports/
+/execution_funnel.jsonl*
+/lane_opportunity_capture.jsonl*
 *.log.*
 *.jsonl.tmp
 *.jsonl.*.tmp

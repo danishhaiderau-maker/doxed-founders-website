@@ -29,27 +29,31 @@ function pickPayload(p) {
 
 async function main() {
   const agent = await prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
+  const requestedInstanceId = process.argv[2] || process.env.LIVE_COPY_INSTANCE_ID || null;
+  const instanceWhere = requestedInstanceId
+    ? { id: requestedInstanceId }
+    : {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: { in: ['ACTIVE', 'PAUSED'] },
+        OR: [
+          { expiresAt: null },
+          { expiresAt: { gt: new Date() } },
+        ],
+      };
   const cheetah = await prisma.tradingAgentInstance.findFirst({
-    where: {
-      agentId: agent.id,
-      exchangeProvider: 'bitfinex',
-      status: 'ACTIVE',
-      OR: [
-        { expiresAt: null },
-        { expiresAt: { gt: new Date() } },
-      ],
-    },
+    where: instanceWhere,
     include: { user: { select: { id: true, platformHandle: true, name: true } } },
     orderBy: { updatedAt: 'desc' },
   });
   if (!cheetah) {
-    console.log('No active bitfinex hire');
+    console.log('No Bitfinex hire');
     return;
   }
 
   const userId = cheetah.userId;
   const who = cheetah.user?.platformHandle ?? cheetah.user?.name ?? userId;
-  console.log(`\n=== ${who} @ ${new Date().toISOString()} ===`);
+  console.log(`\n=== ${who} instance=${cheetah.id} status=${cheetah.status} @ ${new Date().toISOString()} ===`);
   console.log(`instance lastError: ${cheetah.lastError ?? '(none)'}`);
   const dashboard = cheetah.dashboardState && typeof cheetah.dashboardState === 'object'
     ? cheetah.dashboardState
@@ -167,6 +171,30 @@ async function main() {
   }
 
   console.log(`\nLedger OPEN lots: ${openQty} | sum qty: ${ledgerQty.toFixed(5)} BTC`);
+
+  const recentParticipants = await prisma.signalCycleParticipant.findMany({
+    where: { userId, cycle: { agentId: agent.id } },
+    include: {
+      cycle: { select: { tradeId: true, status: true, createdAt: true } },
+      events: { orderBy: { createdAt: 'desc' }, take: 5 },
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: 8,
+  });
+  console.log('\n=== Recent participant lifecycle ===');
+  for (const row of recentParticipants) {
+    console.log(`  ${row.updatedAt.toISOString()} ${row.status} ${row.cycle.tradeId}`);
+    for (const event of [...row.events].reverse()) {
+      const payload = pickPayload(event.payload);
+      console.log(
+        `    ${event.createdAt.toISOString()} ${event.eventType} ` +
+          `${payload.reason ?? payload.event ?? payload.orderStatus ?? ''} ` +
+          `order=${payload.bitfinexOrderId ?? payload.bitfinex_order_id ?? ''} ` +
+          `cancelled=${payload.cancelledOrderId ?? payload.cancelled_order_id ?? ''} ` +
+          `limit=${payload.limit_price ?? payload.limitPrice ?? ''} qty=${payload.qty ?? ''}`,
+      );
+    }
+  }
   await prisma.$disconnect();
 }
 

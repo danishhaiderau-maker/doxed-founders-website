@@ -283,6 +283,13 @@ export function isBenignShowcaseEntryWait(message: string | null | undefined): b
   );
 }
 
+/** Clear only a historical F1 outage after debounced source recovery. */
+export function isRecoveredShowcaseOutageError(
+  message: string | null | undefined,
+): boolean {
+  return !!message && message.startsWith('Showcase unreachable for ');
+}
+
 /**
  * Only intents with a currently resting canonical showcase limit are eligible
  * for pending-order mirroring. Older unfilled INTENT rows must not block a
@@ -1739,8 +1746,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
       }
     } else if (botStateForCap != null || signedFastOrders.length > 0) {
-      this.clearShowcaseUnreachable(instance.id);
-      if (isBenignShowcaseEntryWait(instance.lastError)) {
+      const showcaseRecovered = this.clearShowcaseUnreachable(instance.id);
+      if (
+        isBenignShowcaseEntryWait(instance.lastError) ||
+        (showcaseRecovered && isRecoveredShowcaseOutageError(instance.lastError))
+      ) {
         await this.prisma.tradingAgentInstance
           .updateMany({
             where: { id: instance.id, lastError: instance.lastError },
@@ -6588,19 +6598,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * is preserved until the threshold is met so F1/F2 keep gating entries and
    * orphans throughout the flap.
    */
-  private clearShowcaseUnreachable(instanceId: string): void {
+  private clearShowcaseUnreachable(instanceId: string): boolean {
     if (!this.showcaseUnreachableSince.has(instanceId)) {
       // Already healthy — keep the counter clean.
       this.showcaseRecoveryHits.delete(instanceId);
-      return;
+      return false;
     }
     const hits = (this.showcaseRecoveryHits.get(instanceId) ?? 0) + 1;
     if (hits >= this.SHOWCASE_RECOVERY_HITS_REQUIRED) {
       this.showcaseUnreachableSince.delete(instanceId);
       this.showcaseSafeModeNoticeAt.delete(instanceId);
       this.showcaseRecoveryHits.delete(instanceId);
+      return true;
     } else {
       this.showcaseRecoveryHits.set(instanceId, hits);
+      return false;
     }
   }
 

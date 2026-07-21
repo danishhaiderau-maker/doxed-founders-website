@@ -120,6 +120,19 @@ if ($recordedBotRunning) {
   Start-Sleep -Seconds 1
 }
 
+# Never launch into an occupied port. Python's temporary early-boot server can
+# coexist briefly with a stale SO_REUSEADDR listener on Windows, producing two
+# apparent dashboard owners and non-deterministic responses. A failed cleanup
+# is safer than a duplicate bot, so abort and let the existing owner continue.
+if (Test-PortOpen $BotListenPort) {
+  Stop-ListenPortFast $BotListenPort | Out-Null
+  Start-Sleep -Seconds 2
+}
+if (Test-PortOpen $BotListenPort) {
+  Write-Host "ERROR: Port $BotListenPort still has a listener after cleanup; refusing duplicate bot start." -ForegroundColor Red
+  exit 1
+}
+
 Set-Location $agentDir
 # Script port wins over anything in home-bot.env (vault must not override showcase :7002).
 $env:PORT = "$BotListenPort"
