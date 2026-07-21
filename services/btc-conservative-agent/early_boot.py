@@ -23,6 +23,22 @@ def _utc_iso() -> str:
 _RESERVED_PORTS = frozenset({7810})
 
 
+def _write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+    """Write a boot response; silently accept a client that already disconnected."""
+    body = json.dumps(payload).encode("utf-8")
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+        # Health checkers and browsers routinely abandon the temporary boot
+        # response while the full dashboard is taking ownership of the port.
+        # That is a normal client disconnect, not a bot crash.
+        return
+
+
 def start_early_ping_server(port: int, *, version: str = "booting", host: str = "0.0.0.0") -> None:
     global _server, _thread, _boot_version
     if int(port) in _RESERVED_PORTS:
@@ -39,12 +55,7 @@ def start_early_ping_server(port: int, *, version: str = "booting", host: str = 
             return
 
         def _write_json(self, status: int, payload: dict) -> None:
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            _write_json_response(self, status, payload)
 
         def do_GET(self) -> None:  # noqa: N802
             path = (self.path or "/").split("?", 1)[0]

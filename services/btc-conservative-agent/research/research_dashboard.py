@@ -149,6 +149,7 @@ ANALYZER_LOG_FILE = "analyzer_run.log"
 REPORTS_DIR = "reports"
 ALL_DATA_REPORTS_DIR = os.path.join(REPORTS_DIR, "all_data")
 HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
+RETENTION_STATUS_FILE = "research_retention_status.json"
 ARCHIVE_DIR = "research_session_archives"
 ARCHIVE_INDEX_FILE = "research_session_index.json"
 ZIP_BUNDLE_NAME = "reports_bundle.zip"
@@ -1489,6 +1490,7 @@ def api_summary():
     real = _read_json("real_edge_summary.json")
     historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
     paused_shadow = _read_json("paused_shadow_research_report.json")
+    retention = _read_json(RETENTION_STATUS_FILE)
     stale_meta = _summary_stale_meta(compact)
     p = dict(compact.get("performance") or {})
     re = compact.get("real_edge") or real
@@ -1520,6 +1522,7 @@ def api_summary():
         "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
         "paused_shadow_cohort": paused_shadow,
+        "retention": retention,
     })
 
 
@@ -2534,6 +2537,7 @@ async function loadSummary() {
   const histPerf = hist.performance || {};
   const paused = d.paused_shadow_cohort || {};
   const pausedPerf = paused.overall || {};
+  const retention = d.retention || {};
   const integrity = d.integrity || {};
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
@@ -2579,6 +2583,7 @@ async function loadSummary() {
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['Paused shadow closed', pausedPerf.closed ?? 0],
+    ['Storage cleanup', retention.status === 'COMPLETED' ? 'Daily · verified' : 'Pending first run'],
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],

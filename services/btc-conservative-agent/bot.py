@@ -22878,21 +22878,56 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>3-Factor Research Bot — Bitfinex · __BOT_VERSION__</title>
     <style>
-        body { background:#0d1117; color:#c9d1d9; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin:20px; }
-        h1, h2, h3 { color:#58a6ff; }
-        table { border-collapse: collapse; width:100%; margin:20px 0; }
-        th, td { padding:10px; border:1px solid #30363d; text-align:left; }
-        th { background:#161b22; }
+        :root { color-scheme:dark; --bg:#0b0f14; --surface:#111720; --surface-2:#161d27; --line:#2a3441; --text:#e6edf3; --muted:#8b98a7; --blue:#58a6ff; }
+        * { box-sizing:border-box; }
+        html { background:var(--bg); scroll-behavior:smooth; }
+        body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin:0 auto; padding:20px clamp(14px,2.4vw,36px) 48px; max-width:1600px; font-size:14px; line-height:1.45; }
+        h1 { color:var(--text); font-size:clamp(1.35rem,2.2vw,1.75rem); letter-spacing:-0.025em; margin:0 0 14px; }
+        h2 { color:var(--text); font-size:1.22rem; letter-spacing:-0.015em; margin-top:28px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+        h3 { color:var(--text); font-size:1rem; margin-top:22px; }
+        a { color:var(--blue); }
+        table { border-collapse:collapse; width:100%; max-width:100%; margin:14px 0 20px; display:block; overflow-x:auto; overscroll-behavior-inline:contain; -webkit-overflow-scrolling:touch; font-variant-numeric:tabular-nums; }
+        thead, tbody { min-width:max-content; }
+        th, td { padding:9px 10px; border:1px solid var(--line); text-align:left; white-space:nowrap; }
+        th { background:var(--surface-2); color:#b7c2cf; font-size:0.78rem; font-weight:600; }
         .green { color:#3fb950; } .red { color:#f85149; }
-        button { margin:5px; padding:8px 16px; background:#238636; color:white; border:none; border-radius:6px; cursor:pointer; }
+        button { min-height:34px; margin:4px; padding:7px 13px; background:#238636; color:white; border:1px solid transparent; border-radius:7px; cursor:pointer; font:inherit; font-weight:600; transition:background-color .16s ease,border-color .16s ease,transform .16s ease; }
         button:hover { background:#2ea043; }
+        button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
         #dataBanner { padding:15px; border-radius:6px; margin-bottom:20px; font-weight:bold; }
-        input { margin:5px; width:120px; }
-        select { margin:5px; width:140px; }
+        input { margin:5px; width:120px; max-width:100%; }
+        select { margin:5px; width:140px; max-width:100%; }
         .debug-panel { background:#161b22; padding:15px; margin:15px 0; border-radius:6px; border:1px solid #30363d; }
         #aiInput, #features { display:block; max-width:100%; overflow-wrap:anywhere; word-break:break-word; white-space:normal; }
+        .section-nav { position:sticky; top:0; z-index:20; display:flex; gap:6px; overflow-x:auto; margin:0 0 14px; padding:8px; background:rgba(11,15,20,.94); border:1px solid var(--line); border-radius:8px; backdrop-filter:blur(16px); }
+        .section-nav a { flex:0 0 auto; padding:7px 10px; border-radius:6px; color:#c9d1d9; text-decoration:none; font-weight:600; }
+        .section-nav a:hover { background:var(--surface-2); color:white; }
+        #tradingParamsPanel > summary { cursor:pointer; list-style:none; padding:12px 14px; color:var(--text); font-weight:700; }
+        #tradingParamsPanel > summary::-webkit-details-marker { display:none; }
+        #tradingParamsPanel > summary::after { content:'Show'; float:right; color:var(--muted); font-weight:500; }
+        #tradingParamsPanel[open] > summary::after { content:'Hide'; }
+        .advanced-content { padding:0 14px 14px; border-top:1px solid var(--line); }
+        @media (max-width:900px) {
+          body { padding:12px 12px 36px; }
+          #pathwayLaneTiles { grid-template-columns:1fr !important; }
+          #pathwayLaneTiles [style*="grid-template-columns:repeat(4,1fr)"] { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+          #dashboardToggles { display:flex; flex-wrap:wrap; gap:4px; }
+          #dashboardToggles strong { flex:0 0 100%; }
+          button { margin:2px; }
+          th, td { padding:8px; }
+        }
+        @media (max-width:520px) {
+          .section-nav { margin-inline:-4px; }
+          input, select { width:100%; margin:4px 0 10px; }
+          label { display:block; }
+        }
+        @media (prefers-reduced-motion:reduce) {
+          html { scroll-behavior:auto; }
+          *, *::before, *::after { transition:none !important; animation:none !important; }
+        }
     </style>
 </head>
 <body>
@@ -22911,6 +22946,11 @@ HTML = """<!DOCTYPE html>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
   Server: checking…
 </p>
+<nav class="section-nav" aria-label="Dashboard sections">
+  <a href="#marketOverview">Overview</a>
+  <a href="#pathwayLab">Decisions</a>
+  <a href="#activityTables">Data</a>
+</nav>
 <p>
     <button type="button" onclick="refresh()">Refresh now</button>
     <label style="margin-left:12px;"><input type="checkbox" id="autoRefreshToggle"> Auto-refresh every 3min (optional)</label>
@@ -22939,7 +22979,9 @@ HTML = """<!DOCTYPE html>
   </details>
 </div>
 
-<div id="tradingParamsPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+<details id="tradingParamsPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary>Advanced research &amp; execution controls</summary>
+  <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
   <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, edge gates, AI bands, and chase buckets — saved per port to config-PORT.json + browser backup</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
@@ -23030,8 +23072,9 @@ HTML = """<!DOCTYPE html>
 </div>
 <p style="display:none;color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
 <p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
-</div>
+</div></details>
 
+<div id="marketOverview"></div>
 <div id="dataBanner">
     Data Source: <span id="dataSource">Loading...</span>
 </div>
@@ -23106,7 +23149,7 @@ HTML = """<!DOCTYPE html>
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
-<h2>Active Signals</h2>
+<h2 id="activityTables">Active Signals</h2>
 <table>
     <thead><tr><th>Signal Time (Melbourne)</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
@@ -23155,7 +23198,7 @@ HTML = """<!DOCTYPE html>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
-<h2>Pathway Analytics</h2>
+<h2 id="pathwayAnalytics">Pathway Analytics</h2>
 <div id="pathwayAnalyticsTabs" style="margin:8px 0;">
   <button type="button" onclick="showPathwayTab('scorecard')" id="pathTabScorecard" style="margin-right:6px;font-weight:bold;">Scorecard</button>
   <button type="button" onclick="showPathwayTab('funnel')" id="pathTabFunnel" style="margin-right:6px;">Funnel</button>
@@ -23824,7 +23867,10 @@ DASHBOARD_JS = """(function () {
               + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
               + '</div>')
             : '';
-          const pausedGrid = pausedActive
+          // During a manual pause every lane keeps a truthful zero-valued
+          // shadow panel, including CONTINUOUS. This makes it obvious that
+          // collection is active even before the first replay closes.
+          const pausedGrid = (sourcePaused || pausedActive)
             ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#211536;border:1px solid #8957e5;border-radius:8px;">'
               + statRow('Paused shadow', pausedOpen + ' open', '#a371f7')
               + statRow('Shadow closed', pausedClosed, '#a371f7')

@@ -17556,6 +17556,19 @@ def finalize_analyzer_outputs(
         generate_all_data_companion_reports(dataset_counts, session_trade_count=stc)
     snap = _save_rolling_snapshot()
     archive_research_session(payload)
+    try:
+        from research.retention import run_analyzer_retention
+
+        retention = run_analyzer_retention(os.getcwd())
+        if retention.get("status") == "COMPLETED":
+            print(
+                "  ✅ Daily retention: compact evidence saved; "
+                f"derived bytes pruned={int(retention.get('deleted_bytes') or 0)}; "
+                "live trade ledgers preserved"
+            )
+    except Exception as exc:
+        # Storage housekeeping must never interrupt research generation.
+        print(f"  ⚠️ Daily retention skipped safely: {exc}")
     console_text = format_terminal_status(payload)
     print("\n" + console_text)
     art = payload.get("artifacts") or {}
