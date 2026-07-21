@@ -82,7 +82,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   founderShortcuts = new FounderShortcutRegistry();
   context.subscriptions.push(founderShortcuts);
-  founderCompanion = new FounderCompanionViewProvider();
+  founderCompanion = new FounderCompanionViewProvider(context);
   context.subscriptions.push(
     founderCompanion,
     vscode.window.registerWebviewViewProvider(

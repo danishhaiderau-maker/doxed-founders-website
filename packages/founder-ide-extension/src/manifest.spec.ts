@@ -53,6 +53,16 @@ describe('Founder IDE extension manifest', () => {
     assert.equal(activityContainer?.icon, 'resources/founder.svg');
     assert.equal(hub?.name, 'Founder');
     assert.equal(hub?.type, 'webview');
+    for (const asset of [
+      'dragon-1-clouds-fire.mp4',
+      'dragon-2-nest.mp4',
+      'dragon-3-fast-dive.mp4',
+    ]) {
+      assert.ok(
+        existsSync(join(__dirname, '..', 'resources', 'dragon', asset)),
+        `${asset} must ship with the Founder Dragon`,
+      );
+    }
     assert.deepEqual(
       manifest.activationEvents,
       ['*'],

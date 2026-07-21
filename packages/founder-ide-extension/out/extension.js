@@ -98,7 +98,7 @@ function activate(context) {
     }));
     founderShortcuts = new founder_shortcuts_1.FounderShortcutRegistry();
     context.subscriptions.push(founderShortcuts);
-    founderCompanion = new founder_companion_1.FounderCompanionViewProvider();
+    founderCompanion = new founder_companion_1.FounderCompanionViewProvider(context);
     context.subscriptions.push(founderCompanion, vscode.window.registerWebviewViewProvider(founder_companion_1.FounderCompanionViewProvider.viewId, founderCompanion, { webviewOptions: { retainContextWhenHidden: true } }), vscode.tasks.onDidStartTask((event) => {
         founderCompanion?.setWorking(`Running ${event.execution.task.name}`, 'Local workspace task');
     }), vscode.tasks.onDidEndTaskProcess((event) => {
