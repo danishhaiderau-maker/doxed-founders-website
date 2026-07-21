@@ -137,6 +137,17 @@ export function buildRelayExecutorHealth(input: {
   };
 }
 
+/**
+ * Restart the API only when a stuck executor may have an active live relay.
+ * With zero ACTIVE Bitfinex instances, health stays fail-closed and future
+ * starts are blocked, but the public API/dashboard must remain available.
+ * A null count means persistence/query failed, so exposure is unknown and a
+ * clean restart remains the safer choice.
+ */
+export function relayWatchdogShouldRestart(activeLiveInstanceCount: number | null): boolean {
+  return activeLiveInstanceCount == null || activeLiveInstanceCount > 0;
+}
+
 /** Watchdog cleanup may cancel an entry only when the exchange reports zero fill. */
 export function relayEntryOrderIsCompletelyUnfilled(order: {
   amountOrig: number;
@@ -911,8 +922,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `${health.currentStage ? ` stage ${health.currentStage}` : ''}. ` +
       'Live entries were disarmed; restart required.';
     this.logger.error(reason);
+    let activeLiveInstanceCount: number | null = null;
     try {
-      await this.failClosedStuckLiveInstances(reason);
+      activeLiveInstanceCount = await this.failClosedStuckLiveInstances(reason);
     } catch (err) {
       this.logger.error(
         `Relay watchdog fail-closed persistence failed: ${err instanceof Error ? err.stack ?? err.message : err}`,
@@ -921,18 +933,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // A timed-out async operation cannot be cancelled safely in-process. Exit only
       // after durable fail-closed state is attempted so Railway restarts a clean executor
       // without allowing the abandoned Promise to submit a duplicate later.
-      if (process.env.NODE_ENV !== 'test' && this.config.get('SUBSCRIBER_EXECUTOR_WATCHDOG_EXIT') !== 'false') {
+      const restartRequired = relayWatchdogShouldRestart(activeLiveInstanceCount);
+      if (
+        restartRequired &&
+        process.env.NODE_ENV !== 'test' &&
+        this.config.get('SUBSCRIBER_EXECUTOR_WATCHDOG_EXIT') !== 'false'
+      ) {
         const timer = setTimeout(() => process.exit(1), 250);
         timer.unref();
       } else {
+        if (!restartRequired) {
+          this.logger.warn(
+            'Relay executor is stuck but no ACTIVE Bitfinex relay exists; API remains online and all new live starts stay blocked until executor health recovers.',
+          );
+        }
         this.watchdogHandling = false;
       }
     }
   }
 
-  private async failClosedStuckLiveInstances(reason: string) {
+  private async failClosedStuckLiveInstances(reason: string): Promise<number> {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
-    if (!agent) return;
+    if (!agent) return 0;
     const instances = await this.prisma.tradingAgentInstance.findMany({
       where: {
         agentId: agent.id,
@@ -981,6 +1003,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
       }
     }
+    return instances.length;
   }
 
   /**

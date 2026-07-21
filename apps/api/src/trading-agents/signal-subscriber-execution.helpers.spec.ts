@@ -7,6 +7,7 @@ import {
   isCycleFreshForRelayArm,
   mergedDirectionCompatible,
   relayEntryOrderIsCompletelyUnfilled,
+  relayWatchdogShouldRestart,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   relayArmTimestampMs,
@@ -61,6 +62,12 @@ test('relay executor health fails closed while starting, stale, or stuck', () =>
   });
   assert.equal(stuck.status, 'STUCK');
   assert.equal(stuck.healthy, false);
+});
+
+test('watchdog keeps the API online when no live Bitfinex relay is active', () => {
+  assert.equal(relayWatchdogShouldRestart(0), false);
+  assert.equal(relayWatchdogShouldRestart(1), true);
+  assert.equal(relayWatchdogShouldRestart(null), true);
 });
 
 test('live relay accepts only cycles created after the latest explicit Start', () => {
