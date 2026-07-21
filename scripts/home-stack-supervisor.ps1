@@ -33,6 +33,7 @@ param(
   [int]$IntervalSec = 60,
   [int]$FailThreshold = 5,
   [int]$BotFailThreshold = 2,
+  [int]$BotStartupGraceSec = 180,
   [int]$BotCooldownSec = 300,
   [int]$AnalyzerCooldownSec = 600,
   [int]$TunnelCooldownSec = 900,
@@ -55,6 +56,24 @@ $namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
 function Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
   Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
+}
+
+function Get-BotStartupAgeSeconds {
+  # The crash monitor writes the new PID before Flask is ready to answer.
+  # Treat a live, newly-spawned PID as starting instead of letting this slower
+  # HTTP supervisor kill it after two failed probes.
+  $pidFile = Join-Path $repoRoot ".home-bot.pid"
+  if (-not (Test-Path $pidFile)) { return [double]::PositiveInfinity }
+  try {
+    $botPid = [int]((Get-Content $pidFile -Raw -ErrorAction Stop).Trim())
+    if ($botPid -le 0) { return [double]::PositiveInfinity }
+    $process = Get-Process -Id $botPid -ErrorAction Stop
+    $age = ((Get-Date) - $process.StartTime).TotalSeconds
+    if ($age -lt 0) { return [double]::PositiveInfinity }
+    return [double]$age
+  } catch {
+    return [double]::PositiveInfinity
+  }
 }
 
 function Prevent-Sleep {
@@ -305,7 +324,10 @@ while ($true) {
   $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   $tunnelOk = if ($botOk -and $tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
 
-  if ($botOk) { $fail.bot = 0 } else { $fail.bot++ }
+  $botStartupAgeSec = Get-BotStartupAgeSeconds
+  $botStarting = (-not $botOk -and $botStartupAgeSec -lt $BotStartupGraceSec)
+
+  if ($botOk -or $botStarting) { $fail.bot = 0 } else { $fail.bot++ }
   if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
@@ -320,7 +342,8 @@ while ($true) {
   } else {
     $backoffTag = "rl-ok"
   }
-  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfRunning hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $backoffTag url=$tunnelUrl")
+  $startupTag = if ($botStarting) { "starting=$([int]$botStartupAgeSec)s/$($BotStartupGraceSec)s" } else { "starting=no" }
+  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfRunning hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $startupTag $backoffTag url=$tunnelUrl")
 
   if ($fail.bridge -ge $FailThreshold) {
     $lastRecover.bridge = Invoke-Recovery "bridge" { Restart-BridgeComponent } $lastRecover.bridge $BridgeCooldownSec
@@ -332,7 +355,11 @@ while ($true) {
   # Never restart on a single slow probe — require fail threshold (hung alone is logged only).
   # Bot uses a tighter threshold (BotFailThreshold=2) so a real crash restarts in ~2 min, not 15.
   if ($fail.bot -ge $BotFailThreshold) {
-    if (Test-HomeStackUserStopped) {
+    $recoveryStartupAgeSec = Get-BotStartupAgeSeconds
+    if ($recoveryStartupAgeSec -lt $BotStartupGraceSec) {
+      Log "RECOVER bot skipped - live PID still starting ($([int]$recoveryStartupAgeSec)s/$($BotStartupGraceSec)s grace)"
+      $fail.bot = 0
+    } elseif (Test-HomeStackUserStopped) {
       Log "RECOVER bot skipped - user stopped stack (.home-stack-user-stopped)"
       $fail.bot = 0
     } elseif ($botHalted) {
