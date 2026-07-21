@@ -344,6 +344,13 @@ check("paused shadow preserves one shared paid-call ID", visible_row.get("shared
 check("paused shadow separates AI-call time from lane time", visible_row.get("shared_ai_call_ts") == "2026-07-21T00:16:38+00:00" and visible_row.get("lane_recorded_ts"))
 check("paused shadow remains outside pending orders", not bot.pending_orders)
 check("paused shadow remains outside positions", not bot.open_positions)
+with open(bot.__file__, "r", encoding="utf-8") as dashboard_file:
+    dashboard_source = dashboard_file.read()
+check(
+    "paused shadow dashboard limits the visible table to five rows",
+    "const pausedRecent = (ps.recent || []).slice(0, 5);" in dashboard_source
+    and "pausedRecent.length ? pausedRecent.map" in dashboard_source,
+)
 with bot.replay_lock:
     bot.replay_buffers.pop("pause-shadow-visible-1", None)
 

@@ -24669,7 +24669,8 @@ DASHBOARD_JS = """(function () {
           ' Â· <strong>P&L:</strong> ' + psPnl +
           ' Â· <strong>EV/fill:</strong> ' + psEv
         );
-        safeHTML('pausedShadowTable', (ps.recent || []).length ? (ps.recent || []).map(s => {
+        const pausedRecent = (ps.recent || []).slice(0, 5);
+        safeHTML('pausedShadowTable', pausedRecent.length ? pausedRecent.map(s => {
           const pnl = s.net_pnl_usd == null ? '-' : '$' + Number(s.net_pnl_usd).toFixed(2);
           const entry = s.entry == null ? '-' : Number(s.entry).toFixed(2);
           const callId = s.shared_ai_call_id || (String(s.trade_id || '').startsWith('scan-') ? s.trade_id : '-');
@@ -24689,7 +24690,10 @@ DASHBOARD_JS = """(function () {
           </tr>`;
         }).join('') : '<tr><td colspan="11" style="color:#8b949e">No paused-shadow trade outcomes yet. Older pauses stopped before trade simulation.</td></tr>');
         const psHint = document.getElementById('pausedShadowHint');
-        if (psHint && ps.historical_coverage_note) psHint.innerText = ps.historical_coverage_note + ' Safety: never relay-eligible.';
+        if (psHint && ps.historical_coverage_note) {
+          psHint.innerText = ps.historical_coverage_note +
+            ' Showing latest ' + pausedRecent.length + ' rows. Safety: never relay-eligible.';
+        }
         safeHTML('tradesTable', (d.trades||[]).map(t => `
           <tr>
             <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
