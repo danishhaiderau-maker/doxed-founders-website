@@ -20,6 +20,7 @@ if ($BotListenPort -eq 7810) {
 
 $Host.UI.RawUI.WindowTitle = "Doxed Bot :$BotListenPort"
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotListenPort -BridgePort 7810 -AnalyzerPort ([int]$stackMode.AnalyzerPort)
+$ResearchStackVersion = Get-ResearchStackVersion
 
 function Wait-ForKey {
   Write-Host ""
@@ -47,7 +48,7 @@ function Write-CrashReport([int]$Code, [string]$Message) {
       message       = $Message
       port          = $BotListenPort
       pid           = $PID
-      bot_version   = "v11.1-virtual-chase-known-combos-v1"
+      bot_version   = $ResearchStackVersion
       log_tail      = ($tail -join "`n")
     }
     $json = $report | ConvertTo-Json -Depth 4

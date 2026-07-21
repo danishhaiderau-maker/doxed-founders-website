@@ -22892,6 +22892,7 @@ HTML = """<!DOCTYPE html>
         input { margin:5px; width:120px; }
         select { margin:5px; width:140px; }
         .debug-panel { background:#161b22; padding:15px; margin:15px 0; border-radius:6px; border:1px solid #30363d; }
+        #aiInput, #features { display:block; max-width:100%; overflow-wrap:anywhere; word-break:break-word; white-space:normal; }
     </style>
 </head>
 <body>
@@ -25008,6 +25009,10 @@ def dashboard_js():
         'Content-Type': 'application/javascript',
         'Cache-Control': 'no-store, no-cache, must-revalidate',
     }
+
+@app.route('/favicon.ico')
+def dashboard_favicon():
+    return '', 204
 
 @app.route('/')
 def dashboard():

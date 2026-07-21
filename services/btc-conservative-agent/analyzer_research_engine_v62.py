@@ -184,30 +184,38 @@ def resolve_analyzer_session_scope() -> tuple:
     return True, "SESSION (no research_session.json — analyzing all loaded rows)"
 
 
-def start_research_dashboard_server() -> threading.Thread | None:
-    """Embedded read-only research dashboard (:9001) — same process as analyzer."""
-    try:
-        from research_dashboard import (
-            app,
-            BIND_HOST,
-            BIND_PORT,
-            PUBLIC_URL,
-            RESEARCH_DASHBOARD_VERSION,
-            prime_dashboard_caches,
-        )
-    except ImportError as exc:
-        print(f"  ⚠️ Research dashboard unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-        return None
+def start_research_dashboard_server():
+    """Start :9001 outside the heavy analyzer interpreter.
 
+    A report pass can hold Python's interpreter long enough to starve an
+    embedded Flask thread.  That made the read-only UI miss its health probe
+    and caused the watchdog to kill useful analysis.  The dashboard is a
+    separate failure domain so analysis can remain busy without taking :9001
+    down with it.
+    """
     import socket
+    import subprocess
+
+    bind_host = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1")
+    bind_port = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
+    public_url = os.getenv(
+        "RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{bind_port}/"
+    )
+    dashboard_script = os.path.join(os.path.dirname(__file__), "research_dashboard.py")
+    if not os.path.isfile(dashboard_script):
+        print(
+            f"  ⚠️ Research dashboard unavailable: missing {dashboard_script} "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
+        return None
 
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        probe.bind((BIND_HOST, int(BIND_PORT)))
+        probe.bind((bind_host, bind_port))
     except OSError:
         print(
-            f"  ℹ️ Dashboard port {BIND_PORT} already in use — "
-            f"using existing server at {PUBLIC_URL} {PIPELINE_ENFORCEMENT_TAG}"
+            f"  ℹ️ Dashboard port {bind_port} already in use — "
+            f"using existing server at {public_url} {PIPELINE_ENFORCEMENT_TAG}"
         )
         return None
     finally:
@@ -216,28 +224,23 @@ def start_research_dashboard_server() -> threading.Thread | None:
         except Exception:
             pass
 
-    def _serve():
-        print(
-            f"  Research Dashboard {RESEARCH_DASHBOARD_VERSION} listening on "
-            f"http://{BIND_HOST}:{BIND_PORT}/ (LAN: {PUBLIC_URL}) {PIPELINE_ENFORCEMENT_TAG}"
-        )
-        app.run(host=BIND_HOST, port=BIND_PORT, debug=False, threaded=True, use_reloader=False)
-
-    thread = threading.Thread(target=_serve, name="research_dashboard", daemon=True)
-    thread.start()
-
-    # Cache warming reads a large JSONL history on this installation. Never
-    # make dashboard availability wait for that scan: the read-only server is
-    # the health boundary, while the cache uses stale-while-refresh semantics.
-    # This also keeps the Start Showcase button honest because :9001 can answer
-    # /api/status immediately even while the first analyzer pass is busy.
-    warm_thread = threading.Thread(
-        target=prime_dashboard_caches,
-        name="research_dashboard_cache_warm",
-        daemon=True,
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(
+        [sys.executable, dashboard_script, "--standalone"],
+        cwd=os.path.dirname(__file__),
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+        creationflags=creation_flags,
     )
-    warm_thread.start()
-    return thread
+    print(
+        f"  Research Dashboard {ANALYZER_SYNC_ID} starting as isolated pid={proc.pid} "
+        f"on http://{bind_host}:{bind_port}/ (LAN: {public_url}) {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return proc
 
 
 def _setup_analyzer_output(verbose_console=False, enable_log=True):
@@ -17557,7 +17560,7 @@ def finalize_analyzer_outputs(
     print("\n" + console_text)
     art = payload.get("artifacts") or {}
     print(f"\n  ✅ Research UI:    {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://10.0.0.102:9001/')}")
-    print(f"  ✅ Dashboard:      embedded with analyzer (no separate script)")
+    print(f"  ✅ Dashboard:      isolated read-only process (same report root)")
     print(f"  ✅ Download ZIP:   http://10.0.0.102:9001/download/reports")
     if snap:
         print(f"  ✅ Snapshot:       {os.path.abspath(snap)}")
@@ -17602,14 +17605,20 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print(
-        f"\n=== ANALYZER {ANALYZER_VERSION} — continuous {interval_min} min + embedded dashboard ==="
+        f"\n=== ANALYZER {ANALYZER_VERSION} — continuous {interval_min} min + isolated dashboard ==="
         f" {PIPELINE_ENFORCEMENT_TAG}"
     )
     print(f"  Data scope: {scope_reason}")
     print(f"  Full log:   {os.path.abspath(ANALYZER_RUN_LOG_FILE)}")
     print(f"  Dashboard:  {dashboard_url}")
-    start_research_dashboard_server()
+    dashboard_process = start_research_dashboard_server()
     try:
         run(interval_min=interval_min, session_only=session_only)
     finally:
+        if dashboard_process is not None and dashboard_process.poll() is None:
+            dashboard_process.terminate()
+            try:
+                dashboard_process.wait(timeout=5)
+            except Exception:
+                dashboard_process.kill()
         _restore_analyzer_output(_tee, _log_handle)

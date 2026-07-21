@@ -2367,8 +2367,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-genome">
     <h2>Trading Genome research</h2>
     <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
-    <div class="empty-state" id="genome-empty" style="display:none"></div>
-    <div id="genome-content">
+    <div class="empty-state" id="genome-empty">Loading the current Genome report…</div>
+    <div id="genome-content" style="display:none">
     <div class="kpis" id="genome-kpis"></div>
     <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
@@ -3174,6 +3174,11 @@ def index():
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
 
 
 def main():

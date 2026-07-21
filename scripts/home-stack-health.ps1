@@ -89,15 +89,24 @@ function Test-AnalyzerHealthyQuick {
 }
 
 function Test-AnalyzerHealthy {
+  $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
+  if (-not (Test-Path -LiteralPath $analyzerPidFile)) { return $false }
+  try {
+    $analyzerPid = [int]((Get-Content -LiteralPath $analyzerPidFile -Raw -ErrorAction Stop).Trim())
+    $analyzerProcess = Get-Process -Id $analyzerPid -ErrorAction Stop
+    if ($analyzerProcess.ProcessName -notin @("python", "pythonw")) { return $false }
+  } catch {
+    return $false
+  }
   if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
   try {
     $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
     if (-not $s.ok) { return $false }
-    # Serve one canonical report tree from the agent root; stale research/
-    # copies must not pass simply because their version label matches.
+    # Serve one canonical report tree from the analyzer's research directory.
+    # A matching version label from any copied checkout must not pass.
     $reportRoot = [string]$s.report_root
     if (-not $reportRoot) { $reportRoot = [string]$s.cwd }
-    $expectedReportRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "services\btc-conservative-agent")).TrimEnd('\', '/')
+    $expectedReportRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "services\btc-conservative-agent\research")).TrimEnd('\', '/')
     try { $actualReportRoot = [System.IO.Path]::GetFullPath($reportRoot).TrimEnd('\', '/') } catch { return $false }
     if (-not $actualReportRoot.Equals($expectedReportRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($s.runtime_sync_match -ne $true) { return $false }

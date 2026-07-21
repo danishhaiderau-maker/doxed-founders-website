@@ -15,6 +15,17 @@ $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
 $userStoppedFile = Join-Path $repoRoot ".home-stack-user-stopped"
 
+function Get-ResearchStackVersion {
+  $configPath = Join-Path $agentDir "combo_pathway_config.py"
+  try {
+    $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop
+    if ($configText -match 'RESEARCH_STACK_VERSION\s*=\s*"([^"]+)"') {
+      return $matches[1]
+    }
+  } catch { }
+  return "unknown"
+}
+
 function Set-HomeStackUserStopped {
   Set-Content -Path $userStoppedFile -Value (Get-Date -Format o) -NoNewline
 }

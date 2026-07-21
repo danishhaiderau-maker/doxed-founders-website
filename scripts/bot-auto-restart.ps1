@@ -37,6 +37,7 @@ $restartLog = Join-Path $logsDir "bot_restarts.log"
 # clicks Stop (which sets the .home-stack-user-stopped flag) instead of relaunching
 # the bot and undoing the user's stop.
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port -AnalyzerPort 9001 -BridgePort 7810
+$ResearchStackVersion = Get-ResearchStackVersion
 
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 
@@ -87,7 +88,7 @@ try {
         message     = $Message
         port        = $Port
         pid         = $CrashedPid
-        bot_version = "v11.1-virtual-chase-known-combos-v1"
+        bot_version = $ResearchStackVersion
         log_tail    = ($tail -join "`n")
       }
       $json = $report | ConvertTo-Json -Depth 4

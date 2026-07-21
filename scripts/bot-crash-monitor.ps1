@@ -6,6 +6,8 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $logsDir = Join-Path $repoRoot "logs"
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port -AnalyzerPort 9001 -BridgePort 7810
+$ResearchStackVersion = Get-ResearchStackVersion
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 
 $p = Get-Process -Id $BotPid -ErrorAction SilentlyContinue
@@ -21,7 +23,7 @@ $report = [ordered]@{
   message     = "detached bot non-zero exit"
   port        = $Port
   pid         = $BotPid
-  bot_version = "v11.1-virtual-chase-known-combos-v1"
+  bot_version = $ResearchStackVersion
   log_tail    = ($tail -join "`n")
 }
 $json = $report | ConvertTo-Json -Depth 4

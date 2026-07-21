@@ -35,6 +35,18 @@ local_analyzer = (
 stack_common = (
     Path(__file__).parents[2] / "scripts" / "home-stack-common.ps1"
 ).read_text(encoding="utf-8")
+stack_supervisor = (
+    Path(__file__).parents[2] / "scripts" / "home-stack-supervisor.ps1"
+).read_text(encoding="utf-8")
+supervisor_watchdog = (
+    Path(__file__).parents[2] / "scripts" / "home-stack-supervisor-watchdog.ps1"
+).read_text(encoding="utf-8")
+bot_auto_restart = (
+    Path(__file__).parents[2] / "scripts" / "bot-auto-restart.ps1"
+).read_text(encoding="utf-8")
+bot_crash_monitor = (
+    Path(__file__).parents[2] / "scripts" / "bot-crash-monitor.ps1"
+).read_text(encoding="utf-8")
 analyzer_engine = (
     Path(__file__).parent / "analyzer_research_engine_v62.py"
 ).read_text(encoding="utf-8")
@@ -51,8 +63,7 @@ checks = {
     "health rejects wrong runtime identity": "$s.runtime_sync_match -ne $true" in health,
     "health validates the canonical report root": (
         '$s.report_root' in health
-        and 'services\\btc-conservative-agent' in health
-        and "'[\\\\/]research$'" not in health
+        and 'services\\btc-conservative-agent\\research' in health
     ),
     "restart monitor probes cheap health with a cold-start grace": (
         '[int]$BootGraceSec = 180' in restart_analyzer
@@ -91,6 +102,11 @@ checks = {
         and "refreshActiveSection" in source
         and "async function refreshAll" not in source
     ),
+    "Genome has a truthful async loading state": (
+        'id="genome-empty">Loading the current Genome report' in source
+        and 'id="genome-content" style="display:none"' in source
+    ),
+    "dashboard favicon probe is quiet": '@app.route("/favicon.ico")' in source,
     "read-only report APIs use a bounded cache": (
         "_API_CACHE_TTL_SEC" in source and "X-Research-Cache" in source
     ),
@@ -98,13 +114,46 @@ checks = {
         "BTC_AGENT_REPORT_DIR" in source
         and '_CWD_ROOT / "analyzer_research_engine_v62.py"' in source
     ),
-    "lane aggregation is primed and stale-while-refreshed": (
+    "lane aggregation stays stale-while-refreshed": (
         "prime_dashboard_caches" in source
         and "research-opportunity-cache" in source
-        and "prime_dashboard_caches" in analyzer_engine
-        and 'name="research_dashboard_cache_warm"' in analyzer_engine
-        and analyzer_engine.find("thread.start()")
-        < analyzer_engine.find('name="research_dashboard_cache_warm"')
+    ),
+    "dashboard is isolated from heavy analyzer passes": (
+        "subprocess.Popen(" in analyzer_engine
+        and '[sys.executable, dashboard_script, "--standalone"]' in analyzer_engine
+        and "stdout=subprocess.DEVNULL" in analyzer_engine
+        and "research_dashboard_cache_warm" not in analyzer_engine
+        and '@("research_dashboard.py", "--standalone")' in start_analyzer
+        and '@("research_dashboard.py", "--standalone")' in restart_analyzer
+        and '".home-analyzer-dashboard.pid"' in start_analyzer
+        and "-WindowStyle Hidden -PassThru" in start_analyzer
+    ),
+    "analyzer health requires both dashboard and analyzer owner": (
+        '".home-analyzer.pid"' in health
+        and "Get-Process -Id $analyzerPid" in health
+        and '$analyzerProcess.ProcessName -notin @("python", "pythonw")' in health
+    ),
+    "supervisor recovery replaces monitors with one hidden owner": (
+        'Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid")' in stack_supervisor
+        and 'Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid")' in stack_supervisor
+        and stack_supervisor.count("Start-HiddenPs1 -ScriptPath") >= 2
+        and stack_supervisor.count('"-NoWait"') >= 2
+        and "RECOVER bot - stop + start" not in stack_supervisor
+        and "RECOVER analyzer - stop + start" not in stack_supervisor
+    ),
+    "crash reports derive the canonical stack version": (
+        "function Get-ResearchStackVersion" in stack_common
+        and "Get-ResearchStackVersion" in start_bot
+        and "Get-ResearchStackVersion" in bot_auto_restart
+        and "Get-ResearchStackVersion" in bot_crash_monitor
+        and "v11.1-virtual-chase-known-combos-v1" not in (
+            start_bot + bot_auto_restart + bot_crash_monitor
+        )
+    ),
+    "scheduled supervisor watchdog uses valid parameters": (
+        '"$supervisorScript`" -BotPort $botPort -AnalyzerPort $analyzerPort -BridgePort $bridgePort"'
+        in supervisor_watchdog
+        and "-BridgePort $bridgePort -Quiet" not in supervisor_watchdog
     ),
     "empty chase isolation is collecting": (
         '"verdict": rep.get("verdict") if has_evidence else "COLLECTING"' in source

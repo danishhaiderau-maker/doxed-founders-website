@@ -105,6 +105,7 @@ switch ($Action) {
       Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
     }
     Stop-ListenPortFast $AnalyzerPort | Out-Null
+    Remove-Item (Join-Path $repoRoot ".home-analyzer-dashboard.pid") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $repoRoot ".local-collection-analyzer.lock") -Force -ErrorAction SilentlyContinue
   }

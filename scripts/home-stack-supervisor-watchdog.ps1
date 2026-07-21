@@ -56,7 +56,7 @@ try {
   # (so the bot has NO 24/7 health watcher). Same fix start-home-bot.ps1 uses
   # for the monitor spawn. Quoting the -File value inside one argument string
   # is the reliable solution.
-  $supArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisorScript`" -BotPort $botPort -AnalyzerPort $analyzerPort -BridgePort $bridgePort -Quiet"
+  $supArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$supervisorScript`" -BotPort $botPort -AnalyzerPort $analyzerPort -BridgePort $bridgePort"
   Start-Process -FilePath "powershell" -ArgumentList $supArgString -WindowStyle Hidden | Out-Null
   Wd-Log "supervisor relaunch issued bot=:$botPort analyzer=:$analyzerPort"
 } catch {

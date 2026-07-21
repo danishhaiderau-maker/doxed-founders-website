@@ -121,20 +121,26 @@ function Get-TunnelPublicUrl {
 }
 
 function Restart-BotComponent {
-  Log "RECOVER bot - stop + start on :$BotPort (visible window)"
+  Log "RECOVER bot - replace monitor + bot with one detached owner on :$BotPort"
+  Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid") @("powershell", "pwsh", "cmd") | Out-Null
+  Remove-Item (Join-Path $repoRoot ".home-bot-auto-restart.lock") -Force -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $repoRoot ".home-bot-auto-restart.heartbeat") -Force -ErrorAction SilentlyContinue
   Stop-PythonMatching "btc_conservative_agent" | Out-Null
   Stop-ListenPortFast $BotPort | Out-Null
   Start-Sleep -Seconds 3
-  Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
+  Start-HiddenPs1 -ScriptPath (Join-Path $scriptDir "start-home-bot.ps1") -ExtraArgs @("-Port", "$BotPort", "-NoWait")
 }
 
 function Restart-AnalyzerComponent {
-  Log "RECOVER analyzer - stop + start on :$AnalyzerPort (visible window)"
+  Log "RECOVER analyzer - replace monitor + analyzer with one detached owner on :$AnalyzerPort"
+  Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") @("powershell", "pwsh", "cmd") | Out-Null
+  Remove-Item (Join-Path $repoRoot ".home-analyzer-auto-restart.lock") -Force -ErrorAction SilentlyContinue
   Stop-PythonMatching "analyzer_research_engine" | Out-Null
   Stop-ListenPortFast $AnalyzerPort | Out-Null
+  Remove-Item (Join-Path $repoRoot ".home-analyzer-dashboard.pid") -Force -ErrorAction SilentlyContinue
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
-  Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
+  Start-HiddenPs1 -ScriptPath (Join-Path $scriptDir "start-home-analyzer.ps1") -ExtraArgs @("-Port", "$AnalyzerPort", "-NoWait")
 }
 
 function Restart-TunnelComponent {

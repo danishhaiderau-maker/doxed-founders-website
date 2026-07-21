@@ -107,6 +107,19 @@ if (Test-PortOpen $AnalyzerPort) {
   Start-Sleep -Seconds 2
 }
 
+# Publish the read-only dashboard before the heavy analyzer import. On this PC
+# pandas/scikit imports can take several minutes when the bot is busy; making
+# Flask wait behind those imports caused blank pages and false watchdog kills.
+if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
+  $dashboardProc = Start-Process -FilePath "python" `
+    -ArgumentList @("research_dashboard.py", "--standalone") `
+    -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+  if ($dashboardProc -and $dashboardProc.Id -gt 0) {
+    Set-Content -Path (Join-Path $repoRoot ".home-analyzer-dashboard.pid") `
+      -Value "$($dashboardProc.Id)" -NoNewline -Encoding UTF8
+  }
+}
+
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
 Write-Host "Research dashboard (Flask): http://127.0.0.1:$AnalyzerPort/  LAN: http://10.0.0.102:$AnalyzerPort/"
@@ -124,7 +137,7 @@ if ($NoWait) {
     $lockHandle = $null
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   }
-  $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Normal -PassThru
+  $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   # Auto-restart monitor - mirrors start-home-bot.ps1 launching bot-auto-restart.ps1.
   # Keeps the analyzer alive across crashes/hangs without a human restarting it, which
   # stops the recurring "analyzer_offline_ping=0" stack-abnormality popups. Skipped for

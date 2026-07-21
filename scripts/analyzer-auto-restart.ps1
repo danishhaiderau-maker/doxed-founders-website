@@ -179,6 +179,14 @@ try {
         }
     } catch { }
 
+    $dashboardProc = Start-Process -FilePath "python" `
+      -ArgumentList @("research_dashboard.py", "--standalone") `
+      -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+    if ($dashboardProc -and $dashboardProc.Id -gt 0) {
+      Set-Content -Path (Join-Path $repoRoot ".home-analyzer-dashboard.pid") `
+        -Value "$($dashboardProc.Id)" -NoNewline -Encoding UTF8
+    }
+
     Push-Location $agentDir
     try {
       # Replicates start-home-analyzer.ps1 launch: python analyzer_research_engine_v62.py
