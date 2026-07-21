@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Harden relay recovery and Tile 2 visibility
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
