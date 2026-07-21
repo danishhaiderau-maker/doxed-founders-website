@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Harden low-latency Bitfinex relay execution
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
