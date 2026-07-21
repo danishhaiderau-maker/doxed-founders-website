@@ -1,10 +1,12 @@
-"""Bound derived analyzer storage without touching live trading ledgers.
+"""Bound analyzer storage without touching files owned by a live writer.
 
 The analyzer runs every 30 minutes.  Keeping every complete report tree makes
 storage grow quickly even though those trees describe the same UTC day.  This
 module creates one compact daily evidence snapshot, then keeps one derived
-archive per day.  Append-only bot/trade ledgers are inventoried but never
-rewritten here because the live bot may be writing them concurrently.
+archive per day.  Current append-only bot/trade ledgers are inventoried but
+never rewritten here because the live bot may be writing them concurrently.
+Closed numeric JSONL rotations are immutable and may be removed only after
+their fingerprints are written to the daily evidence manifest.
 """
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +23,7 @@ from pathlib import Path
 STATUS_FILE = "research_retention_status.json"
 MARKER_FILE = ".research_retention_last_run.json"
 DAILY_DIR = Path("research_retention") / "daily"
+RETENTION_SCHEMA = "analyzer_retention_v2"
 
 COMPACT_EVIDENCE_FILES = (
     "research_compact_summary.json",
@@ -89,6 +94,130 @@ def _fingerprint(path: Path) -> dict:
         "fingerprint_mode": mode,
         "retention": "LIVE_LEDGER_NOT_DELETED",
     }
+
+
+def _closed_jsonl_rotations(root: Path) -> list[Path]:
+    """Return immutable ``*.jsonl.N`` siblings, never the active base file."""
+    found = []
+    for path in root.glob("*.jsonl.*"):
+        if path.is_file() and path.suffix[1:].isdigit():
+            found.append(path)
+    return sorted(found, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+
+
+def _rotation_base(path: Path) -> str:
+    return path.name.rsplit(".", 1)[0]
+
+
+def _prune_closed_rotations(
+    paths: list[Path],
+    *,
+    now: datetime,
+    minimum_age_hours: int,
+    keep_latest: int,
+) -> dict:
+    """Delete only fingerprinted, closed rotations outside the hot window."""
+    by_base: dict[str, list[Path]] = {}
+    for path in paths:
+        by_base.setdefault(_rotation_base(path), []).append(path)
+    deleted = []
+    deleted_bytes = 0
+    kept = []
+    for base, siblings in sorted(by_base.items()):
+        siblings.sort(key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+        for index, path in enumerate(siblings):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            age_hours = max(0.0, (now.timestamp() - stat.st_mtime) / 3600.0)
+            if index < keep_latest or age_hours < minimum_age_hours:
+                kept.append(path.name)
+                continue
+            try:
+                path.unlink()
+                deleted.append(path.name)
+                deleted_bytes += int(stat.st_size)
+            except OSError:
+                kept.append(path.name)
+    return {
+        "inventoried": len(paths),
+        "kept": len(kept),
+        "deleted": len(deleted),
+        "deleted_bytes": deleted_bytes,
+        "deleted_files": deleted,
+        "minimum_age_hours": minimum_age_hours,
+        "keep_latest_per_ledger": keep_latest,
+    }
+
+
+def _research_db_inventory(path: Path) -> dict:
+    """Capture compact counts before any raw-row retirement."""
+    if not path.is_file():
+        return {}
+    tables = (
+        "environment_genome", "market_genome", "decision_genome",
+        "execution_genome", "lifecycle_genome", "trade_genome", "research_events",
+    )
+    out = _fingerprint(path)
+    out["retention"] = "RAW_DB_HIGH_FREQUENCY_ROWS_MAY_BE_PRUNED"
+    out["table_counts"] = {}
+    try:
+        with closing(sqlite3.connect(str(path), timeout=2.5)) as conn:
+            conn.execute("PRAGMA busy_timeout=2500")
+            for table in tables:
+                try:
+                    out["table_counts"][table] = int(
+                        conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    )
+                except sqlite3.DatabaseError:
+                    continue
+    except sqlite3.DatabaseError as exc:
+        out["inventory_error"] = str(exc)
+    return out
+
+
+def _prune_research_db_raw(path: Path, *, now: datetime, retain_hours: int) -> dict:
+    """Retire only high-frequency raw rows; preserve decisions/trades and cohorts.
+
+    No VACUUM is attempted while the bot may be writing. SQLite can reuse freed
+    pages immediately; an exclusive physical compaction remains a controlled
+    maintenance action at a stopped-bot boundary.
+    """
+    result = {
+        "status": "NOT_FOUND",
+        "retain_hours": retain_hours,
+        "rows_deleted": 0,
+        "by_table": {},
+        "vacuum_performed": False,
+    }
+    if not path.is_file():
+        return result
+    cutoff = datetime.fromtimestamp(
+        now.timestamp() - (retain_hours * 3600), tz=timezone.utc
+    ).isoformat()
+    try:
+        with closing(sqlite3.connect(str(path), timeout=2.5)) as conn:
+            conn.execute("PRAGMA busy_timeout=2500")
+            conn.execute("BEGIN IMMEDIATE")
+            for table in ("research_events", "lifecycle_genome"):
+                before = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                conn.execute(
+                    f"DELETE FROM {table} WHERE ts IS NOT NULL AND julianday(ts) < julianday(?)",
+                    (cutoff,),
+                )
+                after = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                result["by_table"][table] = {"before": before, "after": after, "deleted": before - after}
+                result["rows_deleted"] += before - after
+            conn.commit()
+            result["freelist_pages"] = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+            result["page_size"] = int(conn.execute("PRAGMA page_size").fetchone()[0])
+            result["reclaimable_bytes"] = result["freelist_pages"] * result["page_size"]
+        result["status"] = "COMPLETED"
+    except sqlite3.DatabaseError as exc:
+        result["status"] = "SKIPPED_BUSY_OR_ERROR"
+        result["error"] = str(exc)
+    return result
 
 
 def _folder_time(path: Path) -> datetime:
@@ -172,15 +301,20 @@ def run_analyzer_retention(
     interval_hours = _env_int("ANALYZER_RETENTION_INTERVAL_HOURS", 24, 1)
     retain_days = _env_int("ANALYZER_DERIVED_RETENTION_DAYS", 30, 7)
     daily_keep_days = _env_int("ANALYZER_DAILY_EVIDENCE_DAYS", 90, 30)
+    rotation_age_hours = _env_int("ANALYZER_ROTATED_RAW_RETENTION_HOURS", 24, 6)
+    rotation_keep_latest = _env_int("ANALYZER_ROTATED_RAW_KEEP_LATEST", 2, 1)
+    raw_db_retain_hours = _env_int("ANALYZER_RAW_DB_RETENTION_HOURS", 72, 24)
     marker = root / MARKER_FILE
     if marker.is_file() and not force:
         try:
             previous = json.loads(marker.read_text(encoding="utf-8"))
+            if previous.get("schema") != RETENTION_SCHEMA:
+                raise ValueError("retention schema upgrade due")
             previous_at = datetime.fromisoformat(str(previous["completed_at"]).replace("Z", "+00:00"))
             age_hours = (now - previous_at).total_seconds() / 3600
             if age_hours < interval_hours:
                 return {
-                    "schema": "analyzer_retention_v1",
+                    "schema": RETENTION_SCHEMA,
                     "status": "SKIPPED_INTERVAL",
                     "last_completed_at": previous_at.isoformat(),
                     "next_due_in_hours": round(interval_hours - age_hours, 2),
@@ -206,17 +340,50 @@ def run_analyzer_retention(
             except OSError:
                 continue
 
+    rotation_paths = _closed_jsonl_rotations(root)
+    rotation_inventory = []
+    for path in rotation_paths:
+        try:
+            row = _fingerprint(path)
+            row["retention"] = "CLOSED_ROTATION_FINGERPRINTED_BEFORE_PRUNE"
+            rotation_inventory.append(row)
+        except OSError:
+            continue
+    db_path = root / "research.db"
+    db_inventory = _research_db_inventory(db_path)
+
     evidence = {
-        "schema": "daily_research_evidence_v1",
+        "schema": "daily_research_evidence_v2",
         "generated_at": now.isoformat(),
         "day_utc": now.date().isoformat(),
         "compact_files": copied,
         "live_ledger_inventory": live_inventory,
+        "closed_rotation_inventory": rotation_inventory,
+        "research_db_inventory": db_inventory,
         "safety": {
             "live_ledgers_deleted": False,
-            "reason": "Bot-owned append-only ledgers are never rewritten by the analyzer.",
+            "reason": (
+                "Active bot-owned ledgers and decision/trade genome tables are preserved. "
+                "Only fingerprinted closed rotations and expired high-frequency raw rows are pruned."
+            ),
         },
     }
+    # Persist the evidence receipt before removing any source data.
+    _atomic_json(daily / "daily_evidence_manifest.json", evidence)
+
+    rotation_prune = _prune_closed_rotations(
+        rotation_paths,
+        now=now,
+        minimum_age_hours=rotation_age_hours,
+        keep_latest=rotation_keep_latest,
+    )
+    db_prune = _prune_research_db_raw(
+        db_path,
+        now=now,
+        retain_hours=raw_db_retain_hours,
+    )
+    evidence["closed_rotation_prune"] = rotation_prune
+    evidence["research_db_prune"] = db_prune
     _atomic_json(daily / "daily_evidence_manifest.json", evidence)
 
     prune_results = [
@@ -232,19 +399,35 @@ def run_analyzer_retention(
     ]
     _reconcile_session_index(root)
     status = {
-        "schema": "analyzer_retention_v1",
+        "schema": RETENTION_SCHEMA,
         "status": "COMPLETED",
         "completed_at": now.isoformat(),
         "interval_hours": interval_hours,
         "derived_retention_days": retain_days,
         "daily_evidence_days": daily_keep_days,
+        "rotated_raw_retention_hours": rotation_age_hours,
+        "rotated_raw_keep_latest": rotation_keep_latest,
+        "raw_db_retention_hours": raw_db_retain_hours,
         "daily_snapshot": str(daily),
         "compact_files": len(copied),
         "live_ledgers_inventoried": len(live_inventory),
         "live_ledgers_deleted": 0,
+        "rotated_raw_inventoried": rotation_prune["inventoried"],
+        "rotated_raw_deleted": rotation_prune["deleted"],
+        "rotated_raw_deleted_bytes": rotation_prune["deleted_bytes"],
+        "raw_db_rows_deleted": db_prune["rows_deleted"],
+        "raw_db_reclaimable_bytes": int(db_prune.get("reclaimable_bytes") or 0),
+        "raw_db_status": db_prune["status"],
         "pruned": prune_results,
-        "deleted_bytes": sum(int(row.get("deleted_bytes") or 0) for row in prune_results),
+        "deleted_bytes": (
+            sum(int(row.get("deleted_bytes") or 0) for row in prune_results)
+            + int(rotation_prune["deleted_bytes"])
+        ),
     }
     _atomic_json(root / STATUS_FILE, status)
-    _atomic_json(marker, {"completed_at": now.isoformat(), "status_file": STATUS_FILE})
+    _atomic_json(marker, {
+        "schema": RETENTION_SCHEMA,
+        "completed_at": now.isoformat(),
+        "status_file": STATUS_FILE,
+    })
     return status

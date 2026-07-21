@@ -179,6 +179,52 @@ def run():
     check("confidence is neutralized", shared_ai.get("win_prob") == 0)
     check("direction is preserved", shared_ai.get("direction") == "SHORT")
 
+    continuous_spawns = []
+    original_spawn_combo_lane = bot._spawn_combo_lane
+    original_continuous_enabled = bot.continuous_ai_research_enabled
+    try:
+        bot._spawn_combo_lane = lambda *args: continuous_spawns.append(args)
+        bot.continuous_ai_research_enabled = lambda: False
+        bot.spawn_continuous_lane_from_ai_scan(
+            {"trade_id": "scan-continuous-off"},
+            {"direction": "LONG", "decision": "APPROVE", "long_score": 80, "short_score": 20},
+            4.0,
+            {"price": 100.0},
+            bot.RESEARCH_LANE_AI_SCAN,
+        )
+    finally:
+        bot._spawn_combo_lane = original_spawn_combo_lane
+        bot.continuous_ai_research_enabled = original_continuous_enabled
+    check("Continuous OFF uses the LAB-capable shared spawner", len(continuous_spawns) == 1)
+    check("Continuous OFF retains the CONTINUOUS lane", continuous_spawns[0][4] == bot.RESEARCH_LANE_CONTINUOUS)
+
+    continuous_labs = []
+    original_lab = bot._spawn_lab_combo_shadow
+    old_continuous_flag = bot.state.get("continuous_ai_research_enabled")
+    try:
+        bot._spawn_lab_combo_shadow = lambda *args, **kwargs: continuous_labs.append((args, kwargs))
+        with bot.state_lock:
+            bot.state["continuous_ai_research_enabled"] = False
+        bot._spawn_combo_lane(
+            {"trade_id": "scan-continuous-lab"},
+            {"direction": "LONG", "decision": "APPROVE", "win_prob": 0},
+            4.0,
+            {"price": 100.0},
+            bot.RESEARCH_LANE_CONTINUOUS,
+            "TEST_CONTINUOUS_OFF",
+        )
+    finally:
+        bot._spawn_lab_combo_shadow = original_lab
+        with bot.state_lock:
+            bot.state["continuous_ai_research_enabled"] = old_continuous_flag
+    check("Continuous OFF opens a LAB shadow instead of DATA_COLLECT_ONLY", len(continuous_labs) == 1)
+
+    page_source = inspect.getsource(bot)
+    check(
+        "Continuous benchmark can display OFF-tile LAB stats",
+        "&& !spec.is_benchmark && spec.status" not in page_source,
+    )
+
     counterfactuals = []
     original_lane_orders_allowed = bot.lane_orders_allowed
     original_start_replay_buffer = bot.start_replay_buffer

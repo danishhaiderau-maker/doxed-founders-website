@@ -12360,7 +12360,10 @@ def _spawn_lab_combo_shadow(
     """
     if not is_research_data_collection():
         return
-    if not is_combo_execution_lane(target_lane):
+    if not (
+        is_combo_execution_lane(target_lane)
+        or str(target_lane or "").upper() == RESEARCH_LANE_CONTINUOUS
+    ):
         return
     study_id = f"lab-{str(target_lane).lower()}-{uuid.uuid4().hex[:12]}"
     ai_dir = str((ai or {}).get("direction") or "LONG").upper()
@@ -13490,18 +13493,17 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         f"decision={ai.get('decision')} orders={'ON' if orders_on else 'OFF(data-only)'} "
         f"[PIPELINE ENFORCEMENT]"
     )
-    process_signal({
-        "event_trigger": True,
-        "research_lane": RESEARCH_LANE_CONTINUOUS,
-        "edge_trigger_reason": f"CONTINUOUS_FROM_{source_lane}",
-        "edge_score": round(float(edge_score or 0), 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features or {},
-        "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": spawn_ctx,
-    })
+    # Apply the same toggle contract as every other execution tile. ON enters
+    # the local order lifecycle; OFF opens a full LAB replay. The former direct
+    # process_signal call stopped at DATA_COLLECT_ONLY and produced no shadow.
+    _spawn_combo_lane(
+        spawn_ctx,
+        copy.deepcopy(ai),
+        float(edge_score or 0),
+        features or {},
+        RESEARCH_LANE_CONTINUOUS,
+        f"CONTINUOUS_FROM_{source_lane}",
+    )
 
 
 def spawn_type_b_lane_from_shared_ai(ctx, ai, edge_score, features, source_lane: str):
@@ -23969,7 +23971,7 @@ DASHBOARD_JS = """(function () {
           // LAB (OFF-combo): primary Trades/PnL/EV show LAB ledger / open shadows.
           // Independent AI V1 tiles (TYPE_B / SR_MICRO) use combo LAB shadow when OFF — same as other combo tiles.
           // V2 keeps its own checker/shadow metrics UI (not LAB ledger).
-          const labEligible = !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && !spec.is_benchmark && spec.status !== 'RETIRED' && !spec.planned;
+          const labEligible = !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && spec.status !== 'RETIRED' && !spec.planned;
           const labOn = labEligible && (stats.lab_mode || (stats.lab_closes > 0) || (stats.lab_open_shadows > 0));
           const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
           const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
@@ -29968,8 +29970,15 @@ def save_persistent_config():
 def rotate_log(file):
     try:
         if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
-            existing = sorted(glob.glob(file + ".*"))
-            next_index = len(existing) + 1
+            # Retention may remove older siblings and leave gaps. Counting the
+            # files can then collide with a surviving suffix, so always advance
+            # from the greatest numeric rotation.
+            suffixes = []
+            for path in glob.glob(file + ".*"):
+                suffix = path.rsplit(".", 1)[-1]
+                if suffix.isdigit():
+                    suffixes.append(int(suffix))
+            next_index = max(suffixes, default=0) + 1
             os.rename(file, f"{file}.{next_index}")
     except OSError as e:
         logger.error(f"[LOG ROTATION] failed for {file}: {e} [PIPELINE ENFORCEMENT]")

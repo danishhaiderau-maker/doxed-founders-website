@@ -2583,7 +2583,11 @@ async function loadSummary() {
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['Paused shadow closed', pausedPerf.closed ?? 0],
-    ['Storage cleanup', retention.status === 'COMPLETED' ? 'Daily · verified' : 'Pending first run'],
+    ['Storage cleanup', retention.status === 'COMPLETED'
+      ? ((retention.rotated_raw_deleted ?? 0) + ' rotations · '
+        + (retention.raw_db_rows_deleted ?? 0) + ' raw rows · '
+        + (Number(retention.deleted_bytes || 0) / 1048576).toFixed(1) + ' MB')
+      : 'Pending first run'],
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],

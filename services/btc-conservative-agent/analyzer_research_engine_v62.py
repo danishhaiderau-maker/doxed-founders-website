@@ -1832,12 +1832,14 @@ def _ladder_lock_for_peak_custom(peak_pct, ladder):
 
 
 def _signal_replay_paths():
-    paths = [_agent_data_path(SIGNAL_REPLAY_FILE)]
-    for i in range(1, 6):
-        alt = _agent_data_path(f"{SIGNAL_REPLAY_FILE}.{i}")
-        if os.path.isfile(alt):
-            paths.append(alt)
-    return paths
+    """Read every closed numeric rotation oldest-to-newest, then active."""
+    active = Path(_agent_data_path(SIGNAL_REPLAY_FILE))
+    rotated = []
+    for path in active.parent.glob(active.name + ".*"):
+        suffix = path.name[len(active.name) + 1:]
+        if path.is_file() and suffix.isdigit():
+            rotated.append((int(suffix), path))
+    return [str(path) for _, path in sorted(rotated)] + [str(active)]
 
 
 def _load_jsonl_replays(use_cache=True):
@@ -17563,8 +17565,10 @@ def finalize_analyzer_outputs(
         if retention.get("status") == "COMPLETED":
             print(
                 "  ✅ Daily retention: compact evidence saved; "
-                f"derived bytes pruned={int(retention.get('deleted_bytes') or 0)}; "
-                "live trade ledgers preserved"
+                f"bytes pruned={int(retention.get('deleted_bytes') or 0)}; "
+                f"closed rotations={int(retention.get('rotated_raw_deleted') or 0)}; "
+                f"expired raw DB rows={int(retention.get('raw_db_rows_deleted') or 0)}; "
+                "active trade ledgers preserved"
             )
     except Exception as exc:
         # Storage housekeeping must never interrupt research generation.
