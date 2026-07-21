@@ -27,8 +27,9 @@ def checksum(path: Path) -> str:
 
 def patch(app: Path) -> None:
     workbench = app / "out" / "vs" / "workbench" / "workbench.desktop.main.js"
+    messages = app / "out" / "nls.messages.json"
     product = app / "product.json"
-    if not workbench.is_file() or not product.is_file():
+    if not workbench.is_file() or not messages.is_file() or not product.is_file():
         raise SystemExit(f"Founder IDE app files were not found below {app}")
 
     data = workbench.read_text(encoding="utf-8")
@@ -74,13 +75,19 @@ def patch(app: Path) -> None:
     for old, new in replacements.items():
         data = data.replace(old, new)
 
+    message_data = messages.read_text(encoding="utf-8")
+    for old, new in replacements.items():
+        message_data = message_data.replace(old, new)
+
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = Path.home() / "FounderVault" / "ide-settings-backups" / stamp
     backup_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(workbench, backup_dir / workbench.name)
+    shutil.copy2(messages, backup_dir / messages.name)
     shutil.copy2(product, backup_dir / product.name)
 
     workbench.write_text(data, encoding="utf-8", newline="")
+    messages.write_text(message_data, encoding="utf-8", newline="")
     manifest = json.loads(product.read_text(encoding="utf-8"))
     checksums = manifest.setdefault("checksums", {})
     checksums[WORKBENCH_KEY] = checksum(workbench)
@@ -91,6 +98,8 @@ def patch(app: Path) -> None:
         raise SystemExit("Founder Settings redirect did not verify")
     if "Void's Settings" in verify:
         raise SystemExit("A user-visible Void Settings label remains")
+    if "Void's Settings" in messages.read_text(encoding="utf-8"):
+        raise SystemExit("A localized Void Settings label remains")
     print(f"Founder Settings redirect installed; backup: {backup_dir}")
 
 
