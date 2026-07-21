@@ -1662,14 +1662,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const signedCachedState = signedFastOrders.length
       ? this.botBridge.getCachedExecutionState()
       : null;
-    const maxConcurrent = simActive
-      ? 1
-      : signedFastOrders.length
-        ? resolveMaxConcurrentCopySignals({
-            botMaxActiveSignals: signedCachedState?.max_active_signals,
-            envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
-          })
-        : await this.resolveMaxConcurrentSignals();
     // A fresh HMAC-authenticated ORDER_PLACED carries the exact canonical
     // limit. Do not hold it behind a 20-30s tunnel request. Reuse a recent
     // canonical cache for caps/observability and refresh the tunnel in the
@@ -1677,6 +1669,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const botStateForCap = signedFastOrders.length
       ? signedCachedState
       : await this.fetchExecutionBotState();
+    // Capacity and money decisions must share the same bounded canonical
+    // execution snapshot. The legacy resolveMaxConcurrentSignals() call used
+    // BotBridge.fetchState(), whose display-oriented fallback waits up to
+    // 20s for /api/relay-state and another 30s for /api/state. An idle relay
+    // therefore spent ~50s before its actual bounded execution fetch, tripped
+    // the 60s watchdog, and made Start fail closed. The canonical execution
+    // fetch above is capped at 2.5s and already carries max_active_signals.
+    const maxConcurrent = simActive
+      ? 1
+      : resolveMaxConcurrentCopySignals({
+          botMaxActiveSignals:
+            botStateForCap?.max_active_signals ?? signedCachedState?.max_active_signals,
+          envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
+        });
     if (signedFastOrders.length) {
       void this.fetchExecutionBotState().catch((err) => {
         this.logger.warn(
@@ -2917,14 +2923,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       sim.showcaseTradeCount = stats.tradeCount;
     }
     await this.relaySim.persistSimState(instance.id, instance.userId, sim, reconcile);
-  }
-
-  private async resolveMaxConcurrentSignals(): Promise<number> {
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
-    return resolveMaxConcurrentCopySignals({
-      botMaxActiveSignals: bot?.max_active_signals,
-      envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
-    });
   }
 
   /**
