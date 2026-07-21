@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-fix(research): isolate analyzer dashboard lifecycle
+Isolate relay executor and enforce no-worse limit entries
 
 ## Last Activity
 
