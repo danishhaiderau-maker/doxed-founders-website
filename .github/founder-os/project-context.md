@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Add relay executor stage diagnostics
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
