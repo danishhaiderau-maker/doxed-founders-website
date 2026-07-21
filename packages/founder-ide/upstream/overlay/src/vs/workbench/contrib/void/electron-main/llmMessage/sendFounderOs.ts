@@ -347,6 +347,22 @@ async function gatewayFetch(
 	}
 }
 
+function inlineReceiptValue(value: unknown, fallback = '?'): string {
+	if (typeof value !== 'string' || !value.trim()) return fallback;
+	return value.trim().replace(/[\r\n`|]/g, ' ').slice(0, 120);
+}
+
+function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: number): string {
+	if (!meta) return '';
+	const provider = inlineReceiptValue(meta.provider);
+	const model = inlineReceiptValue(meta.model);
+	const tier = inlineReceiptValue(meta.tier);
+	const cost = typeof meta.ddollarCost === 'number' && Number.isFinite(meta.ddollarCost)
+		? ` · ${meta.ddollarCost} D$`
+		: '';
+	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}`;
+}
+
 // ---------------------------------------------------------------------------
 // Chat path (chatMessages) - used by Chat, Ctrl+K, Apply, SCM.
 // ---------------------------------------------------------------------------
@@ -366,6 +382,10 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		? requestedModel
 		: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
+	openAiMessages.unshift({
+		role: 'system',
+		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the exact provider and model for this request appear in the Founder route receipt below the answer. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
+	});
 
 	const body: Record<string, unknown> = {
 		model,
@@ -379,8 +399,10 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	const { res, controller } = got;
 	_setAborter(() => controller.abort());
 
+	const startedAt = Date.now();
 	let fullText = '';
 	let fullReasoning = '';
+	let routeMetadata: FounderOsMetadata | undefined;
 
 	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
 		onDelta: (delta) => {
@@ -388,8 +410,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 			onText({ fullText, fullReasoning, toolCall: undefined });
 		},
 		onMetadata: (meta) => {
-			// Route transparency. A future UI hook can surface this in the
-			// chat thread status slot; for now log it so it's observable.
+			routeMetadata = meta;
 			console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
 		},
 	}, controller.signal);
@@ -399,8 +420,9 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		return;
 	}
 
+	const finalText = `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
-		fullText,
+		fullText: finalText,
 		fullReasoning,
 		anthropicReasoning: null,
 	};

@@ -2,6 +2,11 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { readVaultConfig, resolveCredentials } from './credentials';
 import {
+  defaultFounderEntitlements,
+  fetchFounderIdeEntitlements,
+  type FounderEntitlementState,
+} from './entitlements';
+import {
   EXECUTION_PROFILES,
   type ExecutionProfile,
   type ExecutionProfileId,
@@ -16,6 +21,7 @@ import {
 type FounderSettingsAction =
   | 'openChat'
   | 'openConnections'
+  | 'openPersonalAI'
   | 'selectModel'
   | 'openAdvancedSettings'
   | 'openNodeConfig'
@@ -40,6 +46,9 @@ export class FounderSettingsPanel implements vscode.Disposable {
 
   private panel: vscode.WebviewPanel | undefined;
   private panelDisposables: vscode.Disposable[] = [];
+  private entitlementState: FounderEntitlementState =
+    defaultFounderEntitlements('signed-out');
+  private entitlementGeneration = 0;
 
   constructor(private readonly dependencies: FounderSettingsDependencies) {}
 
@@ -47,6 +56,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Active);
       this.refresh();
+      void this.refreshEntitlements();
       return;
     }
 
@@ -68,6 +78,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       ),
     );
     this.refresh();
+    void this.refreshEntitlements();
   }
 
   refresh(): void {
@@ -81,9 +92,18 @@ export class FounderSettingsPanel implements vscode.Disposable {
   }
 
   private disposePanel(): void {
+    this.entitlementGeneration += 1;
     this.panel = undefined;
     for (const disposable of this.panelDisposables) disposable.dispose();
     this.panelDisposables = [];
+  }
+
+  private async refreshEntitlements(): Promise<void> {
+    const generation = ++this.entitlementGeneration;
+    const next = await fetchFounderIdeEntitlements(resolveCredentials());
+    if (!this.panel || generation !== this.entitlementGeneration) return;
+    this.entitlementState = next;
+    this.refresh();
   }
 
   private async handleMessage(message: FounderSettingsMessage): Promise<void> {
@@ -110,6 +130,16 @@ export class FounderSettingsPanel implements vscode.Disposable {
       case 'openConnections':
         await vscode.commands.executeCommand('founderOs.openConnections');
         break;
+      case 'openPersonalAI':
+        try {
+          await vscode.commands.executeCommand('workbench.action.openVoidSettings');
+        } catch {
+          await vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'AI provider',
+          );
+        }
+        break;
       case 'selectModel':
         await vscode.commands.executeCommand('founderOs.selectModel');
         break;
@@ -133,6 +163,9 @@ export class FounderSettingsPanel implements vscode.Disposable {
         break;
     }
     this.refresh();
+    if (message.action === 'signIn' || message.action === 'signOut') {
+      void this.refreshEntitlements();
+    }
   }
 
   private renderHtml(): string {
@@ -150,6 +183,21 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const nodeLabel = connected
       ? vault?.label?.trim() || 'This computer'
       : 'Not connected';
+    const entitlement = this.entitlementState.value;
+    const managedTokens = entitlement.managedTokens;
+    const usagePercent = managedTokens.cap > 0
+      ? Math.min(100, Math.max(0, (managedTokens.used / managedTokens.cap) * 100))
+      : 0;
+    const entitlementStatus = this.entitlementState.source === 'live'
+      ? managedTokens.eligible
+        ? 'Active'
+        : 'Needs attention'
+      : this.entitlementState.source === 'signed-out'
+        ? 'Sign in required'
+        : 'Live usage unavailable';
+    const expiryLabel = managedTokens.daysRemaining == null
+      ? 'Allowance status is checked through Founder Node'
+      : `${managedTokens.daysRemaining} day${managedTokens.daysRemaining === 1 ? '' : 's'} remaining`;
 
     const modeButtons = FOUNDER_WORKSPACE_MODES.map(
       (candidate) => `
@@ -187,15 +235,17 @@ export class FounderSettingsPanel implements vscode.Disposable {
       ['OpenAI', 'GPT and o-series models'],
       ['Anthropic', 'Claude models'],
       ['Google', 'Gemini models'],
+      ['GLM', 'GLM coding and reasoning models'],
       ['DeepSeek', 'Chat and reasoning models'],
       ['OpenRouter', 'One connection for many providers'],
       ['Ollama', 'Models running on this computer'],
+      ['Custom endpoint', 'Any OpenAI-compatible provider or private gateway'],
     ]
       .map(
         ([name, detail]) => `
           <div class="connection-row">
             <div><strong>${name}</strong><span>${detail}</span></div>
-            <button class="link-button" type="button" data-action="openConnections">Connect</button>
+            <button class="link-button" type="button" data-action="openPersonalAI">Connect</button>
           </div>`,
       )
       .join('');
@@ -294,6 +344,20 @@ export class FounderSettingsPanel implements vscode.Disposable {
     }
     .managed-row > div { display: grid; gap: 4px; }
     .managed-row span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .usage-head, .usage-values {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    }
+    .usage-card {
+      display: grid; gap: 12px; margin-top: 18px; padding: 16px;
+      border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
+    }
+    .usage-head strong { font-size: 15px; }
+    .usage-head span, .usage-values, .usage-message { color: var(--muted); font-size: 11px; }
+    .usage-values strong { color: var(--vscode-editor-foreground); font-size: 13px; }
+    .progress { width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 3px; background: var(--surface-hover); }
+    .progress::-webkit-progress-bar { background: var(--surface-hover); }
+    .progress::-webkit-progress-value { background: var(--positive); transition: width 180ms ease-out; }
+    .usage-message { line-height: 1.5; }
     @keyframes panel-in {
       from { opacity: 0; transform: translateY(3px); }
       to { opacity: 1; transform: translateY(0); }
@@ -345,6 +409,17 @@ export class FounderSettingsPanel implements vscode.Disposable {
         <p class="section-copy">Open Founder Chat or continue configuring the services used by this workspace.</p>
         <div class="button-row"><button class="primary" type="button" data-action="openChat">Open Founder Chat</button><button class="secondary" type="button" data-action="openConnections">Manage connections</button></div>
       </section>
+      <section class="section">
+        <h2>Plan and usage</h2>
+        <p class="section-copy">Founder-managed tokens are separate from personal API keys and local models.</p>
+        <div class="usage-card">
+          <div class="usage-head"><strong>Founder Free</strong><span>${escapeHtml(entitlementStatus)}</span></div>
+          <div class="usage-values"><strong>${formatTokenCount(managedTokens.remaining)} remaining</strong><span>${formatTokenCount(managedTokens.used)} of ${formatTokenCount(managedTokens.cap)} used</span></div>
+          <progress class="progress" aria-label="Founder-managed token usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
+          <div class="usage-values"><span>${escapeHtml(expiryLabel)}</span><span>Personal and local AI do not use this allowance</span></div>
+          ${entitlement.message ? `<p class="usage-message">${escapeHtml(entitlement.message)}</p>` : ''}
+        </div>
+      </section>
     </div>
 
     <div class="panel" data-panel="ai">
@@ -360,6 +435,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       <section class="section">
         <h2>Bring your own key</h2>
         <p class="section-copy">Personal providers are encrypted in the Founder Provider Vault and remain separate from the managed allowance.</p>
+        <div class="button-row"><button class="primary" type="button" data-action="openPersonalAI">Add personal AI</button></div>
         <div class="connections">${providerRows}</div>
       </section>
     </div>
@@ -374,7 +450,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       <section class="section">
         <h2>Local models</h2>
         <p class="section-copy">Ollama can run through the embedded Founder Node without sending prompts to a cloud model.</p>
-        <div class="button-row"><button class="primary" type="button" data-action="openConnections">Manage local AI</button></div>
+        <div class="button-row"><button class="primary" type="button" data-action="openPersonalAI">Manage local AI</button></div>
       </section>
     </div>
 
@@ -431,6 +507,10 @@ function profileSummary(id: ExecutionProfileId): string {
     case 'autonomous':
       return 'Longer multi-step agent work';
   }
+}
+
+function formatTokenCount(value: number): string {
+  return Math.max(0, Math.floor(value)).toLocaleString('en-US');
 }
 
 function escapeHtml(value: string): string {

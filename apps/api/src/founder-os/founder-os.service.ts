@@ -77,6 +77,7 @@ export class FounderOsService {
       enabled: settings.enabled && settings.credentialsConfigured,
       message: settings.enabled ? settings.message : null,
       windowDays: settings.windowDays,
+      tokenCap: settings.tokenCap,
     };
   }
 

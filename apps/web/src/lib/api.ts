@@ -3079,7 +3079,7 @@ export interface FounderOnboardingStatus {
 }
 
 export function fetchPublicFounderPromo() {
-  return apiFetch<{ enabled: boolean; message: string | null; windowDays?: number }>(
+  return apiFetch<{ enabled: boolean; message: string | null; windowDays: number; tokenCap: number }>(
     '/founder-os/promo/public',
   );
 }

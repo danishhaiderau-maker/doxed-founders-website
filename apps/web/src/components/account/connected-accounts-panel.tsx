@@ -278,12 +278,12 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         >
           <p className="font-semibold text-white">
             {promo.eligible
-              ? 'Founder AI promo active'
+              ? 'Founder Free active'
               : !promo.founderRegistered
-                ? 'Free 1-month AI — register as founder'
+                ? 'Founder Free — finish account setup'
                 : promo.exhausted
-                  ? 'Free demo ended'
-                  : 'Promo expired'}
+                  ? 'Managed allowance used'
+                  : 'Founder Free needs attention'}
           </p>
           <p className="mt-1 text-xs opacity-90">{promo.message}</p>
           {promo.founderRegistered && (

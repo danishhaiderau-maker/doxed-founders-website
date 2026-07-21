@@ -71,6 +71,7 @@ prisma/*.db-journal
 .edge-analysis/
 
 # Local logs / agent artifacts (never publish)
+artifacts/
 *.log
 agent-restart-report*.txt
 restart-report.txt

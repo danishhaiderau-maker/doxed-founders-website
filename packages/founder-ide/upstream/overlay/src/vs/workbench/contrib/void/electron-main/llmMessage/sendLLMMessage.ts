@@ -7,7 +7,8 @@ import { SendLLMMessageParams, OnText, OnFinalMessage, OnError } from '../../com
 import { IMetricsService } from '../../common/metricsService.js';
 import { displayInfoOfProviderName } from '../../common/voidSettingsTypes.js';
 import { sendLLMMessageToProviderImplementation } from './sendLLMMessage.impl.js';
-// FOUNDER_OS_GATEWAY_REWIRE - Phase 5 step 5. Redirect all AI through our Gateway.
+// FOUNDER_OS_GATEWAY_REWIRE - Founder-managed aliases use our Gateway. Personal
+// and local provider selections stay on Void's encrypted direct-provider path.
 import { sendFounderOsChat, sendFounderOsFIM, founderOsEnabled } from './sendFounderOs.js';
 
 
@@ -102,11 +103,11 @@ export const sendLLMMessage = async ({
 		captureLLMEvent(`${loggingName} - Sending FIM`, { prefixLen: messages_?.prefix?.length, suffixLen: messages_?.suffix?.length })
 
 
-	// FOUNDER_OS_GATEWAY_REWIRE - Phase 5 step 5. Redirect all AI through our Gateway.
-	// Import is at module top (see line 10). If the Founder Node vault is paired,
-	// route every request to our Gateway and skip Void's per-provider dispatch.
-	// If the vault is absent, fall through to Void's normal dispatch.
-	if (founderOsEnabled()) {
+	// A paired Founder IDE can use Founder Managed and remembered personal/local
+	// providers side by side. Only explicit founder-os-* aliases are Gateway
+	// routes; every other selection must honor the provider chosen in the chat.
+	const isFounderManagedSelection = modelName.startsWith('founder-os-')
+	if (founderOsEnabled() && isFounderManagedSelection) {
 		if (messagesType === 'chatMessages') {
 			await sendFounderOsChat({ messages: messages_, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode });
 			return

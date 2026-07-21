@@ -1473,16 +1473,12 @@ model PlatformSettings {
   showcaseRelaySnapshotAt       DateTime?
   showcaseCredentialsUpdatedAt  DateTime?
   showcaseRuntimePushedAt       DateTime?
-  /**
-   * Admin: offer platform-billed AI to new founders (Gemini, DeepSeek, Cursor, Ollama).
-   */
+  /** Admin: offer platform-managed AI to eligible founders. */
   founderPromoAiEnabled         Boolean   @default(false)
-  founderPromoTokenCap          Int       @default(10000000)
+  founderPromoTokenCap          Int       @default(5000000)
   founderPromoWindowDays        Int       @default(30)
   founderPromoMessage           String?   @db.Text
-  /**
-   * Encrypted JSON map: { gemini?, deepseek?, cursor?, openai?, anthropic? }
-   */
+  /** Encrypted JSON map of managed provider credentials. */
   founderPromoAiCredentialsEnc  String?   @db.Text
   /**
    * Permanent platform-level DeepSeek API key — always-available fallback brain for all users.

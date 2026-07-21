@@ -1,5 +1,6 @@
 import { Global, Injectable, Logger, Module } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { FOUNDER_FREE_MANAGED_TOKEN_CAP } from './founder-free.config';
 
 /**
  * Two-tier builder protection.
@@ -209,7 +210,7 @@ export class BuilderScoreService {
     // Pool stats (re-uses the promo aggregation logic without needing the
     // promo service — sum of all platform_promo tokens vs the configured cap).
     const settings = await this.prisma.platformSettings.findFirst();
-    const poolCap = settings?.founderPromoTokenCap ?? 30_000_000;
+    const poolCap = settings?.founderPromoTokenCap ?? FOUNDER_FREE_MANAGED_TOKEN_CAP;
     const poolAgg = await this.prisma.aiTokenUsageLog.aggregate({
       where: { billingSource: 'platform_promo' },
       _sum: { promptTokens: true, completionTokens: true },

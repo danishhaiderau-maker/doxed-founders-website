@@ -24,6 +24,11 @@ import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
 import type { Response } from 'express';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { FounderPromoService } from '../founder-os/founder-promo.service';
+import {
+  toFounderIdeEntitlements,
+  type FounderIdeEntitlements,
+} from './founder-node-entitlements';
 
 const MANIFEST_RELATIVE_PATH = [
   'packages',
@@ -69,6 +74,7 @@ export class FounderNodeController {
     private readonly syncJobs: FounderNodeSyncService,
     private readonly vaultSync: FounderNodeVaultSyncService,
     private readonly ideBridge: IdeBridgeService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   @Post('pairing-code')
@@ -320,6 +326,17 @@ export class FounderNodeController {
   @Post('rotate-token')
   rotateToken(@Req() req: { founderNode: FounderNodeRequestUser }) {
     return this.nodes.rotateToken(req.founderNode.nodeId);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('ide-entitlements')
+  async ideEntitlements(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+  ): Promise<FounderIdeEntitlements> {
+    const status = await this.founderPromo.getUserPromoStatus(
+      req.founderNode.userId,
+    );
+    return toFounderIdeEntitlements(status);
   }
 
   /**
