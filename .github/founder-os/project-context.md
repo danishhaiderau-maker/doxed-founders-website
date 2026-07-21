@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-chore(bitfinex): approve inactive-watchdog safety patch
+fix(ai): enforce founder alias routing
 
 ## Last Activity
 
