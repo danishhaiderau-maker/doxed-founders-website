@@ -9,7 +9,7 @@
 | **Pairs with** | [`RAISE_ROOM_LAUNCH_FLOW.md`](./RAISE_ROOM_LAUNCH_FLOW.md), [`RAISE-ROOM-VALIDATION-VISION-SPEC.md`](./RAISE-ROOM-VALIDATION-VISION-SPEC.md), [`FOUNDER_OS_NORTH_STAR.md`](./FOUNDER_OS_NORTH_STAR.md) |
 | **Review audience** | ChatGPT, fintech counsel (AU/US/EU), smart-contract auditor |
 
-> **2026-07-21 amendment:** The founder has superseded the post-graduation split. The intended post-graduation founder benefit is 0.25% and the platform takes 0% of that benefit. The 1% bonding-curve total and 0.5% founder share remain. The destination of the remaining 0.5% is arithmetically ambiguous: it was described both as entirely buyback/burn and as a 50/50 split between platform USDC treasury and buyback/burn. No contract should encode that half until confirmed. The post-graduation 0.25% must also be defined as either a separate creator fee or an LP-fee claim; it cannot silently replace all LP compensation. See [`DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`](./DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md). This amendment controls over conflicting fee tables, formulas, projections, and open-question answers below.
+> **2026-07-21 amendment:** The final recommended bonding-curve fee is 1% of quote-side volume: 0.5% founder revenue, 0.25% platform USDC operating reserve, and 0.25% platform-token buyback/burn. DCF does not receive or sell the launched project token as fee inventory. The recommended fixed supply is 1 billion: 80% curve, 20% graduated liquidity, 0% unlocked founder/platform allocation. After graduation, a separate 0.25% creator fee goes entirely to the founder, the platform takes 0%, and the audited venue's base LP fee remains separate and fully disclosed. See [`DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`](./DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md). This amendment controls over conflicting fee tables, formulas, projections, and open-question answers below.
 
 > This document captures every locked decision, its reasoning, the concrete formulas, the attack vectors considered, and the open legal questions for the platform's own token ("reverse tokenomics") + the multi-chain launchpad/DEX that funds it. It is a decision-capture document, not a build ticket. Authored for external review before any contract is written.
 
@@ -245,22 +245,25 @@ A frontend surcharge is **bypassable** — users go directly to Uniswap's UI or 
 
 **Universal pattern: own the venue, so fee capture is non-bypassable.** Not one relies on a frontend surcharge.
 
-### 5.3 Locked architecture — bonding curve + own AMM fork
+### 5.3 Recommended v1 architecture — audited launch infrastructure under DCFSwap
 
 ```
-PHASE 1 — BONDING CURVE (your contract, per chain)
-  Every Raise Room graduate launches on YOUR bonding curve
+PHASE 1 — BONDING CURVE (audited venue/program, DCF-branded flow)
+  Every qualified Raise Room launch uses the configured DCF curve
   Constant-product curve: x (USDC/ETH/SOL) × y (token) = k
-  Fee: 1% (0.5% founder + 0.5% buyback-and-burn platform token)
+  Supply: 1B fixed (800M curve + 200M reserved for graduated LP)
+  Fee: 1% quote asset (0.5% founder + 0.25% operations + 0.25% buyback/burn)
+  DCF does not receive or sell launched project tokens as fee inventory
   Graduation threshold: $69K market cap (Pump.fun-proven number)
   → captures 100% of pre-graduation fees, no bypass possible
        │
        ▼ graduates
-PHASE 2 — DCFSwap (own AMM fork, per chain)
-  Fork Uniswap V2 (handles fee-on-transfer cleanly; V3 has FoF issues)
-  Protocol-fee switch routes 0.25% → 0.125% founder + 0.125% buyback-and-burn
-  Raise Room graduates ONLY migrate here → guaranteed liquidity onboarding
-  → fee captured at pool level, non-bypassable on any frontend
+PHASE 2 — DCFSwap (audited CPMM/AMM venue under DCF product shell)
+  Remaining 20% supply + accumulated quote migrate atomically
+  Base venue/LP fee target: 0.25% under the venue's disclosed split
+  Separate quote-asset creator fee: 0.25% → founder; DCF platform share 0%
+  Expected trader total where base fee is 0.25%: 0.50%
+  → fee rights and locked liquidity remain chain-readable on any frontend
 ```
 
 ### 5.4 Bonding curve math (constant-product, per founder-launched token)
@@ -268,20 +271,20 @@ PHASE 2 — DCFSwap (own AMM fork, per chain)
 ```
 Virtual reserves initialized at token launch:
   x0 = initial quote asset (USDC/ETH/SOL) raised during Raise Room pledging
-  y0 = token supply allocated to bonding curve (e.g., 800M of 1B; 200M to founder)
+  y0 = token supply allocated to bonding curve (800M of fixed 1B; 200M reserved for graduated LP)
   k = x0 × y0
 
 Buy Δx quote → receive Δy tokens:
   fee = Δx × 0.01            // 1% bonding curve fee
   Δx_after_fee = Δx - fee
   Δy = y0 × (1 - x0 / (x0 + Δx_after_fee))
-  fee split: 0.5% → founder revenue, 0.5% → buyback-and-burn
+  fee split: 0.5% → founder, 0.25% → operations, 0.25% → buyback-and-burn
 
 Sell Δy tokens → receive Δx quote:
   Δx_before_fee = x0 × (1 - y0 / (y0 + Δy))
   fee = Δx_before_fee × 0.01
   Δx = Δx_before_fee - fee
-  fee split: same 0.5% / 0.5%
+  fee split: same 0.5% / 0.25% / 0.25%
 
 Graduation trigger: when market cap (x × price) ≥ $69K threshold
   → migrate remaining tokens + accumulated quote to DCFSwap pool
@@ -289,9 +292,9 @@ Graduation trigger: when market cap (x × price) ≥ $69K threshold
   → graduation is automatic and irreversible
 ```
 
-### 5.5 Why DCFSwap works for us (and not for a standalone AMM fork)
+### 5.5 Why the DCFSwap product surface works without a novel v1 AMM
 
-The hardest part of forking Uniswap is bootstrapping liquidity — nobody trades on an empty AMM. But every Raise Room graduate *must* migrate somewhere, and if that's DCFSwap by default, we get guaranteed liquidity onboarding on every launch. Same moat Pump.fun used for PumpSwap. We're not competing for liquidity — we're funneling our own graduates in.
+The hardest part of a standalone AMM is bootstrapping liquidity and safely maintaining novel contracts. Every qualified launch can use the DCFSwap-branded journey while the actual v1 curve and graduated pool use audited Raydium LaunchLab/CPMM or Meteora primitives. This gives users one product and gives DCF launch flow and fee-policy control without pretending a new unaudited AMM is safer. An owned AMM is a later option only after liquidity, audits, and operational maturity justify it.
 
 ### 5.6 Long-term migration: Uniswap V4 hooks
 
@@ -309,25 +312,26 @@ The platform token (reverse tokenomics) is a **fair launch**, not a launchpad to
 
 | Phase | Fee | Split | Rationale |
 |---|---|---|---|
-| **Bonding curve** (pre-grad, ~90% of new-token volume) | **1%** | 0.5% founder + 0.5% buyback-and-burn | Market rate (Pump.fun 1.25%, Moonshot 1%, LaunchLab 1%) |
-| **DCFSwap** (post-grad) | **0.25%** | 0.125% founder + 0.125% buyback-and-burn | Matches PumpSwap |
+| **Bonding curve** (pre-grad, ~90% of new-token volume) | **1%** | 0.5% founder + 0.25% operations + 0.25% buyback/burn, all quote-side | Below Pump.fun's current 1.25% total |
+| **DCFSwap** (post-grad) | **0.50% expected trader total** | 0.25% base venue/LP fee + separate 0.25% founder creator fee; DCF 0% creator share | Preserves LP economics and founder income |
 | **Platform token's own LP** | **0%** platform take | Standard Uniswap LP fees only | Not a launchpad token |
 
-### 6.2 Why 50% founder / 50% burn
+### 6.2 Why 50% founder / 25% operations / 25% burn on the curve
 
-- **Founder 50%:** attracts builders to launch on our platform vs competitors (Pump.fun keeps ~all; Believe gives 50%; we give 50% + burn benefit). Founder rev share is the liquidity acquisition lever.
-- **Buyback-and-burn 50%:** deflationary flywheel — more DEX volume → more buy pressure → reduced supply → price support → more founders attracted → more volume. Raydium LaunchLab proves the model (25% to RAY buyback; we do 50%, more aggressive).
-- **Founder payout currency:** USDC (or native chain asset) by default — predictable revenue. Platform token is used for the burn only, not for founder payout. Easy to change later.
+- **Founder 50%:** makes the founder economically aligned without giving an unlocked project-token allocation.
+- **Operations 25%:** provides predictable USDC runway for infrastructure, audits, support, and compliance.
+- **Buyback-and-burn 25%:** funds the disclosed platform-token mechanism without DCF selling the launched project token.
+- **Payout currency:** all three curve destinations originate in the quote asset. The launched project token is never fee inventory.
 
-### 6.3 Why we do NOT go cheaper than 1% / 0.25%
+### 6.3 Why we do not go cheaper than 1% on the curve
 
 We are **tied for cheapest** on both phases. Not uniquely cheapest.
 
-| Option | Bonding | Post-grad | Revenue vs Pump.fun (same volume) | What you lose |
+| Option | Bonding | Post-grad creator fee | Position | What you lose |
 |---|---|---|---|---|
-| **Current (recommended)** | 1% | 0.25% | ~80% of Pump.fun | — |
-| Aggressive cheapest | 0.5% | 0.1% | ~40% of Pump.fun | Half founder rev + half burn pressure |
-| Race-to-bottom | 0.25% | 0.05% | ~20% of Pump.fun | Burn flywheel barely functions |
+| **Current (recommended)** | 1% | 0.25% | Below Pump.fun's current early-stage total | — |
+| Aggressive cheapest | 0.5% | 0.1% | Lower revenue and creator incentive | Founder income, operating runway, and burn budget |
+| Race-to-bottom | 0.25% | 0.05% | Unsustainable without another revenue source | The launch-support model |
 
 Reasons not to go cheaper:
 1. Undercuts the buyback-burn flywheel — weaker burn = weaker platform token = weaker differentiator
@@ -339,16 +343,16 @@ Reasons not to go cheaper:
 
 ### 6.4 Economic projections (fee revenue at various DEX volumes)
 
-Assumes 1% bonding curve fee on ~90% of volume + 0.25% DCFSwap fee on ~10% of post-grad volume. Blended ~0.925% effective fee.
+Assumes 1% bonding-curve fee on ~90% of volume plus the separate 0.25% founder creator fee on ~10% post-grad volume. The venue's base LP fee is excluded because it is not DCF revenue.
 
-| Daily DEX volume | Annual fees | Founder revenue (50%) | Buyback-and-burn (50%) |
-|---|---|---|---|
-| $100K/day | $338K/yr | $169K/yr | $169K/yr |
-| $1M/day | $3.38M/yr | $1.69M/yr | $1.69M/yr |
-| $10M/day | $33.8M/yr | $16.9M/yr | $16.9M/yr |
-| $100M/day (Pump.fun peak) | $338M/yr | $169M/yr | $169M/yr |
+| Daily volume | Founder revenue | Operations reserve | Buyback-and-burn |
+|---|---:|---:|---:|
+| $100K/day | $173K/yr | $82K/yr | $82K/yr |
+| $1M/day | $1.73M/yr | $821K/yr | $821K/yr |
+| $10M/day | $17.34M/yr | $8.21M/yr | $8.21M/yr |
+| $100M/day | $173.38M/yr | $82.13M/yr | $82.13M/yr |
 
-**Context:** Pump.fun at peak (late 2024) was doing >$1M/day in fees from ~$100M/day volume. Our 1% is comparable. Even at $1M/day volume (modest), the platform funds $1.69M/yr in founder payouts + $1.69M/yr in buyback-burn.
+These are scenario calculations, not forecasts. They exclude venue LP fees, token prices, slippage, conversion costs, taxes, refunds, incentives, bad debt, and downtime.
 
 ---
 
@@ -473,7 +477,7 @@ Founders live on the chain they launched on. **No bridge, no hack surface.** Thi
 **Pattern: LayerZero OFT v2 (Omnichain Fungible Token).**
 - Platform token has canonical supply on Robinhood Chain
 - Bridged representations on Ethereum/Base/Solana via OFT v2
-- On each chain, the 50% buyback share market-buys the *bridged* platform token on that chain's DEX → burns it locally → the burn propagates to the canonical supply on Robinhood Chain via OFT v2's burn-and-mint accounting
+- On each chain, the buyback allocation (25% of bonding-curve fees, equal to 0.25% of curve volume) market-buys the *bridged* platform token on that chain's DEX → burns it locally → the burn propagates to the canonical supply on Robinhood Chain via OFT v2's burn-and-mint accounting
 - **No value crosses chains — only a burn message.** Much lower hack surface than bridging USDC
 
 **Why LayerZero OFT v2:** most-audited omnichain token standard. Moving burn messages (not value) directly addresses the founder's hack fear — bridges moving *value* are the #1 hack vector (Wormhole $320M, Ronin $620M, Nomad $190M). Pattern B moves only messages.
@@ -493,18 +497,24 @@ A Solana trader winning a champion slice just needs an EVM wallet (Rabby/MetaMas
 ### 8.4 Cross-chain reward map (summary)
 
 ```
-FEE CAPTURED (1% bonding / 0.25% DCFSwap) on each chain
+QUOTE-ASSET FEE CAPTURED ON THE 1% BONDING CURVE
        │
-       ├─ 50% FOUNDER REVENUE (paid in chain's native asset — NO bridge)
+       ├─ 50% FOUNDER REVENUE (0.5% of trade volume; NO bridge)
        │     Founder on Solana → SOL
        │     Founder on Robinhood → ETH/USDC
        │     Founder on Ethereum → ETH/USDC
        │     Founder on Base → ETH/USDC
        │
-       └─ 50% BUYBACK-AND-BURN (omnichain token, local burn)
+       ├─ 25% OPERATIONS (0.25% of volume; settle to USDC)
+       │
+       └─ 25% BUYBACK-AND-BURN (0.25% of volume; local burn)
              LayerZero OFT v2. Buy bridged platform token on local DEX,
              burn locally → burn message propagates to canonical supply
              on Robinhood Chain. No value crosses chains.
+
+POST-GRADUATION CREATOR FEE (separate 0.25% of trade volume)
+       └─ 100% TO LAUNCHING FOUNDER; DCF PLATFORM SHARE 0%
+          Base venue/LP fee remains separate and disclosed.
 
 CHAMPION POOL (16%, settles year 10) on Robinhood Chain
        Winners (traders/builders/LP/active across ALL 4 chains —
@@ -523,7 +533,7 @@ Traders **pay** the fee — they don't receive it. They're rewarded through thre
 |---|---|---|---|---|
 | **Champion pool — trader bucket (25% of 16%)** | Top traders by wash-filtered lifetime volume | Platform token (on Robinhood Chain) | Year-10 settlement | Solana + EVM volume both count (indexer aggregates cross-chain); winner claims via EVM wallet on Robinhood Chain |
 | **Founder Points — early-follower / paper-capital buckets** | Early backers of successful launches | The *launched* token's community allocation | At each launch's snapshot | Lives on whichever chain the launched token is on — no cross-chain issue |
-| **Buyback-and-burn benefit** | Anyone holding the platform token | Price support + deflation | Continuous | 0.5% buyback buys platform token on DEX and burns it — benefits all holders regardless of chain (if token bridged via OFT v2) |
+| **Buyback-and-burn effect** | Platform-token supply | Publicly verifiable supply reduction | Batched under disclosed policy | 0.25% of bonding-curve volume funds bounded platform-token purchases and burns; this is not a promise of price support |
 
 ---
 
@@ -737,7 +747,7 @@ When reviewing this spec, pressure-test these questions:
 1. **Is "reverse tokenomics" legally defensible framing?** Does calling community-owned locked supply + earned vesting + champion payout "reverse tokenomics" create securities-law exposure vs just calling it a vesting schedule?
 2. **Is the champion pool a "security" or "investment contract"?** (Howey test: investment of money, common enterprise, expectation of profits from efforts of others — does the "efforts of others" prong fail because winners earn by *their own* activity, or does the platform's indexer/scoring count as "efforts of others"?)
 3. **Is the bonding curve itself a regulated instrument?** Some jurisdictions treat bonding-curve launches as securities offerings. Geofencing may be required.
-4. **Is the 50% buyback-and-burn "manipulative"?** Buybacks are legal in equities (Rule 10b-18) but crypto regulatory treatment is evolving. On-chain disclosure is the mitigation — is it sufficient?
+4. **Does the buyback-and-burn policy create market-manipulation or financial-promotion risk?** The current recommendation allocates 0.25% of bonding-curve volume. Is a disclosed, bounded, receipt-backed policy legally sufficient in each launch jurisdiction?
 5. **Multi-chain fee collection + omnichain burn — money-transmitter / MSB exposure in US or AU?** Does LayerZero OFT v2 (messages not value) actually avoid MSB classification?
 6. **AWV (Activity-Weighted Vesting) — is paying people to trade "incentivizing volume," adjacent to wash-trading concerns?** The wash-trade *filter* is the defense — is it legally sufficient?
 7. **10-year contract immutability — if a regulator orders a halt mid-vesting, can the contract actually stop?** The governance pause is the answer — is multi-sig + timelock legally sufficient?

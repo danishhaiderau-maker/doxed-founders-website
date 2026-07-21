@@ -2,26 +2,30 @@
 
 | Field | Value |
 |---|---|
-| Status | Founder decision capture; two arithmetic/mechanics questions remain open |
+| Status | Final recommended economics; legal, security, implementation, and audit gates remain |
 | Updated | 2026-07-21 |
 | Applies to | Bonding curve launches, graduated pools, founder payouts, platform treasury, buyback and burn |
 | Supersedes | Conflicting post-graduation splits and permanent-wallet assumptions in older tokenomics documents |
 
-This document records the economic intent without pretending that a website login is a blockchain security system. Contract code must not be written until the two items marked **Open** are confirmed and legal/security review is complete.
+This document records the final recommended economics without pretending that a website login is a blockchain security system. Contract code must not ship until legal/security review and an independent contract audit are complete.
 
 ## 1. Decisions captured
 
 ### Bonding curve
 
 - The total trading fee during the bonding curve is **1.00%**.
-- **0.50% of trade volume** goes to the verified launching founder.
+- **0.50% of trade volume** goes to the verified launching founder in the quote asset.
+- **0.25% of trade volume** goes to the platform operating reserve in USDC or is converted from the native quote asset to USDC in bounded batches.
+- **0.25% of trade volume** funds platform-token buyback and burn using the quote asset.
 - The founder payout destination is founder-controlled and can be changed through a safe on-chain authority-transfer flow.
 - The platform does not keep the founder's seed phrase or private key.
+- The platform and founder fee vaults do not receive the newly launched project token as a fee.
 
 ### After graduation
 
 - The intended founder benefit is **0.25% of post-graduation trade volume**.
 - The platform takes **0% of that founder benefit**.
+- The recommended implementation is a separate **0.25% creator fee** on top of the underlying pool's disclosed LP/venue fee. With a 0.25% base pool fee, the trader sees a transparent 0.50% total.
 - The founder can claim to a connected self-custody wallet or change the payout address through an authenticated, on-chain transfer.
 - A founder may not change the recipient for fees already claimed, but can change the destination for future claims.
 
@@ -32,28 +36,43 @@ This document records the economic intent without pretending that a website logi
 - High-risk proposals require an on-chain multisig threshold, transaction simulation, a delay where appropriate, and a permanent receipt.
 - Deployer and developer keys are removed after deployment. A contractor or AI system must have no retained production authority.
 
-## 2. Two points that must be confirmed
+## 2. Final recommended launch economics
 
-### Open A: the remaining bonding-curve half
+### Supply and liquidity
 
-Two different descriptions were given for a USD 1,000 fee collected on USD 100,000 of bonding-curve volume:
+- Fixed supply: **1,000,000,000 project tokens**.
+- **80%** is available through the bonding curve.
+- The remaining **20%** becomes initial post-graduation liquidity with the accumulated curve quote reserve.
+- **0% unlocked founder allocation** and **0% platform allocation** at genesis. The founder's durable incentive is fee revenue, not an undisclosed token inventory.
+- Mint authority and freeze authority are revoked after the audited launch/migration setup no longer needs them.
+- Graduation is automatic and atomic when the configured quote target is reached. The curve closes and cannot be reopened.
+- Graduated liquidity is locked or placed into an audited Burn-and-Earn/Fee-Key structure; it cannot be withdrawn through an admin dashboard.
 
-| Interpretation | Founder | Platform treasury in USDC | Buyback and burn |
-|---|---:|---:|---:|
-| A - first statement | USD 500 | USD 0 | USD 500 |
-| B - later dashboard statement | USD 500 | USD 250 | USD 250 |
+### Fee example on USD 100,000 of curve volume
 
-The safest working assumption is **B**, because it matches the requested admin flow: the platform-side USD 500 is split 50/50 between treasury USDC and buyback/burn. This is not locked until the founder confirms it explicitly.
+| Recipient/use | Rate | Value |
+|---|---:|---:|
+| Launching founder, quote asset | 0.50% | USD 500 |
+| Platform operating reserve, USDC | 0.25% | USD 250 |
+| Platform-token buyback and burn | 0.25% | USD 250 |
+| **Total** | **1.00%** | **USD 1,000** |
 
-### Open B: what the post-graduation 0.25% means
+### No project-token sale by DCF
 
-The full AMM trading fee cannot normally go to the founder while also paying liquidity providers. Raydium's standard CPMM fee is 0.25%, but most of it funds LPs; an optional creator fee can be added separately. Therefore choose one of these contract-readable models:
+- Curve fees are assessed and accounted for in SOL, USDC, ETH, or the configured quote asset on both buys and sells.
+- The DCF treasury, operating reserve, and buyback vault do not accrue project tokens and expose no `sellProjectToken` route.
+- If project tokens are accidentally transferred to a controlled vault, the recovery policy may return them to a disclosed project treasury or burn them after multisig approval. It may not market-sell them.
+- This restriction applies to the platform fee machinery. It does not prevent ordinary holders from selling, and it does not create a hidden transfer restriction in the project token.
 
-1. **Recommended v1:** a 0.25% founder creator fee on top of the base pool/LP fee. This is simple and honest, but the trader's total fee is higher than 0.25%.
-2. Give the founder a transferable claim on some or all LP fees through a Fee Key or locked-liquidity fee share. The trader sees the base pool fee, but the exact founder yield depends on LP ownership.
-3. Build a custom DCFSwap AMM that subsidizes LPs elsewhere. This is not recommended for v1 because it adds novel contract and liquidity risk.
+### Post-graduation
 
-User-facing copy must show the total trader fee and its exact recipients, not only the founder component.
+- Base pool/LP fee: target **0.25%**, distributed according to the audited venue's disclosed rules.
+- Founder creator fee: **0.25%** of trade volume, paid to the founder-controlled claim vault in the quote asset.
+- On Raydium CPMM, initialize the pool with creator fees enabled and `creator_fee_on` locked to the quote mint (`OnlyToken0` or `OnlyToken1`, depending on pool ordering). This takes creator fees from quote input on buys and quote output on sells.
+- DCF platform creator-fee share: **0%**.
+- Expected trader total: **0.50%** when the base pool fee is 0.25%. The interface must display the total and both components before confirmation.
+
+This is deliberately simpler than a market-cap-dependent schedule for v1. It is cheaper than Pump.fun's current low-market-cap canonical-pool total, gives the founder predictable revenue, preserves LP compensation, and gives DCF no post-graduation founder-fee take.
 
 ## 3. Recommended custody model
 
@@ -100,12 +119,12 @@ If a single current key is lost before a recovery mechanism exists, rotation may
 The requested admin experience should be one coherent flow:
 
 1. **Accrual:** show claimable fees by launch, token, chain, age, and USD estimate.
-2. **Select:** admin chooses assets and amount; the dashboard never exposes a raw private key.
+2. **Select:** admin chooses supported quote assets and amount; project tokens are not eligible. The dashboard never exposes a raw private key.
 3. **Policy:** apply the confirmed split, daily cap, minimum sweep size, approved routes, slippage, and MEV protection.
 4. **Preview:** simulate expected USDC, expected platform tokens, price impact, route, gas, and minimum received.
 5. **Propose:** create an immutable transaction bundle and proposal ID.
 6. **Approve:** hardware-backed multisig members inspect the same payload and approve separately.
-7. **Execute:** convert the treasury portion to USDC, execute a bounded platform-token buyback, then burn to the canonical burn mechanism.
+7. **Execute:** convert the operating portion of the quote asset to USDC where needed, execute a bounded platform-token buyback with the buyback portion, then burn to the canonical burn mechanism. Never sell the launched project token.
 8. **Prove:** store transaction hashes, amounts, price impact, approvals, and burn proof; make the economic receipt public.
 
 Prefer daily or threshold-based batches over buying on every swap. This reduces gas and makes slippage, sandwich protection, and reporting controllable.
@@ -154,13 +173,11 @@ Buyback/burn promises, discretionary treasury sales, token launches, creator rev
 
 ## 9. Build order
 
-1. Confirm Open A and Open B in plain arithmetic.
-2. Choose Solana v1 venue after a Raydium LaunchLab versus Meteora DBC proof of concept.
-3. Define chain-readable fee and authority interfaces before dashboard work.
-4. Build wallet linking, message-signature verification, and founder fee-recipient rotation on devnet.
-5. Build the treasury proposal/simulation/approval/receipt API and admin dashboard against a devnet multisig.
-6. Add buyback limits, burn proof, observability, and emergency pause drills.
-7. Obtain counsel and external contract audit.
-8. Run adversarial testnet launch, graduation, rotation, compromise, and recovery scenarios.
-9. Only then replace the current fixed-price `DexStubService` and old 0.1% UI copy.
-
+1. Choose Solana v1 venue after a Raydium LaunchLab versus Meteora DBC proof of concept using this exact 80/20 and quote-asset fee model.
+2. Define chain-readable fee, supply, migration, no-project-token-sale, and authority interfaces before dashboard work.
+3. Build wallet linking, message-signature verification, and founder fee-recipient rotation on devnet.
+4. Build the treasury proposal/simulation/approval/receipt API and admin dashboard against a devnet multisig.
+5. Add buyback limits, burn proof, observability, and emergency pause drills.
+6. Obtain counsel and external contract audit.
+7. Run adversarial testnet launch, graduation, rotation, compromise, and recovery scenarios.
+8. Only then replace the current fixed-price `DexStubService` and old 0.1% UI copy.

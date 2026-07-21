@@ -124,6 +124,10 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 - Founder startup/home editor with recent workspaces, current/recent tasks, Node/identity health, and one primary action.
 - Three desks: Build, Agents, Ship.
+- Use the currently empty lower Activity Bar space as a compact Founder shortcut dock. From top to bottom: Founder Home/Build, Agents, Ship, Founder Node, Connections, and Remote Sessions. Keep Account and Settings anchored at the bottom.
+- Every shortcut uses a familiar icon, tooltip, active indicator, and small status badge where useful. Node shows health, Agents shows active-task count, Ship shows failing/pending checks, and Remote shows an active-session indicator.
+- The rail adapts to short windows: preserve Build, Agents, and Ship, then move lower-priority Founder shortcuts into a single overflow menu. Do not leave a large dead strip or allow icons to overlap Account/Settings.
+- Clicking a shortcut opens its real workspace surface, not an external documentation page or a duplicate settings page.
 - Unified command palette entries and deep links for every primary state.
 - Responsive behavior for laptop, wide monitor, narrow window, high DPI, and screen zoom.
 - Persist layout and task context per workspace.
@@ -222,11 +226,11 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 ### Milestone 1: Founder shell
 
-- Implement design tokens, Founder startup/home, Build/Agents/Ship navigation, unified status, and deliberate empty/loading/error states.
+- Implement design tokens, Founder startup/home, the Activity Bar shortcut dock, Build/Agents/Ship navigation, unified status, and deliberate empty/loading/error states.
 - Remove all visible Void wording and duplicate Founder/upstream entry points.
 - Reuse the current compiled upstream checkout during development; do one release build after the milestone, not a fresh fork for every UI change.
 
-**Exit:** the supplied screenshot can no longer be mistaken for Void with a Founder extension installed.
+**Exit:** the supplied screenshot can no longer be mistaken for Void with a Founder extension installed, and the circled Activity Bar space provides working shortcuts without crowding or dead space at every supported window height.
 
 ### Milestone 2: Native account, privacy, and Provider Vault
 
@@ -235,29 +239,24 @@ The target is calm and highly legible, inspired by Apple's restraint but not a v
 
 **Exit:** a new user signs in, chooses privacy, connects or selects AI, and sends a successful request without visiting raw settings.
 
-### Milestone 3: One Build experience
+### Milestone 3: Live Build and Agents
 
-- Unify inherited chat, inline edit, autocomplete, task timeline, diffs, approvals, terminal/tests, checkpoints, and errors.
+- Unify inherited chat, inline edit, autocomplete, task timeline, diffs, approvals, terminal/tests, checkpoints, errors, bounded parallel tasks, and agent controls.
 
-**Exit:** the user watches code change beside the conversation, reviews the diff, runs tests, and accepts or rolls back without switching mental models.
+**Exit:** the user watches code change beside the conversation, reviews the diff, runs tests, accepts or rolls back, and can inspect/pause/cancel every active task without switching mental models.
 
-### Milestone 4: Agents and remote control
+### Milestone 4: Ship, integrations, and remote control
 
-- First-class task runtime, bounded parallel work, web-to-Node sessions, live state, approvals, cancellation, and audit receipts.
+- Add Git/GitHub, CI, Vercel, Railway, Neon, verification, rollback, web-to-Node sessions, remote approvals/cancellation, and audit receipts.
 
-**Exit:** a task started on the website becomes visibly active in the IDE and cannot exceed its workspace/permission boundary.
+**Exit:** a verified commit moves from local changes to a healthy deployment with a complete receipt, while a task started on the website becomes visibly active in the IDE and cannot exceed its workspace/permission boundary.
 
-### Milestone 5: Ship
+### Milestone 5: Launch economics and production trust
 
-- Git/GitHub, CI, Vercel, Railway, Neon, verification, and rollback in one release flow.
+- Implement the audited quote-asset-only bonding curve, automatic graduation, founder fee claims, locked liquidity, multisig treasury, wallet rotation, and no-project-token-sale rule.
+- Complete signing, updater rollback, clean install/uninstall, accessibility, performance, security audit, soak, and release support.
 
-**Exit:** a verified commit moves from local changes to a healthy deployment with a complete receipt.
-
-### Milestone 6: Production hardening
-
-- Signing, updater rollback, clean install/uninstall, accessibility, performance, security audit, soak, and release support.
-
-**Exit:** signed clean-machine builds pass the complete acceptance suite on supported Windows versions; macOS/Linux follow their declared support plan.
+**Exit:** launch/graduation/rotation/recovery pass adversarial testnet and external review, and signed clean-machine IDE builds pass the complete acceptance suite on supported Windows versions; macOS/Linux follow their declared support plan.
 
 ## 8. Completion acceptance story
 

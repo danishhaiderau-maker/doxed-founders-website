@@ -123,15 +123,17 @@ The DEX is part of the long-term revenue loop, but it is not the first screen of
 Latest founder direction, with security interpretation in `DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`:
 
 - Raise Room graduates launch on the platform bonding curve.
-- **1% pre-graduation fee:** 0.5% founder revenue. The other 0.5% still needs one arithmetic confirmation: all buyback/burn, or half platform USDC treasury and half buyback/burn.
+- **1% pre-graduation fee, collected in the quote asset:** 0.5% founder revenue + 0.25% platform USDC operating reserve + 0.25% platform-token buyback/burn.
+- Recommended project-token supply: fixed 1 billion, 80% curve + 20% graduated liquidity, with 0% unlocked founder/platform allocation.
+- DCF fee vaults do not receive or sell the launched project token.
 - Graduated liquidity moves to the platform AMM.
-- **0.25% post-graduation founder benefit:** all of this benefit goes to the launching founder; the platform takes 0% of it. It must be implemented as a disclosed creator fee or LP-fee claim without silently removing LP compensation.
+- **0.25% post-graduation founder creator fee:** all goes to the launching founder; the platform takes 0%. The underlying LP/venue fee remains separate and disclosed, producing a 0.50% total when the base pool fee is 0.25%.
 - Founder payout is in USDC or the relevant native asset.
 - Founders use self-custody wallets or transferable fee-claim authorities; the platform never stores their private keys.
 - Platform treasury changes, conversions, buybacks, burns, and authority rotation use proposal, simulation, multisig approval, on-chain execution, and immutable receipts.
 - Launch rights require Doxxed Builder status and product/trust gates.
 
-This design conflicts with older screens and `BILLING.md`, which still say 0.1%. Treat the schedule as unavailable in user-facing production copy until the two mechanics above, legal/security review, contracts, and audits are complete. Smart contracts, custody assumptions, geofencing, liquidity migration, and rollback/incident plans are mandatory release gates.
+This design conflicts with older screens and `BILLING.md`, which still say 0.1%. Treat the schedule as unavailable in user-facing production copy until legal/security review, contracts, and audits are complete. Smart contracts, custody assumptions, geofencing, liquidity migration, and rollback/incident plans are mandatory release gates.
 
 ## 7. Next engineering milestones
 
@@ -162,7 +164,5 @@ After this contract is stable, both the IDE and redesigned website can consume t
 2. Confirm **five** active personal cloud providers for Pro.
 3. Decide whether Free includes one personal cloud provider or unlimited BYOK with fewer managed features.
 4. Define the monthly/daily Founder Managed allowance by plan and for Launch Partners.
-5. Confirm whether the platform-side 0.5% of bonding volume is all buyback/burn, or 0.25% platform USDC treasury plus 0.25% buyback/burn.
-6. Confirm whether the founder's post-graduation 0.25% is a separate creator fee or an LP-fee claim.
-7. Choose the Solana v1 graduation venue after a Raydium LaunchLab versus Meteora DBC proof of concept.
-8. Obtain legal and security approval before presenting launch/DEX economics as available production functionality.
+5. Choose the Solana v1 graduation venue after a Raydium LaunchLab versus Meteora DBC proof of concept.
+6. Obtain legal and security approval before presenting launch/DEX economics as available production functionality.
