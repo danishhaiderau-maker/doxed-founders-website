@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-Bound relay reconciliation as history grows
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
