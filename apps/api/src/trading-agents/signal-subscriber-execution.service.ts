@@ -4393,25 +4393,40 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds?: ExchangeCredentials,
     activeOrderIdSet?: Set<number>,
   ) {
-    const stuck = await this.prisma.signalCycleParticipant.findMany({
+    // Scope to this user's pending rows before touching the large event
+    // ledger. The legacy relation filters scanned all SignalCycleEvent rows
+    // even when a flat account had no pending entry.
+    const pending = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
         status: SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId },
-        events: { some: { eventType: 'FILLED' } },
         ...participantScope,
       },
-      include: {
-        events: {
-          where: { eventType: 'FILLED' },
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-        },
-      },
+      select: { id: true, cycleId: true, updatedAt: true },
     });
+    if (pending.length === 0) return;
 
-    for (const row of stuck) {
-      const payload = row.events[0]?.payload as { fill_price?: number } | null;
+    const filledEvents = await this.prisma.signalCycleEvent.findMany({
+      where: {
+        participantId: { in: pending.map((row) => row.id) },
+        eventType: 'FILLED',
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { participantId: true, payload: true },
+    });
+    const latestFillByParticipant = new Map<string, { fill_price?: number } | null>();
+    for (const event of filledEvents) {
+      if (!event.participantId || latestFillByParticipant.has(event.participantId)) continue;
+      latestFillByParticipant.set(
+        event.participantId,
+        event.payload as { fill_price?: number } | null,
+      );
+    }
+
+    for (const row of pending) {
+      const payload = latestFillByParticipant.get(row.id);
+      if (payload === undefined) continue;
       const fill =
         payload?.fill_price != null && Number.isFinite(payload.fill_price)
           ? payload.fill_price
@@ -4425,7 +4440,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // row hangs forever and consumes a capacity slot. Heal it to EXIT with $0
     // PnL (no fill = no PnL) and an audit event so operators can see why.
     if (creds && activeOrderIdSet) {
-      await this.reconcileCancelByExchange(userId, agentId, creds, activeOrderIdSet, participantScope);
+      const unfilledIds = pending
+        .filter((row) => !latestFillByParticipant.has(row.id))
+        .map((row) => row.id);
+      if (unfilledIds.length > 0) {
+        await this.reconcileCancelByExchange(
+          userId,
+          agentId,
+          creds,
+          activeOrderIdSet,
+          participantScope,
+          unfilledIds,
+        );
+      }
     }
   }
 
@@ -4440,32 +4467,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     activeOrderIdSet: Set<number>,
     participantScope: { createdAt?: { gte: Date } } = {},
+    candidateIds: string[] = [],
   ) {
+    if (candidateIds.length === 0) return;
     // Only consider participants older than 120s so we don't race with order
     // placement (the entry limit may take a few seconds to land on the book).
     const candidates = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
+        id: { in: candidateIds },
         status: SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId },
         // NOT having a FILLED event is the discriminator — a FILLED row that
         // vanished from the book is healed by healStuckPendingFill above.
-        events: { none: { eventType: 'FILLED' } },
         updatedAt: { lt: new Date(Date.now() - 120_000) },
         ...participantScope,
       },
       include: {
-        events: {
-          where: { eventType: 'FILLED' },
-          take: 1,
-        },
         cycle: { select: { id: true, status: true, intentEnvelope: true } },
       },
     });
 
     for (const row of candidates) {
-      // Still has a FILLED event? skip (covered by healStuckPendingFill).
-      if (row.events.length > 0) continue;
       const meta = await this.loadExecutionMeta(row.id);
       const oid = meta.bitfinexOrderId;
       if (oid == null) continue;

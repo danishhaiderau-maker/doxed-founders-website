@@ -2606,6 +2606,7 @@ model SignalCycleParticipant {
 
   @@unique([cycleId, userId])
   @@index([userId])
+  @@index([userId, status, createdAt(sort: Desc)])
   @@index([feePaymentReference])
 }
 
@@ -2621,6 +2622,7 @@ model SignalCycleEvent {
   participant SignalCycleParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
 
   @@index([cycleId, createdAt(sort: Desc)])
+  @@index([participantId, eventType, createdAt(sort: Desc)])
 }
 
 model TradingAgentActivity {
