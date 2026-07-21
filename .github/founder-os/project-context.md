@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (13 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Harden low-latency Bitfinex relay execution
 
 ## Last Activity
 
