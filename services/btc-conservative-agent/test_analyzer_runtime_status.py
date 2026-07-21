@@ -106,6 +106,11 @@ checks = {
         'id="genome-empty">Loading the current Genome report' in source
         and 'id="genome-content" style="display:none"' in source
     ),
+    "Genome schema cannot be mistaken for the running release": (
+        "Genome schema (not release)" in source
+        and "independent frozen research-data contract" in source
+        and "Running release" in source
+    ),
     "dashboard favicon probe is quiet": '@app.route("/favicon.ico")' in source,
     "read-only report APIs use a bounded cache": (
         "_API_CACHE_TTL_SEC" in source and "X-Research-Cache" in source

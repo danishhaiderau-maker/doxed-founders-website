@@ -3010,7 +3010,7 @@ async function loadGenome() {
   const dq = (d.dna_quality || {}).overall || {};
   const tax = d.genome_taxonomy || {};
   document.getElementById('genome-kpis').innerHTML = [
-    ['Engine schema', d.architecture_frozen || d.schema_version || 'n/a'],
+    ['Genome schema (not release)', d.architecture_frozen || d.schema_version || 'n/a'],
     ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
@@ -3023,7 +3023,10 @@ async function loadGenome() {
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const taxNote = document.getElementById('genome-taxonomy-note');
   if (taxNote && tax.definitions) {
-    taxNote.innerHTML = `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 0} collecting). `
+    taxNote.innerHTML = `<strong>Running release</strong> = {{ dashboard_version }}. `
+      + `<strong>Genome schema</strong> = ${d.architecture_frozen || d.schema_version || 'n/a'} `
+      + `(independent frozen research-data contract, not the bot release). `
+      + `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 0} collecting). `
       + `<strong>Cluster</strong> = validated identity (${tax.validated_clusters ?? 0} validated, `
       + `${tax.candidate_genomes ?? 0} candidates). `
       + `UNKNOWN at high similarity is correct when validated_clusters=0.`;
