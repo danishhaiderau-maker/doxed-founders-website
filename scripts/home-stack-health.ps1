@@ -85,7 +85,7 @@ function Test-BotHealthy {
 
 function Test-AnalyzerHealthyQuick {
   if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
-  return (Test-HttpOk "http://127.0.0.1:$AnalyzerPort/api/status" 2)
+  return (Test-HttpOk "http://127.0.0.1:$AnalyzerPort/api/health" 2)
 }
 
 function Test-AnalyzerHealthy {
@@ -93,10 +93,13 @@ function Test-AnalyzerHealthy {
   try {
     $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
     if (-not $s.ok) { return $false }
-    # The correct embedded dashboard must be running from research/ and must
-    # identify itself as the version expected by the current checkout.
-    $cwd = [string]$s.cwd
-    if ($cwd -and $cwd -notmatch '[\\/]research$') { return $false }
+    # Serve one canonical report tree from the agent root; stale research/
+    # copies must not pass simply because their version label matches.
+    $reportRoot = [string]$s.report_root
+    if (-not $reportRoot) { $reportRoot = [string]$s.cwd }
+    $expectedReportRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "services\btc-conservative-agent")).TrimEnd('\', '/')
+    try { $actualReportRoot = [System.IO.Path]::GetFullPath($reportRoot).TrimEnd('\', '/') } catch { return $false }
+    if (-not $actualReportRoot.Equals($expectedReportRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($s.runtime_sync_match -ne $true) { return $false }
     if ([string]$s.runtime_analyzer_sync_id -ne [string]$s.expected_analyzer_sync_id) { return $false }
 

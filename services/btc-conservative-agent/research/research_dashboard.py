@@ -229,7 +229,7 @@ _API_CACHE_LOCK = threading.Lock()
 def _serve_cached_read_api():
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
-    if request.path in ("/api/status", "/api/integrity"):
+    if request.path in ("/api/health", "/api/status", "/api/integrity"):
         return None
     key = request.full_path
     now = time.monotonic()
@@ -257,7 +257,7 @@ def _cache_read_api_response(response):
     if (
         request.method == "GET"
         and request.path.startswith("/api/")
-        and request.path not in ("/api/status", "/api/integrity")
+        and request.path not in ("/api/health", "/api/status", "/api/integrity")
         and response.status_code == 200
         and response.mimetype == "application/json"
     ):
@@ -1417,6 +1417,23 @@ def _archives_index():
 # ---------------------------------------------------------------------------
 # Routes — API
 # ---------------------------------------------------------------------------
+@app.route("/api/health")
+def api_health():
+    """Cheap process-liveness probe that never reads large report artifacts."""
+    runtime_sync_ok = RESEARCH_DASHBOARD_VERSION == EXPECTED_ANALYZER_SYNC_ID
+    return jsonify({
+        "ok": runtime_sync_ok,
+        "read_only": True,
+        "dashboard_version": RESEARCH_DASHBOARD_VERSION,
+        "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
+        "runtime_sync_match": runtime_sync_ok,
+        "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),
+        "pid": os.getpid(),
+        "data_root": str(DATA_ROOT),
+        "report_root": str(ROOT),
+    })
+
+
 @app.route("/api/status")
 def api_status():
     manifest = _read_json(REPORT_MANIFEST_FILE)
@@ -1449,6 +1466,8 @@ def api_status():
         "analysis_run": run_state,
         "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),
         "cwd": str(ROOT),
+        "data_root": str(DATA_ROOT),
+        "report_root": str(ROOT),
         "public_url": PUBLIC_URL,
         "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "report_analyzer_sync_id": manifest_sync,

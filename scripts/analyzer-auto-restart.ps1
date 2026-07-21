@@ -17,8 +17,8 @@
 #   -MaxCooldownSec      Backoff cap (default 60).
 #   -PollIntervalSec     How often to poll process liveness + health (default 30).
 #   -BootGraceSec        Window after start during which health is NOT probed, so a
-#                        slow Flask startup is not mistaken for a hang (default 90).
-#   -HealthProbeTimeoutSec  Per-request timeout for the /api/status probe (default 5).
+#                        cold research index is not mistaken for a hang (default 180).
+#   -HealthProbeTimeoutSec  Per-request timeout for the health probe (default 10).
 param(
   [int]$AnalyzerPid = 0,
   [int]$Port = 9001,
@@ -27,8 +27,8 @@ param(
   [int]$BaseCooldownSec = 5,
   [int]$MaxCooldownSec = 60,
   [int]$PollIntervalSec = 30,
-  [int]$BootGraceSec = 90,
-  [int]$HealthProbeTimeoutSec = 5
+  [int]$BootGraceSec = 180,
+  [int]$HealthProbeTimeoutSec = 10
 )
 
 $ErrorActionPreference = "Continue"
@@ -152,8 +152,8 @@ try {
   # these proves the Flask server actually answers, not just that the port is bound.
   function Test-AnalyzerHttpHealthy {
     $urls = @(
-      "http://127.0.0.1:$Port/api/status",
       "http://127.0.0.1:$Port/api/health",
+      "http://127.0.0.1:$Port/api/status",
       "http://127.0.0.1:$Port/"
     )
     foreach ($u in $urls) {

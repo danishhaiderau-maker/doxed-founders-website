@@ -143,7 +143,9 @@ if (-not (Test-AnalyzerHealthy)) {
   Write-Step "[2/4] Opening analyzer console (Doxed Analyzer :$AnalyzerPort)..."
   Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
   $messages.Add("[2/4] Analyzer window opened on :$AnalyzerPort")
-  $analyzerDeadline = (Get-Date).AddSeconds(90)
+  # A full historical research pass can exceed 90s on a cold start. Match the
+  # crash monitor grace so the command center does not show a false failure.
+  $analyzerDeadline = (Get-Date).AddSeconds(180)
   while ((Get-Date) -lt $analyzerDeadline) {
     if (Test-AnalyzerHealthy) { break }
     Start-Sleep -Seconds 3

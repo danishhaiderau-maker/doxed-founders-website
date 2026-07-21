@@ -43,7 +43,22 @@ checks = {
     "status exposes live analyzer identity": '"runtime_analyzer_sync_id"' in source,
     "status separates report identity": '"report_analyzer_sync_id"' in source,
     "status exposes current-pass grace": '"report_sync_pending"' in source,
+    "lightweight health route avoids report reads": (
+        '@app.route("/api/health")' in source
+        and '"report_root": str(ROOT)' in source
+        and '"data_root": str(DATA_ROOT)' in source
+    ),
     "health rejects wrong runtime identity": "$s.runtime_sync_match -ne $true" in health,
+    "health validates the canonical report root": (
+        '$s.report_root' in health
+        and 'services\\btc-conservative-agent' in health
+        and "'[\\\\/]research$'" not in health
+    ),
+    "restart monitor probes cheap health with a cold-start grace": (
+        '[int]$BootGraceSec = 180' in restart_analyzer
+        and '    $urls = @(\n      "http://127.0.0.1:$Port/api/health"' in restart_analyzer
+        and 'AddSeconds(180)' in start_all
+    ),
     "health accepts only synced report or bounded current pass": (
         "$s.report_sync_match -eq $true" in health
         and "$s.report_sync_pending -eq $true" in health
@@ -158,6 +173,12 @@ with tempfile.TemporaryDirectory() as tmp:
         research_dashboard.DATA_ROOT = original_data_root
 
 with research_dashboard.app.test_client() as client:
+    health_response = client.get("/api/health")
+    if health_response.status_code != 200:
+        raise SystemExit(f"failed: /api/health returned {health_response.status_code}")
+    health_payload = health_response.get_json()
+    if not health_payload.get("ok") or not health_payload.get("report_root"):
+        raise SystemExit("failed: /api/health did not expose live canonical identity")
     response = client.get("/api/status")
     if response.status_code != 200:
         raise SystemExit(f"failed: /api/status returned {response.status_code}")
