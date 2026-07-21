@@ -24,6 +24,8 @@ export type AiRuntimeRequest = {
   userPrompt: string;
   section: AiRuntimeSection;
   founderBrainTask?: FounderBrainTask;
+  /** Internal alias contract: bypass prompt classification for a forced tier. */
+  intentOverride?: AiRuntimeIntent;
   projectId?: string | null;
   /** Skip cache read/write (forced provider, BYOK overrides, streaming). */
   skipCache?: boolean;

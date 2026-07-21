@@ -26,6 +26,7 @@ export class ModelRouterService {
   constructor(private readonly brainProviders: FounderBrainProvidersService) {}
 
   classifyIntent(request: AiRuntimeRequest): AiRuntimeIntent {
+    if (request.intentOverride) return request.intentOverride;
     const text = `${request.userPrompt} ${request.section}`;
     if (request.section === 'wall_summarizer') return 'summarize';
     if (request.section === 'share_paraphrase' || request.section === 'founder_draft') {

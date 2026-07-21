@@ -8,7 +8,7 @@
     "start": "node dist/main",
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "test": "tsx --test src/ddollar/ddollar-ledger.logic.test.ts src/flight-recorder/flight-recorder.service.spec.ts src/idea-validator/idea-validator.service.spec.ts src/memory-engine/memory-engine.service.spec.ts src/routing-engine/routing-engine.cache.spec.ts src/lam/__tests__/execution-target.spec.ts src/lam/__tests__/computer-use.adapter.spec.ts src/lam/__tests__/lam-orchestrator.service.spec.ts src/founder-node/founder-node.controller.manifest.spec.ts src/trading-agents/showcase-relay-events.service.spec.ts src/trading-agents/bot-bridge.service.spec.ts src/trading-agents/signal-subscriber-execution.helpers.spec.ts src/trading-agents/subscriber-exchange-live.mapper.spec.ts"
+    "test": "tsx --test src/ddollar/ddollar-ledger.logic.test.ts src/flight-recorder/flight-recorder.service.spec.ts src/idea-validator/idea-validator.service.spec.ts src/memory-engine/memory-engine.service.spec.ts src/routing-engine/routing-engine.cache.spec.ts src/ai-proxy/deepseek-model-policy.spec.ts src/ai-proxy/ai-proxy-runtime-routing.spec.ts src/lam/__tests__/execution-target.spec.ts src/lam/__tests__/computer-use.adapter.spec.ts src/lam/__tests__/lam-orchestrator.service.spec.ts src/founder-node/founder-node.controller.manifest.spec.ts src/trading-agents/showcase-relay-events.service.spec.ts src/trading-agents/bot-bridge.service.spec.ts src/trading-agents/signal-subscriber-execution.helpers.spec.ts src/trading-agents/subscriber-exchange-live.mapper.spec.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

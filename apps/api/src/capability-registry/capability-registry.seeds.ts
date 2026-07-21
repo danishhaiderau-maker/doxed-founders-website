@@ -14,6 +14,10 @@
  * seed.largeContextWindow, etc.), so renames here will break seeding.
  */
 import type { CapabilitySeed } from './capability-registry.types';
+import {
+  DEEPSEEK_V4_FLASH_MODEL,
+  DEEPSEEK_V4_PRO_MODEL,
+} from '../ai-proxy/deepseek-model-policy';
 
 export const CAPABILITY_SEEDS: CapabilitySeed[] = [
   {
@@ -52,14 +56,14 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
   },
   {
     provider: 'deepseek',
-    model: 'deepseek-coder-v2',
-    displayName: 'DeepSeek Coder V2',
-    inputCostPer1M: 0.2,
-    outputCostPer1M: 0.6,
-    latencyP50Ms: 1000,
+    model: DEEPSEEK_V4_PRO_MODEL,
+    displayName: 'DeepSeek V4 Pro',
+    inputCostPer1M: 0.3,
+    outputCostPer1M: 0.9,
+    latencyP50Ms: 1800,
     codeScore: 0.92,
-    reasoningScore: 0.7,
-    simpleQaScore: 0.7,
+    reasoningScore: 0.95,
+    simpleQaScore: 0.72,
     agentScore: 0.6,
     visionScore: 0.0,
     toolUse: false,
@@ -69,31 +73,14 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
   },
   {
     provider: 'deepseek',
-    model: 'deepseek-reasoner',
-    displayName: 'DeepSeek Reasoner',
-    inputCostPer1M: 0.3,
-    outputCostPer1M: 0.9,
-    latencyP50Ms: 2200,
-    codeScore: 0.75,
-    reasoningScore: 0.95,
-    simpleQaScore: 0.7,
-    agentScore: 0.7,
-    visionScore: 0.0,
-    toolUse: false,
-    jsonMode: true,
-    largeContext: false,
-    largeContextWindow: null,
-  },
-  {
-    provider: 'deepseek',
-    model: 'deepseek-chat',
-    displayName: 'DeepSeek Chat',
+    model: DEEPSEEK_V4_FLASH_MODEL,
+    displayName: 'DeepSeek V4 Flash',
     inputCostPer1M: 0.15,
     outputCostPer1M: 0.45,
     latencyP50Ms: 900,
     codeScore: 0.78,
-    reasoningScore: 0.55,
-    simpleQaScore: 0.65,
+    reasoningScore: 0.6,
+    simpleQaScore: 0.82,
     agentScore: 0.45,
     visionScore: 0.0,
     toolUse: false,

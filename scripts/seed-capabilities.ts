@@ -63,6 +63,20 @@ async function main() {
     else created += 1;
   }
 
+  // The production DeepSeek account accepts only the v4 model identifiers.
+  // Retire removed seed rows so Routing Engine v2 cannot keep selecting a
+  // legacy model name after a safe re-seed.
+  const activeDeepseekModels = CAPABILITY_SEEDS
+    .filter((seed) => seed.provider === 'deepseek')
+    .map((seed) => seed.model);
+  await prisma.capability.updateMany({
+    where: {
+      provider: 'deepseek',
+      model: { notIn: activeDeepseekModels },
+    },
+    data: { isActive: false },
+  });
+
   const total = await prisma.capability.count();
   const byProvider = await prisma.capability.groupBy({
     by: ['provider'],

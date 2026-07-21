@@ -20,6 +20,10 @@ import type { AiRuntimeIntent } from '../capability-registry/capability-registry
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
+import {
+  forcedIntentForAlias,
+  normalizeProviderModel,
+} from './deepseek-model-policy';
 
 /**
  * Server-side shape of the model list returned at /v1/models. Each alias is
@@ -115,14 +119,7 @@ export class AiProxyRuntimeService {
 
     // Map alias → intent hint. The router does the real classification, but
     // the alias lets the founder force a tier from the IDE.
-    const forcedIntent: string | null =
-      requestedAlias === 'founder-os-code'
-        ? 'code'
-        : requestedAlias === 'founder-os-reasoning'
-          ? 'reasoning'
-          : requestedAlias === 'founder-os-fast'
-            ? 'simple_qa'
-            : null;
+    const forcedIntent = forcedIntentForAlias(requestedAlias);
 
     const lastUserMessage = [...(body.messages ?? [])]
       .reverse()
@@ -133,22 +130,27 @@ export class AiProxyRuntimeService {
     const requestId = randomUUID();
     const promptHash = this.computePromptHash(systemPrompt, userPrompt);
     const inferredIntent = await this.resolveIntent(userPrompt);
+    const effectiveIntent = forcedIntent ?? inferredIntent;
 
     if (USE_ROUTING_ENGINE_V2) {
       try {
         const decision = await this.routingEngine.route({
           userId: auth.userId,
-          intent: inferredIntent,
+          intent: effectiveIntent,
           prompt: `${systemPrompt}\n${userPrompt}`,
           requestId,
         });
-        const tier = this.tierForIntent(decision.chosenProvider, inferredIntent, forcedIntent);
+        const tier = this.tierForIntent(decision.chosenProvider, effectiveIntent);
         return {
           requestId,
           providerKey: decision.chosenProvider,
-          model: decision.chosenModel,
+          model: normalizeProviderModel(
+            decision.chosenProvider,
+            decision.chosenModel,
+            tier,
+          ),
           tier,
-          intent: inferredIntent,
+          intent: effectiveIntent,
           profile: 'balanced',
           candidates: decision.candidates,
           cacheKey: decision.cacheKey ?? null,
@@ -176,6 +178,7 @@ export class AiProxyRuntimeService {
       userPrompt,
       section: 'copilot' as const,
       founderBrainTask: forcedIntent === 'code' ? ('code' as const) : undefined,
+      intentOverride: forcedIntent ?? undefined,
     };
     const route = this.modelRouter.route(runtimeRequest);
 
@@ -184,14 +187,18 @@ export class AiProxyRuntimeService {
         ? 'code'
         : forcedIntent === 'reasoning'
           ? 'reasoning'
-          : route.tier;
+          : forcedIntent === 'simple_qa'
+            ? 'fast'
+            : route.tier;
+
+    const model = normalizeProviderModel(route.providerKey, route.model, tier);
 
     return {
       requestId,
       providerKey: route.providerKey,
-      model: route.model,
+      model,
       tier,
-      intent: route.intent,
+      intent: effectiveIntent,
       profile: 'balanced',
       candidates: [],
       cacheKey: null,
@@ -562,10 +569,9 @@ export class AiProxyRuntimeService {
   private tierForIntent(
     provider: string,
     intent: AiRuntimeIntent,
-    forcedIntent: string | null,
   ): AiProxyTier {
-    if (forcedIntent === 'code' || intent === 'code') return 'code';
-    if (forcedIntent === 'reasoning' || intent === 'reasoning') return 'reasoning';
+    if (intent === 'code') return 'code';
+    if (intent === 'reasoning') return 'reasoning';
     if (intent === 'simple_qa') return 'fast';
     // Default for agent/vision/unknown falls back to whatever the provider
     // is good at — keep it cheap for glm, reasoning-tier for deepseek.
