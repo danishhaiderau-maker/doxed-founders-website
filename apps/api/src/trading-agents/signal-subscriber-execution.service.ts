@@ -1341,6 +1341,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const simState = simActive ? readCopyRelaySimState(instance.dashboardState) : null;
     const participantSince =
       simState?.startedAt != null ? { createdAt: { gte: new Date(simState.startedAt) } } : {};
+    this.currentStage = 'LOAD_CREDENTIALS';
     const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
     if (!creds) {
       await this.prisma.tradingAgentInstance.update({
@@ -1350,16 +1351,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    this.currentStage = 'LOAD_MARGIN_CAP';
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
 
     let activeOrderIdSet = new Set<number>();
     if (instance.exchangeProvider === 'bitfinex') {
       try {
+        this.currentStage = 'BITFINEX_MARGIN_CHECK';
         const funding = await this.activeTrading.ensureDerivativesMargin(creds, marginCap);
         if (funding.message && funding.transferredUsd > 0) {
           this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
         }
+        this.currentStage = 'BITFINEX_ABSURD_ORDER_CHECK';
         await this.cancelAbsurdPendingOrders(creds, instance.userId);
+        this.currentStage = 'BITFINEX_ACTIVE_ORDERS';
         const activeOrders = await this.activeTrading.listActiveOrders(creds);
         activeOrderIdSet = new Set(activeOrders.map((o) => o.id));
       } catch (err) {
@@ -1368,6 +1373,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
+    this.currentStage = 'RECONCILE_FILLED_PARTICIPANTS';
     await this.reconcileFilledParticipants(
       instance.userId,
       agentId,
@@ -1376,6 +1382,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       instance.exchangeProvider === 'bitfinex' ? activeOrderIdSet : undefined,
     );
 
+    this.currentStage = 'RECONCILE_GHOST_LOTS';
     await this.reconcileGhostOpenLots(
       agentId,
       instance.userId,
@@ -1383,6 +1390,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       marginCap,
     );
 
+    this.currentStage = 'RECONCILE_EXCHANGE_FLAT';
     await this.reconcileImmediateExchangeFlat(agentId, instance.userId, creds, participantSince);
 
     // Phase 2 — Layer B (NestJS Live Copy) reconcile-adopt pass. Re-arms
@@ -1392,6 +1400,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // surfaces PENDING_ENTRY / OPEN participants missing critical meta
     // into dashboardState.orphanPositionIds for manual decision. Gated
     // by RECONCILE_WRITE_WINDOW for the stop re-arm write itself.
+    this.currentStage = 'RECONCILE_ADOPT_LOOP';
     await this.reconcileAdoptLoop(
       agentId,
       instance.userId,
@@ -1405,6 +1414,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // that the legacy reconcile path refused to heal. Guardrailed by env flag,
     // per-session budget cap, size sanity, conservative stop, idempotency, and
     // a full audit trail. See reconcileAdoptOrphans for the decision tree.
+    this.currentStage = 'RECONCILE_ADOPT_ORPHANS';
     await this.reconcileAdoptOrphans(
       agentId,
       instance,
@@ -1419,6 +1429,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const MIN_INTENT_TTL_MS = 90_000;
 
+    this.currentStage = 'LOAD_SIGNAL_CYCLES';
     const cycles = await this.prisma.signalCycle.findMany({
       where: {
         agentId,
@@ -1446,6 +1457,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       )
       .filter((order): order is SignedShowcaseExactLimit => order != null);
 
+    this.currentStage = 'LOAD_MANAGED_CYCLES';
     const userManagedCycles = await this.prisma.signalCycle.findMany({
       where: {
         agentId,
@@ -1459,6 +1471,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
     });
 
+    this.currentStage = 'LOAD_EXIT_CYCLES';
     const exitPendingCycles = await this.prisma.signalCycle.findMany({
       where: {
         agentId,
@@ -1477,6 +1490,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
     const allCycles = [...cycleById.values()];
 
+    this.currentStage = 'RECONCILE_UNATTRIBUTED_FILLS';
     await this.reconcileUnattributedExchangeFills(
       agentId,
       instance.userId,
@@ -1488,6 +1502,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     let managedOpenTrade = false;
 
     // Pass 1 — manage existing copy trades (fills, stops, exits) before any new entries.
+    this.currentStage = 'MANAGE_EXISTING_LOTS';
     for (const cycle of allCycles) {
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
@@ -1609,6 +1624,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
+    this.currentStage = 'LOAD_OPEN_PARTICIPANTS';
     const openParticipantAfter = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId: instance.userId,
@@ -1631,6 +1647,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
     }
 
+    this.currentStage = 'RECONCILE_LOT_LEDGER';
     await this.reconcileLotLedger(
       agentId,
       instance,
@@ -1648,8 +1665,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // fetched foreign orders are handed to cleanupOrphanCopyOrders (fix 4) so we
     // don't double-query the exchange. evaluateEntryEligibility now READS the
     // persisted orphanOrderIds instead of re-querying listActiveOrders.
+    this.currentStage = 'SURFACE_ORPHAN_ORDERS';
     const foreignOrphanOrders = await this.surfaceOrphanOrders(instance, creds, managedOrderIds);
 
+    this.currentStage = 'CLEANUP_ORPHAN_ORDERS';
     await this.cleanupOrphanCopyOrders(
       instance.userId,
       instance.id,
@@ -1666,6 +1685,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // limit. Do not hold it behind a 20-30s tunnel request. Reuse a recent
     // canonical cache for caps/observability and refresh the tunnel in the
     // background; unsigned or stale intents retain the fail-closed fetch.
+    this.currentStage = 'FETCH_CANONICAL_EXECUTION_STATE';
     const botStateForCap = signedFastOrders.length
       ? signedCachedState
       : await this.fetchExecutionBotState();
@@ -1740,6 +1760,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Phase 0 — shadow-diff observability. Compares the showcase book (from
     // the state already fetched above) against the copy's ledger. Pure
     // observability: no exchange calls, no behavior change, never throws.
+    this.currentStage = 'RECORD_MIRROR_DIFF';
     await this.recordMirrorDiff(
       agentId,
       instance,
@@ -1753,6 +1774,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
 
     if (exitOnly) {
+      this.currentStage = 'PERSIST_PAUSED_CAPACITY';
       await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
       if (managedOpenTrade) {
         await this.prisma.tradingAgentInstance.update({
@@ -1766,6 +1788,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    this.currentStage = 'PERSIST_ACTIVE_CAPACITY';
     await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
 
     await this.attemptMirrorCatchupEntries(
