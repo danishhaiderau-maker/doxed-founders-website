@@ -79,6 +79,18 @@ checks = {
     "read-only report APIs use a bounded cache": (
         "_API_CACHE_TTL_SEC" in source and "X-Research-Cache" in source
     ),
+    "dashboard resolves reports from the active analyzer root": (
+        "BTC_AGENT_REPORT_DIR" in source
+        and '_CWD_ROOT / "analyzer_research_engine_v62.py"' in source
+    ),
+    "lane aggregation is primed and stale-while-refreshed": (
+        "prime_dashboard_caches" in source
+        and "research-opportunity-cache" in source
+        and "prime_dashboard_caches" in analyzer_engine
+        and 'name="research_dashboard_cache_warm"' in analyzer_engine
+        and analyzer_engine.find("thread.start()")
+        < analyzer_engine.find('name="research_dashboard_cache_warm"')
+    ),
     "empty chase isolation is collecting": (
         '"verdict": rep.get("verdict") if has_evidence else "COLLECTING"' in source
     ),
@@ -90,6 +102,14 @@ checks = {
         "function Close-StaleOrchestratorConsoles" in stack_common
         and "Stop-Process -Id $_.Id -Force" in stack_common
         and '"Doxed Wire to Site",\n    "Doxed Auto-Wire"' in stack_common
+    ),
+    "lifecycle cleanup has restricted-session listener fallback": (
+        "netstat.exe -ano -p TCP" in stack_common
+        and "function Stop-RecordedProcess" in stack_common
+        and '.home-bot-crash-monitor.pid' in stack_common
+        and '.home-analyzer-crash-monitor.pid' in (
+            Path(__file__).parents[2] / "scripts" / "home-stack-cmd-worker.ps1"
+        ).read_text(encoding="utf-8")
     ),
     "MFE cohort cannot be confused with the Type B tile": (
         "MFE Type-B outcome cohort" in source

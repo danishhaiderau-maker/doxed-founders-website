@@ -110,9 +110,28 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-ROOT = Path(os.path.abspath(os.path.dirname(__file__) or os.getcwd()))
+_MODULE_ROOT = Path(os.path.abspath(os.path.dirname(__file__) or os.getcwd()))
+_AGENT_ROOT = _MODULE_ROOT.parent
+_CWD_ROOT = Path.cwd().resolve()
+DATA_ROOT = Path(os.getenv(
+    "BTC_AGENT_DATA_DIR",
+    str(_AGENT_ROOT if (_AGENT_ROOT / "trades_3factor.csv").is_file() else _MODULE_ROOT),
+)).resolve()
+# The canonical source lives in ``agent/research`` but the supported launcher
+# runs ``agent/analyzer_research_engine_v62.py`` and writes its live reports in
+# the agent root.  Resolve the report root from an explicit override first,
+# then the launch cwd, and finally the data root.  This prevents :9001 from
+# silently serving an older duplicate report set from ``agent/research``.
+_REPORT_ROOT_ENV = os.getenv("BTC_AGENT_REPORT_DIR", "").strip()
+if _REPORT_ROOT_ENV:
+    ROOT = Path(_REPORT_ROOT_ENV).resolve()
+elif (_CWD_ROOT / "analyzer_research_engine_v62.py").is_file():
+    ROOT = _CWD_ROOT
+elif (DATA_ROOT / "analyzer_research_engine_v62.py").is_file():
+    ROOT = DATA_ROOT
+else:
+    ROOT = _MODULE_ROOT
 _parent = ROOT.parent
-DATA_ROOT = Path(os.getenv("BTC_AGENT_DATA_DIR", str(_parent if (_parent / "trades_3factor.csv").is_file() else ROOT)))
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "0.0.0.0")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
@@ -582,7 +601,18 @@ def _bundle_paths():
 
 
 
-def _opportunity_lane_stats() -> dict:
+_OPPORTUNITY_STATS_TTL_SEC = max(
+    30.0, float(os.getenv("RESEARCH_OPPORTUNITY_CACHE_TTL_SEC", "180"))
+)
+_OPPORTUNITY_STATS_CACHE = {
+    "expires_at": 0.0,
+    "value": None,
+    "refreshing": False,
+}
+_OPPORTUNITY_STATS_LOCK = threading.Lock()
+
+
+def _compute_opportunity_lane_stats() -> dict:
     """Approve / order / spawn counts from lane_opportunity_capture.jsonl + signal_snapshot."""
     out: dict[str, dict] = {}
     snap_path = None
@@ -690,6 +720,53 @@ def _opportunity_lane_stats() -> dict:
         except Exception:
             pass
     return out
+
+
+def _refresh_opportunity_lane_stats() -> dict:
+    """Refresh the expensive JSONL aggregation without holding cache locks."""
+    try:
+        value = _compute_opportunity_lane_stats()
+        with _OPPORTUNITY_STATS_LOCK:
+            _OPPORTUNITY_STATS_CACHE["value"] = value
+            _OPPORTUNITY_STATS_CACHE["expires_at"] = (
+                time.monotonic() + _OPPORTUNITY_STATS_TTL_SEC
+            )
+        return value
+    finally:
+        with _OPPORTUNITY_STATS_LOCK:
+            _OPPORTUNITY_STATS_CACHE["refreshing"] = False
+
+
+def _opportunity_lane_stats() -> dict:
+    """Return lane counts with stale-while-refresh behavior.
+
+    The underlying ledgers are tens of megabytes and the analyzer performs
+    CPU-heavy replay grids in the same process.  Once primed, an expired cache
+    is returned immediately while a daemon refreshes it, so opening the Lanes
+    tab cannot stall for tens of seconds during an analysis pass.
+    """
+    now = time.monotonic()
+    with _OPPORTUNITY_STATS_LOCK:
+        value = _OPPORTUNITY_STATS_CACHE.get("value")
+        fresh = value is not None and _OPPORTUNITY_STATS_CACHE["expires_at"] > now
+        if fresh:
+            return value
+        if value is not None:
+            if not _OPPORTUNITY_STATS_CACHE["refreshing"]:
+                _OPPORTUNITY_STATS_CACHE["refreshing"] = True
+                threading.Thread(
+                    target=_refresh_opportunity_lane_stats,
+                    name="research-opportunity-cache",
+                    daemon=True,
+                ).start()
+            return value
+        _OPPORTUNITY_STATS_CACHE["refreshing"] = True
+    return _refresh_opportunity_lane_stats()
+
+
+def prime_dashboard_caches() -> None:
+    """Warm expensive dashboard aggregates before the analyzer starts work."""
+    _opportunity_lane_stats()
 
 
 def _lane_rows():

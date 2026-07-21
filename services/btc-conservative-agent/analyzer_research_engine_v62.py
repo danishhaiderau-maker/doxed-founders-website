@@ -193,6 +193,7 @@ def start_research_dashboard_server() -> threading.Thread | None:
             BIND_PORT,
             PUBLIC_URL,
             RESEARCH_DASHBOARD_VERSION,
+            prime_dashboard_caches,
         )
     except ImportError as exc:
         print(f"  ⚠️ Research dashboard unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -224,6 +225,18 @@ def start_research_dashboard_server() -> threading.Thread | None:
 
     thread = threading.Thread(target=_serve, name="research_dashboard", daemon=True)
     thread.start()
+
+    # Cache warming reads a large JSONL history on this installation. Never
+    # make dashboard availability wait for that scan: the read-only server is
+    # the health boundary, while the cache uses stale-while-refresh semantics.
+    # This also keeps the Start Showcase button honest because :9001 can answer
+    # /api/status immediately even while the first analyzer pass is busy.
+    warm_thread = threading.Thread(
+        target=prime_dashboard_caches,
+        name="research_dashboard_cache_warm",
+        daemon=True,
+    )
+    warm_thread.start()
     return thread
 
 

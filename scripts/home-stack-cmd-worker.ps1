@@ -90,6 +90,7 @@ switch ($Action) {
     Stop-ListenPortFast $BotPort | Out-Null
   }
   "stop-analyzer" {
+    Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") @("powershell", "pwsh", "cmd") | Out-Null
     & taskkill.exe /F /T /FI "WINDOWTITLE eq $analyzerTitle" 2>$null | Out-Null
     & taskkill.exe /F /T /FI "WINDOWTITLE eq Doxed Analyzer*" 2>$null | Out-Null
     & taskkill.exe /F /T /FI "WINDOWTITLE eq Local Collection Analyzer :9500" 2>$null | Out-Null

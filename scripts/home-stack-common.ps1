@@ -234,17 +234,51 @@ function Get-TunnelBackoffState {
 
 function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
+  $owners = @()
   try {
-    Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty OwningProcess -Unique |
-      ForEach-Object {
-        $procId = [int]$_
-        if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
-          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-          $killed += $procId
+    $owners += @(Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique)
+  } catch { }
+  # Get-NetTCPConnection intermittently returns nothing on restricted Windows
+  # sessions.  Native netstat is read-only and reliably exposes every listener,
+  # including duplicate SO_REUSEADDR owners on the same port.
+  if ($owners.Count -eq 0) {
+    try {
+      & netstat.exe -ano -p TCP 2>$null | ForEach-Object {
+        if ($_ -match "^\s*TCP\s+\S+:$ListenPort\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+          $owners += [int]$matches[1]
         }
       }
+    } catch { }
+  }
+  $owners | Select-Object -Unique | ForEach-Object {
+    $procId = [int]$_
+    if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
+      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      $killed += $procId
+    }
+  }
+  return $killed
+}
+
+function Stop-RecordedProcess([string]$PidFile, [string[]]$AllowedNames = @()) {
+  $killed = @()
+  if (-not (Test-Path -LiteralPath $PidFile)) { return $killed }
+  try {
+    $recordedPid = [int]((Get-Content -LiteralPath $PidFile -Raw -ErrorAction Stop).Trim())
+    $proc = Get-Process -Id $recordedPid -ErrorAction SilentlyContinue
+    if ($proc -and ($AllowedNames.Count -eq 0 -or $AllowedNames -contains $proc.ProcessName)) {
+      $stamp = (Get-Item -LiteralPath $PidFile).LastWriteTime
+      # A valid owner starts immediately before its PID file is written.  The
+      # skew guard prevents a stale PID file from killing an unrelated process
+      # after Windows has reused the numeric PID.
+      if ([math]::Abs(($stamp - $proc.StartTime).TotalMinutes) -le 5) {
+        Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
+        $killed += $recordedPid
+      }
+    }
   } catch { }
+  Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
   return $killed
 }
 
@@ -262,6 +296,7 @@ function Stop-RelayStatePusher {
 
 function Stop-HomeStackSupervisor {
   $killed = @()
+  $killed += @(Stop-RecordedProcess (Join-Path $repoRoot ".home-stack-supervisor.pid") @("powershell", "pwsh", "cmd"))
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
     Where-Object {
       $_.CommandLine -and (
@@ -548,6 +583,7 @@ function Close-HomeStackWindowTitles {
 
 function Stop-BotPidFile {
   $killed = @()
+  $killed += @(Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid") @("powershell", "pwsh", "cmd"))
   $pidFile = Join-Path $repoRoot ".home-bot.pid"
   if (-not (Test-Path $pidFile)) { return $killed }
   try {
