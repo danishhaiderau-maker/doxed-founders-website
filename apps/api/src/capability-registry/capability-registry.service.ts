@@ -101,6 +101,7 @@ export class CapabilityRegistryService {
     row: Capability,
     req: CapabilityRequirement,
   ): boolean {
+    if (req.provider && row.provider !== req.provider) return false;
     if (req.toolUse && !row.toolUse) return false;
     if (req.jsonMode && !row.jsonMode) return false;
     if (req.largeContext && !row.largeContext) return false;

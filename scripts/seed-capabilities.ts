@@ -77,6 +77,11 @@ async function main() {
     data: { isActive: false },
   });
 
+  // Capability activation/model changes invalidate all shared routing
+  // decisions. Keeping an older row here can override every alias for a
+  // paired Founder Node until TTL expiry.
+  const clearedRoutes = await prisma.routingCacheEntry.deleteMany({});
+
   const total = await prisma.capability.count();
   const byProvider = await prisma.capability.groupBy({
     by: ['provider'],
@@ -85,6 +90,7 @@ async function main() {
   });
 
   console.log(`Created ${created}, updated ${updated}. Total rows: ${total}`);
+  console.log(`Cleared ${clearedRoutes.count} shared routing cache row(s).`);
   console.log('\nBy provider:');
   for (const row of byProvider) {
     console.log(`  ${row.provider.padEnd(12)} ${row._count}`);

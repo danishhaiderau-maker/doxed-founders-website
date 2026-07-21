@@ -22,7 +22,7 @@ import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-c
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 import {
   forcedIntentForAlias,
-  normalizeProviderModel,
+  normalizeFounderAliasRoute,
 } from './deepseek-model-policy';
 
 /**
@@ -139,16 +139,24 @@ export class AiProxyRuntimeService {
           intent: effectiveIntent,
           prompt: `${systemPrompt}\n${userPrompt}`,
           requestId,
+          requirements: [{ provider: 'deepseek' }],
         });
         const tier = this.tierForIntent(decision.chosenProvider, effectiveIntent);
+        const normalizedRoute = normalizeFounderAliasRoute(
+          requestedAlias,
+          decision.chosenProvider,
+          decision.chosenModel,
+          tier,
+        );
+        if (normalizedRoute.wasUnsupported) {
+          this.logger.warn(
+            `Routing Engine selected unsupported chat provider "${decision.chosenProvider}"; using guarded DeepSeek ${tier} route.`,
+          );
+        }
         return {
           requestId,
-          providerKey: decision.chosenProvider,
-          model: normalizeProviderModel(
-            decision.chosenProvider,
-            decision.chosenModel,
-            tier,
-          ),
+          providerKey: normalizedRoute.providerKey,
+          model: normalizedRoute.model,
           tier,
           intent: effectiveIntent,
           profile: 'balanced',
@@ -191,12 +199,17 @@ export class AiProxyRuntimeService {
             ? 'fast'
             : route.tier;
 
-    const model = normalizeProviderModel(route.providerKey, route.model, tier);
+    const normalizedLegacyRoute = normalizeFounderAliasRoute(
+      requestedAlias,
+      route.providerKey,
+      route.model,
+      tier,
+    );
 
     return {
       requestId,
-      providerKey: route.providerKey,
-      model,
+      providerKey: normalizedLegacyRoute.providerKey,
+      model: normalizedLegacyRoute.model,
       tier,
       intent: effectiveIntent,
       profile: 'balanced',

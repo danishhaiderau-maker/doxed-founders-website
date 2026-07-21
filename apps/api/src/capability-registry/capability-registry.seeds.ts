@@ -24,6 +24,8 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     provider: 'glm',
     model: 'glm-5.2',
     displayName: 'GLM 5.2',
+    // Disabled until its platform credential passes a real completion smoke.
+    isActive: false,
     inputCostPer1M: 0.5,
     outputCostPer1M: 1.5,
     latencyP50Ms: 1500,
@@ -41,6 +43,7 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     provider: 'glm',
     model: 'glm-4.6',
     displayName: 'GLM 4.6',
+    isActive: false,
     inputCostPer1M: 0.2,
     outputCostPer1M: 0.6,
     latencyP50Ms: 1200,
@@ -92,6 +95,9 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     provider: 'kimi',
     model: 'kimi-coder',
     displayName: 'Kimi Coder',
+    // Catalogued for research/history only. The Founder gateway does not yet
+    // have a Kimi upstream adapter, so it must not enter chat routing.
+    isActive: false,
     inputCostPer1M: 0.15,
     outputCostPer1M: 0.45,
     latencyP50Ms: 900,
@@ -109,6 +115,7 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     provider: 'kimi',
     model: 'kimi-k2',
     displayName: 'Kimi K2',
+    isActive: false,
     inputCostPer1M: 0.6,
     outputCostPer1M: 2.5,
     latencyP50Ms: 1800,
@@ -132,6 +139,7 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     provider: 'local-playwright',
     model: 'chromium-headless',
     displayName: 'Local Playwright (Chromium headless)',
+    isActive: false,
     inputCostPer1M: 0,
     outputCostPer1M: 0,
     latencyP50Ms: 4000,

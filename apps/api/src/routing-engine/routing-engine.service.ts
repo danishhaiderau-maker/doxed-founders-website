@@ -41,7 +41,12 @@ export class RoutingEngineService {
 
   async route(request: RoutingRequest): Promise<RoutingDecision> {
     // Layer 1: cache lookup.
-    const cacheKey = this.cache.computeKey(request.prompt);
+    // Cache decisions by semantic route scope, not prompt alone. Otherwise
+    // the same text sent through Fast, Reasoning and Code aliases can reuse a
+    // decision made for a different intent (the production kimi-k2 incident).
+    const cacheKey = this.cache.computeKey(
+      `intent:${request.intent}\nrequirements:${JSON.stringify(request.requirements ?? [])}\n${request.prompt}`,
+    );
     const cached = await this.cache.get(cacheKey);
     if (cached) {
       const resolvedProfile = await this.profileService.getProfile(

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AiProxyRuntimeService } from './ai-proxy-runtime.service';
 import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
 
-function runtimeWithDecision(model: string) {
+function runtimeWithDecision(model: string, provider = 'deepseek') {
   const calls: Array<{ intent: string }> = [];
   const runtime = new AiProxyRuntimeService(
     {} as never,
@@ -14,7 +14,7 @@ function runtimeWithDecision(model: string) {
       route: async (request: { intent: string }) => {
         calls.push({ intent: request.intent });
         return {
-          chosenProvider: 'deepseek',
+          chosenProvider: provider,
           chosenModel: model,
           candidates: [],
           cacheLevel: 'miss',
@@ -71,6 +71,17 @@ test('founder-os-fast forces simple_qa before v2 routing and uses v4 flash', asy
   assert.equal(route.model, 'deepseek-v4-flash');
 });
 
+test('stale kimi decision cannot escape the supported gateway boundary', async () => {
+  const { runtime } = runtimeWithDecision('kimi-k2', 'kimi');
+  const route = await runtime.decideRoute(auth, {
+    model: 'founder-os-code',
+    messages,
+  });
+  assert.equal(route.providerKey, 'deepseek');
+  assert.equal(route.model, 'deepseek-v4-pro');
+  assert.equal(route.tier, 'code');
+});
+
 test('reasoning and code aliases route with forced intent and v4 pro', async () => {
   for (const [alias, intent] of [
     ['founder-os-reasoning', 'reasoning'],
@@ -114,5 +125,6 @@ test('legacy fallback honors forced reasoning even for a simple prompt', async (
   });
   assert.equal(route.intent, 'reasoning');
   assert.equal(route.tier, 'reasoning');
-  assert.equal(route.model, 'glm-5.2');
+  assert.equal(route.providerKey, 'deepseek');
+  assert.equal(route.model, 'deepseek-v4-pro');
 });

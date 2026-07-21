@@ -4,7 +4,9 @@ import {
   DEEPSEEK_V4_FLASH_MODEL,
   DEEPSEEK_V4_PRO_MODEL,
   forcedIntentForAlias,
+  normalizeFounderAliasRoute,
   normalizeProviderModel,
+  normalizeProxyRoute,
 } from './deepseek-model-policy';
 
 test('Founder OS aliases force their advertised routing intent', () => {
@@ -12,6 +14,38 @@ test('Founder OS aliases force their advertised routing intent', () => {
   assert.equal(forcedIntentForAlias('founder-os-reasoning'), 'reasoning');
   assert.equal(forcedIntentForAlias('founder-os-code'), 'code');
   assert.equal(forcedIntentForAlias('founder-os-auto'), null);
+});
+
+test('unsupported cached providers fail over to a supported DeepSeek model', () => {
+  assert.deepEqual(normalizeProxyRoute('kimi', 'kimi-k2', 'fast'), {
+    providerKey: 'deepseek',
+    model: DEEPSEEK_V4_FLASH_MODEL,
+    wasUnsupported: true,
+  });
+  assert.deepEqual(normalizeProxyRoute('local-playwright', 'chromium-headless', 'code'), {
+    providerKey: 'deepseek',
+    model: DEEPSEEK_V4_PRO_MODEL,
+    wasUnsupported: true,
+  });
+});
+
+test('Founder aliases enforce the proven DeepSeek adapter', () => {
+  assert.deepEqual(
+    normalizeFounderAliasRoute('founder-os-code', 'glm', 'glm-5.2', 'code'),
+    {
+      providerKey: 'deepseek',
+      model: DEEPSEEK_V4_PRO_MODEL,
+      wasUnsupported: true,
+    },
+  );
+  assert.deepEqual(
+    normalizeFounderAliasRoute('founder-os-fast', 'kimi', 'kimi-k2', 'fast'),
+    {
+      providerKey: 'deepseek',
+      model: DEEPSEEK_V4_FLASH_MODEL,
+      wasUnsupported: true,
+    },
+  );
 });
 
 test('retired DeepSeek route names are translated to supported v4 models', () => {

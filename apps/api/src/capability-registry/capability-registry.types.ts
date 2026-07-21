@@ -8,6 +8,8 @@ export type AiRuntimeIntent = 'code' | 'reasoning' | 'simple_qa' | 'agent' | 'vi
 export type ExecutionProfile = 'turbo' | 'balanced' | 'architect' | 'autonomous';
 
 export type CapabilityRequirement = {
+  /** Restrict a runtime to an upstream adapter that is actually available. */
+  provider?: string;
   toolUse?: boolean;
   jsonMode?: boolean;
   largeContext?: boolean;
