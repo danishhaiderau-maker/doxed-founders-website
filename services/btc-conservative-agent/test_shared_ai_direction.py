@@ -118,6 +118,7 @@ def run():
     history_ai = {
         "trade_id": "scan-history-1",
         "shared_ai_call_id": "scan-history-1",
+        "shared_ai_call_ts": "2026-07-21T00:16:38+00:00",
         "direction": "LONG",
         "candidate_direction": "LONG",
         "raw_direction": "NO_TRADE",
@@ -139,6 +140,8 @@ def run():
         history = list(bot.state["ai_history"])
         counters = bot.state["shared_ai_lane_counters"]
     check("one API call renders one history row", len(history) == 1)
+    check("history preserves the canonical shared-call timestamp", history[0]["time"] == "2026-07-21T00:16:38+00:00")
+    check("shared result carries its paid-call identity", history_ai["shared_ai_call_id"] == "scan-history-1")
     check("Continuous verdict is separate", history[0]["continuous_verdict"]["accepted"] is True)
     check("Type B verdict is separate", history[0]["type_b_verdict"]["accepted"] is False)
     check("Continuous counter counted once", counters[bot.RESEARCH_LANE_CONTINUOUS]["evaluated"] == 1)

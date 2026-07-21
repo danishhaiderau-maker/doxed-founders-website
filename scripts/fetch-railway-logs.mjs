@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // Fetches Railway deployment logs via the graphql-transport-ws WebSocket.
-// Usage: node scripts/fetch-railway-logs.mjs <deployment-id> [build|deploy]
+// Usage: RAILWAY_TOKEN=... node scripts/fetch-railway-logs.mjs <deployment-id> [build|deploy]
 import WebSocket from 'ws';
 
-const token = process.env.RAILWAY_TOKEN || '529467fa-6b10-4d60-837e-97c6cad395df';
+const token = (process.env.RAILWAY_TOKEN || '').trim();
 const deploymentId = process.argv[2];
 const stream = process.argv[3] === 'build' ? 'buildLogs' : 'deploymentLogs';
+if (!token) {
+  console.error('RAILWAY_TOKEN is required; no credential fallback is stored in source control.');
+  process.exit(1);
+}
 if (!deploymentId) {
   console.error('Usage: node scripts/fetch-railway-logs.mjs <deployment-id> [build|deploy]');
   process.exit(1);

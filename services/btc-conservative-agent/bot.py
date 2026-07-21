@@ -11428,10 +11428,21 @@ def _append_ai_history_row(ai_result: dict) -> None:
     """Keep exactly one dashboard row for each actual shared AI API call."""
     now_iso = utc_iso()
     call_id = _shared_ai_call_id(ai_result=ai_result)
+    call_ts = str(
+        ai_result.get("shared_ai_call_ts")
+        or ai_result.get("ai_call_ts")
+        or ai_result.get("completed_at")
+        or now_iso
+    )
+    # Carry the canonical call identity/time into every downstream lane. A
+    # lane may write its replay record seconds later, but that is not another
+    # model request and must never be displayed as one.
+    ai_result["shared_ai_call_id"] = call_id
+    ai_result["shared_ai_call_ts"] = call_ts
     factors = ai_result.get("factors") or {}
     row = {
-        "time": now_iso,
-        "melbourne_time": _format_melbourne_hm(now_iso),
+        "time": call_ts,
+        "melbourne_time": _format_melbourne_hm(call_ts),
         "session_ts": bot_start_time,
         "trade_id": ai_result.get("trade_id"),
         "shared_ai_call_id": call_id,
@@ -12199,7 +12210,9 @@ def _spawn_lab_combo_shadow(
         ai_win_prob=(ai or {}).get("win_prob"),
         edge_score=round(float(edge_score), 1),
         research_lane=target_lane,
-        source_trade_id=(ctx or {}).get("trade_id"),
+        source_trade_id=(ai or {}).get("shared_ai_call_id") or (ctx or {}).get("shared_ai_call_id") or (ctx or {}).get("trade_id"),
+        shared_ai_call_id=(ai or {}).get("shared_ai_call_id") or (ctx or {}).get("shared_ai_call_id") or (ctx or {}).get("trade_id"),
+        shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts"),
         collection_mode=collection_mode,
         paused_shadow=paused_shadow,
         is_counterfactual=bool(is_counterfactual),
@@ -13157,6 +13170,11 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "trade_id": study_id,
         "research_lane": lane,
         "source_trade_id": buf.get("source_trade_id"),
+        "shared_ai_call_id": buf.get("shared_ai_call_id") or buf.get("source_trade_id"),
+        "shared_ai_call_ts": buf.get("shared_ai_call_ts"),
+        "lane_recorded_ts": utc_iso(
+            datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc)
+        ),
         "collection_mode": buf.get("collection_mode") or PATHWAY_STATUS_SHADOW_COLLECTING,
         "paused_shadow": bool(buf.get("paused_shadow")),
         "prompt_id": buf.get("prompt_id"),
@@ -13243,9 +13261,11 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     if not is_ai_scan_lane(source_lane) or not ai:
         return
     spawn_ctx = copy.deepcopy(ctx or {})
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    spawn_ctx["shared_ai_call_id"] = call_id
+    spawn_ctx["shared_ai_call_ts"] = (ai or {}).get("shared_ai_call_ts")
     spawn_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_CONTINUOUS)
     orders_on = continuous_ai_research_enabled()
-    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
     continuous_accept = ai_decision_should_execute(ai)
     continuous_reason = str(
         ai.get("execution_tier")
@@ -13807,6 +13827,8 @@ def _run_type_b_adx_v3_shadow(ai: dict, feat: dict, edge_score: float, ctx: dict
             edge_score=round(float(edge_score or 0), 1),
             research_lane="TYPE_B_HUNTER_ADX_V3_SHADOW",
             source_trade_id=source_trade_id,
+            shared_ai_call_id=source_trade_id,
+            shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts"),
             collection_mode="ADMIN_PAUSED_SHADOW" if paused else "TYPE_B_ADX_V3_SHADOW",
             paused_shadow=paused,
             is_counterfactual=not bool(accepted),
@@ -22438,6 +22460,52 @@ def _read_paused_shadow_rows() -> dict:
 def paused_shadow_dashboard_stats() -> dict:
     """Visible, relay-ineligible stats for trade research collected while paused."""
     finalized = _read_paused_shadow_rows()
+    with state_lock:
+        ai_history = copy.deepcopy(state.get("ai_history") or [])
+    calls_by_id = {
+        str(row.get("shared_ai_call_id") or row.get("trade_id") or ""): row
+        for row in ai_history
+        if row.get("shared_ai_call_id") or row.get("trade_id")
+    }
+
+    def _event_epoch(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _call_meta(row_id: str, row: dict, lane_recorded_ts):
+        explicit_id = str(
+            row.get("shared_ai_call_id")
+            or row.get("source_trade_id")
+            or (row_id if str(row_id).startswith("scan-") else "")
+        )
+        call_row = calls_by_id.get(explicit_id)
+        inferred = False
+        if call_row is None:
+            # Backward-compatible display for replay buffers opened by the
+            # first v14 build before call identity was threaded into every
+            # lane. Match only a same-direction call within 20 seconds.
+            event_ts = _event_epoch(lane_recorded_ts)
+            candidates = []
+            if event_ts is not None:
+                for hist in ai_history:
+                    hist_ts = _event_epoch(hist.get("time") or hist.get("ts"))
+                    hist_dir = str(hist.get("candidate_direction") or hist.get("final_direction") or "").upper()
+                    row_dir = str(row.get("direction") or "").upper()
+                    if hist_ts is not None and hist_dir == row_dir and abs(event_ts - hist_ts) <= 20:
+                        candidates.append((abs(event_ts - hist_ts), hist))
+            if candidates:
+                _, call_row = min(candidates, key=lambda item: item[0])
+                explicit_id = str(call_row.get("shared_ai_call_id") or call_row.get("trade_id") or "")
+                inferred = True
+        call_ts = row.get("shared_ai_call_ts")
+        if call_row is not None:
+            call_ts = call_ts or call_row.get("time") or call_row.get("ts")
+        return explicit_id or None, call_ts, inferred
+
     with replay_lock:
         open_rows = {
             str(tid): copy.deepcopy(buf)
@@ -22472,15 +22540,22 @@ def paused_shadow_dashboard_stats() -> dict:
         losses += int(was_filled and pnl < 0)
         flats += int(was_filled and pnl == 0)
         for bucket, key in ((lane_stats, lane), (adx_stats, band)):
-            stat = bucket.setdefault(key, {"closed": 0, "filled": 0, "wins": 0, "losses": 0, "pnl_usd": 0.0})
+            stat = bucket.setdefault(key, {"open": 0, "closed": 0, "filled": 0, "wins": 0, "losses": 0, "pnl_usd": 0.0})
             stat["closed"] += 1
             stat["filled"] += int(was_filled)
             stat["wins"] += int(was_filled and pnl > 0)
             stat["losses"] += int(was_filled and pnl < 0)
             stat["pnl_usd"] = round(float(stat["pnl_usd"]) + pnl, 4)
+        lane_recorded_ts = row.get("lane_recorded_ts") or row.get("ts")
+        call_id, call_ts, call_inferred = _call_meta(row_id, row, lane_recorded_ts)
         recent.append({
             "ts": row.get("ts"),
-            "time_melbourne": _format_melbourne_hm(str(row.get("ts"))) if row.get("ts") else "-",
+            "lane_recorded_ts": lane_recorded_ts,
+            "time_melbourne": _format_melbourne_hm(str(lane_recorded_ts)) if lane_recorded_ts else "-",
+            "shared_ai_call_id": call_id,
+            "shared_ai_call_ts": call_ts,
+            "shared_ai_call_time_melbourne": _format_melbourne_hm(str(call_ts)) if call_ts else "-",
+            "shared_ai_call_inferred": call_inferred,
             "trade_id": row_id,
             "research_lane": lane,
             "direction": row.get("direction"),
@@ -22493,13 +22568,24 @@ def paused_shadow_dashboard_stats() -> dict:
             "status": "CLOSED",
             "prompt_id": row.get("prompt_id"),
         })
-    recent.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
     for row_id, buf in open_rows.items():
         lane = str(buf.get("research_lane") or "UNKNOWN").upper()
         adx = buf.get("adx_at_signal")
-        recent.insert(0, {
-            "ts": utc_iso(datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc)),
+        lane_recorded_ts = utc_iso(datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc))
+        call_id, call_ts, call_inferred = _call_meta(row_id, buf, lane_recorded_ts)
+        lane_stat = lane_stats.setdefault(
+            lane,
+            {"open": 0, "closed": 0, "filled": 0, "wins": 0, "losses": 0, "pnl_usd": 0.0},
+        )
+        lane_stat["open"] = int(lane_stat.get("open") or 0) + 1
+        recent.append({
+            "ts": lane_recorded_ts,
+            "lane_recorded_ts": lane_recorded_ts,
             "time_melbourne": _timestamp_to_melbourne_display(buf.get("start_ts")),
+            "shared_ai_call_id": call_id,
+            "shared_ai_call_ts": call_ts,
+            "shared_ai_call_time_melbourne": _format_melbourne_hm(str(call_ts)) if call_ts else "-",
+            "shared_ai_call_inferred": call_inferred,
             "trade_id": row_id,
             "research_lane": lane,
             "direction": buf.get("direction"),
@@ -22512,6 +22598,7 @@ def paused_shadow_dashboard_stats() -> dict:
             "status": "OPEN_REPLAY",
             "prompt_id": buf.get("prompt_id"),
         })
+    recent.sort(key=lambda item: str(item.get("lane_recorded_ts") or item.get("ts") or ""), reverse=True)
     for bucket in (lane_stats, adx_stats):
         for stat in bucket.values():
             decided = stat["wins"] + stat["losses"]
@@ -22521,6 +22608,7 @@ def paused_shadow_dashboard_stats() -> dict:
     return {
         "schema": "paused_shadow_dashboard_v1",
         "safety": "NEVER_RELAY_ELIGIBLE",
+        "manual_pause_active": manual_admin_pause_active(),
         "historical_coverage_note": (
             "Only records created by paused-shadow-capable builds are included; "
             "older manual pauses stopped before trade simulation."
@@ -22955,7 +23043,7 @@ HTML = """<!DOCTYPE html>
 </p>
 <div id="pausedShadowSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;"></div>
 <table>
-    <thead><tr><th>Time (Melbourne)</th><th>ID</th><th>Lane</th><th>Dir</th><th>ADX</th><th>Status</th><th>Virtual Entry</th><th>Outcome</th><th>Net USD</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Lane Recorded (Melbourne)</th><th>Shared Call ID</th><th>Lane Trade ID</th><th>Lane</th><th>Dir</th><th>ADX</th><th>Status</th><th>Virtual Entry</th><th>Outcome</th><th>Net USD</th></tr></thead>
     <tbody id="pausedShadowTable"></tbody>
 </table>
 
@@ -23595,6 +23683,15 @@ DASHBOARD_JS = """(function () {
           const entry = spec.entry || {};
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
+          const pausedAll = d.paused_shadow_stats || {};
+          const pausedLane = (pausedAll.by_lane || {})[spec.lane] || {};
+          const pausedOpen = Number(pausedLane.open || 0);
+          const pausedClosed = Number(pausedLane.closed || 0);
+          const pausedFilled = Number(pausedLane.filled || 0);
+          const pausedPnl = Number(pausedLane.pnl_usd || 0);
+          const pausedWin = pausedLane.win_rate_pct;
+          const pausedActive = (pausedOpen + pausedClosed) > 0;
+          const sourcePaused = pausedAll.manual_pause_active === true;
           const statRow = function (lbl, val, col) {
             return '<div style="text-align:center;"><div style="color:#6e7681;font-size:0.72em;">' + lbl + '</div>'
               + '<div style="color:' + (col || '#c9d1d9') + ';font-weight:600;font-size:0.9em;">' + val + '</div></div>';
@@ -23629,8 +23726,16 @@ DASHBOARD_JS = """(function () {
             ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#101820;border:1px solid #30363d;border-radius:8px;">'
               + statRow('Pending', activePending, activePending > 0 ? '#f0c14b' : '#8b949e')
               + statRow('Open', activeOpen, activeOpen > 0 ? '#3fb950' : '#8b949e')
-              + statRow('Local book', on ? 'ACTIVE' : 'EXIT ONLY', on ? '#3fb950' : '#f0c14b')
+              + statRow('Local book', sourcePaused ? 'PAUSED SHADOW' : (on ? 'ACTIVE' : 'EXIT ONLY'), sourcePaused ? '#a371f7' : (on ? '#3fb950' : '#f0c14b'))
               + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
+              + '</div>')
+            : '';
+          const pausedGrid = pausedActive
+            ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#211536;border:1px solid #8957e5;border-radius:8px;">'
+              + statRow('Paused shadow', pausedOpen + ' open', '#a371f7')
+              + statRow('Shadow closed', pausedClosed, '#a371f7')
+              + statRow('Shadow filled', pausedFilled, '#a371f7')
+              + statRow('Shadow PnL', pausedClosed ? ('$' + pausedPnl.toFixed(2) + (pausedWin != null ? (' · ' + Number(pausedWin).toFixed(0) + '% WR') : '')) : 'pending', pausedPnl >= 0 ? '#3fb950' : '#f85149')
               + '</div>')
             : '';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
@@ -23645,7 +23750,7 @@ DASHBOARD_JS = """(function () {
                   + statRow('PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
                   + statRow('EV/appr', labPrimaryEv, '#58a6ff')
                   + statRow('Win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
-                : statRow('Trades', stats.real_fills != null ? stats.real_fills : 0)
+                : statRow('Executed', stats.real_fills != null ? stats.real_fills : 0)
                   + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
                   + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
                   + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%'))
@@ -23657,6 +23762,7 @@ DASHBOARD_JS = """(function () {
               + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
               + '</div>') : '')
             + activeGrid
+            + pausedGrid
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
               + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
@@ -23686,7 +23792,9 @@ DASHBOARD_JS = """(function () {
                           : spec.exec_mode === 'PAPER' ? '#3fb950'
                           : spec.exec_mode === 'EXIT_ONLY' ? '#f0c14b'
                           : '#58a6ff';
-          if (spec.exec_banner) {
+          if (sourcePaused) {
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#211536;border:1px solid #8957e5;border-radius:6px;color:#a371f7;font-size:0.82em;font-weight:700;">PAUSED SHADOW — tile remains ON, but only relay-ineligible counterfactual replays are collected</div>';
+          } else if (spec.exec_banner) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:' + modeBg + ';border:1px solid ' + modeBorder + ';border-radius:6px;color:' + modeColor + ';font-size:0.82em;font-weight:700;">' + spec.exec_banner + (spec.exec_block_reason && spec.exec_mode === 'LIVE' ? ' · gate: ' + spec.exec_block_reason : '') + '</div>';
           } else if (spec.planned) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#6e7681;font-size:0.82em;font-weight:600;">PLANNED — no orders</div>';
@@ -24470,8 +24578,12 @@ DASHBOARD_JS = """(function () {
         safeHTML('pausedShadowTable', (ps.recent || []).length ? (ps.recent || []).map(s => {
           const pnl = s.net_pnl_usd == null ? '-' : '$' + Number(s.net_pnl_usd).toFixed(2);
           const entry = s.entry == null ? '-' : Number(s.entry).toFixed(2);
+          const callId = s.shared_ai_call_id || (String(s.trade_id || '').startsWith('scan-') ? s.trade_id : '-');
+          const callHint = s.shared_ai_call_inferred ? ' title="Backfilled from the nearest same-direction shared call; new rows carry an exact ID"' : '';
           return `<tr>
-            <td>${s.time_melbourne || formatMelbourneDateTime(s.ts)}</td>
+            <td${callHint}>${s.shared_ai_call_time_melbourne || formatMelbourneDateTime(s.shared_ai_call_ts) || '-'}</td>
+            <td>${s.time_melbourne || formatMelbourneDateTime(s.lane_recorded_ts || s.ts)}</td>
+            <td${callHint}>${callId}</td>
             <td>${s.trade_id || '-'}</td>
             <td>${laneBadge(s.research_lane)}</td>
             <td>${s.direction || '-'}</td>
@@ -24481,7 +24593,7 @@ DASHBOARD_JS = """(function () {
             <td>${s.exit_reason || '-'}</td>
             <td>${pnl}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="9" style="color:#8b949e">No paused-shadow trade outcomes yet. Older pauses stopped before trade simulation.</td></tr>');
+        }).join('') : '<tr><td colspan="11" style="color:#8b949e">No paused-shadow trade outcomes yet. Older pauses stopped before trade simulation.</td></tr>');
         const psHint = document.getElementById('pausedShadowHint');
         if (psHint && ps.historical_coverage_note) psHint.innerText = ps.historical_coverage_note + ' Safety: never relay-eligible.';
         safeHTML('tradesTable', (d.trades||[]).map(t => `
@@ -27842,6 +27954,9 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
         ai_win_prob=ai.get("win_prob"),
         edge_score=signal.get("edge_score_at_entry"),
         research_lane=signal.get("research_lane"),
+        source_trade_id=(ai or {}).get("shared_ai_call_id") or signal.get("shared_ai_call_id"),
+        shared_ai_call_id=(ai or {}).get("shared_ai_call_id") or signal.get("shared_ai_call_id"),
+        shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts") or signal.get("shared_ai_call_ts"),
         collection_mode=signal.get("collection_mode") or "ACTIVE_RESEARCH",
         paused_shadow=bool(signal.get("paused_shadow")),
         prompt_id=ai.get("prompt_id") or signal.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
@@ -28204,6 +28319,11 @@ def log_shadow_outcome_jsonl(
             "collection_mode": buf.get("collection_mode"),
             "paused_shadow": bool(buf.get("paused_shadow")),
             "prompt_id": buf.get("prompt_id"),
+            "shared_ai_call_id": buf.get("shared_ai_call_id") or buf.get("source_trade_id"),
+            "shared_ai_call_ts": buf.get("shared_ai_call_ts"),
+            "lane_recorded_ts": utc_iso(
+                datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc)
+            ),
             "adx_at_signal": buf.get("adx_at_signal"),
             "ai_win_prob": buf.get("ai_win_prob") or (ai or {}).get("win_prob"),
             "edge_score": buf.get("edge_score"),
@@ -28324,6 +28444,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "edge_score": meta.get("edge_score"),
             "research_lane": meta.get("research_lane"),
             "source_trade_id": meta.get("source_trade_id"),
+            "shared_ai_call_id": meta.get("shared_ai_call_id") or meta.get("source_trade_id"),
+            "shared_ai_call_ts": meta.get("shared_ai_call_ts"),
             "collection_mode": meta.get("collection_mode"),
             "is_counterfactual": bool(meta.get("is_counterfactual")),
             "policy_version": meta.get("policy_version"),

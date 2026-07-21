@@ -324,6 +324,9 @@ with bot.replay_lock:
         "direction": "SHORT",
         "paused_shadow": True,
         "collection_mode": "ADMIN_PAUSED_SHADOW",
+        "source_trade_id": "scan-pause-shadow-1",
+        "shared_ai_call_id": "scan-pause-shadow-1",
+        "shared_ai_call_ts": "2026-07-21T00:16:38+00:00",
         "adx_at_signal": 27.0,
         "prompt_id": bot.SHARED_DIRECTION_PROMPT_ID,
     }
@@ -333,6 +336,12 @@ check(
     paused_stats.get("open") == baseline_paused_open + 1,
 )
 check("paused shadow safety is explicit", paused_stats.get("safety") == "NEVER_RELAY_ELIGIBLE")
+visible_row = next(
+    row for row in paused_stats.get("recent", [])
+    if row.get("trade_id") == "pause-shadow-visible-1"
+)
+check("paused shadow preserves one shared paid-call ID", visible_row.get("shared_ai_call_id") == "scan-pause-shadow-1")
+check("paused shadow separates AI-call time from lane time", visible_row.get("shared_ai_call_ts") == "2026-07-21T00:16:38+00:00" and visible_row.get("lane_recorded_ts"))
 check("paused shadow remains outside pending orders", not bot.pending_orders)
 check("paused shadow remains outside positions", not bot.open_positions)
 with bot.replay_lock:

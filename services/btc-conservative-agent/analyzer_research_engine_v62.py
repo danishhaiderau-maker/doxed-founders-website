@@ -53,6 +53,10 @@ import shutil
 import sys
 import traceback
 import re
+import csv
+import io
+import zipfile
+from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -96,6 +100,7 @@ EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
 PAUSED_SHADOW_REPORT_FILE = "paused_shadow_research_report.json"
+HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -642,6 +647,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
     ("Type B ADX V3 Shadow", TYPE_B_ADX_V3_SHADOW_REPORT_FILE, "Replay-only challenger decisions, direction balance, ADX bands, and promotion gate"),
     ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
+    ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -2034,6 +2040,206 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
     return df
+
+
+def historical_trade_cohort_report():
+    """Build a read-only deduplicated cohort across exported trade archives.
+
+    Fresh Collection is intentionally the active strategy cohort. This report
+    answers the separate historical question without double-counting repeated
+    downloads or mixing old policy versions into current P&L.
+    """
+    configured = str(os.getenv("RESEARCH_HISTORICAL_BUNDLE_GLOB") or "").strip()
+    patterns = [p for p in configured.split(os.pathsep) if p] if configured else [
+        str(Path.home() / "Downloads" / "3factor_logs*.zip")
+    ]
+    bundle_paths = []
+    for pattern in patterns:
+        bundle_paths.extend(Path(p) for p in glob.glob(pattern))
+    bundle_paths = sorted(
+        {p.resolve() for p in bundle_paths if p.is_file()},
+        key=lambda path: (path.stat().st_mtime_ns, str(path).lower()),
+    )
+
+    rows_by_id = {}
+    source_rows = []
+    raw_rows = 0
+
+    def ingest(rows, source_name, source_kind):
+        nonlocal raw_rows
+        source_raw = 0
+        source_new = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            source_raw += 1
+            trade_id = str(row.get("trade_id") or row.get("ID") or "").strip()
+            if not trade_id:
+                continue
+            if trade_id not in rows_by_id:
+                source_new += 1
+            rows_by_id[trade_id] = dict(row)
+        raw_rows += source_raw
+        source_rows.append({
+            "source": source_name,
+            "kind": source_kind,
+            "raw_rows": source_raw,
+            "new_unique_trades": source_new,
+        })
+
+    for bundle_path in bundle_paths:
+        bundle_raw = []
+        entry_count = 0
+        try:
+            with zipfile.ZipFile(bundle_path) as archive:
+                for info in archive.infolist():
+                    if Path(info.filename).name.lower() != "trades_3factor.csv":
+                        continue
+                    entry_count += 1
+                    with archive.open(info) as handle:
+                        text = io.TextIOWrapper(handle, encoding="utf-8-sig", errors="replace", newline="")
+                        bundle_raw.extend(dict(row) for row in csv.DictReader(text))
+        except (OSError, zipfile.BadZipFile, UnicodeError) as exc:
+            source_rows.append({
+                "source": bundle_path.name,
+                "kind": "zip",
+                "raw_rows": 0,
+                "new_unique_trades": 0,
+                "error": str(exc)[:300],
+            })
+            continue
+        ingest(bundle_raw, bundle_path.name, "zip")
+        source_rows[-1]["trade_csv_entries"] = entry_count
+
+    current_candidates = [
+        Path(_agent_data_path(TRADES_FILE)),
+        Path(TRADES_FILE),
+        Path(__file__).resolve().parent / TRADES_FILE,
+        Path(__file__).resolve().parent.parent / TRADES_FILE,
+    ]
+    current_path = next((path for path in current_candidates if path.is_file()), None)
+    if current_path is not None:
+        try:
+            with current_path.open(encoding="utf-8-sig", errors="replace", newline="") as handle:
+                ingest(list(csv.DictReader(handle)), "current Fresh Collection", "current_csv")
+        except OSError as exc:
+            source_rows.append({
+                "source": "current Fresh Collection",
+                "kind": "current_csv",
+                "raw_rows": 0,
+                "new_unique_trades": 0,
+                "error": str(exc)[:300],
+            })
+
+    rows = list(rows_by_id.values())
+    pnls = []
+    for row in rows:
+        pnl = safe_float(row.get("net_pnl_usd"))
+        pnls.append(0.0 if pd.isna(pnl) else float(pnl))
+    wins = sum(1 for pnl in pnls if pnl > 0)
+    losses = sum(1 for pnl in pnls if pnl < 0)
+    flats = sum(1 for pnl in pnls if pnl == 0)
+    decided = wins + losses
+    total_pnl = float(sum(pnls))
+    timestamps = []
+    policy_versions = set()
+    adx_bands = {
+        "<15": [], "15-20": [], "20-25": [], "25-30": [],
+        "30-35": [], "35-40": [], "40+": [], "UNKNOWN": [],
+    }
+
+    def adx_band(value):
+        try:
+            adx = float(value)
+        except (TypeError, ValueError):
+            return "UNKNOWN"
+        if adx < 15:
+            return "<15"
+        if adx < 20:
+            return "15-20"
+        if adx < 25:
+            return "20-25"
+        if adx < 30:
+            return "25-30"
+        if adx < 35:
+            return "30-35"
+        if adx < 40:
+            return "35-40"
+        return "40+"
+
+    for row, pnl in zip(rows, pnls):
+        raw_ts = row.get("close_ts") or row.get("ts") or row.get("entry_ts")
+        if raw_ts:
+            parsed = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+            if not pd.isna(parsed):
+                timestamps.append(parsed)
+        version = str(
+            row.get("bot_version")
+            or row.get("execution_fix_version")
+            or row.get("analyzer_sync_id")
+            or ""
+        ).strip()
+        if version:
+            policy_versions.add(version)
+        band = adx_band(row.get("adx_at_entry") or row.get("adx"))
+        adx_bands[band].append(pnl)
+
+    by_adx = []
+    for band in ("<15", "15-20", "20-25", "25-30", "30-35", "35-40", "40+", "UNKNOWN"):
+        values = adx_bands[band]
+        band_wins = sum(1 for pnl in values if pnl > 0)
+        band_losses = sum(1 for pnl in values if pnl < 0)
+        band_decided = band_wins + band_losses
+        band_pnl = float(sum(values))
+        by_adx.append({
+            "adx_band": band,
+            "trades": len(values),
+            "wins": band_wins,
+            "losses": band_losses,
+            "win_rate_pct": round(100.0 * band_wins / band_decided, 1) if band_decided else None,
+            "net_pnl_usd": round(band_pnl, 2),
+            "ev_usd": round(band_pnl / len(values), 4) if values else None,
+        })
+
+    current_source = next((item for item in source_rows if item.get("kind") == "current_csv"), {})
+    payload = {
+        "schema": "historical_trade_cohort_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scope": "HISTORICAL_EXECUTED_DEDUP",
+        "safety": "RESEARCH_ONLY_NEVER_EXECUTION",
+        "coverage_note": (
+            "Executed trade exports only. Repeated downloads are deduplicated by trade_id. "
+            "This mixed-policy historical cohort is displayed separately and is never merged "
+            "into Fresh Collection, paused-shadow, tile promotion, or relay decisions."
+        ),
+        "sources": source_rows,
+        "source_zip_count": len(bundle_paths),
+        "raw_rows": raw_rows,
+        "unique_trades": len(rows),
+        "duplicates_removed": max(0, raw_rows - len(rows)),
+        "current_fresh_collection_rows": int(current_source.get("raw_rows") or 0),
+        "current_new_unique_vs_archives": int(current_source.get("new_unique_trades") or 0),
+        "earliest_trade_at": min(timestamps).isoformat() if timestamps else None,
+        "latest_trade_at": max(timestamps).isoformat() if timestamps else None,
+        "policy_versions": sorted(policy_versions),
+        "performance": {
+            "trades": len(rows),
+            "wins": wins,
+            "losses": losses,
+            "flat": flats,
+            "win_rate_pct": round(100.0 * wins / decided, 1) if decided else None,
+            "net_pnl_usd": round(total_pnl, 2),
+            "ev_usd": round(total_pnl / len(rows), 4) if rows else None,
+        },
+        "by_adx_band": by_adx,
+    }
+    with open(analyzer_report_path(HISTORICAL_COHORT_REPORT_FILE), "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"  Historical cohort: raw={raw_rows} unique={len(rows)} "
+        f"duplicates={max(0, raw_rows - len(rows))} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
 
 
 def paused_shadow_research_report(session: dict = None):
@@ -7451,6 +7657,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             "csv_ai_log": len(ai_log),
             "csv_setups": len(setups),
         }
+        historical_trade_cohort_report()
         data_scope = "session" if session_only else "all"
         if session_only:
             trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(

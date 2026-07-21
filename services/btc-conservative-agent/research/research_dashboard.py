@@ -127,6 +127,7 @@ ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 ANALYZER_LOG_FILE = "analyzer_run.log"
 REPORTS_DIR = "reports"
 ALL_DATA_REPORTS_DIR = os.path.join(REPORTS_DIR, "all_data")
+HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
 ARCHIVE_DIR = "research_session_archives"
 ARCHIVE_INDEX_FILE = "research_session_index.json"
 ZIP_BUNDLE_NAME = "reports_bundle.zip"
@@ -210,15 +211,22 @@ def _analyzer_run_state() -> dict:
     if not path.is_file():
         return {
             "in_progress": False,
+            "phase": "IDLE",
             "sync_id": None,
             "started_at": None,
             "updated_at": None,
+            "last_completed_at": None,
             "age_seconds": None,
         }
     header = ""
+    tail = ""
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
             header = handle.readline().strip()
+    except Exception:
+        pass
+    try:
+        tail = path.read_bytes()[-16_384:].decode("utf-8", errors="replace")
     except Exception:
         pass
     match = re.search(r"\bsync=([^|\s]+)", header)
@@ -234,19 +242,23 @@ def _analyzer_run_state() -> dict:
     except Exception:
         updated_at = None
         age_seconds = None
-    # A full pass can take several minutes on the home PC.  The engine rewrites
-    # this log for every pass, so a current-version log updated within 45 min is
-    # reliable evidence that the analyzer is alive and producing the new set.
+    completed = bool(re.search(r"Iteration\s+\d+\s+complete", tail, re.IGNORECASE))
+    # A full pass can take several minutes on the home PC. The engine rewrites
+    # this log at the start of every pass, so a completion footer means the
+    # analyzer is idle between runs, not still analysing for another 45 min.
     in_progress = bool(
         run_sync == EXPECTED_ANALYZER_SYNC_ID
         and age_seconds is not None
         and age_seconds <= 45 * 60
+        and not completed
     )
     return {
         "in_progress": in_progress,
+        "phase": "RUNNING" if in_progress else ("IDLE_BETWEEN_RUNS" if completed else "IDLE"),
         "sync_id": run_sync,
         "started_at": started_at,
         "updated_at": updated_at,
+        "last_completed_at": updated_at if completed else None,
         "age_seconds": age_seconds,
     }
 
@@ -1300,6 +1312,8 @@ def api_status():
 def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
     real = _read_json("real_edge_summary.json")
+    historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
+    paused_shadow = _read_json("paused_shadow_research_report.json")
     stale_meta = _summary_stale_meta(compact)
     p = dict(compact.get("performance") or {})
     re = compact.get("real_edge") or real
@@ -1329,6 +1343,8 @@ def api_summary():
         "stale": stale_meta,
         "integrity": _integrity_payload(),
         "all_data_fallback_active": all_data_active,
+        "historical_cohort": historical,
+        "paused_shadow_cohort": paused_shadow,
     })
 
 
@@ -2027,6 +2043,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
     <div class="kpis" id="kpis"></div>
+    <p class="note" id="cohort-note"></p>
     <pre id="exec-text"></pre>
     <p class="note">Auto-refreshes every 60s. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code> (Trading Genome v11)</p>
   </section>
@@ -2339,6 +2356,10 @@ async function loadSummary() {
   const d = await r.json();
   const p = d.performance || {};
   const re = d.real_edge || {};
+  const hist = d.historical_cohort || {};
+  const histPerf = hist.performance || {};
+  const paused = d.paused_shadow_cohort || {};
+  const pausedPerf = paused.overall || {};
   const integrity = d.integrity || {};
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
@@ -2381,7 +2402,9 @@ async function loadSummary() {
   const kpis = [
     ['Net PnL', '$' + fmtUsd(p.net_pnl_usd)],
     ['Win Rate', (p.win_rate_pct ?? 'n/a') + '%'],
-    ['Trades', p.trades ?? 0],
+    ['Fresh executed', p.trades ?? 0],
+    ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
+    ['Paused shadow closed', pausedPerf.closed ?? 0],
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],
@@ -2390,6 +2413,14 @@ async function loadSummary() {
   ];
   document.getElementById('kpis').innerHTML = kpis.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const cohortNote = document.getElementById('cohort-note');
+  if (cohortNote) {
+    const dupes = hist.duplicates_removed ?? 0;
+    const raw = hist.raw_rows ?? 0;
+    cohortNote.textContent = hist.unique_trades != null
+      ? `Cohorts stay separate: Fresh Collection = current policy; Historical = ${hist.unique_trades} unique executed trades from ${raw} exported rows (${dupes} duplicates removed); Paused Shadow = counterfactual, never relay-eligible.`
+      : 'Cohorts stay separate: Fresh Collection is current policy; Paused Shadow is counterfactual and never relay-eligible. Historical archives have not been imported on this machine.';
+  }
 }
 
 async function loadFindings() {

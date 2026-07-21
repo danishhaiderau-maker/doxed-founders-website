@@ -47,6 +47,16 @@ checks = [
         "pending-order API rows include a Melbourne timestamp",
         'oc["created_ts_melbourne"]' in SOURCE,
     ),
+    (
+        "paused shadow separates shared AI-call and lane-recorded times",
+        "<th>AI Call Time (Melbourne)</th>" in SOURCE
+        and "<th>Lane Recorded (Melbourne)</th>" in SOURCE,
+    ),
+    (
+        "paused shadow exposes the shared paid-call identity",
+        "<th>Shared Call ID</th>" in SOURCE
+        and "shared_ai_call_id" in SOURCE,
+    ),
 ]
 
 passed = sum(check(name, condition) for name, condition in checks)
