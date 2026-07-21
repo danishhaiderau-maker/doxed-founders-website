@@ -14,6 +14,7 @@ LANE_STATUS = "SHADOW_COLLECTING"
 IS_INDEPENDENT_AI = False
 USES_SHARED_AI_DIRECTION = True
 POLICY_VERSION = "type_b_shared_candidate_direction_v2_20260719"
+CANDIDATE_POLICY_VERSION = "type_b_adx_nonmonotonic_shadow_v3_20260721"
 
 AI_OFFSET_SEC = 0
 AI_MAX_AGE_SEC = 180
@@ -220,6 +221,98 @@ def should_enter_type_b(ai_prob, features, direction=None):
     return False, detail
 
 
+def should_enter_type_b_adx_v3_shadow(ai_prob, features, direction=None):
+    """Evidence-backed shadow challenger; never used to submit an order.
+
+    The deduplicated 632-trade cohort showed ADX 25-30 as the only materially
+    negative band. ADX remains strength-only, while structure and delta decide
+    whether that strength supports LONG or SHORT. The active V2 policy stays
+    unchanged until this challenger has a balanced, walk-forward sample.
+    """
+    values = resolve_features(features, direction)
+    detail = {
+        "lane": "TYPE_B_HUNTER_ADX_V3_SHADOW",
+        "policy_version": CANDIDATE_POLICY_VERSION,
+        "score": 0.0,
+        "entered": False,
+        "block_reason": None,
+        "breakdown": {**values, "ai_prob_audit_only": ai_prob, "threshold": MIN_SCORE_TO_ENTER},
+    }
+    if not values["direction"]:
+        detail["block_reason"] = "NO_DIRECTION"
+        return False, detail
+    missing = [name for name in ("adx", "volume_ratio", "structure", "edge") if values[name] is None]
+    if missing:
+        detail["block_reason"] = f"MISSING_FEATURES ({','.join(missing)})"
+        return False, detail
+    adx = values["adx"]
+    if adx < ADX_FLOOR:
+        detail["block_reason"] = f"ADX_FLOOR ({adx:.2f} < {ADX_FLOOR:.0f})"
+        return False, detail
+    if 25.0 <= adx < 30.0:
+        detail["block_reason"] = f"ADX_AMBIGUITY_BAND ({adx:.2f})"
+        return False, detail
+    if values["regime"] in {"UNKNOWN", "CHOPPY", "EXPANSION"}:
+        detail["block_reason"] = f"REGIME_BLOCK ({values['regime']})"
+        return False, detail
+    if values["regime"] == "BULL" and adx < BULL_ADX_FLOOR:
+        detail["block_reason"] = f"BULL_NEEDS_ADX_{BULL_ADX_FLOOR:.0f}_PLUS (adx={adx:.2f})"
+        return False, detail
+    if values["spread"] < MIN_SPREAD_FLOOR:
+        detail["block_reason"] = f"SPREAD_FLOOR ({values['spread']} < {MIN_SPREAD_FLOOR})"
+        return False, detail
+    if values["volume_ratio"] > VOLUME_DANGER:
+        detail["block_reason"] = f"VOLUME_DANGER ({values['volume_ratio']:.3f} > {VOLUME_DANGER:.1f})"
+        return False, detail
+    if values["direction"] == "LONG" and values["structure"] <= -3.0:
+        detail["block_reason"] = "COUNTER_STRUCTURE_LONG"
+        return False, detail
+    if values["direction"] == "SHORT" and values["structure"] >= 3.0:
+        detail["block_reason"] = "COUNTER_STRUCTURE_SHORT"
+        return False, detail
+
+    score = 0.0
+    if 20.0 <= adx < 25.0:
+        score += 1.0
+    elif 30.0 <= adx < 35.0:
+        score += 0.5
+    elif 35.0 <= adx < 40.0:
+        score += 0.75
+    elif adx >= 40.0:
+        score += 1.5
+    if values["volume_ratio"] < 0.80:
+        score += 1.0
+    elif values["volume_ratio"] < 1.20:
+        score += 0.5
+    if values["regime"] == "BEAR":
+        score += 0.5
+    elif values["regime"] == "RANGE":
+        score += 0.25
+    structure = values["structure"]
+    if (values["direction"] == "SHORT" and structure <= -3.0) or (values["direction"] == "LONG" and structure >= 3.0):
+        score += 1.0
+    elif -3.0 < structure < 3.0:
+        score += 0.25
+    delta = values["delta"]
+    if (values["direction"] == "LONG" and delta is not None and delta >= 18.0) or (values["direction"] == "SHORT" and delta is not None and delta <= -18.0):
+        score += 0.75
+    if 3 <= values["spread"] <= 5:
+        score += 0.5
+    if 3.0 <= values["edge"] <= 5.0:
+        score += 0.5
+    ema_slope = values["ema_slope"]
+    if (values["direction"] == "LONG" and ema_slope in {"up", "bullish", "positive"}) or (values["direction"] == "SHORT" and ema_slope in {"down", "bearish", "negative"}):
+        score += 0.25
+    score = round(score, 2)
+    detail["score"] = score
+    detail["breakdown"]["composite_score"] = score
+    if score >= MIN_SCORE_TO_ENTER:
+        detail["entered"] = True
+        return True, detail
+    detail["block_reason"] = f"SCORE_BELOW_THRESHOLD ({score} < {MIN_SCORE_TO_ENTER})"
+    return False, detail
+
+
 def classify_type(cohort_pct):
     if cohort_pct >= TYPE_B_MIN_MFE_PCT:
         return "TYPE_B"
@@ -248,3 +341,7 @@ def self_test():
     # Nested context extraction
     nested = {"market_context": {"trend_strength": {"adx": 32}, "market_structure": {"regime": "BEAR", "structure_score": -4}}, **{k: v for k, v in favorable.items() if k not in {"adx", "regime", "structure_score"}}}
     assert should_enter_type_b(1, nested, "SHORT")[0] is True
+    # V3 challenger specifically rejects the empirically negative 25-30 band,
+    # but keeps the stable 40+ band available when direction evidence agrees.
+    assert should_enter_type_b_adx_v3_shadow(1, {**favorable, "adx": 27.0}, "SHORT")[0] is False
+    assert should_enter_type_b_adx_v3_shadow(1, {**favorable, "adx": 42.0}, "SHORT")[0] is True

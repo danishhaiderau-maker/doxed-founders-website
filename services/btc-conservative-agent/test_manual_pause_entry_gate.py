@@ -114,7 +114,7 @@ check("manual flag blocks fills after reason replacement", not bot.open_position
 check("reason replacement order cancelled", pending.get("status") == "CANCELLED")
 
 
-print("\n[3] Signal, market, limit, and Tile 2 entry routes fail closed")
+print("\n[3] Paused research may collect, while every execution route fails closed")
 reset_state()
 with bot.state_lock:
     bot.state["manual_admin_pause"] = True
@@ -127,12 +127,31 @@ signal_event = {
     "event_trigger": True,
 }
 original_is_buffer_ready = bot.is_buffer_ready
-bot.is_buffer_ready = lambda: (_ for _ in ()).throw(
-    AssertionError("paused signal reached feature pipeline")
-)
+original_log_no_signal = bot.log_no_signal_with_context
+research_progress = []
+bot.is_buffer_ready = lambda: False
+bot.log_no_signal_with_context = lambda reason=None, **kwargs: research_progress.append(reason)
 bot.process_signal(signal_event)
 bot.is_buffer_ready = original_is_buffer_ready
-check("signal pipeline blocked before feature work", signal_event.get("status") == "BLOCKED")
+bot.log_no_signal_with_context = original_log_no_signal
+check(
+    "paused paper runtime reaches isolated research pipeline",
+    research_progress == ["BUFFER_NOT_READY"],
+)
+check("paused research creates no global order", not bot.pending_orders)
+check("paused research creates no global position", not bot.open_positions)
+
+with bot.state_lock:
+    bot.state["strategy_mode"] = "LIVE"
+    bot.state["live_armed"] = True
+live_pause_reached_features = []
+bot.is_buffer_ready = lambda: live_pause_reached_features.append(True) or False
+bot.process_signal(signal_event)
+bot.is_buffer_ready = original_is_buffer_ready
+check("paused live runtime stops before feature work", not live_pause_reached_features)
+with bot.state_lock:
+    bot.state["strategy_mode"] = "RESEARCH"
+    bot.state["live_armed"] = False
 
 market_signal = {
     "trade_id": "pause-market-1",
@@ -292,6 +311,32 @@ with bot.app.test_client() as client:
     check("direct loopback resume is accepted without a token", direct_resume.status_code == 200)
     check("direct loopback resume changes state", bot.state.get("execution_paused") is False)
 bot._BOT_ADMIN_TOKEN = original_admin_token
+
+
+print("\n[8] Paused shadow replay is visible without entering global books")
+reset_state()
+baseline_paused_open = bot.paused_shadow_dashboard_stats().get("open", 0)
+with bot.replay_lock:
+    bot.replay_buffers["pause-shadow-visible-1"] = {
+        "closed": False,
+        "start_ts": 1_721_000_000.0,
+        "research_lane": bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        "direction": "SHORT",
+        "paused_shadow": True,
+        "collection_mode": "ADMIN_PAUSED_SHADOW",
+        "adx_at_signal": 27.0,
+        "prompt_id": bot.SHARED_DIRECTION_PROMPT_ID,
+    }
+paused_stats = bot.paused_shadow_dashboard_stats()
+check(
+    "paused shadow replay appears in dedicated stats",
+    paused_stats.get("open") == baseline_paused_open + 1,
+)
+check("paused shadow safety is explicit", paused_stats.get("safety") == "NEVER_RELAY_ELIGIBLE")
+check("paused shadow remains outside pending orders", not bot.pending_orders)
+check("paused shadow remains outside positions", not bot.open_positions)
+with bot.replay_lock:
+    bot.replay_buffers.pop("pause-shadow-visible-1", None)
 
 
 print("\n" + "=" * 72)

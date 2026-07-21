@@ -107,3 +107,47 @@ Set `RESEARCH_BOT_SYNC_TOKEN` secret on main repo (PAT with read access to priva
 - Paper trade mode UI
 - Clone agent template flow
 - Conviction timeline chart component
+
+## Conservative BTC control flow backlog
+
+This is intentionally a separate product pass from money-path and research-data
+fixes.  The visual redesign must consume the proven state machine; it must not
+invent a second control path.
+
+### Product principles
+
+- One primary action: **Start showcase** / **Stop showcase**. It starts and
+  stops bridge, bot, analyzer, tunnel, and mirror in the tested order.
+- Show one plain-language state at a time: Starting, Collecting research,
+  Paused (shadow collecting), Ready for relay, Live copying, or Needs attention.
+- Separate money boundaries visually: Showcase paper, Paused Shadow, and
+  Bitfinex Live Copy must never share a PnL card or ambiguous status color.
+- Keep advanced service controls in a diagnostics drawer with timestamps,
+  ownership, source revision, and recovery actions. They are not the normal UI.
+- Every queued action must progress through visible acknowledgements or become
+  a specific error; never leave a permanent “queued” toast.
+- Use calm motion, progressive disclosure, generous spacing, and mobile-first
+  cards. Animation explains state changes; it does not decorate them.
+
+### Recommended interaction sequence
+
+1. **System readiness** — one card checks dashboard owner, bot, analyzer,
+   bridge, tunnel, revision, and flat/exposure status.
+2. **Research mode** — live executed paper results and Paused Shadow results are
+   adjacent but clearly labeled; every position/order/signal has a timestamp.
+3. **Relay readiness** — a short checklist explains fresh-only arming,
+   one-account net-position constraints, and current executor health.
+4. **Explicit live confirmation** — smallest-canary choice, account name,
+   maximum margin, and a hold-to-confirm action.
+5. **Live journey** — Source signal → relay receipt → exchange submit → ack →
+   fill → exit, with trade ID, lane, price, and latency at each node.
+6. **Safe stop** — immediately disarm new entries, cancel verified-unfilled copy
+   orders, and keep open-position exit management visible.
+
+### Information architecture
+
+- **Overview:** state, exposure, session result, primary action.
+- **Research:** lane tiles, Paused Shadow statistics, ADX/prompt evidence.
+- **Live copy:** Bitfinex net position, virtual lots, reconciliation, latency.
+- **Timeline:** human-readable events with exact timestamps and IDs.
+- **Diagnostics:** service-level controls, raw health, logs, and downloads.

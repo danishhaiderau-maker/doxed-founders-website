@@ -71,6 +71,80 @@ const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
+const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
+const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
+
+export type RelayExecutorHealthSnapshot = {
+  healthy: boolean;
+  status: 'STARTING' | 'IDLE' | 'RUNNING' | 'STUCK';
+  running: boolean;
+  tickStartedAt: string | null;
+  lastTickCompletedAt: string | null;
+  lastTickDurationMs: number | null;
+  currentInstanceId: string | null;
+  currentStage: string | null;
+  heartbeatAgeMs: number | null;
+  runningForMs: number | null;
+  timeoutMs: number;
+  timeoutCount: number;
+};
+
+/** Pure liveness calculation shared by runtime health and focused tests. */
+export function buildRelayExecutorHealth(input: {
+  nowMs: number;
+  running: boolean;
+  tickStartedAtMs: number;
+  lastTickCompletedAtMs: number;
+  lastTickDurationMs: number;
+  currentInstanceId: string | null;
+  currentStage: string | null;
+  timeoutMs: number;
+  healthMaxAgeMs: number;
+  timeoutCount: number;
+}): RelayExecutorHealthSnapshot {
+  const runningForMs = input.running && input.tickStartedAtMs > 0
+    ? Math.max(0, input.nowMs - input.tickStartedAtMs)
+    : null;
+  const heartbeatAgeMs = input.lastTickCompletedAtMs > 0
+    ? Math.max(0, input.nowMs - input.lastTickCompletedAtMs)
+    : null;
+  const stuck = runningForMs != null && runningForMs > input.timeoutMs;
+  const starting = input.lastTickCompletedAtMs <= 0;
+  const healthy = !stuck && !starting && (
+    input.running || (heartbeatAgeMs != null && heartbeatAgeMs <= input.healthMaxAgeMs)
+  );
+  const status: RelayExecutorHealthSnapshot['status'] = stuck
+    ? 'STUCK'
+    : starting
+      ? 'STARTING'
+      : input.running
+        ? 'RUNNING'
+        : 'IDLE';
+  return {
+    healthy,
+    status,
+    running: input.running,
+    tickStartedAt: input.tickStartedAtMs > 0 ? new Date(input.tickStartedAtMs).toISOString() : null,
+    lastTickCompletedAt:
+      input.lastTickCompletedAtMs > 0 ? new Date(input.lastTickCompletedAtMs).toISOString() : null,
+    lastTickDurationMs: input.lastTickDurationMs > 0 ? input.lastTickDurationMs : null,
+    currentInstanceId: input.currentInstanceId,
+    currentStage: input.currentStage,
+    heartbeatAgeMs,
+    runningForMs,
+    timeoutMs: input.timeoutMs,
+    timeoutCount: input.timeoutCount,
+  };
+}
+
+/** Watchdog cleanup may cancel an entry only when the exchange reports zero fill. */
+export function relayEntryOrderIsCompletelyUnfilled(order: {
+  amountOrig: number;
+  amount: number;
+}): boolean {
+  const filledQty = Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount));
+  return filledQty <= MIN_QTY_BTC;
+}
 
 /**
  * Live relay arming boundary. `relayArmedAt` is written on every explicit
@@ -686,6 +760,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly dustSweepInFlight = new Set<string>();
   private running = false;
   private wakeQueued = false;
+  private tickStartedAtMs = 0;
+  private lastTickCompletedAtMs = 0;
+  private lastTickDurationMs = 0;
+  private currentInstanceId: string | null = null;
+  private currentStage: string | null = null;
+  private executorTimeoutCount = 0;
+  private watchdogHandling = false;
   /** Phase 1 — 1s showcase-state memo for the execution path (flag-gated). */
   private execStateMemo: { at: number; state: BotApiState | null } | null = null;
   /** Phase 0 — MIRROR_DIFF event throttle: participantId → last event ms. */
@@ -793,6 +874,167 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
     setInterval(() => void this.tick(), POLL_MS);
     setTimeout(() => void this.tick(), POLL_MS);
+    setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
+  }
+
+  getHealthSnapshot(nowMs = Date.now()): RelayExecutorHealthSnapshot {
+    const timeoutMs = Math.max(
+      10_000,
+      Number(this.config.get('SUBSCRIBER_EXECUTOR_TICK_TIMEOUT_MS') ?? DEFAULT_EXECUTOR_TICK_TIMEOUT_MS),
+    );
+    const healthMaxAgeMs = Math.max(
+      POLL_MS * 4,
+      Number(this.config.get('SUBSCRIBER_EXECUTOR_HEALTH_MAX_AGE_MS') ?? DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS),
+    );
+    return buildRelayExecutorHealth({
+      nowMs,
+      running: this.running,
+      tickStartedAtMs: this.tickStartedAtMs,
+      lastTickCompletedAtMs: this.lastTickCompletedAtMs,
+      lastTickDurationMs: this.lastTickDurationMs,
+      currentInstanceId: this.currentInstanceId,
+      currentStage: this.currentStage,
+      timeoutMs,
+      healthMaxAgeMs,
+      timeoutCount: this.executorTimeoutCount,
+    });
+  }
+
+  private async watchExecutorLiveness() {
+    const health = this.getHealthSnapshot();
+    if (health.status !== 'STUCK' || this.watchdogHandling) return;
+    this.watchdogHandling = true;
+    this.executorTimeoutCount += 1;
+    const reason =
+      `Relay executor watchdog: tick exceeded ${health.timeoutMs}ms` +
+      `${health.currentInstanceId ? ` at instance ${health.currentInstanceId}` : ''}` +
+      `${health.currentStage ? ` stage ${health.currentStage}` : ''}. ` +
+      'Live entries were disarmed; restart required.';
+    this.logger.error(reason);
+    try {
+      await this.failClosedStuckLiveInstances(reason);
+    } catch (err) {
+      this.logger.error(
+        `Relay watchdog fail-closed persistence failed: ${err instanceof Error ? err.stack ?? err.message : err}`,
+      );
+    } finally {
+      // A timed-out async operation cannot be cancelled safely in-process. Exit only
+      // after durable fail-closed state is attempted so Railway restarts a clean executor
+      // without allowing the abandoned Promise to submit a duplicate later.
+      if (process.env.NODE_ENV !== 'test' && this.config.get('SUBSCRIBER_EXECUTOR_WATCHDOG_EXIT') !== 'false') {
+        const timer = setTimeout(() => process.exit(1), 250);
+        timer.unref();
+      } else {
+        this.watchdogHandling = false;
+      }
+    }
+  }
+
+  private async failClosedStuckLiveInstances(reason: string) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+    if (!agent) return;
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.ACTIVE,
+      },
+    });
+    const nowIso = new Date().toISOString();
+    for (const instance of instances) {
+      const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          status: TradingAgentInstanceStatus.PAUSED,
+          lastError: reason.slice(0, 500),
+          dashboardState: applyDashboardPatch(dash, {
+            relayExecutionMode: 'PAUSED',
+            relayArmedAt: null,
+            realTradingConfirmedAt: null,
+            relayExecutor: {
+              ...this.getHealthSnapshot(),
+              healthy: false,
+              status: 'STUCK',
+              failClosedAt: nowIso,
+              requiresExplicitRestart: true,
+            },
+          }) as unknown as Prisma.InputJsonValue,
+        },
+      });
+      try {
+        await Promise.race([
+          this.cancelVerifiedUnfilledEntriesAfterWatchdog(agent.id, instance),
+          new Promise<never>((_, reject) => {
+            const timer = setTimeout(
+              () => reject(new Error('watchdog pending-order cleanup timed out after 8000ms')),
+              8_000,
+            );
+            timer.unref();
+          }),
+        ]);
+      } catch (err) {
+        this.logger.error(
+          `Relay watchdog pending-order cleanup incomplete for ${instance.userId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Cancel only relay-managed entry orders that are proven to be resting and
+   * completely unfilled. Partial/full fills and open positions are deliberately
+   * left to restart reconciliation and normal exit management.
+   */
+  private async cancelVerifiedUnfilledEntriesAfterWatchdog(
+    agentId: string,
+    instance: TradingAgentInstance,
+  ): Promise<void> {
+    const creds = await this.exchanges.getUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!creds) return;
+    this.activeTrading = this.bitfinex;
+    const pending = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+      },
+      select: { id: true, cycleId: true },
+    });
+    for (const participant of pending) {
+      const meta = await this.loadExecutionMeta(participant.id);
+      const orderId = meta.bitfinexOrderId;
+      if (!orderId) continue;
+      const order = await this.activeTrading.findOrder(creds, orderId).catch(() => null);
+      if (!order) continue;
+      const filledQty = Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount));
+      if (!relayEntryOrderIsCompletelyUnfilled(order)) {
+        this.logger.warn(
+          `Relay watchdog left partially filled entry ${orderId} untouched ` +
+            `participant=${participant.id} filledQty=${filledQty.toFixed(8)}; restart reconciliation required`,
+        );
+        continue;
+      }
+      const cancelled = await this.cancelManagedOrderGone(
+        creds,
+        orderId,
+        `Relay watchdog cancel verified-unfilled entry ${orderId} participant=${participant.id}`,
+      );
+      if (!cancelled.gone) {
+        throw new Error(
+          `CANCEL_FAILED_ORDER_STILL_LIVE order=${orderId} participant=${participant.id}`,
+        );
+      }
+      this.logger.warn(
+        `Relay watchdog cancelled verified-unfilled entry ${orderId} ` +
+          `participant=${participant.id} cycle=${participant.cycleId}`,
+      );
+    }
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
@@ -831,6 +1073,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async tick() {
     if (!executionEnabled() || this.running) return;
     this.running = true;
+    this.tickStartedAtMs = Date.now();
+    this.currentStage = 'LOAD_AGENT';
     try {
       const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
       if (!agent) return;
@@ -853,6 +1097,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
 
       for (const row of instances) {
+        this.currentInstanceId = row.id;
+        this.currentStage = 'LOAD_INSTANCE';
         const instance =
           (await this.prisma.tradingAgentInstance.findUnique({ where: { id: row.id } })) ?? row;
         if (instance.exchangeProvider !== 'bitfinex') continue;
@@ -886,7 +1132,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             // live copy for real trading. The real exchange position is the source of truth;
             // reconcileLotLedger reads it directly via this.activeTrading.
             this.activeTrading = this.bitfinex;
+            this.currentStage = 'PROCESS_SIM_INSTANCE';
             await this.processInstance(agent.id, instance, true);
+            this.currentStage = 'PERSIST_SIM_STATE';
             await this.persistSimTickState(agent.id, instance);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -901,6 +1149,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
         try {
           this.activeTrading = this.bitfinex;
+          this.currentStage = 'PROCESS_LIVE_INSTANCE';
           await this.processInstance(agent.id, instance, false);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -921,6 +1170,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }`,
       );
     } finally {
+      const completedAt = Date.now();
+      this.lastTickDurationMs = Math.max(0, completedAt - this.tickStartedAtMs);
+      this.lastTickCompletedAtMs = completedAt;
+      this.tickStartedAtMs = 0;
+      this.currentInstanceId = null;
+      this.currentStage = null;
       this.running = false;
       if (this.wakeQueued) {
         this.wakeQueued = false;
@@ -2115,6 +2370,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           // piggybacks on an existing per-tick dashboardState write — no extra
           // DB round-trip. A stale lastTickAt means the executor loop is dead.
           lastTickAt: new Date().toISOString(),
+          relayExecutor: this.getHealthSnapshot(),
           // Option A — surface the dynamic-stops circuit-breaker state so the
           // operator sees which participants have tripped it (map of
           // participantId → lastError). Empty object when feature is off or no

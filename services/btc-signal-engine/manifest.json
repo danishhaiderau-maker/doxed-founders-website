@@ -1,5 +1,5 @@
 {
-  "engine_version": "v13-shared-direction-tile2-dual-leg",
+  "engine_version": "v14-paused-shadow-executor-watchdog-adx-v3",
   "combo_version": "2026-07-20",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",

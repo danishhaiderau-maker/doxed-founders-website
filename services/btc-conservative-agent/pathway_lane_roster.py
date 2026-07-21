@@ -1,5 +1,5 @@
 """
-Quality pathway roster -- v13-shared-direction-tile2-dual-leg (2026-07-20).
+Quality pathway roster -- v14-paused-shadow-executor-watchdog-adx-v3 (2026-07-21).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)

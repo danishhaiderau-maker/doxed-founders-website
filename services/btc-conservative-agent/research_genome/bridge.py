@@ -88,7 +88,7 @@ class GenomeBridge:
         approved: bool,
         *,
         trade_id: str = "",
-        ai_confidence: int = 0,
+        ai_confidence: int | None = None,
         direction: str = "",
         block_reason: str = "",
         research_lane: str = "",

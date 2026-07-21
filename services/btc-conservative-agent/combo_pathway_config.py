@@ -212,14 +212,16 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v13-shared-direction-tile2-dual-leg"
+RESEARCH_STACK_VERSION = "v14-paused-shadow-executor-watchdog-adx-v3"
 RESEARCH_STACK_FEATURES = (
     "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
     "SR_MICRO_TILE_V2_STATIC "
     "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
     "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
     "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 dual-leg policy "
-    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720"
+    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720; "
+    "paused-shadow outcome ledger/dashboard; non-monotonic ADX shared prompt; "
+    "Type B ADX-v3 shadow challenger; fail-closed relay executor watchdog"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

@@ -2,14 +2,66 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canonicalPendingIntentCycles,
+  buildRelayExecutorHealth,
   isBenignShowcaseEntryWait,
   isCycleFreshForRelayArm,
   mergedDirectionCompatible,
+  relayEntryOrderIsCompletelyUnfilled,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   relayArmTimestampMs,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
+
+test('watchdog cleanup cancels only exchange orders with zero reported fill', () => {
+  assert.equal(
+    relayEntryOrderIsCompletelyUnfilled({ amountOrig: -0.031, amount: -0.031 }),
+    true,
+  );
+  assert.equal(
+    relayEntryOrderIsCompletelyUnfilled({ amountOrig: -0.031, amount: -0.0308 }),
+    false,
+  );
+  assert.equal(
+    relayEntryOrderIsCompletelyUnfilled({ amountOrig: 0.031, amount: 0 }),
+    false,
+  );
+});
+
+test('relay executor health fails closed while starting, stale, or stuck', () => {
+  const base = {
+    nowMs: 100_000,
+    running: false,
+    tickStartedAtMs: 0,
+    lastTickCompletedAtMs: 0,
+    lastTickDurationMs: 0,
+    currentInstanceId: null,
+    currentStage: null,
+    timeoutMs: 60_000,
+    healthMaxAgeMs: 15_000,
+    timeoutCount: 0,
+  };
+  assert.equal(buildRelayExecutorHealth(base).status, 'STARTING');
+  assert.equal(buildRelayExecutorHealth(base).healthy, false);
+  assert.equal(
+    buildRelayExecutorHealth({ ...base, lastTickCompletedAtMs: 99_000 }).healthy,
+    true,
+  );
+  assert.equal(
+    buildRelayExecutorHealth({ ...base, lastTickCompletedAtMs: 80_000 }).healthy,
+    false,
+  );
+  const stuck = buildRelayExecutorHealth({
+    ...base,
+    running: true,
+    tickStartedAtMs: 30_000,
+    lastTickCompletedAtMs: 29_000,
+    currentInstanceId: 'instance-1',
+    currentStage: 'PROCESS_LIVE_INSTANCE',
+  });
+  assert.equal(stuck.status, 'STUCK');
+  assert.equal(stuck.healthy, false);
+});
 
 test('live relay accepts only cycles created after the latest explicit Start', () => {
   const dashboardState = { relayArmedAt: '2026-07-20T01:02:03.000Z' };

@@ -87,6 +87,7 @@ LANE_CHASE_ISOLATION_REPORT_FILE = "lane_chase_isolation_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
 TYPE_B_PREDICTOR_REPORT_FILE = "type_b_predictor_report.json"
+TYPE_B_ADX_V3_SHADOW_REPORT_FILE = "type_b_adx_v3_shadow_report.json"
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
 CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
@@ -94,6 +95,7 @@ EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
+PAUSED_SHADOW_REPORT_FILE = "paused_shadow_research_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -578,10 +580,12 @@ ANALYZER_JSON_REPORT_FILES = (
     TOP_COMBINATIONS_REPORT_FILE,
     CHASE_EFFICIENCY_MATRIX_REPORT_FILE,
     TYPE_B_PREDICTOR_REPORT_FILE,
+    TYPE_B_ADX_V3_SHADOW_REPORT_FILE,
     CHASE_THRESHOLD_REPORT_FILE,
     CHASE_DELAY_REPORT_FILE,
     EXIT_COMBINATIONS_REPORT_FILE,
     REGIME_LEADERBOARD_REPORT_FILE,
+    PAUSED_SHADOW_REPORT_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
@@ -636,6 +640,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
+    ("Type B ADX V3 Shadow", TYPE_B_ADX_V3_SHADOW_REPORT_FILE, "Replay-only challenger decisions, direction balance, ADX bands, and promotion gate"),
+    ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -723,11 +729,13 @@ SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
 SOFT_REJECT_SHADOW_FILE = "soft_reject_shadow.jsonl"
+TYPE_B_ADX_V3_DECISION_FILE = "type_b_adx_v3_shadow_decisions.jsonl"
 EXPORT_ZIP_FILES = (
     TRADES_FILE, BLOCKED_FILE, DECISIONS_FILE, AI_TRANCHE_FILE, SETUP_LOG_FILE, CANDLES_FILE,
     PIPELINE_EVENTS_FILE, AI_ERRORS_FILE, SIGNAL_PERSIST_FILE, NEAR_EDGE_FILE,
     SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, SIGNAL_SNAPSHOT_FILE, COUNTERFACTUAL_FILE,
     APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
+    TYPE_B_ADX_V3_DECISION_FILE,
     EDGE_CENSUS_FILE,
 )
 RESEARCH_CSV_FILES = (
@@ -2026,6 +2034,137 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
     return df
+
+
+def paused_shadow_research_report(session: dict = None):
+    """Analyze only replay outcomes created while ADMIN_MANUAL was paused.
+
+    These rows are deliberately excluded from executed-trade statistics. The
+    report makes their collection coverage, lane results, and ADX bands visible
+    without ever treating a counterfactual fill as a real showcase/Bitfinex fill.
+    """
+    raw_rows = []
+    for path in (SHADOW_OUTCOME_FILE, SHADOW_LANE_OUTCOME_FILE):
+        raw_rows.extend(_load_jsonl_rows(path))
+    rows = [
+        row for row in raw_rows
+        if isinstance(row, dict) and (
+            _truthy(row.get("paused_shadow"))
+            or str(row.get("collection_mode") or "").upper() == "ADMIN_PAUSED_SHADOW"
+            or str(row.get("block_reason") or "").upper() == "ADMIN_MANUAL_PAUSED_SHADOW"
+        )
+    ]
+    if not rows:
+        payload = {
+            "schema": "paused_shadow_research_report_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "scope": _shadow_scope_label(session),
+            "safety": "NEVER_RELAY_ELIGIBLE",
+            "coverage_note": (
+                "No paused-shadow-capable outcomes yet. Older ADMIN_MANUAL pauses "
+                "stopped before signal/order simulation and cannot be reconstructed."
+            ),
+            "overall": {"closed": 0, "filled": 0, "wins": 0, "losses": 0, "win_rate_pct": None, "net_pnl_usd": 0.0, "ev_usd": None},
+            "by_lane": [],
+            "by_adx_band": [],
+        }
+        with open(analyzer_report_path(PAUSED_SHADOW_REPORT_FILE), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        print(f"  Paused shadow: no capable outcomes yet {PIPELINE_ENFORCEMENT_TAG}")
+        return payload
+
+    df = pd.DataFrame(rows)
+    if session and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
+    if df.empty:
+        filtered_rows = []
+    else:
+        id_col = "trade_id" if "trade_id" in df.columns else "study_id"
+        if id_col in df.columns:
+            df = df.drop_duplicates(subset=[id_col], keep="last")
+        pnl_source = (
+            df["net_pnl_usd"]
+            if "net_pnl_usd" in df.columns
+            else pd.Series(0.0, index=df.index, dtype=float)
+        )
+        df["_pnl"] = pd.to_numeric(pnl_source, errors="coerce").fillna(0.0)
+        if "filled" in df.columns:
+            df["_filled"] = df["filled"].apply(_truthy)
+        else:
+            df["_filled"] = True
+        if "research_lane" not in df.columns:
+            df["research_lane"] = "UNKNOWN"
+        df["research_lane"] = df["research_lane"].fillna("UNKNOWN").astype(str).str.upper()
+        adx = pd.Series(np.nan, index=df.index, dtype=float)
+        for column in ("adx_at_signal", "adx"):
+            if column in df.columns:
+                adx = adx.fillna(pd.to_numeric(df[column], errors="coerce"))
+        if "entry_features" in df.columns:
+            nested = df["entry_features"].apply(
+                lambda value: (value or {}).get("adx_normalized") or (value or {}).get("adx")
+                if isinstance(value, dict) else None
+            )
+            adx = adx.fillna(pd.to_numeric(nested, errors="coerce"))
+        df["_adx"] = adx
+        df["adx_band"] = pd.cut(
+            adx,
+            bins=[-np.inf, 15, 20, 25, 30, 35, 40, np.inf],
+            labels=["<15", "15-20", "20-25", "25-30", "30-35", "35-40", "40+"],
+            right=False,
+        ).astype(object).where(adx.notna(), "UNKNOWN")
+        filtered_rows = df
+
+    def summarize(work):
+        if work is None or len(work) == 0:
+            return {"closed": 0, "filled": 0, "wins": 0, "losses": 0, "win_rate_pct": None, "net_pnl_usd": 0.0, "ev_usd": None}
+        filled_df = work[work["_filled"]]
+        wins = int((filled_df["_pnl"] > 0).sum())
+        losses = int((filled_df["_pnl"] < 0).sum())
+        decided = wins + losses
+        net = float(filled_df["_pnl"].sum()) if len(filled_df) else 0.0
+        return {
+            "closed": int(len(work)),
+            "filled": int(len(filled_df)),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(wins / decided * 100, 1) if decided else None,
+            "net_pnl_usd": round(net, 4),
+            "ev_usd": round(net / len(filled_df), 4) if len(filled_df) else None,
+        }
+
+    overall = summarize(filtered_rows)
+    by_lane = []
+    by_adx = []
+    if isinstance(filtered_rows, pd.DataFrame) and not filtered_rows.empty:
+        by_lane = [
+            {"lane": str(name), **summarize(group)}
+            for name, group in filtered_rows.groupby("research_lane", observed=True)
+        ]
+        by_adx = [
+            {"adx_band": str(name), **summarize(group)}
+            for name, group in filtered_rows.groupby("adx_band", observed=True)
+        ]
+    payload = {
+        "schema": "paused_shadow_research_report_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scope": _shadow_scope_label(session),
+        "safety": "NEVER_RELAY_ELIGIBLE",
+        "coverage_note": (
+            "Counterfactual replay only; never merge with executed trade P&L. "
+            "Historical pauses before the paused-shadow schema have no trade outcomes."
+        ),
+        "overall": overall,
+        "by_lane": by_lane,
+        "by_adx_band": by_adx,
+    }
+    with open(analyzer_report_path(PAUSED_SHADOW_REPORT_FILE), "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"  Paused shadow: closed={overall['closed']} filled={overall['filled']} "
+        f"WR={overall['win_rate_pct']} PnL=${overall['net_pnl_usd']:.2f} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
 
 
 def _load_v2_shadow_outcome_df(session: dict = None):
@@ -7339,6 +7478,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             signal_outcome_analysis(signal_master)
             fill_distance_report()
             shadow_report = shadow_fill_outcome_matrix(trades, session=session, blocked=blocked)
+            paused_shadow_research_report(session=session)
             benchmark_report = benchmark_vs_lanes_report(
                 trades, session=session, blocked=blocked, shadow_report=shadow_report,
                 all_trades=all_trades_unfiltered, decisions=decisions, ai_log=ai_log,
@@ -7449,6 +7589,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
 
         fill_distance_report()
         shadow_report = shadow_fill_outcome_matrix(trades, session=session, blocked=blocked)
+        paused_shadow_research_report(session=session)
         benchmark_report = benchmark_vs_lanes_report(
             trades, session=session, blocked=blocked, shadow_report=shadow_report,
             all_trades=all_trades_unfiltered,
@@ -14303,6 +14444,123 @@ def type_b_predictor_report(trades=None, session=None):
     return payload
 
 
+def type_b_adx_v3_shadow_report(session=None):
+    """Evaluate the non-monotonic ADX Type B challenger without promoting it."""
+    if session is None:
+        session = load_research_session()
+    decisions = pd.DataFrame(_load_jsonl_rows(TYPE_B_ADX_V3_DECISION_FILE))
+    outcomes = pd.DataFrame(_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE))
+    if not decisions.empty:
+        decisions = filter_df_since_session(decisions, session, ts_cols=("ts", "timestamp"))
+        if "study_id" in decisions.columns:
+            decisions = decisions.drop_duplicates(subset=["study_id"], keep="last")
+    if not outcomes.empty:
+        outcomes = filter_df_since_session(outcomes, session, ts_cols=("ts", "timestamp"))
+        if "research_lane" in outcomes.columns:
+            outcomes = outcomes[
+                outcomes["research_lane"].fillna("").astype(str).str.upper()
+                == "TYPE_B_HUNTER_ADX_V3_SHADOW"
+            ]
+        if "study_id" in outcomes.columns:
+            outcomes = outcomes.drop_duplicates(subset=["study_id"], keep="last")
+
+    def outcome_summary(work):
+        if work is None or work.empty:
+            return {
+                "closed": 0, "filled": 0, "wins": 0, "losses": 0,
+                "win_rate_pct": None, "net_pnl_usd": 0.0, "ev_per_fill_usd": None,
+            }
+        filled = work.copy()
+        if "filled" in filled.columns:
+            filled = filled[filled["filled"].apply(_truthy)]
+        pnl_source = (
+            filled["net_pnl_usd"]
+            if "net_pnl_usd" in filled.columns
+            else pd.Series(0.0, index=filled.index, dtype=float)
+        )
+        pnl = pd.to_numeric(pnl_source, errors="coerce").fillna(0.0)
+        wins = int((pnl > 0).sum())
+        losses = int((pnl < 0).sum())
+        decided = wins + losses
+        net = float(pnl.sum())
+        return {
+            "closed": int(len(work)),
+            "filled": int(len(filled)),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(wins / decided * 100, 1) if decided else None,
+            "net_pnl_usd": round(net, 4),
+            "ev_per_fill_usd": round(net / len(filled), 4) if len(filled) else None,
+        }
+
+    accepted_mask = pd.Series(False, index=decisions.index)
+    if not decisions.empty and "accepted" in decisions.columns:
+        accepted_mask = decisions["accepted"].apply(_truthy)
+    accepted_ids = set(
+        decisions.loc[accepted_mask, "study_id"].dropna().astype(str)
+        if not decisions.empty and "study_id" in decisions.columns else []
+    )
+    rejected_ids = set(
+        decisions.loc[~accepted_mask, "study_id"].dropna().astype(str)
+        if not decisions.empty and "study_id" in decisions.columns else []
+    )
+    outcome_ids = outcomes["study_id"].fillna("").astype(str) if not outcomes.empty and "study_id" in outcomes.columns else pd.Series([], dtype=str)
+    accepted_outcomes = outcomes[outcome_ids.isin(accepted_ids)] if not outcomes.empty else outcomes
+    rejected_outcomes = outcomes[outcome_ids.isin(rejected_ids)] if not outcomes.empty else outcomes
+
+    rejection_reasons = {}
+    if not decisions.empty and "block_reason" in decisions.columns:
+        rejected = decisions[~accepted_mask]
+        rejection_reasons = {
+            str(key or "UNKNOWN"): int(value)
+            for key, value in rejected["block_reason"].fillna("UNKNOWN").value_counts().items()
+        }
+    direction_balance = {}
+    if not decisions.empty and "direction" in decisions.columns:
+        direction_balance = {
+            str(key or "UNKNOWN"): int(value)
+            for key, value in decisions.loc[accepted_mask, "direction"].fillna("UNKNOWN").value_counts().items()
+        }
+
+    accepted_metrics = outcome_summary(accepted_outcomes)
+    min_each_direction = min(direction_balance.get("LONG", 0), direction_balance.get("SHORT", 0))
+    promotion_ready = bool(
+        accepted_metrics["closed"] >= 50
+        and min_each_direction >= 15
+        and (accepted_metrics["ev_per_fill_usd"] or 0) > 0
+    )
+    payload = {
+        "schema": "type_b_adx_v3_shadow_report_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_scope": _shadow_scope_label(session),
+        "policy": "type_b_adx_nonmonotonic_shadow_v3_20260721",
+        "safety": "SHADOW_ONLY_NEVER_RELAY_ELIGIBLE",
+        "decisions": {
+            "total": int(len(decisions)),
+            "accepted": int(accepted_mask.sum()) if len(accepted_mask) else 0,
+            "rejected": int((~accepted_mask).sum()) if len(accepted_mask) else 0,
+            "accepted_direction_balance": direction_balance,
+            "rejection_reasons": rejection_reasons,
+        },
+        "accepted_policy_outcomes": accepted_metrics,
+        "rejected_counterfactual_outcomes": outcome_summary(rejected_outcomes),
+        "promotion_gate": {
+            "status": "ELIGIBLE_FOR_MANUAL_REVIEW" if promotion_ready else "COLLECT_MORE",
+            "automatic_promotion": False,
+            "requirements": "at least 50 closed accepted replays, >=15 LONG and >=15 SHORT accepts, positive EV, then walk-forward review",
+        },
+    }
+    with open(analyzer_report_path(TYPE_B_ADX_V3_SHADOW_REPORT_FILE), "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"  Type B ADX v3 shadow: decisions={len(decisions)} "
+        f"accepted={payload['decisions']['accepted']} closed={accepted_metrics['closed']} "
+        f"EV={accepted_metrics['ev_per_fill_usd']} status={payload['promotion_gate']['status']} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
+
+
 def lane_retirement_report(trades=None, session=None, benchmark_report=None):
     """Automatic KEEP / RETIRE / COLLECT MORE recommendations per pathway lane."""
     if session is None:
@@ -15312,6 +15570,7 @@ def pre_test_analytics_reports(
     exit_ladder_simulator_report(trades=trades, session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     type_b_predictor_report(trades=trades, session=session)
+    type_b_adx_v3_shadow_report(session=session)
     first_15m_outcome_report(trades=trades, session=session)
     scenario_c_leakage_report(trades=trades, session=session)
     ai_direction_bias_report(trades=trades, decisions=decisions, session=session)
@@ -16047,6 +16306,7 @@ def build_executive_summary_payload(
     top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
     lane_ret = _load_json_report(LANE_RETIREMENT_REPORT_FILE)
     feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
+    paused_shadow = _load_json_report(PAUSED_SHADOW_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -16211,6 +16471,7 @@ def build_executive_summary_payload(
         "top_leakage": top_leak,
         "lane_retirement": lane_ret,
         "feature_importance": feat_imp,
+        "paused_shadow_research": paused_shadow,
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
@@ -16754,6 +17015,7 @@ def generate_all_data_companion_reports(dataset_counts=None, session_trade_count
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
         no_filter_session = {}
         shadow_report = shadow_fill_outcome_matrix(trades, session=no_filter_session, blocked=blocked)
+        paused_shadow_research_report(session=no_filter_session)
         benchmark_report = benchmark_vs_lanes_report(
             trades, session=no_filter_session, blocked=blocked, shadow_report=shadow_report, all_trades=trades,
         )

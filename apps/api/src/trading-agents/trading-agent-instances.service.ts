@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_PROVIDER_LABELS,
@@ -368,6 +374,17 @@ export class TradingAgentInstancesService {
       );
     }
 
+    if (!paused && instance.exchangeProvider !== 'paper') {
+      const executorHealth = this.execution.getHealthSnapshot();
+      if (!executorHealth.healthy) {
+        throw new ServiceUnavailableException(
+          `Bitfinex relay executor is ${executorHealth.status.toLowerCase()} ` +
+            `(heartbeat ${executorHealth.heartbeatAgeMs ?? 'unavailable'}ms ago). ` +
+            'Live copy remains OFF; wait for a healthy executor heartbeat or restart the platform service.',
+        );
+      }
+    }
+
     // F8 (2026-07-07 follow-up) — Validate Start pre-conditions BEFORE flipping
     // the status to ACTIVE. Previously this endpoint returned 200 without
     // checking Bitfinex credentials, derivatives funding, or showcase
@@ -430,6 +447,7 @@ export class TradingAgentInstancesService {
       realTradingConfirmedAt,
       relayArmedAt: realTradingConfirmedAt,
       relayEntryPolicy: 'NEXT_FRESH_ONLY',
+      relayExecutorAtArm: this.execution.getHealthSnapshot(),
     };
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
