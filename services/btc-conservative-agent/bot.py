@@ -5,6 +5,7 @@ ENFORCED: WINDOW=10 + SINGLE AGGREGATED SOURCE + SOFT FEATURE VALIDATION + EDGE�
 """
 from __future__ import annotations
 import os
+import tempfile
 import time
 import math
 import threading
@@ -922,7 +923,23 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     order_age_sec = max(0.0, fill_ts - float(order_created)) if order_created else 0.0
     entry_delay_sec = signal_age_sec
     features, context = _feature_bundle(signal, signal)
+    lineage_sources = (order, signal, ai)
+    lineage = {}
+    for key in (
+        "genome_environment_id",
+        "genome_market_id",
+        "genome_decision_id",
+        "genome_source_trade_id",
+    ):
+        value = next((source.get(key) for source in lineage_sources if source.get(key)), None)
+        if value is not None:
+            lineage[key] = value
+    lineage.setdefault(
+        "genome_source_trade_id",
+        order.get("source_trade_id") or signal.get("source_trade_id") or order.get("trade_id") or signal.get("trade_id"),
+    )
     return {
+        **lineage,
         "trade_id": order.get("trade_id") or signal.get("trade_id"),
         "dir": direction,
         "entry": entry,
@@ -11542,15 +11559,40 @@ def _emit_genome_ai_events(ai_result: dict) -> None:
     if not bridge:
         return
     try:
+        # A shared AI result feeds multiple research lanes. Its source scan and
+        # decision are one event; every downstream lane carries this lineage.
+        if ai_result.get("genome_market_id") and ai_result.get("genome_decision_id"):
+            return
         with state_lock:
             ema = state.get("ema_status") or {}
             market_context = state.get("market_context") or {}
             trend_strength = market_context.get("trend_strength") or {}
+            market_structure = market_context.get("market_structure") or {}
             feature_snapshot = state.get("feature_snapshot") or {}
             adx = trend_strength.get("adx")
             if adx is None:
                 adx = feature_snapshot.get("adx")
             atr = feature_snapshot.get("volatility_atr")
+            factors = ai_result.get("factors") or {}
+            long_score = ai_result.get("long_score")
+            if long_score is None:
+                long_score = factors.get("long_score")
+            short_score = ai_result.get("short_score")
+            if short_score is None:
+                short_score = factors.get("short_score")
+            bull_score = ai_result.get("bull_score")
+            if bull_score is None:
+                bull_score = factors.get("bull_score")
+            bear_score = ai_result.get("bear_score")
+            if bear_score is None:
+                bear_score = factors.get("bear_score")
+            has_momentum_source = any(
+                feature_snapshot.get(key) is not None for key in ("ret_1m", "ret_5m", "velocity")
+            )
+            direction = str(ai_result.get("direction") or ai_result.get("final_direction") or "")
+            spread = None
+            if any(value is not None for value in (long_score, short_score, bull_score, bear_score)):
+                spread = compute_directional_spread(direction, ai_result)
             market = {
                 "price": state.get("price"),
                 "adx": adx,
@@ -11563,30 +11605,47 @@ def _emit_genome_ai_events(ai_result: dict) -> None:
                 "atr_source": feature_snapshot.get("volatility_source") or "missing",
                 "indicator_normalization_version": feature_snapshot.get("indicator_normalization_version"),
                 "regime": state.get("regime"),
-                "bull_score": ai_result.get("bull_score"),
-                "bear_score": ai_result.get("bear_score"),
-                "spread": ai_result.get("spread"),
+                "bull_score": bull_score,
+                "bear_score": bear_score,
+                "long_score": long_score,
+                "short_score": short_score,
+                "spread": spread,
+                "directional_spread": spread,
+                "score_source": "shared_ai_result",
                 "ema_fast": ema.get("ema_fast"),
                 "ema_slow": ema.get("ema_slow"),
                 "ema_slope": ema.get("ema_spread"),
-                "volatility_percentile": state.get("volatility_percentile"),
-                "volume_percentile": state.get("volume_percentile"),
+                "volatility_percentile": feature_snapshot.get("volatility_percentile"),
+                "volatility_percentile_source": (
+                    "feature_snapshot.volatility_percentile"
+                    if feature_snapshot.get("volatility_percentile") is not None else "missing"
+                ),
+                "volume_percentile": feature_snapshot.get("volume_percentile"),
+                "volume_percentile_source": (
+                    "feature_snapshot.volume_percentile"
+                    if feature_snapshot.get("volume_percentile") is not None else "missing"
+                ),
                 "funding_rate": state.get("funding_rate"),
                 "vwap_distance": state.get("vwap_distance"),
                 "delta": state.get("delta"),
-                "momentum": state.get("momentum"),
-                "structure": state.get("structure_score"),
+                "momentum": _compute_momentum_metric(feature_snapshot) if has_momentum_source else None,
+                "momentum_source": "feature_snapshot.ret_1m|ret_5m|velocity" if has_momentum_source else "missing",
+                "structure": market_structure.get("structure_score"),
+                "structure_source": (
+                    "market_context.market_structure.structure_score"
+                    if market_structure.get("structure_score") is not None else "missing"
+                ),
             }
-        bridge.on_ai_scan_complete(market)
+        genome_ids = bridge.on_ai_scan_complete(market)
         decision = str(ai_result.get("decision") or "").upper()
         approved = decision == "APPROVE" or bool(ai_result.get("approved"))
         confidence_requested = bool(ai_result.get("confidence_requested", False))
         confidence = ai_result.get("win_prob") if confidence_requested else None
-        bridge.on_ai_decision(
+        decision_id = bridge.on_ai_decision(
             approved,
             trade_id=str(ai_result.get("trade_id") or ""),
             ai_confidence=int(confidence) if confidence is not None else None,
-            direction=str(ai_result.get("direction") or ai_result.get("final_direction") or ""),
+            direction=direction,
             block_reason="" if approved else str(ai_result.get("comment") or decision or "REJECT"),
             research_lane=str(ai_result.get("research_lane") or RESEARCH_LANE_AI_SCAN),
             extra={
@@ -11596,6 +11655,10 @@ def _emit_genome_ai_events(ai_result: dict) -> None:
                 "analyzer_sync_id": ANALYZER_SYNC_ID,
             },
         )
+        ai_result["genome_environment_id"] = genome_ids.get("environment_id")
+        ai_result["genome_market_id"] = genome_ids.get("market_genome_id")
+        ai_result["genome_decision_id"] = decision_id
+        ai_result["genome_source_trade_id"] = str(ai_result.get("trade_id") or "") or None
     except Exception as exc:
         logger.warning(f"[GENOME] ai scan events failed: {exc}")
 
@@ -11605,7 +11668,32 @@ def _emit_genome_execution_event(event_name: str, payload: dict) -> None:
     if not bridge:
         return
     try:
-        bridge.on_execution_event(event_name, payload)
+        body = dict(payload or {})
+        trade_id = str(body.get("trade_id") or "")
+        references = []
+        trade_ref = trades_map.get(trade_id) if trade_id else None
+        if isinstance(trade_ref, dict):
+            references.extend([trade_ref.get("ai") or {}, trade_ref.get("signal_ref") or {}])
+        for collection in (open_positions, pending_orders):
+            match = next((item for item in collection if str(item.get("trade_id") or "") == trade_id), None)
+            if match:
+                references.append(match)
+        lineage_keys = (
+            ("environment_id", "genome_environment_id"),
+            ("market_genome_id", "genome_market_id"),
+            ("decision_id", "genome_decision_id"),
+        )
+        for event_key, stored_key in lineage_keys:
+            if body.get(event_key) is None:
+                body[event_key] = next((ref.get(stored_key) for ref in references if ref.get(stored_key)), None)
+        body.setdefault(
+            "genome_source_trade_id",
+            next((ref.get("genome_source_trade_id") for ref in references if ref.get("genome_source_trade_id")), None)
+            or body.get("source_trade_id")
+            or trade_id
+            or None,
+        )
+        bridge.on_execution_event(event_name, body)
     except Exception as exc:
         logger.warning(f"[GENOME] execution event {event_name} failed: {exc}")
 
@@ -19866,6 +19954,11 @@ def close_position(pos: dict, exit_reason: str):
         try:
             bridge.on_position_closed({
                 "trade_id": trade_id,
+                "source_trade_id": pos.get("genome_source_trade_id") or trade_id,
+                "genome_source_trade_id": pos.get("genome_source_trade_id") or trade_id,
+                "environment_id": pos.get("genome_environment_id"),
+                "market_genome_id": pos.get("genome_market_id"),
+                "decision_id": pos.get("genome_decision_id"),
                 "entry_price": pos.get("entry"),
                 "exit_price": price,
                 "pnl_usd": net_pnl,
@@ -22807,7 +22900,7 @@ HTML = """<!DOCTYPE html>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
   <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Research stack build</div>
   <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
-  <div style="font-size:0.85rem;color:#8b949e;">Research analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">:9500 reports</a> · Public desk <a href="__AGENT_HUB_URL__" style="color:#a371f7;font-weight:600;">Agent Hub →</a> (doxxedcrypto.digital)</div>
+  <div style="font-size:0.85rem;color:#8b949e;">Research analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">open reports</a> · Public desk <a href="__AGENT_HUB_URL__" style="color:#a371f7;font-weight:600;">Agent Hub →</a> (doxxedcrypto.digital)</div>
 </div>
 <p style="margin:8px 0;padding:10px 14px;background:#1f1630;border:1px solid #6e40c955;border-radius:8px;">
   <strong style="color:#a371f7;">Showcase + relay</strong> — live book and Bitfinex relay sim run on
@@ -25628,6 +25721,43 @@ def api_ping():
 
 # Monotonic snapshot sequence — increments on every /api/state and /api/relay-state build.
 _SNAPSHOT_SEQ = 0
+_RELAY_STATE_CACHE = None
+_RELAY_STATE_CACHE_AT = 0.0
+_RELAY_STATE_CACHE_LOCK = threading.Lock()
+_RELAY_STATE_REFRESH_LOCK = threading.Lock()
+_RELAY_STATE_CACHE_TTL_SEC = max(0.25, float(os.getenv("RELAY_STATE_CACHE_TTL_SEC", "1.0")))
+_RELAY_STATE_REFRESH_INTERVAL_SEC = max(
+    0.25,
+    float(os.getenv("RELAY_STATE_REFRESH_INTERVAL_SEC", "0.8")),
+)
+_RELAY_STATE_MAX_STALE_SEC = max(
+    _RELAY_STATE_CACHE_TTL_SEC,
+    float(os.getenv("RELAY_STATE_MAX_STALE_SEC", "10.0")),
+)
+
+
+def _cached_relay_state_response(cache_mode: str):
+    # Never wait behind the expensive snapshot rebuild. The refresh lock may
+    # be held for seconds while it reads large ledgers; this cache lock is held
+    # only for an atomic pointer/timestamp copy.
+    with _RELAY_STATE_CACHE_LOCK:
+        cached = copy.deepcopy(_RELAY_STATE_CACHE)
+        cached_at = _RELAY_STATE_CACHE_AT
+    if not isinstance(cached, dict):
+        return None
+    age = max(0.0, time.monotonic() - cached_at)
+    if age > _RELAY_STATE_MAX_STALE_SEC:
+        return None
+    payload = cached
+    payload["snapshot_age_sec"] = round(age, 3)
+    payload["relay_cache"] = {"mode": cache_mode, "age_sec": round(age, 3)}
+    integrity = payload.get("state_integrity")
+    if isinstance(integrity, dict):
+        integrity["snapshot_age_sec"] = round(age, 3)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["X-Relay-State-Cache"] = cache_mode
+    return response
 
 
 def _last_fill_ts() -> float:
@@ -25873,8 +26003,26 @@ def build_state_integrity() -> dict:
 
 
 @app.route('/api/relay-state')
-def api_relay_state():
+def api_relay_state(force_rebuild: bool = False):
     """Fast subset for Railway relay / Agent Hub — no heavy research KPIs."""
+    global _RELAY_STATE_CACHE, _RELAY_STATE_CACHE_AT
+    if not force_rebuild:
+        cached = _cached_relay_state_response("BACKGROUND")
+        if cached is not None:
+            return cached
+        return jsonify({
+            "api_state_error": "no bounded-fresh relay snapshot is available",
+            "bot_version": EXECUTION_FIX_VERSION,
+        }), 503
+    refresh_acquired = _RELAY_STATE_REFRESH_LOCK.acquire(blocking=False)
+    if not refresh_acquired:
+        cached = _cached_relay_state_response("STALE_WHILE_REFRESHING")
+        if cached is not None:
+            return cached
+        return jsonify({
+            "api_state_error": "relay snapshot refresh busy and no bounded-fresh cache is available",
+            "bot_version": EXECUTION_FIX_VERSION,
+        }), 503
     try:
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
@@ -25947,12 +26095,21 @@ def api_relay_state():
             snapshot["genome_bus_seq"] = bridge.bus_seq
             snapshot["genome_stats"] = bridge.stats()
         snapshot["state_integrity"] = build_state_integrity()
+        snapshot["snapshot_age_sec"] = 0
+        snapshot["relay_cache"] = {"mode": "REBUILT", "age_sec": 0}
+        with _RELAY_STATE_CACHE_LOCK:
+            _RELAY_STATE_CACHE = copy.deepcopy(snapshot)
+            _RELAY_STATE_CACHE_AT = time.monotonic()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["X-Relay-State-Cache"] = "REBUILT"
         return resp
     except Exception as e:
         logger.error(f"/api/relay-state error: {e}")
         return jsonify({"api_state_error": str(e)[:500], "bot_version": EXECUTION_FIX_VERSION}), 500
+    finally:
+        if refresh_acquired:
+            _RELAY_STATE_REFRESH_LOCK.release()
 
 
 @app.route('/api/build')
@@ -26368,7 +26525,11 @@ def _start_api_state_cache_refresher():
             return
         _api_state_refresher_started = True
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
-        logger.info("[API STATE] background cache refresher started (1.5s cadence)")
+        threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
+        logger.info(
+            "[API STATE] independent dashboard (1.5s) and relay "
+            f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
+        )
 
 
 def _api_state_cache_refresher_loop():
@@ -26381,6 +26542,20 @@ def _api_state_cache_refresher_loop():
         except Exception as e:
             logger.error(f"/api/state background refresher error: {e}")
         shutdown_event.wait(1.5)
+
+
+def _relay_state_cache_refresher_loop():
+    """Refresh the money-path snapshot independently of the heavy dashboard.
+
+    A slow report/state build must never starve the canonical relay cache.
+    """
+    while not shutdown_event.is_set():
+        try:
+            with app.app_context():
+                api_relay_state(force_rebuild=True)
+        except Exception as e:
+            logger.error(f"/api/relay-state background refresher error: {e}")
+        shutdown_event.wait(_RELAY_STATE_REFRESH_INTERVAL_SEC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29439,8 +29614,6 @@ def _ensure_flask_port_available(port: int = None):
     """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
     if os.name != "nt":
         return
-    if not _port_is_open("127.0.0.1", port):
-        return
     import sys
     if sys.platform != "win32":
         logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
@@ -29798,8 +29971,17 @@ def main():
     global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
     global _PROCESS_SINGLETON, BOT_INSTANCE_ID
     try:
+        # The lock directory must be machine-wide, not relative to this repo.
+        # The command center can coexist with archived/alternate checkouts; a
+        # repo-local lock allowed each checkout to start its own :7002 owner.
+        singleton_root = os.getenv("BOT_SINGLETON_DIR") or os.path.join(
+            os.getenv("LOCALAPPDATA") or tempfile.gettempdir(),
+            "DoxxedCrypto",
+            "locks",
+        )
         _PROCESS_SINGLETON = acquire_process_singleton(
-            f"btc-research-dashboard-{DASHBOARD_PORT}"
+            f"btc-research-dashboard-{DASHBOARD_PORT}",
+            directory=singleton_root,
         )
     except ProcessSingletonError as exc:
         logger.critical(f"[STARTUP] singleton refused: {exc}")

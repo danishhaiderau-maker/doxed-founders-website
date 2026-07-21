@@ -84,12 +84,19 @@ class GenomeLibraryStore:
                 prev = json.loads(existing["payload_json"])
                 body["genome_id"] = genome_id
                 body["first_seen"] = prev.get("first_seen") or now
-                body["observations"] = int(prev.get("observations") or 0) + int(body.get("new_observations") or 1)
+                if body.get("observations") is None:
+                    body["observations"] = int(prev.get("observations") or 0) + int(body.get("new_observations") or 1)
+                else:
+                    body["observations"] = int(body.get("observations") or 0)
                 body.setdefault("trade_count", int(prev.get("trade_count") or 0))
             else:
                 body["genome_id"] = genome_id
                 body["first_seen"] = now
-                body["observations"] = int(body.get("new_observations") or 1)
+                body["observations"] = int(
+                    body.get("observations")
+                    if body.get("observations") is not None
+                    else body.get("new_observations") or 1
+                )
             body["last_seen"] = now
             body["fingerprint_key"] = fingerprint_key
             payload = json.dumps(body, default=str)
@@ -147,11 +154,25 @@ class GenomeLibraryStore:
             conn.commit()
             conn.close()
 
-    def append_ledger(self, entity_type: str, entity_id: str, snapshot: Dict[str, Any]) -> None:
+    def append_ledger(self, entity_type: str, entity_id: str, snapshot: Dict[str, Any]) -> bool:
         ts = str(snapshot.get("ts") or datetime.now(timezone.utc).isoformat())
         period = str(snapshot.get("period_key") or ts[:7])
+        source_watermark = str(snapshot.get("source_watermark") or "")
         with self._lock:
             conn = sqlite3.connect(self.db_path)
+            if source_watermark:
+                rows = conn.execute(
+                    """SELECT payload_json FROM genome_evidence_ledger
+                       WHERE entity_type = ? AND entity_id = ? ORDER BY id DESC""",
+                    (entity_type, entity_id),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        if str((json.loads(row[0]) or {}).get("source_watermark") or "") == source_watermark:
+                            conn.close()
+                            return False
+                    except (TypeError, json.JSONDecodeError):
+                        continue
             conn.execute(
                 """INSERT INTO genome_evidence_ledger (entity_type, entity_id, period_key, ts, payload_json)
                    VALUES (?, ?, ?, ?, ?)""",
@@ -159,6 +180,7 @@ class GenomeLibraryStore:
             )
             conn.commit()
             conn.close()
+        return True
 
     def load_ledger(self, entity_type: str, entity_id: str, limit: int = 52) -> List[Dict[str, Any]]:
         with self._lock:

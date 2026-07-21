@@ -1,10 +1,31 @@
 """DNA fingerprints — join genome layers into market identity vectors."""
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 
-def _bucket_adx(adx: float) -> str:
+def _finite_number(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _first_number(row: Dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = _finite_number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _bucket_adx(adx: Optional[float]) -> str:
+    if adx is None:
+        return "UNKNOWN_ADX"
     if adx >= 35:
         return "HIGH_ADX"
     if adx >= 22:
@@ -12,8 +33,10 @@ def _bucket_adx(adx: float) -> str:
     return "LOW_ADX"
 
 
-def _bucket_spread(spread: float) -> str:
-    s = int(spread or 0)
+def _bucket_spread(spread: Optional[float]) -> str:
+    if spread is None:
+        return "UNKNOWN_SPREAD"
+    s = int(spread)
     if s >= 5:
         return "SPREAD5+"
     if s >= 4:
@@ -23,23 +46,31 @@ def _bucket_spread(spread: float) -> str:
 
 def market_fingerprint(row: Dict[str, Any]) -> Dict[str, Any]:
     """Single market-genome identity (DNA-first, lane-agnostic)."""
-    adx = float(row.get("adx") or 0)
-    spread = float(row.get("spread") or 0)
+    adx = _first_number(row, "adx", "adx_at_signal", "adx_at_entry")
+    spread = _first_number(row, "spread", "directional_spread", "conviction_spread")
+    atr = _first_number(row, "atr", "volatility_atr")
+    bull_score = _first_number(row, "bull_score")
+    bear_score = _first_number(row, "bear_score")
+    long_score = _first_number(row, "long_score")
+    short_score = _first_number(row, "short_score")
     return {
         "session": row.get("trading_session") or row.get("session") or "UNKNOWN",
         "is_weekend": bool(row.get("is_weekend")),
         "adx_bucket": _bucket_adx(adx),
-        "adx": round(adx, 2),
-        "atr": round(float(row.get("atr") or 0), 4),
+        "adx": round(adx, 2) if adx is not None else None,
+        "atr": round(atr, 4) if atr is not None else None,
         "spread_bucket": _bucket_spread(spread),
-        "spread": round(spread, 2),
+        "spread": round(spread, 2) if spread is not None else None,
         "regime": row.get("regime") or "",
         "volatility_percentile": row.get("volatility_percentile"),
         "volume_percentile": row.get("volume_percentile"),
         "funding_window": bool(row.get("funding_window")),
-        "structure": row.get("structure"),
-        "bull_score": row.get("bull_score"),
-        "bear_score": row.get("bear_score"),
+        "structure": _first_number(row, "structure", "structure_score"),
+        "momentum": _first_number(row, "momentum"),
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "long_score": long_score,
+        "short_score": short_score,
         "ai_confidence": row.get("ai_confidence") or row.get("win_prob"),
         "direction": row.get("direction") or "",
     }

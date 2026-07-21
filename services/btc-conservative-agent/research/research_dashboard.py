@@ -11,6 +11,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,15 +148,14 @@ REPORT_NAV_GROUPS = (
     ("overview", "Overview", (
         ("summary", "Overview", None),
         ("findings", "Findings", None),
-        ("regime", "Regime", "regime_leaderboard.json"),
-        ("regime-conf", "Regime x Conf", "regime_confidence_matrix.json"),
+        ("regime", "Regime & ADX", "regime_leaderboard.json"),
     )),
     ("lanes-group", "Lanes & AI", (
         ("lanes", "Laboratory", "benchmark_vs_lanes_report.json"),
         ("lanes-retire", "Retirement", "lane_retirement_report.json"),
         ("lanes-def", "Definitions", "lane_definition_report.json"),
         ("ai", "AI Lab", "ai_calibration_report.json"),
-        ("typeb", "Type B Discovery", "type_b_predictor_report.json"),
+        ("typeb", "MFE Outcome Cohort", "type_b_predictor_report.json"),
     )),
     ("trading-group", "Chase & Exits", (
         ("chase", "Attribution", "chase_attribution_report.json"),
@@ -169,7 +170,7 @@ REPORT_NAV_GROUPS = (
         ("exits", "Exit Leakage", "top_leakage_report.json"),
     )),
     ("deep-group", "Genome & Reports", (
-        ("genome", "Genome", "research/genome/genome_analysis_report.json"),
+        ("genome", "Genome", "genome/genome_analysis_report.json"),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
         ("archives", "Archives", None),
@@ -195,6 +196,63 @@ BUNDLE_FILES = (
 )
 
 app = Flask("research_dashboard")
+
+# Report JSON is immutable between analyzer writes, but several payload builders
+# aggregate large historical ledgers. A short server-side cache keeps tab
+# navigation responsive and prevents repeated browsers from rereading the same
+# files while preserving the live /api/status heartbeat.
+_API_CACHE_TTL_SEC = max(5.0, float(os.getenv("RESEARCH_API_CACHE_TTL_SEC", "60")))
+_API_RESPONSE_CACHE: dict[str, tuple[float, int, str, bytes]] = {}
+_API_CACHE_LOCK = threading.Lock()
+
+
+@app.before_request
+def _serve_cached_read_api():
+    if request.method != "GET" or not request.path.startswith("/api/"):
+        return None
+    if request.path in ("/api/status", "/api/integrity"):
+        return None
+    key = request.full_path
+    now = time.monotonic()
+    with _API_CACHE_LOCK:
+        item = _API_RESPONSE_CACHE.get(key)
+        if item and item[0] > now:
+            _expires, status, content_type, body = item
+        else:
+            if item:
+                _API_RESPONSE_CACHE.pop(key, None)
+            return None
+    response = make_response(body, status)
+    response.headers["Content-Type"] = content_type
+    response.headers["X-Research-Cache"] = "HIT"
+    return response
+
+
+@app.after_request
+def _cache_read_api_response(response):
+    # A response returned by ``before_request`` is already a cache hit. Flask
+    # still runs ``after_request`` for it, so do not re-store it or relabel the
+    # truthful HIT evidence as a MISS.
+    if response.headers.get("X-Research-Cache") == "HIT":
+        return response
+    if (
+        request.method == "GET"
+        and request.path.startswith("/api/")
+        and request.path not in ("/api/status", "/api/integrity")
+        and response.status_code == 200
+        and response.mimetype == "application/json"
+    ):
+        body = response.get_data()
+        if len(body) <= 5 * 1024 * 1024:
+            with _API_CACHE_LOCK:
+                _API_RESPONSE_CACHE[request.full_path] = (
+                    time.monotonic() + _API_CACHE_TTL_SEC,
+                    response.status_code,
+                    response.content_type,
+                    body,
+                )
+        response.headers["X-Research-Cache"] = "MISS"
+    return response
 _DASHBOARD_STARTED_AT = datetime.now(timezone.utc)
 
 
@@ -235,6 +293,14 @@ def _analyzer_run_state() -> dict:
     match = re.search(r"# analyzer run ([^|]+)", header)
     if match:
         started_at = match.group(1).strip()
+        try:
+            started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started_dt.tzinfo is None:
+                # Legacy analyzer headers used local Melbourne wall time.
+                started_dt = started_dt.replace(tzinfo=MELBOURNE_TZ)
+            started_at = started_dt.astimezone(timezone.utc).isoformat()
+        except Exception:
+            pass
     try:
         updated_dt = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         updated_at = updated_dt.isoformat()
@@ -371,7 +437,9 @@ def _iter_data_payloads(name: str):
 def _pick_best_payload(name: str, default=None):
     if default is None:
         default = {}
-    session = _load_bot_session() or {}
+    # Loading the session itself must not recurse through _load_bot_session on
+    # a brand-new/empty installation where research_session.json is absent.
+    session = {} if name == "research_session.json" else (_load_bot_session() or {})
     fresh = bool(session.get("fresh_collection_mode"))
     best = None
     best_key = (-1, -1.0)
@@ -727,7 +795,8 @@ def _lane_rows():
         at_pnl = float(all_time.get("net_pnl_real") or ld.get("all_time_pnl_usd") or 0)
         at_ev = float(all_time.get("ev_usd") or (at_pnl / at_fills if at_fills else 0))
         pathway_status = status_by_lane.get(lane) or ld.get("pathway_status") or ""
-        is_retired = pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK") or lane in (lane_def.get("retired_lanes") or [])
+        # BENCHMARK is an active comparison role, not a retirement state.
+        is_retired = pathway_status in ("RETIRED", "DATA_RETIRED") or lane in (lane_def.get("retired_lanes") or [])
         is_shadow = pathway_status == "SHADOW_COLLECTING"
         is_benchmark = lane == benchmark_lane or pathway_status == "BENCHMARK"
         has_any_data = (
@@ -901,7 +970,7 @@ def _combos_payload():
         "total_combos": len(top),
         "min_trades": rep.get("min_trades_per_combo"),
         "dimensions": rep.get("dimensions") or [],
-        "filter_note": rep.get("filter_note") or "Known AI × spread × entry × lane only (no UNKNOWN/TYPE_B/OTHER)",
+        "filter_note": rep.get("filter_note") or "Known ADX × score gap × entry × lane cohorts only (no UNKNOWN/TYPE_B/OTHER)",
         "top": top[:50],
     }
 
@@ -934,7 +1003,7 @@ def _spread_performance_payload():
             "pnl_usd": round(pnl, 2),
             "ev_usd": round(ev, 2),
         })
-    order = {"0": 0, "1-2": 1, "3-4": 2, "5+": 3}
+    order = {"0-1": 0, "2": 1, "3": 2, "4": 3, "5+": 4}
     out.sort(key=lambda x: (order.get(x["spread_bucket"], 99), x["spread_bucket"]))
     return {
         "generated_at": rep.get("generated_at"),
@@ -1040,14 +1109,21 @@ def _chase_iso_payload():
     primary = rep.get("primary_pair") or {}
     direct = primary.get("direct") or rep.get("continuous_benchmark") or {}
     chase = primary.get("chase") or rep.get("urgent_chase_alpha") or {}
+    has_evidence = bool(
+        primary
+        and (
+            int(direct.get("trades") or 0) > 0
+            or int(chase.get("trades") or 0) > 0
+        )
+    )
     return {
         "generated_at": rep.get("generated_at"),
-        "verdict": rep.get("verdict"),
+        "verdict": rep.get("verdict") if has_evidence else "COLLECTING",
         "notes": rep.get("isolation_notes") or [],
         "continuous": direct,
         "urgent": chase,
         "primary_pair": primary,
-        "primary_inactive": rep.get("primary_inactive"),
+        "primary_inactive": bool(rep.get("primary_inactive")) or not has_evidence,
         "active_lanes": rep.get("active_lanes") or [],
         "pairs": rep.get("pairs") or [],
         "direct_lane": primary.get("direct_lane"),
@@ -1271,6 +1347,9 @@ def api_status():
     manifest_sync = manifest.get("analyzer_sync_id") or compact.get("analyzer_sync_id")
     report_sync_ok = manifest_sync == EXPECTED_ANALYZER_SYNC_ID if manifest_sync else None
     run_state = _analyzer_run_state()
+    previous_report_at = manifest.get("generated_at") or compact.get("generated_at")
+    if not run_state.get("last_completed_at") and previous_report_at:
+        run_state["last_completed_at"] = previous_report_at
     runtime_sync_ok = RESEARCH_DASHBOARD_VERSION == EXPECTED_ANALYZER_SYNC_ID
     report_pending = bool(
         report_sync_ok is not True
@@ -1296,8 +1375,8 @@ def api_status():
         "public_url": PUBLIC_URL,
         "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "report_analyzer_sync_id": manifest_sync,
-        "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
-        "generated_at_melbourne": format_melbourne_dt(manifest.get("generated_at") or compact.get("generated_at")),
+        "generated_at": previous_report_at,
+        "generated_at_melbourne": format_melbourne_dt(previous_report_at),
         "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),
         "timezone": "Australia/Melbourne",
         "report_count": len(_manifest_reports()),
@@ -1391,7 +1470,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Default: 3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V1) -- toggle Show all lanes for historical"
+            else "Default: 3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC) -- toggle Show all lanes for historical"
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })
@@ -1493,9 +1572,11 @@ def api_lane_retirement():
 
 
 def _genome_payload():
-    rep = _read_json(str(Path("research") / "genome" / "genome_analysis_report.json"))
+    # ROOT already points at the research directory. Keep the canonical path
+    # relative to ROOT so embedded and standalone dashboards read one artifact.
+    rep = _read_json(str(Path("genome") / "genome_analysis_report.json"))
     if not rep:
-        rep = _read_json("research/genome/genome_analysis_report.json")
+        rep = _read_json("genome_analysis_report.json")
     return rep or {}
 
 
@@ -2021,6 +2102,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explorer-list li.sel { background: #1a2838; color: var(--accent); }
   h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   .note { color: var(--muted); font-size: 0.8rem; }
+  .empty-state { border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
 </style></head><body>
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
@@ -2045,7 +2127,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
     <pre id="exec-text"></pre>
-    <p class="note">Auto-refreshes every 60s. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code> (Trading Genome v11)</p>
+    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -2065,13 +2147,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Lane</th><th>Sess Trades</th><th>All Trades</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
   </section>
   <section id="sec-typeb">
-    <h2>Type B Discovery</h2>
-    <p class="note" id="typeb-note">Pre-entry feature separators for TYPE_B runners (MFE≥15%). TYPE_B is post-trade classification — not an entry gate.</p>
+    <h2>MFE Type-B outcome cohort</h2>
+    <p class="note" id="typeb-note">Post-trade MFE≥15% classification. This is not the Type B Hunter tile, an entry signal, or a live gate.</p>
     <div class="kpis" id="typeb-kpis"></div>
     <table><thead><tr><th>Cohort</th><th>Trades</th><th>WR%</th><th>Avg MFE%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="typeb-cohort-body"></tbody></table>
-    <h3>Type B probability table (historical — not an entry gate)</h3>
+    <h3>MFE-runner probability table (historical — not an entry gate)</h3>
     <table><thead><tr><th>Dimension</th><th>Bucket</th><th>N</th><th>TYPE_B</th><th>P(TYPE_B)%</th><th>WR%</th></tr></thead><tbody id="typeb-prob-body"></tbody></table>
-    <h3>Top separators (TYPE_B vs TYPE_A)</h3>
+    <h3>Top separators (MFE outcome Type B vs Type A)</h3>
     <table><thead><tr><th>Feature</th><th>TYPE_A mean</th><th>TYPE_B mean</th><th>|Δ|</th></tr></thead><tbody id="typeb-sep-body"></tbody></table>
   </section>
   <section id="sec-lanes-def">
@@ -2087,12 +2169,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Regime</th><th>Trades</th><th>Best lane</th><th>Best EV</th><th>2nd lane</th><th>OK?</th></tr></thead><tbody id="regime-body"></tbody></table>
     <h3>Roster policy (recommend only)</h3>
     <pre id="roster-policy-json">Loading…</pre>
-  </section>
-  <section id="sec-regime-conf">
-    <h2>Regime × Confidence Matrix</h2>
-    <p class="note" id="regime-conf-note">Which AI confidence band wins in each market regime (recommend-only).</p>
-    <div class="kpis" id="regime-conf-kpis"></div>
-    <table><thead><tr><th>Regime</th><th>Band</th><th>Trades</th><th>WR%</th><th>EV</th><th>PnL</th><th>OK?</th></tr></thead><tbody id="regime-conf-body"></tbody></table>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
@@ -2123,9 +2199,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Top Combinations</h2>
-    <p class="note" id="combos-note">Known AI × spread × entry × lane combos — sorted by EV (no UNKNOWN/TYPE_B/OTHER).</p>
+    <p class="note" id="combos-note">Direction-only cohorts: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>
-    <table><thead><tr><th>Combo</th><th>AI</th><th>Spread</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
+    <table><thead><tr><th>Combo</th><th>ADX</th><th>Score gap</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
   </section>
   <section id="sec-spread-perf">
     <h2>Spread Performance</h2>
@@ -2193,8 +2269,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
   </section>
   <section id="sec-genome">
-    <h2>Trading Genome v11</h2>
+    <h2>Trading Genome research</h2>
     <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
+    <div class="empty-state" id="genome-empty" style="display:none"></div>
+    <div id="genome-content">
     <div class="kpis" id="genome-kpis"></div>
     <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
@@ -2209,6 +2287,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <pre id="genome-hypotheses"></pre>
     <h2>Replay capabilities</h2>
     <pre id="genome-replay"></pre>
+    </div>
   </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
@@ -2328,6 +2407,7 @@ function show(id) {
   if (sec) sec.classList.add('active');
   renderNav();
   savePrefs();
+  void refreshActiveSection();
 }
 const showAllEl = document.getElementById('show-all-lanes');
 if (showAllEl) {
@@ -2340,8 +2420,6 @@ if (showAllEl) {
     loadLaneDefs();
   });
 }
-show(activeSection);
-
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
 function fmtMelb(iso) {
   if (!iso) return '—';
@@ -2486,7 +2564,7 @@ async function loadCombos() {
   const r = await fetch('/api/combos');
   const d = await r.json();
   const note = document.getElementById('combos-note');
-  if (note) note.textContent = d.filter_note || `Known AI × spread × entry × lane (min ${d.min_trades ?? 3} trades, ${d.total_combos ?? 0} shown).`;
+  if (note) note.textContent = d.filter_note || `Direction-only ADX × score gap × entry × lane (min ${d.min_trades ?? 3} trades, ${d.total_combos ?? 0} shown).`;
   document.getElementById('combos-kpis').innerHTML = [
     ['Known combos', d.total_combos ?? 0],
     ['Shown', (d.top||[]).length],
@@ -2494,7 +2572,7 @@ async function loadCombos() {
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('combos-body').innerHTML = (d.top||[]).map(c => {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
-    return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
+    return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.adx_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
 }
 
@@ -2760,30 +2838,6 @@ async function loadRetirement() {
   }).join('');
 }
 
-async function loadRegimeConf() {
-  const r = await fetch('/api/report/regime_confidence_matrix.json');
-  if (!r.ok) return;
-  const d = await r.json();
-  const known = (c) => {
-    const reg = String(c.regime || '').toUpperCase();
-    if (!reg || reg.includes('UNKNOWN') || reg.includes('|UNK')) return false;
-    return true;
-  };
-  const cells = (d.cells||[]).filter(c => c.trades && known(c))
-    .sort((a,b) => (b.ev_usd||0) - (a.ev_usd||0) || (b.sum_pnl_usd||0) - (a.sum_pnl_usd||0));
-  document.getElementById('regime-conf-note').textContent = d.usage_note || 'Known regimes only — sorted by EV (most profitable first).';
-  document.getElementById('regime-conf-kpis').innerHTML = [
-    ['Total trades', d.total_trades ?? 'n/a'],
-    ['Known cells', cells.length],
-    ['Regimes', (d.regime_summaries||[]).filter(r => known({regime: r.regime})).length],
-  ].map(([k,v]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-  document.getElementById('regime-conf-body').innerHTML = cells.map(c => {
-    const ok = c.sample_ok ? '✓' : '—';
-    const cls = c.sample_ok && (c.ev_usd||0) > 0 ? 'green' : (c.sample_ok ? 'red' : '');
-    return `<tr><td>${c.regime}</td><td>${c.confidence_band}</td><td>${c.trades}</td><td>${c.win_rate_pct}%</td><td>$${fmtUsd(c.ev_usd)}</td><td>$${fmtUsd(c.sum_pnl_usd)}</td><td class="${cls}">${ok}</td></tr>`;
-  }).join('') || '<tr><td colspan="7">No known regime×confidence data yet.</td></tr>';
-}
-
 async function loadRegime() {
   const [rr, rp] = await Promise.all([
     fetch('/api/report/regime_leaderboard.json'),
@@ -2826,7 +2880,7 @@ async function loadTypeB() {
   const r = await fetch('/api/typeb');
   const d = await r.json();
   const note = document.getElementById('typeb-note');
-  if (note && d.classification) note.textContent = d.classification + ' — advisory research only.';
+  if (note && d.classification) note.textContent = 'Post-trade MFE cohort only; not the Type B Hunter tile. ' + d.classification + ' — advisory research only.';
   document.getElementById('typeb-kpis').innerHTML = [
     ['Cohorts', (d.cohorts||[]).length],
     ['Separators', (d.separators||[]).length],
@@ -2846,13 +2900,22 @@ async function loadTypeB() {
 async function loadGenome() {
   const r = await fetch('/api/genome');
   const d = await r.json();
+  const empty = document.getElementById('genome-empty');
+  const content = document.getElementById('genome-content');
   if (!d || !d.schema) {
-    document.getElementById('genome-note').textContent = 'No genome report yet — run analyzer once after bot records to research.db.';
+    content.style.display = 'none';
+    empty.style.display = 'block';
+    empty.textContent = 'Genome report is not available yet. The analyzer will rebuild it on its next cycle; bot execution is unaffected.';
+    document.getElementById('genome-note').textContent = 'Advisory research only — never relay eligible.';
     return;
   }
+  empty.style.display = 'none';
+  content.style.display = 'block';
   const dq = (d.dna_quality || {}).overall || {};
   const tax = d.genome_taxonomy || {};
   document.getElementById('genome-kpis').innerHTML = [
+    ['Engine schema', d.architecture_frozen || d.schema_version || 'n/a'],
+    ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
     ['EV/trade', '$' + fmtUsd(dq.ev)],
@@ -2875,6 +2938,7 @@ async function loadGenome() {
   let note = (rec.action || 'COLLECT') + ': ' + (rec.detail || d.disclaimer || '');
   if (expl.why) note += ' — ' + expl.why;
   if (rec.action === 'UNKNOWN_MARKET' && sim != null) note += ` (similarity ${Number(sim).toFixed(1)}%)`;
+  note += ' — advisory only; never changes execution.';
   document.getElementById('genome-note').textContent = note;
   document.getElementById('genome-cluster').textContent = JSON.stringify(d.current_market_cluster || {}, null, 2);
   document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
@@ -2966,20 +3030,34 @@ async function loadGptAuditNote() {
   } catch (_) {}
 }
 
-async function refreshAll() {
-  const steps = [
-    loadStatus, loadSummary, loadFindings, loadLanes, loadRetirement, loadLaneDefs,
-    loadRegime, loadRegimeConf, loadChase, loadChaseThreshold, loadChaseDelay, loadChaseIso,
-    loadCombos, loadSpreadPerf, loadExitCombos, loadExitReasonLeak, loadLadderSim,
-    loadPathwayAudit, loadLeakage, loadHorizon, loadFeatures, loadAI, loadTypeB,
-    loadGenome, loadGptAuditNote, loadExplorer, loadArchives,
-  ];
-  for (const step of steps) {
-    try { await step(); } catch (e) { console.warn('refreshAll step failed', step.name || step, e); }
-  }
+const SECTION_LOADERS = {
+  summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
+  lanes: [loadLanes], 'lanes-retire': [loadRetirement], 'lanes-def': [loadLaneDefs],
+  ai: [loadAI], typeb: [loadTypeB], chase: [loadChase],
+  'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
+  'chase-iso': [loadChaseIso], combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
+  'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
+  'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
+  edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
+  download: [loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+};
+const SECTION_REFRESHES = new Map();
+
+async function refreshActiveSection() {
+  const sectionId = activeSection;
+  if (SECTION_REFRESHES.has(sectionId)) return SECTION_REFRESHES.get(sectionId);
+  const steps = [loadStatus, ...(SECTION_LOADERS[sectionId] || [])];
+  const job = Promise.allSettled(steps.map(step => step())).then(results => {
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') console.warn('active tab refresh failed', steps[index].name, result.reason);
+    });
+  }).finally(() => SECTION_REFRESHES.delete(sectionId));
+  SECTION_REFRESHES.set(sectionId, job);
+  return job;
 }
-refreshAll();
-setInterval(refreshAll, 180000);
+
+show(activeSection);
+setInterval(refreshActiveSection, 180000);
 </script></body></html>"""
 
 

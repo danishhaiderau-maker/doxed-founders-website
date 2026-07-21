@@ -114,7 +114,7 @@ Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""
 
-$pyArgs = @("research\analyzer_research_engine_v62.py")
+$pyArgs = @("analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
 
 if ($NoWait) {

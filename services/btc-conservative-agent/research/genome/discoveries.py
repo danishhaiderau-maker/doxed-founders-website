@@ -1,6 +1,7 @@
 """Discovery engine — persistent knowledge with statistical evidence."""
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -17,8 +18,24 @@ from research.genome.library_store import GenomeLibraryStore
 
 def _discovery_id_from_key(dna_key: str, existing: Dict[str, Dict[str, Any]]) -> str:
     if dna_key in existing:
-        return str(existing[dna_key].get("discovery_id") or f"DNA-{hash(dna_key) % 1000:03d}")
-    return f"DNA-{len(existing) + 1:03d}"
+        return str(existing[dna_key].get("discovery_id") or _stable_discovery_id(dna_key))
+    return _stable_discovery_id(dna_key)
+
+
+def _stable_discovery_id(dna_key: str) -> str:
+    return f"DNA-{hashlib.sha256(dna_key.encode('utf-8')).hexdigest()[:12].upper()}"
+
+
+def _evidence_watermark(rows: List[Dict[str, Any]]) -> str:
+    evidence = sorted(
+        "|".join([
+            str(row.get("trade_id") or ""),
+            str(row.get("pnl_usd") if row.get("pnl_usd") is not None else ""),
+            str(row.get("exit_reason") or ""),
+        ])
+        for row in rows
+    )
+    return hashlib.sha256("\n".join(evidence).encode("utf-8")).hexdigest()
 
 
 def _classify_discovery(stats: Dict[str, Any], prev: Dict[str, Any] | None) -> str:
@@ -87,6 +104,7 @@ def generate_discoveries(
 
         wr = round(sum(1 for p in pnls if p > 0) / len(pnls), 4) if pnls else 0
         history = store.load_ledger("discovery", disc_id)
+        evidence_watermark = _evidence_watermark(rows)
         store.append_ledger(
             "discovery",
             disc_id,
@@ -99,6 +117,7 @@ def generate_discoveries(
                     "ev_usd": stats["expected_value_usd"],
                     "sample_size": stats["sample_size"],
                     "dna_quality": stats["dna_quality"],
+                    "source_watermark": evidence_watermark,
                 },
             ),
         )
@@ -133,6 +152,7 @@ def generate_discoveries(
             "research_confidence": stats["research_confidence"],
             "recommendation": _recommendation(status, stats),
             "dna_key": key,
+            "source_watermark": evidence_watermark,
         }
         disc["explanation"] = build_explanation(
             discovery=disc,

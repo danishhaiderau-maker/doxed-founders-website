@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 from pathlib import Path
 import socket
 import subprocess
@@ -47,6 +48,13 @@ def run():
         )
         check("second process is refused by OS lock", child.returncode == 73)
         owner.release()
+
+    main_source = inspect.getsource(bot.main)
+    check(
+        "dashboard singleton uses a machine-wide lock directory",
+        'os.getenv("BOT_SINGLETON_DIR")' in main_source
+        and 'os.getenv("LOCALAPPDATA")' in main_source,
+    )
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))

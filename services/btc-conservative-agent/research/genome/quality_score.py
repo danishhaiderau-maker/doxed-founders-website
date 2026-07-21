@@ -4,6 +4,9 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Tuple
 
+MODERATE_MIN_SAMPLE = 30
+HIGH_MIN_SAMPLE = 200
+
 
 def wilson_ci(wins: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     if n <= 0:
@@ -29,9 +32,9 @@ def ev_confidence_interval(pnls: List[float]) -> Dict[str, float]:
 
 
 def research_confidence_label(n: int) -> str:
-    if n >= 100:
+    if n >= HIGH_MIN_SAMPLE:
         return "HIGH"
-    if n >= 30:
+    if n >= MODERATE_MIN_SAMPLE:
         return "MODERATE"
     return "LOW"
 
@@ -67,4 +70,8 @@ def summarize_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         "win_rate_ci_95": {"low": round(wr_lo, 4), "high": round(wr_hi, 4)},
         "dna_quality": dna_quality(n, wr, ci["ev"]),
         "research_confidence": research_confidence_label(n),
+        "research_confidence_thresholds": {
+            "moderate_min_sample": MODERATE_MIN_SAMPLE,
+            "high_min_sample": HIGH_MIN_SAMPLE,
+        },
     }

@@ -231,6 +231,37 @@ def run():
         "Continuous tile exposes the no-confidence contract",
         "AI confidence not requested" in continuous_tile.get("filter_chips", []),
     )
+    relay_source = inspect.getsource(bot.api_relay_state)
+    check("relay-state uses a single in-flight snapshot refresh", "_RELAY_STATE_REFRESH_LOCK.acquire" in relay_source)
+    check("relay-state request path is cache-only", "if not force_rebuild" in relay_source)
+    check(
+        "background refresher owns relay snapshot rebuilds",
+        "api_relay_state(force_rebuild=True)" in inspect.getsource(bot._relay_state_cache_refresher_loop),
+    )
+    check(
+        "relay refresh is independent from the heavy dashboard snapshot",
+        "api_relay_state" not in inspect.getsource(bot._api_state_cache_refresher_loop)
+        and "_build_api_state_snapshot" not in inspect.getsource(bot._relay_state_cache_refresher_loop),
+    )
+    check(
+        "cache reads never wait on the expensive relay rebuild lock",
+        "with _RELAY_STATE_CACHE_LOCK" in inspect.getsource(bot._cached_relay_state_response)
+        and bot._RELAY_STATE_CACHE_LOCK is not bot._RELAY_STATE_REFRESH_LOCK,
+    )
+    check("relay-state exposes bounded cache evidence", "X-Relay-State-Cache" in inspect.getsource(bot._cached_relay_state_response))
+    old_cache, old_at = bot._RELAY_STATE_CACHE, bot._RELAY_STATE_CACHE_AT
+    try:
+        bot._RELAY_STATE_CACHE = {"state_integrity": {"snapshot_age_sec": 0}}
+        bot._RELAY_STATE_CACHE_AT = bot.time.monotonic()
+        with bot.app.app_context():
+            cached_response = bot._cached_relay_state_response("FRESH")
+            check("fresh relay-state cache returns immediately", cached_response.status_code == 200)
+            check("relay-state cache response is labeled", cached_response.headers.get("X-Relay-State-Cache") == "FRESH")
+        bot._RELAY_STATE_CACHE_AT = bot.time.monotonic() - bot._RELAY_STATE_MAX_STALE_SEC - 1
+        with bot.app.app_context():
+            check("over-age relay-state cache fails closed", bot._cached_relay_state_response("STALE") is None)
+    finally:
+        bot._RELAY_STATE_CACHE, bot._RELAY_STATE_CACHE_AT = old_cache, old_at
     print(f"PASS: {passed} shared AI contract checks")
 
 

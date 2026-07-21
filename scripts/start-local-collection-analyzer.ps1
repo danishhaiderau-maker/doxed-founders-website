@@ -78,7 +78,7 @@ Write-Host "Data: $($LocalCollection.DataDir)"
 Write-Host "Dashboard: http://127.0.0.1:$AnalyzerPort/"
 Write-Host ""
 
-$pyArgs = @("research\analyzer_research_engine_v62.py")
+$pyArgs = @("analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
 
 $exitCode = 0

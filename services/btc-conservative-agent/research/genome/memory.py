@@ -56,10 +56,10 @@ def merge_cluster_into_library(
         ) if cand.get("trade_count") else {"sample_size": 0, "ev": 0, "win_rate": 0, "dna_quality": 0, "research_confidence": "LOW"}
 
         prev = existing_by_fp.get(fp_key) or {}
-        sessions = Counter(prev.get("_session_counts") or {})
-        sessions[str(rep.get("session") or "?")] += int(cand.get("market_observations") or 1)
-        weekends = Counter(prev.get("_weekend_counts") or {})
-        weekends["weekend" if rep.get("is_weekend") else "weekday"] += int(cand.get("market_observations") or 1)
+        observations = int(cand.get("market_observations") or 0)
+        previous_observations = int(prev.get("observations") or 0)
+        sessions = Counter({str(rep.get("session") or "?"): observations})
+        weekends = Counter({"weekend" if rep.get("is_weekend") else "weekday": observations})
 
         genome_id = id_map.get(fp_key) or _genome_id_from_key(fp_key, next_seq)
         if fp_key not in id_map:
@@ -68,7 +68,11 @@ def merge_cluster_into_library(
 
         ev = float(cand.get("ev_usd") or trade_summary.get("ev") or 0)
         n = int(cand.get("trade_count") or trade_summary.get("sample_size") or 0)
-        wr = float(trade_summary.get("win_rate") or 0)
+        wr = float(
+            cand.get("win_rate")
+            if cand.get("win_rate") is not None
+            else trade_summary.get("win_rate") or 0
+        )
 
         body = {
             "genome_id": genome_id,
@@ -76,13 +80,16 @@ def merge_cluster_into_library(
             "fingerprint_key": fp_key,
             "representative": rep,
             "centroid": cand.get("centroid") or {},
-            "new_observations": int(cand.get("market_observations") or 1),
+            "centroid_coverage": cand.get("centroid_coverage") or {},
+            "observations": observations,
+            "new_observations": max(0, observations - previous_observations),
+            "source_watermark": cand.get("source_watermark"),
             "trade_count": n,
             "average_ev": round(ev, 4),
             "median_ev": round(ev, 4),
             "win_rate": round(wr, 4),
             "dna_quality": dna_quality(n, wr, ev),
-            "research_confidence": trade_summary.get("research_confidence") or "LOW",
+            "research_confidence": cand.get("research_confidence") or trade_summary.get("research_confidence") or "LOW",
             "dominant_session": _dominant(sessions),
             "dominant_weekday": _dominant(weekends),
             "dominant_regime": rep.get("regime"),
@@ -102,7 +109,7 @@ def merge_cluster_into_library(
         body["half_life_days"] = _half_life_days(
             prev.get("first_seen") or datetime.now(timezone.utc).isoformat(),
             datetime.now(timezone.utc).isoformat(),
-            int(prev.get("observations") or 0) + body["new_observations"],
+            observations,
         )
         merged = store.upsert_genome(genome_id, fp_key, body)
         merged = annotate_genome(merged)
@@ -119,6 +126,8 @@ def merge_cluster_into_library(
                     "trade_count": merged.get("trade_count"),
                     "dna_quality": merged.get("dna_quality"),
                     "trend": merged.get("strengthening"),
+                    "observations": merged.get("observations"),
+                    "source_watermark": cand.get("source_watermark"),
                 },
             ),
         )

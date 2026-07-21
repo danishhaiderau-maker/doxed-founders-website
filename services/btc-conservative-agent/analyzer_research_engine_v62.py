@@ -234,7 +234,7 @@ def _setup_analyzer_output(verbose_console=False, enable_log=True):
         try:
             log_handle = open(ANALYZER_RUN_LOG_FILE, "w", encoding="utf-8", buffering=1)
             header = (
-                f"# analyzer run {datetime.now().isoformat()} | "
+                f"# analyzer run {datetime.now(timezone.utc).isoformat()} | "
                 f"sync={ANALYZER_SYNC_ID} | verbose_console={verbose_console}\n"
             )
             log_handle.write(header)
@@ -700,7 +700,7 @@ EDGE_BUCKET_ORDER = ["0.5-1.0", "1.0-1.5", "1.5-2.0", "2.0-2.5", "2.5-3.0", "3.0
 SPREAD_BUCKET_ORDER = ["0-1", "2", "3", "4", "5+"]
 SR_BUCKET_ORDER = ["NEAR_SUPPORT", "MID_RANGE", "NEAR_RESISTANCE"]
 SESSION_BUCKET_ORDER = ["ASIA", "LONDON", "OVERLAP", "NEW_YORK"]
-AI_PROB_BUCKET_ORDER = ["45-50", "50-55", "55-60", "60-65", "65+"]
+AI_PROB_BUCKET_ORDER = ["DIRECTION_ONLY", "45-50", "50-55", "55-60", "60-65", "65+"]
 MIN_APPROVES_FOR_EDGE_CONCLUSIONS = 50
 LIVE_MIN_FACTOR_SPREAD = 1
 ENTRY_ADX_MIN_SWEEP = [8, 9, 10, 11, 12, 13, 14, 15, 16, 18]
@@ -5041,8 +5041,46 @@ def _sr_bucket_val(sr_state):
     return "MID_RANGE"
 
 
-def _ai_prob_bucket_val(prob):
-    p = float(prob or 0)
+def _explicit_confidence_requested(*sources):
+    """Return the first explicit confidence-request flag found in source order."""
+    for source in sources:
+        if source is None:
+            continue
+        getter = getattr(source, "get", None)
+        if getter is None:
+            continue
+        for key in ("confidence_requested", "ai_confidence_requested"):
+            value = getter(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "1", "yes", "on"):
+                    return True
+                if normalized in ("false", "0", "no", "off", ""):
+                    return False
+            return bool(value)
+    return None
+
+
+def _valid_probability_confidence(prob, confidence_requested=None):
+    """Return usable probability evidence, or None for direction-only/N/A."""
+    if confidence_requested is False:
+        return None
+    try:
+        value = float(prob)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _ai_prob_bucket_val(prob, confidence_requested=None):
+    valid = _valid_probability_confidence(prob, confidence_requested)
+    if valid is None:
+        return "DIRECTION_ONLY"
+    p = valid
     if p < 50:
         return "45-50"
     if p < 55:
@@ -5172,19 +5210,44 @@ def _enrich_trades_with_buckets(df):
         return df
     work = df.copy()
     if "edge_score_bucket" not in work.columns:
-        edge_src = work.get("edge_score_at_entry", work.get("edge_score", 0))
+        edge_src = work["edge_score_at_entry"] if "edge_score_at_entry" in work else (
+            work["edge_score"] if "edge_score" in work else pd.Series(0, index=work.index)
+        )
         work["edge_score_bucket"] = pd.to_numeric(edge_src, errors="coerce").apply(_edge_score_bucket_val)
     if "directional_spread_bucket" not in work.columns:
-        bull = pd.to_numeric(work.get("bull_score_at_entry", 0), errors="coerce").fillna(0)
-        bear = pd.to_numeric(work.get("bear_score_at_entry", 0), errors="coerce").fillna(0)
-        direction = work.get("final_direction", work.get("dir", "LONG")).astype(str).str.upper()
-        spread = np.where(direction == "LONG", bull - bear, bear - bull)
+        zeros = pd.Series(0.0, index=work.index)
+        bull = pd.to_numeric(work["bull_score_at_entry"] if "bull_score_at_entry" in work else zeros, errors="coerce").fillna(0)
+        bear = pd.to_numeric(work["bear_score_at_entry"] if "bear_score_at_entry" in work else zeros, errors="coerce").fillna(0)
+        direction_src = work["final_direction"] if "final_direction" in work else (
+            work["dir"] if "dir" in work else pd.Series("LONG", index=work.index)
+        )
+        direction = direction_src.astype(str).str.upper()
+        score_spread = np.where(direction == "LONG", bull - bear, bear - bull)
+        # Shared direction-only calls persist their normalized score gap in
+        # conviction_spread; older rows may not have separate bull/bear fields.
+        spread_src = work["conviction_spread"] if "conviction_spread" in work else zeros
+        stored_spread = pd.to_numeric(spread_src, errors="coerce").fillna(0)
+        score_fields_present = (bull.abs() + bear.abs()) > 0
+        spread = np.where(score_fields_present, score_spread, stored_spread)
         work["directional_spread"] = spread
-        work["directional_spread_bucket"] = pd.Series(spread).apply(_spread_bucket_val)
+        work["directional_spread_bucket"] = pd.Series(spread, index=work.index).apply(_spread_bucket_val)
     if "support_resistance_bucket" not in work.columns:
-        work["support_resistance_bucket"] = work.get("sr_state", "UNKNOWN").apply(_sr_bucket_val)
+        sr_src = work["sr_state"] if "sr_state" in work else pd.Series("UNKNOWN", index=work.index)
+        work["support_resistance_bucket"] = sr_src.apply(_sr_bucket_val)
     if "ai_probability_bucket" not in work.columns:
-        work["ai_probability_bucket"] = pd.to_numeric(work.get("ai_win_prob", 0), errors="coerce").apply(_ai_prob_bucket_val)
+        work["ai_probability_bucket"] = work.apply(
+            lambda row: _ai_prob_bucket_val(
+                row.get("ai_win_prob"),
+                _explicit_confidence_requested(row),
+            ),
+            axis=1,
+        )
+    if "adx_bucket" not in work.columns:
+        adx_raw = work["adx_at_entry"] if "adx_at_entry" in work else (
+            work["adx"] if "adx" in work else pd.Series(np.nan, index=work.index)
+        )
+        adx_src = pd.to_numeric(adx_raw, errors="coerce")
+        work["adx_bucket"] = adx_src.apply(_adx_bucket_val)
     if "session_bucket" not in work.columns:
         work["session_bucket"] = "UNKNOWN"
     if "mfe_margin_pct" not in work.columns and "max_profit" in work.columns:
@@ -5193,16 +5256,28 @@ def _enrich_trades_with_buckets(df):
         work["mae_margin_pct"] = pd.to_numeric(work["max_drawdown"], errors="coerce")
     work["entry_delay_min"] = _normalize_entry_delay_min(work)
     if "peak_mfe_bucket" not in work.columns:
-        mfe_src = work.get("mfe_margin_pct", work.get("max_profit"))
+        mfe_src = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
+            work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
+        )
         work["peak_mfe_bucket"] = pd.to_numeric(mfe_src, errors="coerce").apply(_peak_mfe_bucket_val)
     if "time_in_trade_bucket" not in work.columns:
-        dur = pd.to_numeric(work.get("outcome_duration_sec"), errors="coerce")
+        dur_src = work["outcome_duration_sec"] if "outcome_duration_sec" in work else pd.Series(np.nan, index=work.index)
+        dur = pd.to_numeric(dur_src, errors="coerce")
         work["time_in_trade_bucket"] = dur.apply(_time_in_trade_bucket_val)
-    if "entry_mode_bucket" not in work.columns and "research_lane" in work.columns:
-        work["entry_mode_bucket"] = work["research_lane"].apply(
-            lambda ln: "CONTINUOUS"
-            if str(ln).upper().endswith("_DIRECT") or str(ln).upper().endswith("DIRECT")
-            else ("CHASE_3PLUS" if "CHASE" in str(ln).upper() else "OTHER")
+    if "entry_mode_bucket" not in work.columns:
+        raw_mode = work.get("entry_mode", work.get("fill_model", pd.Series("", index=work.index)))
+        raw_mode = raw_mode.fillna("").astype(str).str.upper()
+        chase_raw = work["limit_chase_count"] if "limit_chase_count" in work else pd.Series(0, index=work.index)
+        chase_count = pd.to_numeric(chase_raw, errors="coerce").fillna(0)
+        work["entry_mode_bucket"] = np.select(
+            [
+                chase_count >= 3,
+                chase_count.between(1, 2),
+                raw_mode.str.contains("STATIC|RESTING", regex=True),
+                raw_mode.str.contains("DIRECT|LIMIT|MAKER", regex=True),
+            ],
+            ["CHASE_3PLUS", "CHASE_1_2", "RESTING_LIMIT", "DIRECT"],
+            default="OTHER",
         )
     return work
 
@@ -8647,6 +8722,73 @@ def _static_pathway_lane_specs():
             "benchmark_comparison": "Self",
             "diff_vs_benchmark": [],
         },
+        "TYPE_B_HUNTER_V1": {
+            "lane": "TYPE_B_HUNTER_V1",
+            "label": RESEARCH_LANE_LABELS.get("TYPE_B_HUNTER_V1", "Type B Hunter V1"),
+            "subtitle": "SHARED DIRECTION - FIXED DETERMINISTIC ENTRY POLICY",
+            "role": "shared-direction candidate lane with deterministic ADX, score-gap, and composite-score gates",
+            "parent_lane": BENCHMARK_LANE,
+            "toggle_key": "type_b_hunter_enabled",
+            "hypothesis": "A fixed market-strength gate can improve the shared AI direction without requesting a second AI call.",
+            "research_question": "Does the fixed Type B ADX/score-gap policy beat the CONTINUOUS shared-direction baseline?",
+            "entry": {
+                "trigger": (
+                    "reuse the shared LONG/SHORT direction; raw score gap >=20/100; normalized spread >=2; "
+                    "ADX >=20 (BULL >=28); composite score >=3.0"
+                ),
+                "entry_path": "SHARED_AI_DIRECTION_DETERMINISTIC_GATE",
+                "fill_path": "BOUNDED_LIMIT_CHASE",
+                "ai_path": "same shared direction call as CONTINUOUS; confidence not requested",
+                "execution": "fixed Type B policy; one accepted paper order per signal",
+                "policy_version": "type_b_shared_candidate_direction_v2_20260719",
+                "margin_usd": FLAT_MARGIN_LIVE_USD,
+            },
+            "exit": scenario_c_exit,
+            "exit_path": "Type B frozen ladder policy",
+            "promotion_criteria": promote,
+            "kill_criteria": kill,
+            "expected_advantage": "Filters weak shared-direction calls without an extra AI request",
+            "expected_risk": "Deterministic gates reduce opportunity count",
+            "benchmark_comparison": "vs CONTINUOUS shared-direction baseline",
+            "diff_vs_benchmark": [
+                "Activation: fixed ADX, raw score-gap, normalized-spread, and composite-score gates",
+                "AI: one shared direction call; no independent confidence request",
+            ],
+        },
+        "SR_MICRO_TILE_V2_STATIC": {
+            "lane": "SR_MICRO_TILE_V2_STATIC",
+            "label": RESEARCH_LANE_LABELS.get("SR_MICRO_TILE_V2_STATIC", "S/R Micro Tile V2 Static"),
+            "subtitle": "DUAL RESTING S/R LIMITS - 30M TTL - NO CHASE",
+            "role": "deterministic dual-ended wick-capture lane with one resting order per direction",
+            "parent_lane": BENCHMARK_LANE,
+            "toggle_key": "sr_micro_tile_v2_enabled",
+            "hypothesis": "Resting at both micro-S/R extremes captures wicks without repricing or a separate AI call.",
+            "research_question": "Do dual static S/R limits add EV while preserving exact entry-price fidelity?",
+            "entry": {
+                "trigger": (
+                    "one LONG resting limit at micro-support and one SHORT resting limit at micro-resistance; "
+                    "one active slot per direction; ADX present and <=40; London 08:00-12:59 UTC excluded"
+                ),
+                "entry_path": "DETERMINISTIC_DUAL_SR_BRACKET",
+                "fill_path": "STATIC_RESTING_LIMIT",
+                "ai_path": "none",
+                "execution": "two independent paper slots; 30m unfilled TTL; no chase or repricing (max chases=0)",
+                "policy_version": "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720",
+                "margin_usd_per_leg": FLAT_MARGIN_LIVE_USD,
+            },
+            "exit": scenario_c_exit,
+            "exit_path": "Scenario C 12->10 provisional cohort",
+            "promotion_criteria": promote,
+            "kill_criteria": kill,
+            "expected_advantage": "Captures either support or resistance wick with exact resting-limit entries",
+            "expected_risk": "Two opposing paper legs cannot be simultaneously copied into one merged Bitfinex net position",
+            "benchmark_comparison": "vs CONTINUOUS directional entry",
+            "diff_vs_benchmark": [
+                "Entry: deterministic dual S/R bracket, one active LONG and one active SHORT",
+                "Lifetime: 30m unfilled TTL; static price with zero replacements",
+                "AI: none",
+            ],
+        },
         "HIGH_EDGE_RUNNER": {
             "lane": "HIGH_EDGE_RUNNER",
             "label": RESEARCH_LANE_LABELS["HIGH_EDGE_RUNNER"],
@@ -9276,9 +9418,12 @@ def _filter_jsonl_rows_by_session(rows, session: dict = None):
     return filtered.to_dict("records") if not filtered.empty else []
 
 
-def _ai_calib_report_bucket(prob):
+def _ai_calib_report_bucket(prob, confidence_requested=None):
     """Confidence bucket for AI calibration report (50-55, 55-60, 60-65, 65+)."""
-    p = float(prob or 0)
+    valid = _valid_probability_confidence(prob, confidence_requested)
+    if valid is None:
+        return "DIRECTION_ONLY"
+    p = valid
     if p < 55:
         return "50-55"
     if p < 60:
@@ -9495,6 +9640,8 @@ def _build_ai_reason_outcome_rows(session=None, trades=None):
             ai_prob = float(ai_prob) if ai_prob is not None else None
         except (TypeError, ValueError):
             ai_prob = None
+        confidence_requested = _explicit_confidence_requested(r, trade, outcome, shadow)
+        probability_confidence = _valid_probability_confidence(ai_prob, confidence_requested)
         direction = str(r.get("direction") or trade.get("final_direction") or trade.get("dir") or "").upper()
         if direction not in ("LONG", "SHORT"):
             direction = None
@@ -9502,8 +9649,10 @@ def _build_ai_reason_outcome_rows(session=None, trades=None):
             "trade_id": tid,
             "research_lane": str(r.get("research_lane") or trade.get("research_lane") or "UNKNOWN").upper(),
             "direction": direction,
-            "ai_prob": ai_prob,
-            "ai_confidence_bucket": _ai_calib_report_bucket(ai_prob) if ai_prob is not None else None,
+            "ai_prob": probability_confidence,
+            "confidence_requested": confidence_requested,
+            "confidence_mode": "PROBABILITY" if probability_confidence is not None else "DIRECTION_ONLY",
+            "ai_confidence_bucket": _ai_calib_report_bucket(ai_prob, confidence_requested),
             "fingerprint": _ai_reason_fingerprint(r),
             "net_pnl_usd": pnl,
             "win": float(pnl) > 0 if pnl is not None else None,
@@ -9534,11 +9683,11 @@ def _classify_missed_opportunity_reason(reason: str) -> str:
     return "OTHER"
 
 
-def _confidence_band_label(conf) -> str:
-    try:
-        c = float(conf)
-    except (TypeError, ValueError):
-        return None
+def _confidence_band_label(conf, confidence_requested=None) -> str:
+    valid = _valid_probability_confidence(conf, confidence_requested)
+    if valid is None:
+        return "DIRECTION_ONLY"
+    c = valid
     if c < 45:
         return "0-45"
     if c < 50:
@@ -9557,8 +9706,9 @@ def _direction_cohort_stats(sub):
     if sub is None or sub.empty:
         base.update({"avg_edge": 0.0, "avg_ai_confidence": 0.0})
         return base
-    edge = pd.to_numeric(sub.get("edge_score_at_entry", sub.get("edge_score")), errors="coerce")
-    ai = pd.to_numeric(sub.get("ai_win_prob", sub.get("conf")), errors="coerce")
+    missing = pd.Series(np.nan, index=sub.index, dtype=float)
+    edge = pd.to_numeric(sub.get("edge_score_at_entry", sub.get("edge_score", missing)), errors="coerce")
+    ai = pd.to_numeric(sub.get("ai_win_prob", sub.get("conf", missing)), errors="coerce")
     base["avg_edge"] = round(float(edge.mean()), 2) if edge.notna().any() else 0.0
     base["avg_ai_confidence"] = round(float(ai.mean()), 1) if ai.notna().any() else 0.0
     return base
@@ -9726,12 +9876,19 @@ def confidence_band_report(trades=None, decisions=None, session=None):
     print(f"\n=== CONFIDENCE_BAND_REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     fill_buckets = []
+    direction_only_fills = 0
     if trades is not None and not trades.empty:
         work = trades.copy()
         if "trade_id" in work.columns:
             work = work.drop_duplicates(subset=["trade_id"], keep="last")
-        conf = pd.to_numeric(work.get("ai_win_prob", work.get("conf")), errors="coerce")
-        work["confidence_band"] = conf.apply(_confidence_band_label)
+        work["confidence_band"] = work.apply(
+            lambda row: _confidence_band_label(
+                row.get("ai_win_prob", row.get("conf")),
+                _explicit_confidence_requested(row),
+            ),
+            axis=1,
+        )
+        direction_only_fills = int((work["confidence_band"] == "DIRECTION_ONLY").sum())
         for bucket in CONFIDENCE_BAND_BUCKET_ORDER:
             sub = work[work["confidence_band"] == bucket]
             stats = _direction_cohort_stats(sub)
@@ -9743,10 +9900,17 @@ def confidence_band_report(trades=None, decisions=None, session=None):
                 )
 
     approve_buckets = []
+    direction_only_approves = 0
     if decisions is not None and not decisions.empty:
         dec = decisions.copy()
-        conf = pd.to_numeric(dec.get("ai_win_prob", dec.get("conf")), errors="coerce")
-        dec["confidence_band"] = conf.apply(_confidence_band_label)
+        dec["confidence_band"] = dec.apply(
+            lambda row: _confidence_band_label(
+                row.get("ai_win_prob", row.get("conf")),
+                _explicit_confidence_requested(row),
+            ),
+            axis=1,
+        )
+        direction_only_approves = int((dec["confidence_band"] == "DIRECTION_ONLY").sum())
         for bucket in CONFIDENCE_BAND_BUCKET_ORDER:
             sub = dec[dec["confidence_band"] == bucket]
             approve_buckets.append({
@@ -9765,6 +9929,11 @@ def confidence_band_report(trades=None, decisions=None, session=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "filled_trades_by_band": fill_buckets,
         "ai_decisions_by_band": approve_buckets,
+        "direction_only": {
+            "filled_trades": direction_only_fills,
+            "ai_decisions": direction_only_approves,
+            "calibration_eligible": False,
+        },
     }
     expectancy_buckets = ["45-50", "50-55", "55-60", "60-65", "65+"]
     expectancy_rows = []
@@ -9794,7 +9963,11 @@ def confidence_band_report(trades=None, decisions=None, session=None):
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "note": "Filled-trade expectancy by AI confidence band — discover profitable confidence zones.",
+        "note": (
+            "Filled-trade expectancy for explicitly probabilistic AI calls only; "
+            "direction-only calls are excluded."
+        ),
+        "direction_only_excluded": direction_only_fills,
         "buckets": expectancy_rows,
     }
     try:
@@ -9953,6 +10126,8 @@ def _build_ai_calibration_cohort(trades=None, session=None):
             ai_conf = float(ai_conf) if ai_conf is not None else None
         except (TypeError, ValueError):
             ai_conf = None
+        confidence_requested = _explicit_confidence_requested(ai, reason, cal, trade, rb, snap)
+        probability_confidence = _valid_probability_confidence(ai_conf, confidence_requested)
 
         net_pnl = trade.get("net_pnl_usd")
         if net_pnl is None or (isinstance(net_pnl, float) and np.isnan(net_pnl)):
@@ -10007,8 +10182,10 @@ def _build_ai_calibration_cohort(trades=None, session=None):
 
         rows.append({
             "trade_id": tid,
-            "ai_confidence": ai_conf,
-            "ai_confidence_bucket": _ai_calib_report_bucket(ai_conf) if ai_conf is not None else None,
+            "ai_confidence": probability_confidence,
+            "confidence_requested": confidence_requested,
+            "confidence_mode": "PROBABILITY" if probability_confidence is not None else "DIRECTION_ONLY",
+            "ai_confidence_bucket": _ai_calib_report_bucket(ai_conf, confidence_requested),
             "edge_score": edge,
             "edge_score_bucket": _edge_score_bucket_val(edge) if edge is not None else None,
             "net_pnl_usd": net_pnl,
@@ -10049,12 +10226,13 @@ def ai_calibration_report(trades=None, session=None):
             "expected_bot_version": EXPECTED_BOT_VERSION,
             "session_scope": scope,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sample_size": {"approve_rows": 0, "with_outcome": 0},
+            "calibration_status": "NO_DATA",
+            "sample_size": {"approve_rows": 0, "with_ai_confidence": 0, "direction_only_rows": 0, "with_outcome": 0},
             "confidence_buckets": [],
             "calibration_bands": {},
             "expected_vs_actual": {},
             "usage_note": (
-                "Analyzer-only — review every 48-72h. Do not auto-adjust bot AI thresholds from this file."
+                "No probability-calibration cohort is available. Direction-only calls are excluded."
             ),
             "feature_attribution": {},
             "decision_fingerprints": [],
@@ -10073,6 +10251,10 @@ def ai_calibration_report(trades=None, session=None):
 
     with_outcome = cohort[cohort["net_pnl_usd"].notna() | cohort["win"].notna()].copy()
     with_conf = cohort[cohort["ai_confidence"].notna()].copy()
+    probability_outcomes = with_outcome[with_outcome["ai_confidence"].notna()].copy()
+    direction_only_rows = int((cohort.get("confidence_mode") == "DIRECTION_ONLY").sum()) \
+        if "confidence_mode" in cohort.columns else int(len(cohort) - len(with_conf))
+    calibration_status = "AVAILABLE" if not probability_outcomes.empty else "DIRECTION_ONLY"
     print(
         f"  APPROVE cohort: {len(cohort)} | with AI confidence: {len(with_conf)} | "
         f"with outcome: {len(with_outcome)} {PIPELINE_ENFORCEMENT_TAG}"
@@ -10082,7 +10264,7 @@ def ai_calibration_report(trades=None, session=None):
     print("\n--- 1. Confidence Buckets ---")
     bucket_rows = []
     for bucket in AI_CALIB_REPORT_BUCKET_ORDER:
-        sub = with_outcome[with_outcome["ai_confidence_bucket"] == bucket]
+        sub = probability_outcomes[probability_outcomes["ai_confidence_bucket"] == bucket]
         stats = _ai_calib_cohort_stats(sub)
         row = {"bucket": bucket, **stats}
         bucket_rows.append(row)
@@ -10099,7 +10281,7 @@ def ai_calibration_report(trades=None, session=None):
     cal_detail = []
     abs_errors = []
     for bucket in AI_CALIB_REPORT_BUCKET_ORDER:
-        sub = with_outcome[with_outcome["ai_confidence_bucket"] == bucket]
+        sub = probability_outcomes[probability_outcomes["ai_confidence_bucket"] == bucket]
         if sub.empty:
             continue
         conf = pd.to_numeric(sub["ai_confidence"], errors="coerce").dropna()
@@ -10124,9 +10306,9 @@ def ai_calibration_report(trades=None, session=None):
             f"error={err:.3f} n={n} {PIPELINE_ENFORCEMENT_TAG}"
         )
 
-    overall_conf = pd.to_numeric(with_outcome["ai_confidence"], errors="coerce").dropna()
-    overall_wins = with_outcome.loc[overall_conf.index, "win"].fillna(
-        with_outcome.loc[overall_conf.index, "net_pnl_usd"].apply(lambda x: float(x) > 0 if pd.notna(x) else np.nan)
+    overall_conf = pd.to_numeric(probability_outcomes["ai_confidence"], errors="coerce").dropna()
+    overall_wins = probability_outcomes.loc[overall_conf.index, "win"].fillna(
+        probability_outcomes.loc[overall_conf.index, "net_pnl_usd"].apply(lambda x: float(x) > 0 if pd.notna(x) else np.nan)
     ).dropna()
     mae = round(float(np.mean(abs_errors)), 3) if abs_errors else None
     brier = None
@@ -10174,10 +10356,10 @@ def ai_calibration_report(trades=None, session=None):
         ("regime", "regime_bucket"),
     ):
         dim_rows = []
-        if col not in with_outcome.columns:
+        if col not in probability_outcomes.columns:
             feature_attribution[dim] = dim_rows
             continue
-        for val, sub in with_outcome.groupby(col, observed=True):
+        for val, sub in probability_outcomes.groupby(col, observed=True):
             if str(val) in ("UNKNOWN", "nan", ""):
                 continue
             stats = _ai_calib_cohort_stats(sub)
@@ -10198,8 +10380,8 @@ def ai_calibration_report(trades=None, session=None):
     print("\n--- 4. Decision Fingerprints ---")
     fp_cols = ["regime_bucket", "structure_bucket", "participation_bucket", "context_bucket"]
     fp_rows = []
-    if all(c in with_outcome.columns for c in fp_cols):
-        for keys, sub in with_outcome.groupby(fp_cols, observed=True):
+    if all(c in probability_outcomes.columns for c in fp_cols):
+        for keys, sub in probability_outcomes.groupby(fp_cols, observed=True):
             stats = _ai_calib_cohort_stats(sub)
             if stats["trades"] == 0:
                 continue
@@ -10238,7 +10420,10 @@ def ai_calibration_report(trades=None, session=None):
     # --- 6. Confidence vs Edge cross-reference ---
     print("\n--- 6. Confidence vs Edge Cross-Reference ---")
     cross_rows = []
-    cross_df = with_outcome[with_outcome["ai_confidence_bucket"].notna() & with_outcome["edge_score_bucket"].notna()]
+    cross_df = probability_outcomes[
+        probability_outcomes["ai_confidence_bucket"].notna()
+        & probability_outcomes["edge_score_bucket"].notna()
+    ]
     if not cross_df.empty:
         for (conf_b, edge_b), sub in cross_df.groupby(["ai_confidence_bucket", "edge_score_bucket"], observed=True):
             stats = _ai_calib_cohort_stats(sub)
@@ -10283,7 +10468,7 @@ def ai_calibration_report(trades=None, session=None):
             f"EV=${o['ev_usd']:.2f} conf={o['avg_ai_confidence']} n={o['trades']} {PIPELINE_ENFORCEMENT_TAG}"
         )
 
-    confidence_edge_matrix = _build_confidence_edge_matrix(with_outcome)
+    confidence_edge_matrix = _build_confidence_edge_matrix(probability_outcomes)
     _print_confidence_edge_matrix(confidence_edge_matrix)
 
     report = {
@@ -10294,9 +10479,11 @@ def ai_calibration_report(trades=None, session=None):
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "calibration_status": calibration_status,
         "sample_size": {
             "approve_rows": len(cohort),
             "with_ai_confidence": len(with_conf),
+            "direction_only_rows": direction_only_rows,
             "with_outcome": len(with_outcome),
             "executed": int(cohort["executed"].sum()) if "executed" in cohort.columns else 0,
         },
@@ -10314,7 +10501,7 @@ def ai_calibration_report(trades=None, session=None):
             else None
         ),
         "usage_note": (
-            "Analyzer-only — review every 48-72h. Do not auto-adjust bot AI thresholds from this file."
+            "Direction-only calls are excluded from probability calibration. Analyzer-only — do not auto-adjust thresholds."
         ),
         "feature_attribution": feature_attribution,
         "decision_fingerprints": fp_rows,
@@ -13465,11 +13652,17 @@ def _lane_depends_on_edge(lane_key: str, spec: dict) -> bool:
 def _lane_depends_on_ai(lane_key: str, spec: dict) -> bool:
     if lane_key == "SHADOW_RUNNER":
         return False
+    if lane_key == "SR_MICRO_TILE_V2_STATIC":
+        return False
     text = " ".join(_lane_entry_conditions(spec)).lower()
     return "ai" in text or lane_key in ("CONTINUOUS", "AI_60_65_ALPHA", "TYPE_B_HUNTER", "SHORT_BEAR_ALPHA")
 
 
 def _lane_depends_on_chase(lane_key: str, spec: dict) -> bool:
+    if lane_key == "SR_MICRO_TILE_V2_STATIC":
+        return False
+    if lane_key == "TYPE_B_HUNTER_V1":
+        return True
     if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
         return True
     entry = spec.get("entry") or {}
@@ -13836,9 +14029,18 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
     primary = active_pairs[0] if active_pairs else (pairs_out[0] if pairs_out else {})
     direct_primary = primary.get("direct") or {}
     chase_primary = primary.get("chase") or {}
-    isolated = True
+    has_primary_evidence = bool(
+        primary
+        and (
+            int(direct_primary.get("trades") or 0) > 0
+            or int(chase_primary.get("trades") or 0) > 0
+        )
+    )
+    isolated = has_primary_evidence
     notes = []
-    if primary.get("session_inactive"):
+    if not primary:
+        notes.append("No current direct/chase comparison pair has observations yet — continue collecting.")
+    elif primary.get("session_inactive"):
         notes.append(
             "COMBO tiles inactive this session (retired 2026-06-26) — compare CONTINUOUS vs AI60_SP3 instead."
         )
@@ -13862,13 +14064,13 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "verdict": "ISOLATED" if isolated else "CONTAMINATED",
+        "verdict": "ISOLATED" if isolated else "COLLECTING",
         "isolation_notes": notes,
         "global_fill_model": global_fill,
         "active_lanes": list(ACTIVE_CHASE_ISOLATION_LANES),
         "pairs": pairs_out,
         "primary_pair": primary,
-        "primary_inactive": bool(primary.get("session_inactive")),
+        "primary_inactive": not has_primary_evidence or bool(primary.get("session_inactive")),
         "benchmark_lane": BENCHMARK_LANE,
         "continuous_benchmark": direct_primary,
         "urgent_chase_alpha": chase_primary,
@@ -13887,31 +14089,39 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
     return payload
 
 
+def _direction_only_trade_cohort(trades: pd.DataFrame) -> pd.DataFrame:
+    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
+    if work.empty:
+        return work
+    return work[work["ai_probability_bucket"] == "DIRECTION_ONLY"].copy()
+
+
 def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
-    """Rank AI × spread × type × lane cohorts — top and bottom performers."""
+    """Rank ADX x direction-gap x entry x lane cohorts for direction-only calls."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== TOP COMBINATIONS — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
+    work = _direction_only_trade_cohort(trades)
     if work.empty:
         print(f"  No trades for combination heatmap. {PIPELINE_ENFORCEMENT_TAG}")
-        payload = {"schema": "top_combinations_v1", "top": [], "bottom": [], "session_scope": scope}
+        payload = {"schema": "top_combinations_v2", "top": [], "bottom": [], "session_scope": scope}
         with open(analyzer_report_path(TOP_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         return payload
 
     combos = []
-    dims = ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"]
+    dims = ["adx_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"]
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
-        ai_b, spread_b, entry_b, lane = keys
+        adx_b, spread_b, entry_b, lane = keys
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
-        combo_label = f"AI{ai_b}+SPREAD{spread_b}+{entry_b}+{lane}"
+        combo_label = f"{str(adx_b).upper()}+GAP_{spread_b}+{entry_b}+{str(lane).upper()}"
         combos.append({
             "combo": combo_label,
-            "ai_bucket": ai_b,
+            "adx_bucket": adx_b,
+            "decision_mode": "DIRECTION_ONLY",
             "spread_bucket": spread_b,
             "entry_mode": entry_b,
             "lane": str(lane).upper(),
@@ -13926,13 +14136,14 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
             f"EV=${row['ev_usd']:+.2f} PnL=${row['pnl_usd']:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
         )
     payload = {
-        "schema": "top_combinations_v1",
+        "schema": "top_combinations_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "min_trades_per_combo": min_trades,
-        "dimensions": ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"],
+        "dimensions": dims,
+        "filter_note": "Explicit direction-only cohort only: ADX x normalized score gap x entry path x lane. Probability-era trades are excluded; AI confidence is not fabricated.",
         "total_combos": len(combos),
         "top": top,
         "bottom": bottom,
@@ -16062,6 +16273,8 @@ def _best_worst_confidence_bands(ai_cal, conf_band):
     for src in (ai_cal.get("confidence_buckets") or [], conf_band.get("filled_trades_by_band") or conf_band.get("bands") or []):
         for b in src:
             bucket = b.get("bucket") or b.get("confidence_bucket")
+            if bucket in ("DIRECTION_ONLY", "N/A", "UNKNOWN", None):
+                continue
             trades = int(b.get("trades") or 0)
             wr = b.get("win_rate_pct")
             pnl = b.get("sum_pnl_usd") or b.get("sum_pnl") or 0
@@ -16072,6 +16285,22 @@ def _best_worst_confidence_bands(ai_cal, conf_band):
     best = max(candidates, key=lambda x: (x["wr"], x["pnl"]))
     worst = min(candidates, key=lambda x: (x["wr"], x["pnl"]))
     return best, worst
+
+
+def _ai_calibration_verdict(ai_cal):
+    status = str(ai_cal.get("calibration_status") or "").upper()
+    if status in ("DIRECTION_ONLY", "NO_DATA", "N/A"):
+        return None
+    eva = ai_cal.get("expected_vs_actual") or {}
+    exp_wr = eva.get("overall_expected_wr_pct")
+    act_wr = eva.get("overall_actual_wr_pct")
+    if exp_wr is None or act_wr is None:
+        return None
+    if act_wr > exp_wr + 5:
+        return f"under-confident (actual {act_wr}% vs AI {exp_wr}% implied)"
+    if act_wr < exp_wr - 5:
+        return f"over-confident (actual {act_wr}% vs AI {exp_wr}% implied)"
+    return "well-calibrated"
 
 
 def _best_worst_lanes(bench):
@@ -16552,18 +16781,7 @@ def build_executive_summary_payload(
         or conf_band.get("confidence_bands")
         or []
     )
-    eva = ai_cal.get("expected_vs_actual") or {}
-    exp_wr = eva.get("overall_expected_wr_pct")
-    act_wr = eva.get("overall_actual_wr_pct")
-    if exp_wr is not None and act_wr is not None:
-        if act_wr > exp_wr + 5:
-            ai_verdict = f"under-confident (actual {act_wr}% vs AI {exp_wr}% implied)"
-        elif act_wr < exp_wr - 5:
-            ai_verdict = f"over-confident (actual {act_wr}% vs AI {exp_wr}% implied)"
-        else:
-            ai_verdict = "well-calibrated"
-    else:
-        ai_verdict = None
+    ai_verdict = _ai_calibration_verdict(ai_cal)
 
     pathway_specs = _load_json_report(PATHWAY_LANE_SPECS_FILE) or {}
     bench_profile = (
@@ -17259,6 +17477,24 @@ def finalize_analyzer_outputs(
         dataset_counts=dataset_counts,
         data_scope=data_scope,
     )
+    # The Genome pipeline used to be described in the UI but was never invoked
+    # by the continuous analyzer. Rebuild it on every cycle so the Genome tab
+    # cannot silently drift to an empty or stale artifact.
+    try:
+        from research.genome.run_analyzer import run_genome_analyzer
+
+        genome_payload = run_genome_analyzer()
+        print(
+            "  ✅ Trading Genome: "
+            f"{len(genome_payload.get('genome_library') or [])} genomes | "
+            f"{(genome_payload.get('validation') or {}).get('verdict', 'UNKNOWN')} | "
+            f"{genome_payload.get('architecture_frozen', 'schema unknown')}"
+        )
+    except Exception as exc:
+        # Research generation must never interrupt the analyzer or bot. The
+        # dashboard exposes the missing artifact as degraded/empty evidence.
+        print(f"  ⚠️ Trading Genome rebuild failed (execution unaffected): {exc}")
+
     _mirror_reports_to_dir()
     files = {
         EXECUTIVE_SUMMARY_FILE: format_executive_summary_short(payload),

@@ -1,10 +1,22 @@
-"""Trading Genome analyzer — DNA-first pipeline with persistent Genome Memory (v11)."""
+"""Trading Genome analyzer — DNA-first pipeline with persistent Genome Memory.
+
+The v11 identifier describes this research engine's frozen architecture. It is
+not the running bot release, which is reported separately by the dashboards.
+"""
 from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+
+# Support both ``python -m research.genome.run_analyzer`` and the documented
+# direct ``python research/genome/run_analyzer.py`` invocation.
+if __package__ in (None, ""):
+    _DIRECT_AGENT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if _DIRECT_AGENT_ROOT not in sys.path:
+        sys.path.insert(0, _DIRECT_AGENT_ROOT)
 
 from research.genome.clustering import build_cluster_library
 from research.genome.discoveries import generate_discoveries
@@ -196,7 +208,12 @@ def _recommendation_engine(
     }
 
 
-def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) -> dict:
+def run_genome_analyzer(
+    db_path: str | None = None,
+    out_dir: str | None = None,
+    *,
+    publish_root_artifacts: bool = True,
+) -> dict:
     agent_root = _agent_root()
     db = db_path or os.path.join(agent_root, "research.db")
     out = out_dir or os.path.join(agent_root, "research", "genome")
@@ -236,6 +253,7 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
         "analyzer_mode": "DNA_FIRST_MEMORY",
         "disclaimer": "Advisory knowledge only — analyzer never changes bot execution.",
         "validation": validation,
+        "data_quality": validation.get("data_quality") or {},
         "layer_counts": {k: len(v) for k, v in layers.items()},
         "genome_memory": {
             "persistent_genomes": memory_stats["genomes"],
@@ -281,26 +299,27 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
 
-    root_report = os.path.join(agent_root, "research", GENOME_REPORT_FILE)
-    try:
-        with open(root_report, "w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2)
-    except OSError:
-        pass
+    if publish_root_artifacts:
+        root_report = os.path.join(agent_root, "research", GENOME_REPORT_FILE)
+        try:
+            with open(root_report, "w", encoding="utf-8") as fh:
+                json.dump(report, fh, indent=2)
+        except OSError:
+            pass
 
-    try:
-        from build_gpt_audit_bundle import build as build_gpt_audit
+        try:
+            from build_gpt_audit_bundle import build as build_gpt_audit
 
-        build_gpt_audit(agent_root=agent_root)
-    except Exception:
-        pass
+            build_gpt_audit(agent_root=agent_root)
+        except Exception:
+            pass
 
-    try:
-        from research.genome.data_integrity_audit import run_golden_trade_audit
+        try:
+            from research.genome.data_integrity_audit import run_golden_trade_audit
 
-        run_golden_trade_audit(db_path=db)
-    except Exception:
-        pass
+            run_golden_trade_audit(db_path=db)
+        except Exception:
+            pass
 
     return report
 

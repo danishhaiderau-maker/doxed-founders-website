@@ -219,7 +219,9 @@ RESEARCH_STACK_FEATURES = (
     "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
     "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
     "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 dual-leg policy "
-    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720"
+    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720; "
+    "paused-shadow outcome ledger/dashboard; non-monotonic ADX shared prompt; "
+    "Type B ADX-v3 shadow challenger; fail-closed relay executor watchdog"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

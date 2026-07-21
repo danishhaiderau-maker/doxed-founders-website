@@ -181,10 +181,10 @@ try {
 
     Push-Location $agentDir
     try {
-      # Replicates start-home-analyzer.ps1 launch: python research\analyzer_research_engine_v62.py
+      # Replicates start-home-analyzer.ps1 launch: python analyzer_research_engine_v62.py
       # (no --once; we want the continuous 30-min loop on auto-restart).
       $analyzerProc = Start-Process -FilePath "python" `
-        -ArgumentList @("research\analyzer_research_engine_v62.py") `
+        -ArgumentList @("analyzer_research_engine_v62.py") `
         -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
     } finally { Pop-Location }
 

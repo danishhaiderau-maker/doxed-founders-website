@@ -71,6 +71,26 @@ def main() -> int:
     tile2 = analyzer._policy_filtered_research_lane_metrics(
         rows, "SR_MICRO_TILE_V2_STATIC"
     )
+    direction_only = analyzer._enrich_trades_with_buckets(pd.DataFrame([{
+        "trade_id": "direction-only",
+        "research_lane": "CONTINUOUS",
+        "dir": "LONG",
+        "ai_win_prob": 0,
+        "conviction_spread": 6,
+        "adx_at_entry": 28.4,
+        "entry_mode": "AI_DIRECT_LIMIT",
+        "limit_chase_count": 2,
+    }])).iloc[0]
+    mixed_confidence = analyzer._direction_only_trade_cohort(pd.DataFrame([
+        {
+            "trade_id": "direction-only", "research_lane": "CONTINUOUS", "dir": "LONG",
+            "ai_win_prob": 0, "confidence_requested": False, "net_pnl_usd": 1.0,
+        },
+        {
+            "trade_id": "probability-era", "research_lane": "CONTINUOUS", "dir": "LONG",
+            "ai_win_prob": 62, "confidence_requested": True, "net_pnl_usd": 1.0,
+        },
+    ]))
 
     checks = {
         "Type B accepted LAB close": type_b["lab_closes"] == 1,
@@ -79,6 +99,17 @@ def main() -> int:
         "Type B counterfactual PnL": type_b["counterfactual_pnl_usd"] == -1.25,
         "Tile 2 current cohort only": tile2["lab_closes"] == 1,
         "Tile 2 LAB PnL": tile2["lab_net_pnl"] == 3.0,
+        "Direction-only output is not fake confidence": (
+            direction_only["ai_probability_bucket"] == "DIRECTION_ONLY"
+        ),
+        "Shared score gap survives missing bull/bear fields": (
+            float(direction_only["directional_spread"]) == 6.0
+        ),
+        "ADX cohort is retained": direction_only["adx_bucket"] not in ("unknown", ""),
+        "Actual chase path is retained": direction_only["entry_mode_bucket"] == "CHASE_1_2",
+        "Probability-era rows are excluded from direction-only combinations": (
+            mixed_confidence["trade_id"].tolist() == ["direction-only"]
+        ),
     }
     failed = [name for name, ok in checks.items() if not ok]
     if failed:

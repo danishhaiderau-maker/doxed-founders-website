@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 
@@ -18,6 +18,19 @@ const singletonAgent = join(root, 'services/btc-conservative-agent/process_singl
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
+const agentDir = join(root, 'services/btc-conservative-agent');
+const scenarioConfig = join(agentDir, 'scenario_c_config.py');
+
+function probeEnv(extra = {}) {
+  const pythonPath = [
+    agentDir,
+    join(root, 'services/btc-signal-engine'),
+    process.env.PYTHONPATH,
+  ]
+    .filter(Boolean)
+    .join(delimiter);
+  return { ...process.env, PYTHONPATH: pythonPath, ...extra };
+}
 
 function sha256(path) {
   const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
@@ -74,10 +87,18 @@ console.log('OK  btc_conservative_agent.py entry point present');
 
 if (!existsSync(fixtures)) fail('Missing tests/fixtures/signal-parity-cases.json');
 if (!existsSync(probe)) fail('Missing services/btc-signal-engine/signal_probe.py');
+if (!existsSync(scenarioConfig)) {
+  fail('Missing canonical scenario_c_config.py dependency for combo fixture probe');
+}
 
 console.log('\n--- Phase 2: combo fixture probe ---\n');
 try {
-  execSync(`python "${probe}"`, { cwd: root, stdio: 'inherit', encoding: 'utf8' });
+  execSync(`python "${probe}"`, {
+    cwd: root,
+    stdio: 'inherit',
+    encoding: 'utf8',
+    env: probeEnv(),
+  });
 } catch {
   fail('signal_probe.py failed');
 }
@@ -91,12 +112,11 @@ if (fullProbe) {
       stdio: 'inherit',
       encoding: 'utf8',
       timeout: 120_000,
-      env: {
-        ...process.env,
+      env: probeEnv({
         FORCE_PAPER_MODE: '1',
         RESEARCH_DATA_COLLECTION: '1',
         SKIP_EXCHANGE_MARKET_LOAD: '1',
-      },
+      }),
     });
   } catch {
     fail('signal_probe.py --full failed');

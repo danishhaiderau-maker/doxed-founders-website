@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 UNKNOWN_SIMILARITY_THRESHOLD = 55.0
 
@@ -11,9 +11,47 @@ FEATURE_KEYS = (
     "spread", "bull_score", "bear_score", "momentum", "structure",
 )
 
+FEATURE_SCALES = {
+    "adx": 100.0,
+    "atr": 1000.0,
+    "volatility_percentile": 100.0,
+    "volume_percentile": 100.0,
+    "spread": 10.0,
+    "bull_score": 10.0,
+    "bear_score": 10.0,
+    "momentum": 1.0,
+    "structure": 10.0,
+}
+MIN_SHARED_FEATURES = 3
+
 
 def _vector(row: Dict[str, Any]) -> List[float]:
     return [float(row.get(k) or 0.0) for k in FEATURE_KEYS]
+
+
+def _finite(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def normalized_feature_similarity(
+    a: Dict[str, Any], b: Dict[str, Any], minimum_shared: int = MIN_SHARED_FEATURES,
+) -> Tuple[Optional[float], int]:
+    """Missing-aware distance similarity over normalized shared dimensions."""
+    distances = []
+    for key in FEATURE_KEYS:
+        av = _finite(a.get(key))
+        bv = _finite(b.get(key))
+        if av is None or bv is None:
+            continue
+        scale = max(float(FEATURE_SCALES.get(key) or 1.0), 1e-9)
+        distances.append(min(1.0, abs(av - bv) / scale))
+    if len(distances) < minimum_shared:
+        return None, len(distances)
+    return max(0.0, 1.0 - (sum(distances) / len(distances))), len(distances)
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -45,8 +83,9 @@ def nearest_cluster(
             vec = _vector(market_row)
             for cluster in clusters:
                 centroid = cluster.get("centroid") or {}
-                sim = cosine_similarity(vec, _vector(centroid))
-                if sim > closest_sim:
+                sim_value, _ = normalized_feature_similarity(market_row, centroid)
+                sim = sim_value or 0.0
+                if sim_value is not None and (closest_id is None or sim > closest_sim):
                     closest_sim = sim
                     closest_id = str(
                         cluster.get("genome_id")
@@ -66,14 +105,16 @@ def nearest_cluster(
                 "0 validated clusters (need ≥30 trades + MODERATE confidence)."
             ),
         }
-    vec = _vector(market_row)
     best_id = "UNKNOWN"
     best_sim = 0.0
+    best_shared = 0
     for cluster in pool:
         centroid = cluster.get("centroid") or {}
-        sim = cosine_similarity(vec, _vector(centroid))
-        if sim > best_sim:
+        sim_value, shared = normalized_feature_similarity(market_row, centroid)
+        sim = sim_value or 0.0
+        if sim_value is not None and (best_id == "UNKNOWN" or sim > best_sim):
             best_sim = sim
+            best_shared = shared
             best_id = str(
                 cluster.get("genome_id")
                 or cluster.get("cluster_id")
@@ -81,6 +122,20 @@ def nearest_cluster(
                 or "UNKNOWN"
             )
     sim_pct = round(best_sim * 100.0, 1)
+    if best_shared < MIN_SHARED_FEATURES:
+        return {
+            "cluster_id": "UNKNOWN",
+            "similarity_pct": 0.0,
+            "closest_genome_id": best_id if best_id != "UNKNOWN" else None,
+            "shared_features": best_shared,
+            "required_shared_features": MIN_SHARED_FEATURES,
+            "validated_clusters_available": len(pool),
+            "recommendation": "Collect only - insufficient populated features",
+            "reason": (
+                f"Only {best_shared} shared feature(s); need at least "
+                f"{MIN_SHARED_FEATURES} for a market match."
+            ),
+        }
     if sim_pct < UNKNOWN_SIMILARITY_THRESHOLD:
         return {
             "cluster_id": "UNKNOWN",
