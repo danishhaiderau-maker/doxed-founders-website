@@ -12,7 +12,7 @@ Product & platform (13 recent commits)
 
 ## Last Commit
 
-fix(ai): preserve streamed Founder responses
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
