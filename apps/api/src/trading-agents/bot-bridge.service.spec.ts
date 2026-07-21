@@ -131,3 +131,20 @@ test('backs off after HTTP 429 instead of falling through into another request',
     globalThis.fetch = originalFetch;
   }
 });
+
+test('execution polling fails closed without falling through to the heavy state endpoint', async () => {
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => {
+    urls.push(String(input));
+    return new Response('temporary failure', { status: 502 });
+  };
+
+  try {
+    const bridge = makeBridge();
+    assert.equal(await bridge.fetchStateForExecution(true), null);
+    assert.deepEqual(urls, ['https://showcase.test/api/relay-state']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

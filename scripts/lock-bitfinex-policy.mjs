@@ -9,6 +9,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY_FILES = [
   'packages/utils/src/bitfinex-copy-policy.ts',
   'packages/utils/src/subscriber-exit.ts',
+  'apps/api/src/trading-agents/bot-bridge.service.ts',
   'apps/api/src/trading-agents/signal-subscriber-execution.service.ts',
 ];
 

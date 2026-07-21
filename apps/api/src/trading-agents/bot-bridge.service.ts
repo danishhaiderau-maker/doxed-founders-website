@@ -50,6 +50,18 @@ export class BotBridgeService {
    * back to 5000 if the tunnel can't take the load).
    */
   private execCacheMs = Number(process.env.BOT_BRIDGE_EXEC_CACHE_MS ?? 2000);
+  /**
+   * The canonical bot lives in Australia while Railway currently runs in SFO.
+   * An 800ms deadline was below the observed cross-region tail latency, so every
+   * poll aborted and immediately tried the much heavier `/api/state` fallback.
+   * Keep one bounded relay-state request inside the user's 2-3 second target;
+   * on failure the money path remains fail-closed and waits for the next signed
+   * webhook/poll instead of creating a request storm.
+   */
+  private readonly executionRelayTimeoutMs = Math.max(
+    1_500,
+    Math.min(3_000, Number(process.env.BOT_BRIDGE_EXEC_TIMEOUT_MS ?? 2_500)),
+  );
   private dbUrlCache: { url: string | null; at: number } | null = null;
   /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
   private execCached: BotApiState | null = null;
@@ -297,12 +309,12 @@ export class BotBridgeService {
     if (this.execCached && now - this.execFetchAt < this.execCacheMs) {
       return this.execCached;
     }
-    const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
+    const data = await this.fetchShowcaseState(['/api/relay-state'], {
       // The signed webhook is the primary money-path transport. Canonical
-      // polling is its fail-closed backstop and must never monopolise the
-      // single execution tick for tens of seconds.
-      relayTimeout: 800,
-      stateTimeout: 1_200,
+      // polling is its fail-closed backstop. Use one lightweight request with
+      // enough cross-region budget; never fall through to the full state dump.
+      relayTimeout: this.executionRelayTimeoutMs,
+      stateTimeout: this.executionRelayTimeoutMs,
       userAgent: 'doxxedcrypto-relay/1.0',
       lane: 'execution',
     });
