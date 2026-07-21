@@ -207,23 +207,22 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand('workbench.view.extension.founderOs'),
     ),
     vscode.commands.registerCommand('founderOs.openCompanion', () =>
-      revealFounderView('founderWork', FounderCompanionViewProvider.viewId),
+      revealFounderView('founderOs', FounderCompanionViewProvider.viewId),
     ),
     vscode.commands.registerCommand('founderOs.openAgents', async () => {
-      await revealFounderView('founderWork', FounderCompanionViewProvider.viewId);
-      await revealFounderView('founderWork', 'founderOs.agents');
+      await revealFounderView('founderOs', 'founderOs.agents');
     }),
     vscode.commands.registerCommand('founderOs.openShip', () =>
-      revealFounderView('founderWork', 'founderOs.ship'),
+      revealFounderView('founderOs', 'founderOs.ship'),
     ),
     vscode.commands.registerCommand('founderOs.openNodeView', () =>
-      revealFounderView('founderConnect', 'founderOs.node'),
+      revealFounderView('founderOs', 'founderOs.node'),
     ),
     vscode.commands.registerCommand('founderOs.openConnectionsView', () =>
-      revealFounderView('founderConnect', 'founderOs.connections'),
+      revealFounderView('founderOs', 'founderOs.connections'),
     ),
     vscode.commands.registerCommand('founderOs.openRemoteView', () =>
-      revealFounderView('founderConnect', 'founderOs.remote'),
+      revealFounderView('founderOs', 'founderOs.remote'),
     ),
     vscode.commands.registerCommand('founderOs.openRemoteControl', () =>
       vscode.env.openExternal(

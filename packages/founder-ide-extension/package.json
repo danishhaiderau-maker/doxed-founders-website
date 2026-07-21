@@ -38,16 +38,6 @@
           "id": "founderOs",
           "title": "Founder",
           "icon": "resources/founder.svg"
-        },
-        {
-          "id": "founderWork",
-          "title": "Founder Work",
-          "icon": "resources/agents.svg"
-        },
-        {
-          "id": "founderConnect",
-          "title": "Founder Connect",
-          "icon": "resources/connections.svg"
         }
       ]
     },
@@ -57,35 +47,37 @@
           "id": "founderOs.hub",
           "name": "Founder",
           "type": "webview"
-        }
-      ],
-      "founderWork": [
+        },
         {
           "id": "founderOs.companion",
-          "name": "Founder Dragon",
-          "type": "webview"
+          "name": "Dragon",
+          "type": "webview",
+          "when": "config.founderOs.companion.enabled"
         },
         {
           "id": "founderOs.agents",
-          "name": "Agents"
+          "name": "Agents",
+          "visibility": "collapsed"
         },
         {
           "id": "founderOs.ship",
-          "name": "Ship"
-        }
-      ],
-      "founderConnect": [
+          "name": "Ship",
+          "visibility": "collapsed"
+        },
         {
           "id": "founderOs.node",
-          "name": "Founder Node"
+          "name": "Founder Node",
+          "visibility": "collapsed"
         },
         {
           "id": "founderOs.connections",
-          "name": "Connections"
+          "name": "Connections",
+          "visibility": "collapsed"
         },
         {
           "id": "founderOs.remote",
-          "name": "Remote Sessions"
+          "name": "Remote Sessions",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -336,6 +328,11 @@
           ],
           "default": "hybrid",
           "description": "Where this workspace runs and which connected services it may use."
+        },
+        "founderOs.companion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Founder Dragon companion in the Founder sidebar."
         },
         "founderOs.apiBaseUrl": {
           "type": "string",

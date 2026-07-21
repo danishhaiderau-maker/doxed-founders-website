@@ -12,7 +12,7 @@ interface ExtensionManifest {
     viewsContainers?: {
       activitybar?: Array<{ id?: string; title?: string; icon?: string }>;
     };
-    views?: Record<string, Array<{ id?: string; name?: string; type?: string }>>;
+    views?: Record<string, Array<{ id?: string; name?: string; type?: string; visibility?: string }>>;
     menus?: Record<string, Array<{ command?: string; when?: string }>>;
   };
 }
@@ -71,9 +71,15 @@ describe('Founder IDE extension manifest', () => {
       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
     ) as ExtensionManifest;
     const expectedContainers = [
-      ['founderOs', ['founderOs.hub']],
-      ['founderWork', ['founderOs.companion', 'founderOs.agents', 'founderOs.ship']],
-      ['founderConnect', ['founderOs.node', 'founderOs.connections', 'founderOs.remote']],
+      ['founderOs', [
+        'founderOs.hub',
+        'founderOs.companion',
+        'founderOs.agents',
+        'founderOs.ship',
+        'founderOs.node',
+        'founderOs.connections',
+        'founderOs.remote',
+      ]],
     ] as const;
     const containers = manifest.contributes?.viewsContainers?.activitybar ?? [];
     const commands = new Set(
@@ -92,6 +98,10 @@ describe('Founder IDE extension manifest', () => {
         manifest.contributes?.views?.[containerId]?.map((view) => view.id),
         [...viewIds],
       );
+    }
+    assert.equal(containers.length, 1, 'Founder navigation should use one labelled home');
+    for (const view of manifest.contributes?.views?.founderOs?.slice(2) ?? []) {
+      assert.equal(view.visibility, 'collapsed', `${view.id} should use progressive disclosure`);
     }
 
     for (const item of manifest.contributes?.menus?.['view/title'] ?? []) {
