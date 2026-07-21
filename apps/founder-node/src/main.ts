@@ -58,6 +58,11 @@ import {
   discoverClaudeCodeWorkspaces,
 } from './claude-code-discovery';
 import {
+  discoverFounderIdeAgents,
+  discoverFounderIdeAgentSessions,
+  discoverFounderIdeAgentWorkspaces,
+} from './founder-ide-agent-discovery';
+import {
   connectAllIdes,
   connectCursor,
   connectFounderIde,
@@ -644,6 +649,7 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
     const claudeSessions = discoverClaudeCodeSessions();
     const sessions = [
       ...discoverFounderIdeSessions(config.nodeId),
+      ...discoverFounderIdeAgentSessions(),
       ...cursorSessions,
       ...claudeSessions,
     ];
@@ -695,10 +701,13 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     const claudeWorkspaces = discoverClaudeCodeWorkspaces();
     const claudeAgents = discoverClaudeCodeAgents();
     const claudeSessions = discoverClaudeCodeSessions();
-    const workspaces = [...cursorWorkspaces, ...claudeWorkspaces];
-    const agents = [...cursorAgents, ...claudeAgents];
+    const founderIdeWorkspaces = discoverFounderIdeAgentWorkspaces();
+    const founderIdeAgents = discoverFounderIdeAgents();
+    const workspaces = [...founderIdeWorkspaces, ...cursorWorkspaces, ...claudeWorkspaces];
+    const agents = [...founderIdeAgents, ...cursorAgents, ...claudeAgents];
     const sessions = [
       ...discoverFounderIdeSessions(config.nodeId),
+      ...discoverFounderIdeAgentSessions(),
       ...cursorSessions,
       ...claudeSessions,
     ];

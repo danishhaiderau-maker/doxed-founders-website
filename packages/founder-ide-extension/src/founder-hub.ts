@@ -7,6 +7,7 @@ import {
   workspaceModeDefinition,
   type FounderWorkspaceMode,
 } from './founder-hub-state';
+import type { FounderAgentAwarenessSummary } from './agent-awareness';
 
 type FounderHubAction =
   | 'signIn'
@@ -44,6 +45,11 @@ export class FounderHubProvider
 
   private view: vscode.WebviewView | undefined;
   private readonly disposables: vscode.Disposable[] = [];
+  private agentAwareness: FounderAgentAwarenessSummary = {
+    activeCount: 0,
+    conflictCount: 0,
+    tasks: [],
+  };
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -64,6 +70,11 @@ export class FounderHubProvider
   refresh(): void {
     if (!this.view) return;
     this.view.webview.html = this.renderHtml();
+  }
+
+  setAgentAwareness(summary: FounderAgentAwarenessSummary): void {
+    this.agentAwareness = summary;
+    this.refresh();
   }
 
   dispose(): void {
@@ -198,6 +209,16 @@ export class FounderHubProvider
       : 'Not connected';
     const connectionClass = connected ? 'online' : 'offline';
     const connectionLabel = connected ? 'Connected' : 'Sign in required';
+    const agentLabel = this.agentAwareness.activeCount === 0
+      ? 'No active tasks'
+      : `${this.agentAwareness.activeCount} active${this.agentAwareness.conflictCount > 0 ? ` | ${this.agentAwareness.conflictCount} coordinating` : ''}`;
+    const agentRows = this.agentAwareness.tasks.map((task) => `
+      <div class="agent-row ${task.conflict ? 'conflict' : ''}">
+        <span class="agent-signal" aria-hidden="true"></span>
+        <span class="agent-copy"><strong>${escapeHtml(task.title)}</strong><span>${escapeHtml(task.branch ?? 'No branch')} | ${escapeHtml(task.files.slice(0, 2).join(', ') || 'Reading workspace')}</span></span>
+        <span class="agent-state">${task.conflict ? 'Coordinate' : 'Working'}</span>
+      </div>
+    `).join('');
 
     const modeButtons = FOUNDER_WORKSPACE_MODES.map(
       (candidate) => `
@@ -512,6 +533,38 @@ export class FounderHubProvider
       line-height: 1.55;
     }
 
+    .agent-awareness {
+      padding: 3px 0 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .agent-awareness header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 28px;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    .agent-awareness header strong { color: var(--vscode-foreground); font-size: 11px; }
+    .agent-list { display: grid; gap: 1px; }
+    .agent-row {
+      display: grid;
+      grid-template-columns: 8px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 4px 2px;
+    }
+    .agent-signal { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .agent-row.conflict .agent-signal { background: var(--amber); }
+    .agent-copy { min-width: 0; }
+    .agent-copy strong, .agent-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-copy strong { font-size: 11px; font-weight: 600; }
+    .agent-copy span, .agent-state { color: var(--muted); font-size: 9px; }
+    .agent-row.conflict .agent-state { color: var(--amber); }
+
     .account-footer {
       margin-top: auto;
       padding-top: 14px;
@@ -551,7 +604,7 @@ export class FounderHubProvider
       </button>
       <button class="nav-item" type="button" data-action="openAgents">
         <span class="nav-icon" aria-hidden="true">A</span>
-        <span class="nav-copy"><strong>Agents</strong><span>Active coordinated work</span></span>
+        <span class="nav-copy"><strong>Agents</strong><span>${escapeHtml(agentLabel)}</span></span>
         <span class="nav-arrow" aria-hidden="true">&gt;</span>
       </button>
       <button class="nav-item" type="button" data-action="openSourceControl">
@@ -560,6 +613,13 @@ export class FounderHubProvider
         <span class="nav-arrow" aria-hidden="true">&gt;</span>
       </button>
     </nav>
+
+    ${this.agentAwareness.activeCount > 0 ? `
+      <section class="agent-awareness" aria-label="Active agent work">
+        <header><strong>Active work</strong><span>${escapeHtml(agentLabel)}</span></header>
+        <div class="agent-list">${agentRows}</div>
+      </section>
+    ` : ''}
 
     <section class="section">
       <details open>

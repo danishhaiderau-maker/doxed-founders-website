@@ -49,6 +49,7 @@ import { FounderHubProvider } from './founder-hub';
 import { FounderSettingsPanel } from './founder-settings';
 import { FounderShortcutRegistry } from './founder-shortcuts';
 import { FounderCompanionViewProvider } from './founder-companion';
+import { FounderAgentAwareness } from './agent-awareness';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -63,6 +64,7 @@ let founderHub: FounderHubProvider | undefined;
 let founderSettings: FounderSettingsPanel | undefined;
 let founderShortcuts: FounderShortcutRegistry | undefined;
 let founderCompanion: FounderCompanionViewProvider | undefined;
+let founderAgentAwareness: FounderAgentAwareness | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -100,6 +102,20 @@ export function activate(context: vscode.ExtensionContext): void {
         founderCompanion?.setError(
           event.execution.task.name,
           event.exitCode == null ? 'Task ended without a result' : `Task exited with code ${event.exitCode}`,
+        );
+      }
+    }),
+  );
+  founderAgentAwareness = new FounderAgentAwareness();
+  founderHub.setAgentAwareness(founderAgentAwareness.summary());
+  context.subscriptions.push(
+    founderAgentAwareness,
+    founderAgentAwareness.onDidChange((summary) => {
+      founderHub?.setAgentAwareness(summary);
+      if (summary.conflictCount > 0) {
+        founderCompanion?.setAttention(
+          'Agents are coordinating',
+          `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`,
         );
       }
     }),
@@ -210,7 +226,8 @@ export function activate(context: vscode.ExtensionContext): void {
       revealFounderView('founderOs', FounderCompanionViewProvider.viewId),
     ),
     vscode.commands.registerCommand('founderOs.openAgents', async () => {
-      await revealFounderView('founderOs', 'founderOs.agents');
+      await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+      await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
     }),
     vscode.commands.registerCommand('founderOs.openShip', () =>
       revealFounderView('founderOs', 'founderOs.ship'),
@@ -421,6 +438,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     creds,
     profileManager: profileManager!,
     costTracker: costTracker!,
+    coordination: founderAgentAwareness,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setWorking('Flying to Founder AI', modelId);

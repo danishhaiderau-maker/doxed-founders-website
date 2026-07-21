@@ -33,6 +33,11 @@ export interface ParticipantDeps {
     ok: boolean,
     errorMessage?: string,
   ) => void;
+  coordination?: {
+    begin(prompt: string, provider: string): string;
+    contextFor(taskId: string): string;
+    end(taskId: string): void;
+  };
 }
 
 const MAX_TOOL_TURNS = 8;
@@ -118,6 +123,7 @@ async function handleParticipantRequest(
     if (codeModel) alias = codeModel;
   }
   deps.onRequestStart?.(alias.id);
+  const coordinationTaskId = deps.coordination?.begin(prompt, alias.id);
 
   // Build the system prompt with Memory Engine context.
   let memoryText = '';
@@ -128,9 +134,11 @@ async function handleParticipantRequest(
     /* memory must never block chat */
   }
 
-  const systemContent = memoryText.length > 0
-    ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.`
-    : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+  let coordinationText = coordinationTaskId
+    ? deps.coordination?.contextFor(coordinationTaskId) ?? ''
+    : '';
+  const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+  const systemContent = [memoryText, coordinationText, identity].filter(Boolean).join('\n\n');
 
   const gatewayMessages: GatewayMessage[] = [
     { role: 'system', content: systemContent },
@@ -152,6 +160,14 @@ async function handleParticipantRequest(
     let completed = false;
 
     for (let turn = 0; turn < MAX_TOOL_TURNS && !token.isCancellationRequested; turn += 1) {
+      if (turn > 0 && coordinationTaskId) {
+        const refreshed = deps.coordination?.contextFor(coordinationTaskId) ?? '';
+        if (refreshed && refreshed !== coordinationText) {
+          coordinationText = refreshed;
+          gatewayMessages.push({ role: 'system', content: refreshed });
+          stream.progress('Founder Agents: coordination refreshed');
+        }
+      }
       const toolCalls: GatewayToolCall[] = [];
       let assistantText = '';
       await callGateway(
@@ -246,6 +262,7 @@ async function handleParticipantRequest(
     }
     return;
   } finally {
+    if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
     deps.onRequestEnd?.(alias.id, ok, errorMessage);
   }
 

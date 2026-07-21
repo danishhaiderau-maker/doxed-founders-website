@@ -72,6 +72,7 @@ const founder_hub_1 = require("./founder-hub");
 const founder_settings_1 = require("./founder-settings");
 const founder_shortcuts_1 = require("./founder-shortcuts");
 const founder_companion_1 = require("./founder-companion");
+const agent_awareness_1 = require("./agent-awareness");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -85,6 +86,7 @@ let founderHub;
 let founderSettings;
 let founderShortcuts;
 let founderCompanion;
+let founderAgentAwareness;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -107,6 +109,14 @@ function activate(context) {
         }
         else {
             founderCompanion?.setError(event.execution.task.name, event.exitCode == null ? 'Task ended without a result' : `Task exited with code ${event.exitCode}`);
+        }
+    }));
+    founderAgentAwareness = new agent_awareness_1.FounderAgentAwareness();
+    founderHub.setAgentAwareness(founderAgentAwareness.summary());
+    context.subscriptions.push(founderAgentAwareness, founderAgentAwareness.onDidChange((summary) => {
+        founderHub?.setAgentAwareness(summary);
+        if (summary.conflictCount > 0) {
+            founderCompanion?.setAttention('Agents are coordinating', `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`);
         }
     }));
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
@@ -175,7 +185,8 @@ function activate(context) {
         costTracker?.reset();
         void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
     }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openCompanion', () => revealFounderView('founderOs', founder_companion_1.FounderCompanionViewProvider.viewId)), vscode.commands.registerCommand('founderOs.openAgents', async () => {
-        await revealFounderView('founderOs', 'founderOs.agents');
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${founder_hub_1.FounderHubProvider.viewId}.focus`);
     }), vscode.commands.registerCommand('founderOs.openShip', () => revealFounderView('founderOs', 'founderOs.ship')), vscode.commands.registerCommand('founderOs.openNodeView', () => revealFounderView('founderOs', 'founderOs.node')), vscode.commands.registerCommand('founderOs.openConnectionsView', () => revealFounderView('founderOs', 'founderOs.connections')), vscode.commands.registerCommand('founderOs.openRemoteView', () => revealFounderView('founderOs', 'founderOs.remote')), vscode.commands.registerCommand('founderOs.openRemoteControl', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/founder-den?onboard=sovereign'))), vscode.commands.registerCommand('founderOs.openChat', async () => {
         try {
             await vscode.commands.executeCommand('void.sidebar.open');
@@ -321,6 +332,7 @@ function registerOrNotify(context) {
         creds,
         profileManager: profileManager,
         costTracker: costTracker,
+        coordination: founderAgentAwareness,
         onRequestStart: (modelId) => {
             pairingStatusBar?.setRequestInFlight(modelId);
             founderCompanion?.setWorking('Flying to Founder AI', modelId);
