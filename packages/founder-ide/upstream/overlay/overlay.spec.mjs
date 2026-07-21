@@ -7,10 +7,10 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const read = (relativePath) =>
   fs.readFileSync(path.join(root, relativePath), 'utf8');
+const manifest = JSON.parse(read('MANIFEST.json'));
 
 describe('Founder IDE upstream overlay', () => {
   it('ships the native composer override through the manifest', () => {
-    const manifest = JSON.parse(read('MANIFEST.json'));
     assert.ok(
       manifest.files.some(
         (entry) =>
@@ -20,12 +20,36 @@ describe('Founder IDE upstream overlay', () => {
     );
   });
 
+  it('removes visible upstream branding from personal AI settings', () => {
+    const manifestPaths = new Set(manifest.files.map((entry) => entry.dest));
+    assert.ok(manifestPaths.has('src/vs/workbench/contrib/void/browser/sidebarActions.ts'));
+    assert.ok(manifestPaths.has('src/vs/workbench/contrib/void/browser/voidSettingsPane.ts'));
+    assert.ok(manifestPaths.has('src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx'));
+
+    const settings = read('src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx');
+    const pane = read('src/vs/workbench/contrib/void/browser/voidSettingsPane.ts');
+    const actions = read('src/vs/workbench/contrib/void/browser/sidebarActions.ts');
+    assert.match(settings, />Personal AI</);
+    assert.doesNotMatch(settings, /Void's Settings/);
+    assert.doesNotMatch(pane, /Void\\?'s Settings/);
+    assert.doesNotMatch(actions, /Void's Settings/);
+  });
+
   it('uses Founder Gateway only for Founder-managed aliases', () => {
     const source = read(
       'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts',
     );
     assert.match(source, /modelName\.startsWith\('founder-os-'\)/);
     assert.match(source, /founderOsEnabled\(\) && isFounderManagedSelection/);
+  });
+
+  it('marks added files so the overlay can be applied repeatedly', () => {
+    const added = manifest.files.filter((entry) => entry.mode === 'add');
+    assert.ok(added.length > 0);
+    for (const entry of added) {
+      assert.ok(entry.marker, `${entry.dest} needs an ownership marker`);
+      assert.match(read(entry.src), new RegExp(entry.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    }
   });
 
   it('adds route receipts and Founder identity to managed responses', () => {

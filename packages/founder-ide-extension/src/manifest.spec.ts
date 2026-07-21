@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import { FOUNDER_TOOL_IDS } from './tool-names';
 
 interface ExtensionManifest {
+  activationEvents?: string[];
   contributes?: {
     authentication?: Array<{ id?: string; label?: string }>;
     languageModelTools?: Array<{ name?: string }>;
@@ -52,6 +53,11 @@ describe('Founder IDE extension manifest', () => {
     assert.equal(activityContainer?.icon, 'resources/founder.svg');
     assert.equal(hub?.name, 'Founder');
     assert.equal(hub?.type, 'webview');
+    assert.deepEqual(
+      manifest.activationEvents,
+      ['*'],
+      'Founder Node and Founder Home must start with the IDE',
+    );
     assert.deepEqual(manifest.contributes?.authentication, [
       { id: 'founderOs', label: 'Founder' },
     ]);

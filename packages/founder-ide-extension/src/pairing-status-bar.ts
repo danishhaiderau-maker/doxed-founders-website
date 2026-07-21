@@ -64,7 +64,7 @@ export class PairingStatusBar {
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-    this.item.command = 'founderOs.manage';
+    this.item.command = 'founderOs.openHub';
     this.disposables.push(this.item);
 
     // Watch node-config.json so pairing done by the tray (or another
@@ -153,7 +153,7 @@ export class PairingStatusBar {
       this.item.tooltip = `Founder is responding with ${this.requestModel}.`;
     } else if (this.lastError) {
       this.item.text = '$(error) Founder';
-      this.item.tooltip = `${this.lastError}\n\nClick to manage Founder.`;
+      this.item.tooltip = `${this.lastError}\n\nClick to open Founder.`;
     } else {
       this.item.text = base.text;
       this.item.tooltip = this.lastRoute

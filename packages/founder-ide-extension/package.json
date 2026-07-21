@@ -2,7 +2,7 @@
   "name": "founder-ide-extension",
   "displayName": "Founder",
   "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -23,7 +23,7 @@
     }
   },
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "contributes": {
     "authentication": [
@@ -57,27 +57,32 @@
         {
           "id": "founderOs.agents",
           "name": "Agents",
-          "visibility": "collapsed"
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
         },
         {
           "id": "founderOs.ship",
           "name": "Ship",
-          "visibility": "collapsed"
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
         },
         {
           "id": "founderOs.node",
           "name": "Founder Node",
-          "visibility": "collapsed"
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
         },
         {
           "id": "founderOs.connections",
           "name": "Connections",
-          "visibility": "collapsed"
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
         },
         {
           "id": "founderOs.remote",
           "name": "Remote Sessions",
-          "visibility": "collapsed"
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
         }
       ]
     },
@@ -333,6 +338,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show the Founder Dragon companion in the Founder sidebar."
+        },
+        "founderOs.advancedIdeTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the legacy IDE icon rail and detailed Founder shortcut sections."
         },
         "founderOs.apiBaseUrl": {
           "type": "string",

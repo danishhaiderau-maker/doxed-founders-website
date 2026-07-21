@@ -119,7 +119,12 @@ foreach ($entry in $manifest.files) {
         }
         "add" {
             if ($destExists) {
-                throw "mode=add but upstream already has $destAbs (already customized upstream? switch mode to replace)"
+                $marker = [string]$entry.marker
+                $existingContent = Get-Content $destAbs -Raw
+                if (-not $marker -or $existingContent -notmatch [regex]::Escape($marker)) {
+                    throw "mode=add but upstream already has $destAbs without the Founder overlay marker (upstream conflict; review before overwriting)"
+                }
+                Write-Host "[apply-founder]   reapply  $destRel" -ForegroundColor DarkCyan
             }
         }
         default { throw "Unknown mode '$mode' for $srcRel (expected 'replace' or 'add')" }

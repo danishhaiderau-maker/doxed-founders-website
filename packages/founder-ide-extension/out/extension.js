@@ -184,6 +184,7 @@ function activate(context) {
             await vscode.commands.executeCommand('workbench.action.chat.open');
         }
     }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()));
+    void applyFounderNavigationDefaults(context);
     // First-pass registration (synchronous so the model picker populates fast).
     registerOrNotify(context);
     // Phase 3 — start the named-pipe IPC server so the embedded relay can
@@ -235,6 +236,21 @@ function activate(context) {
             founderShortcuts?.refresh();
         });
     });
+}
+async function applyFounderNavigationDefaults(context) {
+    const migrationKey = 'founderOs.navigationV3Applied';
+    if (context.globalState.get(migrationKey, false))
+        return;
+    const workbench = vscode.workspace.getConfiguration('workbench');
+    const location = workbench.get('activityBar.location', 'default');
+    if (location === 'default') {
+        await workbench.update('activityBar.location', 'hidden', vscode.ConfigurationTarget.Global);
+    }
+    await vscode.workspace
+        .getConfiguration('founderOs')
+        .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
+    await context.globalState.update(migrationKey, true);
+    await vscode.commands.executeCommand('workbench.view.extension.founderOs');
 }
 async function revealFounderView(containerId, viewId) {
     await vscode.commands.executeCommand(`workbench.view.extension.${containerId}`);

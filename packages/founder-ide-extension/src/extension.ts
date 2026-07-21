@@ -252,6 +252,8 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  void applyFounderNavigationDefaults(context);
+
   // First-pass registration (synchronous so the model picker populates fast).
   registerOrNotify(context);
 
@@ -309,6 +311,28 @@ export function activate(context: vscode.ExtensionContext): void {
       founderShortcuts?.refresh();
     });
   });
+}
+
+async function applyFounderNavigationDefaults(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  const migrationKey = 'founderOs.navigationV3Applied';
+  if (context.globalState.get<boolean>(migrationKey, false)) return;
+
+  const workbench = vscode.workspace.getConfiguration('workbench');
+  const location = workbench.get<string>('activityBar.location', 'default');
+  if (location === 'default') {
+    await workbench.update(
+      'activityBar.location',
+      'hidden',
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  await vscode.workspace
+    .getConfiguration('founderOs')
+    .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
+  await context.globalState.update(migrationKey, true);
+  await vscode.commands.executeCommand('workbench.view.extension.founderOs');
 }
 
 async function revealFounderView(containerId: string, viewId: string): Promise<void> {
