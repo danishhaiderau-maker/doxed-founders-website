@@ -214,5 +214,7 @@ describe('Founder IDE upstream overlay', () => {
       assert.match(source, new RegExp(`label: '${action}'`));
     }
     assert.match(source, /aria-label='Founder actions'/);
+    assert.match(source, /flex min-w-0 flex-wrap gap-1/);
+    assert.doesNotMatch(source, /gap-1 overflow-x-auto pb-0\.5' role='toolbar'/);
   });
 });

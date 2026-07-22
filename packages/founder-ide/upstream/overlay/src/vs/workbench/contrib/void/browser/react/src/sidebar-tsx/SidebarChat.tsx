@@ -3213,7 +3213,7 @@ export const SidebarChat = () => {
 	}, [onSubmit, onAbort, isRunning])
 
 	const inputChatArea = <div className='flex min-w-0 flex-col gap-1.5'>
-		<div className='flex min-w-0 gap-1 overflow-x-auto pb-0.5' role='toolbar' aria-label='Founder actions'>
+		<div className='flex min-w-0 flex-wrap gap-1 pb-0.5' role='toolbar' aria-label='Founder actions'>
 			{founderActions.map((action) => <button
 				key={action.label}
 				type='button'
