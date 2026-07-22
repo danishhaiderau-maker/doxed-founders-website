@@ -55,6 +55,20 @@ Write-Host "[stack] monorepo root: $MonorepoRoot"
 Write-Host "[stack] vscodium checkout: $VscodiumCheckout"
 Write-Host "[stack] version: $Version"
 
+# The current Void build cache is the VS Code source tree itself, while older
+# downstream checkouts keep that source under a VSCode/ child. Detect both so
+# a warm local build and the clean CI build package the same application.
+$vscodeSource = $VscodiumCheckout
+if (-not (Test-Path (Join-Path $vscodeSource "gulpfile.js"))) {
+    $nestedVscodeSource = Join-Path $VscodiumCheckout "VSCode"
+    if (Test-Path (Join-Path $nestedVscodeSource "gulpfile.js")) {
+        $vscodeSource = $nestedVscodeSource
+    } else {
+        throw "VS Code source tree not found at $VscodiumCheckout or $nestedVscodeSource"
+    }
+}
+Write-Host "[stack] vscode source: $vscodeSource"
+
 # --- Locate iscc (Inno Setup compiler) ---------------------------------------
 if (-not $IsccPath) {
     $candidates = @(
@@ -152,7 +166,7 @@ $ideAppRoot = Join-Path $ideRoot "resources\app"
 $sqliteRelativePath = "node_modules\@vscode\sqlite3\build\Release\vscode-sqlite3.node"
 $sqliteNativeDest = Join-Path $ideAppRoot $sqliteRelativePath
 if (-not (Test-Path $sqliteNativeDest)) {
-    $sqliteNativeSource = Join-Path $VscodiumCheckout "vscode\$sqliteRelativePath"
+    $sqliteNativeSource = Join-Path $vscodeSource $sqliteRelativePath
     if (-not (Test-Path $sqliteNativeSource)) {
         throw "Founder IDE SQLite native binding is missing from both payload and source: $sqliteRelativePath"
     }
@@ -216,7 +230,6 @@ $embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-found
 & $embedScript -IdeRoot $ideRoot -RelayRoot $relayRoot
 
 # The relay must be embedded before gulp packages the inner installer.
-$vscodeSource = Join-Path $VscodiumCheckout "VSCode"
 Push-Location $vscodeSource
 try {
     # Inno prints one line per compressed file (thousands of lines for the
