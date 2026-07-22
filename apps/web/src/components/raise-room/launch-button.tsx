@@ -75,16 +75,16 @@ export function LaunchButton({
         type="button"
         disabled={!canLaunch}
         onClick={() => setModalOpen(true)}
-        className={`group relative w-full overflow-hidden rounded-xl px-6 py-4 text-base font-semibold transition-all ${
+        className={`group relative w-full overflow-hidden rounded-lg px-6 py-4 text-base font-semibold transition ${
           canLaunch
-            ? 'bg-gradient-to-r from-violet-600 via-fuchsia-600 to-rose-500 text-white shadow-lg shadow-fuchsia-900/30 hover:shadow-fuchsia-700/40 hover:brightness-110'
+            ? 'bg-blue-600 text-white shadow-lg shadow-blue-950/25 hover:bg-blue-500'
             : 'cursor-not-allowed bg-zinc-900 text-zinc-600'
         }`}
       >
         <span className="relative z-10 flex items-center justify-center gap-2">
           <span className={canLaunch ? 'animate-pulse' : ''}>🚀</span>
           {canLaunch
-            ? "I'm ready to launch my token"
+            ? 'Prepare devnet release'
             : 'Token launch locked'}
         </span>
         {!canLaunch && elig && (
@@ -100,9 +100,9 @@ export function LaunchButton({
 
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-950 p-6 shadow-2xl">
+          <div className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-950 p-6 shadow-2xl">
             <h3 className="text-lg font-semibold text-zinc-100">
-              Release your token on Solana devnet
+              Review the sandbox release
             </h3>
             <p className="mt-2 text-sm text-zinc-400">
               This will mint your SPL token and open a 15-day community
@@ -137,8 +137,9 @@ export function LaunchButton({
               <li className="flex gap-2">
                 <span className="text-violet-400">•</span>
                 <span>
-                  <span className="font-semibold">0.1% DEX fee:</span> every
-                  post-launch swap accrues a 0.1% fee to the platform treasury.
+                  <span className="font-semibold">Demo accounting only:</span>{' '}
+                  the sandbox records a simulated 0.1% ledger fee. It is not the
+                  production DCF Swap policy and moves no mainnet funds.
                 </span>
               </li>
             </ul>
@@ -165,7 +166,7 @@ export function LaunchButton({
                 type="button"
                 disabled={submitting}
                 onClick={handleConfirm}
-                className="rounded-lg bg-gradient-to-r from-violet-600 to-fuchsia-600 px-4 py-2 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
               >
                 {submitting ? 'Minting on devnet…' : '🚀 Release token'}
               </button>

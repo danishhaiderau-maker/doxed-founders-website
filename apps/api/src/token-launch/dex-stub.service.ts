@@ -14,8 +14,8 @@ import type {
 
 /**
  * DEX stub for Phase 8 — implements DexRouter. Real AMM / Jupiter plugs in
- * via the same interface (dex-router.interface.ts). Fixed-price swap at
- * launch.initialPrice; 0.1% platform fee accrues to PlatformTreasury.
+ * via the same interface. This fixed-price sandbox writes a simulated ledger
+ * fee; it is not production DCF Swap settlement.
  */
 @Injectable()
 export class DexStubService implements DexRouter {
@@ -112,7 +112,7 @@ export class DexStubService implements DexRouter {
         userId,
         amountDdollar: 0,
         actionKey: 'DEX_FEE',
-        label: `0.1% DEX fee — launch ${launchId}`,
+        label: `Sandbox swap ledger fee — launch ${launchId}`,
         metadata: {
           launchId,
           swapId: swap.id,

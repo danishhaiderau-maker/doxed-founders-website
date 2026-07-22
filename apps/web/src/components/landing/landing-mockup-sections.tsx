@@ -53,11 +53,11 @@ export function LandingSinglePage({
 
       <LandingPlatformAdoption />
 
-      <footer className="rounded-2xl border border-zinc-800/80 bg-zinc-950/50 px-4 py-4">
+      <footer className="rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-4 py-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-lg font-bold text-white">80% community owned</p>
-            <p className="text-[10px] text-zinc-500">10% airdrop · 70% over 10 years · Ollama + Founder IDE — you own the inference bill</p>
+            <p className="text-lg font-bold text-white">Terms before transactions</p>
+            <p className="text-[10px] text-zinc-500">Public fees, vesting, authority, and settlement status before a founder signs</p>
           </div>
           <div className="flex flex-wrap gap-3 text-[10px] text-zinc-500">
             <Link href="/downloads#founder-node" className="font-semibold text-violet-300 hover:text-violet-200">

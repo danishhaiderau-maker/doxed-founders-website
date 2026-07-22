@@ -319,16 +319,16 @@ edit and command demonstration.
 - [ ] Add proactive founder intelligence: decision archaeology, competitor
   watch, idea validation, repeated-pattern detection, and a daily brief with
   sources and opt-in controls.
-- [ ] Specify token launch, vesting, treasury, DCF Swap, liquidity, wallet
+- [x] Specify token launch, vesting, treasury, DCF Swap, liquidity, wallet
   rotation, emergency controls, acquisition offers, holder analytics, and
   settlement as audited business contracts before implementation.
-- [ ] Resolve and publish one token economics contract covering the bonding
+- [x] Resolve and publish one token economics contract covering the bonding
   curve fee, any platform share, founder share, graduation threshold, DCF Swap
   fee destination, and every treasury action before deployment.
-- [ ] Model the proposed 50% founder/team allocation as continuous daily vesting
+- [x] Model the proposed 50% founder/team allocation as continuous daily vesting
   over ten years, claimable only by the configured founder wallet, with public
   schedule, claimed, available, and remaining supply.
-- [ ] Model platform-received project tokens as a transparent locked treasury
+- [x] Model platform-received project tokens as a transparent locked treasury
   with the proposed ten-month 10% monthly release option; prohibit automatic
   sale, burn, or liquidity movement until the approved policy is explicit.
 - [ ] Add a basket-level treasury simulator so an approved sale can distribute
@@ -340,7 +340,7 @@ edit and command demonstration.
 - [ ] Build wallet rotation around role-separated multisig or smart-account
   authority, hardware-backed admin authentication, delay, guardian/recovery,
   test transaction, and audit; application code never stores raw private keys.
-- [ ] Treat emergency asset or token migration as a governed recovery plan with
+- [x] Treat emergency asset or token migration as a governed recovery plan with
   pause, snapshot, simulation, notice, claim/migration contract, timelock, and
   independent security review rather than a unilateral one-click replacement.
 - [ ] Give every project an acquisition-interest workflow with verified buyer
@@ -358,8 +358,12 @@ edit and command demonstration.
 - [ ] Build admin execution as propose, simulate, approve with strong hardware
   authentication, timelock where appropriate, execute, and audit.
 
-Evidence: capability audit, sourced intelligence examples, contract specs,
-security review, legal/compliance gate, end-to-end admin simulations.
+Evidence: capability audit, sourced intelligence examples,
+`DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`, contract specs, security review,
+legal/compliance gate, and end-to-end admin simulations. Specifications marked
+complete above are design-complete; mainnet implementation remains blocked on
+the explicitly listed legal, security, multisig, oracle, and contract-audit
+gates.
 
 ## Stage 11 - Verify, package, install, and release
 
