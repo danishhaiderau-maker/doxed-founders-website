@@ -18,6 +18,7 @@ export type FounderIdeEntitlements = {
     weightsVersion: 'founder-wtu-v1';
     cap: number;
     used: number;
+    reserved: number;
     remaining: number;
     eligible: boolean;
     resetsOrExpiresAt: string | null;
@@ -50,6 +51,7 @@ export function toFounderIdeEntitlements(
       weightsVersion: status.weightsVersion,
       cap: status.tokenCap,
       used: status.tokensUsed,
+      reserved: status.reservedWeightedUnits,
       remaining: status.tokensRemaining,
       eligible: status.eligible,
       resetsOrExpiresAt: status.expiresAt,

@@ -38,6 +38,7 @@ export type FounderPromoStatus = {
   daysRemaining: number | null;
   tokenCap: number;
   tokensUsed: number;
+  reservedWeightedUnits: number;
   tokensRemaining: number;
   exhausted: boolean;
   message: string | null;
@@ -574,6 +575,11 @@ export class FounderPromoService {
         (legacyUsage._sum.promptTokens ?? 0) +
         (legacyUsage._sum.completionTokens ?? 0) * 3,
     );
+    const reservedWeightedUnits = Math.ceil(
+      reservations
+        .filter((row) => row.status === 'RESERVED')
+        .reduce((sum, row) => sum + row.reservedWeightedUnits, 0),
+    );
     const tokensRemaining = Math.max(0, tokenCap - tokensUsed);
     const exhausted = tokensUsed >= tokenCap;
 
@@ -590,6 +596,7 @@ export class FounderPromoService {
       weightsVersion: 'founder-wtu-v1' as const,
       tokenCap,
       tokensUsed,
+      reservedWeightedUnits,
       tokensRemaining,
       exhausted,
       providers: [...MANAGED_FOUNDER_PROVIDERS],

@@ -18,6 +18,7 @@ export interface FounderIdeEntitlements {
     weightsVersion: 'founder-wtu-v1';
     cap: number;
     used: number;
+    reserved: number;
     remaining: number;
     eligible: boolean;
     resetsOrExpiresAt: string | null;
@@ -61,6 +62,7 @@ export function defaultFounderEntitlements(
         weightsVersion: 'founder-wtu-v1',
         cap: FOUNDER_FREE_MANAGED_TOKEN_CAP,
         used: 0,
+        reserved: 0,
         remaining: FOUNDER_FREE_MANAGED_TOKEN_CAP,
         eligible: false,
         resetsOrExpiresAt: null,
@@ -124,6 +126,7 @@ function isFounderIdeEntitlements(value: unknown): value is FounderIdeEntitlemen
     Boolean(managed) &&
     Number.isFinite(managed?.cap) &&
     Number.isFinite(managed?.used) &&
+    Number.isFinite(managed?.reserved) &&
     Number.isFinite(managed?.remaining) &&
     typeof managed?.eligible === 'boolean'
     && managed?.unit === 'weighted_tokens'

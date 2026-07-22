@@ -35,6 +35,7 @@ describe('fetchFounderIdeEntitlements', () => {
               weightsVersion: 'founder-wtu-v1',
               cap: 200_000,
               used: 20,
+              reserved: 0,
               remaining: 199_980,
               eligible: true,
               resetsOrExpiresAt: null,
@@ -72,7 +73,7 @@ describe('fetchFounderIdeEntitlements', () => {
           features: { coordination: true, remoteControl: true, rolesAndAudit: plan === 'team' },
           managedTokens: {
             unit: 'weighted_tokens', weightsVersion: 'founder-wtu-v1', cap: 5_000_000,
-            used: 100, remaining: 4_999_900, eligible: true,
+            used: 100, reserved: 20, remaining: 4_999_900, eligible: true,
             resetsOrExpiresAt: null, daysRemaining: null,
           },
           personalProviders: { used: null, limit: null, localModelsCountTowardLimit: false },

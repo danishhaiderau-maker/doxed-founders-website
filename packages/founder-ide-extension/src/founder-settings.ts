@@ -26,6 +26,7 @@ type FounderSettingsAction =
   | 'openAdvancedSettings'
   | 'openNodeConfig'
   | 'manageConnection'
+  | 'upgradePlan'
   | 'signIn'
   | 'signOut';
 
@@ -155,6 +156,11 @@ export class FounderSettingsPanel implements vscode.Disposable {
       case 'manageConnection':
         await vscode.commands.executeCommand('founderOs.manage');
         break;
+      case 'upgradePlan':
+        await vscode.env.openExternal(
+          vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
+        );
+        break;
       case 'signIn':
         await vscode.commands.executeCommand('founderOs.signIn');
         break;
@@ -203,6 +209,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const usagePercent = managedTokens.cap > 0
       ? Math.min(100, Math.max(0, (managedTokens.used / managedTokens.cap) * 100))
       : 0;
+    const remainingPercent = managedTokens.cap > 0
+      ? Math.min(100, Math.max(0, (managedTokens.remaining / managedTokens.cap) * 100))
+      : 0;
+    const reservedPercent = managedTokens.cap > 0
+      ? Math.min(100, Math.max(0, (managedTokens.reserved / managedTokens.cap) * 100))
+      : 0;
     const entitlementStatus = this.entitlementState.source === 'live'
       ? managedTokens.eligible
         ? 'Active'
@@ -213,6 +225,15 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const expiryLabel = managedTokens.daysRemaining == null
       ? 'Allowance status is checked through Founder Node'
       : `${managedTokens.daysRemaining} day${managedTokens.daysRemaining === 1 ? '' : 's'} remaining`;
+    const renewalLabel = managedTokens.resetsOrExpiresAt
+      ? `Renews ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(managedTokens.resetsOrExpiresAt))}`
+      : expiryLabel;
+    const lowQuota = this.entitlementState.source === 'live'
+      && managedTokens.eligible
+      && remainingPercent <= 15;
+    const reservationLabel = managedTokens.reserved > 0
+      ? `${reservedPercent < 0.1 ? '<0.1' : reservedPercent.toFixed(1)}% reserved by work in progress`
+      : 'No quota currently reserved';
 
     const modeButtons = FOUNDER_WORKSPACE_MODES.map(
       (candidate) => `
@@ -373,6 +394,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .progress::-webkit-progress-bar { background: var(--surface-hover); }
     .progress::-webkit-progress-value { background: var(--positive); transition: width 180ms ease-out; }
     .usage-message { line-height: 1.5; }
+    .usage-warning { color: var(--warning); font-size: 11px; font-weight: 600; line-height: 1.45; }
     @keyframes panel-in {
       from { opacity: 0; transform: translateY(3px); }
       to { opacity: 1; transform: translateY(0); }
@@ -431,9 +453,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
           <div class="usage-head"><strong>${escapeHtml(planLabel)}</strong><span>${escapeHtml([planPrice, entitlementStatus].filter(Boolean).join(' | '))}</span></div>
           <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>Managed quota</span></div>
           <progress class="progress" aria-label="${escapeHtml(planLabel)} quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
-          <div class="usage-values"><span>${escapeHtml(expiryLabel)}</span><span>Personal and local AI do not use this quota</span></div>
+          <div class="usage-values"><span>${remainingPercent.toFixed(0)}% available</span><span>${escapeHtml(reservationLabel)}</span></div>
+          <div class="usage-values"><span>${escapeHtml(renewalLabel)}</span><span>Personal keys and local AI stay outside this quota</span></div>
           <div class="usage-values"><span>${entitlement.features.coordination ? 'Agent coordination' : 'Focused agent'}</span><span>${entitlement.features.remoteControl ? 'Remote control included' : 'Remote control on Builder'}</span></div>
+          ${lowQuota ? '<p class="usage-warning">Managed quota is running low. Switch to personal or local AI, or upgrade before starting a large task.</p>' : ''}
           ${entitlement.message ? `<p class="usage-message">${escapeHtml(entitlement.message)}</p>` : ''}
+          ${entitlement.plan === 'free' ? '<div class="button-row"><button class="primary" type="button" data-action="upgradePlan">View Founder Builder</button></div>' : ''}
         </div>
       </section>
     </div>

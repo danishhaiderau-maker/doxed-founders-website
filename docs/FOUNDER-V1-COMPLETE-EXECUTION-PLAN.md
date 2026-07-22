@@ -82,15 +82,15 @@ result.
 - [x] Compact prompts deterministically and cache reusable context.
 - [x] Record baseline input, actual input, cache level, and tokens avoided.
 - [x] Version the baseline and weighted-token formula.
-- [ ] Add semantic result caching for safe read-only questions.
-- [ ] Add exact-diff context retrieval and changed-file invalidation.
-- [ ] Show measured savings in usage receipts and dragon notifications.
+- [x] Add semantic result caching for safe read-only questions.
+- [x] Add exact-diff context retrieval and changed-file invalidation.
+- [x] Show measured savings in usage receipts and dragon notifications.
 - [ ] Benchmark representative coding tasks against full-context execution.
 - [ ] Keep the cacheable prefix byte-stable across turns and record provider
   cache-hit input separately from ordinary input.
 - [ ] Invalidate file, symbol, dependency, solution, and semantic caches from a
   single changed-file event rather than waiting for stale output to fail.
-- [ ] Reserve cache reuse for read-only or equivalently proven results; tool
+- [x] Reserve cache reuse for read-only or equivalently proven results; tool
   execution, secrets, changing remote state, and destructive actions bypass it.
 - [ ] Show both token and estimated-cost comparisons against an explicit named
   baseline; marketing percentages remain hidden until the benchmark proves
@@ -113,11 +113,11 @@ zero unsupported percentage claims.
 - [x] Add team pool membership, role, and audit enforcement. Owner/admin/member
   mutations are bounded, and coordination plus membership changes emit a
   server-side audit trail.
-- [ ] Present allowances as a friendly weekly quota in the product while usage
+- [x] Present allowances as a friendly weekly quota in the product while usage
   receipts retain exact weighted units, raw tokens, cache status, and cost.
-- [ ] Add low-quota warnings, reservation visibility, renewal time, upgrade,
+- [x] Add low-quota warnings, reservation visibility, renewal time, upgrade,
   cancellation, grace, and fail-closed exhausted states in both IDE and web.
-- [ ] Keep personal keys and local models outside the managed quota; plan limits
+- [x] Keep personal keys and local models outside the managed quota; plan limits
   apply to managed inference and paid collaboration capabilities rather than
   silently restricting founders from connecting their own providers.
 
@@ -172,20 +172,20 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Prevent stale agents from overwriting a newer lease or result.
 - [x] Refresh awareness on events and at a bounded heartbeat while working.
 - [x] Allow independent work to continue quietly when scopes do not overlap.
-- [ ] Add Focus and Team modes; Team creates bounded specialist tasks.
+- [x] Add Focus and Team modes; Team creates bounded specialist tasks.
 - [x] Show a task graph with running, waiting, blocked, verifying, and complete
   states plus a compact coordination indicator.
 - [x] Require a verified merge step for cross-agent output.
-- [ ] Make every active chat publish a lightweight awareness heartbeat at least
+- [x] Make every active chat publish a lightweight awareness heartbeat at least
   every 10-15 minutes and immediately on goal, scope, file, blocker, and result
   changes.
-- [ ] Surface nearby work before an agent acts; coordinate when goals, files, or
+- [x] Surface nearby work before an agent acts; coordinate when goals, files, or
   dependencies overlap and keep unrelated work quiet.
-- [ ] Give each task a clear goal, expected output, owned paths, dependencies,
+- [x] Give each task a clear goal, expected output, owned paths, dependencies,
   budget, parent goal, verification state, and final receipt.
-- [ ] Keep Team bounded to useful specialist roles selected for the goal rather
+- [x] Keep Team bounded to useful specialist roles selected for the goal rather
   than displaying an arbitrary agent count; default Focus remains one agent.
-- [ ] Show overlap, waiting, blocked, verification, and merge decisions in a
+- [x] Show overlap, waiting, blocked, verification, and merge decisions in a
   founder-readable activity timeline and graph.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
