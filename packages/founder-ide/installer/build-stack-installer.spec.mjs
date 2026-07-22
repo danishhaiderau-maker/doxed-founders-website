@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const source = fs.readFileSync(path.join(root, 'build-stack-installer.ps1'), 'utf8');
+const installerSource = fs.readFileSync(path.join(root, 'founder-stack.iss'), 'utf8');
 
 describe('Founder IDE one-app installer orchestrator', () => {
   it('resolves the payload beside either direct or nested VS Code source', () => {
@@ -19,5 +20,16 @@ describe('Founder IDE one-app installer orchestrator', () => {
     const packageInner = source.indexOf('vscode-win32-x64-user-setup');
     assert.ok(embed >= 0);
     assert.ok(packageInner > embed);
+  });
+
+  it('persists a deployment mode during silent installation', () => {
+    assert.match(
+      installerSource,
+      /ModePage\.SelectedValueIndex := 2;\s*SelectedDeploymentMode := 'HYBRID';/,
+    );
+    assert.match(
+      installerSource,
+      /ModePage\.SelectedValueIndex := 1;\s*SelectedDeploymentMode := 'PUBLIC';/,
+    );
   });
 });

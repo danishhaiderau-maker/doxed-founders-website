@@ -241,8 +241,10 @@ begin
   // silently fall back to Hybrid (the user can still pick Public).
   if PrivateModeBinariesAvailable() then begin
     ModePage.SelectedValueIndex := 2;
+    SelectedDeploymentMode := 'HYBRID';
   end else begin
     ModePage.SelectedValueIndex := 1;
+    SelectedDeploymentMode := 'PUBLIC';
   end;
 
   // If the Private binaries are missing, pop a one-time info dialog so the
