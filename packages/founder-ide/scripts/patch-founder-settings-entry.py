@@ -37,11 +37,17 @@ def patch(app: Path) -> None:
         raise SystemExit(f"Founder IDE app files were not found below {app}")
 
     data = workbench.read_text(encoding="utf-8")
-    marker = 'id:"void.settingsAction"'
-    if data.count(marker) != 1:
-        raise SystemExit(f"Expected one inherited settings action, found {data.count(marker)}")
+    # Release builds may be minified (`id:"..."`) or readable
+    # (`id: "..."`). Match both so the post-build hardening step does not
+    # accidentally require the unsupported mangled target.
+    marker = re.compile(r'id:\s*["\']void\.settingsAction["\']')
+    marker_matches = list(marker.finditer(data))
+    if len(marker_matches) != 1:
+        raise SystemExit(
+            f"Expected one inherited settings action, found {len(marker_matches)}"
+        )
 
-    start = data.index(marker)
+    start = marker_matches[0].start()
     end = min(len(data), start + 2_000)
     action = data[start:end]
     redirected = 'executeCommand("founderOs.openSettings")'
