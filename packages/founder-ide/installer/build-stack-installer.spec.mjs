@@ -25,6 +25,10 @@ describe('Founder IDE one-app installer orchestrator', () => {
   it('persists a deployment mode during silent installation', () => {
     assert.match(
       installerSource,
+      /WizardIsComponentSelected\('private_core'\).*?Result := 'HYBRID'.*?Result := 'PUBLIC'/s,
+    );
+    assert.match(
+      installerSource,
       /ModePage\.SelectedValueIndex := 2;\s*SelectedDeploymentMode := 'HYBRID';/,
     );
     assert.match(

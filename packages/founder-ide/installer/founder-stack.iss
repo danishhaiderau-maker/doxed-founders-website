@@ -198,7 +198,13 @@ var
 
 function SelectedMode(Param: string): string;
 begin
-  Result := SelectedDeploymentMode;
+  if SelectedDeploymentMode <> '' then begin
+    Result := SelectedDeploymentMode;
+  end else if WizardIsComponentSelected('private_core') then begin
+    Result := 'HYBRID';
+  end else begin
+    Result := 'PUBLIC';
+  end;
 end;
 
 // Returns True if the Forgejo + cloudflared binaries are present in this
