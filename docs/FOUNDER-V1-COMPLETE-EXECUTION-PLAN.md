@@ -87,7 +87,9 @@ zero unsupported percentage claims.
 - [x] Add Builder checkout/webhook lifecycle, cancellation, grace, and
   downgrade rules. Team checkout remains truthfully unavailable until price
   and pool are approved.
-- [ ] Add team pool membership, role, and audit enforcement.
+- [x] Add team pool membership, role, and audit enforcement. Owner/admin/member
+  mutations are bounded, and coordination plus membership changes emit a
+  server-side audit trail.
 
 Evidence: concurrency tests, replay/idempotency tests, billing webhook tests,
 admin and user usage screenshots.
@@ -114,14 +116,14 @@ screenshots, quota tests, native final-response screenshots.
 
 ## Stage 6 - Coordinated agents across chats
 
-- [ ] Persist a workspace coordination ledger shared by every chat.
+- [x] Persist a workspace coordination ledger shared by every connected chat.
 - [ ] Broadcast goal, scope, branch, files, dependencies, and expected output
   before work starts.
-- [ ] Acquire short-lived file/path leases with fencing tokens before edits.
-- [ ] Detect overlap and negotiate ownership before agents write.
-- [ ] Prevent stale agents from overwriting a newer lease or result.
-- [ ] Refresh awareness on events and at a bounded heartbeat while working.
-- [ ] Allow independent work to continue quietly when scopes do not overlap.
+- [x] Acquire short-lived file/path leases with fencing tokens before edits.
+- [x] Detect path overlap and require ownership resolution before agents write.
+- [x] Prevent stale agents from overwriting a newer lease or result.
+- [x] Refresh awareness on events and at a bounded heartbeat while working.
+- [x] Allow independent work to continue quietly when scopes do not overlap.
 - [ ] Add Focus and Team modes; Team creates bounded specialist tasks.
 - [ ] Show a task graph with running, waiting, blocked, verifying, and complete
   states plus a compact coordination indicator.

@@ -125,6 +125,14 @@ export class FounderPathLeaseStore {
     }
   }
 
+  release(lease: FounderPathLease): void {
+    const file = this.claimFile(lease.workspacePath, lease.relativePath);
+    const current = this.read(file);
+    if (!current) return;
+    if (current.taskId !== lease.taskId || current.fencingToken !== lease.fencingToken) return;
+    try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
+  }
+
   prune(now = Date.now()): void {
     for (const file of this.files()) {
       const lease = this.read(file);

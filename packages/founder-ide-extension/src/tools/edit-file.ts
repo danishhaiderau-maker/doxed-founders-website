@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { founderPathLeases } from '../agent-path-leases';
 import { currentFounderTaskId } from '../agent-task-context';
+import { founderCoordinationCloud } from '../agent-coordination-cloud';
 
 export interface EditFileInput {
   filePath: string;
@@ -185,6 +186,20 @@ export const editFileTool: vscode.LanguageModelTool<EditFileInput> = {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(`Error: ${validation.reason} Read the file and retry.`),
       ]);
+    }
+    if (activeTaskId) {
+      const cloudClaim = await founderCoordinationCloud.claim(
+        activeTaskId,
+        path.relative(workspaceRoot, uri.fsPath).replaceAll('\\', '/'),
+      );
+      if (!cloudClaim.ok) {
+        founderPathLeases.release(claim.lease);
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Error: ${cloudClaim.ownerTitle ?? 'Another Founder task'} already owns this path. Coordinate before editing.`,
+          ),
+        ]);
+      }
     }
 
     try {

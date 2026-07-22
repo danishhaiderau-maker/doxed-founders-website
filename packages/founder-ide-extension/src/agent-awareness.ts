@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +12,8 @@ import {
   type FounderAgentPresence,
 } from './agent-coordination-state';
 import { founderPathLeases } from './agent-path-leases';
+import { founderCoordinationCloud, type FounderCloudTask } from './agent-coordination-cloud';
+import { resolveCredentials } from './credentials';
 
 export interface FounderAgentAwarenessSummary {
   activeCount: number;
@@ -36,6 +38,8 @@ export class FounderAgentAwareness implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<FounderAgentAwarenessSummary>();
   private readonly timer: NodeJS.Timeout;
   private readonly documentListener: vscode.Disposable;
+  private cloudPeers: FounderAgentPresence[] = [];
+  private cloudSyncing = false;
   private lastWarningKey = '';
 
   readonly onDidChange = this.changeEmitter.event;
@@ -53,6 +57,19 @@ export class FounderAgentAwareness implements vscode.Disposable {
     const file = path.join(coordinationRoot(), `${safeFileName(taskId)}.json`);
     this.leases.set(taskId, { file, presence });
     this.writeLease(file, presence);
+    const credentials = resolveCredentials();
+    if (credentials && presence.workspacePath) {
+      founderCoordinationCloud.begin(credentials, {
+        clientTaskId: taskId,
+        workspaceKey: workspaceKeyFor(presence.workspacePath),
+        title: presence.title,
+        branch: presence.branch,
+        provider,
+        scope: { openFiles: presence.ownedFiles.slice(0, 20) },
+        permissions: { workspaceEdits: true, commandsRequireConfirmation: true },
+      });
+      void this.syncCloudPeers(taskId);
+    }
     this.emitSummary(taskId);
     return taskId;
   }
@@ -61,7 +78,8 @@ export class FounderAgentAwareness implements vscode.Disposable {
     const lease = this.leases.get(taskId);
     if (!lease) return '';
     this.refreshLease(lease);
-    const peers = readAllPresences().filter((presence) => presence.id !== taskId);
+    const peers = [...readAllPresences(), ...this.cloudPeers]
+      .filter((presence) => presence.id !== taskId);
     const risks = findAgentRisks(lease.presence, peers);
     if (risks.length > 0) {
       const warningKey = risks.map((risk) => risk.peer.id).sort().join('|');
@@ -86,6 +104,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
     if (!lease) return;
     this.leases.delete(taskId);
     founderPathLeases.releaseTask(taskId);
+    void founderCoordinationCloud.finish(taskId);
     try { fs.rmSync(lease.file, { force: true }); } catch { /* best effort */ }
     this.lastWarningKey = '';
     this.emitSummary();
@@ -124,11 +143,14 @@ export class FounderAgentAwareness implements vscode.Disposable {
   private refreshLeases(): void {
     this.pruneStaleFiles();
     for (const lease of this.leases.values()) this.refreshLease(lease);
+    const firstTaskId = this.leases.keys().next().value as string | undefined;
+    if (firstTaskId) void this.syncCloudPeers(firstTaskId);
     this.emitSummary();
   }
 
   private refreshLease(lease: ActiveLease): void {
     founderPathLeases.refreshTask(lease.presence.id);
+    void founderCoordinationCloud.heartbeat(lease.presence.id, lease.presence.status === 'waiting' ? 'WAITING' : 'ACTIVE');
     const claimedFiles = founderPathLeases
       .claimsForTask(lease.presence.id)
       .map((claim) => claim.relativePath);
@@ -173,7 +195,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
   }
 
   private buildSummary(focusTaskId?: string): FounderAgentAwarenessSummary {
-    const all = readAllPresences();
+    const all = [...readAllPresences(), ...this.cloudPeers];
     const local = focusTaskId
       ? this.leases.get(focusTaskId)?.presence
       : this.leases.values().next().value?.presence as FounderAgentPresence | undefined;
@@ -194,6 +216,22 @@ export class FounderAgentAwareness implements vscode.Disposable {
         conflict: presence.id === local?.id ? risks.length > 0 : conflictingIds.has(presence.id),
       })),
     };
+  }
+
+  private async syncCloudPeers(taskId: string): Promise<void> {
+    if (this.cloudSyncing) return;
+    this.cloudSyncing = true;
+    try {
+      const peers = await founderCoordinationCloud.peers(taskId);
+      const localIds = new Set(this.leases.keys());
+      const workspacePath = this.leases.get(taskId)?.presence.workspacePath ?? '';
+      this.cloudPeers = peers
+        .filter((peer) => !localIds.has(peer.clientTaskId))
+        .map((peer) => cloudPresence(peer, workspacePath));
+      this.emitSummary(taskId);
+    } finally {
+      this.cloudSyncing = false;
+    }
   }
 }
 
@@ -257,6 +295,50 @@ function readGitBranch(workspacePath: string): string | undefined {
   }
 }
 
+function workspaceKeyFor(workspacePath: string): string {
+  const remote = readGitRemote(workspacePath);
+  const identity = remote ? `remote:${remote}` : `local:${normalizedPath(workspacePath)}`;
+  return `repo:${createHash('sha256').update(identity).digest('hex')}`;
+}
+
+function readGitRemote(workspacePath: string): string | undefined {
+  if (!workspacePath) return undefined;
+  try {
+    const dotGit = path.join(workspacePath, '.git');
+    let gitDir = dotGit;
+    if (fs.statSync(dotGit).isFile()) {
+      const target = fs.readFileSync(dotGit, 'utf8').trim().replace(/^gitdir:\s*/i, '');
+      gitDir = path.resolve(workspacePath, target);
+      const commonDirFile = path.join(gitDir, 'commondir');
+      if (fs.existsSync(commonDirFile)) {
+        gitDir = path.resolve(gitDir, fs.readFileSync(commonDirFile, 'utf8').trim());
+      }
+    }
+    const config = fs.readFileSync(path.join(gitDir, 'config'), 'utf8');
+    const section = config.match(/\[remote\s+"origin"\]([\s\S]*?)(?=\n\[|$)/i)?.[1];
+    const remote = section?.match(/^\s*url\s*=\s*(.+)$/im)?.[1]?.trim();
+    return remote?.replace(/\.git$/i, '').toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function cloudPresence(task: FounderCloudTask, workspacePath: string): FounderAgentPresence {
+  return {
+    version: 1,
+    id: `cloud:${task.id}`,
+    workspacePath,
+    workspaceName: 'Shared Founder workspace',
+    branch: task.branch,
+    title: task.title,
+    provider: task.provider ?? 'Founder AI',
+    status: task.status === 'WAITING' ? 'waiting' : 'working',
+    ownedFiles: task.claims.map((claim) => claim.path).slice(0, 80),
+    startedAt: task.heartbeatAt,
+    heartbeatAt: task.heartbeatAt,
+  };
+}
+
 function taskTitle(prompt: string): string {
   return prompt.replace(/\s+/g, ' ').trim().slice(0, 140) || 'Founder AI task';
 }
@@ -274,5 +356,6 @@ export const __testHooks = {
   openWorkspaceFiles,
   readGitBranch,
   readAllPresences,
+  workspaceKeyFor,
   ttlMs: AGENT_PRESENCE_TTL_MS,
 };

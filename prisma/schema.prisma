@@ -484,6 +484,13 @@ enum FounderTeamRole {
   MEMBER
 }
 
+enum FounderCoordinationTaskStatus {
+  ACTIVE
+  WAITING
+  COMPLETE
+  CANCELED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -596,6 +603,8 @@ model User {
   founderPlanSubscription  FounderPlanSubscription?
   ownedFounderPlanTeams    FounderPlanTeam[]              @relation("FounderPlanTeamOwner")
   founderTeamMemberships   FounderPlanTeamMember[]
+  founderCoordinationTasks FounderCoordinationTask[]
+  founderCoordinationAudit FounderCoordinationAudit[]
   messagesSent             PlatformMessage[]            @relation("MessageFrom")
   messagesReceived         PlatformMessage[]            @relation("MessageTo")
   wallMessages             ProjectWallMessage[]
@@ -805,6 +814,8 @@ model FounderPlanTeam {
   owner        User                     @relation("FounderPlanTeamOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   members      FounderPlanTeamMember[]
   subscription FounderPlanSubscription?
+  coordinationTasks FounderCoordinationTask[]
+  coordinationAudit FounderCoordinationAudit[]
 
   @@index([ownerUserId])
 }
@@ -822,6 +833,71 @@ model FounderPlanTeamMember {
 
   @@unique([teamId, userId])
   @@index([userId])
+}
+
+model FounderCoordinationTask {
+  id                  String                        @id @default(cuid())
+  clientTaskId        String
+  ownerUserId         String
+  teamId              String?
+  workspaceKey        String
+  title               String
+  scope               Json?
+  branch              String?
+  provider            String?
+  permissions         Json?
+  budgetWeightedUnits Int?
+  status              FounderCoordinationTaskStatus @default(ACTIVE)
+  heartbeatAt         DateTime                      @default(now())
+  expiresAt           DateTime
+  completedAt         DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+
+  owner  User                         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  team   FounderPlanTeam?             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  claims FounderCoordinationPathClaim[]
+  audit  FounderCoordinationAudit[]
+
+  @@unique([ownerUserId, clientTaskId])
+  @@index([workspaceKey, status, expiresAt])
+  @@index([teamId, workspaceKey, status])
+}
+
+model FounderCoordinationPathClaim {
+  id            String   @id @default(cuid())
+  taskId        String
+  workspaceKey  String
+  path          String
+  fencingToken  String   @unique
+  generation    Int      @default(1)
+  heartbeatAt   DateTime @default(now())
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  task FounderCoordinationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceKey, path])
+  @@index([taskId, expiresAt])
+}
+
+model FounderCoordinationAudit {
+  id          String   @id @default(cuid())
+  actorUserId String
+  teamId      String?
+  taskId      String?
+  action      String
+  details     Json?
+  createdAt   DateTime @default(now())
+
+  actor User                     @relation(fields: [actorUserId], references: [id], onDelete: Cascade)
+  team  FounderPlanTeam?         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  task  FounderCoordinationTask? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([teamId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([taskId, createdAt])
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────

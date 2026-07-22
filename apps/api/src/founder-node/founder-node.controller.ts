@@ -5,7 +5,9 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -29,6 +31,11 @@ import {
   toFounderIdeEntitlements,
   type FounderIdeEntitlements,
 } from './founder-node-entitlements';
+import {
+  FounderAgentCoordinationService,
+  type ClaimFounderPathInput,
+  type StartFounderTaskInput,
+} from '../founder-os/founder-agent-coordination.service';
 
 const MANIFEST_RELATIVE_PATH = [
   'packages',
@@ -75,6 +82,7 @@ export class FounderNodeController {
     private readonly vaultSync: FounderNodeVaultSyncService,
     private readonly ideBridge: IdeBridgeService,
     private readonly founderPromo: FounderPromoService,
+    private readonly coordination: FounderAgentCoordinationService,
   ) {}
 
   @Post('pairing-code')
@@ -337,6 +345,72 @@ export class FounderNodeController {
       req.founderNode.userId,
     );
     return toFounderIdeEntitlements(status);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('coordination/tasks')
+  startCoordinationTask(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: StartFounderTaskInput,
+  ) {
+    return this.coordination.startTask(req.founderNode.userId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('coordination/tasks')
+  listCoordinationTasks(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Query('workspaceKey') workspaceKey: string,
+  ) {
+    return this.coordination.listTasks(req.founderNode.userId, workspaceKey);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('coordination/tasks/:taskId/heartbeat')
+  heartbeatCoordinationTask(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Body() body: { status?: 'ACTIVE' | 'WAITING' },
+  ) {
+    return this.coordination.heartbeat(
+      req.founderNode.userId,
+      taskId,
+      body?.status ?? 'ACTIVE',
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('coordination/tasks/:taskId/claims')
+  claimCoordinationPath(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Body() body: ClaimFounderPathInput,
+  ) {
+    return this.coordination.claimPath(req.founderNode.userId, taskId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Delete('coordination/tasks/:taskId/claims')
+  releaseCoordinationPath(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Query('path') claimedPath: string,
+  ) {
+    return this.coordination.releasePath(req.founderNode.userId, taskId, claimedPath);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Patch('coordination/tasks/:taskId/finish')
+  finishCoordinationTask(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Body() body: { status?: 'COMPLETE' | 'CANCELED' },
+  ) {
+    return this.coordination.finishTask(
+      req.founderNode.userId,
+      taskId,
+      body?.status ?? 'COMPLETE',
+    );
   }
 
   /**

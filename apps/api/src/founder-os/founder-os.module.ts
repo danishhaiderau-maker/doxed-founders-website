@@ -14,10 +14,13 @@ import { FounderPromoService } from './founder-promo.service';
 import { FounderPlanEntitlementsService } from './founder-plan-entitlements.service';
 import { FounderPlanBillingController } from './founder-plan-billing.controller';
 import { FounderPlanBillingService } from './founder-plan-billing.service';
+import { FounderAgentCoordinationController } from './founder-agent-coordination.controller';
+import { FounderAgentCoordinationService } from './founder-agent-coordination.service';
+import { FounderPlanTeamService } from './founder-plan-team.service';
 
 @Module({
   imports: [NotificationsModule, forwardRef(() => XSocialModule), GitHubModule, forwardRef(() => EventsModule)],
-  controllers: [FounderOsController, FounderPlanBillingController],
+  controllers: [FounderOsController, FounderPlanBillingController, FounderAgentCoordinationController],
   providers: [
     FounderOsService,
     FounderOsIntegrationService,
@@ -26,8 +29,10 @@ import { FounderPlanBillingService } from './founder-plan-billing.service';
     FounderCloudService,
     FounderPlanEntitlementsService,
     FounderPlanBillingService,
+    FounderAgentCoordinationService,
+    FounderPlanTeamService,
     FounderPromoService,
   ],
-  exports: [FounderOsService, GithubAutoSyncService, FounderCloudService, FounderPlanEntitlementsService, FounderPromoService],
+  exports: [FounderOsService, GithubAutoSyncService, FounderCloudService, FounderPlanEntitlementsService, FounderPromoService, FounderAgentCoordinationService],
 })
 export class FounderOsModule {}

@@ -189,6 +189,27 @@ Complete the calm Founder-native shell, signed installer/updater, clean upgrade/
 
 The coordination feature is complete when a founder requests one change spanning UI, API, schema, and tests; Founder chooses Team mode, creates isolated worktrees, detects an intentional API/schema overlap, records one agreed owner and interface without being prompted, shows live progress, merges in dependency order, runs independent visual and automated verification, and produces one truthful completion receipt. No duplicate implementation, contaminated branch, hidden conflict, or unexplained provider charge remains.
 
+## Implemented V1 foundation (2026-07-23)
+
+- Local tasks publish 60-second presence heartbeats and refresh between tool turns.
+- Every model-driven or remote workspace edit acquires an atomic local path
+  claim and validates its fencing token immediately before `WorkspaceEdit`.
+- Builder and Team tasks mirror into an authenticated server ledger through the
+  paired Founder Node credential. Repository identity is hashed; local absolute
+  paths and credentials are not placed in request URLs.
+- Server path claims are unique per workspace/path, expire after three minutes,
+  increment their generation after stale takeover, and reject a live competing
+  task with an explicit conflict response.
+- Team owners, admins, and members have enforced role boundaries. Task, claim,
+  and membership mutations create durable audit entries.
+- Local and offline work remains usable if the cloud ledger is unavailable;
+  same-machine fencing stays active. Cross-device guarantees resume when the
+  connection returns.
+
+Focus/Team task decomposition, dependency-aware graph states, isolated worktree
+creation, verified merge orchestration, and the visual task graph remain in the
+next coordination increment.
+
 ## 13. Research references
 
 - Spettro product and workflow: https://spettro.app/
