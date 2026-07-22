@@ -47,6 +47,20 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /outside managed quota/);
   });
 
+  it('advertises the current DeepSeek V4 context contract for every managed route', () => {
+    const capabilities = read('src/vs/workbench/contrib/void/common/modelCapabilities.ts');
+    for (const alias of [
+      'founder-os-auto',
+      'founder-os-fast',
+      'founder-os-reasoning',
+      'founder-os-code',
+    ]) {
+      const start = capabilities.indexOf(`'${alias}':`);
+      assert.ok(start >= 0, `${alias} must be present`);
+      assert.match(capabilities.slice(start, start + 260), /contextWindow:\s*1_000_000/);
+    }
+  });
+
   it('ships encrypted remembered personal provider profiles', () => {
     const settings = read(
       'src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx',
