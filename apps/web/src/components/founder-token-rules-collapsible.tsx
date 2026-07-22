@@ -5,8 +5,8 @@ export function FounderTokenRulesCollapsible() {
   return (
     <details className="mt-3 rounded-lg border border-zinc-700/60 bg-zinc-900/30 p-4 text-sm open:border-violet-500/40 open:bg-violet-950/10">
       <summary className="flex cursor-pointer list-none items-center justify-between text-zinc-300 hover:text-white">
-        <span className="font-medium">How free AI tokens work on Founder OS</span>
-        <span className="text-xs text-zinc-500">5M managed tokens | BYOK anytime</span>
+        <span className="font-medium">How Founder Free works</span>
+        <span className="text-xs text-zinc-500">Managed quota | personal AI anytime</span>
       </summary>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -17,9 +17,9 @@ export function FounderTokenRulesCollapsible() {
           </p>
           <p className="mt-1 text-xs text-emerald-200/70">Activate with your verified X account</p>
           <ul className="mt-3 space-y-1.5 text-xs text-zinc-300">
-            <li>5 million Founder-managed AI tokens</li>
+            <li>Managed quota for questions, planning, and small edits</li>
             <li>30-day activation window</li>
-            <li>Live usage and expiry visible in Founder IDE</li>
+            <li>Clear quota percentage and expiry in Founder IDE and your account</li>
             <li>Builder activity can increase the daily fair-use allowance</li>
             <li>Your own provider keys remain available at any time</li>
           </ul>
@@ -36,7 +36,7 @@ export function FounderTokenRulesCollapsible() {
             <li>Add a custom OpenAI-compatible endpoint</li>
             <li>Run Ollama privately on this device</li>
             <li>Personal provider usage is billed by that provider</li>
-            <li>Personal and local usage does not consume Founder Free tokens</li>
+            <li>Personal and local usage does not consume Founder Free quota</li>
           </ul>
         </div>
       </div>

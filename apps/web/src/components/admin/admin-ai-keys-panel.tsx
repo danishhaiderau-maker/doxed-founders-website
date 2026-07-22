@@ -47,7 +47,7 @@ const GROUPS: ProviderGroup[] = [
     id: 'promo',
     label: 'Founder promo pool',
     blurb:
-      'Keys used for the Founder Free managed-token allowance. Billed as platform_promo. Toggle, cap, and activation window live in Platform & Treasury.',
+      'Keys used for Founder Free managed quota. Billed as platform_promo. Toggle, cap, and activation window live in AI & Usage.',
     keys: ['glm', 'gemini', 'deepseek'],
   },
 ];

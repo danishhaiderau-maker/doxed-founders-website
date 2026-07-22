@@ -24,11 +24,14 @@ import { ReferralPanel } from '@/components/account/referral-panel';
 import { AccountAgentTradeExports } from '@/components/account/account-agent-trade-exports';
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
+import { FounderFreeQuotaCard } from '@/components/account/founder-free-quota-card';
 import {
   AccountActivityItem,
   AccountOverview,
   fetchAccountActivity,
   fetchAccountOverview,
+  fetchFounderPromoStatus,
+  FounderPromoUserStatus,
 } from '@/lib/api';
 
 export type AccountTab =
@@ -64,6 +67,7 @@ export function AccountHub({
   const [tab, setTab] = useState<AccountTab>(initialTab);
   const [overview, setOverview] = useState<AccountOverview | null>(null);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
+  const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unreadMessages = useUnreadMessageCount(token);
 
@@ -71,12 +75,14 @@ export function AccountHub({
     if (!token) return;
     setError(null);
     try {
-      const [ov, act] = await Promise.all([
+      const [ov, act, promo] = await Promise.all([
         fetchAccountOverview(token),
         fetchAccountActivity(token),
+        fetchFounderPromoStatus(token).catch(() => null),
       ]);
       setOverview(ov);
       setActivity(act);
+      setPromoStatus(promo);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
     }
@@ -349,6 +355,7 @@ export function AccountHub({
                 </Link>
               </div>
             </div>
+            <FounderFreeQuotaCard status={promoStatus} />
             <TopUpPanel accessToken={token} />
           </section>
         )}

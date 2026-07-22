@@ -23,7 +23,7 @@ Status: Complete in the IDE. Production entitlement deployment remains a tracked
 - Added microphone input and visible personal-AI access beside the composer.
 - Added remembered BYOK providers: OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter, and OpenAI-compatible endpoints.
 - Kept Founder Managed as the simple default with Auto, Fast, Build, and Deep intents.
-- Added plan and usage presentation for the 5,000,000-token Founder Free allowance.
+- Added plan and usage presentation for the Founder Free managed quota while keeping exact metering in admin controls.
 - When the production entitlement endpoint is unavailable, the UI says live usage is unavailable instead of inventing a number.
 - Verified a clean installed native chat response through `deepseek/deepseek-v4-pro` with a route receipt.
 

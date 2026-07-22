@@ -59,7 +59,7 @@ export class FounderPromoService {
       windowDays: row?.founderPromoWindowDays ?? FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
       message:
         row?.founderPromoMessage?.trim() ||
-        'Founder Free includes 5 million Founder-managed AI tokens. Connect your own provider at any time.',
+        'Founder Free is available. Connect your own provider or local model at any time.',
       credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
@@ -238,15 +238,15 @@ export class FounderPromoService {
 
   promoEndedMessage(status: FounderPromoStatus): string {
     if (status.enabled && status.founderRegistered && !status.exhausted) {
-      return 'Your Founder Free allowance has ended. Connect your own AI in Founder Settings to keep building.';
+      return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
     }
     if (!status.enabled || !status.founderRegistered) {
-      return 'Connect your own AI in Founder Settings to use Founder AI.';
+      return 'Connect personal AI in Founder Settings to use Founder AI.';
     }
     if (status.exhausted) {
-      return `You've used your free ${(status.tokenCap / 1_000_000).toFixed(0)}M Founder-managed tokens. Connect your own AI in Founder Settings to continue.`;
+      return 'You have used your Founder Free quota. Connect personal AI in Founder Settings to continue.';
     }
-    return 'Your Founder Free allowance has ended. Connect your own AI in Founder Settings to keep building.';
+    return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
@@ -269,7 +269,7 @@ export class FounderPromoService {
     // (set on X OAuth + blue-verified flow) — no schema migration needed.
     const twitterVerified = Boolean(user?.xVerified);
     const TWITTER_GATE_MESSAGE =
-      'Founder Free requires a verified X account. Connect X in Founder Settings to claim your managed tokens.';
+      'Founder Free requires a verified X account. Connect X in Founder Settings to activate your quota.';
 
     // Promo is available to ALL signed-up users — use founder.createdAt OR user.createdAt
     const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
@@ -351,7 +351,7 @@ export class FounderPromoService {
 
     if (!settings.credentialsConfigured) {
       baseStatus.message =
-        'AI promo is enabled but platform API keys are not configured yet. Ask your admin to add keys in Connected Accounts.';
+        'Founder Free is enabled but platform AI capacity is not configured yet. Ask an admin to review AI & Usage.';
       return baseStatus;
     }
 

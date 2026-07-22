@@ -411,12 +411,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
       </section>
       <section class="section">
         <h2>Plan and usage</h2>
-        <p class="section-copy">Founder-managed tokens are separate from personal API keys and local models.</p>
+        <p class="section-copy">Founder Free is a managed quota. Personal API keys and local models remain separate.</p>
         <div class="usage-card">
           <div class="usage-head"><strong>Founder Free</strong><span>${escapeHtml(entitlementStatus)}</span></div>
-          <div class="usage-values"><strong>${formatTokenCount(managedTokens.remaining)} remaining</strong><span>${formatTokenCount(managedTokens.used)} of ${formatTokenCount(managedTokens.cap)} used</span></div>
-          <progress class="progress" aria-label="Founder-managed token usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
-          <div class="usage-values"><span>${escapeHtml(expiryLabel)}</span><span>Personal and local AI do not use this allowance</span></div>
+          <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>Managed quota</span></div>
+          <progress class="progress" aria-label="Founder Free quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
+          <div class="usage-values"><span>${escapeHtml(expiryLabel)}</span><span>Personal and local AI do not use this quota</span></div>
           ${entitlement.message ? `<p class="usage-message">${escapeHtml(entitlement.message)}</p>` : ''}
         </div>
       </section>
@@ -507,10 +507,6 @@ function profileSummary(id: ExecutionProfileId): string {
     case 'autonomous':
       return 'Longer multi-step agent work';
   }
-}
-
-function formatTokenCount(value: number): string {
-  return Math.max(0, Math.floor(value)).toLocaleString('en-US');
 }
 
 function escapeHtml(value: string): string {

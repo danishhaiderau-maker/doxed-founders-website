@@ -350,7 +350,6 @@ export default function AdminControlPage() {
 
           {section === 'treasury-launch' && (
             <section className="space-y-4">
-              {token && <AdminFounderPromoPanel accessToken={token} hideKeyCards />}
               <form onSubmit={handleSaveDefaultSettings} className="rounded-lg border border-amber-500/25 bg-amber-950/10 p-6">
                 <h2 className="font-semibold text-amber-200">Hire rules & public message</h2>
                 <p className="mt-1 text-sm text-zinc-500">
@@ -440,11 +439,14 @@ export default function AdminControlPage() {
             </section>
           )}
           {section === 'ai-usage' && token && (
-            <AdminAiKeysPanel
-              token={token}
-              overview={overview}
-              onOverviewChange={setOverview}
-            />
+            <section className="space-y-4">
+              <AdminFounderPromoPanel accessToken={token} hideKeyCards />
+              <AdminAiKeysPanel
+                token={token}
+                overview={overview}
+                onOverviewChange={setOverview}
+              />
+            </section>
           )}
           {section === 'ai-usage' && token && <AdminBuilderBreakdownPanel accessToken={token} />}
         </div>
