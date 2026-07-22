@@ -23,6 +23,7 @@ import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_S
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 import {
+  deepseekUserIsolationId,
   forcedIntentForAlias,
   tierForFounderPlan,
   normalizeFounderAliasRoute,
@@ -286,6 +287,9 @@ export class AiProxyRuntimeService {
       ...(body.tools?.length ? { tools: body.tools } : {}),
       ...(body.tools?.length && body.tool_choice
         ? { tool_choice: body.tool_choice }
+        : {}),
+      ...(route.providerKey === 'deepseek'
+        ? { user_id: deepseekUserIsolationId(auth.userId) }
         : {}),
     };
 

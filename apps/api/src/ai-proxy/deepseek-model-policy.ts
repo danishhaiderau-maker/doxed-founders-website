@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AiProxyTier } from '@dcf/utils';
 import type { FounderPlanName } from '../founder-os/founder-plan-entitlements.service';
 
@@ -11,6 +12,11 @@ export const DEEPSEEK_V4_FLASH_MODEL = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL = 'deepseek-v4-pro';
 export const DEEPSEEK_V4_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 384_000;
+
+export function deepseekUserIsolationId(userId: string): string {
+  const digest = createHash('sha256').update(userId).digest('hex').slice(0, 40);
+  return `founder_${digest}`;
+}
 
 export type ForcedAliasIntent = 'simple_qa' | 'reasoning' | 'code';
 

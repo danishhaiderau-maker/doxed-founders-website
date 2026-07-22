@@ -5,6 +5,7 @@ import {
   DEEPSEEK_V4_FLASH_MODEL,
   DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
   DEEPSEEK_V4_PRO_MODEL,
+  deepseekUserIsolationId,
   forcedIntentForAlias,
   normalizeFounderAliasRoute,
   normalizeProviderModel,
@@ -16,6 +17,14 @@ import {
 test('DeepSeek V4 capability limits match the current provider contract', () => {
   assert.equal(DEEPSEEK_V4_CONTEXT_WINDOW, 1_000_000);
   assert.equal(DEEPSEEK_V4_MAX_OUTPUT_TOKENS, 384_000);
+});
+
+test('DeepSeek cache isolation is stable per founder without exposing an account id', () => {
+  const first = deepseekUserIsolationId('founder@example.com');
+  assert.equal(first, deepseekUserIsolationId('founder@example.com'));
+  assert.notEqual(first, deepseekUserIsolationId('other@example.com'));
+  assert.match(first, /^founder_[a-f0-9]{40}$/);
+  assert.doesNotMatch(first, /founder@example\.com/);
 });
 
 test('Founder OS aliases force their advertised routing intent', () => {
