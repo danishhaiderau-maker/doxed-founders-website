@@ -83,8 +83,10 @@ zero unsupported percentage claims.
 - [x] Charge the conservative reservation when a started outcome is uncertain.
 - [x] Release requests rejected before provider execution.
 - [x] Expose cap, used, reserved, remaining, reset time, unit, and formula.
-- [ ] Make allowance server-authoritative by plan: Free, Builder, Team.
-- [ ] Add checkout/webhook lifecycle, cancellation, grace, and downgrade rules.
+- [x] Make allowance server-authoritative by plan: Free, Builder, Team.
+- [x] Add Builder checkout/webhook lifecycle, cancellation, grace, and
+  downgrade rules. Team checkout remains truthfully unavailable until price
+  and pool are approved.
 - [ ] Add team pool membership, role, and audit enforcement.
 
 Evidence: concurrency tests, replay/idempotency tests, billing webhook tests,
@@ -228,4 +230,3 @@ security review, legal/compliance gate, end-to-end admin simulations.
 
 Evidence: signed artifact/hash, clean-machine matrix, installed-app screenshots,
 test report, visual audit bundle, release receipt, and blocker register.
-

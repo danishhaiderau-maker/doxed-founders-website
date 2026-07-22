@@ -1,7 +1,18 @@
 import type { FounderPromoStatus } from '../founder-os/founder-promo.service';
 
 export type FounderIdeEntitlements = {
-  plan: 'free' | 'founder_pro' | 'launch_partner';
+  plan: 'free' | 'builder' | 'team';
+  priceCentsMonthly: number | null;
+  team: {
+    id: string;
+    name: string;
+    role: 'owner' | 'admin' | 'member';
+  } | null;
+  features: {
+    coordination: boolean;
+    remoteControl: boolean;
+    rolesAndAudit: boolean;
+  };
   managedTokens: {
     unit: 'weighted_tokens';
     weightsVersion: 'founder-wtu-v1';
@@ -24,7 +35,16 @@ export function toFounderIdeEntitlements(
   status: FounderPromoStatus,
 ): FounderIdeEntitlements {
   return {
-    plan: 'free',
+    plan: status.plan,
+    priceCentsMonthly: status.priceCentsMonthly,
+    team: status.teamId && status.teamName && status.teamRole
+      ? { id: status.teamId, name: status.teamName, role: status.teamRole }
+      : null,
+    features: {
+      coordination: status.coordination,
+      remoteControl: status.remoteControl,
+      rolesAndAudit: status.rolesAndAudit,
+    },
     managedTokens: {
       unit: status.unit,
       weightsVersion: status.weightsVersion,

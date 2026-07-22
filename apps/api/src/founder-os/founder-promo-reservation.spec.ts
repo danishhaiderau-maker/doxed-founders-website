@@ -7,6 +7,7 @@ type Row = {
   id: string;
   requestId: string;
   userId: string;
+  quotaOwnerKey: string;
   status: 'RESERVED' | 'RECONCILED' | 'RELEASED' | 'UNCERTAIN';
   reservedWeightedUnits: number;
   actualWeightedUnits: number | null;
@@ -14,7 +15,10 @@ type Row = {
   createdAt: Date;
 };
 
-function serviceHarness(initial: Row[] = []) {
+function serviceHarness(
+  initial: Row[] = [],
+  resolvePlan?: (userId: string) => Record<string, unknown>,
+) {
   const rows = [...initial];
   const tx = {
     $executeRaw: async () => 1,
@@ -39,7 +43,10 @@ function serviceHarness(initial: Row[] = []) {
       findUnique: async ({ where }: { where: { requestId: string } }) =>
         rows.find((row) => row.requestId === where.requestId) ?? null,
       updateMany: async () => ({ count: 0 }),
-      findMany: async () => rows.filter((row) => row.status !== 'RELEASED'),
+      findMany: async ({ where }: { where: { quotaOwnerKey: string } }) =>
+        rows.filter(
+          (row) => row.status !== 'RELEASED' && row.quotaOwnerKey === where.quotaOwnerKey,
+        ),
       create: async ({ data }: { data: Omit<Row, 'id' | 'status' | 'actualWeightedUnits' | 'createdAt'> }) => {
         const row: Row = {
           ...data,
@@ -58,7 +65,28 @@ function serviceHarness(initial: Row[] = []) {
   };
   return {
     rows,
-    service: new FounderPromoService(prisma as never, {} as never, {} as never),
+    service: new FounderPromoService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {
+        resolve: async (userId: string) => resolvePlan?.(userId) ?? ({
+          plan: 'free',
+          quotaOwnerKey: `user:${userId}`,
+          weeklyWeightedUnitCap: 200_000,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
+          priceCentsMonthly: 0,
+          teamId: null,
+          teamName: null,
+          teamRole: null,
+          coordination: false,
+          remoteControl: false,
+          rolesAndAudit: false,
+          requiresXVerification: true,
+        }),
+      } as never,
+    ),
   };
 }
 
@@ -87,6 +115,7 @@ describe('FounderPromoService managed reservations', () => {
         id: 'used-1',
         requestId: 'used-request',
         userId: 'user-1',
+        quotaOwnerKey: 'user:user-1',
         status: 'RECONCILED',
         reservedWeightedUnits: 199_000,
         actualWeightedUnits: 199_000,
@@ -107,6 +136,50 @@ describe('FounderPromoService managed reservations', () => {
         }),
       (error: unknown) =>
         error instanceof HttpException && error.getStatus() === 429,
+    );
+  });
+
+  it('serializes Team members against one shared allowance', async () => {
+    const teamPlan = () => ({
+      plan: 'team',
+      quotaOwnerKey: 'team:team-1',
+      weeklyWeightedUnitCap: 200_000,
+      currentPeriodStart: '2026-07-20T00:00:00.000Z',
+      currentPeriodEnd: '2026-08-20T00:00:00.000Z',
+      priceCentsMonthly: null,
+      teamId: 'team-1',
+      teamName: 'Launch Lab',
+      teamRole: 'member',
+      coordination: true,
+      remoteControl: true,
+      rolesAndAudit: true,
+      requiresXVerification: false,
+    });
+    const { service } = serviceHarness([
+      {
+        id: 'team-used-1',
+        requestId: 'team-used-request',
+        userId: 'user-1',
+        quotaOwnerKey: 'team:team-1',
+        status: 'RECONCILED',
+        reservedWeightedUnits: 199_000,
+        actualWeightedUnits: 199_000,
+        expiresAt: new Date('2026-07-22T01:00:00.000Z'),
+        createdAt: new Date('2026-07-22T00:00:00.000Z'),
+      },
+    ], teamPlan);
+
+    await assert.rejects(
+      () => service.reserveManagedUsage({
+        userId: 'user-2',
+        requestId: 'team-over-cap',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        tier: 'fast',
+        estimatedInputTokens: 1_000,
+        maxOutputTokens: 1,
+      }),
+      (error: unknown) => error instanceof HttpException && error.getStatus() === 429,
     );
   });
 
@@ -133,6 +206,7 @@ describe('FounderPromoService managed reservations', () => {
     const service = new FounderPromoService(
       prisma as never,
       crypto as never,
+      {} as never,
       {} as never,
     );
 

@@ -31,6 +31,7 @@ import {
   parseClientPromptEfficiency,
   type ClientPromptEfficiencyEstimate,
 } from './ai-proxy-efficiency';
+import { calculateDeepseekCostUsd } from './deepseek-provider-cost';
 
 /**
  * Server-side shape of the model list returned at /v1/models. Each alias is
@@ -487,6 +488,7 @@ export class AiProxyRuntimeService {
         route.model,
         usage.promptTokens,
         usage.completionTokens,
+        usage.providerUsage,
       );
       if (route.flightRecorderHasDecisionRow) {
         // v2 path: the Routing Engine already wrote the decision row at
@@ -692,16 +694,21 @@ export class AiProxyRuntimeService {
   }
 
   /**
-   * Compute the USD cost of a request from token counts and the matching
-   * Capability row. Returns null if the Capability is missing (e.g. v2 not
-   * seeded yet) so the Flight Recorder stores an honest null rather than 0.
+   * Compute USD cost from provider-reported DeepSeek cache usage when present.
+   * Other providers and missing usage fall back to the matching Capability
+   * row. Missing pricing remains an honest null rather than a fabricated zero.
    */
   private async computeCostUsd(
     provider: string,
     model: string,
     promptTokens: number,
     completionTokens: number,
+    providerUsage?: ProviderTokenUsage,
   ): Promise<number | null> {
+    if (provider === 'deepseek') {
+      const measured = calculateDeepseekCostUsd(model, providerUsage);
+      if (measured) return measured.costUsd;
+    }
     try {
       const cap = await this.prisma.capability.findUnique({
         where: { provider_model: { provider, model } },

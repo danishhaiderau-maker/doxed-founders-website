@@ -7,6 +7,18 @@ Founder-managed AI is a recurring allowance measured in weighted token units
 seven-day window for an eligible verified founder. BYOK and local inference do
 not consume this allowance.
 
+Plan authority is held by the API:
+
+- Free: 200,000 WTU per recurring seven-day window.
+- Builder: $35/month and 5,000,000 WTU per recurring seven-day window.
+- Team: a shared `quotaOwnerKey` and admin-agreed weekly pool. Team checkout
+  remains unavailable until its price and allowance are approved.
+
+Active and trialing Builder subscriptions retain access through their paid
+period. Past-due subscriptions receive a bounded three-day grace period;
+canceled or expired subscriptions resolve to Free. Stripe webhook signatures
+are verified before any entitlement change.
+
 The `founder-wtu-v1` weights are:
 
 - uncached input: 1 WTU

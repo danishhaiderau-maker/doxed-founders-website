@@ -466,6 +466,24 @@ enum AiManagedReservationStatus {
   UNCERTAIN
 }
 
+enum FounderPlanTier {
+  FREE
+  BUILDER
+  TEAM
+}
+
+enum FounderPlanStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+}
+
+enum FounderTeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -575,6 +593,9 @@ model User {
   topUpPayments            TopUpPayment[]
   aiTokenUsageLogs         AiTokenUsageLog[]
   aiManagedReservations    AiManagedReservation[]
+  founderPlanSubscription  FounderPlanSubscription?
+  ownedFounderPlanTeams    FounderPlanTeam[]              @relation("FounderPlanTeamOwner")
+  founderTeamMemberships   FounderPlanTeamMember[]
   messagesSent             PlatformMessage[]            @relation("MessageFrom")
   messagesReceived         PlatformMessage[]            @relation("MessageTo")
   wallMessages             ProjectWallMessage[]
@@ -726,6 +747,7 @@ model AiManagedReservation {
   id                    String                     @id @default(cuid())
   requestId             String                     @unique
   userId                String
+  quotaOwnerKey         String
   provider              String
   model                 String
   tier                  String
@@ -748,7 +770,58 @@ model AiManagedReservation {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status, createdAt])
+  @@index([quotaOwnerKey, status, createdAt])
   @@index([status, expiresAt])
+}
+
+model FounderPlanSubscription {
+  id                  String            @id @default(cuid())
+  tier                FounderPlanTier
+  status              FounderPlanStatus @default(ACTIVE)
+  userId              String?           @unique
+  teamId              String?           @unique
+  currentPeriodStart  DateTime
+  currentPeriodEnd    DateTime
+  cancelAtPeriodEnd   Boolean           @default(false)
+  stripeCustomerId    String?
+  stripeSubscriptionId String?          @unique
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  user User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team FounderPlanTeam? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([status, currentPeriodEnd])
+}
+
+model FounderPlanTeam {
+  id                    String   @id @default(cuid())
+  name                  String
+  ownerUserId           String
+  weeklyWeightedUnitCap Int      @default(20000000)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  owner        User                     @relation("FounderPlanTeamOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  members      FounderPlanTeamMember[]
+  subscription FounderPlanSubscription?
+
+  @@index([ownerUserId])
+}
+
+model FounderPlanTeamMember {
+  id        String          @id @default(cuid())
+  teamId    String
+  userId    String
+  role      FounderTeamRole @default(MEMBER)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  team FounderPlanTeam @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId])
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────

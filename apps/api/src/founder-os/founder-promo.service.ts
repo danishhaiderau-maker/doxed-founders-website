@@ -16,8 +16,17 @@ import {
   FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
   FOUNDER_FREE_MANAGED_TOKEN_CAP,
 } from './founder-free.config';
+import { FounderPlanEntitlementsService } from './founder-plan-entitlements.service';
 
 export type FounderPromoStatus = {
+  plan: 'free' | 'builder' | 'team';
+  priceCentsMonthly: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  teamRole: 'owner' | 'admin' | 'member' | null;
+  coordination: boolean;
+  remoteControl: boolean;
+  rolesAndAudit: boolean;
   unit: 'weighted_tokens';
   weightsVersion: 'founder-wtu-v1';
   enabled: boolean;
@@ -67,6 +76,7 @@ export class FounderPromoService {
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
     private readonly builderScore: BuilderScoreService,
+    private readonly planEntitlements: FounderPlanEntitlementsService,
   ) {}
 
   async getPlatformPromoSettings() {
@@ -172,9 +182,10 @@ export class FounderPromoService {
     });
     const estimatedOutputTokens = input.maxOutputTokens ?? 4_096;
     const now = new Date();
+    const entitlement = await this.planEntitlements.resolve(input.userId, now);
 
     return this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.userId}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${entitlement.quotaOwnerKey}))`;
 
       const existing = await tx.aiManagedReservation.findUnique({
         where: { requestId: input.requestId },
@@ -203,12 +214,16 @@ export class FounderPromoService {
         }),
       ]);
       const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
+      const quotaAnchor = entitlement.currentPeriodStart
+        ? new Date(entitlement.currentPeriodStart)
+        : registeredAt;
       const enabled = settings?.founderPromoAiEnabled ?? false;
-      if (!enabled || !registeredAt || !user?.xVerified) {
+      const xGateFailed = entitlement.requiresXVerification && !user?.xVerified;
+      if (!enabled || !quotaAnchor || xGateFailed) {
         throw new HttpException(
           {
             statusCode: HttpStatus.PAYMENT_REQUIRED,
-            message: !user?.xVerified
+            message: xGateFailed
               ? 'Founder Free requires a verified X account. Connect X or use a personal/local model.'
               : 'Founder managed AI is unavailable. Continue with a personal or local model.',
             code: 'FOUNDER_MANAGED_NOT_ELIGIBLE',
@@ -217,13 +232,16 @@ export class FounderPromoService {
         );
       }
 
-      const tokenCap = settings?.founderPromoTokenCap ?? FOUNDER_FREE_MANAGED_TOKEN_CAP;
-      const windowDays = settings?.founderPromoWindowDays ?? FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS;
-      const window = founderQuotaWindow(registeredAt, now, windowDays);
+      const tokenCap = entitlement.weeklyWeightedUnitCap;
+      const window = founderQuotaWindow(
+        quotaAnchor,
+        now,
+        FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
+      );
 
       await tx.aiManagedReservation.updateMany({
         where: {
-          userId: input.userId,
+          quotaOwnerKey: entitlement.quotaOwnerKey,
           status: 'RESERVED',
           upstreamStartedAt: null,
           expiresAt: { lt: now },
@@ -231,10 +249,9 @@ export class FounderPromoService {
         data: { status: 'RELEASED', reconciledAt: now },
       });
 
-      const [reservations, legacyUsage] = await Promise.all([
-        tx.aiManagedReservation.findMany({
+      const reservations = await tx.aiManagedReservation.findMany({
           where: {
-            userId: input.userId,
+            quotaOwnerKey: entitlement.quotaOwnerKey,
             createdAt: { gte: window.startsAt, lt: window.resetsAt },
             status: { in: ['RESERVED', 'RECONCILED', 'UNCERTAIN'] },
           },
@@ -243,16 +260,17 @@ export class FounderPromoService {
             reservedWeightedUnits: true,
             actualWeightedUnits: true,
           },
-        }),
-        tx.aiTokenUsageLog.aggregate({
+        });
+      const legacyUsage = entitlement.plan === 'team'
+        ? { _sum: { promptTokens: null, completionTokens: null } }
+        : await tx.aiTokenUsageLog.aggregate({
           where: {
             userId: input.userId,
             billingSource: { in: ['platform_promo', 'platform_brain'] },
             createdAt: { gte: window.startsAt, lt: window.resetsAt },
           },
           _sum: { promptTokens: true, completionTokens: true },
-        }),
-      ]);
+        });
       const reservationUsage = reservations.reduce(
         (sum, row) => sum + chargeForManagedReservation(row),
         0,
@@ -288,6 +306,7 @@ export class FounderPromoService {
         data: {
           requestId: input.requestId,
           userId: input.userId,
+          quotaOwnerKey: entitlement.quotaOwnerKey,
           provider: input.provider,
           model: input.model,
           tier: input.tier,
@@ -458,26 +477,32 @@ export class FounderPromoService {
   }
 
   promoEndedMessage(status: FounderPromoStatus): string {
+    const label = status.plan === 'builder'
+      ? 'Founder Builder'
+      : status.plan === 'team'
+        ? 'Founder Team'
+        : 'Founder Free';
     if (status.enabled && status.founderRegistered && !status.exhausted) {
-      return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
+      return `${label} managed access is unavailable. Connect personal AI in Founder Settings to keep building.`;
     }
     if (!status.enabled || !status.founderRegistered) {
       return 'Connect personal AI in Founder Settings to use Founder AI.';
     }
     if (status.exhausted) {
-      return 'You have used your Founder Free quota. Connect personal AI in Founder Settings to continue.';
+      return `You have used your ${label} quota. Connect personal AI in Founder Settings to continue.`;
     }
-    return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
+    return `${label} managed access is unavailable. Connect personal AI in Founder Settings to keep building.`;
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
-    const [settings, founder, user] = await Promise.all([
+    const [settings, founder, user, entitlement] = await Promise.all([
       this.getPlatformPromoSettings(),
       this.prisma.founder.findUnique({ where: { userId }, select: { createdAt: true } }),
       this.prisma.user.findUnique({
         where: { id: userId },
         select: { createdAt: true, xVerified: true, twitterHandle: true },
       }),
+      this.planEntitlements.resolve(userId),
     ]);
 
     // Free-token eligibility gate: only accounts with a verified X/Twitter
@@ -491,16 +516,19 @@ export class FounderPromoService {
     // Promo is available to ALL signed-up users — use founder.createdAt OR user.createdAt
     const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
 
-    const tokenCap = settings.tokenCap;
+    const tokenCap = entitlement.weeklyWeightedUnitCap;
     const now = new Date();
-    const window = registeredAt
-      ? founderQuotaWindow(registeredAt, now, settings.windowDays)
+    const quotaAnchor = entitlement.currentPeriodStart
+      ? new Date(entitlement.currentPeriodStart)
+      : registeredAt;
+    const window = quotaAnchor
+      ? founderQuotaWindow(quotaAnchor, now, FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS)
       : null;
 
     if (window) {
       await this.prisma.aiManagedReservation.updateMany({
         where: {
-          userId,
+          quotaOwnerKey: entitlement.quotaOwnerKey,
           status: 'RESERVED',
           upstreamStartedAt: null,
           expiresAt: { lt: now },
@@ -509,11 +537,10 @@ export class FounderPromoService {
       });
     }
 
-    const [reservations, legacyUsage] = window
-      ? await Promise.all([
-          this.prisma.aiManagedReservation.findMany({
+    const reservations = window
+      ? await this.prisma.aiManagedReservation.findMany({
             where: {
-              userId,
+              quotaOwnerKey: entitlement.quotaOwnerKey,
               createdAt: { gte: window.startsAt, lt: window.resetsAt },
               status: { in: ['RESERVED', 'RECONCILED', 'UNCERTAIN'] },
             },
@@ -522,17 +549,18 @@ export class FounderPromoService {
               reservedWeightedUnits: true,
               actualWeightedUnits: true,
             },
-          }),
-          this.prisma.aiTokenUsageLog.aggregate({
+          })
+      : [];
+    const legacyUsage = window && entitlement.plan !== 'team'
+      ? await this.prisma.aiTokenUsageLog.aggregate({
             where: {
               userId,
               billingSource: { in: ['platform_promo', 'platform_brain'] },
               createdAt: { gte: window.startsAt, lt: window.resetsAt },
             },
             _sum: { promptTokens: true, completionTokens: true },
-          }),
-        ])
-      : [[], { _sum: { promptTokens: null, completionTokens: null } }];
+          })
+      : { _sum: { promptTokens: null, completionTokens: null } };
 
     const tokensUsed = Math.ceil(
       reservations.reduce((sum, row) => sum + chargeForManagedReservation(row), 0) +
@@ -543,6 +571,14 @@ export class FounderPromoService {
     const exhausted = tokensUsed >= tokenCap;
 
     const statusBase = {
+      plan: entitlement.plan,
+      priceCentsMonthly: entitlement.priceCentsMonthly,
+      teamId: entitlement.teamId,
+      teamName: entitlement.teamName,
+      teamRole: entitlement.teamRole,
+      coordination: entitlement.coordination,
+      remoteControl: entitlement.remoteControl,
+      rolesAndAudit: entitlement.rolesAndAudit,
       unit: 'weighted_tokens' as const,
       weightsVersion: 'founder-wtu-v1' as const,
       tokenCap,
@@ -582,7 +618,8 @@ export class FounderPromoService {
       0,
       Math.ceil((window.resetsAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)),
     );
-    const eligible = !exhausted && settings.credentialsConfigured && twitterVerified;
+    const xEligible = !entitlement.requiresXVerification || twitterVerified;
+    const eligible = !exhausted && settings.credentialsConfigured && xEligible;
 
     const baseStatus: FounderPromoStatus = {
       ...statusBase,
@@ -600,14 +637,14 @@ export class FounderPromoService {
       return baseStatus;
     }
 
-    if (!twitterVerified) {
+    if (!xEligible) {
       baseStatus.message = TWITTER_GATE_MESSAGE;
       return baseStatus;
     }
 
     if (!settings.credentialsConfigured) {
       baseStatus.message =
-        'Founder Free is enabled but platform AI capacity is not configured yet. Ask an admin to review AI & Usage.';
+        'Founder managed AI is enabled but DeepSeek capacity is not configured yet. Ask an admin to review AI & Usage.';
       return baseStatus;
     }
 
@@ -616,12 +653,15 @@ export class FounderPromoService {
   }
 
   async getPromoUsageByProvider(userId: string) {
-    const status = await this.getUserPromoStatus(userId);
+    const [status, entitlement] = await Promise.all([
+      this.getUserPromoStatus(userId),
+      this.planEntitlements.resolve(userId),
+    ]);
     if (!status.promoStartedAt || !status.expiresAt) return [];
     const [reservations, logs] = await Promise.all([
       this.prisma.aiManagedReservation.findMany({
         where: {
-          userId,
+          quotaOwnerKey: entitlement.quotaOwnerKey,
           createdAt: {
             gte: new Date(status.promoStartedAt),
             lt: new Date(status.expiresAt),
@@ -635,7 +675,9 @@ export class FounderPromoService {
           actualWeightedUnits: true,
         },
       }),
-      this.prisma.aiTokenUsageLog.groupBy({
+      entitlement.plan === 'team'
+        ? Promise.resolve([])
+        : this.prisma.aiTokenUsageLog.groupBy({
         by: ['provider'],
         where: {
           userId,
@@ -646,7 +688,7 @@ export class FounderPromoService {
           },
         },
         _sum: { promptTokens: true, completionTokens: true },
-      }),
+          }),
     ]);
     const byProvider = new Map<string, number>();
     for (const row of reservations) {

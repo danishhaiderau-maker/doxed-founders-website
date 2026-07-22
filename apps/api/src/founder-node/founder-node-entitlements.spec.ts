@@ -5,6 +5,14 @@ import { toFounderIdeEntitlements } from './founder-node-entitlements.js';
 describe('toFounderIdeEntitlements', () => {
   it('maps the paired-node allowance without inventing paid-plan limits', () => {
     const result = toFounderIdeEntitlements({
+      plan: 'free',
+      priceCentsMonthly: 0,
+      teamId: null,
+      teamName: null,
+      teamRole: null,
+      coordination: false,
+      remoteControl: false,
+      rolesAndAudit: false,
       unit: 'weighted_tokens',
       weightsVersion: 'founder-wtu-v1',
       enabled: true,
@@ -23,6 +31,13 @@ describe('toFounderIdeEntitlements', () => {
 
     assert.deepEqual(result, {
       plan: 'free',
+      priceCentsMonthly: 0,
+      team: null,
+      features: {
+        coordination: false,
+        remoteControl: false,
+        rolesAndAudit: false,
+      },
       managedTokens: {
         unit: 'weighted_tokens',
         weightsVersion: 'founder-wtu-v1',
