@@ -145,6 +145,25 @@ Write-Host "[stack]   embedded Founder extension -> $builtinExtension"
 # Patch the compiled shell after the downstream build and before installer
 # packaging. Both scripts fail closed if an upstream minified signature moves.
 $ideAppRoot = Join-Path $ideRoot "resources\app"
+
+# VS Code requires its Electron-targeted SQLite binding during main-process
+# startup. Cached payload builds can otherwise look healthy while omitting the
+# native file and then emit an uncaught exception on every launch.
+$sqliteRelativePath = "node_modules\@vscode\sqlite3\build\Release\vscode-sqlite3.node"
+$sqliteNativeDest = Join-Path $ideAppRoot $sqliteRelativePath
+if (-not (Test-Path $sqliteNativeDest)) {
+    $sqliteNativeSource = Join-Path $VscodiumCheckout "vscode\$sqliteRelativePath"
+    if (-not (Test-Path $sqliteNativeSource)) {
+        throw "Founder IDE SQLite native binding is missing from both payload and source: $sqliteRelativePath"
+    }
+    New-Item -ItemType Directory -Path (Split-Path $sqliteNativeDest -Parent) -Force | Out-Null
+    Copy-Item $sqliteNativeSource $sqliteNativeDest -Force
+    Write-Host "[stack]   restored SQLite native binding -> $sqliteNativeDest"
+}
+if ((Get-Item $sqliteNativeDest).Length -lt 100000) {
+    throw "Founder IDE SQLite native binding is unexpectedly small: $sqliteNativeDest"
+}
+
 foreach ($patchName in @("patch-founder-settings-entry.py", "patch-founder-native-ai.py")) {
     $patchScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\$patchName"
     if (-not (Test-Path $patchScript)) { throw "Founder IDE shell patch not found: $patchScript" }

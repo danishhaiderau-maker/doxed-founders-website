@@ -64,15 +64,17 @@ Status: Complete for local workspace awareness.
 Status: Complete for local release acceptance. Production signing remains an external release gate.
 
 - Rebuilt the one-click Founder IDE installer from the cached compiled IDE payload without recompiling the editor core.
+- Caught and repaired a cached-payload packaging regression where the Electron SQLite native binding was absent; the installer now restores it from the matching source build or fails closed before packaging.
 - Cleared Electron Builder output before packaging and proved the retired Dragon asset is absent after an in-place upgrade.
 - Installed into the normal Windows application location and verified the embedded Founder Node runtime.
+- Passed a normal, non-debug launch: the installed SQLite binary matched the build payload, Founder Node started automatically with `--embedded-founder-ide`, its IDE handshake connected, no SQLite module error appeared, and debug ports `9451`/`9452` were closed.
 - Archived obsolete external Founder extension copies without touching credentials or workspaces.
 - Repaired and verified the desktop, Start Menu, and existing taskbar shortcuts against the installed executable.
 - Passed a clean-profile navigation, branding, Personal AI, BYOK, custom-model, account, plan, and 5,000,000-token allowance sweep with no renderer errors.
 - Passed a live native chat prompt through `deepseek/deepseek-v4-pro` in 3.5 seconds with the Founder route receipt visible.
 - Passed installed Dragon idle, flight, fire-delivery, attention, blocked, transparency, and exact `48 x 32` pixel drag checks.
 - Passed 94 extension tests and 36 embedded-node tests.
-- Final installer SHA-256: `1067799EA2D51D40929E7F9F6FECC7EA730951EB79B316E7B2F26B9A17469536`.
+- Final installer SHA-256: `893B2016C1A063AB239026D65C343336CA1A9C7B872BAF053136EA682BD22E0D`.
 - Authenticode is truthfully `NotSigned`; stable publishing remains blocked until a valid signing identity is provisioned.
 
 ## 7. Redesign the whole product shell
