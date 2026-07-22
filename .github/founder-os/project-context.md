@@ -12,7 +12,7 @@ Product & platform (17 recent commits)
 
 ## Last Commit
 
-fix(relay): fast-path attributed same-direction limits
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
