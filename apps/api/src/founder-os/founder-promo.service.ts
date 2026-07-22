@@ -48,7 +48,7 @@ export type PromoCredentialsMap = Partial<Record<PromoCredentialProvider, string
 
 export type PromoCredentialsStatus = Record<PromoCredentialProvider, boolean>;
 
-const PROMO_PROVIDERS = ['GLM', 'DEEPSEEK', 'GEMINI', 'OLLAMA_LOCAL'] as const;
+const MANAGED_FOUNDER_PROVIDERS = ['DEEPSEEK', 'OLLAMA_LOCAL'] as const;
 
 const PROMO_CREDENTIAL_KEYS: PromoCredentialProvider[] = ['glm', 'gemini', 'deepseek'];
 
@@ -79,7 +79,7 @@ export class FounderPromoService {
       message:
         row?.founderPromoMessage?.trim() ||
         'Founder Free is available. Connect your own provider or local model at any time.',
-      credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
+      credentialsConfigured: credentialsStatus.deepseek,
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
     };
@@ -369,6 +369,9 @@ export class FounderPromoService {
     userId: string,
     provider: PromoCredentialProvider,
   ): Promise<string | null> {
+    // Founder V1 has one managed cloud provider. Other stored credentials are
+    // retained for admin migration only; GLM/Gemini remain personal BYOK.
+    if (provider !== 'deepseek') return null;
     // Per-user advisory lock — hashtext gives a stable int32 per userId.
     await this.prisma.$executeRaw`SELECT pg_advisory_lock(hashtext(${userId}))`;
     try {
@@ -447,6 +450,7 @@ export class FounderPromoService {
 
   /** Whether a provider can be used via promo (eligible + platform key saved). */
   async hasPromoProvider(userId: string, provider: PromoCredentialProvider): Promise<boolean> {
+    if (provider !== 'deepseek') return false;
     const status = await this.getUserPromoStatus(userId);
     if (!status.eligible) return false;
     const map = await this.loadDecryptedCredentials();
@@ -545,7 +549,7 @@ export class FounderPromoService {
       tokensUsed,
       tokensRemaining,
       exhausted,
-      providers: [...PROMO_PROVIDERS],
+      providers: [...MANAGED_FOUNDER_PROVIDERS],
     };
 
     if (!settings.enabled) {
@@ -712,10 +716,12 @@ export class FounderPromoService {
     try { return this.crypto.decrypt(row.platformBrainDeepseekKeyEnc); } catch { return null; }
   }
 
-  /** Decrypted platform GLM (ZhipuAI) promo key, or null if not configured. */
+  /**
+   * Legacy compatibility surface. Managed GLM is disabled in Founder V1;
+   * founders can still connect GLM as a personal provider in Founder IDE.
+   */
   async getDecryptedPlatformGlmKey(): Promise<string | null> {
-    const map = await this.loadDecryptedCredentials();
-    return map.glm ?? null;
+    return null;
   }
 
   /** Decrypted platform DeepSeek promo key (distinct from platform brain fallback). */
@@ -727,10 +733,7 @@ export class FounderPromoService {
   /**
    * Returns the list of AI "brains" the calling user can pick from in the
    * workspace chat dropdown. Reflects what is actually wired up:
-   *   - GLM / Gemini / DeepSeek: available when an admin has saved a platform
-   *     promo key for that provider (any signed-up founder can use them while
-   *     the promo window is open).
-   *   - DeepSeek is also available when the legacy platform-brain DeepSeek key
+   *   - DeepSeek: available when the managed or legacy platform-brain key
    *     is configured (separate column on PlatformSettings).
    *   - OLLAMA: available when the user's own Founder Node has heartbeated in
    *     the last 3 minutes (user-scoped, requires userId).
@@ -746,22 +749,10 @@ export class FounderPromoService {
     const creds = settings.credentialsStatus;
     const brains: AvailableBrain[] = [
       {
-        key: 'GLM',
-        label: 'GLM 5.2',
-        hint: 'Promo - fast',
-        available: Boolean(creds.glm),
-      },
-      {
         key: 'DEEPSEEK',
         label: 'DeepSeek',
-        hint: 'Platform brain',
+        hint: 'Founder managed',
         available: Boolean(creds.deepseek) || platformBrain.configured,
-      },
-      {
-        key: 'GEMINI',
-        label: 'Gemini',
-        hint: 'Google',
-        available: Boolean(creds.gemini),
       },
     ];
 

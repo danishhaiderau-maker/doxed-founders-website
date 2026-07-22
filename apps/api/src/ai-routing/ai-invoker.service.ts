@@ -12,6 +12,18 @@ import { AiRoutingService } from './ai-routing.service';
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
+export type InvokeLifecycleContext = {
+  providerKey: string;
+  model: string;
+  maxTokens?: number;
+};
+
+export type InvokeLifecycle = {
+  beforeProvider?: (context: InvokeLifecycleContext) => Promise<void>;
+  afterProvider?: (result: InvokeResult) => Promise<void>;
+  providerUncertain?: (context: InvokeLifecycleContext, error: unknown) => Promise<void>;
+};
+
 export type InvokeOptions = {
   /** Section slug — resolved via AiSectionRouting to a provider. */
   section: string;
@@ -26,6 +38,8 @@ export type InvokeOptions = {
   providerKey?: string;
   /** Override the model (otherwise the provider's defaultModel is used). */
   model?: string;
+  /** Optional accounting/fencing hooks owned by the calling product surface. */
+  lifecycle?: InvokeLifecycle;
 };
 
 export type InvokeResult = {
@@ -98,6 +112,15 @@ export class AiInvokerService {
     const model = options.model ?? provider.defaultModel;
     const temperature = options.temperature ?? 0.4;
     const baseUrl = providerKey === 'glm' ? getGlmApiBaseUrl() : provider.baseUrl;
+    const lifecycleContext: InvokeLifecycleContext = {
+      providerKey,
+      model,
+      maxTokens: options.maxTokens,
+    };
+
+    // Configuration failures above consume nothing. Managed callers reserve
+    // here, after key validation and immediately before provider I/O.
+    await options.lifecycle?.beforeProvider?.(lifecycleContext);
 
     let result: InvokeResult;
     try {
@@ -110,6 +133,13 @@ export class AiInvokerService {
       result.provider = providerKey;
       result.model = model;
     } catch (err) {
+      try {
+        await options.lifecycle?.providerUncertain?.(lifecycleContext, err);
+      } catch (lifecycleError) {
+        this.logger.error(
+          `invoke(${section}) failed to fence uncertain managed usage: ${lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError)}`,
+        );
+      }
       this.logger.warn(
         `invoke(${section}, provider=${providerKey}, model=${model}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -119,6 +149,16 @@ export class AiInvokerService {
     }
 
     // Centralised token logging — best-effort, never throws into the request path.
+    try {
+      await options.lifecycle?.afterProvider?.(result);
+    } catch (lifecycleError) {
+      // The provider already returned a valid response. Preserve it and leave
+      // an operational repair signal instead of converting success to outage.
+      this.logger.error(
+        `invoke(${section}) failed to reconcile managed usage: ${lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError)}`,
+      );
+    }
+
     const billingSource = options.billingSource ?? 'platform_routed';
     void this.adoption
       .recordAiUsage({

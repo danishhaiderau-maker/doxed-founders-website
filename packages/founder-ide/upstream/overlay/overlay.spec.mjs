@@ -55,7 +55,8 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(settings, /Profile name \(for chat dropdown\)/);
     assert.match(settings, /Base URL/);
     assert.match(settings, /API key/);
-    assert.match(profiles, /FOUNDER_PROVIDER_PROFILE_LIMIT = 5/);
+    assert.doesNotMatch(profiles, /FOUNDER_PROVIDER_PROFILE_LIMIT/);
+    assert.doesNotMatch(settings, /Maximum five personal AI profiles/);
     assert.match(profiles, /founder-os-/);
   });
 

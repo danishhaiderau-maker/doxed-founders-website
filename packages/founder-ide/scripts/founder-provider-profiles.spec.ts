@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  FOUNDER_PROVIDER_PROFILE_LIMIT,
   FOUNDER_PROVIDER_PROFILES_KEY,
   headersWithoutFounderProviderProfiles,
   readFounderProviderProfiles,
@@ -41,7 +40,7 @@ describe('Founder personal provider profiles', () => {
     assert.equal(resolveFounderProviderProfile(encoded, 'founder-os-auto'), null);
   });
 
-  it('rejects unsafe records, duplicate labels, and profiles beyond the V1 limit', () => {
+  it('rejects unsafe records and duplicate labels without imposing a profile limit', () => {
     const encoded = JSON.stringify({
       [FOUNDER_PROVIDER_PROFILES_KEY]: [
         ...Array.from({ length: 8 }, (_, index) => profile(index)),
@@ -51,7 +50,7 @@ describe('Founder personal provider profiles', () => {
       ],
     });
     const profiles = readFounderProviderProfiles(encoded);
-    assert.equal(profiles.length, FOUNDER_PROVIDER_PROFILE_LIMIT);
+    assert.equal(profiles.length, 8);
     assert.equal(new Set(profiles.map((entry) => entry.label.toLowerCase())).size, profiles.length);
   });
 

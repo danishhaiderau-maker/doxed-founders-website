@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------*/
 
 export const FOUNDER_PROVIDER_PROFILES_KEY = '__founderProviderProfilesV1';
-export const FOUNDER_PROVIDER_PROFILE_LIMIT = 5;
 
 export type FounderProviderProfile = {
 	id: string;
@@ -70,7 +69,6 @@ export const readFounderProviderProfiles = (
 		seenIds.add(profile.id);
 		seenLabels.add(profile.label.toLowerCase());
 		profiles.push(profile);
-		if (profiles.length === FOUNDER_PROVIDER_PROFILE_LIMIT) break;
 	}
 	return profiles;
 };
@@ -82,8 +80,7 @@ export const writeFounderProviderProfiles = (
 	const root = readRoot(rawHeadersJson);
 	root[FOUNDER_PROVIDER_PROFILES_KEY] = profiles
 		.map(cleanProfile)
-		.filter((profile): profile is FounderProviderProfile => Boolean(profile))
-		.slice(0, FOUNDER_PROVIDER_PROFILE_LIMIT);
+		.filter((profile): profile is FounderProviderProfile => Boolean(profile));
 	return JSON.stringify(root);
 };
 

@@ -12,7 +12,7 @@ The `founder-wtu-v1` weights are:
 - uncached input: 1 WTU
 - cached input: 0.25 WTU
 - visible output: 3 WTU
-- reasoning output: 4 WTU
+- reasoning output: 3 WTU
 
 ## Authority and request lifecycle
 
@@ -39,11 +39,25 @@ the current recurring window and remaining allowance for a truthful client UI.
 
 ## Legacy boundary
 
-Founder IDE and `/api/v1` Founder AI calls use the reservation ledger. Older
-BuilderService website copilot paths still obtain promo keys through
-`resolvePromoApiKey()` and log usage afterward as `platform_promo`. Stage 5
-must consolidate those calls onto the gateway before the platform can claim a
-single universal reservation path. Admin views label this distinction.
+Founder IDE, `/api/v1` Founder AI, and the managed BuilderService website
+copilot paths use the reservation ledger. Legacy GLM and Gemini credentials
+may remain encrypted for admin migration, but they are ineligible for managed
+Founder V1 calls. GLM and every other non-DeepSeek cloud provider are personal
+BYOK options. Ollama remains local, private, and outside managed WTU.
+
+## DeepSeek model and cost boundary
+
+Founder V1 uses `deepseek-v4-flash` for routine and fast work, and
+`deepseek-v4-pro` for explicit code/reasoning or a measured escalation. The
+provider cost ledger uses provider-reported cache-hit input, cache-miss input,
+and output tokens with the price version that was effective for the request.
+WTU remains a fairness allowance and is not substituted for USD cost.
+
+Pricing baseline verified against DeepSeek's official documentation on
+2026-07-22: Flash $0.0028/M cached input, $0.14/M uncached input, and $0.28/M
+output; Pro $0.003625/M cached input, $0.435/M uncached input, and $0.87/M
+output. Prices are versioned operational inputs because the provider may
+change them.
 
 ## Release order and proof
 

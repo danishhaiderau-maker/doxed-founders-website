@@ -130,11 +130,9 @@ export class FounderBrainProvidersService implements OnModuleInit {
 
   async resolveApiKey(provider: FounderBrainProviderSlug): Promise<string | null> {
     if (provider === 'glm') {
-      const env = process.env.GLM_API_KEY?.trim();
-      if (env) return env;
-      const promo = await this.founderPromo.getDecryptedPlatformGlmKey();
-      if (promo) return promo;
-      return this.aiRouting.getDecryptedKey('glm');
+      // Founder V1 deliberately has one managed cloud provider. GLM remains
+      // available through the IDE's encrypted personal-provider profiles.
+      return null;
     }
 
     const env = process.env.DEEPSEEK_API_KEY?.trim();
@@ -217,12 +215,6 @@ export class FounderBrainProvidersService implements OnModuleInit {
 
   private async resolveKeyStatus(provider: FounderBrainProviderSlug): Promise<FounderBrainProviderKeyStatus> {
     if (provider === 'glm') {
-      const env = process.env.GLM_API_KEY?.trim();
-      if (env) return { configured: true, source: 'env', last4: env.slice(-4) };
-      const promo = await this.founderPromo.getDecryptedPlatformGlmKey();
-      if (promo) return { configured: true, source: 'promo', last4: promo.slice(-4) };
-      const routed = await this.aiRouting.getDecryptedKey('glm');
-      if (routed) return { configured: true, source: 'routing', last4: routed.slice(-4) };
       return { configured: false, source: null, last4: null };
     }
 

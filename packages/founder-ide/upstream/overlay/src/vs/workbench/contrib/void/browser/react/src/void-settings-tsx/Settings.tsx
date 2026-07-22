@@ -24,7 +24,6 @@ import { useMCPServiceState } from '../util/services.js';
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js';
 import { StorageScope, StorageTarget } from '../../../../../../../platform/storage/common/storage.js';
 import {
-	FOUNDER_PROVIDER_PROFILE_LIMIT,
 	readFounderProviderProfiles,
 	writeFounderProviderProfiles,
 } from '../../../../common/founderProviderProfiles.js';
@@ -648,10 +647,6 @@ const PersonalProviderProfiles = () => {
 			setError('Names beginning with founder-os- are reserved for Founder Managed.');
 			return;
 		}
-		if (profiles.length >= FOUNDER_PROVIDER_PROFILE_LIMIT) {
-			setError(`Founder IDE V1 remembers up to ${FOUNDER_PROVIDER_PROFILE_LIMIT} personal endpoints.`);
-			return;
-		}
 		if (profiles.some((profile) => profile.label.toLowerCase() === cleanLabel.toLowerCase())
 			|| provider.models.some((entry) => entry.modelName === cleanLabel)) {
 			setError('Choose a unique profile name.');
@@ -736,8 +731,8 @@ const PersonalProviderProfiles = () => {
 			</div>
 			<input className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5 font-mono text-xs' value={headers} onChange={(event) => setHeaders(event.target.value)} placeholder='Optional headers JSON, for example {"X-Team":"founder"}' />
 			<div className='flex items-center justify-between gap-3'>
-				<span className='text-xs text-void-fg-3'>{profiles.length} of {FOUNDER_PROVIDER_PROFILE_LIMIT} profiles saved</span>
-				<button type='submit' className='rounded bg-[#0e70c0] px-3 py-1.5 text-white disabled:opacity-50' disabled={profiles.length >= FOUNDER_PROVIDER_PROFILE_LIMIT}>Add provider</button>
+				<span className='text-xs text-void-fg-3'>{profiles.length} personal {profiles.length === 1 ? 'provider' : 'providers'} saved</span>
+				<button type='submit' className='rounded bg-[#0e70c0] px-3 py-1.5 text-white'>Add provider</button>
 			</div>
 			{error && <div role='alert' className='text-sm text-red-500'>{error}</div>}
 		</form>

@@ -109,4 +109,39 @@ describe('FounderPromoService managed reservations', () => {
         error instanceof HttpException && error.getStatus() === 429,
     );
   });
+
+  it('exposes DeepSeek as the only managed cloud brain', async () => {
+    const prisma = {
+      platformSettings: {
+        findUnique: async () => ({
+          founderPromoAiEnabled: true,
+          founderPromoTokenCap: 200_000,
+          founderPromoWindowDays: 7,
+          founderPromoAiCredentialsEnc: 'encrypted',
+          platformBrainDeepseekKeyEnc: null,
+          updatedAt: new Date('2026-07-22T00:00:00.000Z'),
+        }),
+      },
+    };
+    const crypto = {
+      decrypt: () => JSON.stringify({
+        deepseek: 'deepseek-secret',
+        glm: 'legacy-glm-secret',
+        gemini: 'legacy-gemini-secret',
+      }),
+    };
+    const service = new FounderPromoService(
+      prisma as never,
+      crypto as never,
+      {} as never,
+    );
+
+    assert.equal(await service.resolvePromoApiKey('user-1', 'glm'), null);
+    assert.equal(await service.hasPromoProvider('user-1', 'gemini'), false);
+    assert.equal(await service.getDecryptedPlatformGlmKey(), null);
+    assert.deepEqual(
+      (await service.getAvailableBrains()).map((brain) => brain.key),
+      ['DEEPSEEK', 'RULE_BASED'],
+    );
+  });
 });

@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { BadRequestException, HttpException, Injectable, Logger } from '@nestjs/common';
 import {
   AiProvider,
   ComputePlaneMode,
@@ -72,12 +73,25 @@ import {
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
 import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
-import { AiInvokerService } from '../ai-routing/ai-invoker.service';
+import {
+  AiInvokerService,
+  type InvokeLifecycle,
+} from '../ai-routing/ai-invoker.service';
 import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
+
+class ProviderRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ProviderRequestError';
+  }
+}
 
 /** Map an AiProvider to its promo credential provider key, or null if not a promo provider. */
 function promoProviderForAi(provider: AiProvider): PromoCredentialProvider | null {
@@ -1020,6 +1034,56 @@ export class BuilderService {
    * unchanged. This is intentionally surgical: the cascade below is NOT
    * rewritten, only short-circuited when routing is configured.
    */
+  private managedInvokeLifecycle(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    tier: string,
+  ): InvokeLifecycle {
+    let requestId: string | null = null;
+    return {
+      beforeProvider: async (context) => {
+        requestId = `builder-${randomUUID()}`;
+        await this.founderPromo.reserveManagedUsage({
+          userId,
+          requestId,
+          provider: context.providerKey,
+          model: context.model,
+          tier,
+          estimatedInputTokens: estimateLlmTokensFromText(`${system}\n${userPrompt}`),
+          maxOutputTokens: context.maxTokens,
+        });
+        try {
+          await this.founderPromo.markManagedReservationStarted(userId, requestId);
+        } catch (error) {
+          await this.founderPromo.releaseManagedReservation(userId, requestId);
+          requestId = null;
+          throw error;
+        }
+      },
+      afterProvider: async (result) => {
+        if (!requestId) return;
+        try {
+          await this.founderPromo.reconcileManagedReservation({
+            userId,
+            requestId,
+            usage: {
+              prompt_tokens: result.usage.promptTokens,
+              completion_tokens: result.usage.completionTokens,
+            },
+          });
+        } catch (error) {
+          await this.founderPromo.markManagedReservationUncertain(userId, requestId);
+          throw error;
+        }
+      },
+      providerUncertain: async () => {
+        if (!requestId) return;
+        await this.founderPromo.markManagedReservationUncertain(userId, requestId);
+      },
+    };
+  }
+
   private async tryRoutedInvoker(
     section: 'copilot' | 'quick_build' | 'founder_draft',
     userId: string,
@@ -1049,7 +1113,13 @@ export class BuilderService {
         temperature: 0.4,
         maxTokens,
         userId,
-        billingSource: 'platform_routed',
+        billingSource: 'platform_managed',
+        lifecycle: this.managedInvokeLifecycle(
+          userId,
+          system,
+          userPrompt,
+          `website-${section}`,
+        ),
       });
       return {
         ok: true,
@@ -1061,6 +1131,7 @@ export class BuilderService {
         founderBrainTask: options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt),
       };
     } catch (err) {
+      if (err instanceof HttpException) throw err;
       // ServiceUnavailableException = admin hasn't configured the routed
       // provider yet → fall through to the cascade silently.
       const name = err?.constructor?.name;
@@ -1208,7 +1279,13 @@ export class BuilderService {
               temperature: 0.4,
               maxTokens: ctx.maxOutputTokens,
               userId,
-              billingSource: 'platform_routed',
+              billingSource: 'platform_managed',
+              lifecycle: this.managedInvokeLifecycle(
+                userId,
+                ctx.request.system,
+                ctx.request.userPrompt,
+                `website-${route.intent}`,
+              ),
             });
             return {
               ok: true,
@@ -1218,7 +1295,8 @@ export class BuilderService {
               promptTokens: result.usage.promptTokens,
               completionTokens: result.usage.completionTokens,
             };
-          } catch {
+          } catch (error) {
+            if (error instanceof HttpException) throw error;
             return {
               ok: false,
               intent: route.intent,
@@ -1410,13 +1488,23 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const result = await this.completionWithProvider(
-          provider,
-          apiKey,
-          llmSystem,
-          llmUserPrompt,
-          model,
-        );
+        const result = billingSource === 'platform_promo'
+          ? await this.completionWithManagedProvider(
+              userId,
+              provider,
+              apiKey,
+              llmSystem,
+              llmUserPrompt,
+              model,
+              'website-copilot',
+            )
+          : await this.completionWithProvider(
+              provider,
+              apiKey,
+              llmSystem,
+              llmUserPrompt,
+              model,
+            );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
@@ -1426,7 +1514,7 @@ export class BuilderService {
             result.text.trim(),
             'copilot',
             result.usage,
-            billingSource,
+            billingSource === 'platform_promo' ? 'platform_managed' : billingSource,
           );
           return { ok: true, text: result.text.trim(), provider, founderBrainTask };
         }
@@ -1595,8 +1683,15 @@ export class BuilderService {
       );
       if (promoFallback) return promoFallback;
 
-      const platformBrain = await this.tryPlatformDeepseekFallback(userId, system, userPrompt, llmErrors);
-      if (platformBrain) return platformBrain;
+      if (forceProvider === AiProvider.DEEPSEEK) {
+        const platformBrain = await this.tryPlatformDeepseekFallback(
+          userId,
+          system,
+          userPrompt,
+          llmErrors,
+        );
+        if (platformBrain) return platformBrain;
+      }
 
       const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
       if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
@@ -1613,7 +1708,17 @@ export class BuilderService {
         : cfg.defaultModel ?? undefined;
 
     try {
-      const result = await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
+      const result = billingSource === 'platform_promo'
+        ? await this.completionWithManagedProvider(
+            userId,
+            forceProvider,
+            apiKey,
+            system,
+            userPrompt,
+            model,
+            'website-forced',
+          )
+        : await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
       if (result?.text?.trim()) {
         await this.logAiTokenUsage(
           userId,
@@ -1623,7 +1728,7 @@ export class BuilderService {
           result.text.trim(),
           'copilot_forced',
           result.usage,
-          billingSource,
+          billingSource === 'platform_promo' ? 'platform_managed' : billingSource,
         );
         return { ok: true, text: result.text.trim(), provider: forceProvider };
       }
@@ -1653,16 +1758,12 @@ export class BuilderService {
     settings: { preferredModel?: string | null; defaultProvider?: AiProvider | null },
   ): Promise<{ ok: true; text: string; provider: AiProvider } | { ok: false; llmErrors: string[] } | null> {
     const forcedPromoProvider = promoProviderForAi(forcedProvider);
-    if (!forcedPromoProvider) return null; // non-promo provider (OpenAI/Anthropic/etc.) — no fallback
+    if (forcedPromoProvider !== 'deepseek') return null;
 
     const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
     if (!promoStatus.eligible) return null;
 
-    const order: PromoCredentialProvider[] = [];
-    order.push(forcedPromoProvider);
-    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
-      if (!order.includes(p)) order.push(p);
-    }
+    const order: PromoCredentialProvider[] = ['deepseek'];
 
     const llmErrors: string[] = [];
     for (const p of order) {
@@ -1675,7 +1776,15 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
           : cfg?.defaultModel ?? undefined;
       try {
-        const result = await this.completionWithProvider(actualProvider, promoKey, system, userPrompt, model);
+        const result = await this.completionWithManagedProvider(
+          userId,
+          actualProvider,
+          promoKey,
+          system,
+          userPrompt,
+          model,
+          'website-forced',
+        );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
@@ -1685,9 +1794,9 @@ export class BuilderService {
             result.text.trim(),
             'copilot_forced_promo',
             result.usage,
-            'platform_promo',
+            'platform_managed',
           );
-          // Surface the provider the user selected so the UI reads "GLM" (not RULE_BASED).
+          // Preserve the explicit managed DeepSeek selection in the older UI.
           return { ok: true, text: result.text.trim(), provider: forcedProvider };
         }
         llmErrors.push(`${actualProvider}: empty response`);
@@ -1717,12 +1826,14 @@ export class BuilderService {
     if (!platformKey) return null;
 
     try {
-      const result = await this.completionWithProvider(
+      const result = await this.completionWithManagedProvider(
+        userId,
         AiProvider.DEEPSEEK,
         platformKey,
         system,
         userPrompt,
-        undefined,
+        'deepseek-v4-flash',
+        'website-auto',
       );
       if (result?.text?.trim()) {
         await this.logAiTokenUsage(
@@ -1733,7 +1844,7 @@ export class BuilderService {
           result.text.trim(),
           'copilot_platform_brain',
           result.usage,
-          'platform_brain',
+          'platform_managed',
         );
         return { ok: true, text: result.text.trim(), provider: AiProvider.DEEPSEEK };
       }
@@ -1744,6 +1855,62 @@ export class BuilderService {
       );
     }
     return null;
+  }
+
+  private async settleManagedProviderFailure(
+    userId: string,
+    requestId: string,
+    error: unknown,
+  ): Promise<void> {
+    if (error instanceof ProviderRequestError && error.status >= 400 && error.status < 500) {
+      await this.founderPromo.releaseManagedReservation(userId, requestId);
+      return;
+    }
+    await this.founderPromo.markManagedReservationUncertain(userId, requestId);
+  }
+
+  private async completionWithManagedProvider(
+    userId: string,
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model: string | undefined,
+    tier: string,
+  ): Promise<{ text: string; usage: LlmUsage | null } | null> {
+    const requestId = `builder-${randomUUID()}`;
+    await this.founderPromo.reserveManagedUsage({
+      userId,
+      requestId,
+      provider: String(provider).toLowerCase(),
+      model: model ?? aiProviderConfig(provider)?.defaultModel ?? String(provider).toLowerCase(),
+      tier,
+      estimatedInputTokens: estimateLlmTokensFromText(`${system}\n${userPrompt}`),
+    });
+    try {
+      await this.founderPromo.markManagedReservationStarted(userId, requestId);
+      const result = await this.completionWithProvider(
+        provider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+      );
+      await this.founderPromo.reconcileManagedReservation({
+        userId,
+        requestId,
+        usage: result?.usage
+          ? {
+              prompt_tokens: result.usage.promptTokens,
+              completion_tokens: result.usage.completionTokens,
+            }
+          : null,
+      });
+      return result;
+    } catch (error) {
+      await this.settleManagedProviderFailure(userId, requestId, error);
+      throw error;
+    }
   }
 
   private async completionWithProvider(
@@ -1811,7 +1978,7 @@ export class BuilderService {
           apiKey,
           system,
           userPrompt,
-          model ?? 'deepseek-chat',
+          model ?? 'deepseek-v4-flash',
         );
       case AiProvider.OPENROUTER:
         return yield* this.streamOpenAiCompatible(
@@ -1875,7 +2042,10 @@ export class BuilderService {
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
     }
 
     const reader = res.body.getReader();
@@ -1945,7 +2115,10 @@ export class BuilderService {
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
     }
 
     const reader = res.body.getReader();
@@ -2015,7 +2188,10 @@ export class BuilderService {
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
     }
 
     const reader = res.body.getReader();
@@ -2225,12 +2401,36 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const gen = this.completionWithProviderStream(provider, apiKey, effectiveSystem, userPrompt, model);
-        const first = await gen.next();
+        let gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>;
+        let first: IteratorResult<string, { text: string; usage: LlmUsage | null } | null>;
+        let managedRequestId: string | undefined;
+        if (billingSource === 'platform_promo') {
+          const managed = await this.beginManagedProviderStream(
+            userId,
+            provider,
+            apiKey,
+            effectiveSystem,
+            userPrompt,
+            model,
+            'website-copilot',
+          );
+          ({ gen, first } = managed);
+          managedRequestId = managed.requestId;
+        } else {
+          gen = this.completionWithProviderStream(
+            provider,
+            apiKey,
+            effectiveSystem,
+            userPrompt,
+            model,
+          );
+          first = await gen.next();
+        }
+        const effectiveBillingSource = managedRequestId ? 'platform_managed' : billingSource;
         if (first.done) {
           // No content emitted at all — treat as empty.
           if (first.value?.text) {
-            await this.logAiTokenUsage(userId, provider, effectiveSystem, userPrompt, first.value.text, 'copilot', first.value.usage, billingSource);
+            await this.logAiTokenUsage(userId, provider, effectiveSystem, userPrompt, first.value.text, 'copilot', first.value.usage, effectiveBillingSource);
             return {
               ok: true,
               provider,
@@ -2245,7 +2445,7 @@ export class BuilderService {
         // log usage on completion.
         const firstChunk = first.value as string;
         this.logger.log(
-          `stream resolved provider=${provider} billing=${billingSource}` +
+          `stream resolved provider=${provider} billing=${effectiveBillingSource}` +
             ` model=${model ?? cfg.defaultModel ?? '?'}`,
         );
         return {
@@ -2259,7 +2459,8 @@ export class BuilderService {
             provider,
             effectiveSystem,
             userPrompt,
-            billingSource,
+            effectiveBillingSource,
+            managedRequestId,
           ),
         };
       } catch (err) {
@@ -2274,7 +2475,7 @@ export class BuilderService {
       llmErrors,
     );
     if (platformBrain) {
-      this.logger.log(`stream resolved provider=DEEPSEEK billing=platform_brain (fallback)`);
+      this.logger.log(`stream resolved provider=DEEPSEEK billing=platform_managed (fallback)`);
       return { ok: true, provider: AiProvider.DEEPSEEK, founderBrainTask, stream: platformBrain };
     }
 
@@ -2296,6 +2497,57 @@ export class BuilderService {
     return provider;
   }
 
+  private async beginManagedProviderStream(
+    userId: string,
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model: string | undefined,
+    tier: string,
+  ): Promise<{
+    requestId: string;
+    gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>;
+    first: IteratorResult<string, { text: string; usage: LlmUsage | null } | null>;
+  }> {
+    const requestId = `builder-${randomUUID()}`;
+    await this.founderPromo.reserveManagedUsage({
+      userId,
+      requestId,
+      provider: String(provider).toLowerCase(),
+      model: model ?? aiProviderConfig(provider)?.defaultModel ?? String(provider).toLowerCase(),
+      tier,
+      estimatedInputTokens: estimateLlmTokensFromText(`${system}\n${userPrompt}`),
+    });
+    try {
+      await this.founderPromo.markManagedReservationStarted(userId, requestId);
+      const gen = this.completionWithProviderStream(
+        provider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+      );
+      const first = await gen.next();
+      if (first.done) {
+        await this.founderPromo.reconcileManagedReservation({
+          userId,
+          requestId,
+          usage: first.value?.usage
+            ? {
+                prompt_tokens: first.value.usage.promptTokens,
+                completion_tokens: first.value.usage.completionTokens,
+              }
+            : null,
+        });
+      }
+      return { requestId, gen, first };
+    } catch (error) {
+      await this.settleManagedProviderFailure(userId, requestId, error);
+      throw error;
+    }
+  }
+
   /** Resume a streaming generator after the first chunk has been pulled. */
   private async *wrapStreamWithUsageLog(
     gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>,
@@ -2304,11 +2556,12 @@ export class BuilderService {
     provider: AiProvider,
     system: string,
     userPrompt: string,
-    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'founder_os_local',
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'platform_managed' | 'founder_os_local',
+    managedRequestId?: string,
   ): AsyncGenerator<string, AiProvider> {
-    yield firstChunk;
     let result: { text: string; usage: LlmUsage | null } | null = null;
     try {
+      yield firstChunk;
       // Pull remaining chunks.
       while (true) {
         const { done, value } = await gen.next();
@@ -2323,6 +2576,35 @@ export class BuilderService {
         await gen.return(null);
       } catch {
         // ignore
+      }
+      if (managedRequestId) {
+        if (result) {
+          try {
+            await this.founderPromo.reconcileManagedReservation({
+              userId,
+              requestId: managedRequestId,
+              usage: result.usage
+                ? {
+                    prompt_tokens: result.usage.promptTokens,
+                    completion_tokens: result.usage.completionTokens,
+                  }
+                : null,
+            });
+          } catch (error) {
+            await this.founderPromo.markManagedReservationUncertain(
+              userId,
+              managedRequestId,
+            );
+            this.logger.error(
+              `Managed stream ${managedRequestId} completed but usage reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        } else {
+          await this.founderPromo.markManagedReservationUncertain(
+            userId,
+            managedRequestId,
+          );
+        }
       }
     }
     if (result?.text) {
@@ -2441,8 +2723,17 @@ export class BuilderService {
       );
       if (promoFallback) return promoFallback;
 
-      const platformBrain = await this.tryPlatformDeepseekFallbackStream(userId, system, userPrompt, llmErrors);
-      if (platformBrain) return { ok: true, provider: AiProvider.DEEPSEEK, stream: platformBrain };
+      if (forceProvider === AiProvider.DEEPSEEK) {
+        const platformBrain = await this.tryPlatformDeepseekFallbackStream(
+          userId,
+          system,
+          userPrompt,
+          llmErrors,
+        );
+        if (platformBrain) {
+          return { ok: true, provider: AiProvider.DEEPSEEK, stream: platformBrain };
+        }
+      }
 
       const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
       if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
@@ -2458,25 +2749,43 @@ export class BuilderService {
         : cfg.defaultModel ?? undefined;
 
     try {
-      const gen = this.completionWithProviderStream(forceProvider, apiKey, system, userPrompt, model);
-      const first = await gen.next();
+      let gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>;
+      let first: IteratorResult<string, { text: string; usage: LlmUsage | null } | null>;
+      let managedRequestId: string | undefined;
+      if (billingSource === 'platform_promo') {
+        const managed = await this.beginManagedProviderStream(
+          userId,
+          forceProvider,
+          apiKey,
+          system,
+          userPrompt,
+          model,
+          'website-forced',
+        );
+        ({ gen, first } = managed);
+        managedRequestId = managed.requestId;
+      } else {
+        gen = this.completionWithProviderStream(forceProvider, apiKey, system, userPrompt, model);
+        first = await gen.next();
+      }
+      const effectiveBillingSource = managedRequestId ? 'platform_managed' : billingSource;
       if (first.done) {
         if (first.value?.text) {
-          await this.logAiTokenUsage(userId, forceProvider, system, userPrompt, first.value.text, 'copilot_forced', first.value.usage, billingSource);
+          await this.logAiTokenUsage(userId, forceProvider, system, userPrompt, first.value.text, 'copilot_forced', first.value.usage, effectiveBillingSource);
           this.logger.log(
-            `forced stream resolved provider=${forceProvider} billing=${billingSource} model=${model ?? cfg.defaultModel ?? '?'} (single-chunk)`,
+            `forced stream resolved provider=${forceProvider} billing=${effectiveBillingSource} model=${model ?? cfg.defaultModel ?? '?'} (single-chunk)`,
           );
           return { ok: true, provider: forceProvider, stream: this.singleChunkStream(first.value.text, forceProvider) };
         }
         return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
       }
       this.logger.log(
-        `forced stream resolved provider=${forceProvider} billing=${billingSource} model=${model ?? cfg.defaultModel ?? '?'}`,
+        `forced stream resolved provider=${forceProvider} billing=${effectiveBillingSource} model=${model ?? cfg.defaultModel ?? '?'}`,
       );
       return {
         ok: true,
         provider: forceProvider,
-        stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, forceProvider, system, userPrompt, billingSource),
+        stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, forceProvider, system, userPrompt, effectiveBillingSource, managedRequestId),
       };
     } catch (err) {
       return { ok: false, llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`] };
@@ -2492,16 +2801,12 @@ export class BuilderService {
     settings: { preferredModel?: string | null; defaultProvider?: AiProvider | null },
   ): Promise<{ ok: true; provider: AiProvider; stream: AsyncGenerator<string, AiProvider> } | { ok: false; llmErrors: string[] } | null> {
     const forcedPromoProvider = promoProviderForAi(forcedProvider);
-    if (!forcedPromoProvider) return null;
+    if (forcedPromoProvider !== 'deepseek') return null;
 
     const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
     if (!promoStatus.eligible) return null;
 
-    const order: PromoCredentialProvider[] = [];
-    order.push(forcedPromoProvider);
-    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
-      if (!order.includes(p)) order.push(p);
-    }
+    const order: PromoCredentialProvider[] = ['deepseek'];
 
     const llmErrors: string[] = [];
     for (const p of order) {
@@ -2514,11 +2819,19 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
           : cfg?.defaultModel ?? undefined;
       try {
-        const gen = this.completionWithProviderStream(actualProvider, promoKey, system, userPrompt, model);
-        const first = await gen.next();
+        const managed = await this.beginManagedProviderStream(
+          userId,
+          actualProvider,
+          promoKey,
+          system,
+          userPrompt,
+          model,
+          'website-forced',
+        );
+        const { gen, first, requestId } = managed;
         if (first.done) {
           if (first.value?.text) {
-            await this.logAiTokenUsage(userId, actualProvider, system, userPrompt, first.value.text, 'copilot_forced_promo', first.value.usage, 'platform_promo');
+            await this.logAiTokenUsage(userId, actualProvider, system, userPrompt, first.value.text, 'copilot_forced_promo', first.value.usage, 'platform_managed');
             return { ok: true, provider: forcedProvider, stream: this.singleChunkStream(first.value.text, forcedProvider) };
           }
           llmErrors.push(`${actualProvider}: empty response`);
@@ -2527,7 +2840,7 @@ export class BuilderService {
         return {
           ok: true,
           provider: forcedProvider,
-          stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, actualProvider, system, userPrompt, 'platform_promo'),
+          stream: this.wrapStreamWithUsageLog(gen, first.value as string, userId, actualProvider, system, userPrompt, 'platform_managed', requestId),
         };
       } catch (err) {
         llmErrors.push(`${actualProvider}: ${err instanceof Error ? err.message : 'request failed'}`);
@@ -2552,23 +2865,25 @@ export class BuilderService {
     if (!platformKey) return null;
 
     try {
-      const gen = this.completionWithProviderStream(
+      const managed = await this.beginManagedProviderStream(
+        userId,
         AiProvider.DEEPSEEK,
         platformKey,
         system,
         userPrompt,
-        undefined,
+        'deepseek-v4-flash',
+        'website-auto',
       );
-      const first = await gen.next();
+      const { gen, first, requestId } = managed;
       if (first.done) {
         if (first.value?.text) {
-          void this.logAiTokenUsage(userId, AiProvider.DEEPSEEK, system, userPrompt, first.value.text, 'copilot_platform_brain', first.value.usage, 'platform_brain');
+          void this.logAiTokenUsage(userId, AiProvider.DEEPSEEK, system, userPrompt, first.value.text, 'copilot_platform_brain', first.value.usage, 'platform_managed');
           return this.singleChunkStream(first.value.text, AiProvider.DEEPSEEK);
         }
         existingErrors.push('DEEPSEEK (platform brain): empty response');
         return null;
       }
-      return this.wrapStreamWithUsageLog(gen, first.value as string, userId, AiProvider.DEEPSEEK, system, userPrompt, 'platform_brain');
+      return this.wrapStreamWithUsageLog(gen, first.value as string, userId, AiProvider.DEEPSEEK, system, userPrompt, 'platform_managed', requestId);
     } catch (err) {
       existingErrors.push(`DEEPSEEK (platform brain): ${err instanceof Error ? err.message : 'request failed'}`);
       return null;
@@ -2583,7 +2898,7 @@ export class BuilderService {
     text: string,
     source: string,
     usage?: LlmUsage | null,
-    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'founder_os_local' = 'byok',
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain' | 'platform_managed' | 'founder_os_local' = 'byok',
   ) {
     const promptTokens =
       usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
@@ -2796,9 +3111,7 @@ export class BuilderService {
     const status = await this.founderPromo.getUserPromoStatus(userId);
     if (!status.eligible) return new Set();
     const out = new Set<string>();
-    for (const p of ['glm', 'gemini', 'deepseek'] as const) {
-      if (await this.founderPromo.hasPromoProvider(userId, p)) out.add(p);
-    }
+    if (await this.founderPromo.hasPromoProvider(userId, 'deepseek')) out.add('deepseek');
     return out;
   }
 
@@ -2890,7 +3203,7 @@ export class BuilderService {
       return { apiKey: userKey.trim(), billingSource: 'byok' };
     }
 
-    if (credentialProvider === 'cursor') return null;
+    if (credentialProvider !== 'deepseek') return null;
     const promoKey = await this.founderPromo.resolvePromoApiKey(userId, credentialProvider);
     if (promoKey) {
       return { apiKey: promoKey, billingSource: 'platform_promo' };
@@ -2974,7 +3287,7 @@ export class BuilderService {
             method: 'POST',
             headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              model: 'deepseek-chat',
+              model: 'deepseek-v4-flash',
               messages: [{ role: 'user', content: 'ping' }],
               max_tokens: 8,
             }),
@@ -3053,7 +3366,13 @@ export class BuilderService {
         temperature: 0.4,
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
+    }
     const data = (await res.json()) as {
       choices?: { message?: { content?: string } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -3102,7 +3421,13 @@ export class BuilderService {
         }),
       },
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
+    }
     const data = (await res.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
       usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
@@ -3124,7 +3449,7 @@ export class BuilderService {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model ?? 'deepseek-chat',
+        model: model ?? 'deepseek-v4-flash',
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },
@@ -3134,7 +3459,10 @@ export class BuilderService {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+      throw new ProviderRequestError(
+        res.status,
+        `HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
     }
     const data = (await res.json()) as {
       choices?: { message?: { content?: string } }[];
