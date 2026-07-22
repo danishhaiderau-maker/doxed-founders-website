@@ -57,6 +57,34 @@ class PastAnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "run analyzer"):
                 seal_past_analysis(tmp)
 
+    def test_latest_prefers_meaningful_analysis_over_newer_empty_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "past_analysis"
+            meaningful = parent / "2026-07-22_100000Z_meaningful"
+            empty = parent / "2026-07-22_110000Z_empty"
+            for archive in (meaningful, empty):
+                archive.mkdir(parents=True)
+                (archive / "past_analysis_manifest.json").write_text("{}", encoding="utf-8")
+            (parent / "index.json").write_text(
+                json.dumps({
+                    "schema": "past_analysis_v1",
+                    "analyses": [
+                        {
+                            "archive_id": empty.name,
+                            "performance": {"trades": 0, "net_pnl_usd": None},
+                        },
+                        {
+                            "archive_id": meaningful.name,
+                            "performance": {"trades": 179, "net_pnl_usd": 27.28},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(latest_past_analysis(root), meaningful)
+
     def test_research_store_reset_starts_a_new_empty_epoch(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ResearchStore(tmp)
