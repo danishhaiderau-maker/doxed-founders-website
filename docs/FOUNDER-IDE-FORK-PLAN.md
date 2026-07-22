@@ -90,7 +90,9 @@ The Windows packaging flow (`build/windows/package.sh`, [source](https://github.
 4. Delete prebuilt `.node` native files (forces rebuild for target arch).
 5. Run `../build/windows/rtf/make.sh` — generate the RTF license for Inno Setup.
 6. Generate Group Policy definitions.
-7. `npm run gulp "vscode-win32-${VSCODE_ARCH}-min-ci"` — the actual compilation (minified VS Code build).
+7. `npm run gulp "vscode-win32-${VSCODE_ARCH}"` — compile and package the
+   current source without the upstream mangler. The `-ci` target packages
+   precompiled output and must not be used as the compilation step.
 8. `build_cli.sh` — build the `founder-ide` CLI (tunnel/reuse-window commands).
 9. For x64: optionally build REH (remote server) and REH-web.
 
@@ -98,7 +100,7 @@ The Windows packaging flow (`build/windows/package.sh`, [source](https://github.
 
 | Gulp task | Output |
 |---|---|
-| `vscode-win32-x64-min-ci` | The compiled app |
+| `vscode-win32-x64` | The compiled app (supported Founder release target) |
 | `vscode-win32-x64-inno-updater` | Inno updater |
 | `vscode-win32-x64-user-setup` | **NSIS user installer** (`.exe`) |
 | `vscode-win32-x64-system-setup` | **NSIS system installer** (`.exe`) |

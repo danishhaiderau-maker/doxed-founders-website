@@ -30,7 +30,7 @@ name: Build Founder IDE
 #   5.  apply the Founder IDE overlay (scripts/apply-founder-customizations.ps1)
 #   6.  cache .build/electron (the ~200MB Electron download) + node_modules + .npmrc
 #   7.  npm ci (with the pinned Python on PATH for node-gyp)
-#   8.  gulp vscode-win32-x64-min-ci          (compiles TS + downloads Electron + native ext)
+#   8.  gulp vscode-win32-x64                 (compiles TS + downloads Electron + native ext)
 #   9.  embed the Founder relay into the IDE payload
 #   10. gulp vscode-win32-x64-user-setup + build the mode-aware bootstrapper
 #   11. compute SHA256 + size

@@ -10,7 +10,7 @@ CI flow (`.github/workflows/build-founder-ide.yml`):
 3. Run `scripts/apply-founder-customizations.ps1` from the **monorepo root**.
    This copies every file listed in `MANIFEST.json` over the freshly cloned
    checkout (`mode: replace` overwrites; `mode: add` creates a new file).
-4. `npm ci`, `gulp vscode-win32-x64-min-ci`, `gulp vscode-win32-x64-user-setup`.
+4. `npm ci`, `gulp vscode-win32-x64`, `gulp vscode-win32-x64-user-setup`.
 5. Build the outer Founder Stack installer with Inno Setup.
 
 ## Why an overlay (and not a git patch)
@@ -55,4 +55,4 @@ Then re-trigger `build-founder-ide.yml` manually.
 |---|---|---|
 | Monorepo (this repo) | `packages/founder-ide/installer/founder-stack.iss` | Inno Setup (outer bundle) |
 | Monorepo (this repo) | `packages/founder-ide/upstream/overlay/` | copied onto upstream Void at build time |
-| External (cloned by CI) | `vscode/` from `voideditor/void` | `gulp vscode-win32-x64-min-ci` |
+| External (cloned by CI) | `vscode/` from `voideditor/void` | `gulp vscode-win32-x64` |

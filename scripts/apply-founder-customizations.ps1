@@ -257,4 +257,4 @@ if ($codeIssContent -notmatch '#ifexist "tools\\\*"') {
 Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto, #ifexist tools guard present" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64-min-ci." -ForegroundColor Green
+Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64." -ForegroundColor Green
