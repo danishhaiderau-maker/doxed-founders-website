@@ -258,6 +258,29 @@ Set-FounderSourceLiteral $legacyUpdateMain "Restart Void to update!" "Restart Fo
 Set-FounderSourceLiteral $legacyUpdateMain "A new version of Void is available!" "A new version of Founder IDE is available!"
 Set-FounderSourceLiteral $legacyUpdateMain "Void is up-to-date!" "Founder IDE is up-to-date!"
 
+# Void renamed VS Code's auxiliary bar throughout the shell. Founder uses a
+# plain product term so layout menus describe the destination instead of the
+# upstream fork. Keep this exact list explicit so new surfaces require review.
+$assistantPanelSources = @(
+    "src\vs\workbench\contrib\quickaccess\browser\viewQuickAccess.ts",
+    "src\vs\workbench\browser\workbench.contribution.ts",
+    "src\vs\workbench\browser\actions\layoutActions.ts",
+    "src\vs\workbench\browser\parts\panel\panelActions.ts",
+    "src\vs\workbench\browser\parts\paneCompositeBar.ts",
+    "src\vs\workbench\browser\parts\auxiliarybar\auxiliaryBarPart.ts",
+    "src\vs\workbench\browser\parts\auxiliarybar\auxiliaryBarActions.ts"
+)
+foreach ($assistantPanelSource in $assistantPanelSources) {
+    Set-FounderSourceLiteral $assistantPanelSource "Void Side Bar" "Assistant Panel"
+}
+
+$fileActions = "src\vs\workbench\contrib\files\browser\fileActions.contribution.ts"
+Set-FounderSourceLiteral $fileActions "&&Open Void Settings" "&&Open Founder Settings"
+
+$dialogHandler = "src\vs\workbench\electron-sandbox\parts\dialogs\dialogHandler.ts"
+Set-FounderSourceLiteral $dialogHandler "VSCode Version: {0}" "Editor Core Version: {0}"
+Set-FounderSourceLiteral $dialogHandler "Void Version: {1}" "Founder IDE Version: {1}"
+
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
 try {

@@ -196,6 +196,8 @@ describe('Founder IDE upstream overlay', () => {
       'Founder IDE: Generate Commit Message',
       'Founder IDE: Quick Edit',
       'Founder IDE: Check for Updates',
+      'Assistant Panel',
+      'Founder IDE Version: {1}',
     ]) {
       assert.ok(applyScript.includes(founderLabel), `missing ${founderLabel}`);
     }
