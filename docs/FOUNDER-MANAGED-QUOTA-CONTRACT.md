@@ -71,6 +71,15 @@ output; Pro $0.003625/M cached input, $0.435/M uncached input, and $0.87/M
 output. Prices are versioned operational inputs because the provider may
 change them.
 
+Both V4 models advertise a 1,000,000-token context window and a provider
+maximum output of 384,000 tokens. Founder IDE reserves a smaller default
+output budget for ordinary work; the provider maximum is a capability, not a
+target response size. Managed requests include a deterministic hashed
+`user_id` so DeepSeek cache isolation stays founder-scoped without disclosing
+the account identifier. The retired `deepseek-chat` and
+`deepseek-reasoner` aliases are never emitted by Founder OS; DeepSeek removes
+them on 2026-07-24 at 15:59 UTC.
+
 ## Release order and proof
 
 Deploy the Prisma migration before or atomically with the API image. Release
