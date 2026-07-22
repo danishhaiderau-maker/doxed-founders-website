@@ -290,6 +290,7 @@ services/btc-conservative-agent/research_accumulator/
 services/btc-conservative-agent/research/downloads/
 services/btc-conservative-agent/research/backups/
 services/btc-conservative-agent/research_retention/
+services/btc-conservative-agent/past_analysis/
 /artifacts/
 /exports/
 /execution_funnel.jsonl*

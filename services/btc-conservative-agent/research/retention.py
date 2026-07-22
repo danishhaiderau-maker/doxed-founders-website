@@ -313,11 +313,27 @@ def run_analyzer_retention(
             previous_at = datetime.fromisoformat(str(previous["completed_at"]).replace("Z", "+00:00"))
             age_hours = (now - previous_at).total_seconds() / 3600
             if age_hours < interval_hours:
+                # Derived archives are cheap to evaluate and grow on every
+                # analyzer pass. Bound them every cycle even though raw-ledger
+                # fingerprinting/database pruning remains a daily operation.
+                derived_pruned = [
+                    _prune_derived_folders(
+                        root / "reports" / "history", now=now, retain_days=retain_days
+                    ),
+                    _prune_derived_folders(
+                        root / "research_session_archives", now=now, retain_days=retain_days
+                    ),
+                ]
+                _reconcile_session_index(root)
                 return {
                     "schema": RETENTION_SCHEMA,
                     "status": "SKIPPED_INTERVAL",
                     "last_completed_at": previous_at.isoformat(),
                     "next_due_in_hours": round(interval_hours - age_hours, 2),
+                    "derived_pruned": derived_pruned,
+                    "derived_deleted_bytes": sum(
+                        int(row.get("deleted_bytes") or 0) for row in derived_pruned
+                    ),
                 }
         except (OSError, ValueError, TypeError, KeyError):
             pass

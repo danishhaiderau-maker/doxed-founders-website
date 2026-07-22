@@ -88,6 +88,37 @@ class ResearchStore:
             self._conn.executescript(DDL)
             self._conn.commit()
 
+    def reset(self) -> Dict[str, int]:
+        """Atomically replace the current research epoch with an empty schema."""
+        removed_bytes = 0
+        with self._lock:
+            if self._conn is not None:
+                self._conn.commit()
+                self._conn.close()
+                self._conn = None
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                path = self.db_path + suffix
+                try:
+                    if os.path.isfile(path):
+                        removed_bytes += int(os.path.getsize(path))
+                        os.remove(path)
+                except OSError:
+                    self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                    self._conn.executescript(DDL)
+                    self._conn.commit()
+                    raise
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.executescript(DDL)
+            self._conn.commit()
+        return {"removed_bytes": removed_bytes, "tables": len(LAYER_TABLES) + 1}
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.commit()
+                self._conn.close()
+                self._conn = None
+
     def append_event(self, event: Dict[str, Any]) -> None:
         payload = json.dumps(event, default=str)
         with self._lock:

@@ -106,8 +106,17 @@ class ResearchRetentionTests(unittest.TestCase):
             root = Path(tmp)
             now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
             retention.run_analyzer_retention(root, now=now, force=True)
+            history = root / "reports" / "history"
+            for index in range(6):
+                folder = history / f"intraday-{index}"
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "report.json").write_text("{}", encoding="utf-8")
+                stamp = (now + timedelta(minutes=index)).timestamp()
+                os.utime(folder, (stamp, stamp))
             result = retention.run_analyzer_retention(root, now=now + timedelta(hours=1))
             self.assertEqual(result["status"], "SKIPPED_INTERVAL")
+            self.assertEqual(len(list(history.iterdir())), 3)
+            self.assertGreater(result["derived_deleted_bytes"], 0)
 
 
 if __name__ == "__main__":

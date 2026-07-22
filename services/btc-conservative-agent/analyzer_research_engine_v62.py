@@ -16700,7 +16700,25 @@ def archive_research_session(payload):
             if os.path.isfile(name):
                 shutil.copy2(name, os.path.join(folder, name))
         if os.path.isdir(REPORTS_DIR):
-            shutil.copytree(REPORTS_DIR, os.path.join(folder, "reports"), dirs_exist_ok=True)
+            # Preserve this run's derived reports only. reports/history contains
+            # earlier snapshots; recursively copying it made every new archive
+            # larger than the last and consumed hundreds of MB in one day.
+            report_destination = os.path.join(folder, "reports")
+            for source_root, dirs, files in os.walk(REPORTS_DIR):
+                relative_root = os.path.relpath(source_root, REPORTS_DIR)
+                if relative_root == ".":
+                    dirs[:] = [name for name in dirs if name != "history"]
+                elif relative_root.split(os.sep, 1)[0] == "history":
+                    dirs[:] = []
+                    continue
+                target_root = (
+                    report_destination
+                    if relative_root == "."
+                    else os.path.join(report_destination, relative_root)
+                )
+                os.makedirs(target_root, exist_ok=True)
+                for name in files:
+                    shutil.copy2(os.path.join(source_root, name), os.path.join(target_root, name))
         index = {"sessions": []}
         if os.path.isfile(SESSION_ARCHIVE_INDEX_FILE):
             try:

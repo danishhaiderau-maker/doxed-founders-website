@@ -762,6 +762,46 @@ def archive_research_session(reason: str = "manual") -> str:
     )
     return dest
 
+
+def compact_research_archive(archive_path: str, past_analysis_id: str = "") -> dict:
+    """Remove verified raw copies after durable derived analysis is sealed."""
+    kept = {"archive_meta.json", "archive_compaction_receipt.json"}
+    deleted_files = 0
+    deleted_bytes = 0
+    for root, _, files in os.walk(archive_path):
+        for name in files:
+            path = os.path.join(root, name)
+            if os.path.abspath(root) == os.path.abspath(archive_path) and name in kept:
+                continue
+            try:
+                deleted_bytes += int(os.path.getsize(path))
+                os.remove(path)
+                deleted_files += 1
+            except OSError as exc:
+                raise ArchiveIntegrityError(f"archive compaction failed {path}: {exc}") from exc
+    receipt = {
+        "schema": "research_archive_compaction_v1",
+        "compacted_at": utc_iso(),
+        "past_analysis_id": past_analysis_id,
+        "deleted_files": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "raw_payloads_retained": False,
+    }
+    receipt_path = os.path.join(archive_path, "archive_compaction_receipt.json")
+    with open(receipt_path, "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2)
+    meta_path = os.path.join(archive_path, "archive_meta.json")
+    try:
+        with open(meta_path, encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        meta = {}
+    meta["compacted"] = True
+    meta["compaction_receipt"] = receipt
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, indent=2)
+    return receipt
+
 def _wipe_research_on_startup_if_needed():
     if not _should_wipe_research_on_startup():
         logger.info(
@@ -20810,7 +20850,22 @@ def research_wipe_file_paths():
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     paths.extend(v2_wipe_files())
+    paths.extend(glob.glob(os.path.join("research", "genome", "*.jsonl")))
     return paths
+
+
+def _fresh_collection_derived_history_paths() -> list:
+    """Redundant histories superseded by the compact Past Analysis bundle."""
+    found = []
+    for parent in (
+        "research_session_archives",
+        os.path.join("research_retention", "daily"),
+    ):
+        if not os.path.isdir(parent):
+            continue
+        for root, _, files in os.walk(parent):
+            found.extend(os.path.join(root, name) for name in files)
+    return found
 
 
 def _research_wipe_rotated_jsonl_paths() -> list:
@@ -20886,6 +20941,7 @@ def _reset_runtime_log_handlers():
 def reset_all_research_files() -> tuple:
     deleted, errors = _delete_paths(
         all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+        + _fresh_collection_derived_history_paths()
     )
     return deleted, errors
 
@@ -20916,16 +20972,35 @@ def _perform_fresh_collection_reset_locked() -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     try:
+        from research.past_analysis import seal_past_analysis
+
+        past_analysis = seal_past_analysis(os.getcwd(), reason="fresh_collection_dashboard")
+        past_analysis_id = str(past_analysis.get("archive_id") or "")
         archive_path = archive_research_session(reason="fresh_collection_dashboard")
-    except ArchiveIntegrityError as exc:
-        logger.error(f"[FRESH COLLECTION] ABORT WIPE — archive integrity failed: {exc} [PIPELINE ENFORCEMENT]")
+    except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
+        logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
         return {
             "ok": False,
             "wipe_aborted": True,
             "error": str(exc),
-            "summary": "ABORT WIPE — archive verification failed",
+            "summary": "ABORT WIPE — final analysis preservation failed",
         }
     logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, wiping session state")
+    genome_reset = {}
+    bridge = get_genome_bridge()
+    if bridge is not None:
+        try:
+            genome_reset = bridge.reset_research_store()
+        except Exception as exc:
+            logger.error(f"[FRESH COLLECTION] ABORT WIPE — research.db reset failed: {exc} [PIPELINE ENFORCEMENT]")
+            return {
+                "ok": False,
+                "wipe_aborted": True,
+                "error": str(exc),
+                "summary": "ABORT WIPE — research database reset failed",
+                "archive_path": archive_path,
+                "past_analysis_id": past_analysis_id,
+            }
     with replay_lock:
         replay_buffers.clear()
     with trade_lock:
@@ -20950,6 +21025,12 @@ def _perform_fresh_collection_reset_locked() -> dict:
         state["fresh_collection_mode"] = True
     _write_research_session(bot_start_time, fresh_collection_reset=True)
     load_session_trades_from_csv()
+    archive_compaction = {}
+    if not errors:
+        try:
+            archive_compaction = compact_research_archive(archive_path, past_analysis_id)
+        except ArchiveIntegrityError as exc:
+            errors.append(str(exc))
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
@@ -20961,7 +21042,18 @@ def _perform_fresh_collection_reset_locked() -> dict:
         state["_pause_priority"] = 0
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
-    return {"deleted": deleted, "errors": errors, "summary": summary, "archive_path": archive_path, "ts": utc_iso(), "ok": True, "wipe_aborted": False}
+    return {
+        "deleted": deleted,
+        "errors": errors,
+        "summary": summary,
+        "archive_path": archive_path,
+        "archive_compaction": archive_compaction,
+        "past_analysis_id": past_analysis_id,
+        "genome_reset": genome_reset,
+        "ts": utc_iso(),
+        "ok": True,
+        "wipe_aborted": False,
+    }
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100

@@ -152,6 +152,7 @@ HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
 RETENTION_STATUS_FILE = "research_retention_status.json"
 ARCHIVE_DIR = "research_session_archives"
 ARCHIVE_INDEX_FILE = "research_session_index.json"
+PAST_ANALYSIS_DIR = "past_analysis"
 ZIP_BUNDLE_NAME = "reports_bundle.zip"
 COMPLETE_BUNDLE_NAME = "trading_sessions_complete.zip"
 COMPLETE_BUNDLE_FALLBACKS = (
@@ -1415,6 +1416,15 @@ def _archives_index():
     return {"sessions": sessions}
 
 
+def _past_analysis_index():
+    try:
+        from research.past_analysis import list_past_analyses
+
+        return {"analyses": list_past_analyses(ROOT)}
+    except Exception:
+        return {"analyses": []}
+
+
 # ---------------------------------------------------------------------------
 # Routes — API
 # ---------------------------------------------------------------------------
@@ -1721,6 +1731,11 @@ def api_archives():
     return jsonify(_archives_index())
 
 
+@app.route("/api/past-analysis")
+def api_past_analysis():
+    return jsonify(_past_analysis_index())
+
+
 _RESEARCH_ARTIFACT_NAMES = frozenset({
     EXECUTIVE_SUMMARY_FILE,
     HIGHLIGHTS_FILE,
@@ -1903,6 +1918,36 @@ def download_archive(session_id):
                 zf.write(path, arcname=str(path.relative_to(arch)))
     buf.seek(0)
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"{safe}.zip")
+
+
+@app.route("/download/past-analysis")
+@app.route("/download/past-analysis/<archive_id>")
+def download_past_analysis(archive_id=None):
+    """Download preserved derived analysis without bulky raw ledgers."""
+    try:
+        from research.past_analysis import latest_past_analysis
+    except ImportError:
+        abort(503, description="Past Analysis support is unavailable")
+    if archive_id:
+        safe = os.path.basename(archive_id)
+        archive = ROOT / PAST_ANALYSIS_DIR / safe
+    else:
+        archive = latest_past_analysis(ROOT)
+        safe = archive.name if archive else ""
+    if not archive or not archive.is_dir() or not (archive / "past_analysis_manifest.json").is_file():
+        abort(404, description="No preserved Past Analysis is available yet")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(archive.rglob("*")):
+            if path.is_file():
+                zf.write(path, arcname=str(path.relative_to(archive)))
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"past_analysis_{safe}.zip",
+    )
 
 
 @app.route("/download/all-sessions")
@@ -2405,9 +2450,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Session Archive</h2>
     <p class="note">One archive folder per analyzer run (when enabled).</p>
     <table><thead><tr><th>Session</th><th>Time</th><th>Trades</th><th>PnL</th><th>Download</th></tr></thead><tbody id="archive-body"></tbody></table>
+    <h2>Preserved Past Analysis</h2>
+    <p class="note">Final derived findings preserved before Fresh Collection. Raw CSV/JSONL/database payloads are fingerprinted but excluded.</p>
+    <table><thead><tr><th>Analysis</th><th>Sealed</th><th>Trades</th><th>PnL</th><th>Download</th></tr></thead><tbody id="past-analysis-body"></tbody></table>
   </section>
   <section id="sec-download">
     <h2>Download Center</h2>
+    <p><b>Past Analysis</b> — the latest preserved pre-wipe conclusions, all derived reports, integrity manifest, and source fingerprints. Bulky raw data is excluded.</p>
+    <a class="btn" href="/download/past-analysis" id="dl-past-analysis">&#11015; Download Past Analysis</a>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
     <p><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
     <a class="btn" href="/download/research-pack" id="dl-research-pack" style="background:#2a6e2a">⬇ Research Pack (one file, all 6 merged)</a>
@@ -3106,12 +3156,21 @@ async function loadExplorer() {
 }
 
 async function loadArchives() {
-  const r = await fetch('/api/archives');
-  const d = await r.json();
+  const [archiveResponse, pastResponse] = await Promise.all([
+    fetch('/api/archives'),
+    fetch('/api/past-analysis'),
+  ]);
+  const d = await archiveResponse.json();
+  const past = await pastResponse.json();
   document.getElementById('archive-body').innerHTML = (d.sessions||[]).map(s => {
     const sid = s.id || s.session_id || '';
     return `<tr><td>${sid}</td><td>${(s.generated_at||'').slice(0,19)}</td><td>${s.trades??'n/a'}</td><td>$${fmtUsd(s.net_pnl_usd)}</td><td><a href="/download/archive/${encodeURIComponent(sid)}">ZIP</a></td></tr>`;
   }).join('') || '<tr><td colspan="5">No archives yet — run analyzer once.</td></tr>';
+  document.getElementById('past-analysis-body').innerHTML = (past.analyses||[]).map(a => {
+    const id = a.archive_id || '';
+    const perf = a.performance || {};
+    return `<tr><td>${id}</td><td>${(a.created_at||'').slice(0,19)}</td><td>${perf.trades??'n/a'}</td><td>$${fmtUsd(perf.net_pnl_usd)}</td><td><a href="/download/past-analysis/${encodeURIComponent(id)}">ZIP</a></td></tr>`;
+  }).join('') || '<tr><td colspan="5">No preserved analysis yet. Fresh Collection creates one only after a completed analyzer run.</td></tr>';
 }
 
 async function loadStatus() {

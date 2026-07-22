@@ -135,6 +135,14 @@ class GenomeBridge:
             **self.store.stats(),
         }
 
+    def reset_research_store(self) -> Dict[str, int]:
+        result = self.store.reset()
+        self._current_env_id = None
+        self._current_mkt_id = None
+        self._current_dec_id = None
+        logger.info("[GENOME] Fresh Collection reset completed bytes=%s", result["removed_bytes"])
+        return result
+
 
 def init_genome_bridge(base_dir: str | None = None) -> GenomeBridge:
     global _bridge
