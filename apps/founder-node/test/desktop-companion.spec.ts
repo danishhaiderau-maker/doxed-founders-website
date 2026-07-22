@@ -41,6 +41,9 @@ describe('Founder desktop companion', () => {
     assert.match(windowSource, /positions\[String\(display\.id\)\]/);
     assert.match(windowSource, /Hide until next task/);
     assert.match(windowSource, /hiddenUntilNextTask/);
+    assert.match(windowSource, /pendingUpdateSnapshot/);
+    assert.match(windowSource, /lastTaskSnapshot\.state !== 'idle'/);
+    assert.match(windowSource, /updateDesktopCompanionUpdate/);
     assert.match(windowSource, /Reduce motion/);
     assert.match(html, /setPointerCapture/);
     assert.match(html, /planning/);

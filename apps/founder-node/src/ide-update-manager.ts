@@ -153,6 +153,12 @@ export interface AuthenticodeResult {
   error?: string;
 }
 
+export type IdeUpdateStateListener = (
+  state: FounderStackUpdateState,
+  reason: string | null,
+  update: IdeUpdateInfo | null,
+) => void;
+
 /** Constructor options (mostly for tests; production uses defaults). */
 export interface IdeUpdateManagerOptions {
   apiBaseUrl: string;
@@ -179,6 +185,7 @@ const MANIFEST_CACHE_TTL_MS = 60_000;
 
 let trayRef: Tray | null = null;
 let menuRefresh: (() => void) | null = null;
+let updateStateListener: IdeUpdateStateListener | null = null;
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
 let checkInFlight = false;
 
@@ -217,8 +224,19 @@ export function setIdeUpdateMenuRefresh(fn: () => void): void {
   menuRefresh = fn;
 }
 
+export function setIdeUpdateStateListener(
+  listener: IdeUpdateStateListener | null,
+): void {
+  updateStateListener = listener;
+  listener?.(updateState, lastFailureReason, lastResolvedUpdate);
+}
+
 function notifyMenuRefresh(): void {
   menuRefresh?.();
+}
+
+function notifyUpdateState(): void {
+  updateStateListener?.(updateState, lastFailureReason, lastResolvedUpdate);
 }
 
 /** Current updater state — read by the runtime-status builder (Workstream C). */
@@ -281,6 +299,7 @@ function setState(next: FounderStackUpdateState, reason?: string): void {
     lastFailureReason = null;
   }
   notifyMenuRefresh();
+  notifyUpdateState();
 }
 
 // ─── Default manifest fetcher ─────────────────────────────────────────────
@@ -594,6 +613,7 @@ export async function checkForIdeUpdates(
     const update = resolveIdeUpdate(manifest, installed);
     lastResolvedUpdate = update;
     notifyMenuRefresh();
+    notifyUpdateState();
 
     // Defence-in-depth yank refusal: resolveIdeUpdate already returns null,
     // but if a yanked release somehow snuck through, refuse explicitly here.
@@ -823,6 +843,7 @@ export async function downloadVerifyInstallAndHandshake(
     configuredHandshakePollMs,
   );
   if (ok) {
+    lastResolvedUpdate = null;
     setState('idle');
     await displayBalloonSafe('Founder IDE updated', `Now running v${info.version}.`);
     return;
@@ -856,6 +877,7 @@ export async function downloadVerifyInstallAndHandshake(
     configuredHandshakePollMs,
   );
   if (rollbackOk) {
+    lastResolvedUpdate = null;
     setState('idle');
     await showDialogSafe({
       type: 'warning',
@@ -944,6 +966,7 @@ export function __resetIdeUpdaterForTests(): void {
   checkInFlight = false;
   trayRef = null;
   menuRefresh = null;
+  updateStateListener = null;
   configuredAuthenticodeVerifier = defaultAuthenticodeVerifier;
   configuredInstallerLauncher = defaultInstallerLauncher;
   configuredHandshakeProbe = () => false;

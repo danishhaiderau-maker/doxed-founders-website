@@ -100,6 +100,7 @@ import {
   getLastResolvedUpdate,
   ideUpdateTooltipSuffix,
   setIdeUpdateMenuRefresh,
+  setIdeUpdateStateListener,
   startIdeAutoUpdateChecks,
 } from './ide-update-manager';
 import {
@@ -128,6 +129,7 @@ import {
   destroyDesktopCompanion,
   setDesktopCompanionActionHandler,
   updateDesktopCompanion,
+  updateDesktopCompanionUpdate,
 } from './desktop-companion';
 // Phase 2 — device-code first-run + pairing state machine.
 import {
@@ -335,6 +337,66 @@ function reportCurrentIdeHandshake(vaultRoot: string): void {
     config.nodeToken,
     ideIpcClient?.isHandshakeActive() ?? false,
   );
+}
+
+function connectIdeUpdaterToCompanion(): void {
+  setIdeUpdateStateListener((state, reason, update) => {
+    if (!EMBEDDED_RELAY_MODE) return;
+    if (state === 'idle' && !update) {
+      updateDesktopCompanionUpdate(null);
+      return;
+    }
+
+    const version = update?.version ? `v${update.version}` : 'Founder IDE';
+    const snapshot = state === 'failed'
+      ? {
+          visible: true,
+          state: 'error' as const,
+          title: 'Update needs attention',
+          detail: reason ?? 'Founder IDE could not finish the update.',
+          reducedMotion: false,
+        }
+      : state === 'rolling_back'
+        ? {
+            visible: true,
+            state: 'attention' as const,
+            title: 'Restoring the last healthy build',
+            detail: `${version} did not pass its health check. Founder is rolling back safely.`,
+            reducedMotion: false,
+          }
+        : state === 'verifying'
+          ? {
+              visible: true,
+              state: 'verifying' as const,
+              title: 'Verifying the update',
+              detail: `${version} is being checked for integrity and signature.`,
+              reducedMotion: false,
+            }
+          : state === 'downloading'
+            ? {
+                visible: true,
+                state: 'update' as const,
+                title: 'Bringing the update home',
+                detail: `${version} is downloading in the background.`,
+                reducedMotion: false,
+              }
+            : state === 'installing'
+              ? {
+                  visible: true,
+                  state: 'update' as const,
+                  title: 'Installing the update',
+                  detail: `${version} will be accepted only after the IDE reconnects successfully.`,
+                  reducedMotion: false,
+                }
+              : {
+                  visible: true,
+                  state: 'update' as const,
+                  title: 'Founder IDE update ready',
+                  detail: `${version} is available when you are ready to install it.`,
+                  reducedMotion: false,
+                };
+    updateDesktopCompanionUpdate(snapshot);
+  });
 }
 
 function startIdeHandshakeReporting(vaultRoot: string): void {
@@ -1185,7 +1247,10 @@ app.whenReady().then(() => {
   const backgroundKeeper = new BrowserWindow({ show: false });
   backgroundKeeper.hide();
 
-  if (EMBEDDED_RELAY_MODE) createDesktopCompanion();
+  if (EMBEDDED_RELAY_MODE) {
+    createDesktopCompanion();
+    connectIdeUpdaterToCompanion();
+  }
 
   const vaultRoot = defaultVaultRoot();
   const nodeId = loadOrCreateNodeId(vaultRoot);

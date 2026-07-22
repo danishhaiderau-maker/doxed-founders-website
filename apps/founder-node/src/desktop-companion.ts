@@ -48,6 +48,8 @@ const DEFAULT_SNAPSHOT: DesktopCompanionSnapshot = {
 
 let companionWindow: BrowserWindow | null = null;
 let lastSnapshot = DEFAULT_SNAPSHOT;
+let lastTaskSnapshot = DEFAULT_SNAPSHOT;
+let pendingUpdateSnapshot: DesktopCompanionSnapshot | null = null;
 let ipcRegistered = false;
 let hitTestTimer: NodeJS.Timeout | null = null;
 let mouseInteractive = false;
@@ -335,7 +337,7 @@ export function createDesktopCompanion(): BrowserWindow {
   return companionWindow;
 }
 
-export function updateDesktopCompanion(snapshot: DesktopCompanionSnapshot): void {
+function renderDesktopCompanion(snapshot: DesktopCompanionSnapshot): void {
   lastSnapshot = {
     visible: snapshot.visible,
     state: snapshot.state,
@@ -357,6 +359,22 @@ export function updateDesktopCompanion(snapshot: DesktopCompanionSnapshot): void
   sendSnapshot();
 }
 
+export function updateDesktopCompanion(snapshot: DesktopCompanionSnapshot): void {
+  lastTaskSnapshot = snapshot;
+  const canShowUpdate = snapshot.state === 'idle' || snapshot.state === 'update';
+  renderDesktopCompanion(canShowUpdate && pendingUpdateSnapshot
+    ? pendingUpdateSnapshot
+    : snapshot);
+}
+
+export function updateDesktopCompanionUpdate(
+  snapshot: DesktopCompanionSnapshot | null,
+): void {
+  pendingUpdateSnapshot = snapshot;
+  if (lastTaskSnapshot.state !== 'idle' && lastTaskSnapshot.state !== 'update') return;
+  renderDesktopCompanion(snapshot ?? lastTaskSnapshot);
+}
+
 export function destroyDesktopCompanion(): void {
   persistPosition();
   stopCursorHitTesting();
@@ -365,4 +383,7 @@ export function destroyDesktopCompanion(): void {
   companionWindow = null;
   actionHandler = null;
   hiddenUntilNextTask = false;
+  lastSnapshot = DEFAULT_SNAPSHOT;
+  lastTaskSnapshot = DEFAULT_SNAPSHOT;
+  pendingUpdateSnapshot = null;
 }

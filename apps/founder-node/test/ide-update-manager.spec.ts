@@ -30,7 +30,9 @@ import {
   downloadVerifyInstallAndHandshake,
   getIdeUpdateState,
   getIdeUpdateFailureReason,
+  setIdeUpdateStateListener,
   __resetIdeUpdaterForTests,
+  __setIdeUpdateStateForTests,
   __resetIdeManifestCacheForTests,
   findRollbackCandidate,
   waitForHandshake,
@@ -107,6 +109,23 @@ afterEach(() => {
   } catch {
     /* best effort */
   }
+});
+
+describe('IDE update state notifications', () => {
+  it('reports updater transitions to the embedded companion bridge', () => {
+    const seen: Array<{ state: string; reason: string | null }> = [];
+    setIdeUpdateStateListener((state, reason) => seen.push({ state, reason }));
+    __setIdeUpdateStateForTests('downloading');
+    __setIdeUpdateStateForTests('verifying');
+    __setIdeUpdateStateForTests('failed', 'signature rejected');
+
+    assert.deepEqual(seen, [
+      { state: 'idle', reason: null },
+      { state: 'downloading', reason: null },
+      { state: 'verifying', reason: null },
+      { state: 'failed', reason: 'signature rejected' },
+    ]);
+  });
 });
 
 // ─── Version comparison ───────────────────────────────────────────────────
