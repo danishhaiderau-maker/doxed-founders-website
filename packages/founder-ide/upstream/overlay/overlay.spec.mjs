@@ -76,6 +76,7 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /You are Founder AI/);
     assert.match(source, /\*\*Founder route\*\*/);
     assert.match(source, /founder_os_metadata: true/);
+    assert.match(source, /Free: Flash/);
   });
 
   it('keeps voice input and personal AI next to the native composer', () => {
@@ -85,5 +86,15 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /Add or manage personal AI/);
     assert.match(source, /Start voice input/);
     assert.match(source, /founderSpeechRecognitionConstructor/);
+  });
+
+  it('adds the seven focused Founder actions above the native composer', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
+    );
+    for (const action of ['Verify', 'Challenge', 'Research', 'Panel', 'Test', 'Explain', 'Optimize']) {
+      assert.match(source, new RegExp(`label: '${action}'`));
+    }
+    assert.match(source, /aria-label='Founder actions'/);
   });
 });

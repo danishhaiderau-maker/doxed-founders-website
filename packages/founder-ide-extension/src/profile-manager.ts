@@ -7,7 +7,7 @@
  * state so it survives reloads.
  *
  * Profiles (see task spec / design report §7):
- *   - Turbo      → founder-os-code      (speed + low DDollar cost)
+ *   - Turbo      → founder-os-fast      (speed + low managed cost)
  *   - Balanced   → founder-os-auto      (default routing)
  *   - Architect  → founder-os-reasoning (deep reasoning)
  *   - Autonomous → founder-os-reasoning (maps to architect for now)
@@ -42,28 +42,28 @@ export const EXECUTION_PROFILES: readonly ExecutionProfile[] = [
   {
     id: 'turbo',
     label: 'Turbo',
-    detail: 'Optimize for speed and low DDollar cost (founder-os-code).',
-    aliasId: 'founder-os-code',
+    detail: 'DeepSeek V4 Flash for fast, cost-efficient work.',
+    aliasId: 'founder-os-fast',
     icon: '$(rocket)',
   },
   {
     id: 'balanced',
     label: 'Balanced',
-    detail: 'Default routing — let the Routing Engine decide (founder-os-auto).',
+    detail: 'DeepSeek V4 Flash by default, with explicit Pro modes when needed.',
     aliasId: 'founder-os-auto',
     icon: '$(symbol-enum)',
   },
   {
     id: 'architect',
     label: 'Architect',
-    detail: 'Prioritize deep reasoning (founder-os-reasoning).',
+    detail: 'DeepSeek V4 Pro for deliberate reasoning and architecture.',
     aliasId: 'founder-os-reasoning',
     icon: '$(beaker)',
   },
   {
     id: 'autonomous',
     label: 'Autonomous',
-    detail: 'Allow more expensive multi-step agent execution (maps to Architect for now).',
+    detail: 'Allow bounded multi-step execution with verification (maps to Reasoning for now).',
     aliasId: 'founder-os-reasoning',
     icon: '$(robot)',
   },

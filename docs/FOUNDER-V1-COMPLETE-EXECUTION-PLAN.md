@@ -9,8 +9,9 @@ only when its acceptance evidence exists. Chat claims are not evidence.
 ## Product decisions locked for V1
 
 - Founder-managed AI uses DeepSeek only.
-- Routine work routes to DeepSeek Flash; coding, reasoning, escalation, and
-  failed verification route to DeepSeek Pro.
+- Founder Free always uses DeepSeek V4 Flash while preserving the requested
+  task intent. Builder and Team use Flash by default and may explicitly route
+  coding, reasoning, and verification escalation to DeepSeek V4 Pro.
 - GLM, Claude, OpenAI, Gemini, Groq, Mistral, and other cloud providers are
   available only through the founder's own key and endpoint.
 - Local Ollama remains private, offline-capable, unlimited, and unmetered by
@@ -103,11 +104,16 @@ admin and user usage screenshots.
 - [x] Keep local Ollama and direct BYOK outside Founder quota.
 - [x] Add microphone/speech-to-text control to the native composer.
 - [ ] Put every legacy website copilot call behind the same reservation ledger.
-- [ ] Add live provider capability probes and truthful route receipts.
+- [x] Add truthful route receipts with tier, provider, model, latency, and the
+  Free Flash-only policy when it applies.
+- [ ] Add scheduled live provider capability probes to disable an unhealthy
+  managed model before customer traffic reaches it.
 - [ ] Add explicit fallback rules: Flash to Pro on difficulty or failed QA;
   managed DeepSeek never silently becomes another provider.
-- [ ] Add the seven focused actions: Verify, Challenge, Research, Panel, Test,
-  Explain, Optimize. Higher-model actions require a connected BYOK profile.
+- [x] Add the seven focused actions: Verify, Challenge, Research, Panel, Test,
+  Explain, Optimize. Each drafts a focused, editable instruction above the
+  native composer; the selected managed, personal, or local model remains
+  explicit in the model menu.
 - [ ] Run authenticated native tests for Auto, Fast, Reasoning, Code, BYOK,
   Ollama, streaming content, completion marker, cancellation, and quota errors.
 

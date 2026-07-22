@@ -2943,6 +2943,15 @@ export const SidebarChat = () => {
 	const chatThreadsService = accessor.get('IChatThreadService')
 
 	const settingsState = useSettingsState()
+	const founderActions = [
+		{ label: 'Verify', detail: 'Independently verify the current work. Inspect the changed files, run the smallest relevant tests, check the visible result, and report evidence plus any remaining risk.' },
+		{ label: 'Challenge', detail: 'Challenge the current approach. Find the strongest failure case, security risk, hidden assumption, or simpler design, then recommend a concrete correction.' },
+		{ label: 'Research', detail: 'Research this decision using primary sources and the current codebase. Separate verified facts from inference, compare credible options, and recommend the next action.' },
+		{ label: 'Panel', detail: 'Run a compact expert panel on this decision: implementation, product, security, and cost. Reconcile disagreements into one recommendation and name the evidence used.' },
+		{ label: 'Test', detail: 'Test the current work end to end. Run focused automated checks first, then inspect the user-visible path and return a pass/fail receipt with exact blockers.' },
+		{ label: 'Explain', detail: 'Explain the current code or decision in plain language for a founder. Cover what it does, why it matters, the tradeoffs, and the next practical step.' },
+		{ label: 'Optimize', detail: 'Optimize this work for correctness, speed, token efficiency, and maintainability. Measure before changing it, keep behavior stable, and report the measured improvement.' },
+	] as const
 	// ----- HIGHER STATE -----
 
 	// threads state
@@ -3183,7 +3192,20 @@ export const SidebarChat = () => {
 		}
 	}, [onSubmit, onAbort, isRunning])
 
-	const inputChatArea = <VoidChatArea
+	const inputChatArea = <div className='flex min-w-0 flex-col gap-1.5'>
+		<div className='flex min-w-0 gap-1 overflow-x-auto pb-0.5' role='toolbar' aria-label='Founder actions'>
+			{founderActions.map((action) => <button
+				key={action.label}
+				type='button'
+				className='h-6 shrink-0 rounded border border-void-border-2 bg-void-bg-1 px-2 text-[11px] text-void-fg-3 hover:border-void-border-1 hover:bg-void-bg-2 hover:text-void-fg-1'
+				title={`${action.label}: draft this focused instruction`}
+				onClick={() => {
+					textAreaFnsRef.current?.setValue(action.detail)
+					textAreaRef.current?.focus()
+				}}
+			>{action.label}</button>)}
+		</div>
+		<VoidChatArea
 		featureName='Chat'
 		onSubmit={() => onSubmit()}
 		onAbort={onAbort}
@@ -3241,7 +3263,8 @@ export const SidebarChat = () => {
 			multiline={true}
 		/>
 
-	</VoidChatArea>
+		</VoidChatArea>
+	</div>
 
 
 	const isLandingPage = previousMessages.length === 0

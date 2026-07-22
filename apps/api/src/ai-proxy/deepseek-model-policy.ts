@@ -1,4 +1,5 @@
 import type { AiProxyTier } from '@dcf/utils';
+import type { FounderPlanName } from '../founder-os/founder-plan-entitlements.service';
 
 /**
  * Current model identifiers accepted by the DeepSeek platform key used by
@@ -18,6 +19,24 @@ export function forcedIntentForAlias(alias: string): ForcedAliasIntent | null {
   if (alias === 'founder-os-reasoning') return 'reasoning';
   if (alias === 'founder-os-fast') return 'simple_qa';
   return null;
+}
+
+export function tierForFounderAlias(alias: string, inferred: AiProxyTier): AiProxyTier {
+  if (alias === 'founder-os-auto' || alias === 'founder-os-fast') return 'fast';
+  if (alias === 'founder-os-code') return 'code';
+  if (alias === 'founder-os-reasoning') return 'reasoning';
+  return inferred;
+}
+
+export function tierForFounderPlan(
+  plan: FounderPlanName,
+  alias: string,
+  inferred: AiProxyTier,
+): { tier: AiProxyTier; policy: 'free_flash_only' | 'managed_auto' } {
+  if (plan === 'free') {
+    return { tier: 'fast', policy: 'free_flash_only' };
+  }
+  return { tier: tierForFounderAlias(alias, inferred), policy: 'managed_auto' };
 }
 
 export function normalizeProviderModel(

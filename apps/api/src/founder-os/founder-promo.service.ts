@@ -17,6 +17,7 @@ import {
   FOUNDER_FREE_MANAGED_TOKEN_CAP,
 } from './founder-free.config';
 import { FounderPlanEntitlementsService } from './founder-plan-entitlements.service';
+import type { FounderPlanName } from './founder-plan-entitlements.service';
 
 export type FounderPromoStatus = {
   plan: 'free' | 'builder' | 'team';
@@ -78,6 +79,12 @@ export class FounderPromoService {
     private readonly builderScore: BuilderScoreService,
     private readonly planEntitlements: FounderPlanEntitlementsService,
   ) {}
+
+  /** Resolve the plan before routing so Free requests cannot select managed Pro. */
+  async managedPlanForUser(userId: string): Promise<FounderPlanName> {
+    const entitlement = await this.planEntitlements.resolve(userId);
+    return entitlement.plan;
+  }
 
   async getPlatformPromoSettings() {
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });

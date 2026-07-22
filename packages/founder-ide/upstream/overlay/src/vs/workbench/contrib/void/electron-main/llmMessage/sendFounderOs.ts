@@ -157,6 +157,7 @@ interface FounderOsMetadata {
 	provider?: string;
 	model?: string;
 	ddollarCost?: number;
+	routePolicy?: 'free_flash_only' | 'managed_auto';
 	[k: string]: unknown;
 }
 
@@ -360,7 +361,8 @@ function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: num
 	const cost = typeof meta.ddollarCost === 'number' && Number.isFinite(meta.ddollarCost)
 		? ` · ${meta.ddollarCost} D$`
 		: '';
-	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}`;
+	const policy = meta.routePolicy === 'free_flash_only' ? ' | Free: Flash' : '';
+	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}`;
 }
 
 // ---------------------------------------------------------------------------

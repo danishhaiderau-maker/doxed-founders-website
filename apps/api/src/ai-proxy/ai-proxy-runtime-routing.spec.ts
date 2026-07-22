@@ -3,7 +3,11 @@ import test from 'node:test';
 import { AiProxyRuntimeService } from './ai-proxy-runtime.service';
 import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
 
-function runtimeWithDecision(model: string, provider = 'deepseek') {
+function runtimeWithDecision(
+  model: string,
+  provider = 'deepseek',
+  plan: 'free' | 'builder' | 'team' = 'builder',
+) {
   const calls: Array<{ intent: string }> = [];
   const runtime = new AiProxyRuntimeService(
     {} as never,
@@ -26,7 +30,7 @@ function runtimeWithDecision(model: string, provider = 'deepseek') {
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
     {} as never,
-    {} as never,
+    { managedPlanForUser: async () => plan } as never,
   );
   return { runtime, calls };
 }
@@ -54,7 +58,7 @@ function runtimeWithV2Failure() {
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
     {} as never,
-    {} as never,
+    { managedPlanForUser: async () => 'builder' } as never,
   );
 }
 
@@ -97,7 +101,7 @@ test('reasoning and code aliases route with forced intent and v4 pro', async () 
   }
 });
 
-test('founder-os-auto preserves inferred intent while normalizing stale model', async () => {
+test('founder-os-auto preserves intent evidence but starts on v4 flash', async () => {
   const { runtime, calls } = runtimeWithDecision('deepseek-reasoner');
   const route = await runtime.decideRoute(auth, {
     model: 'founder-os-auto',
@@ -105,7 +109,21 @@ test('founder-os-auto preserves inferred intent while normalizing stale model', 
   });
   assert.equal(calls[0]?.intent, 'reasoning');
   assert.equal(route.intent, 'reasoning');
-  assert.equal(route.model, 'deepseek-v4-pro');
+  assert.equal(route.tier, 'fast');
+  assert.equal(route.model, 'deepseek-v4-flash');
+});
+
+test('free plan preserves code intent but is cost-fenced to v4 flash', async () => {
+  const { runtime, calls } = runtimeWithDecision('deepseek-v4-pro', 'deepseek', 'free');
+  const route = await runtime.decideRoute(auth, {
+    model: 'founder-os-code',
+    messages,
+  });
+  assert.equal(calls[0]?.intent, 'code');
+  assert.equal(route.intent, 'code');
+  assert.equal(route.tier, 'fast');
+  assert.equal(route.model, 'deepseek-v4-flash');
+  assert.equal(route.routePolicy, 'free_flash_only');
 });
 
 test('founder-os-fast stays fast/flash when v2 falls back to the legacy router', async () => {

@@ -24,6 +24,7 @@ import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-c
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 import {
   forcedIntentForAlias,
+  tierForFounderPlan,
   normalizeFounderAliasRoute,
 } from './deepseek-model-policy';
 import {
@@ -64,6 +65,7 @@ export type ProxyInvokeResult = {
   promptTokens?: number;
   completionTokens?: number;
   promptEfficiency?: ClientPromptEfficiencyEstimate;
+  routePolicy: 'free_flash_only' | 'managed_auto';
 };
 
 /**
@@ -90,6 +92,7 @@ type ResolvedRoute = AiProxyRouteDecision & {
    * that row with usage data instead of inserting a second row.
    */
   flightRecorderHasDecisionRow: boolean;
+  routePolicy: 'free_flash_only' | 'managed_auto';
 };
 
 /**
@@ -141,6 +144,7 @@ export class AiProxyRuntimeService {
     const promptHash = this.computePromptHash(systemPrompt, userPrompt);
     const inferredIntent = await this.resolveIntent(userPrompt);
     const effectiveIntent = forcedIntent ?? inferredIntent;
+    const managedPlan = await this.founderPromo.managedPlanForUser(auth.userId);
 
     if (USE_ROUTING_ENGINE_V2) {
       try {
@@ -151,7 +155,12 @@ export class AiProxyRuntimeService {
           requestId,
           requirements: [{ provider: 'deepseek' }],
         });
-        const tier = this.tierForIntent(decision.chosenProvider, effectiveIntent);
+        const planRoute = tierForFounderPlan(
+          managedPlan,
+          requestedAlias,
+          this.tierForIntent(decision.chosenProvider, effectiveIntent),
+        );
+        const tier = planRoute.tier;
         const normalizedRoute = normalizeFounderAliasRoute(
           requestedAlias,
           decision.chosenProvider,
@@ -177,6 +186,7 @@ export class AiProxyRuntimeService {
           // Routing Engine v2 writes a Flight Recorder row at decision time
           // (fire-and-forget). The post-request hook patches it in place.
           flightRecorderHasDecisionRow: true,
+          routePolicy: planRoute.policy,
         };
       } catch (err) {
         // If v2 cannot serve (e.g. RoutingInfeasibleError, Capability table
@@ -200,7 +210,7 @@ export class AiProxyRuntimeService {
     };
     const route = this.modelRouter.route(runtimeRequest);
 
-    const tier: AiProxyTier =
+    const inferredTier: AiProxyTier =
       forcedIntent === 'code'
         ? 'code'
         : forcedIntent === 'reasoning'
@@ -208,6 +218,8 @@ export class AiProxyRuntimeService {
           : forcedIntent === 'simple_qa'
             ? 'fast'
             : route.tier;
+    const planRoute = tierForFounderPlan(managedPlan, requestedAlias, inferredTier);
+    const tier = planRoute.tier;
 
     const normalizedLegacyRoute = normalizeFounderAliasRoute(
       requestedAlias,
@@ -230,6 +242,7 @@ export class AiProxyRuntimeService {
       // Legacy path: no prior decision row, so the post-request hook
       // inserts a fresh Flight Recorder entry.
       flightRecorderHasDecisionRow: false,
+      routePolicy: planRoute.policy,
     };
   }
 
@@ -343,6 +356,7 @@ export class AiProxyRuntimeService {
         tier: route.tier,
         cacheLevel: route.cacheLevel,
         promptEfficiency,
+        routePolicy: route.routePolicy,
       };
     }
 
@@ -373,6 +387,7 @@ export class AiProxyRuntimeService {
         tier: route.tier,
         cacheLevel: route.cacheLevel,
         promptEfficiency,
+        routePolicy: route.routePolicy,
       };
     }
 
@@ -411,6 +426,7 @@ export class AiProxyRuntimeService {
       promptTokens,
       completionTokens,
       promptEfficiency,
+      routePolicy: route.routePolicy,
     };
   }
 

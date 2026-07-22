@@ -7,6 +7,7 @@ import {
   normalizeFounderAliasRoute,
   normalizeProviderModel,
   normalizeProxyRoute,
+  tierForFounderAlias,
 } from './deepseek-model-policy';
 
 test('Founder OS aliases force their advertised routing intent', () => {
@@ -14,6 +15,13 @@ test('Founder OS aliases force their advertised routing intent', () => {
   assert.equal(forcedIntentForAlias('founder-os-reasoning'), 'reasoning');
   assert.equal(forcedIntentForAlias('founder-os-code'), 'code');
   assert.equal(forcedIntentForAlias('founder-os-auto'), null);
+});
+
+test('Founder Auto starts on Flash and requires an explicit Pro alias', () => {
+  assert.equal(tierForFounderAlias('founder-os-auto', 'reasoning'), 'fast');
+  assert.equal(tierForFounderAlias('founder-os-fast', 'code'), 'fast');
+  assert.equal(tierForFounderAlias('founder-os-code', 'fast'), 'code');
+  assert.equal(tierForFounderAlias('founder-os-reasoning', 'fast'), 'reasoning');
 });
 
 test('unsupported cached providers fail over to a supported DeepSeek model', () => {

@@ -15,6 +15,7 @@ type PipeAiProxySseResponseArgs = {
   model: string;
   routeCacheLevel?: 'hit' | 'partial' | 'miss';
   promptEfficiency?: ClientPromptEfficiencyEstimate;
+  routePolicy?: 'free_flash_only' | 'managed_auto';
 };
 
 /** Own the Express response until the provider SSE stream reaches EOF. */
@@ -29,6 +30,7 @@ export async function pipeAiProxySseResponse({
   model,
   routeCacheLevel,
   promptEfficiency,
+  routePolicy,
 }: PipeAiProxySseResponseArgs): Promise<void> {
   res.status(status);
   res.setHeader('Content-Type', 'text/event-stream');
@@ -47,6 +49,7 @@ export async function pipeAiProxySseResponse({
           ddollarCost,
           routeCacheLevel: routeCacheLevel ?? 'miss',
           ...(promptEfficiency ? { promptEfficiency } : {}),
+          ...(routePolicy ? { routePolicy } : {}),
         },
       })}\n\n`,
     );

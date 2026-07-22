@@ -11,7 +11,8 @@ The user-facing promise is:
 - Founder Free supplies a simple managed quota for questions, planning, explanations, and small edits.
 - Paid plans unlock serious autonomous work, longer verification loops, remote actions, and more concurrent coordinated agents.
 - Personal provider keys and local models remain available without consuming managed quota.
-- Founder OS chooses the cheapest healthy model that passes the task's capability and quality requirements.
+- Founder Free uses DeepSeek V4 Flash. Builder and Team start on Flash and can
+  explicitly use V4 Pro for complex code, reasoning, or verification.
 
 Exact tokens, provider costs, cache rates, and margin controls remain visible to platform admins.
 
@@ -21,9 +22,10 @@ Exact tokens, provider costs, cache rates, and margin controls remain visible to
 - The last verified production routes use DeepSeek v4 Pro or Flash. GLM must remain disabled until its configured API key and target model pass an authenticated completion probe.
 - Admins can add platform-wide OpenAI-compatible providers with a name, base URL, model, and API key.
 - Ordinary founders can connect several known providers and switch connected providers in website chat.
-- Ordinary founders do not yet have the complete named custom-provider profile experience in the IDE.
-- The managed allowance has a per-user advisory lock, daily fair-use tiers, and pool preservation, but it does not yet reserve estimated cost before a request. A completion can therefore overshoot a cap. Hard reservation is a launch requirement.
-- The IDE has a local coordination ledger and ownership signals, but server-backed awareness across every task, device, and workspace is not complete.
+- Ordinary founders have unlimited encrypted named provider profiles in the IDE with display name, base URL, API key, model ID, optional headers, connection testing, persistence, and chat selection.
+- Managed usage is reserved atomically before provider access, reconciled from provider usage, and conservatively charged when an in-flight result is uncertain.
+- Builder and Team coordination is server-backed across tasks and devices, with local atomic path claims, server fencing generations, overlap rejection, heartbeats, and an audit trail.
+- Founder Free is fenced to V4 Flash even when a Code or Reasoning intent is requested. Builder and Team can use V4 Pro, and the served route is exposed in the response receipt.
 
 ## Seven-stage completion plan
 
@@ -127,9 +129,6 @@ Do not advertise a large swarm count as the product. More agents can increase co
 
 ## Release gates still open
 
-- Complete personal custom-provider profiles and IDE dropdown synchronization.
-- Add server-backed agent leases, overlap detection, and coordination events.
-- Implement hard cost reservation and reconciliation.
 - Approve prices and connect the billing entitlement source.
 - Run the 100-founder capacity and margin test.
 - Finish authenticated website deep-route redesign and production deployment.

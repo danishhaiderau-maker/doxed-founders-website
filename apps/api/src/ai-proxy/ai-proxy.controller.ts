@@ -235,6 +235,7 @@ export class AiProxyController {
       model: result.model,
       routeCacheLevel: result.cacheLevel,
       promptEfficiency: result.promptEfficiency,
+      routePolicy: result.routePolicy,
     });
 
   }
