@@ -65,11 +65,11 @@ installer hashes, soak log.
 - [x] Exclude secrets, dependencies, generated files, and large binaries.
 - [x] Add decision provenance and negative memory: rejected approaches are not
   suggested again unless the founder reopens them.
-- [ ] Detect repeated solutions and reuse verified prior work.
+- [x] Detect repeated solutions and reuse verified prior work.
 - [x] Surface dependency impact before an agent edits shared modules.
 - [ ] Link chats to projects and goals so a founder can resume work without
   reconstructing context from message history.
-- [ ] Store compact verified solution patterns with commit, checks, affected
+- [x] Store compact verified solution patterns with commit, checks, affected
   symbols, and invalidation conditions; never reuse an unverified answer.
 - [ ] Add a founder-controlled daily project brief covering completed work,
   blockers, decisions, usage, savings, and suggested next actions.

@@ -30,6 +30,11 @@ import {
   founderAutoEscalationReason,
   type FounderAutoEscalationReason,
 } from './auto-escalation';
+import {
+  isVerificationCommand,
+  type FounderVerifiedSolutionMemory,
+  type VerifiedSolutionCheck,
+} from './verified-solution-memory';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -51,8 +56,14 @@ export interface ParticipantDeps {
   projectContext?: {
     contextFor(prompt: string): string;
     cacheContextFor(prompt: string): WorkspaceCacheContext | null;
+    workspaceIdValue(): string | null;
+    allFileHashes(): Array<{ path: string; sha256: string }>;
+    fileHashes(paths: string[]): Array<{ path: string; sha256: string }>;
+    headCommit(): string | null;
+    refresh(force?: boolean): Promise<void>;
   };
   resultCache?: FounderSafeResultCache;
+  solutionMemory?: FounderVerifiedSolutionMemory;
 }
 
 const MAX_TOOL_TURNS = 8;
@@ -166,11 +177,22 @@ async function handleParticipantRequest(
     : '';
   const projectContextText = deps.projectContext?.contextFor(prompt) ?? '';
   const cacheContext = deps.projectContext?.cacheContextFor(prompt) ?? null;
+  const workspaceId = deps.projectContext?.workspaceIdValue()
+    ?? cacheContext?.workspaceId
+    ?? null;
+  const priorSolutions = workspaceId
+    ? deps.solutionMemory?.contextFor(
+        workspaceId,
+        prompt,
+        deps.projectContext?.allFileHashes() ?? [],
+      ) ?? ''
+    : '';
   const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
   const systemContent = composeFounderSystemPrompt({
     identity,
     memory: memoryText,
     projectContext: projectContextText,
+    additionalStableContext: priorSolutions,
     coordination: coordinationText,
   });
 
@@ -210,6 +232,9 @@ async function handleParticipantRequest(
     let usedTools = false;
     let reusableAnswer = '';
     let reusableTokenEstimate = 0;
+    const editedPaths = new Set<string>();
+    const passedChecks: VerifiedSolutionCheck[] = [];
+    let finalAnswer = '';
 
     for (let turn = 0; turn < MAX_TOOL_TURNS && !token.isCancellationRequested; turn += 1) {
       if (turn > 0 && coordinationTaskId) {
@@ -267,6 +292,7 @@ async function handleParticipantRequest(
         completed = true;
         reusableAnswer = assistantText;
         reusableTokenEstimate = efficiency.estimate.sentTokens + estimateTokensFromText(assistantText);
+        finalAnswer = assistantText;
         break;
       }
 
@@ -284,6 +310,7 @@ async function handleParticipantRequest(
 
       for (const call of toolCalls) {
         let resultText: string;
+        const parsedInput = parseToolInput(call.arguments) as Record<string, unknown>;
         if (!FOUNDER_TOOL_NAMES.has(call.name)) {
           resultText = `Error: tool "${call.name}" is not available.`;
         } else {
@@ -292,7 +319,7 @@ async function handleParticipantRequest(
             const invoke = () => vscode.lm.invokeTool(
               call.name,
               {
-                input: parseToolInput(call.arguments),
+                input: parsedInput,
                 toolInvocationToken: request.toolInvocationToken,
               },
               token,
@@ -306,6 +333,26 @@ async function handleParticipantRequest(
               error instanceof Error ? error.message : String(error)
             }`;
           }
+        }
+        if (
+          call.name === 'founder-edit-file'
+          && typeof parsedInput.filePath === 'string'
+          && !resultText.startsWith('Error:')
+        ) {
+          editedPaths.add(
+            parsedInput.filePath.replaceAll('\\', '/').replace(/^\.\//, ''),
+          );
+        }
+        if (
+          call.name === 'founder-run-command'
+          && typeof parsedInput.command === 'string'
+          && isVerificationCommand(parsedInput.command)
+          && /\[exit code 0\]\s*$/.test(resultText)
+        ) {
+          passedChecks.push({
+            command: parsedInput.command,
+            result: 'passed',
+          });
         }
         gatewayMessages.push({
           role: 'tool',
@@ -330,6 +377,31 @@ async function handleParticipantRequest(
     ok = completed && !token.isCancellationRequested;
     if (ok && !usedTools && cacheInput && reusableAnswer) {
       deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
+    }
+    if (
+      ok
+      && finalAnswer
+      && editedPaths.size > 0
+      && passedChecks.length > 0
+      && workspaceId
+    ) {
+      await deps.projectContext?.refresh(true);
+      const affectedFiles = deps.projectContext?.fileHashes([...editedPaths]) ?? [];
+      if (affectedFiles.length === editedPaths.size) {
+        const remembered = deps.solutionMemory?.remember({
+          workspaceId,
+          goal: prompt,
+          summary: finalAnswer,
+          commit: deps.projectContext?.headCommit() ?? null,
+          affectedFiles,
+          checks: passedChecks,
+        });
+        if (remembered) {
+          stream.markdown(
+            '\n\n---\n**Founder memory** | verified solution pattern saved locally',
+          );
+        }
+      }
     }
     if (ok && escalationReason) {
       stream.markdown(

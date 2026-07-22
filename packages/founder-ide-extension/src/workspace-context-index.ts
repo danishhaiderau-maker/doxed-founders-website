@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -15,6 +16,7 @@ import {
   type WorkspaceDecisionRecord,
   type WorkspaceCacheContext,
 } from './workspace-context-state';
+import type { VerifiedSolutionFile } from './verified-solution-memory';
 
 const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,java,kt,swift,cs,cpp,c,h,hpp,css,scss,html,yml,yaml,toml,sql,prisma,sol,sh,ps1}';
 const EXCLUDE_GLOB = '**/{.git,node_modules,dist,out,build,.next,.turbo,coverage,.cache,.venv,venv,__pycache__,artifacts}/**';
@@ -64,6 +66,40 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     return workspaceCacheContext(this.state, prompt);
   }
 
+  workspaceIdValue(): string | null {
+    return this.state?.workspaceId ?? this.workspaceId;
+  }
+
+  allFileHashes(): VerifiedSolutionFile[] {
+    return this.state?.files.map((file) => ({
+      path: file.path,
+      sha256: file.sha256,
+    })) ?? [];
+  }
+
+  fileHashes(paths: string[]): VerifiedSolutionFile[] {
+    const requested = new Set(
+      paths.map((file) => this.normalizeWorkspaceFile(file)).filter(Boolean),
+    );
+    return this.allFileHashes().filter((file) => requested.has(file.path));
+  }
+
+  headCommit(): string | null {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return null;
+    try {
+      const value = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 2_000,
+        windowsHide: true,
+      }).trim();
+      return /^[a-f0-9]{40,64}$/i.test(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   summary(): FounderWorkspaceContextSummary {
     return {
       files: this.state?.files.length ?? 0,
@@ -96,6 +132,23 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     return workspaceId
       ? path.join(this.context.globalStorageUri.fsPath, 'workspace-context', `${workspaceId}.json`)
       : null;
+  }
+
+  private normalizeWorkspaceFile(file: string): string {
+    if (!path.isAbsolute(file)) {
+      return file.replaceAll('\\', '/').replace(/^\.\//, '');
+    }
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const relative = path.relative(folder.uri.fsPath, file);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        continue;
+      }
+      const normalized = relative.replaceAll('\\', '/');
+      return (vscode.workspace.workspaceFolders?.length ?? 0) > 1
+        ? `${folder.name}/${normalized}`
+        : normalized;
+    }
+    return '';
   }
 
   private switchWorkspace(): void {

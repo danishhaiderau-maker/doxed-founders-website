@@ -52,6 +52,7 @@ import { FounderCompanionViewProvider } from './founder-companion';
 import { FounderAgentAwareness } from './agent-awareness';
 import { FounderWorkspaceContextIndex } from './workspace-context-index';
 import { FounderSafeResultCache } from './safe-result-cache';
+import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -69,6 +70,7 @@ let founderCompanion: FounderCompanionViewProvider | undefined;
 let founderAgentAwareness: FounderAgentAwareness | undefined;
 let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
 let founderSafeResultCache: FounderSafeResultCache | undefined;
+let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -128,6 +130,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(founderWorkspaceContext);
   founderSafeResultCache = new FounderSafeResultCache(
     path.join(context.globalStorageUri.fsPath, 'safe-result-cache'),
+  );
+  founderVerifiedSolutionMemory = new FounderVerifiedSolutionMemory(
+    path.join(context.globalStorageUri.fsPath, 'verified-solutions'),
   );
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
@@ -460,6 +465,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     coordination: founderAgentAwareness,
     projectContext: founderWorkspaceContext,
     resultCache: founderSafeResultCache,
+    solutionMemory: founderVerifiedSolutionMemory,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setWorking('Flying to Founder AI', modelId);

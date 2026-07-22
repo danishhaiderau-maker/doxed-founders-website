@@ -47,8 +47,15 @@ export function composeFounderSystemPrompt(input: {
   memory?: string;
   projectContext?: string;
   coordination?: string;
+  additionalStableContext?: string;
 }): string {
-  return [input.identity, input.memory, input.projectContext, input.coordination]
+  return [
+    input.identity,
+    input.memory,
+    input.projectContext,
+    input.additionalStableContext,
+    input.coordination,
+  ]
     .map((block) => block?.trim() ?? '')
     .filter(Boolean)
     .join('\n\n');
