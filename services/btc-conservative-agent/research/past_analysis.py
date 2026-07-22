@@ -289,7 +289,18 @@ def latest_past_analysis(root: str | Path = ".") -> Path | None:
     rows = list_past_analyses(root)
     if not rows:
         return None
-    return root / PAST_ANALYSIS_DIR / _safe_id(rows[0].get("archive_id") or "")
+    # A repeated Fresh Collection click on an already-empty session can create
+    # a legitimate zero-trade receipt.  Keep that receipt in the archive table,
+    # but make the one-click download resolve to the newest *meaningful* result
+    # so it cannot hide the completed pre-wipe analysis the operator expects.
+    selected = next(
+        (
+            row for row in rows
+            if int((row.get("performance") or {}).get("trades") or 0) > 0
+        ),
+        rows[0],
+    )
+    return root / PAST_ANALYSIS_DIR / _safe_id(selected.get("archive_id") or "")
 
 
 if __name__ == "__main__":
