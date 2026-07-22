@@ -73,6 +73,8 @@ const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
+const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
+const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 
 export type RelayExecutorHealthSnapshot = {
   healthy: boolean;
@@ -160,6 +162,23 @@ export function relayEntryOrderIsCompletelyUnfilled(order: {
 }): boolean {
   const filledQty = Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount));
   return filledQty <= MIN_QTY_BTC;
+}
+
+/**
+ * Remove exchange orders already attributed to a current virtual lot. The
+ * expensive expired-participant recovery query is needed only for genuinely
+ * unattributed orders, not for every normal pending entry/protective stop.
+ */
+export function untrackedActiveOrderIds(
+  activeOrderIds: Iterable<number>,
+  liveLotMeta: Iterable<Pick<ExecutionPayload, 'bitfinexOrderId' | 'stopOrderId'>>,
+): number[] {
+  const untracked = new Set(activeOrderIds);
+  for (const meta of liveLotMeta) {
+    if (meta.bitfinexOrderId != null) untracked.delete(meta.bitfinexOrderId);
+    if (meta.stopOrderId != null) untracked.delete(meta.stopOrderId);
+  }
+  return [...untracked];
 }
 
 /**
@@ -1198,6 +1217,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           `CANCEL_FAILED_ORDER_STILL_LIVE order=${orderId} participant=${participant.id}`,
         );
       }
+      // Keep the participant-level audit truthful without closing the shared
+      // showcase cycle: another subscriber may still be mirroring that same
+      // source order. The UI can now distinguish watchdog cancellation from
+      // ordinary TTL expiry and show both creation and cancellation times.
+      await this.prisma.$transaction([
+        this.prisma.signalCycleEvent.create({
+          data: {
+            cycleId: participant.cycleId,
+            participantId: participant.id,
+            eventType: 'EXPIRED',
+            payload: {
+              venue: 'bitfinex',
+              reason: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+              event: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+              bitfinex_order_id: orderId,
+              pnl_usd: 0,
+              source: 'hire',
+            },
+          },
+        }),
+        this.prisma.signalCycleParticipant.update({
+          where: { id: participant.id },
+          data: {
+            status: SignalCycleStatus.EXPIRED,
+            pnlUsd: 0,
+            settlementStatus: 'WAIVED',
+            feeUsd: 0,
+            settledAt: new Date(),
+          },
+        }),
+      ]);
       this.logger.warn(
         `Relay watchdog cancelled verified-unfilled entry ${orderId} ` +
           `participant=${participant.id} cycle=${participant.cycleId}`,
@@ -4845,16 +4895,44 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // resolved once findOrder confirms the order is gone. Audit
     // RECONCILE_RECANCEL_EXPIRED_STILL_LIVE on every re-attempt so the operator
     // can see the ledger/exchange drift being healed.
+    // First account for every currently managed entry/stop order. Previously
+    // this code scanned and folded the entire historical participant ledger on
+    // every 250ms tick even when the only active order was the current pending
+    // entry. That unbounded O(history) loop caused the production watchdog to
+    // exceed 60s and cancel a healthy, unfilled canary.
+    const liveParticipants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        cycle: { agentId },
+        ...participantScope,
+      },
+      select: { id: true },
+    });
+    const liveLotMeta: ExecutionPayload[] = [];
+    for (const participant of liveParticipants) {
+      liveLotMeta.push(await this.loadExecutionMeta(participant.id));
+    }
+    const untrackedOrderIds = untrackedActiveOrderIds(activeOrderIdSet, liveLotMeta);
+    if (untrackedOrderIds.length === 0) return;
+
+    const recentCutoff = new Date(Date.now() - EXPIRED_STILL_LIVE_LOOKBACK_MS);
+    const scopedCutoff = participantScope.createdAt?.gte;
+    const effectiveCutoff =
+      scopedCutoff && scopedCutoff > recentCutoff ? scopedCutoff : recentCutoff;
     const expiredCandidates = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
         status: { in: [SignalCycleStatus.EXPIRED, SignalCycleStatus.CLOSED] },
         cycle: { agentId },
         events: { none: { eventType: 'FILLED' } },
-        updatedAt: { lt: new Date(Date.now() - 120_000) },
         ...participantScope,
+        createdAt: { gt: effectiveCutoff },
+        updatedAt: { lt: new Date(Date.now() - 120_000) },
       },
       select: { id: true, cycleId: true, status: true, venue: true },
+      orderBy: { updatedAt: 'desc' },
+      take: EXPIRED_STILL_LIVE_CANDIDATE_LIMIT,
     });
 
     for (const row of expiredCandidates) {
@@ -4862,7 +4940,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const oid = meta.bitfinexOrderId;
       if (oid == null) continue;
       // Only act if the order is confirmed still on the active book.
-      if (!activeOrderIdSet.has(oid)) continue;
+      if (!untrackedOrderIds.includes(oid)) continue;
 
       const venue = row.venue ?? 'bitfinex';
       const cancel = await this.cancelManagedOrderGone(

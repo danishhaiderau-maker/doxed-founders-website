@@ -1096,6 +1096,7 @@ export class TradingAgentsService implements OnModuleInit {
         qty: meta.qty,
         stopLoss: meta.stopPrice,
         takeProfit: meta.profitLockFloor,
+        terminalReason: meta.terminalReason,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

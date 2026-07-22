@@ -12,6 +12,7 @@ import {
   mergedDirectionCompatible,
   relayEntryOrderIsCompletelyUnfilled,
   relayWatchdogShouldRestart,
+  untrackedActiveOrderIds,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   relayArmTimestampMs,
@@ -31,6 +32,23 @@ test('watchdog cleanup cancels only exchange orders with zero reported fill', ()
   assert.equal(
     relayEntryOrderIsCompletelyUnfilled({ amountOrig: 0.031, amount: 0 }),
     false,
+  );
+});
+
+test('historical orphan recovery ignores orders attributed to current live lots', () => {
+  assert.deepEqual(
+    untrackedActiveOrderIds(
+      [101, 102, 103],
+      [
+        { bitfinexOrderId: 101 },
+        { bitfinexOrderId: 102, stopOrderId: 103 },
+      ],
+    ),
+    [],
+  );
+  assert.deepEqual(
+    untrackedActiveOrderIds([101, 999], [{ bitfinexOrderId: 101 }]),
+    [999],
   );
 });
 

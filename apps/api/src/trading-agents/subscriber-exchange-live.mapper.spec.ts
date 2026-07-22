@@ -91,3 +91,40 @@ test('session P&L uses one exchange accounting basis without virtual-lot double 
     -4.59,
   );
 });
+
+test('expired copy rows expose creation, cancellation, and terminal reason separately', () => {
+  const createdAt = new Date('2026-07-22T12:36:19.000Z');
+  const expiredAt = new Date('2026-07-22T12:38:42.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.EXPIRED,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: 0,
+        pnlMarginPct: null,
+        limitPrice: 65_892.83,
+        qty: 0.03035,
+        terminalReason: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+        createdAt,
+        updatedAt: expiredAt,
+        cycle: {
+          tradeId: 'cont-c9a9f6dd243d',
+          status: SignalCycleStatus.PENDING_ENTRY,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt,
+        },
+      },
+    ],
+  });
+
+  assert.equal(book.expiredOrders[0]?.createdTime, '2026-07-22 22:36:19 AEST');
+  assert.equal(book.expiredOrders[0]?.expiredTime, '2026-07-22 22:38:42 AEST');
+  assert.equal(
+    book.expiredOrders[0]?.reason,
+    'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+  );
+});

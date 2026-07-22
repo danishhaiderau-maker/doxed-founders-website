@@ -5,6 +5,7 @@ export type ParticipantExecutionMeta = {
   stopPrice: number | null;
   profitLockFloor: number | null;
   direction: 'LONG' | 'SHORT' | null;
+  terminalReason: string | null;
 };
 
 type EventRow = { eventType: string; payload: unknown };
@@ -27,9 +28,15 @@ function impliedHardStopPrice(
 
 export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExecutionMeta {
   const merged: Record<string, unknown> = {};
+  let terminalReason: string | null = null;
   for (const e of events) {
     if (e.payload && typeof e.payload === 'object') {
-      Object.assign(merged, e.payload as Record<string, unknown>);
+      const payload = e.payload as Record<string, unknown>;
+      Object.assign(merged, payload);
+      if (e.eventType === 'EXPIRED' || e.eventType === 'EXIT') {
+        const reason = payload.reason ?? payload.exit_reason ?? payload.event;
+        if (typeof reason === 'string' && reason.trim()) terminalReason = reason.trim();
+      }
     }
   }
 
@@ -60,7 +67,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
     }
   }
 
-  return { limitPrice, qty, stopPrice, profitLockFloor, direction };
+  return { limitPrice, qty, stopPrice, profitLockFloor, direction, terminalReason };
 }
 
 /** @deprecated Use foldParticipantExecutionMeta */

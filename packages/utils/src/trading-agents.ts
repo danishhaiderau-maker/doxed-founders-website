@@ -35,6 +35,10 @@ export type AgentLivePendingOrderRow = {
 
 export type AgentLiveExpiredOrderRow = {
   time: string;
+  /** Source/copy participant creation time; optional for legacy snapshots. */
+  createdTime?: string;
+  /** Terminal expiry/cancellation time; optional for legacy snapshots. */
+  expiredTime?: string;
   direction: string;
   limitPrice: number;
   ageMin: number;

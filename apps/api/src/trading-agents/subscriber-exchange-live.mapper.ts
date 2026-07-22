@@ -28,6 +28,7 @@ export type SubscriberCycleRow = {
   qty?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  terminalReason?: string | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -158,10 +159,12 @@ export function mapSubscriberExchangeLiveBook(input: {
       );
       expiredOrders.push({
         time: fmtTime(row.updatedAt),
+        createdTime: fmtTime(row.createdAt),
+        expiredTime: fmtTime(row.updatedAt),
         direction,
         limitPrice,
         ageMin,
-        reason: row.cycle.showcaseExitReason ?? 'EXPIRED',
+        reason: row.terminalReason ?? row.cycle.showcaseExitReason ?? 'EXPIRED',
         confidence: Math.round(Number(intent.confidence ?? 0)),
         mode: 'LIVE_COPY',
       });

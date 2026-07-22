@@ -144,6 +144,13 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           hired: dashR.value.agent.hired ?? prev?.hired ?? false,
           following: dashR.value.agent.following ?? prev?.following ?? false,
         }));
+        // Dashboard polling is the live source of truth for automatic safety
+        // pauses. Previously only the initial agent fetch updated this state,
+        // so a watchdog-paused relay could remain falsely green until a full
+        // page reload.
+        setInstanceStatus(dashR.value.agent.instanceStatus ?? null);
+        setInstanceMode(dashR.value.agent.instanceMode ?? null);
+        setExchangeConnected(Boolean(dashR.value.agent.exchangeConnected));
         setDashboard(dashR.value.dashboard);
         setBotConnected(Boolean(dashR.value.botConnected));
         setExecutionPaused(Boolean(dashR.value.executionPaused));

@@ -132,7 +132,8 @@ export function AgentTransparencyTables({
   ]);
 
   const expiredRows = book.expiredOrders.slice(0, cap).map((o) => [
-    displayMelbourneTime(o.time),
+    displayMelbourneTime(o.createdTime ?? o.time),
+    displayMelbourneTime(o.expiredTime ?? o.time),
     o.direction,
     fmtPrice(o.limitPrice),
     String(o.ageMin),
@@ -238,7 +239,17 @@ export function AgentTransparencyTables({
       />
       <MiniTable
         title="Expired orders"
-        headers={['Time', 'Dir', 'Limit price', 'Age min', 'Reason', 'Conf', 'Mode']}
+        subtitle="Created and expired/cancelled timestamps are both Melbourne time"
+        headers={[
+          'Created (Melbourne)',
+          'Expired (Melbourne)',
+          'Dir',
+          'Limit price',
+          'Age min',
+          'Reason',
+          'Conf',
+          'Mode',
+        ]}
         rows={expiredRows}
         emptyMessage="No recently expired orders."
       />
