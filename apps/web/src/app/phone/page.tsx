@@ -17,15 +17,11 @@ import type { ConnectedNode, NodeStatusResponse } from '@/components/phone/types
  * authenticates with their NextAuth session JWT (same auth as the rest of the
  * web app), sees a list of connected IDEs / Founder Nodes, and can switch
  * which IDE the phone is "controlling" via the switch button at the top. The
- * chat panel streams responses from the AI Gateway (`/api/v1/chat/phone-completions`)
- * using the same routing path as the desktop IDE, with per-turn route metadata
- * (tier / provider / model / DDollar cost) shown under each reply.
+ * chat panel either streams Founder AI or dispatches a request to the selected
+ * Founder IDE through its authenticated Founder Node relay.
  *
- * Architecture (Phase 2 = first half of the bridge):
- *   Phone Browser ←(SSE)→ Founder OS Cloud API ←(WebSocket)→ Founder Node ←→ IDE
- *
- * The Founder Node ↔ IDE WebSocket bridge is a later phase. See
- * docs/FOUNDER-IDE-FORK-PLAN.md §8.
+ * Architecture:
+ *   Phone Browser <-> Founder OS Cloud API <-> Founder Node <-> Founder IDE
  */
 export default function PhoneRemotePage() {
   const { data: session, status } = useSession();
@@ -173,7 +169,7 @@ export default function PhoneRemotePage() {
         <PhoneChat accessToken={accessToken} activeNode={activeNode} />
 
         <p className="pb-6 text-center text-[10px] text-zinc-600">
-          Phone Remote · Phase 2 · same AI routing as your desktop IDE
+          Founder AI and authenticated Founder IDE control
         </p>
       </div>
     </main>

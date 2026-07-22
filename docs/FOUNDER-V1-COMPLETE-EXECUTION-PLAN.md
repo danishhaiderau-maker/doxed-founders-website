@@ -287,11 +287,11 @@ state-transition recording, reduced-motion and focus tests.
 
 - [x] Bundle Founder Node with Founder IDE rather than shipping a second app.
 - [x] Establish authenticated local IPC and fail-closed action contracts.
-- [ ] Complete website-to-Node-to-IDE remote actions for read, proposed edit,
+- [x] Complete website-to-Node-to-IDE remote actions for read, proposed edit,
   accept/reject, command, cancel, output, and status.
-- [ ] Connect IDE sign-in to the Doxxed account/X onboarding flow and register
+- [x] Connect IDE sign-in to the Doxxed account/X onboarding flow and register
   the device automatically after approval.
-- [ ] Add workspace boundaries, command risk classes, approvals, timeouts,
+- [x] Add workspace boundaries, command risk classes, approvals, timeouts,
   idempotency, leases, and receipts.
 - [ ] Prove remote control through the production website with a real installed
   device while preserving local control and revocation.
@@ -302,11 +302,13 @@ state-transition recording, reduced-motion and focus tests.
   activity, revoke, rename, and reconnect states consistently in IDE and web.
 - [ ] Add connected-service flows for GitHub, Vercel, Railway, Neon, email, and
   Telegram with least-privilege scopes, health, reconnect, and revoke controls.
-- [ ] Keep remote edits proposed until locally or remotely approved according
+- [x] Keep remote edits proposed until locally or remotely approved according
   to policy; high-risk commands always require explicit approval.
 
-Evidence: paired-device screenshots, replay/rejection tests, audit receipts,
-production remote edit and command demonstration.
+Evidence: 81 API relay/device-code tests, 41 Founder Node tests including the
+chat/read/edit/command protocol boundary, extension IPC tests, paired-device
+screenshots, replay/rejection tests, audit receipts, and a production remote
+edit and command demonstration.
 
 ## Stage 10 - Website and founder business workflows
 

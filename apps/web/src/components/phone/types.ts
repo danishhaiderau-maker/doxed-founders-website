@@ -2,14 +2,13 @@
  * Shared types for the Founder OS Phone Remote UI.
  *
  * The phone UI lets a founder control / mirror their desktop IDE from a phone
- * browser. Phase 2 wires the first half of the bridge:
+ * browser. The production bridge is:
  *
  *   Phone Browser ←(SSE)→ Founder OS Cloud API ←(WebSocket)→ Founder Node ←→ IDE
  *
- * The Founder Node ↔ IDE WebSocket bridge is a later phase, so for now the
- * phone UI talks directly to the AI Gateway (`/api/v1/chat/phone-completions`)
- * and lists connected nodes from `/api/founder-node/status`. See
- * docs/FOUNDER-IDE-FORK-PLAN.md §8 and apps/web/src/app/phone/page.tsx.
+ * Founder AI messages use the AI Gateway; Control IDE messages enter the
+ * selected machine's authenticated dispatch queue and are forwarded over the
+ * local Founder Node IPC connection.
  */
 
 /** A single connected Founder Node / IDE host, from GET /api/founder-node/status. */

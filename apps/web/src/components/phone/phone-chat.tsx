@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Send } from 'lucide-react';
 import { apiUrl } from '@/lib/api-base';
+import { dispatchToIdeSession, fetchIdeDispatchStatus } from '@/lib/api';
 import {
   PHONE_MODEL_ALIASES,
   type PhoneChatMessage,
@@ -16,6 +17,11 @@ type Props = {
   /** The IDE the phone is currently controlling (shown in the chat header). */
   activeNode: ConnectedNode | null;
 };
+
+type PhoneMode = 'ai' | 'ide';
+
+const DISPATCH_POLL_MS = 1_500;
+const DISPATCH_TIMEOUT_MS = 75_000;
 
 /**
  * Phone chat with SSE streaming through the AI Gateway.
@@ -33,6 +39,7 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
   const [messages, setMessages] = useState<PhoneChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [model, setModel] = useState<PhoneModelId>('founder-os-auto');
+  const [mode, setMode] = useState<PhoneMode>('ai');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -67,6 +74,59 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
     abortRef.current = controller;
 
     try {
+      if (mode === 'ide') {
+        if (!activeNode || activeNode.status !== 'online') {
+          throw new Error('Choose an online Founder IDE before sending remote work.');
+        }
+        const created = await dispatchToIdeSession(
+          accessToken,
+          `founder-ide:${activeNode.nodeId}`,
+          text,
+          'founder-ide',
+        );
+        const deadline = Date.now() + DISPATCH_TIMEOUT_MS;
+        let lastStatus = created.status;
+        while (Date.now() < deadline) {
+          if (controller.signal.aborted) throw new DOMException('Stopped', 'AbortError');
+          const status = await fetchIdeDispatchStatus(accessToken, created.id);
+          lastStatus = status.status;
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    content:
+                      status.status === 'DISPATCHING'
+                        ? `Founder Node reached ${activeNode.label || 'your laptop'}. Waiting for Founder IDE...`
+                        : `Queued securely for ${activeNode.label || 'your laptop'}...`,
+                  }
+                : message,
+            ),
+          );
+          if (status.failed) throw new Error(remoteFailureMessage(status.result));
+          if (status.delivered) {
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content: `Delivered to ${activeNode.label || 'Founder IDE'}. The request is visible in Founder Chat; edits and commands still require approval.`,
+                      streaming: false,
+                    }
+                  : message,
+              ),
+            );
+            return;
+          }
+          await delay(DISPATCH_POLL_MS, controller.signal);
+        }
+        throw new Error(
+          lastStatus === 'PENDING'
+            ? 'Founder IDE did not come online before the delivery window expired.'
+            : 'Founder IDE did not confirm delivery in time.',
+        );
+      }
+
       const res = await fetch(apiUrl('/api/v1/chat/phone-completions'), {
         method: 'POST',
         headers: {
@@ -139,7 +199,7 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
       setSending(false);
       abortRef.current = null;
     }
-  }, [accessToken, activeNode, input, messages, model, sending]);
+  }, [accessToken, activeNode, input, messages, mode, model, sending]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -148,32 +208,65 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
   return (
     <div className="flex flex-col rounded-2xl border border-zinc-800 bg-zinc-950/50">
       {/* Header — model selector + active IDE */}
-      <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 px-3 py-2">
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value as PhoneModelId)}
-          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
-          aria-label="Execution profile"
-        >
-          {PHONE_MODEL_ALIASES.map((m) => (
-            <option key={m.id} value={m.id} title={m.hint}>
-              {m.label}
-            </option>
+      <div className="space-y-2 border-b border-zinc-800/80 px-3 py-2.5">
+        <div className="grid grid-cols-2 rounded-lg bg-zinc-900 p-0.5" role="tablist" aria-label="Phone Remote mode">
+          {([
+            ['ai', 'Founder AI'],
+            ['ide', 'Control IDE'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={mode === value}
+              onClick={() => setMode(value)}
+              className={[
+                'min-h-8 rounded-md px-2 text-xs font-semibold transition',
+                mode === value ? 'bg-zinc-700 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-200',
+              ].join(' ')}
+            >
+              {label}
+            </button>
           ))}
-        </select>
-        <span className="truncate text-[10px] text-zinc-500">
-          {activeNode ? activeNode.label ?? 'Unnamed machine' : 'No IDE'}
-        </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          {mode === 'ai' ? (
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value as PhoneModelId)}
+              className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              aria-label="Execution profile"
+            >
+              {PHONE_MODEL_ALIASES.map((m) => (
+                <option key={m.id} value={m.id} title={m.hint}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-[11px] text-zinc-400">Authenticated Founder Node relay</span>
+          )}
+          <span className="truncate text-[10px] text-zinc-500">
+            {mode === 'ide'
+              ? activeNode?.status === 'online'
+                ? activeNode.label ?? 'Founder IDE online'
+                : 'Choose an online IDE'
+              : 'Managed DeepSeek'}
+          </span>
+        </div>
       </div>
 
       {/* Messages */}
       <div ref={scrollRef} className="max-h-[52vh] min-h-[40vh] space-y-3 overflow-y-auto px-3 py-4">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 py-10 text-center">
-            <p className="text-sm text-zinc-500">Chat with Founder OS AI from your phone.</p>
+            <p className="text-sm text-zinc-500">
+              {mode === 'ide' ? 'Send work to the selected Founder IDE.' : 'Chat with Founder AI from your phone.'}
+            </p>
             <p className="max-w-xs text-[11px] text-zinc-600">
-              Same routing as your desktop IDE — pick a profile, type a message, tokens stream back. Route + DDollar cost
-              show under each reply.
+              {mode === 'ide'
+                ? 'Founder Node delivers it to Founder Chat. File changes and commands remain reviewable and fail closed.'
+                : 'Same managed routing as the desktop IDE, with the provider and usage receipt shown under each reply.'}
             </p>
           </div>
         ) : (
@@ -199,7 +292,7 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
             }
           }}
           rows={1}
-          placeholder="Message Founder OS…"
+          placeholder={mode === 'ide' ? 'Ask Founder IDE to review or change something...' : 'Message Founder AI...'}
           className="max-h-32 min-h-[2.5rem] flex-1 resize-none rounded-xl border border-zinc-800 bg-black px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none"
         />
         {sending ? (
@@ -214,7 +307,7 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
           <button
             type="button"
             onClick={() => void send()}
-            disabled={!input.trim()}
+            disabled={!input.trim() || (mode === 'ide' && activeNode?.status !== 'online')}
             className="rounded-xl bg-emerald-500 p-2.5 text-black disabled:opacity-40"
             aria-label="Send"
           >
@@ -224,6 +317,33 @@ export function PhoneChat({ accessToken, activeNode }: Props) {
       </div>
     </div>
   );
+}
+
+function remoteFailureMessage(result: string | null): string {
+  if (!result) return 'Founder IDE rejected or could not deliver the request.';
+  try {
+    const parsed = JSON.parse(result) as { error?: unknown };
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      return `Founder IDE could not deliver the request: ${parsed.error.slice(0, 180)}`;
+    }
+  } catch {
+    // Older bridge results are plain text.
+  }
+  return `Founder IDE could not deliver the request: ${result.replace(/^error:\s*/i, '').slice(0, 180)}`;
+}
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, ms);
+    signal.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer);
+        reject(new DOMException('Stopped', 'AbortError'));
+      },
+      { once: true },
+    );
+  });
 }
 
 function MessageBubble({ message }: { message: PhoneChatMessage }) {
