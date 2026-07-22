@@ -50,6 +50,7 @@ import { FounderSettingsPanel } from './founder-settings';
 import { FounderShortcutRegistry } from './founder-shortcuts';
 import { FounderCompanionViewProvider } from './founder-companion';
 import { FounderAgentAwareness } from './agent-awareness';
+import { FounderWorkspaceContextIndex } from './workspace-context-index';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -65,6 +66,7 @@ let founderSettings: FounderSettingsPanel | undefined;
 let founderShortcuts: FounderShortcutRegistry | undefined;
 let founderCompanion: FounderCompanionViewProvider | undefined;
 let founderAgentAwareness: FounderAgentAwareness | undefined;
+let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -120,6 +122,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
   );
+  founderWorkspaceContext = new FounderWorkspaceContextIndex(context);
+  context.subscriptions.push(founderWorkspaceContext);
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
     onDidSignIn: async () => {
@@ -267,6 +271,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
       founderShortcuts?.refresh(),
     ),
+    vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+      await founderWorkspaceContext?.refresh(true);
+      const summary = founderWorkspaceContext?.summary();
+      void vscode.window.showInformationMessage(
+        summary
+          ? `Founder project map refreshed: ${summary.files} files, ${summary.symbols} symbols.`
+          : 'Open a folder to build the Founder project map.',
+      );
+    }),
   );
 
   void applyFounderNavigationDefaults(context);
@@ -440,6 +453,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     profileManager: profileManager!,
     costTracker: costTracker!,
     coordination: founderAgentAwareness,
+    projectContext: founderWorkspaceContext,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setWorking('Flying to Founder AI', modelId);

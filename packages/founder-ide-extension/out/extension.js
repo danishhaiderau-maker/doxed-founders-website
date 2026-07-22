@@ -73,6 +73,7 @@ const founder_settings_1 = require("./founder-settings");
 const founder_shortcuts_1 = require("./founder-shortcuts");
 const founder_companion_1 = require("./founder-companion");
 const agent_awareness_1 = require("./agent-awareness");
+const workspace_context_index_1 = require("./workspace-context-index");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -87,6 +88,7 @@ let founderSettings;
 let founderShortcuts;
 let founderCompanion;
 let founderAgentAwareness;
+let founderWorkspaceContext;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -119,6 +121,8 @@ function activate(context) {
             founderCompanion?.setAttention('Agents are coordinating', `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`);
         }
     }));
+    founderWorkspaceContext = new workspace_context_index_1.FounderWorkspaceContextIndex(context);
+    context.subscriptions.push(founderWorkspaceContext);
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
         onDidSignIn: async () => {
             await (0, credentials_1.syncVaultIntoSettings)();
@@ -194,7 +198,13 @@ function activate(context) {
         catch {
             await vscode.commands.executeCommand('workbench.action.chat.open');
         }
-    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()));
+    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+        await founderWorkspaceContext?.refresh(true);
+        const summary = founderWorkspaceContext?.summary();
+        void vscode.window.showInformationMessage(summary
+            ? `Founder project map refreshed: ${summary.files} files, ${summary.symbols} symbols.`
+            : 'Open a folder to build the Founder project map.');
+    }));
     void applyFounderNavigationDefaults(context);
     // First-pass registration (synchronous so the model picker populates fast).
     registerOrNotify(context);
@@ -334,6 +344,7 @@ function registerOrNotify(context) {
         profileManager: profileManager,
         costTracker: costTracker,
         coordination: founderAgentAwareness,
+        projectContext: founderWorkspaceContext,
         onRequestStart: (modelId) => {
             pairingStatusBar?.setRequestInFlight(modelId);
             founderCompanion?.setWorking('Flying to Founder AI', modelId);

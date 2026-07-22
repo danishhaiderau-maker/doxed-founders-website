@@ -128,8 +128,9 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     let coordinationText = coordinationTaskId
         ? deps.coordination?.contextFor(coordinationTaskId) ?? ''
         : '';
+    const projectContextText = deps.projectContext?.contextFor(prompt) ?? '';
     const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
-    const systemContent = [memoryText, coordinationText, identity].filter(Boolean).join('\n\n');
+    const systemContent = [memoryText, projectContextText, coordinationText, identity].filter(Boolean).join('\n\n');
     const gatewayMessages = [
         { role: 'system', content: systemContent },
         { role: 'user', content: prompt },

@@ -76,6 +76,7 @@ describe('Founder IDE extension manifest', () => {
     assert.ok(commands.has('founderOs.signOut'));
     assert.ok(commands.has('founderOs.openConnections'));
     assert.ok(commands.has('founderOs.openSettings'));
+    assert.ok(commands.has('founderOs.refreshProjectContext'));
     const preferences = manifest.contributes?.menus?.['menubar/preferences'] ?? [];
     assert.ok(
       preferences.some((item: { command?: string }) => item.command === 'founderOs.openSettings'),
