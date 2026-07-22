@@ -12,7 +12,7 @@ Product & platform (17 recent commits)
 
 ## Last Commit
 
-Fix relay cancel-race fill attribution
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
