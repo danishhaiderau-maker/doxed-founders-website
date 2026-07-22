@@ -22,6 +22,7 @@ import {
   relayArmTimestampMs,
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
+  shouldClearShowcaseStatusError,
 } from './signal-subscriber-execution.service';
 
 test('orphan adoption defers to a same-direction pending entry that may own the fill', () => {
@@ -373,6 +374,35 @@ test('recognizes only historical F1 outage text for recovery clearing', () => {
     false,
   );
   assert.equal(isRecoveredShowcaseOutageError(null), false);
+});
+
+test('clears a persisted F1 warning after restart only when no outage is tracked', () => {
+  const message =
+    'Showcase unreachable for 61s — live copy in safe mode: no new entries (F1).';
+  assert.equal(
+    shouldClearShowcaseStatusError({
+      message,
+      hadTrackedOutage: false,
+      recoveredNow: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldClearShowcaseStatusError({
+      message,
+      hadTrackedOutage: true,
+      recoveredNow: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldClearShowcaseStatusError({
+      message,
+      hadTrackedOutage: true,
+      recoveredNow: true,
+    }),
+    true,
+  );
 });
 
 for (const message of [

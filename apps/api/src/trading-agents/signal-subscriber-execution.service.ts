@@ -345,6 +345,25 @@ export function isRecoveredShowcaseOutageError(
 }
 
 /**
+ * A deploy resets the in-memory outage streak but intentionally preserves the
+ * lastError audit text in Postgres. Once canonical state is healthy, clear
+ * that persisted warning when there is no current tracked outage; otherwise
+ * retain the three-hit recovery debounce for an outage observed by this
+ * process.
+ */
+export function shouldClearShowcaseStatusError(input: {
+  message: string | null | undefined;
+  hadTrackedOutage: boolean;
+  recoveredNow: boolean;
+}): boolean {
+  return (
+    isBenignShowcaseEntryWait(input.message) ||
+    (isRecoveredShowcaseOutageError(input.message) &&
+      (input.recoveredNow || !input.hadTrackedOutage))
+  );
+}
+
+/**
  * Only intents with a currently resting canonical showcase limit are eligible
  * for pending-order mirroring. Older unfilled INTENT rows must not block a
  * newer order that is actually present in the live book.
@@ -2101,11 +2120,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
       }
     } else if (botStateForCap != null || signedFastOrders.length > 0) {
+      const hadTrackedOutage = this.showcaseUnreachableSince.has(instance.id);
       const showcaseRecovered = this.clearShowcaseUnreachable(instance.id);
-      if (
-        isBenignShowcaseEntryWait(instance.lastError) ||
-        (showcaseRecovered && isRecoveredShowcaseOutageError(instance.lastError))
-      ) {
+      if (shouldClearShowcaseStatusError({
+        message: instance.lastError,
+        hadTrackedOutage,
+        recoveredNow: showcaseRecovered,
+      })) {
         await this.prisma.tradingAgentInstance
           .updateMany({
             where: { id: instance.id, lastError: instance.lastError },
