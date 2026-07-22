@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { AiProxyRuntimeService } from './ai-proxy-runtime.service';
 import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
+import { ChatCompletionRequestDto } from './dto/ai-proxy.dto';
 
 function runtimeWithDecision(model: string, provider = 'deepseek') {
   const calls: Array<{ intent: string }> = [];
@@ -127,4 +130,108 @@ test('legacy fallback honors forced reasoning even for a simple prompt', async (
   assert.equal(route.tier, 'reasoning');
   assert.equal(route.providerKey, 'deepseek');
   assert.equal(route.model, 'deepseek-v4-pro');
+});
+
+test('Founder Agent tool fields pass strict request validation', async () => {
+  const request = plainToInstance(ChatCompletionRequestDto, {
+    model: 'founder-os-reasoning',
+    messages: [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function' }] },
+      { role: 'tool', content: 'file contents', tool_call_id: 'call-1' },
+    ],
+    stream: true,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'read_file',
+          description: 'Read a workspace file.',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        },
+      },
+    ],
+    tool_choice: 'auto',
+  });
+
+  const errors = await validate(request, {
+    whitelist: true,
+    forbidNonWhitelisted: true,
+  });
+  assert.deepEqual(errors, []);
+});
+
+test('Founder Agent tools and tool history reach the upstream provider', async () => {
+  const sentBodies: Array<Record<string, unknown>> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    sentBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const runtime = new AiProxyRuntimeService(
+      {} as never,
+      {} as never,
+      {} as never,
+      { resolveApiKey: async () => 'test-key' } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { buildMemoryContext: async () => '' } as never,
+    );
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'read_file',
+          description: 'Read a workspace file.',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        },
+      },
+    ];
+
+    const result = await runtime.invoke(
+      auth,
+      {
+        model: 'founder-os-reasoning',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+          },
+          { role: 'tool', content: 'file contents', tool_call_id: 'call-1' },
+        ],
+        tools,
+        tool_choice: 'auto',
+      },
+      {
+        requestId: 'request-tools',
+        providerKey: 'deepseek',
+        model: 'deepseek-v4-pro',
+        tier: 'code',
+        intent: 'code',
+        profile: 'balanced',
+        candidates: [],
+        cacheKey: null,
+        cacheLevel: 'miss',
+        promptHash: 'hash',
+        flightRecorderHasDecisionRow: false,
+      } as never,
+    );
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(sentBodies[0]?.tools, tools);
+    assert.equal(sentBodies[0]?.tool_choice, 'auto');
+    assert.deepEqual((sentBodies[0]?.messages as Array<Record<string, unknown>>)[0]?.tool_calls, [
+      { id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{}' } },
+    ]);
+    assert.equal((sentBodies[0]?.messages as Array<Record<string, unknown>>)[1]?.tool_call_id, 'call-1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
