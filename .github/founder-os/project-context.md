@@ -12,7 +12,7 @@ Product & platform (17 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(relay): clear stale outage status after restart
 
 ## Last Activity
 
