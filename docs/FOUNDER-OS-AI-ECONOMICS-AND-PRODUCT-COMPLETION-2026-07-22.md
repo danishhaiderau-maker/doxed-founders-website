@@ -72,7 +72,7 @@ Acceptance: no request can exceed its user, task, or global cost reservation; ad
 Proposed packaging, pending final pricing approval:
 
 - Free: one active managed task, light work, queued execution, personal and local AI available.
-- Builder: serious autonomous builds, two or three coordinated agents, remote actions, deployment connections, and several remembered personal profiles.
+- Builder: serious autonomous builds, two or three coordinated agents, remote actions, deployment connections, and unlimited remembered Personal AI profiles. Plan limits govern managed allowance and coordination capacity, not how many keys a founder may save.
 - Team: shared projects, pooled capacity, roles, audit trail, and higher concurrency.
 - Launch Partner: contracted platform capacity and token-launch support with negotiated limits.
 

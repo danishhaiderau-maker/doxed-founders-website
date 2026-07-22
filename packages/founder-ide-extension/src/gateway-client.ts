@@ -117,13 +117,15 @@ export interface GatewayToolCall {
 }
 
 export interface GatewayClient {
-  /** Base URL ending in `/api/v1` (no trailing slash). */
+  /** OpenAI-compatible API base URL (no trailing slash). */
   baseUrl: string;
   /**
    * Authorization credential. Prefer the full `FounderNode {id}:{token}` header
    * value. Legacy `fos_{id}:{token}` is still accepted (sent as Bearer).
    */
   bearer: string;
+  /** Additional encrypted BYOK headers. Authorization is owned by `bearer`. */
+  headers?: Record<string, string>;
 }
 
 export interface StreamCallbacks {
@@ -372,10 +374,13 @@ export async function callGateway(
 
     try {
       const headers: Record<string, string> = {
+        ...client.headers,
         'Content-Type': 'application/json',
-        Authorization: authorizationHeader(client.bearer),
         Accept: 'text/event-stream',
       };
+      if (client.bearer?.trim()) {
+        headers.Authorization = authorizationHeader(client.bearer);
+      }
       if (options.executionProfile && options.executionProfile !== 'auto') {
         headers['X-Execution-Profile'] = options.executionProfile;
       }

@@ -8,7 +8,7 @@ import { EditorInput } from '../../../common/editor/editorInput.js';
 import * as nls from '../../../../nls.js';
 import { EditorExtensions } from '../../../common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -18,14 +18,15 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
-import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 
 
 import { mountVoidSettings } from './react/out/void-settings-tsx/index.js'
 import { Codicon } from '../../../../base/common/codicons.js';
 import { toDisposable } from '../../../../base/common/lifecycle.js';
+import './founderPersonalAiActions.js';
 
 
 // refer to preferences.contribution.ts keybindings editor
@@ -140,28 +141,7 @@ registerAction2(class extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const editorService = accessor.get(IEditorService);
-		const editorGroupService = accessor.get(IEditorGroupsService);
-
-		const instantiationService = accessor.get(IInstantiationService);
-
-		// if is open, close it
-		const openEditors = editorService.findEditors(VoidSettingsInput.RESOURCE); // should only have 0 or 1 elements...
-		if (openEditors.length !== 0) {
-			const openEditor = openEditors[0].editor
-			const isCurrentlyOpen = editorService.activeEditor?.resource?.fsPath === openEditor.resource?.fsPath
-			if (isCurrentlyOpen)
-				await editorService.closeEditors(openEditors)
-			else
-				await editorGroupService.activeGroup.openEditor(openEditor)
-			return;
-		}
-
-
-		// else open it
-		const input = instantiationService.createInstance(VoidSettingsInput);
-
-		await editorGroupService.activeGroup.openEditor(input);
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings');
 	}
 })
 
@@ -178,18 +158,7 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const editorService = accessor.get(IEditorService);
-		const instantiationService = accessor.get(IInstantiationService);
-
-		// close all instances if found
-		const openEditors = editorService.findEditors(VoidSettingsInput.RESOURCE);
-		if (openEditors.length > 0) {
-			await editorService.closeEditors(openEditors);
-		}
-
-		// then, open one single editor
-		const input = instantiationService.createInstance(VoidSettingsInput);
-		await editorService.openEditor(input);
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings');
 	}
 })
 
@@ -201,8 +170,8 @@ registerAction2(class extends Action2 {
 MenuRegistry.appendMenuItem(MenuId.GlobalActivity, {
 	group: '0_command',
 	command: {
-		id: VOID_TOGGLE_SETTINGS_ACTION_ID,
-		title: nls.localize('voidSettingsActionGear', 'Personal AI')
+		id: 'founderOs.openSettings',
+		title: nls.localize('voidSettingsActionGear', 'Founder Settings')
 	},
 	order: 1
 });

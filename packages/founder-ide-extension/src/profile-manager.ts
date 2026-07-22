@@ -71,6 +71,7 @@ export const EXECUTION_PROFILES: readonly ExecutionProfile[] = [
 
 const DEFAULT_PROFILE: ExecutionProfileId = 'balanced';
 const STATE_KEY = 'founderOs.executionProfile';
+const ALIAS_STATE_KEY = 'founderOs.managedModelAlias';
 
 export function findProfile(id: string): ExecutionProfile | undefined {
   return EXECUTION_PROFILES.find((p) => p.id === id);
@@ -92,6 +93,7 @@ export class ProfileManager {
   private readonly bar: vscode.StatusBarItem;
   private readonly showStatusBar: boolean;
   private current: ExecutionProfile;
+  private currentAliasId: FounderOsModelAliasId;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -107,6 +109,8 @@ export class ProfileManager {
 
     const stored = context.workspaceState.get<string>(STATE_KEY);
     this.current = findProfile(stored ?? DEFAULT_PROFILE) ?? findProfile(DEFAULT_PROFILE)!;
+    const storedAlias = context.workspaceState.get<string>(ALIAS_STATE_KEY);
+    this.currentAliasId = findModelAlias(storedAlias ?? '')?.id ?? this.current.aliasId;
   }
 
   get profile(): ExecutionProfile {
@@ -115,7 +119,7 @@ export class ProfileManager {
 
   /** Model alias the active profile routes through. */
   get alias(): FounderOsModelAlias {
-    return findModelAlias(this.current.aliasId) ?? FOUNDER_OS_MODELS[0];
+    return findModelAlias(this.currentAliasId) ?? FOUNDER_OS_MODELS[0];
   }
 
   /** Show the status-bar item reflecting the active profile. */
@@ -149,11 +153,15 @@ export class ProfileManager {
     const next = findProfile(id);
     if (!next) return;
     if (next.id === this.current.id) {
+      this.currentAliasId = next.aliasId;
+      await this.context.workspaceState.update(ALIAS_STATE_KEY, next.aliasId);
       this.show();
       return;
     }
     this.current = next;
+    this.currentAliasId = next.aliasId;
     await this.context.workspaceState.update(STATE_KEY, next.id);
+    await this.context.workspaceState.update(ALIAS_STATE_KEY, next.aliasId);
     this.show();
     // Best-effort backend persistence. No controller exists for this yet, so
     // we don't actually fire the request — flip `persistToBackend` when
@@ -162,6 +170,20 @@ export class ProfileManager {
     void vscode.window.showInformationMessage(
       `Founder OS profile set to ${next.label} (model: ${next.aliasId}).`,
     );
+  }
+
+  /** Select a concrete Founder managed route immediately. */
+  async setAlias(id: FounderOsModelAliasId): Promise<void> {
+    const alias = findModelAlias(id);
+    if (!alias) throw new Error('Unknown Founder managed model route.');
+    this.currentAliasId = alias.id;
+    this.current = profileForAlias(alias.id);
+    await Promise.all([
+      this.context.workspaceState.update(ALIAS_STATE_KEY, alias.id),
+      this.context.workspaceState.update(STATE_KEY, this.current.id),
+    ]);
+    this.show();
+    void vscode.window.showInformationMessage(`${alias.name} is now active.`);
   }
 
   dispose(): void {

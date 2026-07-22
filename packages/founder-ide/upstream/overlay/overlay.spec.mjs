@@ -43,6 +43,8 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /founderOsEnabled\(\) && isFounderManagedSelection/);
     assert.match(source, /resolveFounderProviderProfile/);
     assert.match(source, /effectiveModelName/);
+    assert.match(source, /Personal AI/);
+    assert.match(source, /outside managed quota/);
   });
 
   it('ships encrypted remembered personal provider profiles', () => {
@@ -58,6 +60,20 @@ describe('Founder IDE upstream overlay', () => {
     assert.doesNotMatch(profiles, /FOUNDER_PROVIDER_PROFILE_LIMIT/);
     assert.doesNotMatch(settings, /Maximum five personal AI profiles/);
     assert.match(profiles, /founder-os-/);
+    const bridge = read(
+      'src/vs/workbench/contrib/void/browser/founderPersonalAiActions.ts',
+    );
+    for (const command of [
+      'founder.personalAi.save',
+      'founder.personalAi.select',
+      'founder.personalAi.enable',
+      'founder.personalAi.delete',
+      'founder.managedAi.select',
+    ]) {
+      assert.ok(bridge.includes(command));
+    }
+    assert.match(bridge, /Remote Personal AI providers must use HTTPS/);
+    assert.match(bridge, /BLOCKED_HEADERS/);
   });
 
   it('marks added files so the overlay can be applied repeatedly', () => {
@@ -86,6 +102,7 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /Add or manage personal AI/);
     assert.match(source, /Start voice input/);
     assert.match(source, /founderSpeechRecognitionConstructor/);
+    assert.match(source, /founderOs\.openSettings/);
   });
 
   it('coordinates the native chat with other active Founder tasks', () => {

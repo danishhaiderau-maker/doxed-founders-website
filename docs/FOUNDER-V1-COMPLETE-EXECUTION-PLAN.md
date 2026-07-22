@@ -33,6 +33,15 @@ only when its acceptance evidence exists. Chat claims are not evidence.
 - Provider pooling across third-party free tiers is rejected for V1.
 - Usage and savings claims must be measured against a named baseline and must
   never be invented.
+- Managed cost receipts use the versioned DeepSeek price card supplied for
+  2026-07-22: V4 Flash $0.0028/M cached input, $0.14/M uncached input, and
+  $0.28/M output; V4 Pro $0.003625/M cached input, $0.435/M uncached input,
+  and $0.87/M output. A price change creates a new version rather than silently
+  rewriting historical receipts.
+- Product economics use observed provider usage and cache hits. The example
+  70% cache-hit margin scenario is a forecast, not a customer-facing promise;
+  savings copy remains hidden until measured against the named full-context,
+  uncached-input baseline.
 
 ## Stage 0 - One source of truth
 
@@ -147,6 +156,18 @@ admin and user usage screenshots.
   Explain, Optimize. Each drafts a focused, editable instruction above the
   native composer; the selected managed, personal, or local model remains
   explicit in the model menu.
+- [x] Implement the Founder Settings Personal AI manager with name, connection
+  kind, base URL, key, model, optional headers, edit-with-secret-preservation,
+  connectivity test, enable/disable, delete, and active selection. Secrets use
+  operating-system encrypted storage and are never returned to the webview.
+- [x] Bridge Founder Settings into the native chat picker and direct-provider
+  runtime so the settings gear has one Founder-owned destination and changing
+  a route is not a cosmetic selection.
+- [x] Permit HTTP only for localhost and private-network endpoints; remote
+  Personal AI requires HTTPS, protected headers cannot be overridden, and
+  keys are redacted from logs and visible route receipts.
+- [x] Show a native Personal/Local route receipt with profile, configured model,
+  latency, and outside-managed-quota status without exposing credentials.
 - [ ] Run authenticated native tests for Auto, Fast, Reasoning, Code, BYOK,
   Ollama, streaming content, completion marker, cancellation, and quota errors.
 - [ ] Make model identity truthful in the native answer and receipt: managed
@@ -155,7 +176,9 @@ admin and user usage screenshots.
 - [ ] Make the composer model picker switch instantly among Founder Auto, Fast,
   Reasoning, Code, Ollama, and every named personal profile.
 - [ ] Support OpenAI-compatible profiles through name, base URL, key, model,
-  optional headers, connectivity test, edit, disable, and delete controls.
+  optional headers, connectivity test, edit, disable, and delete controls in
+  the installed IDE; source and unit coverage are complete, installed visual
+  and live-provider proof remain.
 - [ ] Add input-device choice, permission/error states, transcription preview,
   cancel, and keyboard-accessible microphone behavior.
 

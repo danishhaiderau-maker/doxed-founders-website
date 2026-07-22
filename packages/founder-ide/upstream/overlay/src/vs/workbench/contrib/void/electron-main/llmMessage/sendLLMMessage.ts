@@ -146,6 +146,14 @@ export const sendLLMMessage = async ({
 			},
 		}
 		: settingsOfProvider;
+	const personalOnFinalMessage: OnFinalMessage = personalProfile
+		? (params) => {
+			const routeKind = personalProfile.kind === 'ollama' ? 'Local' : 'Personal AI';
+			const latencyMs = Date.now() - submit_time.getTime();
+			const receipt = `\n\n---\n**Founder route** | ${routeKind} | ${personalProfile.label} | ${personalProfile.model} | outside managed quota | ${latencyMs.toLocaleString()} ms`;
+			onFinalMessage({ ...params, fullText: `${params.fullText}${receipt}` });
+		}
+		: onFinalMessage;
 
 try {
 		const implementation = sendLLMMessageToProviderImplementation[providerName]
@@ -155,7 +163,7 @@ try {
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
-			await sendChat({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
+			await sendChat({ messages: messages_, onText, onFinalMessage: personalOnFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
 			return
 		}
 		if (messagesType === 'FIMMessage') {

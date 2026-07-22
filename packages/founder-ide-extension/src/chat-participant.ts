@@ -37,10 +37,17 @@ import {
   type VerifiedSolutionCheck,
 } from './verified-solution-memory';
 import type { FounderProjectActivityStore } from './project-activity';
+import {
+  personalAiApiBase,
+  personalAiRequestHeaders,
+  type PersonalAiProfileSecret,
+  type PersonalAiProfileStore,
+} from './personal-ai-profiles';
 
 export interface ParticipantDeps {
-  creds: FounderOsCredentials;
+  creds?: FounderOsCredentials;
   profileManager: ProfileManager;
+  personalAiProfiles?: PersonalAiProfileStore;
   costTracker: CostTracker;
   onRequestStart?: (modelId: string) => void;
   onMetadata?: (meta: GatewayFounderOsMetadata) => void;
@@ -146,31 +153,41 @@ async function handleParticipantRequest(
     return;
   }
 
-  // Resolve the alias for the active execution profile (or `/code` slash cmd).
+  await deps.personalAiProfiles?.ready();
+  const personalProfile = deps.personalAiProfiles?.active() ?? null;
+
+  // Resolve the managed alias for the active route (or `/code` slash cmd).
   const desiredAlias = deps.profileManager.alias;
   let alias = desiredAlias ?? FOUNDER_OS_MODELS[0];
   if (request.command === 'code') {
     const codeModel = findModelAlias('founder-os-code');
     if (codeModel) alias = codeModel;
   }
-  const autoSelected = alias.id === 'founder-os-auto';
+  const autoSelected = !personalProfile && alias.id === 'founder-os-auto';
   let escalationReason: FounderAutoEscalationReason | null = autoSelected
     ? founderAutoEscalationReason([{ role: 'user', content: prompt }])
     : null;
   if (escalationReason) {
     alias = findModelAlias('founder-os-reasoning') ?? alias;
   }
-  deps.onRequestStart?.(alias.id);
+  const selectedModelId = personalProfile?.model ?? alias.id;
+  deps.onRequestStart?.(selectedModelId);
   const agentMode = normalizeFounderAgentMode(
     vscode.workspace.getConfiguration('founderOs').get<string>('agentMode'),
   );
-  const coordinationTaskId = deps.coordination?.begin(prompt, alias.id, agentMode);
+  const coordinationTaskId = deps.coordination?.begin(
+    prompt,
+    personalProfile ? `personal:${personalProfile.name}/${personalProfile.model}` : alias.id,
+    agentMode,
+  );
 
   // Build the system prompt with Memory Engine context.
   let memoryText = '';
   try {
-    const memory = await buildSystemPrompt(deps.creds, token);
-    if (memory.hasMemory && memory.text.length > 0) memoryText = memory.text;
+    if (deps.creds) {
+      const memory = await buildSystemPrompt(deps.creds, token);
+      if (memory.hasMemory && memory.text.length > 0) memoryText = memory.text;
+    }
   } catch {
     /* memory must never block chat */
   }
@@ -184,7 +201,7 @@ async function handleParticipantRequest(
     ?? cacheContext?.workspaceId
     ?? null;
   const activityId = workspaceId
-    ? deps.projectActivity?.begin(workspaceId, prompt, alias.id) ?? null
+    ? deps.projectActivity?.begin(workspaceId, prompt, selectedModelId) ?? null
     : null;
   const priorSolutions = workspaceId
     ? deps.solutionMemory?.contextFor(
@@ -193,7 +210,7 @@ async function handleParticipantRequest(
         deps.projectContext?.allFileHashes() ?? [],
       ) ?? ''
     : '';
-  const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+  const identity = 'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
   const systemMessages = composeFounderPromptMessages({
     identity,
     memory: memoryText,
@@ -217,7 +234,7 @@ async function handleParticipantRequest(
       `\n\n---\n**Founder reuse** | safe read-only result | no provider request | ~${cached.estimatedTokensAvoided.toLocaleString()} tokens avoided (estimated)`,
     );
     if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
-    deps.onRequestEnd?.(alias.id, true);
+    deps.onRequestEnd?.(selectedModelId, true);
     deps.onCacheHit?.(cached.estimatedTokensAvoided);
     deps.projectActivity?.complete(activityId, {
       status: 'reused',
@@ -227,10 +244,27 @@ async function handleParticipantRequest(
     return;
   }
 
-  const client: GatewayClient = {
-    baseUrl: proxyBaseUrl(deps.creds.apiBaseUrl),
-    bearer: authorizationHeaderFromCredentials(deps.creds),
-  };
+  if (!personalProfile && !deps.creds) {
+    stream.markdown('Sign in to use Founder-managed AI, or select a Personal AI or Ollama profile in Founder Settings.');
+    if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
+    deps.onRequestEnd?.(selectedModelId, false, 'Sign in or select Personal AI.');
+    deps.projectActivity?.complete(activityId, {
+      status: 'failed',
+      summary: 'Managed AI requires Founder sign-in; no personal or local profile was selected.',
+    });
+    return;
+  }
+
+  const client: GatewayClient = personalProfile
+    ? {
+        baseUrl: personalAiApiBase(personalProfile),
+        bearer: personalProfile.apiKey,
+        headers: personalAiRequestHeaders({ ...personalProfile, apiKey: '' }),
+      }
+    : {
+        baseUrl: proxyBaseUrl(deps.creds!.apiBaseUrl),
+        bearer: authorizationHeaderFromCredentials(deps.creds!),
+      };
 
   const cfg = vscode.workspace.getConfiguration('founderOs');
   const timeoutMs = cfg.get<number>('requestTimeoutMs') ?? 120_000;
@@ -244,6 +278,16 @@ async function handleParticipantRequest(
   let activityChecks: string[] = [];
   const providerUsageEvidence: { value?: GatewayProviderUsage } = {};
   let inputCostComparison: GatewayFounderOsMetadata['inputCostComparison'];
+  const requestStartedAt = Date.now();
+  if (personalProfile) {
+    activityProvider = personalProfile.kind === 'ollama' ? 'ollama' : personalProfile.name;
+    activityProviderModel = personalProfile.model;
+    deps.onMetadata?.({
+      tier: personalProfile.kind === 'ollama' ? 'local' : 'personal',
+      provider: activityProvider,
+      model: personalProfile.model,
+    });
+  }
   try {
     const tools = availableFounderTools();
     let completed = false;
@@ -269,10 +313,10 @@ async function handleParticipantRequest(
       await callGateway(
         client,
         {
-          model: alias.id,
+          model: personalProfile?.model ?? alias.id,
           messages: efficiency.messages,
-          executionProfile: alias.executionProfile,
-          founderOsMetadata: true,
+          executionProfile: personalProfile ? undefined : alias.executionProfile,
+          founderOsMetadata: !personalProfile,
           timeoutMs,
           tools: tools.map((tool) => ({
             type: 'function',
@@ -283,11 +327,13 @@ async function handleParticipantRequest(
             },
           })),
           toolChoice: 'auto',
-          metadata: {
-            founder_memory_included: memoryText.length > 0,
-            prompt_efficiency: efficiency.estimate,
-            ...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
-          },
+          metadata: personalProfile
+            ? undefined
+            : {
+                founder_memory_included: memoryText.length > 0,
+                prompt_efficiency: efficiency.estimate,
+                ...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
+              },
         },
         {
           onToken: (delta) => {
@@ -306,7 +352,9 @@ async function handleParticipantRequest(
             providerUsageEvidence.value = usage;
           },
           onError: (status, body) => {
-            errorMessage = gatewayUserMessage(status, body);
+            errorMessage = personalProfile
+              ? personalProviderUserMessage(personalProfile, status)
+              : gatewayUserMessage(status, body);
           },
         },
         token,
@@ -385,7 +433,7 @@ async function handleParticipantRequest(
           content: resultText,
         });
       }
-      if (autoSelected && !escalationReason) {
+      if (!personalProfile && autoSelected && !escalationReason) {
         const detected = founderAutoEscalationReason(gatewayMessages);
         if (detected) {
           escalationReason = detected;
@@ -435,13 +483,22 @@ async function handleParticipantRequest(
         `\n\n---\n**Founder Auto escalation** | Pro | ${escalationReason.replace('_', ' ')}`,
       );
     }
+    if (ok) {
+      const latencyMs = Date.now() - requestStartedAt;
+      const route = personalProfile
+        ? personalProfile.kind === 'ollama'
+          ? `Local | ${personalProfile.name} | ${personalProfile.model} | outside managed quota`
+          : `Personal AI | ${personalProfile.name} | ${personalProfile.model} | outside managed quota`
+        : `Founder managed | ${activityProvider ?? 'DeepSeek'} | ${activityProviderModel ?? alias.id}`;
+      stream.markdown(`\n\n---\n**Founder route** | ${route} | ${latencyMs.toLocaleString()} ms`);
+    }
     const providerUsage = providerUsageEvidence.value;
     if (ok && providerUsage) {
       const cacheRate = providerUsage.promptTokens > 0
         ? Math.round((providerUsage.cachedInputTokens / providerUsage.promptTokens) * 10_000) / 100
         : 0;
       stream.markdown(
-        `\n\n---\n**DeepSeek cache evidence** | ${providerUsage.cachedInputTokens.toLocaleString()} hit | ${providerUsage.uncachedInputTokens.toLocaleString()} miss | ${cacheRate}% hit rate | ${providerUsage.outputTokens.toLocaleString()} output`,
+        `\n\n**${personalProfile ? 'Provider' : 'DeepSeek'} cache evidence** | ${providerUsage.cachedInputTokens.toLocaleString()} hit | ${providerUsage.uncachedInputTokens.toLocaleString()} miss | ${cacheRate}% hit rate | ${providerUsage.outputTokens.toLocaleString()} output`,
       );
     }
     if (ok && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
@@ -457,7 +514,7 @@ async function handleParticipantRequest(
     return;
   } finally {
     if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
-    deps.onRequestEnd?.(alias.id, ok, errorMessage);
+    deps.onRequestEnd?.(selectedModelId, ok, errorMessage);
     deps.projectActivity?.complete(activityId, {
       status: token.isCancellationRequested ? 'cancelled' : ok ? 'completed' : 'failed',
       summary: ok ? activitySummary : errorMessage ?? 'Founder request did not complete.',
@@ -471,6 +528,17 @@ async function handleParticipantRequest(
   if (!ok && errorMessage) {
     stream.markdown(`\n\n_Founder OS request failed: ${errorMessage}_`);
   }
+}
+
+function personalProviderUserMessage(
+  profile: PersonalAiProfileSecret,
+  status: number,
+): string {
+  if (status === 0) return `${profile.name} could not be reached. Test the profile in Founder Settings.`;
+  if (status === 401 || status === 403) return `${profile.name} rejected its saved credential. Update and test the profile in Founder Settings.`;
+  if (status === 429) return `${profile.name} is rate limited. Try again shortly or select another profile.`;
+  if (status >= 500) return `${profile.name} is temporarily unavailable (HTTP ${status}). Your local files are safe.`;
+  return `${profile.name} rejected this request (HTTP ${status}). Test the profile and model ID in Founder Settings.`;
 }
 
 /** Re-export so extension.ts can import from one place. */

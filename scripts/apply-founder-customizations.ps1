@@ -189,15 +189,26 @@ Write-Host "[apply-founder] product.json OK: nameLong='$($product.nameLong)' app
 $sendLlm = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendLLMMessage.ts"
 $sendFos = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendFounderOs.ts"
 $nativeCoordination = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\founderNativeCoordination.ts"
+$personalAiBridge = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\browser\founderPersonalAiActions.ts"
 if (-not (Test-Path $sendLlm)) { throw "sendLLMMessage.ts missing at $sendLlm" }
 if (-not (Test-Path $sendFos)) { throw "sendFounderOs.ts missing at $sendFos" }
 if (-not (Test-Path $nativeCoordination)) { throw "founderNativeCoordination.ts missing at $nativeCoordination" }
+if (-not (Test-Path $personalAiBridge)) { throw "founderPersonalAiActions.ts missing at $personalAiBridge" }
 $sendLlmContent = Get-Content $sendLlm -Raw
 if ($sendLlmContent -notmatch "FOUNDER_OS_GATEWAY_REWIRE") {
     throw "sendLLMMessage.ts is missing the FOUNDER_OS_GATEWAY_REWIRE marker - overlay did not apply"
 }
 if ((Get-Content $chatThreadService -Raw) -notmatch 'workspacePath: this\._workspaceContextService') {
     throw "Native chat is missing workspace-scoped coordination metadata"
+}
+$personalAiBridgeContent = Get-Content $personalAiBridge -Raw
+foreach ($commandId in @("founder.personalAi.save", "founder.personalAi.select", "founder.managedAi.select")) {
+    if ($personalAiBridgeContent -notmatch [regex]::Escape($commandId)) {
+        throw "Founder Personal AI bridge is missing command '$commandId'"
+    }
+}
+if ($personalAiBridgeContent -notmatch "Remote Personal AI providers must use HTTPS") {
+    throw "Founder Personal AI bridge is missing remote URL hardening"
 }
 $sendFosLen = (Get-Item $sendFos).Length
 if ($sendFosLen -lt 5000) {

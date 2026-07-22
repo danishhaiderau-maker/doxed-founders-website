@@ -161,6 +161,22 @@ describe('gateway-client — SSE happy path', () => {
     assert.equal(cb.errors.length, 0);
   });
 
+  it('supports personal-provider headers without requiring a Founder bearer', async () => {
+    const res = sseResponse(['data: [DONE]\n\n']);
+    const { fetchImpl, calls } = makeFetchSequence([res]);
+    await callGateway(
+      { baseUrl: 'https://personal.test/v1', bearer: '', headers: { 'X-Project': 'founder' } },
+      DEFAULT_OPTS,
+      callbacks(),
+      makeToken(),
+      { fetchImpl, sleepImpl: noopSleep },
+    );
+    const headers = new Headers(calls[0]?.init?.headers);
+    assert.equal(headers.get('X-Project'), 'founder');
+    assert.equal(headers.get('Authorization'), null);
+    assert.equal(calls[0]?.url, 'https://personal.test/v1/chat/completions');
+  });
+
   it('parses founderOs metadata pre-line', async () => {
     const res = sseResponse([
       'data: {"founderOs":{"requestId":"req_1","tier":"reasoning","provider":"glm","model":"glm-4.5","ddollarCost":0.012}}\n\n',

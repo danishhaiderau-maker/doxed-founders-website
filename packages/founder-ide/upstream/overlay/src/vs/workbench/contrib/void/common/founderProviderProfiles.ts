@@ -8,10 +8,14 @@ export const FOUNDER_PROVIDER_PROFILES_KEY = '__founderProviderProfilesV1';
 export type FounderProviderProfile = {
 	id: string;
 	label: string;
+	kind?: 'openai-compatible' | 'ollama';
 	baseUrl: string;
 	apiKey: string;
 	model: string;
 	headers: Record<string, string>;
+	enabled?: boolean;
+	createdAt?: string;
+	updatedAt?: string;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -51,7 +55,11 @@ const cleanProfile = (value: unknown): FounderProviderProfile | null => {
 	if (!id || !label || !baseUrl || !model) return null;
 	if (!/^https?:\/\//i.test(baseUrl)) return null;
 	if (label.startsWith('founder-os-')) return null;
-	return { id, label, baseUrl, apiKey, model, headers: cleanHeaders(value.headers) };
+	const kind = value.kind === 'ollama' ? 'ollama' : 'openai-compatible';
+	const enabled = value.enabled !== false;
+	const createdAt = typeof value.createdAt === 'string' ? value.createdAt : undefined;
+	const updatedAt = typeof value.updatedAt === 'string' ? value.updatedAt : undefined;
+	return { id, label, kind, baseUrl, apiKey, model, headers: cleanHeaders(value.headers), enabled, createdAt, updatedAt };
 };
 
 export const readFounderProviderProfiles = (
@@ -97,4 +105,4 @@ export const resolveFounderProviderProfile = (
 	selectionName: string,
 ): FounderProviderProfile | null =>
 	readFounderProviderProfiles(rawHeadersJson)
-		.find((profile) => profile.label === selectionName) ?? null;
+		.find((profile) => profile.enabled !== false && profile.label === selectionName) ?? null;

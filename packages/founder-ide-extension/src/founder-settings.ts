@@ -7,7 +7,6 @@ import {
   type FounderEntitlementState,
 } from './entitlements';
 import {
-  EXECUTION_PROFILES,
   type ExecutionProfile,
   type ExecutionProfileId,
 } from './profile-manager';
@@ -17,11 +16,20 @@ import {
   workspaceModeDefinition,
   type FounderWorkspaceMode,
 } from './founder-hub-state';
+import {
+  FOUNDER_OS_MODELS,
+  type FounderOsModelAlias,
+  type FounderOsModelAliasId,
+} from './models';
+import {
+  parsePersonalAiHeaders,
+  type PersonalAiProfileDraft,
+  type PersonalAiProfileStore,
+} from './personal-ai-profiles';
 
 type FounderSettingsAction =
   | 'openChat'
   | 'openConnections'
-  | 'openPersonalAI'
   | 'selectModel'
   | 'openAdvancedSettings'
   | 'openNodeConfig'
@@ -31,15 +39,39 @@ type FounderSettingsAction =
   | 'signOut';
 
 interface FounderSettingsMessage {
-  type: 'action' | 'selectMode' | 'selectProfile';
+  type:
+    | 'action'
+    | 'selectMode'
+    | 'selectProfile'
+    | 'selectManagedAlias'
+    | 'savePersonalProfile'
+    | 'selectPersonalProfile'
+    | 'testPersonalProfile'
+    | 'togglePersonalProfile'
+    | 'deletePersonalProfile';
   action?: FounderSettingsAction;
   mode?: FounderWorkspaceMode;
   profile?: ExecutionProfileId;
+  alias?: FounderOsModelAliasId;
+  profileId?: string;
+  enabled?: boolean;
+  draft?: {
+    id?: string;
+    name?: string;
+    kind?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    headers?: string;
+  };
 }
 
 export interface FounderSettingsDependencies {
   getProfile(): ExecutionProfile;
   setProfile(id: ExecutionProfileId): Promise<void>;
+  getManagedAlias(): FounderOsModelAlias;
+  setManagedAlias(id: FounderOsModelAliasId): Promise<void>;
+  personalAiProfiles: PersonalAiProfileStore;
 }
 
 export class FounderSettingsPanel implements vscode.Disposable {
@@ -118,7 +150,76 @@ export class FounderSettingsPanel implements vscode.Disposable {
     }
 
     if (message.type === 'selectProfile' && message.profile) {
+      await this.dependencies.personalAiProfiles.select(null);
       await this.dependencies.setProfile(message.profile);
+      await this.dependencies.setManagedAlias(this.dependencies.getManagedAlias().id);
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'selectManagedAlias' && message.alias) {
+      await this.dependencies.personalAiProfiles.select(null);
+      await this.dependencies.setManagedAlias(message.alias);
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'savePersonalProfile' && message.draft) {
+      try {
+        const draft = personalDraftFromMessage(message.draft);
+        const saved = await this.dependencies.personalAiProfiles.save(draft);
+        await this.dependencies.personalAiProfiles.select(saved.id);
+        void vscode.window.showInformationMessage(`${saved.name} saved securely and selected.`);
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'selectPersonalProfile' && message.profileId) {
+      try {
+        await this.dependencies.personalAiProfiles.select(message.profileId);
+        const selected = this.dependencies.personalAiProfiles.get(message.profileId);
+        void vscode.window.showInformationMessage(`${selected?.name ?? 'Personal AI'} is now active.`);
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'testPersonalProfile' && message.profileId) {
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Testing Personal AI', cancellable: false },
+        async () => {
+          const result = await this.dependencies.personalAiProfiles.probe(message.profileId!);
+          if (result.ok) void vscode.window.showInformationMessage(result.message);
+          else void vscode.window.showErrorMessage(result.message);
+        },
+      );
+      return;
+    }
+
+    if (message.type === 'togglePersonalProfile' && message.profileId) {
+      try {
+        await this.dependencies.personalAiProfiles.setEnabled(message.profileId, Boolean(message.enabled));
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'deletePersonalProfile' && message.profileId) {
+      const profile = this.dependencies.personalAiProfiles.get(message.profileId);
+      if (!profile) return;
+      const answer = await vscode.window.showWarningMessage(
+        `Delete ${profile.name}? Its saved key and headers will be removed from encrypted storage.`,
+        { modal: true },
+        'Delete',
+      );
+      if (answer === 'Delete') await this.dependencies.personalAiProfiles.delete(profile.id);
       this.refresh();
       return;
     }
@@ -130,16 +231,6 @@ export class FounderSettingsPanel implements vscode.Disposable {
         break;
       case 'openConnections':
         await vscode.commands.executeCommand('founderOs.openConnections');
-        break;
-      case 'openPersonalAI':
-        try {
-          await vscode.commands.executeCommand('workbench.action.openVoidSettings');
-        } catch {
-          await vscode.commands.executeCommand(
-            'workbench.action.openSettings',
-            'AI provider',
-          );
-        }
         break;
       case 'selectModel':
         await vscode.commands.executeCommand('founderOs.selectModel');
@@ -180,6 +271,10 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const mode = normalizeWorkspaceMode(config.get<string>('workspaceMode'));
     const modeDefinition = workspaceModeDefinition(mode);
     const profile = this.dependencies.getProfile();
+    const managedAlias = this.dependencies.getManagedAlias();
+    const personalProfiles = this.dependencies.personalAiProfiles.list();
+    const activePersonalId = this.dependencies.personalAiProfiles.activeId();
+    const activePersonal = personalProfiles.find((candidate) => candidate.id === activePersonalId);
     const credentials = resolveCredentials();
     const vault = readVaultConfig();
     const connected = Boolean(credentials);
@@ -243,12 +338,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
         </button>`,
     ).join('');
 
-    const profileButtons = EXECUTION_PROFILES.map(
+    const modelButtons = FOUNDER_OS_MODELS.map(
       (candidate) => `
-        <button class="choice ${candidate.id === profile.id ? 'selected' : ''}" type="button"
-          data-profile="${candidate.id}" aria-pressed="${candidate.id === profile.id}">
-          <span class="choice-title">${escapeHtml(candidate.label)}</span>
-          <span>${escapeHtml(profileSummary(candidate.id))}</span>
+        <button class="choice ${!activePersonal && candidate.id === managedAlias.id ? 'selected' : ''}" type="button"
+          data-alias="${candidate.id}" aria-pressed="${!activePersonal && candidate.id === managedAlias.id}">
+          <span class="choice-title">${escapeHtml(candidate.name.replace('Founder OS ', ''))}</span>
+          <span>${escapeHtml(candidate.detail)}</span>
         </button>`,
     ).join('');
 
@@ -267,24 +362,24 @@ export class FounderSettingsPanel implements vscode.Disposable {
       )
       .join('');
 
-    const providerRows = [
-      ['OpenAI', 'GPT and o-series models'],
-      ['Anthropic', 'Claude models'],
-      ['Google', 'Gemini models'],
-      ['GLM', 'GLM coding and reasoning models'],
-      ['DeepSeek', 'Chat and reasoning models'],
-      ['OpenRouter', 'One connection for many providers'],
-      ['Ollama', 'Models running on this computer'],
-      ['Custom endpoint', 'Any OpenAI-compatible provider or private gateway'],
-    ]
-      .map(
-        ([name, detail]) => `
-          <div class="connection-row">
-            <div><strong>${name}</strong><span>${detail}</span></div>
-            <button class="link-button" type="button" data-action="openPersonalAI">Connect</button>
-          </div>`,
-      )
-      .join('');
+    const personalProfileRows = personalProfiles.length > 0
+      ? personalProfiles.map((candidate) => `
+          <div class="profile-row ${candidate.id === activePersonalId ? 'active' : ''}">
+            <div class="profile-copy">
+              <div><strong>${escapeHtml(candidate.name)}</strong><span class="route-badge">${candidate.kind === 'ollama' ? 'Local' : 'Personal'}</span>${candidate.id === activePersonalId ? '<span class="active-badge">Active</span>' : ''}</div>
+              <span>${escapeHtml(candidate.model)} &middot; ${escapeHtml(candidate.baseUrl)}</span>
+              <span>${candidate.hasApiKey ? 'Encrypted key saved' : 'No key required'}${candidate.headerNames.length ? ` &middot; ${candidate.headerNames.length} custom header${candidate.headerNames.length === 1 ? '' : 's'}` : ''}</span>
+            </div>
+            <div class="profile-actions">
+              ${candidate.enabled && candidate.id !== activePersonalId ? `<button class="link-button" type="button" data-personal-select="${candidate.id}">Use</button>` : ''}
+              <button class="link-button" type="button" data-personal-test="${candidate.id}">Test</button>
+              <button class="link-button" type="button" data-personal-edit="${candidate.id}">Edit</button>
+              <button class="link-button" type="button" data-personal-toggle="${candidate.id}" data-enabled="${!candidate.enabled}">${candidate.enabled ? 'Disable' : 'Enable'}</button>
+              <button class="link-button danger" type="button" data-personal-delete="${candidate.id}">Delete</button>
+            </div>
+          </div>`).join('')
+      : '<div class="empty-state"><strong>No personal AI yet</strong><span>Add an OpenAI-compatible provider or local Ollama model below.</span></div>';
+    const personalProfilesJson = JSON.stringify(personalProfiles).replaceAll('<', '\\u003c');
 
     return `<!doctype html>
 <html lang="en">
@@ -344,7 +439,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     h2 { font-size: 15px; font-weight: 650; }
     .section-copy { padding-top: 6px; max-width: 620px; line-height: 1.55; }
     .status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-top: 18px; }
-    .status-item, .connection-row {
+    .status-item, .connection-row, .profile-row {
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
       min-width: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
     }
@@ -359,7 +454,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .mode-detail span { color: var(--muted); }
     .choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-top: 18px; }
     .choice { display: grid; min-height: 82px; align-content: center; gap: 6px; padding: 14px 16px; text-align: left; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); cursor: pointer; }
-    .choice:hover, .connection-row:hover { background: var(--surface-hover); }
+    .choice:hover, .connection-row:hover, .profile-row:hover { background: var(--surface-hover); }
     .choice.selected { border-color: var(--vscode-focusBorder); box-shadow: inset 3px 0 0 var(--accent); }
     .choice-title { color: var(--vscode-editor-foreground) !important; font-weight: 650; }
     .connections { display: grid; gap: 8px; padding-top: 18px; }
@@ -372,6 +467,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .secondary { border: 1px solid var(--border); background: var(--surface); }
     .secondary:hover { background: var(--surface-hover); }
     .link-button { border: 0; background: transparent; color: var(--vscode-textLink-foreground); }
+    .link-button.danger { color: var(--vscode-errorForeground); }
     .note { padding-top: 14px; font-size: 11px; line-height: 1.55; }
     .managed-row {
       display: flex; align-items: center; justify-content: space-between; gap: 20px;
@@ -395,6 +491,29 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .progress::-webkit-progress-value { background: var(--positive); transition: width 180ms ease-out; }
     .usage-message { line-height: 1.5; }
     .usage-warning { color: var(--warning); font-size: 11px; font-weight: 600; line-height: 1.45; }
+    .profile-row.active { border-color: color-mix(in srgb, var(--positive) 65%, var(--border)); }
+    .profile-copy { display: grid; min-width: 0; gap: 4px; }
+    .profile-copy > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+    .profile-copy > span { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+    .route-badge, .active-badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 650; }
+    .route-badge { background: var(--surface-hover); color: var(--muted); }
+    .active-badge { background: color-mix(in srgb, var(--positive) 18%, transparent); color: var(--positive); }
+    .profile-actions { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .empty-state { display: grid; gap: 5px; margin-top: 18px; padding: 18px; border: 1px dashed var(--border); border-radius: 7px; }
+    .empty-state span { color: var(--muted); font-size: 11px; }
+    .profile-form { display: grid; gap: 13px; margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field { display: grid; min-width: 0; gap: 6px; }
+    .field.wide { grid-column: 1 / -1; }
+    .field label { color: var(--muted); font-size: 11px; font-weight: 600; }
+    .field input, .field select, .field textarea {
+      width: 100%; min-height: 34px; border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 5px;
+      padding: 7px 9px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font: inherit;
+    }
+    .field textarea { min-height: 68px; resize: vertical; font-family: var(--vscode-editor-font-family); }
+    .field input:focus, .field select:focus, .field textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+    .form-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .form-title span, .field-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
     @keyframes panel-in {
       from { opacity: 0; transform: translateY(3px); }
       to { opacity: 1; transform: translateY(0); }
@@ -404,7 +523,10 @@ export class FounderSettingsPanel implements vscode.Disposable {
     }
     @media (max-width: 680px) {
       .page { width: min(100% - 28px, 860px); padding-top: 24px; }
-      .status-grid, .choices { grid-template-columns: 1fr; }
+      .status-grid, .choices, .form-grid { grid-template-columns: 1fr; }
+      .field.wide { grid-column: auto; }
+      .profile-row { align-items: flex-start; flex-direction: column; }
+      .profile-actions { justify-content: flex-start; }
       .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .tab { width: 100%; }
     }
@@ -466,18 +588,30 @@ export class FounderSettingsPanel implements vscode.Disposable {
     <div class="panel" data-panel="ai">
       <section class="section">
         <h2>Founder AI</h2>
-        <p class="section-copy">Managed routing is the default and stays available when no personal provider is selected.</p>
+        <p class="section-copy">Founder-managed DeepSeek is the default. Free uses V4 Flash; Builder can use V4 Flash or V4 Pro. Every response shows the resolved route.</p>
         <div class="managed-row">
-          <div><strong>Founder managed</strong><span>${escapeHtml(profile.label)} &middot; ${escapeHtml(profile.aliasId)}</span></div>
-          <button class="secondary" type="button" data-action="selectModel">Choose route</button>
+          <div><strong>${activePersonal ? escapeHtml(activePersonal.name) : 'Founder managed'}</strong><span>${activePersonal ? `${escapeHtml(activePersonal.model)} &middot; outside managed quota` : `${escapeHtml(managedAlias.name)} &middot; ${escapeHtml(profile.label)}`}</span></div>
+          <button class="secondary" type="button" data-action="selectModel">Quick switch</button>
         </div>
-        <div class="choices">${profileButtons}</div>
+        <div class="choices">${modelButtons}</div>
       </section>
       <section class="section">
         <h2>Bring your own key</h2>
-        <p class="section-copy">Personal providers are encrypted in the Founder Provider Vault and remain separate from the managed allowance.</p>
-        <div class="button-row"><button class="primary" type="button" data-action="openPersonalAI">Add personal AI</button></div>
-        <div class="connections">${providerRows}</div>
+        <p class="section-copy">Add as many OpenAI-compatible or Ollama profiles as you need. Keys and custom headers use encrypted operating-system storage and never enter the project.</p>
+        <div class="connections">${personalProfileRows}</div>
+        <form class="profile-form" id="personal-profile-form">
+          <input type="hidden" id="profile-id">
+          <div class="form-title"><strong id="profile-form-title">Add personal AI</strong><span>Saved locally on this computer</span></div>
+          <div class="form-grid">
+            <div class="field"><label for="profile-kind">Connection</label><select id="profile-kind"><option value="openai-compatible">OpenAI-compatible</option><option value="ollama">Ollama on this computer</option></select></div>
+            <div class="field"><label for="profile-name">Name</label><input id="profile-name" maxlength="60" required placeholder="My coding model"></div>
+            <div class="field wide"><label for="profile-url">Base URL</label><input id="profile-url" required placeholder="https://provider.example/v1"></div>
+            <div class="field"><label for="profile-model">Model ID</label><input id="profile-model" maxlength="200" required placeholder="provider-model-id"></div>
+            <div class="field"><label for="profile-key">API key</label><input id="profile-key" type="password" autocomplete="off" required placeholder="Required for remote providers"><span class="field-hint">Leave blank while editing to keep the encrypted key.</span></div>
+            <div class="field wide"><label for="profile-headers">Optional headers (JSON)</label><textarea id="profile-headers" spellcheck="false" placeholder='{"X-Organization": "team-id"}'></textarea><span class="field-hint">Leave blank while editing to keep existing encrypted headers.</span></div>
+          </div>
+          <div class="button-row"><button class="primary" type="submit" id="profile-save">Save and use</button><button class="secondary" type="button" id="profile-cancel" hidden>Cancel edit</button></div>
+        </form>
       </section>
     </div>
 
@@ -491,7 +625,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       <section class="section">
         <h2>Local models</h2>
         <p class="section-copy">Ollama can run through the embedded Founder Node without sending prompts to a cloud model.</p>
-        <div class="button-row"><button class="primary" type="button" data-action="openPersonalAI">Manage local AI</button></div>
+        <div class="button-row"><button class="primary" type="button" data-open-ai-tab>Manage local AI</button></div>
       </section>
     </div>
 
@@ -514,13 +648,17 @@ export class FounderSettingsPanel implements vscode.Disposable {
   </main>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const personalProfiles = ${personalProfilesJson};
     const tabs = [...document.querySelectorAll('[data-tab]')];
     const panels = [...document.querySelectorAll('[data-panel]')];
+    const showTab = (name) => {
+      for (const item of tabs) item.classList.toggle('selected', item.dataset.tab === name);
+      for (const panel of panels) panel.classList.toggle('selected', panel.dataset.panel === name);
+      vscode.setState({ ...(vscode.getState() || {}), tab: name });
+    };
+    showTab((vscode.getState() || {}).tab || 'account');
     for (const tab of tabs) {
-      tab.addEventListener('click', () => {
-        for (const item of tabs) item.classList.toggle('selected', item === tab);
-        for (const panel of panels) panel.classList.toggle('selected', panel.dataset.panel === tab.dataset.tab);
-      });
+      tab.addEventListener('click', () => showTab(tab.dataset.tab));
     }
     for (const button of document.querySelectorAll('[data-action]')) {
       button.addEventListener('click', () => vscode.postMessage({ type: 'action', action: button.dataset.action }));
@@ -528,25 +666,88 @@ export class FounderSettingsPanel implements vscode.Disposable {
     for (const button of document.querySelectorAll('[data-mode]')) {
       button.addEventListener('click', () => vscode.postMessage({ type: 'selectMode', mode: button.dataset.mode }));
     }
-    for (const button of document.querySelectorAll('[data-profile]')) {
-      button.addEventListener('click', () => vscode.postMessage({ type: 'selectProfile', profile: button.dataset.profile }));
+    for (const button of document.querySelectorAll('[data-alias]')) {
+      button.addEventListener('click', () => vscode.postMessage({ type: 'selectManagedAlias', alias: button.dataset.alias }));
     }
+    for (const button of document.querySelectorAll('[data-open-ai-tab]')) {
+      button.addEventListener('click', () => showTab('ai'));
+    }
+    for (const button of document.querySelectorAll('[data-personal-select]')) {
+      button.addEventListener('click', () => vscode.postMessage({ type: 'selectPersonalProfile', profileId: button.dataset.personalSelect }));
+    }
+    for (const button of document.querySelectorAll('[data-personal-test]')) {
+      button.addEventListener('click', () => vscode.postMessage({ type: 'testPersonalProfile', profileId: button.dataset.personalTest }));
+    }
+    for (const button of document.querySelectorAll('[data-personal-toggle]')) {
+      button.addEventListener('click', () => vscode.postMessage({ type: 'togglePersonalProfile', profileId: button.dataset.personalToggle, enabled: button.dataset.enabled === 'true' }));
+    }
+    for (const button of document.querySelectorAll('[data-personal-delete]')) {
+      button.addEventListener('click', () => vscode.postMessage({ type: 'deletePersonalProfile', profileId: button.dataset.personalDelete }));
+    }
+    const profileForm = document.getElementById('personal-profile-form');
+    const profileId = document.getElementById('profile-id');
+    const profileKind = document.getElementById('profile-kind');
+    const profileName = document.getElementById('profile-name');
+    const profileUrl = document.getElementById('profile-url');
+    const profileModel = document.getElementById('profile-model');
+    const profileKey = document.getElementById('profile-key');
+    const profileHeaders = document.getElementById('profile-headers');
+    const profileTitle = document.getElementById('profile-form-title');
+    const profileCancel = document.getElementById('profile-cancel');
+    const resetForm = () => {
+      profileForm.reset();
+      profileId.value = '';
+      profileTitle.textContent = 'Add personal AI';
+      profileCancel.hidden = true;
+    };
+    profileKind.addEventListener('change', () => {
+      if (profileKind.value === 'ollama') {
+        if (!profileUrl.value) profileUrl.value = 'http://127.0.0.1:11434';
+        profileKey.required = false;
+        profileKey.placeholder = 'Optional';
+      } else {
+        profileKey.required = !profileId.value;
+        profileKey.placeholder = 'Required for remote providers';
+      }
+    });
+    for (const button of document.querySelectorAll('[data-personal-edit]')) {
+      button.addEventListener('click', () => {
+        const profile = personalProfiles.find((candidate) => candidate.id === button.dataset.personalEdit);
+        if (!profile) return;
+        showTab('ai');
+        profileId.value = profile.id;
+        profileKind.value = profile.kind;
+        profileName.value = profile.name;
+        profileUrl.value = profile.baseUrl;
+        profileModel.value = profile.model;
+        profileKey.value = '';
+        profileKey.required = false;
+        profileHeaders.value = '';
+        profileTitle.textContent = 'Edit ' + profile.name;
+        profileCancel.hidden = false;
+        profileName.focus();
+      });
+    }
+    profileCancel.addEventListener('click', resetForm);
+    profileForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      vscode.setState({ ...(vscode.getState() || {}), tab: 'ai' });
+      vscode.postMessage({
+        type: 'savePersonalProfile',
+        draft: {
+          id: profileId.value || undefined,
+          kind: profileKind.value,
+          name: profileName.value,
+          baseUrl: profileUrl.value,
+          model: profileModel.value,
+          apiKey: profileKey.value,
+          headers: profileHeaders.value,
+        },
+      });
+    });
   </script>
 </body>
 </html>`;
-  }
-}
-
-function profileSummary(id: ExecutionProfileId): string {
-  switch (id) {
-    case 'turbo':
-      return 'Fast answers and focused edits';
-    case 'balanced':
-      return 'Best default for everyday building';
-    case 'architect':
-      return 'Deeper reasoning for complex systems';
-    case 'autonomous':
-      return 'Longer multi-step agent work';
   }
 }
 
@@ -557,4 +758,24 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function personalDraftFromMessage(
+  value: NonNullable<FounderSettingsMessage['draft']>,
+): PersonalAiProfileDraft {
+  const kind = value.kind === 'ollama' ? 'ollama' : 'openai-compatible';
+  const headers = value.headers?.trim()
+    ? parsePersonalAiHeaders(value.headers)
+    : value.id
+      ? undefined
+      : {};
+  return {
+    id: value.id?.trim() || undefined,
+    name: value.name ?? '',
+    kind,
+    baseUrl: value.baseUrl ?? '',
+    apiKey: value.apiKey?.trim() || undefined,
+    model: value.model ?? '',
+    headers,
+  };
 }

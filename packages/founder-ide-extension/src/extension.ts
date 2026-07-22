@@ -54,6 +54,7 @@ import { FounderWorkspaceContextIndex } from './workspace-context-index';
 import { FounderSafeResultCache } from './safe-result-cache';
 import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
 import { FounderProjectActivityStore } from './project-activity';
+import { PersonalAiProfileStore } from './personal-ai-profiles';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -73,6 +74,7 @@ let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
 let founderSafeResultCache: FounderSafeResultCache | undefined;
 let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
 let founderProjectActivity: FounderProjectActivityStore | undefined;
+let personalAiProfiles: PersonalAiProfileStore | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -172,15 +174,45 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
   profileManager = new ProfileManager(context, { showStatusBar: false });
+  personalAiProfiles = new PersonalAiProfileStore(context, {
+    save: async (profile) => {
+      await vscode.commands.executeCommand('founder.personalAi.save', profile);
+    },
+    select: async (id) => {
+      await vscode.commands.executeCommand('founder.personalAi.select', id);
+    },
+    setEnabled: async (id, enabled) => {
+      await vscode.commands.executeCommand('founder.personalAi.enable', { id, enabled });
+    },
+    delete: async (id) => {
+      await vscode.commands.executeCommand('founder.personalAi.delete', id);
+    },
+  });
   costTracker = new CostTracker();
   gatewayMetadataUi = new GatewayMetadataUi();
-  context.subscriptions.push(profileManager, costTracker, gatewayMetadataUi);
+  context.subscriptions.push(profileManager, personalAiProfiles, costTracker, gatewayMetadataUi);
   profileManager.show();
   founderSettings = new FounderSettingsPanel({
     getProfile: () => profileManager!.profile,
     setProfile: (id) => profileManager!.setProfile(id),
+    getManagedAlias: () => profileManager!.alias,
+    setManagedAlias: async (id) => {
+      await profileManager!.setAlias(id);
+      await vscode.commands.executeCommand('founder.managedAi.select', id);
+    },
+    personalAiProfiles,
   });
   context.subscriptions.push(founderSettings);
+  context.subscriptions.push(
+    personalAiProfiles.onDidChange(() => {
+      founderSettings?.refresh();
+      founderHub?.refresh();
+    }),
+  );
+  void personalAiProfiles.ready().then(() => {
+    founderSettings?.refresh();
+    registerOrNotify(context);
+  });
 
   // Agentic tools (registered once; available to any chat participant / model).
   // `vscode.lm.registerTool` only exists on VS Code 1.96+ (proposed `lmTools`
@@ -440,25 +472,15 @@ export function deactivate(): void {
 /** Register the chat participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context: vscode.ExtensionContext): void {
   const creds = resolveCredentials();
-  if (!creds) {
-    registeredParticipant?.dispose();
-    registeredParticipant = undefined;
-    debugSquasherDisposable?.dispose();
-    debugSquasherDisposable = undefined;
-    currentCreds = null;
-    pairingStatusBar?.refresh();
-    founderHub?.refresh();
-    founderSettings?.refresh();
-    founderShortcuts?.refresh();
-    void showPairPrompt(context);
-    return;
-  }
-
   if (
-    currentCreds &&
-    currentCreds.apiBaseUrl === creds.apiBaseUrl &&
-    currentCreds.nodeId === creds.nodeId &&
-    currentCreds.nodeToken === creds.nodeToken
+    registeredParticipant
+    && (
+      (!currentCreds && !creds)
+      || (currentCreds && creds
+        && currentCreds.apiBaseUrl === creds.apiBaseUrl
+        && currentCreds.nodeId === creds.nodeId
+        && currentCreds.nodeToken === creds.nodeToken)
+    )
   ) {
     pairingStatusBar?.refresh();
     founderShortcuts?.refresh();
@@ -470,8 +492,9 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
   debugSquasherDisposable?.dispose();
 
   registeredParticipant = registerFounderOsChatParticipant(context, {
-    creds,
+    creds: creds ?? undefined,
     profileManager: profileManager!,
+    personalAiProfiles,
     costTracker: costTracker!,
     coordination: founderAgentAwareness,
     projectContext: founderWorkspaceContext,
@@ -516,12 +539,17 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
   });
 
   // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
-  debugSquasherDisposable = createDebugSquasherStatus(
-    context,
-    () => resolveCredentials(),
-    { showStatusBar: false },
-  );
-  context.subscriptions.push(debugSquasherDisposable);
+  if (creds) {
+    debugSquasherDisposable = createDebugSquasherStatus(
+      context,
+      () => resolveCredentials(),
+      { showStatusBar: false },
+    );
+    context.subscriptions.push(debugSquasherDisposable);
+  } else {
+    debugSquasherDisposable = undefined;
+    void showPairPrompt(context);
+  }
 
   currentCreds = creds;
   pairingStatusBar?.refresh();
@@ -704,21 +732,44 @@ async function openProjectBrief(): Promise<void> {
 }
 
 async function selectModelAlias(): Promise<void> {
-  const items = FOUNDER_OS_MODELS.map((m) => ({
-    label: m.name,
-    description: m.id,
-    detail: m.detail,
-    picked: m.isDefault,
-  }));
+  await personalAiProfiles?.ready();
+  const activePersonalId = personalAiProfiles?.activeId();
+  const items: Array<vscode.QuickPickItem & {
+    routeKind: 'managed' | 'personal';
+    id: string;
+  }> = [
+    ...FOUNDER_OS_MODELS.map((model) => ({
+      label: `$(sparkle) ${model.name}`,
+      description: model.id,
+      detail: model.detail,
+      picked: !activePersonalId && profileManager?.alias.id === model.id,
+      routeKind: 'managed' as const,
+      id: model.id,
+    })),
+    ...(personalAiProfiles?.list().filter((profile) => profile.enabled).map((profile) => ({
+      label: `${profile.kind === 'ollama' ? '$(device-desktop)' : '$(key)'} ${profile.name}`,
+      description: profile.kind === 'ollama' ? 'Local | outside managed quota' : 'Personal AI | outside managed quota',
+      detail: `${profile.model} | ${profile.baseUrl}`,
+      picked: activePersonalId === profile.id,
+      routeKind: 'personal' as const,
+      id: profile.id,
+    })) ?? []),
+  ];
   const picked = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select a Founder OS model alias (changes the chat model dropdown selection)',
+    title: 'Choose AI for Founder Chat',
+    placeHolder: 'Founder managed, Personal AI, or local Ollama',
   });
   if (!picked) return;
-  // Open the chat model picker so the user can apply the selection. The
-  // underlying provider is already registered; this is a UX hint.
-  void vscode.window.showInformationMessage(
-    `Selected ${picked.label}. Pick it from the model dropdown in Chat to apply.`,
-  );
+  if (picked.routeKind === 'managed') {
+    await personalAiProfiles?.select(null);
+    const aliasId = picked.id as (typeof FOUNDER_OS_MODELS)[number]['id'];
+    await profileManager?.setAlias(aliasId);
+    await vscode.commands.executeCommand('founder.managedAi.select', aliasId);
+  } else {
+    await personalAiProfiles?.select(picked.id);
+    void vscode.window.showInformationMessage(`${picked.label.replace(/^\$\([^)]+\)\s*/, '')} is now active.`);
+  }
+  founderSettings?.refresh();
 }
 
 /**
