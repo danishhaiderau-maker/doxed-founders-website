@@ -50,6 +50,10 @@ import {
 	shouldAssembleNativeTeam,
 	type FounderTeamAdviser,
 } from './founderNativeTeam.js';
+import {
+	nativeAutoEscalationReason,
+	type FounderNativeEscalationReason,
+} from './founderNativeRouting.js';
 
 // ---------------------------------------------------------------------------
 // Credential discovery - mirrors credentials.ts. Reads the vault file that
@@ -408,7 +412,11 @@ function inlineReceiptValue(value: unknown, fallback = '?'): string {
 	return value.trim().replace(/[\r\n`|]/g, ' ').slice(0, 120);
 }
 
-function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: number): string {
+function founderRouteReceipt(
+	meta: FounderOsMetadata | undefined,
+	latencyMs: number,
+	escalationReason: FounderNativeEscalationReason | null,
+): string {
 	if (!meta) return '';
 	const provider = inlineReceiptValue(meta.provider);
 	const model = inlineReceiptValue(meta.model);
@@ -417,7 +425,10 @@ function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: num
 		? ` · ${meta.ddollarCost} D$`
 		: '';
 	const policy = meta.routePolicy === 'free_flash_only' ? ' | Free: Flash' : '';
-	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}`;
+	const escalation = escalationReason
+		? ` | Auto requested Pro: ${escalationReason.replace('_', ' ')}`
+		: '';
+	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}${escalation}`;
 }
 
 async function requestNativeTeamAdvice(
@@ -516,11 +527,16 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
 	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode, mcpTools } = params;
 
-	const requestedModel = modelSelection?.modelName;
-	const model = typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
-		? requestedModel
-		: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
+	const requestedModel = modelSelection?.modelName;
+	const escalationReason = requestedModel === 'founder-os-auto'
+		? nativeAutoEscalationReason(openAiMessages)
+		: null;
+	const model = escalationReason
+		? 'founder-os-reasoning'
+		: typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
+			? requestedModel
+			: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	openAiMessages.unshift({
 		role: 'system',
 		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the exact provider and model for this request appear in the Founder route receipt below the answer. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
@@ -571,6 +587,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		messages: openAiMessages,
 		stream: true,
 		founder_os_metadata: true,
+		...(escalationReason ? { metadata: { founder_auto_escalation: escalationReason } } : {}),
 	};
 	const tools = gatewayTools(chatMode, mcpTools);
 	if (tools.length > 0) {
@@ -663,7 +680,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	}
 	const finalText = toolCall
 		? fullText
-		: `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt)}`;
+		: `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
 		fullText: finalText,
 		fullReasoning,

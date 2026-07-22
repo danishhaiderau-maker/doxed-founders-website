@@ -141,7 +141,7 @@ admin and user usage screenshots.
   managed model before customer traffic reaches it.
 - [x] Ensure managed DeepSeek never silently becomes another provider and a
   failed health probe removes it from customer routing until recovery.
-- [ ] Escalate Flash to Pro only on measured difficulty or failed QA and record
+- [x] Escalate Flash to Pro only on measured difficulty or failed QA and record
   the escalation reason in the task receipt.
 - [x] Add the seven focused actions: Verify, Challenge, Research, Panel, Test,
   Explain, Optimize. Each drafts a focused, editable instruction above the

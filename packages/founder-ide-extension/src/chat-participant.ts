@@ -26,6 +26,10 @@ import { runWithFounderTask } from './agent-task-context';
 import type { FounderSafeResultCache } from './safe-result-cache';
 import type { WorkspaceCacheContext } from './workspace-context-state';
 import { normalizeFounderAgentMode } from './founder-agent-mode';
+import {
+  founderAutoEscalationReason,
+  type FounderAutoEscalationReason,
+} from './auto-escalation';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -135,6 +139,13 @@ async function handleParticipantRequest(
     const codeModel = findModelAlias('founder-os-code');
     if (codeModel) alias = codeModel;
   }
+  const autoSelected = alias.id === 'founder-os-auto';
+  let escalationReason: FounderAutoEscalationReason | null = autoSelected
+    ? founderAutoEscalationReason([{ role: 'user', content: prompt }])
+    : null;
+  if (escalationReason) {
+    alias = findModelAlias('founder-os-reasoning') ?? alias;
+  }
   deps.onRequestStart?.(alias.id);
   const agentMode = normalizeFounderAgentMode(
     vscode.workspace.getConfiguration('founderOs').get<string>('agentMode'),
@@ -232,6 +243,7 @@ async function handleParticipantRequest(
           metadata: {
             founder_memory_included: memoryText.length > 0,
             prompt_efficiency: efficiency.estimate,
+            ...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
           },
         },
         {
@@ -302,6 +314,14 @@ async function handleParticipantRequest(
           content: resultText,
         });
       }
+      if (autoSelected && !escalationReason) {
+        const detected = founderAutoEscalationReason(gatewayMessages);
+        if (detected) {
+          escalationReason = detected;
+          alias = findModelAlias('founder-os-reasoning') ?? alias;
+          stream.progress(`Founder Auto: escalating to Pro (${detected.replace('_', ' ')})`);
+        }
+      }
     }
 
     if (!completed && !token.isCancellationRequested) {
@@ -310,6 +330,11 @@ async function handleParticipantRequest(
     ok = completed && !token.isCancellationRequested;
     if (ok && !usedTools && cacheInput && reusableAnswer) {
       deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
+    }
+    if (ok && escalationReason) {
+      stream.markdown(
+        `\n\n---\n**Founder Auto escalation** | Pro | ${escalationReason.replace('_', ' ')}`,
+      );
     }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);

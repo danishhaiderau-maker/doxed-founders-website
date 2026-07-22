@@ -121,6 +121,20 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(team, /mode !== 'team' \|\| chatMode !== 'agent'/);
   });
 
+  it('escalates Founder Auto only from deterministic evidence', () => {
+    const gateway = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    const routing = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeRouting.ts',
+    );
+    assert.match(gateway, /requestedModel === 'founder-os-auto'/);
+    assert.match(gateway, /Auto requested Pro/);
+    assert.match(routing, /failed_verification/);
+    assert.match(routing, /signals >= 2/);
+    assert.match(routing, /\[exit code/);
+  });
+
   it('preserves native tools, reasoning, and the terminal completion marker', () => {
     const source = read(
       'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
