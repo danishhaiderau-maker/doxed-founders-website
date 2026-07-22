@@ -24,6 +24,11 @@ import {
   forcedIntentForAlias,
   normalizeFounderAliasRoute,
 } from './deepseek-model-policy';
+import {
+  clientIncludedFounderMemory,
+  parseClientPromptEfficiency,
+  type ClientPromptEfficiencyEstimate,
+} from './ai-proxy-efficiency';
 
 /**
  * Server-side shape of the model list returned at /v1/models. Each alias is
@@ -55,6 +60,7 @@ export type ProxyInvokeResult = {
   cacheLevel: 'hit' | 'partial' | 'miss';
   promptTokens?: number;
   completionTokens?: number;
+  promptEfficiency?: ClientPromptEfficiencyEstimate;
 };
 
 /**
@@ -245,7 +251,10 @@ export class AiProxyRuntimeService {
 
     // Inject Memory Engine context into the system message (kernel §3).
     // Best-effort — empty memory or a store hiccup leaves messages unchanged.
-    const messages = await this.injectMemoryContext(auth.userId, body.messages);
+    const messages = clientIncludedFounderMemory(body.metadata)
+      ? body.messages
+      : await this.injectMemoryContext(auth.userId, body.messages);
+    const promptEfficiency = parseClientPromptEfficiency(body.metadata) ?? undefined;
 
     const payload = {
       model: route.model,
@@ -303,7 +312,8 @@ export class AiProxyRuntimeService {
         model: route.model,
         intent: route.intent,
         tier: route.tier,
-        cacheLevel: 'miss',
+        cacheLevel: route.cacheLevel,
+        promptEfficiency,
       };
     }
 
@@ -326,7 +336,8 @@ export class AiProxyRuntimeService {
         model: route.model,
         intent: route.intent,
         tier: route.tier,
-        cacheLevel: 'miss',
+        cacheLevel: route.cacheLevel,
+        promptEfficiency,
       };
     }
 
@@ -357,9 +368,10 @@ export class AiProxyRuntimeService {
       model: route.model,
       intent: route.intent,
       tier: route.tier,
-      cacheLevel: 'miss',
+      cacheLevel: route.cacheLevel,
       promptTokens,
       completionTokens,
+      promptEfficiency,
     };
   }
 

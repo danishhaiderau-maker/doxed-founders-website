@@ -78,6 +78,8 @@ export interface GatewayCallOptions {
   /** OpenAI-compatible tools made available to the routed model. */
   tools?: GatewayToolDefinition[];
   toolChoice?: 'auto' | 'required';
+  /** Non-secret Founder telemetry used for truthful efficiency receipts. */
+  metadata?: Record<string, unknown>;
 }
 
 export interface GatewayFounderOsMetadata {
@@ -371,6 +373,7 @@ export async function callGateway(
       if (options.founderOsMetadata) body.founder_os_metadata = true;
       if (options.tools?.length) body.tools = options.tools;
       if (options.tools?.length && options.toolChoice) body.tool_choice = options.toolChoice;
+      if (options.metadata) body.metadata = options.metadata;
 
       log('info', `→ POST ${url} (attempt ${attempt + 1}/${maxRetries + 1})`);
 

@@ -55,12 +55,25 @@ test('SSE response remains open through metadata, content delta, and DONE', asyn
     tier: 'reasoning',
     provider: 'deepseek',
     model: 'deepseek-v4-pro',
+    routeCacheLevel: 'hit',
+    promptEfficiency: {
+      measurement: 'estimated',
+      baselineTokens: 100,
+      sentTokens: 75,
+      avoidedTokens: 25,
+      savingsPercent: 25,
+      compactedToolResults: 1,
+      removedStaleCoordinationBlocks: 0,
+      techniques: ['bounded-tool-results'],
+    },
   });
 
   const body = response.text();
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers.get('content-type'), 'text/event-stream');
   assert.match(body, /"founderOs":/);
+  assert.match(body, /"routeCacheLevel":"hit"/);
+  assert.match(body, /"measurement":"estimated"/);
   assert.match(body, /"choices":\[\{"delta":\{"content":"Hello"\}/);
   assert.match(body, /data: \[DONE\]/);
   assert.ok(body.indexOf('"founderOs":') < body.indexOf('"choices":'));

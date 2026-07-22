@@ -214,6 +214,8 @@ async function callGateway(client, options, callbacks, token, extra = {}) {
                 body.tools = options.tools;
             if (options.tools?.length && options.toolChoice)
                 body.tool_choice = options.toolChoice;
+            if (options.metadata)
+                body.metadata = options.metadata;
             log('info', `→ POST ${url} (attempt ${attempt + 1}/${maxRetries + 1})`);
             let res;
             try {

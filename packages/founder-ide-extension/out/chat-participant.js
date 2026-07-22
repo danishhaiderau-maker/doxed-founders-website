@@ -49,10 +49,13 @@ const memory_1 = require("./memory");
 const credentials_1 = require("./credentials");
 const gateway_client_1 = require("./gateway-client");
 const tool_names_1 = require("./tool-names");
+const prompt_efficiency_1 = require("./prompt-efficiency");
 const MAX_TOOL_TURNS = 8;
 function availableFounderTools() {
     const tools = vscode.lm.tools;
-    return (tools ?? []).filter((tool) => tool_names_1.FOUNDER_TOOL_NAMES.has(tool.name));
+    return [...(tools ?? [])]
+        .filter((tool) => tool_names_1.FOUNDER_TOOL_NAMES.has(tool.name))
+        .sort((left, right) => left.name.localeCompare(right.name));
 }
 function toolResultText(result) {
     const parts = [];
@@ -130,7 +133,12 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         : '';
     const projectContextText = deps.projectContext?.contextFor(prompt) ?? '';
     const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
-    const systemContent = [memoryText, projectContextText, coordinationText, identity].filter(Boolean).join('\n\n');
+    const systemContent = (0, prompt_efficiency_1.composeFounderSystemPrompt)({
+        identity,
+        memory: memoryText,
+        projectContext: projectContextText,
+        coordination: coordinationText,
+    });
     const gatewayMessages = [
         { role: 'system', content: systemContent },
         { role: 'user', content: prompt },
@@ -157,9 +165,10 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
             }
             const toolCalls = [];
             let assistantText = '';
+            const efficiency = (0, prompt_efficiency_1.planPromptEfficiency)(gatewayMessages);
             await (0, gateway_client_1.callGateway)(client, {
                 model: alias.id,
-                messages: gatewayMessages,
+                messages: efficiency.messages,
                 executionProfile: alias.executionProfile,
                 founderOsMetadata: true,
                 timeoutMs,
@@ -172,6 +181,10 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
                     },
                 })),
                 toolChoice: 'auto',
+                metadata: {
+                    founder_memory_included: memoryText.length > 0,
+                    prompt_efficiency: efficiency.estimate,
+                },
             }, {
                 onToken: (delta) => {
                     if (token.isCancellationRequested)

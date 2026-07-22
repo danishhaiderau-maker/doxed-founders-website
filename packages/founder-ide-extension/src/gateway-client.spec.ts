@@ -203,6 +203,10 @@ describe('gateway-client — SSE happy path', () => {
           },
         ],
         toolChoice: 'auto',
+        metadata: {
+          founder_memory_included: true,
+          prompt_efficiency: { measurement: 'estimated', avoidedTokens: 120 },
+        },
       },
       callbacks(),
       makeToken(),
@@ -211,9 +215,12 @@ describe('gateway-client — SSE happy path', () => {
     const body = JSON.parse(String(calls[0]?.init?.body)) as {
       tools?: Array<{ function?: { name?: string } }>;
       tool_choice?: string;
+      metadata?: { founder_memory_included?: boolean; prompt_efficiency?: { avoidedTokens?: number } };
     };
     assert.equal(body.tools?.[0]?.function?.name, 'founder-edit-file');
     assert.equal(body.tool_choice, 'auto');
+    assert.equal(body.metadata?.founder_memory_included, true);
+    assert.equal(body.metadata?.prompt_efficiency?.avoidedTokens, 120);
   });
 });
 

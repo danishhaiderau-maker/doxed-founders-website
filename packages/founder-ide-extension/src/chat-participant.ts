@@ -21,6 +21,7 @@ import {
   gatewayUserMessage,
 } from './gateway-client';
 import { FOUNDER_TOOL_NAMES } from './tool-names';
+import { composeFounderSystemPrompt, planPromptEfficiency } from './prompt-efficiency';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -49,7 +50,9 @@ function availableFounderTools(): readonly vscode.LanguageModelToolInformation[]
   const tools = (vscode.lm as unknown as {
     tools?: readonly vscode.LanguageModelToolInformation[];
   }).tools;
-  return (tools ?? []).filter((tool) => FOUNDER_TOOL_NAMES.has(tool.name));
+  return [...(tools ?? [])]
+    .filter((tool) => FOUNDER_TOOL_NAMES.has(tool.name))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function toolResultText(result: vscode.LanguageModelToolResult): string {
@@ -142,7 +145,12 @@ async function handleParticipantRequest(
     : '';
   const projectContextText = deps.projectContext?.contextFor(prompt) ?? '';
   const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
-  const systemContent = [memoryText, projectContextText, coordinationText, identity].filter(Boolean).join('\n\n');
+  const systemContent = composeFounderSystemPrompt({
+    identity,
+    memory: memoryText,
+    projectContext: projectContextText,
+    coordination: coordinationText,
+  });
 
   const gatewayMessages: GatewayMessage[] = [
     { role: 'system', content: systemContent },
@@ -174,11 +182,12 @@ async function handleParticipantRequest(
       }
       const toolCalls: GatewayToolCall[] = [];
       let assistantText = '';
+      const efficiency = planPromptEfficiency(gatewayMessages);
       await callGateway(
         client,
         {
           model: alias.id,
-          messages: gatewayMessages,
+          messages: efficiency.messages,
           executionProfile: alias.executionProfile,
           founderOsMetadata: true,
           timeoutMs,
@@ -191,6 +200,10 @@ async function handleParticipantRequest(
             },
           })),
           toolChoice: 'auto',
+          metadata: {
+            founder_memory_included: memoryText.length > 0,
+            prompt_efficiency: efficiency.estimate,
+          },
         },
         {
           onToken: (delta) => {

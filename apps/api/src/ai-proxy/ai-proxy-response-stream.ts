@@ -2,6 +2,7 @@ import { AI_PROXY_DDOLLAR_COST, type AiProxyTier } from '@dcf/utils';
 import type { Response } from 'express';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import type { ClientPromptEfficiencyEstimate } from './ai-proxy-efficiency';
 
 type PipeAiProxySseResponseArgs = {
   res: Response;
@@ -12,6 +13,8 @@ type PipeAiProxySseResponseArgs = {
   tier: AiProxyTier;
   provider: string;
   model: string;
+  routeCacheLevel?: 'hit' | 'partial' | 'miss';
+  promptEfficiency?: ClientPromptEfficiencyEstimate;
 };
 
 /** Own the Express response until the provider SSE stream reaches EOF. */
@@ -24,6 +27,8 @@ export async function pipeAiProxySseResponse({
   tier,
   provider,
   model,
+  routeCacheLevel,
+  promptEfficiency,
 }: PipeAiProxySseResponseArgs): Promise<void> {
   res.status(status);
   res.setHeader('Content-Type', 'text/event-stream');
@@ -34,7 +39,15 @@ export async function pipeAiProxySseResponse({
     const ddollarCost = AI_PROXY_DDOLLAR_COST[tier] ?? 0;
     res.write(
       `data: ${JSON.stringify({
-        founderOs: { requestId, tier, provider, model, ddollarCost },
+        founderOs: {
+          requestId,
+          tier,
+          provider,
+          model,
+          ddollarCost,
+          routeCacheLevel: routeCacheLevel ?? 'miss',
+          ...(promptEfficiency ? { promptEfficiency } : {}),
+        },
       })}\n\n`,
     );
   }
