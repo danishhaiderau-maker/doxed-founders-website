@@ -185,6 +185,29 @@ describe('gateway-client — SSE happy path', () => {
     });
   });
 
+  it('reports provider cache hits and misses from terminal usage', async () => {
+    const usage: Array<{ promptTokens: number; cachedInputTokens: number; uncachedInputTokens: number; outputTokens: number }> = [];
+    await callGateway(
+      CLIENT,
+      { model: 'founder-os-fast', messages: [{ role: 'user', content: 'hello' }] },
+      {
+        onToken: () => {},
+        onUsage: (value) => usage.push(value),
+      },
+      makeToken(),
+      { fetchImpl: async () => sseResponse([
+        'data: {"choices":[],"usage":{"prompt_tokens":180000,"prompt_cache_hit_tokens":150000,"prompt_cache_miss_tokens":30000,"completion_tokens":20000}}\n\n',
+        'data: [DONE]\n\n',
+      ]) },
+    );
+    assert.deepEqual(usage, [{
+      promptTokens: 180000,
+      cachedInputTokens: 150000,
+      uncachedInputTokens: 30000,
+      outputTokens: 20000,
+    }]);
+  });
+
   it('forwards tool definitions and tool choice to the gateway', async () => {
     const res = sseResponse(['data: [DONE]\n\n']);
     const { fetchImpl, calls } = makeFetchSequence([res]);

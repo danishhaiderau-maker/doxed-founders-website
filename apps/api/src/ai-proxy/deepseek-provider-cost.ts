@@ -61,3 +61,29 @@ export function calculateDeepseekCostUsd(
     outputTokens,
   };
 }
+
+export function estimateDeepseekInputSavingsUsd(
+  model: string,
+  avoidedInputTokens: number,
+): {
+  measurement: 'estimated';
+  baseline: 'same-request-full-context-uncached-input';
+  currency: 'USD';
+  priceVersion: typeof DEEPSEEK_PRICE_VERSION;
+  avoidedInputTokens: number;
+  avoidedUsd: number;
+} | null {
+  const prices = DEEPSEEK_PRICES_PER_MILLION[
+    model as keyof typeof DEEPSEEK_PRICES_PER_MILLION
+  ];
+  if (!prices || !Number.isFinite(avoidedInputTokens) || avoidedInputTokens < 0) return null;
+  const bounded = Math.min(10_000_000, Math.floor(avoidedInputTokens));
+  return {
+    measurement: 'estimated',
+    baseline: 'same-request-full-context-uncached-input',
+    currency: 'USD',
+    priceVersion: DEEPSEEK_PRICE_VERSION,
+    avoidedInputTokens: bounded,
+    avoidedUsd: Math.round(((bounded / 1_000_000) * prices.uncachedInput) * 1e12) / 1e12,
+  };
+}

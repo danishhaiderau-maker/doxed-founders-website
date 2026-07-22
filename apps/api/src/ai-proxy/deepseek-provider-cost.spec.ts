@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   calculateDeepseekCostUsd,
   DEEPSEEK_PRICE_VERSION,
+  estimateDeepseekInputSavingsUsd,
 } from './deepseek-provider-cost';
 
 describe('DeepSeek provider cost', () => {
@@ -32,5 +33,16 @@ describe('DeepSeek provider cost', () => {
   it('returns null for an unversioned model or missing provider usage', () => {
     assert.equal(calculateDeepseekCostUsd('deepseek-chat', {}), null);
     assert.equal(calculateDeepseekCostUsd('deepseek-v4-flash', null), null);
+  });
+
+  it('labels an input-only full-context comparison as estimated', () => {
+    assert.deepEqual(estimateDeepseekInputSavingsUsd('deepseek-v4-flash', 50_000), {
+      measurement: 'estimated',
+      baseline: 'same-request-full-context-uncached-input',
+      currency: 'USD',
+      priceVersion: DEEPSEEK_PRICE_VERSION,
+      avoidedInputTokens: 50_000,
+      avoidedUsd: 0.007,
+    });
   });
 });

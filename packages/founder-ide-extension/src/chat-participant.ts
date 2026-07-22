@@ -16,12 +16,13 @@ import {
   type GatewayMessage,
   type GatewayClient,
   type GatewayFounderOsMetadata,
+  type GatewayProviderUsage,
   type GatewayToolCall,
   callGateway,
   gatewayUserMessage,
 } from './gateway-client';
 import { FOUNDER_TOOL_NAMES } from './tool-names';
-import { composeFounderSystemPrompt, estimateTokensFromText, planPromptEfficiency } from './prompt-efficiency';
+import { composeFounderPromptMessages, estimateTokensFromText, planPromptEfficiency } from './prompt-efficiency';
 import { runWithFounderTask } from './agent-task-context';
 import type { FounderSafeResultCache } from './safe-result-cache';
 import type { WorkspaceCacheContext } from './workspace-context-state';
@@ -193,7 +194,7 @@ async function handleParticipantRequest(
       ) ?? ''
     : '';
   const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
-  const systemContent = composeFounderSystemPrompt({
+  const systemMessages = composeFounderPromptMessages({
     identity,
     memory: memoryText,
     projectContext: projectContextText,
@@ -202,7 +203,7 @@ async function handleParticipantRequest(
   });
 
   const gatewayMessages: GatewayMessage[] = [
-    { role: 'system', content: systemContent },
+    ...systemMessages,
     { role: 'user', content: prompt },
   ];
 
@@ -241,6 +242,8 @@ async function handleParticipantRequest(
   let activityProviderModel: string | null = null;
   let activityEditedFiles: string[] = [];
   let activityChecks: string[] = [];
+  const providerUsageEvidence: { value?: GatewayProviderUsage } = {};
+  let inputCostComparison: GatewayFounderOsMetadata['inputCostComparison'];
   try {
     const tools = availableFounderTools();
     let completed = false;
@@ -296,7 +299,11 @@ async function handleParticipantRequest(
           onMetadata: (meta) => {
             activityProvider = typeof meta.provider === 'string' ? meta.provider : activityProvider;
             activityProviderModel = typeof meta.model === 'string' ? meta.model : activityProviderModel;
+            inputCostComparison = meta.inputCostComparison ?? inputCostComparison;
             deps.onMetadata?.(meta);
+          },
+          onUsage: (usage) => {
+            providerUsageEvidence.value = usage;
           },
           onError: (status, body) => {
             errorMessage = gatewayUserMessage(status, body);
@@ -426,6 +433,20 @@ async function handleParticipantRequest(
     if (ok && escalationReason) {
       stream.markdown(
         `\n\n---\n**Founder Auto escalation** | Pro | ${escalationReason.replace('_', ' ')}`,
+      );
+    }
+    const providerUsage = providerUsageEvidence.value;
+    if (ok && providerUsage) {
+      const cacheRate = providerUsage.promptTokens > 0
+        ? Math.round((providerUsage.cachedInputTokens / providerUsage.promptTokens) * 10_000) / 100
+        : 0;
+      stream.markdown(
+        `\n\n---\n**DeepSeek cache evidence** | ${providerUsage.cachedInputTokens.toLocaleString()} hit | ${providerUsage.uncachedInputTokens.toLocaleString()} miss | ${cacheRate}% hit rate | ${providerUsage.outputTokens.toLocaleString()} output`,
+      );
+    }
+    if (ok && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
+      stream.markdown(
+        `\n\n**Estimated input comparison** | ${inputCostComparison.avoidedInputTokens.toLocaleString()} fewer input tokens | $${inputCostComparison.avoidedUsd.toFixed(6)} USD avoided | baseline: same request with full context and uncached ${activityProviderModel ?? 'DeepSeek'} input | ${inputCostComparison.priceVersion}`,
       );
     }
   } catch (err) {

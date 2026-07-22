@@ -88,7 +88,22 @@ export interface GatewayFounderOsMetadata {
   provider?: string;
   model?: string;
   ddollarCost?: number;
+  inputCostComparison?: {
+    measurement: 'estimated';
+    baseline: 'same-request-full-context-uncached-input';
+    currency: 'USD';
+    priceVersion: string;
+    avoidedInputTokens: number;
+    avoidedUsd: number;
+  };
   [k: string]: unknown;
+}
+
+export interface GatewayProviderUsage {
+  promptTokens: number;
+  cachedInputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
 }
 
 /** Aggregated tool-call shape — emitted once the gateway closes a tool call. */
@@ -114,6 +129,8 @@ export interface GatewayClient {
 export interface StreamCallbacks {
   onToken: (delta: string) => void;
   onMetadata?: (meta: GatewayFounderOsMetadata) => void;
+  /** Provider-reported terminal token usage, including DeepSeek prefix-cache evidence. */
+  onUsage?: (usage: GatewayProviderUsage) => void;
   /** Aggregated tool-call emitted when the gateway signals end-of-call. */
   onToolCall?: (call: GatewayToolCall) => void;
   /** Non-2xx response (after retries exhausted) — receives status + body slice. */
@@ -628,6 +645,11 @@ function handleSseEvent(
     return;
   }
 
+  if ('usage' in evt && evt.usage && typeof evt.usage === 'object') {
+    const usage = providerUsage(evt.usage as Record<string, unknown>);
+    if (usage) callbacks.onUsage?.(usage);
+  }
+
   const choices = evt.choices as
     | Array<{
         delta?: { content?: string; tool_calls?: Array<ToolCallDelta> };
@@ -649,6 +671,27 @@ function handleSseEvent(
       }
     }
   }
+}
+
+function providerUsage(value: Record<string, unknown>): GatewayProviderUsage | null {
+  const promptTokens = nonNegativeInteger(value.prompt_tokens);
+  const outputTokens = nonNegativeInteger(value.completion_tokens);
+  const cachedInputTokens = Math.min(
+    promptTokens,
+    nonNegativeInteger(value.prompt_cache_hit_tokens),
+  );
+  const reportedMiss = nonNegativeInteger(value.prompt_cache_miss_tokens);
+  const uncachedInputTokens = reportedMiss > 0
+    ? Math.min(promptTokens, reportedMiss)
+    : Math.max(0, promptTokens - cachedInputTokens);
+  if (promptTokens === 0 && outputTokens === 0) return null;
+  return { promptTokens, cachedInputTokens, uncachedInputTokens, outputTokens };
+}
+
+function nonNegativeInteger(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
 }
 
 // ─── Tool-call aggregation ──────────────────────────────────────────────────

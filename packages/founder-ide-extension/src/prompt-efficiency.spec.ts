@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   composeFounderSystemPrompt,
+  composeFounderPromptMessages,
   estimateMessagesTokens,
   planPromptEfficiency,
   type EfficientPromptMessage,
 } from './prompt-efficiency';
+import { runFounderEfficiencyBenchmark } from './prompt-efficiency-benchmark';
 
 describe('Founder prompt efficiency', () => {
   it('keeps the stable identity block first for provider prefix caching', () => {
@@ -19,6 +21,22 @@ describe('Founder prompt efficiency', () => {
       prompt,
       'stable identity\n\nfounder memory\n\nproject map\n\ncoordination',
     );
+  });
+
+  it('keeps the first provider message byte-stable when live context changes', () => {
+    const first = composeFounderPromptMessages({
+      identity: 'Founder identity v1',
+      memory: 'memory one',
+      projectContext: 'repo map one',
+    });
+    const second = composeFounderPromptMessages({
+      identity: 'Founder identity v1',
+      memory: 'memory two',
+      projectContext: 'repo map two',
+      coordination: 'agent heartbeat',
+    });
+    assert.deepEqual(first[0], second[0]);
+    assert.notEqual(first[1]?.content, second[1]?.content);
   });
 
   it('keeps only the latest live coordination snapshot', () => {
@@ -76,5 +94,14 @@ describe('Founder prompt efficiency', () => {
     assert.equal(JSON.stringify(messages), before);
     assert.equal(plan.estimate.avoidedTokens, 0);
     assert.equal(plan.estimate.sentTokens, estimateMessagesTokens(messages));
+  });
+
+  it('benchmarks five named coding workloads against the full-context baseline', () => {
+    const first = runFounderEfficiencyBenchmark();
+    const repeated = Array.from({ length: 4 }, () => runFounderEfficiencyBenchmark());
+    assert.equal(first.length, 5);
+    for (const run of repeated) assert.deepEqual(run, first);
+    assert.ok(first.every((result) => result.baselineTokens > result.sentTokens));
+    assert.ok(first.every((result) => result.avoidedTokens === result.baselineTokens - result.sentTokens));
   });
 });

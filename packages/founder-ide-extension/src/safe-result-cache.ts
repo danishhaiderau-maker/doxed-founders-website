@@ -17,9 +17,10 @@ export interface SafeResultCacheHit {
 }
 
 interface PersistedResult extends SafeResultCacheHit {
-  version: 1;
+  version: 2;
   expiresAt: string;
   model: string;
+  workspaceId: string;
 }
 
 const DEFAULT_TTL_MS = 24 * 60 * 60_000;
@@ -37,12 +38,13 @@ export class FounderSafeResultCache {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<PersistedResult>;
       if (
-        parsed.version !== 1
+        parsed.version !== 2
         || typeof parsed.text !== 'string'
         || typeof parsed.createdAt !== 'string'
         || typeof parsed.expiresAt !== 'string'
         || typeof parsed.estimatedTokensAvoided !== 'number'
         || parsed.model !== input.model
+        || parsed.workspaceId !== input.context.workspaceId
         || parsed.contextHash !== input.context.contextHash
         || Date.parse(parsed.expiresAt) <= now
       ) {
@@ -74,13 +76,14 @@ export class FounderSafeResultCache {
       || containsSensitiveMaterial(normalizedText)
     ) return false;
     const value: PersistedResult = {
-      version: 1,
+      version: 2,
       text: normalizedText,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + this.ttlMs).toISOString(),
       estimatedTokensAvoided: Math.max(0, Math.round(estimatedTokensAvoided)),
       contextHash: input.context.contextHash,
       model: input.model,
+      workspaceId: input.context.workspaceId,
     };
     try {
       fs.mkdirSync(this.root, { recursive: true });
@@ -93,6 +96,27 @@ export class FounderSafeResultCache {
     } catch {
       return false;
     }
+  }
+
+  invalidateWorkspace(workspaceId: string): number {
+    let removed = 0;
+    try {
+      for (const entry of fs.readdirSync(this.root, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const file = path.join(this.root, entry.name);
+        try {
+          const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<PersistedResult>;
+          if (value.workspaceId !== workspaceId) continue;
+          fs.rmSync(file, { force: true });
+          removed += 1;
+        } catch {
+          fs.rmSync(file, { force: true });
+        }
+      }
+    } catch {
+      return removed;
+    }
+    return removed;
   }
 
   private fileFor(input: SafeResultCacheInput): string {
@@ -129,4 +153,3 @@ export function semanticReadOnlyKey(prompt: string): string {
 export function containsSensitiveMaterial(value: string): boolean {
   return /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_-]?key|secret|password|private[_-]?key)\s*[:=]\s*[^\s]{8,}|\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{16,})/i.test(value);
 }
-

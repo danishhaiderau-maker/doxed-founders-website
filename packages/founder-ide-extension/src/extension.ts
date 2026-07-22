@@ -128,6 +128,11 @@ export function activate(context: vscode.ExtensionContext): void {
   founderSafeResultCache = new FounderSafeResultCache(
     path.join(context.globalStorageUri.fsPath, 'safe-result-cache'),
   );
+  context.subscriptions.push(
+    founderWorkspaceContext.onDidInvalidate(({ workspaceId }) => {
+      founderSafeResultCache?.invalidateWorkspace(workspaceId);
+    }),
+  );
   founderVerifiedSolutionMemory = new FounderVerifiedSolutionMemory(
     path.join(context.globalStorageUri.fsPath, 'verified-solutions'),
   );

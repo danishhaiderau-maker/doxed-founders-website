@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ClientPromptEfficiencyEstimate } from './ai-proxy-efficiency';
+import { estimateDeepseekInputSavingsUsd } from './deepseek-provider-cost';
 
 type PipeAiProxySseResponseArgs = {
   res: Response;
@@ -39,6 +40,9 @@ export async function pipeAiProxySseResponse({
 
   if (includeMetadata) {
     const ddollarCost = AI_PROXY_DDOLLAR_COST[tier] ?? 0;
+    const inputCostComparison = provider === 'deepseek' && promptEfficiency
+      ? estimateDeepseekInputSavingsUsd(model, promptEfficiency.avoidedTokens)
+      : null;
     res.write(
       `data: ${JSON.stringify({
         founderOs: {
@@ -49,6 +53,7 @@ export async function pipeAiProxySseResponse({
           ddollarCost,
           routeCacheLevel: routeCacheLevel ?? 'miss',
           ...(promptEfficiency ? { promptEfficiency } : {}),
+          ...(inputCostComparison ? { inputCostComparison } : {}),
           ...(routePolicy ? { routePolicy } : {}),
         },
       })}\n\n`,

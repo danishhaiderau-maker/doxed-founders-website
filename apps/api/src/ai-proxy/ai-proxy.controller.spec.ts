@@ -74,6 +74,8 @@ test('SSE response remains open through metadata, content delta, and DONE', asyn
   assert.match(body, /"founderOs":/);
   assert.match(body, /"routeCacheLevel":"hit"/);
   assert.match(body, /"measurement":"estimated"/);
+  assert.match(body, /"baseline":"same-request-full-context-uncached-input"/);
+  assert.match(body, /"avoidedUsd":0\.000010875/);
   assert.match(body, /"choices":\[\{"delta":\{"content":"Hello"\}/);
   assert.match(body, /data: \[DONE\]/);
   assert.ok(body.indexOf('"founderOs":') < body.indexOf('"choices":'));

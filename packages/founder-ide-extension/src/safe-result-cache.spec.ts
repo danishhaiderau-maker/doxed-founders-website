@@ -61,5 +61,23 @@ describe('Founder safe result cache', () => {
     assert.equal(cache.put(input, 'Safe explanation.', 100, 100), true);
     assert.equal(cache.get(input, 1_101), null);
   });
-});
 
+  it('invalidates every semantic result for one changed workspace', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-result-cache-'));
+    const cache = new FounderSafeResultCache(root, 10_000);
+    const first = {
+      prompt: 'explain the session flow',
+      model: 'founder-os-auto',
+      context: { workspaceId: 'first', contextHash: 'a'.repeat(64), files: [] },
+    };
+    const second = {
+      ...first,
+      context: { workspaceId: 'second', contextHash: 'b'.repeat(64), files: [] },
+    };
+    assert.equal(cache.put(first, 'First result.', 100), true);
+    assert.equal(cache.put(second, 'Second result.', 100), true);
+    assert.equal(cache.invalidateWorkspace('first'), 1);
+    assert.equal(cache.get(first), null);
+    assert.equal(cache.get(second)?.text, 'Second result.');
+  });
+});

@@ -61,6 +61,29 @@ export function composeFounderSystemPrompt(input: {
     .join('\n\n');
 }
 
+export function composeFounderPromptMessages(input: {
+  identity: string;
+  memory?: string;
+  projectContext?: string;
+  coordination?: string;
+  additionalStableContext?: string;
+}): EfficientPromptMessage[] {
+  const identity = input.identity.trim();
+  const context = [
+    input.memory,
+    input.projectContext,
+    input.additionalStableContext,
+    input.coordination,
+  ]
+    .map((block) => block?.trim() ?? '')
+    .filter(Boolean)
+    .join('\n\n');
+  return [
+    ...(identity ? [{ role: 'system' as const, content: identity }] : []),
+    ...(context ? [{ role: 'system' as const, content: context }] : []),
+  ];
+}
+
 function compactToolResult(content: string, budget: number): string {
   if (content.length <= budget) return content;
   const digest = createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);

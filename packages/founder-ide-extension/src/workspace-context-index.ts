@@ -39,6 +39,8 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
   private readonly watcher: vscode.FileSystemWatcher;
   private workspaceId: string | null;
   private indexFile: string | null;
+  private readonly invalidationEmitter = new vscode.EventEmitter<{ workspaceId: string; path?: string }>();
+  readonly onDidInvalidate = this.invalidationEmitter.event;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.workspaceId = currentWorkspaceId();
@@ -47,9 +49,9 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     this.watcher = vscode.workspace.createFileSystemWatcher(INDEXABLE_GLOB);
     context.subscriptions.push(
       this.watcher,
-      this.watcher.onDidCreate(() => this.scheduleRefresh()),
-      this.watcher.onDidChange(() => this.scheduleRefresh()),
-      this.watcher.onDidDelete(() => this.scheduleRefresh()),
+      this.watcher.onDidCreate((uri) => this.invalidateAndSchedule(uri)),
+      this.watcher.onDidChange((uri) => this.invalidateAndSchedule(uri)),
+      this.watcher.onDidDelete((uri) => this.invalidateAndSchedule(uri)),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         this.switchWorkspace();
         this.scheduleRefresh(true);
@@ -119,7 +121,20 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
 
   dispose(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.invalidationEmitter.dispose();
     this.watcher.dispose();
+  }
+
+  private invalidateAndSchedule(uri?: vscode.Uri): void {
+    const workspaceId = this.workspaceId;
+    this.state = null;
+    if (workspaceId) {
+      this.invalidationEmitter.fire({
+        workspaceId,
+        ...(uri ? { path: relativeWorkspacePath(uri) ?? undefined } : {}),
+      });
+    }
+    this.scheduleRefresh(true);
   }
 
   private scheduleRefresh(force = false): void {

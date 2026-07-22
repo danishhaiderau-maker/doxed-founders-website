@@ -85,14 +85,14 @@ result.
 - [x] Add semantic result caching for safe read-only questions.
 - [x] Add exact-diff context retrieval and changed-file invalidation.
 - [x] Show measured savings in usage receipts and dragon notifications.
-- [ ] Benchmark representative coding tasks against full-context execution.
-- [ ] Keep the cacheable prefix byte-stable across turns and record provider
+- [x] Benchmark representative coding tasks against full-context execution.
+- [x] Keep the cacheable prefix byte-stable across turns and record provider
   cache-hit input separately from ordinary input.
-- [ ] Invalidate file, symbol, dependency, solution, and semantic caches from a
+- [x] Invalidate file, symbol, dependency, solution, and semantic caches from a
   single changed-file event rather than waiting for stale output to fail.
 - [x] Reserve cache reuse for read-only or equivalently proven results; tool
   execution, secrets, changing remote state, and destructive actions bypass it.
-- [ ] Show both token and estimated-cost comparisons against an explicit named
+- [x] Show both token and estimated-cost comparisons against an explicit named
   baseline; marketing percentages remain hidden until the benchmark proves
   them.
 
