@@ -23,6 +23,13 @@ describe('fetchFounderIdeEntitlements', () => {
         return new Response(
           JSON.stringify({
             plan: 'free',
+            priceCentsMonthly: 0,
+            team: null,
+            features: {
+              coordination: false,
+              remoteControl: false,
+              rolesAndAudit: false,
+            },
             managedTokens: {
               unit: 'weighted_tokens',
               weightsVersion: 'founder-wtu-v1',
@@ -52,6 +59,29 @@ describe('fetchFounderIdeEntitlements', () => {
     assert.equal(requestedAuthorization, 'FounderNode node-1:secret-token');
     assert.equal(result.source, 'live');
     assert.equal(result.value.managedTokens.remaining, 199_980);
+  });
+
+  it('accepts Builder and Team plan names returned by the current API', async () => {
+    for (const plan of ['builder', 'team'] as const) {
+      const result = await fetchFounderIdeEntitlements(
+        { apiBaseUrl: 'https://example.test', nodeId: 'node-1', nodeToken: 'secret-token' },
+        (async () => new Response(JSON.stringify({
+          plan,
+          priceCentsMonthly: plan === 'builder' ? 3_500 : null,
+          team: plan === 'team' ? { id: 'team-1', name: 'Studio', role: 'owner' } : null,
+          features: { coordination: true, remoteControl: true, rolesAndAudit: plan === 'team' },
+          managedTokens: {
+            unit: 'weighted_tokens', weightsVersion: 'founder-wtu-v1', cap: 5_000_000,
+            used: 100, remaining: 4_999_900, eligible: true,
+            resetsOrExpiresAt: null, daysRemaining: null,
+          },
+          personalProviders: { used: null, limit: null, localModelsCountTowardLimit: false },
+          message: null,
+        }), { status: 200 })) as typeof fetch,
+      );
+      assert.equal(result.source, 'live');
+      assert.equal(result.value.plan, plan);
+    }
   });
 
   it('returns a truthful signed-out state without a network request', async () => {

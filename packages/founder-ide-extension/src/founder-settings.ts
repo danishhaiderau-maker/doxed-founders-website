@@ -185,6 +185,21 @@ export class FounderSettingsPanel implements vscode.Disposable {
       : 'Not connected';
     const entitlement = this.entitlementState.value;
     const managedTokens = entitlement.managedTokens;
+    const planLabel = entitlement.plan === 'builder'
+      ? 'Founder Builder'
+      : entitlement.plan === 'team'
+        ? entitlement.team?.name || 'Founder Team'
+        : 'Founder Free';
+    const planSummary = entitlement.plan === 'free'
+      ? 'A weekly managed allowance for questions, planning, and small edits.'
+      : entitlement.plan === 'builder'
+        ? 'Managed DeepSeek, coordination, and remote control for active builders.'
+        : 'A shared allowance with team roles, coordination, and audit.';
+    const planPrice = entitlement.priceCentsMonthly == null
+      ? entitlement.plan === 'team' ? 'Contact plan' : ''
+      : entitlement.priceCentsMonthly === 0
+        ? 'Free'
+        : `$${(entitlement.priceCentsMonthly / 100).toFixed(0)}/month`;
     const usagePercent = managedTokens.cap > 0
       ? Math.min(100, Math.max(0, (managedTokens.used / managedTokens.cap) * 100))
       : 0;
@@ -411,12 +426,13 @@ export class FounderSettingsPanel implements vscode.Disposable {
       </section>
       <section class="section">
         <h2>Plan and usage</h2>
-        <p class="section-copy">Founder Free is a managed quota. Personal API keys and local models remain separate.</p>
+        <p class="section-copy">${escapeHtml(planSummary)} Personal API keys and local models remain separate.</p>
         <div class="usage-card">
-          <div class="usage-head"><strong>Founder Free</strong><span>${escapeHtml(entitlementStatus)}</span></div>
+          <div class="usage-head"><strong>${escapeHtml(planLabel)}</strong><span>${escapeHtml([planPrice, entitlementStatus].filter(Boolean).join(' | '))}</span></div>
           <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>Managed quota</span></div>
-          <progress class="progress" aria-label="Founder Free quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
+          <progress class="progress" aria-label="${escapeHtml(planLabel)} quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
           <div class="usage-values"><span>${escapeHtml(expiryLabel)}</span><span>Personal and local AI do not use this quota</span></div>
+          <div class="usage-values"><span>${entitlement.features.coordination ? 'Agent coordination' : 'Focused agent'}</span><span>${entitlement.features.remoteControl ? 'Remote control included' : 'Remote control on Builder'}</span></div>
           ${entitlement.message ? `<p class="usage-message">${escapeHtml(entitlement.message)}</p>` : ''}
         </div>
       </section>

@@ -1,7 +1,18 @@
 export const FOUNDER_FREE_MANAGED_TOKEN_CAP = 200_000;
 
 export interface FounderIdeEntitlements {
-  plan: 'free' | 'founder_pro' | 'launch_partner';
+  plan: 'free' | 'builder' | 'team';
+  priceCentsMonthly: number | null;
+  team: {
+    id: string;
+    name: string;
+    role: 'owner' | 'admin' | 'member';
+  } | null;
+  features: {
+    coordination: boolean;
+    remoteControl: boolean;
+    rolesAndAudit: boolean;
+  };
   managedTokens: {
     unit: 'weighted_tokens';
     weightsVersion: 'founder-wtu-v1';
@@ -38,6 +49,13 @@ export function defaultFounderEntitlements(
     source,
     value: {
       plan: 'free',
+      priceCentsMonthly: 0,
+      team: null,
+      features: {
+        coordination: false,
+        remoteControl: false,
+        rolesAndAudit: false,
+      },
       managedTokens: {
         unit: 'weighted_tokens',
         weightsVersion: 'founder-wtu-v1',
@@ -97,9 +115,12 @@ function isFounderIdeEntitlements(value: unknown): value is FounderIdeEntitlemen
   const candidate = value as Partial<FounderIdeEntitlements>;
   const managed = candidate.managedTokens;
   return (
-    (candidate.plan === 'free' ||
-      candidate.plan === 'founder_pro' ||
-      candidate.plan === 'launch_partner') &&
+    (candidate.plan === 'free' || candidate.plan === 'builder' || candidate.plan === 'team') &&
+    (candidate.priceCentsMonthly === null || Number.isFinite(candidate.priceCentsMonthly)) &&
+    (candidate.team === null || Boolean(candidate.team && typeof candidate.team === 'object')) &&
+    Boolean(candidate.features && typeof candidate.features.coordination === 'boolean'
+      && typeof candidate.features.remoteControl === 'boolean'
+      && typeof candidate.features.rolesAndAudit === 'boolean') &&
     Boolean(managed) &&
     Number.isFinite(managed?.cap) &&
     Number.isFinite(managed?.used) &&
