@@ -53,6 +53,7 @@ import { FounderAgentAwareness } from './agent-awareness';
 import { FounderWorkspaceContextIndex } from './workspace-context-index';
 import { FounderSafeResultCache } from './safe-result-cache';
 import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
+import { FounderProjectActivityStore } from './project-activity';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -71,6 +72,7 @@ let founderAgentAwareness: FounderAgentAwareness | undefined;
 let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
 let founderSafeResultCache: FounderSafeResultCache | undefined;
 let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
+let founderProjectActivity: FounderProjectActivityStore | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -128,6 +130,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   founderVerifiedSolutionMemory = new FounderVerifiedSolutionMemory(
     path.join(context.globalStorageUri.fsPath, 'verified-solutions'),
+  );
+  founderProjectActivity = new FounderProjectActivityStore(
+    path.join(context.globalStorageUri.fsPath, 'project-activity.json'),
   );
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
@@ -290,6 +295,7 @@ export function activate(context: vscode.ExtensionContext): void {
           : 'Open a folder to build the Founder project map.',
       );
     }),
+    vscode.commands.registerCommand('founderOs.openProjectBrief', openProjectBrief),
   );
 
   void applyFounderNavigationDefaults(context);
@@ -466,6 +472,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     projectContext: founderWorkspaceContext,
     resultCache: founderSafeResultCache,
     solutionMemory: founderVerifiedSolutionMemory,
+    projectActivity: founderProjectActivity,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setPlanning('Planning the route', modelId);
@@ -675,6 +682,20 @@ async function openVaultConfig(): Promise<void> {
   }
   const doc = await vscode.workspace.openTextDocument(file);
   await vscode.window.showTextDocument(doc);
+}
+
+async function openProjectBrief(): Promise<void> {
+  const workspaceId = founderWorkspaceContext?.workspaceIdValue();
+  const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'Founder project';
+  if (!workspaceId || !founderProjectActivity) {
+    void vscode.window.showInformationMessage('Open a project to view its Founder brief.');
+    return;
+  }
+  const document = await vscode.workspace.openTextDocument({
+    language: 'markdown',
+    content: founderProjectActivity.dailyBrief(workspaceId, workspaceName),
+  });
+  await vscode.window.showTextDocument(document, { preview: true });
 }
 
 async function selectModelAlias(): Promise<void> {

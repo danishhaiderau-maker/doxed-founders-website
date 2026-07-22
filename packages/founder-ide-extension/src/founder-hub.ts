@@ -36,6 +36,7 @@ type FounderHubAction =
   | 'openSettings'
   | 'openNodeConfig'
   | 'showUsage'
+  | 'openProjectBrief'
   | 'toggleAdvancedTools'
   | 'toggleCompanion';
 
@@ -175,6 +176,9 @@ export class FounderHubProvider
         break;
       case 'showUsage':
         await vscode.commands.executeCommand('founderOs.openSettings');
+        break;
+      case 'openProjectBrief':
+        await vscode.commands.executeCommand('founderOs.openProjectBrief');
         break;
       case 'toggleAdvancedTools': {
         const workbench = vscode.workspace.getConfiguration('workbench');
@@ -685,6 +689,7 @@ export class FounderHubProvider
           <button class="tool-item" type="button" data-action="openSourceControl"><strong>Changes</strong><span>Review and commit</span></button>
           <button class="tool-item" type="button" data-action="openTerminal"><strong>Terminal</strong><span>Commands</span></button>
           <button class="tool-item" type="button" data-action="runTask"><strong>Run task</strong><span>Build or test</span></button>
+          <button class="tool-item" type="button" data-action="openProjectBrief"><strong>Project brief</strong><span>Last 24 hours and next work</span></button>
           <button class="tool-item" type="button" data-action="openExtensions"><strong>Extensions</strong><span>Advanced</span></button>
           <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>${advancedToolsVisible ? 'Hide' : 'Show'} IDE rail</strong><span>Advanced tools</span></button>
         </div>

@@ -35,6 +35,7 @@ import {
   type FounderVerifiedSolutionMemory,
   type VerifiedSolutionCheck,
 } from './verified-solution-memory';
+import type { FounderProjectActivityStore } from './project-activity';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -64,6 +65,7 @@ export interface ParticipantDeps {
   };
   resultCache?: FounderSafeResultCache;
   solutionMemory?: FounderVerifiedSolutionMemory;
+  projectActivity?: FounderProjectActivityStore;
 }
 
 const MAX_TOOL_TURNS = 8;
@@ -180,6 +182,9 @@ async function handleParticipantRequest(
   const workspaceId = deps.projectContext?.workspaceIdValue()
     ?? cacheContext?.workspaceId
     ?? null;
+  const activityId = workspaceId
+    ? deps.projectActivity?.begin(workspaceId, prompt, alias.id) ?? null
+    : null;
   const priorSolutions = workspaceId
     ? deps.solutionMemory?.contextFor(
         workspaceId,
@@ -213,6 +218,11 @@ async function handleParticipantRequest(
     if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
     deps.onRequestEnd?.(alias.id, true);
     deps.onCacheHit?.(cached.estimatedTokensAvoided);
+    deps.projectActivity?.complete(activityId, {
+      status: 'reused',
+      summary: 'Reused a matching read-only result after relevant context hashes were verified.',
+      estimatedTokensAvoided: cached.estimatedTokensAvoided,
+    });
     return;
   }
 
@@ -226,6 +236,11 @@ async function handleParticipantRequest(
 
   let ok = false;
   let errorMessage: string | undefined;
+  let activitySummary = '';
+  let activityProvider: string | null = null;
+  let activityProviderModel: string | null = null;
+  let activityEditedFiles: string[] = [];
+  let activityChecks: string[] = [];
   try {
     const tools = availableFounderTools();
     let completed = false;
@@ -279,6 +294,8 @@ async function handleParticipantRequest(
           },
           onToolCall: (call) => toolCalls.push(call),
           onMetadata: (meta) => {
+            activityProvider = typeof meta.provider === 'string' ? meta.provider : activityProvider;
+            activityProviderModel = typeof meta.model === 'string' ? meta.model : activityProviderModel;
             deps.onMetadata?.(meta);
           },
           onError: (status, body) => {
@@ -375,6 +392,9 @@ async function handleParticipantRequest(
       stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
     }
     ok = completed && !token.isCancellationRequested;
+    activitySummary = finalAnswer;
+    activityEditedFiles = [...editedPaths];
+    activityChecks = passedChecks.map((check) => check.command);
     if (ok && !usedTools && cacheInput && reusableAnswer) {
       deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
     }
@@ -417,6 +437,14 @@ async function handleParticipantRequest(
   } finally {
     if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
     deps.onRequestEnd?.(alias.id, ok, errorMessage);
+    deps.projectActivity?.complete(activityId, {
+      status: token.isCancellationRequested ? 'cancelled' : ok ? 'completed' : 'failed',
+      summary: ok ? activitySummary : errorMessage ?? 'Founder request did not complete.',
+      provider: activityProvider,
+      providerModel: activityProviderModel,
+      editedFiles: activityEditedFiles,
+      checks: activityChecks,
+    });
   }
 
   if (!ok && errorMessage) {

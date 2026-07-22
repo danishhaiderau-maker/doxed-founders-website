@@ -65,6 +65,13 @@ export function shortcutEntries(
           icon: 'history',
           command: 'founderOs.recentGatewayMetadata',
         },
+        {
+          id: 'project-brief',
+          label: 'Project brief',
+          description: 'Completed, blocked, and next work',
+          icon: 'notebook',
+          command: 'founderOs.openProjectBrief',
+        },
       ];
     case 'ship':
       return [
