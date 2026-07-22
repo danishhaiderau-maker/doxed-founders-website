@@ -11,6 +11,7 @@ import {
   parsePresence,
   type FounderAgentPresence,
 } from './agent-coordination-state';
+import { founderPathLeases } from './agent-path-leases';
 
 export interface FounderAgentAwarenessSummary {
   activeCount: number;
@@ -84,6 +85,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
     const lease = this.leases.get(taskId);
     if (!lease) return;
     this.leases.delete(taskId);
+    founderPathLeases.releaseTask(taskId);
     try { fs.rmSync(lease.file, { force: true }); } catch { /* best effort */ }
     this.lastWarningKey = '';
     this.emitSummary();
@@ -126,10 +128,17 @@ export class FounderAgentAwareness implements vscode.Disposable {
   }
 
   private refreshLease(lease: ActiveLease): void {
+    founderPathLeases.refreshTask(lease.presence.id);
+    const claimedFiles = founderPathLeases
+      .claimsForTask(lease.presence.id)
+      .map((claim) => claim.relativePath);
     lease.presence = {
       ...lease.presence,
       branch: readGitBranch(lease.presence.workspacePath),
-      ownedFiles: openWorkspaceFiles(lease.presence.workspacePath),
+      ownedFiles: [...new Set([
+        ...claimedFiles,
+        ...openWorkspaceFiles(lease.presence.workspacePath),
+      ])].slice(0, 80),
       heartbeatAt: new Date().toISOString(),
     };
     this.writeLease(lease.file, lease.presence);
@@ -148,6 +157,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
   }
 
   private pruneStaleFiles(): void {
+    founderPathLeases.prune();
     for (const file of listPresenceFiles()) {
       try {
         const presence = parsePresence(JSON.parse(fs.readFileSync(file, 'utf8')));

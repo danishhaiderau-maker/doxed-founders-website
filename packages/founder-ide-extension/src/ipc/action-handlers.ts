@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { founderPathLeases } from '../agent-path-leases';
 import {
   generateNonce,
   type IpcCancel,
@@ -172,69 +173,98 @@ async function handleProposedEdit(
     return;
   }
 
-  await showDiff(message.requestId, resolved.file, original, proposed.content);
-  const choice = await vscode.window.showWarningMessage(
-    `Founder OS wants to ${message.edit.kind} ${path.relative(resolved.root, resolved.file)}.`,
-    { modal: true, detail: 'Review the open diff, then approve or reject this change.' },
-    'Apply edit',
-    'Reject',
-  );
-  if (choice !== 'Apply edit') {
+  const remoteTaskId = `remote-edit-${message.requestId}`;
+  const claim = founderPathLeases.claim(resolved.root, resolved.file, remoteTaskId);
+  if (!claim.ok) {
     send({
       type: 'editReviewResult',
       requestId: message.requestId,
       approved: false,
-      reason: 'user_denied',
+      reason: `${claim.reason} Coordinate with the active task before retrying.`,
       ...envelope(),
     } satisfies IpcEditReviewResult);
     return;
   }
 
-  let changedDuringReview = false;
   try {
-    changedDuringReview = exists
-      ? (await fs.promises.readFile(resolved.file, 'utf8')) !== original
-      : fs.existsSync(resolved.file);
-  } catch {
-    changedDuringReview = true;
-  }
-  if (changedDuringReview) {
+    await showDiff(message.requestId, resolved.file, original, proposed.content);
+    const choice = await vscode.window.showWarningMessage(
+      `Founder OS wants to ${message.edit.kind} ${path.relative(resolved.root, resolved.file)}.`,
+      { modal: true, detail: 'Review the open diff, then approve or reject this change.' },
+      'Apply edit',
+      'Reject',
+    );
+    if (choice !== 'Apply edit') {
+      send({
+        type: 'editReviewResult',
+        requestId: message.requestId,
+        approved: false,
+        reason: 'user_denied',
+        ...envelope(),
+      } satisfies IpcEditReviewResult);
+      return;
+    }
+
+    let changedDuringReview = false;
+    try {
+      changedDuringReview = exists
+        ? (await fs.promises.readFile(resolved.file, 'utf8')) !== original
+        : fs.existsSync(resolved.file);
+    } catch {
+      changedDuringReview = true;
+    }
+    if (changedDuringReview) {
+      send({
+        type: 'editReviewResult',
+        requestId: message.requestId,
+        approved: false,
+        reason: 'File changed while the edit was being reviewed. Review a fresh proposal.',
+        ...envelope(),
+      } satisfies IpcEditReviewResult);
+      return;
+    }
+
+    const validation = founderPathLeases.validate(claim.lease);
+    if (!validation.ok) {
+      send({
+        type: 'editReviewResult',
+        requestId: message.requestId,
+        approved: false,
+        reason: validation.reason,
+        ...envelope(),
+      } satisfies IpcEditReviewResult);
+      return;
+    }
+
+    const uri = vscode.Uri.file(resolved.file);
+    const workspaceEdit = new vscode.WorkspaceEdit();
+    if (!exists) {
+      workspaceEdit.createFile(uri, { ignoreIfExists: false });
+      workspaceEdit.insert(uri, new vscode.Position(0, 0), proposed.content);
+    } else {
+      const document = await vscode.workspace.openTextDocument(uri);
+      const fullRange = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length),
+      );
+      workspaceEdit.replace(uri, fullRange, proposed.content);
+    }
+    const applied = await vscode.workspace.applyEdit(workspaceEdit);
+    if (applied) {
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: false });
+      await document.save();
+    }
     send({
       type: 'editReviewResult',
       requestId: message.requestId,
-      approved: false,
-      reason: 'File changed while the edit was being reviewed. Review a fresh proposal.',
+      approved: applied,
+      reason: applied ? undefined : 'workspace_edit_rejected',
       ...envelope(),
     } satisfies IpcEditReviewResult);
-    return;
+  } finally {
+    founderPathLeases.releaseTask(remoteTaskId);
   }
-
-  const uri = vscode.Uri.file(resolved.file);
-  const workspaceEdit = new vscode.WorkspaceEdit();
-  if (!exists) {
-    workspaceEdit.createFile(uri, { ignoreIfExists: false });
-    workspaceEdit.insert(uri, new vscode.Position(0, 0), proposed.content);
-  } else {
-    const document = await vscode.workspace.openTextDocument(uri);
-    const fullRange = new vscode.Range(
-      document.positionAt(0),
-      document.positionAt(document.getText().length),
-    );
-    workspaceEdit.replace(uri, fullRange, proposed.content);
-  }
-  const applied = await vscode.workspace.applyEdit(workspaceEdit);
-  if (applied) {
-    const document = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(document, { preview: false });
-    await document.save();
-  }
-  send({
-    type: 'editReviewResult',
-    requestId: message.requestId,
-    approved: applied,
-    reason: applied ? undefined : 'workspace_edit_rejected',
-    ...envelope(),
-  } satisfies IpcEditReviewResult);
 }
 
 function sendOutput(

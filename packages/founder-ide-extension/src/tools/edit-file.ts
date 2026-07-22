@@ -12,6 +12,9 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { founderPathLeases } from '../agent-path-leases';
+import { currentFounderTaskId } from '../agent-task-context';
 
 export interface EditFileInput {
   filePath: string;
@@ -159,32 +162,61 @@ export const editFileTool: vscode.LanguageModelTool<EditFileInput> = {
       ]);
     }
 
-    const we = new vscode.WorkspaceEdit();
-    if (!exists && input.createIfMissing) {
-      // Create the file with the new content, then we still record a replace
-      // for the (empty) range so undo restores the prior (nonexistent) state.
-      we.createFile(uri, { ignoreIfExists: false, overwrite: false });
-    }
-    we.replace(uri, range, input.newText);
-    const ok = await vscode.workspace.applyEdit(we);
-    if (!ok) {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
       return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+        new vscode.LanguageModelTextPart('Error: no workspace is open.'),
+      ]);
+    }
+    const activeTaskId = currentFounderTaskId();
+    const taskId = activeTaskId ?? `standalone-edit-${randomUUID()}`;
+    const claim = founderPathLeases.claim(workspaceRoot, uri.fsPath, taskId);
+    if (!claim.ok) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(`Error: ${claim.reason} Coordinate with that task before editing.`),
+      ]);
+    }
+    const releaseStandaloneClaim = () => {
+      if (!activeTaskId) founderPathLeases.releaseTask(taskId);
+    };
+    const validation = founderPathLeases.validate(claim.lease);
+    if (!validation.ok) {
+      releaseStandaloneClaim();
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(`Error: ${validation.reason} Read the file and retry.`),
       ]);
     }
 
-    // Persist so the editor shows it.
     try {
-      await vscode.workspace.save(uri);
-    } catch {
-      /* save is best-effort */
-    }
+      const we = new vscode.WorkspaceEdit();
+      if (!exists && input.createIfMissing) {
+        // Create the file with the new content, then we still record a replace
+        // for the (empty) range so undo restores the prior (nonexistent) state.
+        we.createFile(uri, { ignoreIfExists: false, overwrite: false });
+      }
+      we.replace(uri, range, input.newText);
+      const ok = await vscode.workspace.applyEdit(we);
+      if (!ok) {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+        ]);
+      }
 
-    return new vscode.LanguageModelToolResult([
-      new vscode.LanguageModelTextPart(
-        `Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`,
-      ),
-    ]);
+      // Persist so the editor shows it.
+      try {
+        await vscode.workspace.save(uri);
+      } catch {
+        /* save is best-effort */
+      }
+
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`,
+        ),
+      ]);
+    } finally {
+      releaseStandaloneClaim();
+    }
   },
 };
 

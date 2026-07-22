@@ -22,6 +22,7 @@ import {
 } from './gateway-client';
 import { FOUNDER_TOOL_NAMES } from './tool-names';
 import { composeFounderSystemPrompt, planPromptEfficiency } from './prompt-efficiency';
+import { runWithFounderTask } from './agent-task-context';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -244,7 +245,7 @@ async function handleParticipantRequest(
         } else {
           stream.progress(`Founder OS: ${call.name}`);
           try {
-            const result = await vscode.lm.invokeTool(
+            const invoke = () => vscode.lm.invokeTool(
               call.name,
               {
                 input: parseToolInput(call.arguments),
@@ -252,6 +253,9 @@ async function handleParticipantRequest(
               },
               token,
             );
+            const result = coordinationTaskId
+              ? await runWithFounderTask(coordinationTaskId, invoke)
+              : await invoke();
             resultText = toolResultText(result);
           } catch (error) {
             resultText = `Error: ${
