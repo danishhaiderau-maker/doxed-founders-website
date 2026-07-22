@@ -552,6 +552,40 @@ function handleCancel(message: IpcCancel): void {
   if (child) terminateCommand(child);
 }
 
+async function handleCompanionAction(
+  action: Extract<IpcMessage, { type: 'companionAction' }>['action'],
+): Promise<void> {
+  switch (action) {
+    case 'openTask':
+      await vscode.commands.executeCommand('founderOs.openAgents');
+      break;
+    case 'openUsage':
+    case 'openSettings':
+      await vscode.commands.executeCommand('founderOs.openSettings');
+      break;
+    case 'hide':
+      await vscode.workspace.getConfiguration('founderOs').update(
+        'companion.enabled',
+        false,
+        vscode.ConfigurationTarget.Global,
+      );
+      break;
+    case 'toggleReducedMotion': {
+      const config = vscode.workspace.getConfiguration('founderOs');
+      const reduced = config.get<boolean>('companion.reducedMotion', false);
+      await config.update(
+        'companion.reducedMotion',
+        !reduced,
+        vscode.ConfigurationTarget.Global,
+      );
+      break;
+    }
+    case 'signOut':
+      await vscode.commands.executeCommand('founderOs.signOut');
+      break;
+  }
+}
+
 export async function handleAuthenticatedAction(
   message: IpcMessage,
   send: SendMessage,
@@ -571,6 +605,9 @@ export async function handleAuthenticatedAction(
       break;
     case 'cancel':
       handleCancel(message);
+      break;
+    case 'companionAction':
+      await handleCompanionAction(message.action);
       break;
     default:
       break;

@@ -48,6 +48,7 @@ const ALL_TYPES = [
   'memoryHealth',
   'versionState',
   'companionState',
+  'companionAction',
   'heartbeat',
 ] as const;
 
@@ -65,12 +66,12 @@ describe('IPC protocol contract', () => {
   });
 
   describe('IpcMessage discriminated union', () => {
-    it('covers all 21 message types from the brief, remote delivery, and desktop companion flow', () => {
+    it('covers all 22 message types from the brief, remote delivery, and desktop companion flow', () => {
       // Includes the request/result pair used for remote workspace reads.
       // The brief lists "15 message types" but counts hello/authState as a
       // single handshake pair; we expose them as separate union members so
       // the dispatcher can switch on `type` exhaustively.
-      assert.equal(ALL_TYPES.length, 21);
+      assert.equal(ALL_TYPES.length, 22);
       // Sanity: no duplicates in the literal list.
       const unique = new Set(ALL_TYPES);
       assert.equal(unique.size, ALL_TYPES.length, 'duplicate message type in ALL_TYPES');
@@ -84,7 +85,7 @@ describe('IPC protocol contract', () => {
         assert.ok(typeof t === 'string', `message type ${t} must be a string`);
       }
       // Referencing _typeCheck keeps it from being tree-shaken in some setups.
-      assert.equal(_typeCheck.length, 21);
+      assert.equal(_typeCheck.length, 22);
     });
   });
 

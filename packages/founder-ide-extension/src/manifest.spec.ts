@@ -91,7 +91,6 @@ describe('Founder IDE extension manifest', () => {
     const expectedContainers = [
       ['founderOs', [
         'founderOs.hub',
-        'founderOs.companion',
         'founderOs.agents',
         'founderOs.ship',
         'founderOs.node',
@@ -118,7 +117,7 @@ describe('Founder IDE extension manifest', () => {
       );
     }
     assert.equal(containers.length, 1, 'Founder navigation should use one labelled home');
-    for (const view of manifest.contributes?.views?.founderOs?.slice(2) ?? []) {
+    for (const view of manifest.contributes?.views?.founderOs?.slice(1) ?? []) {
       assert.equal(view.visibility, 'collapsed', `${view.id} should use progressive disclosure`);
     }
 

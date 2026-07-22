@@ -92,6 +92,7 @@ const FOUNDER_NODE_CAPABILITIES: IpcCapability[] = [
   'memoryHealth',
   'versionState',
   'companionState',
+  'companionAction',
   'heartbeat',
 ];
 

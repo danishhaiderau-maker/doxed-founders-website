@@ -56,6 +56,24 @@
       transform: translateY(8px) scale(0.98);
       transition: opacity 180ms ease, transform 180ms ease;
     }
+    .task-tabs {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 5px;
+    }
+    .task-tab {
+      min-height: 17px;
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: var(--bubble-muted);
+      background: color-mix(in srgb, var(--bubble-text) 8%, transparent);
+      font-size: 8px;
+      font-weight: 700;
+      line-height: 1;
+      text-transform: uppercase;
+    }
+    .task-tab.live { color: var(--signal); }
     .task-bubble.visible {
       opacity: 1;
       transform: translateY(0) scale(1);
@@ -112,14 +130,20 @@
       pointer-events: none;
     }
     .idle .dragon-stage { animation: breathe 3.6s ease-in-out infinite; }
+    .listening .dragon-stage { animation: listen 1.35s ease-in-out infinite; }
+    .planning .dragon-stage { animation: plan 1.8s ease-in-out infinite; }
     .working .dragon-stage { animation: fly 760ms ease-in-out infinite alternate; }
+    .coordinating .dragon-stage { animation: coordinate 1.05s ease-in-out infinite alternate; }
+    .verifying .dragon-stage { animation: verify 820ms ease-in-out infinite alternate; }
     .success .dragon-stage { animation: deliver 680ms cubic-bezier(.2,.8,.2,1) both; }
     .success .dragon { filter: none; }
     .attention .dragon-stage { animation: alert 1.2s ease-in-out infinite; }
     .error .dragon-stage { animation: blocked 560ms ease-in-out 2; filter: saturate(.72); }
-    .working { --signal: #2f80ed; }
+    .offline .dragon-stage { animation: none; filter: grayscale(.82) opacity(.76); }
+    .update .dragon-stage { animation: alert 1.2s ease-in-out infinite; }
+    .listening, .working, .coordinating { --signal: #2f80ed; }
+    .planning, .verifying, .attention, .update { --signal: #e4a853; }
     .success { --signal: #35b779; }
-    .attention { --signal: #e4a853; }
     .error { --signal: #e45b5b; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes breathe {
@@ -129,6 +153,22 @@
     @keyframes fly {
       from { transform: translate3d(-4px, 6px, 0) rotate(-1.5deg) scale(0.98); }
       to { transform: translate3d(5px, -8px, 0) rotate(1.5deg) scale(1.035); }
+    }
+    @keyframes listen {
+      0%, 100% { transform: rotate(-1deg) translateY(1px); }
+      50% { transform: rotate(1deg) translateY(-3px) scale(1.02); }
+    }
+    @keyframes plan {
+      0%, 100% { transform: translateY(2px) scale(.985); filter: brightness(.92); }
+      50% { transform: translateY(-3px) scale(1.02); filter: brightness(1.08); }
+    }
+    @keyframes coordinate {
+      from { transform: translate3d(-7px, 3px, 0) rotate(-2deg); }
+      to { transform: translate3d(7px, -5px, 0) rotate(2deg); }
+    }
+    @keyframes verify {
+      from { transform: translateY(2px) scale(.97); filter: saturate(.82); }
+      to { transform: translateY(-4px) scale(1.025); filter: saturate(1.2); }
     }
     @keyframes deliver {
       0% { transform: translateY(14px) scale(.9); opacity: .5; }
@@ -156,11 +196,14 @@
       .dragon-stage, .pulse { animation: none !important; }
       .task-bubble { transition: none; }
     }
+    .reduced-motion .dragon-stage, .reduced-motion .pulse { animation: none !important; }
+    .reduced-motion .task-bubble { transition: none; }
   </style>
 </head>
 <body>
   <main class="companion idle" data-companion>
     <section class="task-bubble interactive" data-bubble>
+      <div class="task-tabs"><span class="task-tab">Founder</span><span class="task-tab live" data-state>Ready</span></div>
       <div class="task-title" data-title>Founder is ready</div>
       <div class="task-detail" data-detail>Watching this workspace.</div>
       <span class="pulse" aria-hidden="true"></span>
@@ -175,13 +218,26 @@
     const bubble = document.querySelector('[data-bubble]');
     const title = document.querySelector('[data-title]');
     const detail = document.querySelector('[data-detail]');
+    const stateLabel = document.querySelector('[data-state]');
     const dragon = document.querySelector('[data-dragon]');
     const images = {
       idle: 'dragon-idle.png',
+      listening: 'dragon-attention.png',
+      planning: 'dragon-attention.png',
       working: 'dragon-working.png',
+      coordinating: 'dragon-working.png',
+      verifying: 'dragon-working.png',
       success: 'dragon-success-v3.png',
       attention: 'dragon-attention.png',
       error: 'dragon-attention.png',
+      offline: 'dragon-idle.png',
+      update: 'dragon-attention.png',
+    };
+    const labels = {
+      idle: 'Resting', listening: 'Listening', planning: 'Planning',
+      working: 'In flight', coordinating: 'Coordinating', verifying: 'Verifying',
+      success: 'Delivered', attention: 'Needs you', error: 'Blocked',
+      offline: 'Offline', update: 'Update ready',
     };
     [...new Set(Object.values(images))].forEach((source) => {
       const image = new Image();
@@ -189,30 +245,43 @@
     });
     document.querySelectorAll('.interactive').forEach((target) => {
       let pointerId = null;
+      let origin = null;
+      let moved = false;
       target.addEventListener('pointerdown', (event) => {
         if (event.button !== 0) return;
         pointerId = event.pointerId;
+        origin = { x: event.screenX, y: event.screenY };
+        moved = false;
         target.setPointerCapture(pointerId);
         api?.beginDrag();
       });
-      target.addEventListener('pointermove', () => {
-        if (pointerId !== null) api?.dragToPointer();
+      target.addEventListener('pointermove', (event) => {
+        if (pointerId !== null) {
+          if (origin && Math.hypot(event.screenX - origin.x, event.screenY - origin.y) > 4) moved = true;
+          api?.dragToPointer();
+        }
       });
       const finishDrag = (event) => {
         if (pointerId === null || event.pointerId !== pointerId) return;
         if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
         pointerId = null;
         api?.endDrag();
+        if (!moved) api?.openTask();
       };
       target.addEventListener('pointerup', finishDrag);
       target.addEventListener('pointercancel', finishDrag);
     });
+    document.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      api?.showMenu();
+    });
     api?.onState((snapshot) => {
       const state = images[snapshot?.state] ? snapshot.state : 'idle';
-      root.className = `companion ${state}`;
+      root.className = `companion ${state}${snapshot?.reducedMotion ? ' reduced-motion' : ''}`;
       dragon.src = images[state];
       title.textContent = snapshot?.title || 'Founder is ready';
       detail.textContent = snapshot?.detail || 'Watching this workspace.';
+      stateLabel.textContent = labels[state] || 'Ready';
       bubble.classList.toggle('visible', state !== 'idle');
       document.body.setAttribute('aria-label', `${title.textContent}. ${detail.textContent}`);
     });

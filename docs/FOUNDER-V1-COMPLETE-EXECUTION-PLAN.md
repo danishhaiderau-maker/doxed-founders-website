@@ -234,10 +234,10 @@ zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
 
 ## Stage 8 - Living Founder Dragon and proof receipts
 
-- [ ] Build one transparent, frameless, always-on-top companion owned by Founder
+- [x] Build one transparent, frameless, always-on-top companion owned by Founder
   IDE; remove duplicate Dragon/IDE launch identities.
 - [ ] Make it draggable across screens and remember its position per display.
-- [ ] States: resting in nest, listening, planning, flying/working, coordinating,
+- [x] States: resting in nest, listening, planning, flying/working, coordinating,
   blocked, verifying, delivered/fire, failed, offline, and update available.
 - [ ] Drive states from real task, network, coordination, verification, usage,
   and update events rather than a cosmetic timer.
@@ -247,12 +247,12 @@ zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
   pause, settings, sign in/out, and reduced motion.
 - [ ] Keep transparent assets free of baked-in backgrounds and provide a quiet
   non-animated accessibility state.
-- [ ] Ensure the companion never steals typing focus or blocks essential UI.
+- [x] Ensure the companion never steals typing focus or blocks essential UI.
 - [ ] Keep one recognisable dragon across every state, with transparent
   animation assets sized for a desktop companion rather than a video panel.
 - [ ] Support snap-to-edge, multi-monitor work areas, temporary click-through,
   hide until next task, and recovery when a saved display is disconnected.
-- [ ] Announce delivered work with a compact two-line result card and a brief
+- [x] Announce delivered work with a compact two-line result card and a brief
   fire state; resting returns the dragon to its nest without visual noise.
 
 Evidence: transparent pixel checks, multi-monitor drag test, restart persistence,

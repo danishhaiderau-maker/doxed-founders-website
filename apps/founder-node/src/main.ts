@@ -13,6 +13,7 @@ import {
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { generateNonce } from 'founder-ide-extension/ipc';
 import { configureSharedElectronUserData } from './app-paths';
 import {
   enforceSingleFounderNodeInstance,
@@ -125,6 +126,7 @@ import { isEmbeddedRelayMode } from './runtime-mode';
 import {
   createDesktopCompanion,
   destroyDesktopCompanion,
+  setDesktopCompanionActionHandler,
   updateDesktopCompanion,
 } from './desktop-companion';
 // Phase 2 — device-code first-run + pairing state machine.
@@ -281,6 +283,14 @@ function ensureIdeIpcClient(vaultRoot: string): boolean {
   if (ideIpcClient || !readNodeConfig(vaultRoot)) return false;
 
   ideIpcClient = startIdeIpcClient();
+  setDesktopCompanionActionHandler((action) => {
+    ideIpcClient?.send({
+      type: 'companionAction',
+      action,
+      nonce: generateNonce(),
+      ts: new Date().toISOString(),
+    });
+  });
   ideIpcClient.on('connected', () => {
     const config = readNodeConfig(vaultRoot);
     if (config) {
@@ -310,6 +320,7 @@ function ensureIdeIpcClient(vaultRoot: string): boolean {
       state: message.state,
       title: message.title,
       detail: message.detail,
+      reducedMotion: message.reducedMotion,
     });
   });
   return true;

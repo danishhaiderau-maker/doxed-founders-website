@@ -3,7 +3,18 @@ import * as vscode from 'vscode';
 import { generateNonce } from './ipc/protocol';
 import { broadcastCompanionState } from './ipc/server';
 
-export type FounderCompanionState = 'idle' | 'working' | 'success' | 'attention' | 'error';
+export type FounderCompanionState =
+  | 'idle'
+  | 'listening'
+  | 'planning'
+  | 'working'
+  | 'coordinating'
+  | 'verifying'
+  | 'success'
+  | 'attention'
+  | 'error'
+  | 'offline'
+  | 'update';
 
 type CompanionSnapshot = {
   state: FounderCompanionState;
@@ -21,10 +32,16 @@ const IDLE: CompanionSnapshot = {
 
 const MEDIA_BY_STATE: Record<FounderCompanionState, string> = {
   idle: 'dragon-idle.png',
+  listening: 'dragon-attention.png',
+  planning: 'dragon-attention.png',
   working: 'dragon-working.png',
+  coordinating: 'dragon-working.png',
+  verifying: 'dragon-working.png',
   success: 'dragon-success-v3.png',
   attention: 'dragon-attention.png',
   error: 'dragon-attention.png',
+  offline: 'dragon-idle.png',
+  update: 'dragon-attention.png',
 };
 
 export class FounderCompanionViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -77,6 +94,22 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
     this.set({ state: 'working', title, detail });
   }
 
+  setPlanning(title: string, detail: string): void {
+    this.set({ state: 'planning', title, detail });
+  }
+
+  setCoordinating(title: string, detail: string): void {
+    this.set({ state: 'coordinating', title, detail });
+  }
+
+  setVerifying(title: string, detail: string): void {
+    this.set({ state: 'verifying', title, detail });
+  }
+
+  setOffline(title: string, detail: string): void {
+    this.set({ state: 'offline', title, detail });
+  }
+
   setSuccess(title: string, detail: string): void {
     this.set({ state: 'success', title, detail }, 5_000);
   }
@@ -123,6 +156,7 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
       nonce: generateNonce(),
       ts: new Date().toISOString(),
       visible: vscode.workspace.getConfiguration('founderOs').get<boolean>('companion.enabled', true),
+      reducedMotion: vscode.workspace.getConfiguration('founderOs').get<boolean>('companion.reducedMotion', false),
       ...this.snapshot,
     });
   }
@@ -211,7 +245,9 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
       transform: scale(.96);
     }
     .idle .dragon-image { animation: nest-breathe 3.6s ease-in-out infinite; }
-    .working .dragon-image { animation: flight-pulse 760ms ease-in-out infinite alternate; }
+    .planning .dragon-image, .listening .dragon-image { animation: attention-pulse 1.2s ease-in-out infinite; }
+    .working .dragon-image, .coordinating .dragon-image { animation: flight-pulse 760ms ease-in-out infinite alternate; }
+    .verifying .dragon-image { animation: verify-pulse 940ms ease-in-out infinite alternate; }
     .attention .dragon-image { animation: attention-pulse 1.2s ease-in-out infinite; }
     .error .dragon-image { filter: grayscale(.24) sepia(.2) hue-rotate(315deg) saturate(1.25); }
     .success .stage { filter: none; }
@@ -303,6 +339,7 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
     }
     @keyframes nest-breathe { 0%, 100% { transform: scale(.95); } 50% { transform: scale(.985) translateY(-1px); } }
     @keyframes attention-pulse { 0%, 100% { transform: scale(.94) rotate(-1deg); } 50% { transform: scale(.99) rotate(1deg); } }
+    @keyframes verify-pulse { from { transform: scale(.95); filter: saturate(.9); } to { transform: scale(1); filter: saturate(1.2); } }
     @media (max-width: 280px) {
       .companion { grid-template-columns: 96px minmax(0, 1fr); gap: 8px; }
       .stage { min-width: 96px; }
@@ -359,20 +396,32 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
 function labelFor(state: FounderCompanionState): string {
   switch (state) {
     case 'working': return 'In flight';
+    case 'listening': return 'Listening';
+    case 'planning': return 'Planning';
+    case 'coordinating': return 'Coordinating';
+    case 'verifying': return 'Verifying';
     case 'success': return 'Delivered';
     case 'attention': return 'Needs you';
     case 'error': return 'Blocked';
     case 'idle': return 'At rest';
+    case 'offline': return 'Offline';
+    case 'update': return 'Update ready';
   }
 }
 
 function toneFor(state: FounderCompanionState): string {
   switch (state) {
     case 'working': return 'var(--blue)';
+    case 'listening': return 'var(--blue)';
+    case 'planning': return 'var(--amber)';
+    case 'coordinating': return 'var(--blue)';
+    case 'verifying': return 'var(--amber)';
     case 'success': return 'var(--green)';
     case 'attention': return 'var(--amber)';
     case 'error': return 'var(--red)';
     case 'idle': return 'var(--muted)';
+    case 'offline': return 'var(--muted)';
+    case 'update': return 'var(--amber)';
   }
 }
 

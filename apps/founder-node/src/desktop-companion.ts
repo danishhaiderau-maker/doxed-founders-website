@@ -1,14 +1,34 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, screen } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type DesktopCompanionState = 'idle' | 'working' | 'success' | 'attention' | 'error';
+export type DesktopCompanionState =
+  | 'idle'
+  | 'listening'
+  | 'planning'
+  | 'working'
+  | 'coordinating'
+  | 'verifying'
+  | 'success'
+  | 'attention'
+  | 'error'
+  | 'offline'
+  | 'update';
+
+export type DesktopCompanionAction =
+  | 'openTask'
+  | 'openUsage'
+  | 'openSettings'
+  | 'hide'
+  | 'toggleReducedMotion'
+  | 'signOut';
 
 export interface DesktopCompanionSnapshot {
   visible: boolean;
   state: DesktopCompanionState;
   title: string;
   detail: string;
+  reducedMotion: boolean;
 }
 
 const WINDOW_WIDTH = 360;
@@ -23,6 +43,7 @@ const DEFAULT_SNAPSHOT: DesktopCompanionSnapshot = {
   state: 'idle',
   title: 'Resting in the nest',
   detail: 'Founder is ready for the next mission.',
+  reducedMotion: false,
 };
 
 let companionWindow: BrowserWindow | null = null;
@@ -31,6 +52,7 @@ let ipcRegistered = false;
 let hitTestTimer: NodeJS.Timeout | null = null;
 let mouseInteractive = false;
 let dragOffset: { x: number; y: number } | null = null;
+let actionHandler: ((action: DesktopCompanionAction) => void) | null = null;
 
 function assetRoot(): string {
   return app.isPackaged
@@ -85,6 +107,30 @@ function persistPosition(): void {
     fs.writeFileSync(positionFile(), JSON.stringify({ x, y }, null, 2), 'utf8');
   } catch {
     // Position persistence is optional; the companion still works without it.
+  }
+}
+
+function snapToNearbyEdge(): void {
+  if (!companionWindow || companionWindow.isDestroyed()) return;
+  const bounds = companionWindow.getBounds();
+  const workArea = screen.getDisplayMatching(bounds).workArea;
+  const candidates = [
+    { distance: Math.abs(bounds.x - workArea.x), x: workArea.x, y: bounds.y },
+    {
+      distance: Math.abs(bounds.x + bounds.width - (workArea.x + workArea.width)),
+      x: workArea.x + workArea.width - bounds.width,
+      y: bounds.y,
+    },
+    { distance: Math.abs(bounds.y - workArea.y), x: bounds.x, y: workArea.y },
+    {
+      distance: Math.abs(bounds.y + bounds.height - (workArea.y + workArea.height)),
+      x: bounds.x,
+      y: workArea.y + workArea.height - bounds.height,
+    },
+  ].sort((left, right) => left.distance - right.distance);
+  const nearest = candidates[0];
+  if (nearest && nearest.distance <= 36) {
+    companionWindow.setPosition(Math.round(nearest.x), Math.round(nearest.y));
   }
 }
 
@@ -179,8 +225,36 @@ function registerIpc(): void {
   ipcMain.on('founder-companion-drag-end', (event) => {
     if (event.sender !== companionWindow?.webContents) return;
     dragOffset = null;
+    snapToNearbyEdge();
     persistPosition();
   });
+  ipcMain.on('founder-companion-open-task', (event) => {
+    if (event.sender === companionWindow?.webContents) actionHandler?.('openTask');
+  });
+  ipcMain.on('founder-companion-show-menu', (event) => {
+    if (event.sender !== companionWindow?.webContents || !companionWindow) return;
+    const send = (action: DesktopCompanionAction) => actionHandler?.(action);
+    Menu.buildFromTemplate([
+      { label: 'Open current task', click: () => send('openTask') },
+      { label: 'Plan and usage', click: () => send('openUsage') },
+      { label: 'Founder Settings', click: () => send('openSettings') },
+      { type: 'separator' },
+      {
+        label: 'Reduce motion',
+        type: 'checkbox',
+        checked: lastSnapshot.reducedMotion,
+        click: () => send('toggleReducedMotion'),
+      },
+      { label: 'Hide Dragon', click: () => send('hide') },
+      { label: 'Sign out', click: () => send('signOut') },
+    ]).popup({ window: companionWindow });
+  });
+}
+
+export function setDesktopCompanionActionHandler(
+  handler: ((action: DesktopCompanionAction) => void) | null,
+): void {
+  actionHandler = handler;
 }
 
 export function createDesktopCompanion(): BrowserWindow {
@@ -236,6 +310,7 @@ export function updateDesktopCompanion(snapshot: DesktopCompanionSnapshot): void
     state: snapshot.state,
     title: snapshot.title.slice(0, 96),
     detail: snapshot.detail.slice(0, 220),
+    reducedMotion: snapshot.reducedMotion,
   };
   if (!companionWindow || companionWindow.isDestroyed()) createDesktopCompanion();
   if (!lastSnapshot.visible) {
@@ -254,4 +329,5 @@ export function destroyDesktopCompanion(): void {
   dragOffset = null;
   if (companionWindow && !companionWindow.isDestroyed()) companionWindow.destroy();
   companionWindow = null;
+  actionHandler = null;
 }

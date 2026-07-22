@@ -304,6 +304,7 @@ function handleMessage(socket: Socket, raw: unknown, helloTimer: NodeJS.Timeout)
     msg.type !== 'workspaceReadRequest' &&
     msg.type !== 'proposedEdit' &&
     msg.type !== 'commandRequest' &&
+    msg.type !== 'companionAction' &&
     msg.type !== 'cancel'
   ) {
     return;

@@ -93,13 +93,8 @@ export function activate(context: vscode.ExtensionContext): void {
   founderCompanion = new FounderCompanionViewProvider(context);
   context.subscriptions.push(
     founderCompanion,
-    vscode.window.registerWebviewViewProvider(
-      FounderCompanionViewProvider.viewId,
-      founderCompanion,
-      { webviewOptions: { retainContextWhenHidden: true } },
-    ),
     vscode.tasks.onDidStartTask((event) => {
-      founderCompanion?.setWorking(`Running ${event.execution.task.name}`, 'Local workspace task');
+      founderCompanion?.setVerifying(`Checking ${event.execution.task.name}`, 'Running a local workspace task');
     }),
     vscode.tasks.onDidEndTaskProcess((event) => {
       if (event.exitCode === 0) {
@@ -119,7 +114,7 @@ export function activate(context: vscode.ExtensionContext): void {
     founderAgentAwareness.onDidChange((summary) => {
       founderHub?.setAgentAwareness(summary);
       if (summary.conflictCount > 0) {
-        founderCompanion?.setAttention(
+        founderCompanion?.setCoordinating(
           'Agents are coordinating',
           `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`,
         );
@@ -152,7 +147,7 @@ export function activate(context: vscode.ExtensionContext): void {
       founderHub?.refresh();
       founderSettings?.refresh();
       founderShortcuts?.refresh();
-      founderCompanion?.setAttention('Sign in required', 'Connect Founder to use managed AI and remote control');
+      founderCompanion?.setOffline('Sign in required', 'Connect Founder to use managed AI and remote control');
     },
   });
   context.subscriptions.push(
@@ -236,9 +231,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.openHub', () =>
       vscode.commands.executeCommand('workbench.view.extension.founderOs'),
     ),
-    vscode.commands.registerCommand('founderOs.openCompanion', () =>
-      revealFounderView('founderOs', FounderCompanionViewProvider.viewId),
-    ),
+    vscode.commands.registerCommand('founderOs.openCompanion', async () => {
+      await vscode.workspace.getConfiguration('founderOs').update(
+        'companion.enabled',
+        true,
+        vscode.ConfigurationTarget.Global,
+      );
+      founderCompanion?.syncEnabled();
+    }),
     vscode.commands.registerCommand('founderOs.openAgents', async () => {
       await vscode.commands.executeCommand('workbench.view.extension.founderOs');
       await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
@@ -468,7 +468,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     solutionMemory: founderVerifiedSolutionMemory,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
-      founderCompanion?.setWorking('Flying to Founder AI', modelId);
+      founderCompanion?.setPlanning('Planning the route', modelId);
     },
     onMetadata: (meta) => {
       const tier = meta.tier ?? '?';

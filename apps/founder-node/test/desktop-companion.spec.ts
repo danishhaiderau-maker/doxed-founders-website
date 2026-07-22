@@ -36,6 +36,12 @@ describe('Founder desktop companion', () => {
     assert.match(windowSource, /setIgnoreMouseEvents\(!interactive/);
     assert.match(windowSource, /setShape\(/);
     assert.match(windowSource, /founder-companion-drag-move/);
+    assert.match(windowSource, /snapToNearbyEdge/);
+    assert.match(windowSource, /Reduce motion/);
     assert.match(html, /setPointerCapture/);
+    assert.match(html, /planning/);
+    assert.match(html, /coordinating/);
+    assert.match(html, /verifying/);
+    assert.match(html, /showMenu/);
   });
 });

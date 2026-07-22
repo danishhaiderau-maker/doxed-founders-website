@@ -62,6 +62,7 @@ export type IpcCapability =
   | 'memoryHealth'
   | 'versionState'
   | 'companionState'
+  | 'companionAction'
   | 'heartbeat';
 
 /** Auth states the extension can report. Mirrors `PairingState` in founder-vault. */
@@ -325,9 +326,33 @@ export interface IpcVersionState extends IpcEnvelope {
 export interface IpcCompanionState extends IpcEnvelope {
   type: 'companionState';
   visible: boolean;
-  state: 'idle' | 'working' | 'success' | 'attention' | 'error';
+  state:
+    | 'idle'
+    | 'listening'
+    | 'planning'
+    | 'working'
+    | 'coordinating'
+    | 'verifying'
+    | 'success'
+    | 'attention'
+    | 'error'
+    | 'offline'
+    | 'update';
   title: string;
   detail: string;
+  reducedMotion: boolean;
+}
+
+/** User action from the desktop Dragon back to the owning IDE. */
+export interface IpcCompanionAction extends IpcEnvelope {
+  type: 'companionAction';
+  action:
+    | 'openTask'
+    | 'openUsage'
+    | 'openSettings'
+    | 'hide'
+    | 'toggleReducedMotion'
+    | 'signOut';
 }
 
 /** Heartbeat — both sides emit this every 15s to keep the pipe alive. */
@@ -363,6 +388,7 @@ export type IpcMessage =
   | IpcMemoryHealth
   | IpcVersionState
   | IpcCompanionState
+  | IpcCompanionAction
   | IpcHeartbeat;
 
 /**
@@ -407,6 +433,7 @@ export type IpcEvent =
   | IpcMemoryHealth
   | IpcVersionState
   | IpcCompanionState
+  | IpcCompanionAction
   | IpcHeartbeat;
 
 // ---------------------------------------------------------------------------
@@ -514,6 +541,7 @@ export function isIpcMessage(value: unknown): value is IpcMessage {
     'memoryHealth',
     'versionState',
     'companionState',
+    'companionAction',
     'heartbeat',
   ]);
   return validTypes.has(v.type);

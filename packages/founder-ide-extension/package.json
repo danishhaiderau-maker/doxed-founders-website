@@ -49,12 +49,6 @@
           "type": "webview"
         },
         {
-          "id": "founderOs.companion",
-          "name": "Dragon",
-          "type": "webview",
-          "when": "config.founderOs.companion.enabled"
-        },
-        {
           "id": "founderOs.agents",
           "name": "Agents",
           "visibility": "collapsed",
@@ -355,6 +349,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show the draggable Founder Dragon on the desktop and its status controls in Founder IDE."
+        },
+        "founderOs.companion.reducedMotion": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep the Founder Dragon visible without continuous motion."
         },
         "founderOs.advancedIdeTools": {
           "type": "boolean",
