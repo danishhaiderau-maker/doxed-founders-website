@@ -10,6 +10,7 @@ import { sendLLMMessageToProviderImplementation } from './sendLLMMessage.impl.js
 // FOUNDER_OS_GATEWAY_REWIRE - Founder-managed aliases use our Gateway. Personal
 // and local provider selections stay on Void's encrypted direct-provider path.
 import { sendFounderOsChat, sendFounderOsFIM, founderOsEnabled } from './sendFounderOs.js';
+import { headersWithoutFounderProviderProfiles, resolveFounderProviderProfile } from '../../common/founderProviderProfiles.js';
 
 
 export const sendLLMMessage = async ({
@@ -118,6 +119,28 @@ export const sendLLMMessage = async ({
 		}
 	}
 
+	const personalProfile = providerName === 'openAICompatible'
+		? resolveFounderProviderProfile(settingsOfProvider.openAICompatible.headersJSON, modelName)
+		: null;
+	const effectiveModelName = personalProfile?.model ?? modelName;
+	const effectiveSettingsOfProvider = providerName === 'openAICompatible'
+		? {
+			...settingsOfProvider,
+			openAICompatible: {
+				...settingsOfProvider.openAICompatible,
+				...(personalProfile ? {
+					endpoint: personalProfile.baseUrl,
+					apiKey: personalProfile.apiKey,
+					headersJSON: JSON.stringify(personalProfile.headers),
+				} : {
+					headersJSON: headersWithoutFounderProviderProfiles(
+						settingsOfProvider.openAICompatible.headersJSON,
+					),
+				}),
+			},
+		}
+		: settingsOfProvider;
+
 try {
 		const implementation = sendLLMMessageToProviderImplementation[providerName]
 		if (!implementation) {
@@ -126,12 +149,12 @@ try {
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
-			await sendChat({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, overridesOfModel, modelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
+			await sendChat({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
 			return
 		}
 		if (messagesType === 'FIMMessage') {
 			if (sendFIM) {
-				await sendFIM({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, overridesOfModel, modelName, _setAborter, providerName, separateSystemMessage })
+				await sendFIM({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage })
 				return
 			}
 			onError({ message: `Error running Autocomplete with ${providerName} - ${modelName}.`, fullError: null })

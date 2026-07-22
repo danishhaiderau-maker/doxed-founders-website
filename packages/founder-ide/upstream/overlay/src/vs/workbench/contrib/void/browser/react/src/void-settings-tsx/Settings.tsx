@@ -23,6 +23,11 @@ import { MCPServer } from '../../../../common/mcpServiceTypes.js';
 import { useMCPServiceState } from '../util/services.js';
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js';
 import { StorageScope, StorageTarget } from '../../../../../../../platform/storage/common/storage.js';
+import {
+	FOUNDER_PROVIDER_PROFILE_LIMIT,
+	readFounderProviderProfiles,
+	writeFounderProviderProfiles,
+} from '../../../../common/founderProviderProfiles.js';
 
 type Tab =
 	| 'models'
@@ -610,6 +615,135 @@ export const ModelDump = ({ filteredProviders }: { filteredProviders?: ProviderN
 
 // providers
 
+const PersonalProviderProfiles = () => {
+	const accessor = useAccessor();
+	const settingsStateService = accessor.get('IVoidSettingsService');
+	const settingsState = useSettingsState();
+	const provider = settingsState.settingsOfProvider.openAICompatible;
+	const profiles = useMemo(
+		() => readFounderProviderProfiles(provider.headersJSON),
+		[provider.headersJSON],
+	);
+	const [label, setLabel] = useState('');
+	const [baseUrl, setBaseUrl] = useState('');
+	const [apiKey, setApiKey] = useState('');
+	const [model, setModel] = useState('');
+	const [headers, setHeaders] = useState('{}');
+	const [error, setError] = useState('');
+
+	const saveProfile = async (event: React.FormEvent) => {
+		event.preventDefault();
+		const cleanLabel = label.trim();
+		const cleanUrl = baseUrl.trim().replace(/\/+$/, '');
+		const cleanModel = model.trim();
+		if (!cleanLabel || !cleanUrl || !cleanModel) {
+			setError('Name, base URL, and model are required.');
+			return;
+		}
+		if (!/^https?:\/\//i.test(cleanUrl)) {
+			setError('Base URL must begin with http:// or https://.');
+			return;
+		}
+		if (cleanLabel.startsWith('founder-os-')) {
+			setError('Names beginning with founder-os- are reserved for Founder Managed.');
+			return;
+		}
+		if (profiles.length >= FOUNDER_PROVIDER_PROFILE_LIMIT) {
+			setError(`Founder IDE V1 remembers up to ${FOUNDER_PROVIDER_PROFILE_LIMIT} personal endpoints.`);
+			return;
+		}
+		if (profiles.some((profile) => profile.label.toLowerCase() === cleanLabel.toLowerCase())
+			|| provider.models.some((entry) => entry.modelName === cleanLabel)) {
+			setError('Choose a unique profile name.');
+			return;
+		}
+		let parsedHeaders: Record<string, string> = {};
+		try {
+			const value: unknown = JSON.parse(headers || '{}');
+			if (typeof value !== 'object' || value === null || Array.isArray(value)
+				|| Object.values(value).some((headerValue) => typeof headerValue !== 'string')) {
+				throw new Error('invalid headers');
+			}
+			parsedHeaders = value as Record<string, string>;
+		} catch {
+			setError('Headers must be a JSON object with text values.');
+			return;
+		}
+
+		const nextProfile = {
+			id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+			label: cleanLabel,
+			baseUrl: cleanUrl,
+			apiKey: apiKey.trim(),
+			model: cleanModel,
+			headers: parsedHeaders,
+		};
+		await settingsStateService.dangerousSetState({
+			...settingsState,
+			settingsOfProvider: {
+				...settingsState.settingsOfProvider,
+				openAICompatible: {
+					...provider,
+					headersJSON: writeFounderProviderProfiles(provider.headersJSON, [...profiles, nextProfile]),
+					models: [...provider.models, { modelName: cleanLabel, type: 'custom', isHidden: false }],
+				},
+			},
+		});
+		setLabel('');
+		setBaseUrl('');
+		setApiKey('');
+		setModel('');
+		setHeaders('{}');
+		setError('');
+	};
+
+	const removeProfile = async (id: string, selectionName: string) => {
+		await settingsStateService.dangerousSetState({
+			...settingsState,
+			settingsOfProvider: {
+				...settingsState.settingsOfProvider,
+				openAICompatible: {
+					...provider,
+					headersJSON: writeFounderProviderProfiles(
+						provider.headersJSON,
+						profiles.filter((profile) => profile.id !== id),
+					),
+					models: provider.models.filter((entry) => entry.modelName !== selectionName),
+				},
+			},
+		});
+	};
+
+	return <div className='my-3 max-w-3xl'>
+		<p className='mb-3 text-void-fg-3'>Remember personal and private OpenAI-compatible endpoints. Keys stay in Founder IDE encrypted settings and personal usage never consumes Founder Free.</p>
+		{profiles.length > 0 && <div className='mb-4 grid gap-2'>
+			{profiles.map((profile) => <div key={profile.id} className='flex items-center justify-between gap-3 rounded border border-void-border-2 bg-void-bg-1 px-3 py-2'>
+				<div className='min-w-0'>
+					<div className='truncate font-medium'>{profile.label}</div>
+					<div className='truncate text-xs text-void-fg-3'>{profile.model} · {profile.baseUrl}</div>
+				</div>
+				<button type='button' className='shrink-0 text-void-fg-3 hover:text-void-fg-1' onClick={() => { void removeProfile(profile.id, profile.label); }} aria-label={`Remove ${profile.label}`}>
+					<X className='size-4' />
+				</button>
+			</div>)}
+		</div>}
+		<form className='grid gap-2 rounded border border-void-border-2 p-3' onSubmit={saveProfile}>
+			<div className='grid grid-cols-1 gap-2 md:grid-cols-2'>
+				<input className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5' value={label} onChange={(event) => setLabel(event.target.value)} placeholder='Profile name (for chat dropdown)' />
+				<input className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5' value={model} onChange={(event) => setModel(event.target.value)} placeholder='Model name' />
+				<input className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5' value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder='Base URL, for example https://api.example.com/v1' />
+				<input type='password' autoComplete='off' className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5' value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder='API key (optional for local endpoints)' />
+			</div>
+			<input className='rounded border border-void-border-2 bg-void-bg-1 px-2 py-1.5 font-mono text-xs' value={headers} onChange={(event) => setHeaders(event.target.value)} placeholder='Optional headers JSON, for example {"X-Team":"founder"}' />
+			<div className='flex items-center justify-between gap-3'>
+				<span className='text-xs text-void-fg-3'>{profiles.length} of {FOUNDER_PROVIDER_PROFILE_LIMIT} profiles saved</span>
+				<button type='submit' className='rounded bg-[#0e70c0] px-3 py-1.5 text-white disabled:opacity-50' disabled={profiles.length >= FOUNDER_PROVIDER_PROFILE_LIMIT}>Add provider</button>
+			</div>
+			{error && <div role='alert' className='text-sm text-red-500'>{error}</div>}
+		</form>
+	</div>;
+};
+
 const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerName: ProviderName, settingName: SettingName, subTextMd: React.ReactNode }) => {
 
 	const { title: settingTitle, placeholder, isPasswordField } = displayInfoOfSettingName(providerName, settingName)
@@ -703,6 +837,12 @@ export const SettingsForProvider = ({ providerName, showProviderTitle, showProvi
 	const settingNames = customSettingNamesOfProvider(providerName)
 
 	const { title: providerTitle } = displayInfoOfProviderName(providerName)
+	if (providerName === 'openAICompatible') {
+		return <div>
+			{showProviderTitle && <h3 className='text-xl truncate'>Personal AI providers</h3>}
+			<PersonalProviderProfiles />
+		</div>;
+	}
 
 	return <div>
 

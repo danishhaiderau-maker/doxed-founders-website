@@ -41,6 +41,22 @@ describe('Founder IDE upstream overlay', () => {
     );
     assert.match(source, /modelName\.startsWith\('founder-os-'\)/);
     assert.match(source, /founderOsEnabled\(\) && isFounderManagedSelection/);
+    assert.match(source, /resolveFounderProviderProfile/);
+    assert.match(source, /effectiveModelName/);
+  });
+
+  it('ships encrypted remembered personal provider profiles', () => {
+    const settings = read(
+      'src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx',
+    );
+    const profiles = read(
+      'src/vs/workbench/contrib/void/common/founderProviderProfiles.ts',
+    );
+    assert.match(settings, /Profile name \(for chat dropdown\)/);
+    assert.match(settings, /Base URL/);
+    assert.match(settings, /API key/);
+    assert.match(profiles, /FOUNDER_PROVIDER_PROFILE_LIMIT = 5/);
+    assert.match(profiles, /founder-os-/);
   });
 
   it('marks added files so the overlay can be applied repeatedly', () => {
