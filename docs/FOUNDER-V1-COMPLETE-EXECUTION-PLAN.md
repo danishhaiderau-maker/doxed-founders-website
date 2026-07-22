@@ -103,13 +103,17 @@ admin and user usage screenshots.
 - [x] Add encrypted named personal provider profiles with no arbitrary limit.
 - [x] Keep local Ollama and direct BYOK outside Founder quota.
 - [x] Add microphone/speech-to-text control to the native composer.
-- [ ] Put every legacy website copilot call behind the same reservation ledger.
+- [x] Put every platform-managed legacy website copilot call behind the same
+  reservation ledger and enforce DeepSeek-only plus Free Flash policy at the
+  final streaming and non-streaming provider boundaries.
 - [x] Add truthful route receipts with tier, provider, model, latency, and the
   Free Flash-only policy when it applies.
-- [ ] Add scheduled live provider capability probes to disable an unhealthy
+- [x] Add scheduled live provider capability probes to disable an unhealthy
   managed model before customer traffic reaches it.
-- [ ] Add explicit fallback rules: Flash to Pro on difficulty or failed QA;
-  managed DeepSeek never silently becomes another provider.
+- [x] Ensure managed DeepSeek never silently becomes another provider and a
+  failed health probe removes it from customer routing until recovery.
+- [ ] Escalate Flash to Pro only on measured difficulty or failed QA and record
+  the escalation reason in the task receipt.
 - [x] Add the seven focused actions: Verify, Challenge, Research, Panel, Test,
   Explain, Optimize. Each drafts a focused, editable instruction above the
   native composer; the selected managed, personal, or local model remains

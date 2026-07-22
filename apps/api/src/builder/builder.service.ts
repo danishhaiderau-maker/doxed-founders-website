@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, HttpException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, HttpException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import {
   AiProvider,
   ComputePlaneMode,
@@ -80,6 +80,11 @@ import {
 import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
+import {
+  DEEPSEEK_V4_FLASH_MODEL,
+  DEEPSEEK_V4_PRO_MODEL,
+  managedDeepseekModelForPlan,
+} from '../ai-proxy/deepseek-model-policy';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -1043,6 +1048,18 @@ export class BuilderService {
     let requestId: string | null = null;
     return {
       beforeProvider: async (context) => {
+        if (context.providerKey !== 'deepseek') {
+          throw new ServiceUnavailableException(
+            'Founder-managed cloud inference supports DeepSeek only',
+          );
+        }
+        const plan = await this.founderPromo.managedPlanForUser(userId);
+        const allowedModel = managedDeepseekModelForPlan(plan, context.model);
+        if (context.model !== allowedModel) {
+          throw new ServiceUnavailableException(
+            `Managed model policy requires ${allowedModel} for the current plan`,
+          );
+        }
         requestId = `builder-${randomUUID()}`;
         await this.founderPromo.reserveManagedUsage({
           userId,
@@ -1097,15 +1114,21 @@ export class BuilderService {
   > {
     try {
       const routedKey = await this.aiInvoker.resolveProviderKey(section);
-      if (!routedKey) return null;
+      if (!routedKey || routedKey !== 'deepseek') return null;
       // Only short-circuit when the routed provider is actually enabled + keyed.
       // resolveProviderKey does not check enabled/key, so probe via invoke; if
       // it throws ServiceUnavailableException (disabled / no key), fall through.
       const maxTokens = options?.runtimeRequest
         ? this.founderAiRuntime.maxOutputTokensFor(options.runtimeRequest)
         : undefined;
+      const requestedModel = options?.runtimeRequest
+        ? this.founderAiRuntime.route(options.runtimeRequest).model
+        : DEEPSEEK_V4_FLASH_MODEL;
+      const model = await this.managedDeepseekModel(userId, requestedModel);
       const result = await this.aiInvoker.invoke({
         section,
+        providerKey: 'deepseek',
+        model,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userPrompt },
@@ -1268,10 +1291,11 @@ export class BuilderService {
         preparedRequest,
         async (route, ctx) => {
           try {
+            const model = await this.managedDeepseekModel(userId, route.model);
             const result = await this.aiInvoker.invoke({
               section: 'copilot',
-              providerKey: route.providerKey,
-              model: route.model,
+              providerKey: 'deepseek',
+              model,
               messages: [
                 { role: 'system', content: ctx.request.system },
                 { role: 'user', content: ctx.request.userPrompt },
@@ -1290,8 +1314,8 @@ export class BuilderService {
             return {
               ok: true,
               text: result.content,
-              provider: route.providerKey,
-              model: result.model,
+              provider: 'deepseek',
+              model,
               promptTokens: result.usage.promptTokens,
               completionTokens: result.usage.completionTokens,
             };
@@ -1878,12 +1902,18 @@ export class BuilderService {
     model: string | undefined,
     tier: string,
   ): Promise<{ text: string; usage: LlmUsage | null } | null> {
+    if (provider !== AiProvider.DEEPSEEK) {
+      throw new ServiceUnavailableException(
+        'Founder-managed cloud inference supports DeepSeek only',
+      );
+    }
+    const effectiveModel = await this.managedDeepseekModel(userId, model);
     const requestId = `builder-${randomUUID()}`;
     await this.founderPromo.reserveManagedUsage({
       userId,
       requestId,
       provider: String(provider).toLowerCase(),
-      model: model ?? aiProviderConfig(provider)?.defaultModel ?? String(provider).toLowerCase(),
+      model: effectiveModel,
       tier,
       estimatedInputTokens: estimateLlmTokensFromText(`${system}\n${userPrompt}`),
     });
@@ -1894,7 +1924,7 @@ export class BuilderService {
         apiKey,
         system,
         userPrompt,
-        model,
+        effectiveModel,
       );
       await this.founderPromo.reconcileManagedReservation({
         userId,
@@ -2510,12 +2540,18 @@ export class BuilderService {
     gen: AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null>;
     first: IteratorResult<string, { text: string; usage: LlmUsage | null } | null>;
   }> {
+    if (provider !== AiProvider.DEEPSEEK) {
+      throw new ServiceUnavailableException(
+        'Founder-managed cloud inference supports DeepSeek only',
+      );
+    }
+    const effectiveModel = await this.managedDeepseekModel(userId, model);
     const requestId = `builder-${randomUUID()}`;
     await this.founderPromo.reserveManagedUsage({
       userId,
       requestId,
       provider: String(provider).toLowerCase(),
-      model: model ?? aiProviderConfig(provider)?.defaultModel ?? String(provider).toLowerCase(),
+      model: effectiveModel,
       tier,
       estimatedInputTokens: estimateLlmTokensFromText(`${system}\n${userPrompt}`),
     });
@@ -2526,7 +2562,7 @@ export class BuilderService {
         apiKey,
         system,
         userPrompt,
-        model,
+        effectiveModel,
       );
       const first = await gen.next();
       if (first.done) {
@@ -3185,8 +3221,15 @@ export class BuilderService {
     return new Set(creds.map((c) => c.provider));
   }
 
-  /** User BYOK first; platform promo keys only while eligible (1-month window + token cap).
-   *  Accepts promo providers (glm/gemini/deepseek) plus 'cursor' which is BYOK-only. */
+  private async managedDeepseekModel(
+    userId: string,
+    requestedModel: string | null | undefined,
+  ): Promise<typeof DEEPSEEK_V4_FLASH_MODEL | typeof DEEPSEEK_V4_PRO_MODEL> {
+    const plan = await this.founderPromo.managedPlanForUser(userId);
+    return managedDeepseekModelForPlan(plan, requestedModel);
+  }
+
+  /** User BYOK first; only DeepSeek may fall through to a managed platform key. */
   private async resolveLlmApiKey(
     userId: string,
     credentialProvider: PromoCredentialProvider | 'cursor',
@@ -3228,7 +3271,7 @@ export class BuilderService {
       if (c.token?.trim()) out.add(c.provider);
     }
 
-    const promoProviders: PromoCredentialProvider[] = ['glm', 'gemini', 'deepseek'];
+    const promoProviders: PromoCredentialProvider[] = ['deepseek'];
     for (const p of promoProviders) {
       if (await this.founderPromo.hasPromoProvider(userId, p)) {
         out.add(p);

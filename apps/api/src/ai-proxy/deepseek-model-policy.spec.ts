@@ -6,6 +6,7 @@ import {
   forcedIntentForAlias,
   normalizeFounderAliasRoute,
   normalizeProviderModel,
+  managedDeepseekModelForPlan,
   normalizeProxyRoute,
   tierForFounderAlias,
 } from './deepseek-model-policy';
@@ -15,6 +16,21 @@ test('Founder OS aliases force their advertised routing intent', () => {
   assert.equal(forcedIntentForAlias('founder-os-reasoning'), 'reasoning');
   assert.equal(forcedIntentForAlias('founder-os-code'), 'code');
   assert.equal(forcedIntentForAlias('founder-os-auto'), null);
+});
+
+test('managed website model policy keeps Free on Flash and paid Pro explicit', () => {
+  assert.equal(
+    managedDeepseekModelForPlan('free', 'deepseek-v4-pro'),
+    'deepseek-v4-flash',
+  );
+  assert.equal(
+    managedDeepseekModelForPlan('builder', 'deepseek-v4-pro'),
+    'deepseek-v4-pro',
+  );
+  assert.equal(
+    managedDeepseekModelForPlan('team', 'deepseek-reasoner'),
+    'deepseek-v4-flash',
+  );
 });
 
 test('Founder Auto starts on Flash and requires an explicit Pro alias', () => {

@@ -26,6 +26,10 @@ Exact tokens, provider costs, cache rates, and margin controls remain visible to
 - Managed usage is reserved atomically before provider access, reconciled from provider usage, and conservatively charged when an in-flight result is uncertain.
 - Builder and Team coordination is server-backed across tasks and devices, with local atomic path claims, server fencing generations, overlap rejection, heartbeats, and an audit trail.
 - Founder Free is fenced to V4 Flash even when a Code or Reasoning intent is requested. Builder and Team can use V4 Pro, and the served route is exposed in the response receipt.
+- The older website copilot now follows the same managed DeepSeek-only model
+  policy and reservation lifecycle. A bounded authenticated health probe
+  disables an unhealthy managed route and automatically restores it on a
+  later successful probe.
 
 ## Seven-stage completion plan
 

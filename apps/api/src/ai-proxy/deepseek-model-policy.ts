@@ -39,6 +39,16 @@ export function tierForFounderPlan(
   return { tier: tierForFounderAlias(alias, inferred), policy: 'managed_auto' };
 }
 
+export function managedDeepseekModelForPlan(
+  plan: FounderPlanName,
+  requestedModel: string | null | undefined,
+): typeof DEEPSEEK_V4_FLASH_MODEL | typeof DEEPSEEK_V4_PRO_MODEL {
+  if (plan === 'free') return DEEPSEEK_V4_FLASH_MODEL;
+  return requestedModel === DEEPSEEK_V4_PRO_MODEL
+    ? DEEPSEEK_V4_PRO_MODEL
+    : DEEPSEEK_V4_FLASH_MODEL;
+}
+
 export function normalizeProviderModel(
   provider: string,
   model: string,

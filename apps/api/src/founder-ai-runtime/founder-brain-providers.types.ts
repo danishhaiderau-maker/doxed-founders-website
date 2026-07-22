@@ -26,6 +26,13 @@ export type FounderBrainProviderKeyStatus = {
 
 export type FounderBrainProvidersAdminView = FounderBrainProvidersConfig & {
   keys: Record<FounderBrainProviderSlug, FounderBrainProviderKeyStatus>;
+  managedHealth: {
+    deepseek: {
+      state: 'unknown' | 'healthy' | 'unhealthy';
+      checkedAt: string | null;
+      message: string | null;
+    };
+  };
   glmApiBase: string;
   updatedAt: string | null;
 };

@@ -1,10 +1,12 @@
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { parseFounderBrainMode, type FounderBrainMode } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { AiRoutingService } from '../ai-routing/ai-routing.service';
 import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 import type { ModelRoute } from './founder-ai-runtime.types';
+import { DEEPSEEK_V4_FLASH_MODEL } from '../ai-proxy/deepseek-model-policy';
 import {
   DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG,
   FOUNDER_BRAIN_PROVIDER_ALLOWLIST,
@@ -16,11 +18,18 @@ import {
 } from './founder-brain-providers.types';
 
 const DEEPSEEK_CHAT_URL = 'https://api.deepseek.com/chat/completions';
+const MANAGED_PROVIDER_PROBE_INTERVAL_MS = 60_000;
+const MANAGED_PROVIDER_PROBE_TIMEOUT_MS = 8_000;
 
 @Injectable()
 export class FounderBrainProvidersService implements OnModuleInit {
   private readonly logger = new Logger(FounderBrainProvidersService.name);
   private cachedConfig: FounderBrainProvidersConfig = { ...DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG };
+  private deepseekHealth: {
+    state: 'unknown' | 'healthy' | 'unhealthy';
+    checkedAt: string | null;
+    message: string | null;
+  } = { state: 'unknown', checkedAt: null, message: null };
 
   constructor(
     private readonly prisma: PrismaService,
@@ -30,6 +39,7 @@ export class FounderBrainProvidersService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.refreshCache();
+    await this.refreshManagedProviderHealth();
   }
 
   getSyncConfig(): FounderBrainProvidersConfig {
@@ -66,6 +76,7 @@ export class FounderBrainProvidersService implements OnModuleInit {
     return {
       ...config,
       keys: { deepseek: deepseekStatus, glm: glmStatus },
+      managedHealth: { deepseek: { ...this.deepseekHealth } },
       glmApiBase: getGlmApiBaseUrl(),
       updatedAt: row?.updatedAt?.toISOString() ?? null,
     };
@@ -135,6 +146,11 @@ export class FounderBrainProvidersService implements OnModuleInit {
       return null;
     }
 
+    if (this.deepseekHealth.state === 'unhealthy') return null;
+    return this.resolveConfiguredDeepseekKey();
+  }
+
+  private async resolveConfiguredDeepseekKey(): Promise<string | null> {
     const env = process.env.DEEPSEEK_API_KEY?.trim();
     if (env) return env;
     const brain = await this.founderPromo.getDecryptedPlatformDeepseekKey();
@@ -146,14 +162,18 @@ export class FounderBrainProvidersService implements OnModuleInit {
 
   async testProvider(provider: FounderBrainProviderSlug): Promise<FounderBrainProviderTestResult> {
     const started = Date.now();
-    const key = await this.resolveApiKey(provider);
+    const key = provider === 'deepseek'
+      ? await this.resolveConfiguredDeepseekKey()
+      : await this.resolveApiKey(provider);
     if (!key) {
-      return {
+      const result = {
         provider,
         ok: false,
         message: 'No API key configured for this provider',
         latencyMs: Date.now() - started,
       };
+      if (provider === 'deepseek') this.recordDeepseekHealth(result);
+      return result;
     }
 
     try {
@@ -174,43 +194,63 @@ export class FounderBrainProvidersService implements OnModuleInit {
         const res = await fetch(DEEPSEEK_CHAT_URL, {
           method: 'POST',
           headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(MANAGED_PROVIDER_PROBE_TIMEOUT_MS),
           body: JSON.stringify({
-            model: this.cachedConfig.deepseekFastModel,
+            model: DEEPSEEK_V4_FLASH_MODEL,
             messages: [{ role: 'user', content: 'ping' }],
             max_tokens: 8,
           }),
         });
         if (!res.ok) {
           const body = await res.text().catch(() => '');
-          return {
+          const result = {
             provider,
             ok: false,
             message: `DeepSeek ping failed (${res.status}): ${body.slice(0, 120)}`,
             latencyMs: Date.now() - started,
           };
+          this.recordDeepseekHealth(result);
+          return result;
         }
       }
-      return {
+      const result = {
         provider,
         ok: true,
         message: 'Provider reachable',
         latencyMs: Date.now() - started,
       };
+      if (provider === 'deepseek') this.recordDeepseekHealth(result);
+      return result;
     } catch (err) {
-      return {
+      const result = {
         provider,
         ok: false,
         message: err instanceof Error ? err.message : String(err),
         latencyMs: Date.now() - started,
       };
+      if (provider === 'deepseek') this.recordDeepseekHealth(result);
+      return result;
     }
   }
 
   async testAllProviders(): Promise<FounderBrainProviderTestResult[]> {
-    return Promise.all([
-      this.testProvider('deepseek'),
-      this.testProvider('glm'),
-    ]);
+    return [await this.testProvider('deepseek')];
+  }
+
+  @Interval(MANAGED_PROVIDER_PROBE_INTERVAL_MS)
+  async refreshManagedProviderHealth(): Promise<void> {
+    const result = await this.testProvider('deepseek');
+    if (!result.ok) {
+      this.logger.warn(`Managed DeepSeek health probe failed: ${result.message}`);
+    }
+  }
+
+  private recordDeepseekHealth(result: FounderBrainProviderTestResult): void {
+    this.deepseekHealth = {
+      state: result.ok ? 'healthy' : 'unhealthy',
+      checkedAt: new Date().toISOString(),
+      message: result.message,
+    };
   }
 
   private async resolveKeyStatus(provider: FounderBrainProviderSlug): Promise<FounderBrainProviderKeyStatus> {
