@@ -159,6 +159,105 @@ if ($chatThreadContent.Contains($coordinationOld)) {
     Write-Host "[apply-founder]   reapply  native chat workspace coordination" -ForegroundColor DarkCyan
 }
 
+# Keep user-visible upstream strings behind a small, fail-closed branding
+# boundary. Copying the very large upstream modules into the overlay would make
+# upgrades needlessly brittle; exact literal replacements instead fail loudly
+# when upstream moves while preserving internal service/API identifiers.
+function Set-FounderSourceLiteral {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Old,
+        [Parameter(Mandatory = $true)][string]$New
+    )
+
+    $target = Join-Path $VscodiumCheckout $RelativePath
+    if (-not (Test-Path $target)) { throw "Founder branding target missing: $target" }
+    $content = Get-Content $target -Raw
+    if ($content.Contains($Old)) {
+        $content = $content.Replace($Old, $New)
+        [System.IO.File]::WriteAllText($target, $content, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "[apply-founder]   brand    $RelativePath" -ForegroundColor Cyan
+        return
+    }
+    if (-not $content.Contains($New)) {
+        throw "Founder branding signature changed upstream in ${RelativePath}: '$Old'"
+    }
+    Write-Host "[apply-founder]   reapply  $RelativePath" -ForegroundColor DarkCyan
+}
+
+$telemetryService = "src\vs\platform\telemetry\common\telemetryService.ts"
+Set-FounderSourceLiteral $telemetryService `
+    "Void separately records basic usage like the number of messages people are sending. If you'd like to disable Void metrics, you may do so in Void's Settings." `
+    "Founder IDE can record basic product usage such as message counts. You can disable Founder metrics in Founder Settings."
+
+$sendMessageService = "src\vs\workbench\contrib\void\common\sendLLMMessageService.ts"
+Set-FounderSourceLiteral $sendMessageService "Please add a provider in Void's Settings." "Choose Founder Managed AI, Personal AI, or Local AI in Founder Settings."
+
+$settingsTypes = "src\vs\workbench\contrib\void\common\voidSettingsTypes.ts"
+Set-FounderSourceLiteral $settingsTypes "authenticate before using Vertex with Void." "authenticate before using Vertex with Founder IDE."
+
+$scmService = "src\vs\workbench\contrib\void\browser\voidSCMService.ts"
+Set-FounderSourceLiteral $scmService "VoidSCM - Commit Message" "Founder IDE - Commit Message"
+Set-FounderSourceLiteral $scmService "Void: Generate Commit Message" "Founder IDE: Generate Commit Message"
+Set-FounderSourceLiteral $scmService "Void: Cancel Commit Message Generation" "Founder IDE: Cancel Commit Message Generation"
+
+$commandBarService = "src\vs\workbench\contrib\void\browser\voidCommandBarService.ts"
+Set-FounderSourceLiteral $commandBarService "Void: " "Founder IDE: "
+
+$toolsService = "src\vs\workbench\contrib\void\browser\toolsService.ts"
+Set-FounderSourceLiteral $toolsService "automatically killed by Void after" "automatically stopped by Founder IDE after"
+
+$terminalService = "src\vs\workbench\contrib\void\browser\terminalToolService.ts"
+Set-FounderSourceLiteral $terminalService "Void Agent" "Founder Agent"
+
+$sidebarPane = "src\vs\workbench\contrib\void\browser\sidebarPane.ts"
+Set-FounderSourceLiteral $sidebarPane "Open Void Sidebar" "Open Founder Chat"
+
+$editCodeService = "src\vs\workbench\contrib\void\browser\editCodeService.ts"
+Set-FounderSourceLiteral $editCodeService "Void Agent" "Founder Agent"
+Set-FounderSourceLiteral $editCodeService "Void:" "Founder IDE:"
+
+$fileService = "src\vs\workbench\contrib\void\browser\fileService.ts"
+Set-FounderSourceLiteral $fileService "Void: Copy Prompt" "Founder IDE: Copy Prompt"
+
+$metricsService = "src\vs\workbench\contrib\void\common\metricsService.ts"
+Set-FounderSourceLiteral $metricsService "Void: Log Debug Info" "Founder IDE: Log Debug Info"
+
+$quickEditActions = "src\vs\workbench\contrib\void\browser\quickEditActions.ts"
+Set-FounderSourceLiteral $quickEditActions "Void: Quick Edit" "Founder IDE: Quick Edit"
+
+$legacyOnboarding = "src\vs\workbench\contrib\void\browser\react\src\void-onboarding\VoidOnboarding.tsx"
+Set-FounderSourceLiteral $legacyOnboarding `
+    "[Email us](mailto:founders@voideditor.com)" `
+    "[Founder support](https://doxxedcrypto.digital)"
+
+$providerRuntime = "src\vs\workbench\contrib\void\electron-main\llmMessage\sendLLMMessage.impl.ts"
+Set-FounderSourceLiteral $providerRuntime "'HTTP-Referer': 'https://voideditor.com'" "'HTTP-Referer': 'https://doxxedcrypto.digital'"
+Set-FounderSourceLiteral $providerRuntime "'X-Title': 'Void'" "'X-Title': 'Founder IDE'"
+Set-FounderSourceLiteral $providerRuntime "Void providerName was invalid" "Founder IDE provider name was invalid"
+Set-FounderSourceLiteral $providerRuntime "Void: Response from model was empty." "Founder AI response was empty."
+
+# Founder Node owns the signed manifest, verification, rollback, and Dragon
+# update states. Disable Void's legacy action and periodic checker so the one
+# installed application never exposes or runs a second update path.
+$legacyUpdater = "src\vs\workbench\contrib\void\browser\voidUpdateActions.ts"
+Set-FounderSourceLiteral $legacyUpdater "registerAction2(class extends Action2" "false && registerAction2(class extends Action2"
+Set-FounderSourceLiteral $legacyUpdater "registerWorkbenchContribution2(VoidUpdateWorkbenchContribution.ID" "false && registerWorkbenchContribution2(VoidUpdateWorkbenchContribution.ID"
+Set-FounderSourceLiteral $legacyUpdater "This is a very old version of Void" "This Founder IDE build is out of date"
+Set-FounderSourceLiteral $legacyUpdater "[Void Editor](https://voideditor.com/download-beta)" "[Founder IDE](https://doxxedcrypto.digital)"
+Set-FounderSourceLiteral $legacyUpdater "https://voideditor.com/download-beta" "https://doxxedcrypto.digital"
+Set-FounderSourceLiteral $legacyUpdater "Void Site" "Founder site"
+Set-FounderSourceLiteral $legacyUpdater "https://voideditor.com/" "https://doxxedcrypto.digital/"
+Set-FounderSourceLiteral $legacyUpdater "Void Error:" "Founder IDE update error:"
+Set-FounderSourceLiteral $legacyUpdater "reinstall Void" "reinstall Founder IDE"
+Set-FounderSourceLiteral $legacyUpdater "Void Update" "Founder IDE Update"
+Set-FounderSourceLiteral $legacyUpdater "Void: Check for Updates" "Founder IDE: Check for Updates"
+
+$legacyUpdateMain = "src\vs\workbench\contrib\void\electron-main\voidUpdateMainService.ts"
+Set-FounderSourceLiteral $legacyUpdateMain "Restart Void to update!" "Restart Founder IDE to update!"
+Set-FounderSourceLiteral $legacyUpdateMain "A new version of Void is available!" "A new version of Founder IDE is available!"
+Set-FounderSourceLiteral $legacyUpdateMain "Void is up-to-date!" "Founder IDE is up-to-date!"
+
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
 try {

@@ -187,6 +187,23 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(applyScript, /workspacePath: this\._workspaceContextService/);
   });
 
+  it('owns every visible upstream brand boundary and disables the legacy updater', () => {
+    const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
+    for (const founderLabel of [
+      'Founder Settings',
+      'Open Founder Chat',
+      'Founder Agent',
+      'Founder IDE: Generate Commit Message',
+      'Founder IDE: Quick Edit',
+      'Founder IDE: Check for Updates',
+    ]) {
+      assert.ok(applyScript.includes(founderLabel), `missing ${founderLabel}`);
+    }
+    assert.match(applyScript, /false && registerAction2/);
+    assert.match(applyScript, /false && registerWorkbenchContribution2/);
+    assert.match(applyScript, /Founder Node owns the signed manifest/);
+  });
+
   it('adds the seven focused Founder actions above the native composer', () => {
     const source = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
