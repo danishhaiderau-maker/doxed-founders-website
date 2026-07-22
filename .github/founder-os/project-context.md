@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(analyzer): pin canonical report root
+Preserve analyzer evidence and bound research storage
 
 ## Last Activity
 
