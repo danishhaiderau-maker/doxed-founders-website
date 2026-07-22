@@ -763,44 +763,56 @@ def archive_research_session(reason: str = "manual") -> str:
     return dest
 
 
-def compact_research_archive(archive_path: str, past_analysis_id: str = "") -> dict:
-    """Remove verified raw copies after durable derived analysis is sealed."""
-    kept = {"archive_meta.json", "archive_compaction_receipt.json"}
-    deleted_files = 0
-    deleted_bytes = 0
-    for root, _, files in os.walk(archive_path):
-        for name in files:
-            path = os.path.join(root, name)
-            if os.path.abspath(root) == os.path.abspath(archive_path) and name in kept:
-                continue
-            try:
-                deleted_bytes += int(os.path.getsize(path))
-                os.remove(path)
-                deleted_files += 1
-            except OSError as exc:
-                raise ArchiveIntegrityError(f"archive compaction failed {path}: {exc}") from exc
-    receipt = {
-        "schema": "research_archive_compaction_v1",
-        "compacted_at": utc_iso(),
-        "past_analysis_id": past_analysis_id,
-        "deleted_files": deleted_files,
-        "deleted_bytes": deleted_bytes,
+def create_research_archive_receipt(past_analysis: dict, reason: str) -> str:
+    """Record a wipe receipt without duplicating already-analyzed raw payloads."""
+    os.makedirs(RESEARCH_ARCHIVE_DIR, exist_ok=True)
+    sessions = [
+        name for name in os.listdir(RESEARCH_ARCHIVE_DIR)
+        if name.startswith("session_")
+        and os.path.isdir(os.path.join(RESEARCH_ARCHIVE_DIR, name))
+    ]
+    numbers = []
+    for name in sessions:
+        suffix = name.split("_", 1)[-1]
+        if suffix.isdigit():
+            numbers.append(int(suffix))
+    destination = os.path.join(
+        RESEARCH_ARCHIVE_DIR,
+        f"session_{(max(numbers) if numbers else 0) + 1:03d}",
+    )
+    os.makedirs(destination, exist_ok=False)
+    source_inventory = list(past_analysis.get("source_inventory") or [])
+    total_bytes = sum(int(row.get("bytes") or 0) for row in source_inventory if isinstance(row, dict))
+    meta = {
+        "schema": "research_archive_receipt_v2",
+        "reason": reason,
+        "archived_ts": utc_iso(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "past_analysis_id": past_analysis.get("archive_id"),
+        "analysis_generated_at": past_analysis.get("analysis_generated_at"),
+        "source_inventory": source_inventory,
+        "integrity": {
+            "verified": bool(source_inventory),
+            "method": "source fingerprints preserved in Past Analysis",
+            "file_count": len(source_inventory),
+            "total_source_bytes": total_bytes,
+        },
+        "compacted": True,
         "raw_payloads_retained": False,
     }
-    receipt_path = os.path.join(archive_path, "archive_compaction_receipt.json")
-    with open(receipt_path, "w", encoding="utf-8") as handle:
-        json.dump(receipt, handle, indent=2)
-    meta_path = os.path.join(archive_path, "archive_meta.json")
-    try:
-        with open(meta_path, encoding="utf-8") as handle:
-            meta = json.load(handle)
-    except (OSError, ValueError, TypeError):
-        meta = {}
-    meta["compacted"] = True
-    meta["compaction_receipt"] = receipt
-    with open(meta_path, "w", encoding="utf-8") as handle:
+    with open(os.path.join(destination, "archive_meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2)
-    return receipt
+    with open(os.path.join(destination, "archive_compaction_receipt.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "schema": "research_archive_compaction_v1",
+            "compacted_at": meta["archived_ts"],
+            "past_analysis_id": meta["past_analysis_id"],
+            "deleted_files": 0,
+            "deleted_bytes": 0,
+            "raw_payloads_retained": False,
+        }, handle, indent=2)
+    return destination
 
 def _wipe_research_on_startup_if_needed():
     if not _should_wipe_research_on_startup():
@@ -20976,7 +20988,10 @@ def _perform_fresh_collection_reset_locked() -> dict:
 
         past_analysis = seal_past_analysis(os.getcwd(), reason="fresh_collection_dashboard")
         past_analysis_id = str(past_analysis.get("archive_id") or "")
-        archive_path = archive_research_session(reason="fresh_collection_dashboard")
+        archive_path = create_research_archive_receipt(
+            past_analysis,
+            reason="fresh_collection_dashboard",
+        )
     except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
         logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
         return {
@@ -21025,12 +21040,12 @@ def _perform_fresh_collection_reset_locked() -> dict:
         state["fresh_collection_mode"] = True
     _write_research_session(bot_start_time, fresh_collection_reset=True)
     load_session_trades_from_csv()
-    archive_compaction = {}
-    if not errors:
-        try:
-            archive_compaction = compact_research_archive(archive_path, past_analysis_id)
-        except ArchiveIntegrityError as exc:
-            errors.append(str(exc))
+    archive_compaction = {
+        "past_analysis_id": past_analysis_id,
+        "deleted_files": 0,
+        "deleted_bytes": 0,
+        "raw_payloads_retained": False,
+    }
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")

@@ -1,9 +1,9 @@
 {
   "engine_version": "v14-paused-shadow-executor-watchdog-adx-v3",
-  "combo_version": "2026-07-21",
+  "combo_version": "2026-07-22",
   "exit_version": "scenario-c-v4",
-  "benchmark_lane": "COMBO_65_SP5_CHASE_3PLUS",
-  "signal_hash": "9d8743214baa",
+  "benchmark_lane": "CONTINUOUS",
+  "signal_hash": "d5ad64b38ccf",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-07-22T10:30:00.000Z"
+  "updated_at": "2026-07-22T10:49:16.925Z"
 }
