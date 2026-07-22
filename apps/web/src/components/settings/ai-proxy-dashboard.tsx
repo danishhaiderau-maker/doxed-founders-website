@@ -258,7 +258,7 @@ export function AiProxyDashboard({ accessToken }: Props) {
             href="/settings/builder?tab=founder-node"
             className="text-violet-300 underline hover:text-violet-200"
           >
-            Founder Stack settings
+            Founder IDE settings
           </a>
           .
         </p>

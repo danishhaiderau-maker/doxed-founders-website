@@ -23,19 +23,19 @@ const QUICK_LLM = [
   {
     provider: 'glm',
     label: 'GLM 5.2 (ZhipuAI)',
-    hint: 'Recommended — cheapest coding LLM, OpenAI-compatible',
+    hint: 'Long-horizon coding option, OpenAI-compatible',
     keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
   },
   {
     provider: 'deepseek',
     label: 'DeepSeek',
-    hint: 'Low cost, strong for planning',
+    hint: 'Cost-efficient coding and planning option',
     keyUrl: 'https://platform.deepseek.com/api_keys',
   },
   {
     provider: 'gemini',
     label: 'Google Gemini',
-    hint: 'Fast & free-tier friendly',
+    hint: 'Fast lightweight option',
     keyUrl: 'https://aistudio.google.com/apikey',
   },
 ] as const;
@@ -114,22 +114,21 @@ export function FounderOnboardingAiStack({
 
   return (
     <div className="space-y-5">
-      {promoActive && promo?.message && (
+      {promoActive && (
         <div className="rounded-lg border border-amber-500/35 bg-amber-950/25 p-3 text-xs text-amber-100">
-          <strong className="text-amber-300">AI promo active.</strong> {promo.message}
+          <strong className="text-amber-300">Founder Free is active.</strong> Managed AI is ready for questions,
+          planning, and small edits.
           {promo.daysRemaining != null && (
             <span className="mt-1 block text-amber-200/80">
-              {promo.daysRemaining} days · {(promo.tokensRemaining / 1_000_000).toFixed(1)}M tokens left
-              — GLM 5.2, DeepSeek & Gemini billed to the platform. Add your own keys anytime.
+              {promo.daysRemaining} days remaining. Add your own keys at any time.
             </span>
           )}
         </div>
       )}
 
       <div className="rounded-lg border border-emerald-500/25 bg-emerald-950/15 p-3 text-xs text-emerald-100/90">
-        <strong className="text-emerald-300">BYO AI — you pay vendors directly.</strong> Founder OS
-        orchestrates; keys stay encrypted on the API. DeepSeek is ~$0.14/M tokens vs hosted wrappers
-        charging markup.
+        <strong className="text-emerald-300">Personal AI - you pay providers directly.</strong> Founder OS
+        orchestrates while your keys stay encrypted. Personal and local usage does not consume Founder Free quota.
       </div>
 
       <div>

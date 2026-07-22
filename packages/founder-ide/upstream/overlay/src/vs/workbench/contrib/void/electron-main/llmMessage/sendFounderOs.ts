@@ -98,6 +98,27 @@ function bearerFromVault(cfg: NodeConfigFile): string {
 	return `fos_${cfg.nodeId}:${cfg.nodeToken}`;
 }
 
+function gatewayErrorMessage(status: number, responseBody: string): string {
+	const normalized = responseBody.toLowerCase();
+	const providerCredentialFailed =
+		normalized.includes('api key') &&
+		(normalized.includes('invalid') || normalized.includes('authentication'));
+
+	if (providerCredentialFailed) {
+		return 'The selected AI provider is unavailable. Open Founder Connections to repair it or choose another model.';
+	}
+	if (status === 401 || status === 403) {
+		return 'Your Founder session needs to be renewed. Open the Founder panel and sign in again.';
+	}
+	if (status === 429) {
+		return 'Your Founder AI allowance is temporarily unavailable. Check Founder Connections for usage and provider options.';
+	}
+	if (status >= 500) {
+		return 'Founder AI is temporarily unavailable. Your workspace and local files are unaffected.';
+	}
+	return 'Founder could not send this request. Check the active model in Founder Connections.';
+}
+
 // ---------------------------------------------------------------------------
 // Feature -> model alias mapping (design report section 4.3).
 // loggingName values come from the callers:
@@ -310,15 +331,36 @@ async function gatewayFetch(
 		});
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
-			onError({ message: `Founder OS gateway returned ${res.status}: ${text.slice(0, 500)}`, fullError: null });
+			onError({
+				message: gatewayErrorMessage(res.status, text),
+				fullError: null,
+			});
 			return null;
 		}
 		return { res, controller };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		onError({ message: `Founder OS gateway network error: ${message}`, fullError: err instanceof Error ? err : null });
+		onError({
+			message: 'Founder could not reach the AI gateway. Check your connection from the Founder panel.',
+			fullError: err instanceof Error ? err : null,
+		});
 		return null;
 	}
+}
+
+function inlineReceiptValue(value: unknown, fallback = '?'): string {
+	if (typeof value !== 'string' || !value.trim()) return fallback;
+	return value.trim().replace(/[\r\n`|]/g, ' ').slice(0, 120);
+}
+
+function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: number): string {
+	if (!meta) return '';
+	const provider = inlineReceiptValue(meta.provider);
+	const model = inlineReceiptValue(meta.model);
+	const tier = inlineReceiptValue(meta.tier);
+	const cost = typeof meta.ddollarCost === 'number' && Number.isFinite(meta.ddollarCost)
+		? ` · ${meta.ddollarCost} D$`
+		: '';
+	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,10 +375,17 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 }
 
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
-	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, separateSystemMessage, chatMode } = params;
+	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode } = params;
 
-	const model = aliasForFeature(loggingName, 'chatMessages', chatMode);
+	const requestedModel = modelSelection?.modelName;
+	const model = typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
+		? requestedModel
+		: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
+	openAiMessages.unshift({
+		role: 'system',
+		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the exact provider and model for this request appear in the Founder route receipt below the answer. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
+	});
 
 	const body: Record<string, unknown> = {
 		model,
@@ -350,8 +399,10 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	const { res, controller } = got;
 	_setAborter(() => controller.abort());
 
+	const startedAt = Date.now();
 	let fullText = '';
 	let fullReasoning = '';
+	let routeMetadata: FounderOsMetadata | undefined;
 
 	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
 		onDelta: (delta) => {
@@ -359,8 +410,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 			onText({ fullText, fullReasoning, toolCall: undefined });
 		},
 		onMetadata: (meta) => {
-			// Route transparency. A future UI hook can surface this in the
-			// chat thread status slot; for now log it so it's observable.
+			routeMetadata = meta;
 			console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
 		},
 	}, controller.signal);
@@ -370,8 +420,9 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		return;
 	}
 
+	const finalText = `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
-		fullText,
+		fullText: finalText,
 		fullReasoning,
 		anthropicReasoning: null,
 	};

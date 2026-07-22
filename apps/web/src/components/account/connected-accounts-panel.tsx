@@ -10,19 +10,15 @@ import {
   connectGitHubRepo,
   connectIntegration,
   disconnectIntegration,
-  fetchAccountOverview,
   fetchBuilderSettings,
   fetchCopilotMemory,
   fetchFounderOsDashboard,
-  fetchFounderPromoStatus,
   fetchIntegrationProviders,
   fetchXConnectionStatus,
   FounderOsDashboard,
-  FounderPromoUserStatus,
   IntegrationProviderConfig,
 } from '@/lib/api';
 import { AI_PROVIDERS } from '@dcf/utils';
-import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 
 type Props = {
   accessToken: string;
@@ -48,8 +44,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [promo, setPromo] = useState<FounderPromoUserStatus | null>(null);
   const [aiProviders, setAiProviders] = useState<
     { key: string; label: string; connected: boolean; billTip: string; defaultModel: string | null }[]
   >([]);
@@ -87,7 +81,7 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   const load = useCallback(async () => {
     setErr(null);
     try {
-    const [dashResult, memory, provResult, x, overview, builder, promoStatus] = await Promise.all([
+    const [dashResult, memory, provResult, x, builder] = await Promise.all([
       fetchFounderOsDashboard(accessToken)
         .then((value) => ({ ok: true as const, value }))
         .catch((e: unknown) => ({ ok: false as const, error: e })),
@@ -96,16 +90,12 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         .then((value) => ({ ok: true as const, value }))
         .catch(() => ({ ok: false as const, value: INTEGRATION_PROVIDERS })),
       fetchXConnectionStatus(accessToken).catch(() => null),
-      fetchAccountOverview(accessToken).catch(() => null),
       fetchBuilderSettings(accessToken).catch(() => null),
-      fetchFounderPromoStatus(accessToken).catch(() => null),
     ]);
 
     const prov = provResult.value;
     setProviders(prov);
     setXStatus(x);
-    setIsAdmin(overview?.isAdmin ?? false);
-    setPromo(promoStatus);
     const repo = memory?.repoFullName ?? null;
     setLinkedRepo(repo);
     if (repo) setRepoInput(repo);
@@ -264,50 +254,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
 
   return (
     <section className="space-y-6">
-      {isAdmin && <AdminFounderPromoPanel accessToken={accessToken} />}
-
-      {promo?.enabled && promo.message && (
-        <div
-          className={`rounded-xl border px-4 py-3 text-sm ${
-            promo.eligible
-              ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
-              : promo.exhausted
-                ? 'border-amber-500/40 bg-amber-950/25 text-amber-100'
-                : 'border-violet-500/40 bg-violet-950/25 text-violet-100'
-          }`}
-        >
-          <p className="font-semibold text-white">
-            {promo.eligible
-              ? 'Founder AI promo active'
-              : !promo.founderRegistered
-                ? 'Free 1-month AI — register as founder'
-                : promo.exhausted
-                  ? 'Free demo ended'
-                  : 'Promo expired'}
-          </p>
-          <p className="mt-1 text-xs opacity-90">{promo.message}</p>
-          {promo.founderRegistered && (
-            <p className="mt-2 text-[11px] opacity-80">
-              {(promo.tokensUsed / 1_000_000).toFixed(2)}M / {(promo.tokenCap / 1_000_000).toFixed(0)}M tokens
-              {promo.daysRemaining != null ? ` · ${promo.daysRemaining} days left` : ''}
-            </p>
-          )}
-          {!promo.founderRegistered && (
-            <Link href="/founder-den?tab=build" className="mt-2 inline-block text-xs font-semibold underline">
-              Register as founder →
-            </Link>
-          )}
-          {promo.founderRegistered && !promo.eligible && (
-            <Link
-              href="/settings/builder#connect-ai"
-              className="mt-2 inline-flex rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10"
-            >
-              Connect your own API keys →
-            </Link>
-          )}
-        </div>
-      )}
-
       <div>
         <p className="text-sm text-zinc-400">
           All integrations in one place — deploy stack, OAuth, GitHub, and AI brain providers. Each card includes setup

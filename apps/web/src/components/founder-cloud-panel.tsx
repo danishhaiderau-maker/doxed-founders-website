@@ -71,7 +71,7 @@ export function FounderCloudPanel({ accessToken, showImport }: Props) {
           href="/downloads#founder-node"
           className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-300 hover:text-white"
         >
-          Download Founder Stack
+          Download Founder IDE
         </Link>
         <code className="rounded bg-zinc-900 px-2 py-1 text-[10px] text-zinc-500">
           node scripts/founder-local.mjs start

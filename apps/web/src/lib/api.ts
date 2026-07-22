@@ -2025,7 +2025,7 @@ export function markAllNotificationsRead(token: string) {
   return apiFetch('/notifications/read-all', { method: 'PATCH' }, token);
 }
 
-// ─── Founder Den / Public Founder Presence ───────────────────────────────────
+// ─── Build workspace / Public Founder Presence ───────────────────────────────
 
 export interface FounderVideo {
   id: string;
@@ -3079,7 +3079,7 @@ export interface FounderOnboardingStatus {
 }
 
 export function fetchPublicFounderPromo() {
-  return apiFetch<{ enabled: boolean; message: string | null; windowDays?: number }>(
+  return apiFetch<{ enabled: boolean; message: string | null; windowDays: number; tokenCap: number }>(
     '/founder-os/promo/public',
   );
 }
@@ -5949,6 +5949,25 @@ export function fetchFounderNodeVaultRelays(token: string) {
 
 export function fetchFounderNodeStatus(token: string) {
   return apiFetch<{ nodes: FounderNodeStatusRow[] }>('/founder-node/status', undefined, token);
+}
+
+export function authorizeFounderNodeDevice(
+  token: string,
+  input: { userCode: string; label?: string; platform?: string },
+) {
+  return apiFetch<{ authorized: true; founderId: string; nodeId: string }>(
+    '/founder-node/device-code/authorize',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function denyFounderNodeDevice(token: string, userCode: string) {
+  return apiFetch<{ denied: true }>(
+    '/founder-node/device-code/deny',
+    { method: 'POST', body: JSON.stringify({ userCode }) },
+    token,
+  );
 }
 
 export function revokeFounderNode(nodeId: string, token: string) {

@@ -1,5 +1,7 @@
 # Founder OS — Billing & Revenue Model
 
+> **Direction notice (2026-07-21):** The “no subscription / no BYOK” assumptions in this draft are under revision. The latest founder direction adds a proposed USD 35 Founder Pro plan and a persistent multi-provider key vault. Do not implement new billing or provider restrictions from this file without reconciling [`FOUNDER-PRODUCT-DIRECTION-2026-07.md`](./FOUNDER-PRODUCT-DIRECTION-2026-07.md).
+
 | Field | Value |
 |-------|-------|
 | **Status** | DRAFT — pending founder review |

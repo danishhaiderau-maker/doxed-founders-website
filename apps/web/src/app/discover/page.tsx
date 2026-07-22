@@ -73,8 +73,8 @@ export default function DiscoverPage() {
         <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
           <div>
             {loading && !data ? (
-              <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/50">
-                <div className="flex gap-3">
+              <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950/50">
+                <div className="flex flex-wrap justify-center gap-3 px-4">
                   {[96, 72, 120, 56].map((size, i) => (
                     <span
                       key={size}

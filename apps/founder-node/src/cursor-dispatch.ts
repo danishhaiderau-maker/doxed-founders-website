@@ -5,6 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import {
+  generateNonce,
+  type IpcMessage,
+} from 'founder-ide-extension/ipc';
+import {
   findComposerWithRecentUserText,
   focusComposerInWorkspaceState,
   getComposerWorkspaceFocusState,
@@ -13,6 +17,7 @@ import {
 } from './cursor-discovery';
 import { readNodeConfig } from './vault-manager';
 import { throwIfFounderNodeAuthResponse } from './sync-client';
+import type { IdeIpcClient } from './ide-ipc-client';
 
 /**
  * Cursor IDE message relay.
@@ -134,6 +139,229 @@ export async function completeDispatch(
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Dispatch complete failed (${res.status}): ${text}`);
+  }
+}
+
+function isFounderIdeProvider(provider: string): boolean {
+  return ['founder-ide', 'founder_ide', 'void', 'vscode'].includes(provider.toLowerCase());
+}
+
+function ipcEnvelope() {
+  return { nonce: generateNonce(), ts: new Date().toISOString() };
+}
+
+function buildFounderIdeMessage(dispatch: PendingDispatch): IpcMessage {
+  let action: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(dispatch.prompt) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const root = parsed as Record<string, unknown>;
+      action =
+        root.founderIdeAction &&
+        typeof root.founderIdeAction === 'object' &&
+        !Array.isArray(root.founderIdeAction)
+          ? (root.founderIdeAction as Record<string, unknown>)
+          : root;
+    }
+  } catch {
+    // Plain user prompts are the normal path.
+  }
+
+  if (action?.type === 'workspaceReadRequest') {
+    return {
+      type: 'workspaceReadRequest',
+      requestId: dispatch.id,
+      ...(typeof action.path === 'string' ? { path: action.path } : {}),
+      ...(typeof action.maxEntries === 'number'
+        ? { maxEntries: action.maxEntries }
+        : {}),
+      ...ipcEnvelope(),
+    };
+  }
+
+  if (
+    action?.type === 'proposedEdit' &&
+    typeof action.path === 'string' &&
+    action.edit &&
+    typeof action.edit === 'object' &&
+    !Array.isArray(action.edit)
+  ) {
+    const edit = action.edit as Record<string, unknown>;
+    const kind = edit.kind;
+    if (
+      (kind === 'create' || kind === 'overwrite' || kind === 'append' || kind === 'patch') &&
+      typeof edit.content === 'string'
+    ) {
+      return {
+        type: 'proposedEdit',
+        requestId: dispatch.id,
+        path: action.path,
+        diff: typeof action.diff === 'string' ? action.diff : '',
+        creates: action.creates === true || kind === 'create',
+        edit: {
+          kind,
+          content: edit.content,
+          ...(typeof edit.anchor === 'string' ? { anchor: edit.anchor } : {}),
+        },
+        ...ipcEnvelope(),
+      };
+    }
+  }
+
+  if (action?.type === 'commandRequest' && typeof action.command === 'string') {
+    const risk =
+      action.risk === 'readonly' || action.risk === 'destructive'
+        ? action.risk
+        : 'mutation';
+    return {
+      type: 'commandRequest',
+      requestId: dispatch.id,
+      command: action.command,
+      ...(typeof action.cwd === 'string' ? { cwd: action.cwd } : {}),
+      risk,
+      ...(typeof action.timeoutMs === 'number' ? { timeoutMs: action.timeoutMs } : {}),
+      ...ipcEnvelope(),
+    };
+  }
+
+  return {
+    type: 'chatPrompt',
+    requestId: dispatch.id,
+    sessionId: dispatch.sessionId,
+    prompt: dispatch.prompt,
+    ...ipcEnvelope(),
+  };
+}
+
+function waitForFounderIdeResult(
+  client: IdeIpcClient,
+  request: IpcMessage,
+): Promise<string> {
+  if (
+    request.type !== 'chatPrompt' &&
+    request.type !== 'workspaceReadRequest' &&
+    request.type !== 'proposedEdit' &&
+    request.type !== 'commandRequest'
+  ) {
+    return Promise.reject(new Error(`Unsupported Founder IDE action: ${request.type}`));
+  }
+  const requestId = request.requestId;
+
+  return new Promise((resolve, reject) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const timeoutMs =
+      request.type === 'commandRequest'
+        ? Math.max(30_000, Math.min((request.timeoutMs ?? 30_000) + 30_000, 330_000))
+        : request.type === 'workspaceReadRequest'
+          ? 30_000
+          : request.type === 'chatPrompt'
+            ? 30_000
+            : 10 * 60_000;
+    const cleanup = () => {
+      clearTimeout(timer);
+      client.off('message', onMessage);
+    };
+    const finish = (result: string) => {
+      cleanup();
+      resolve(result);
+    };
+    const onMessage = (message: IpcMessage) => {
+      if (!('requestId' in message) || message.requestId !== requestId) return;
+      if (request.type === 'chatPrompt' && message.type === 'chatPromptResult') {
+        finish(
+          JSON.stringify({
+            kind: 'chat',
+            delivered: message.delivered,
+            ...(message.error ? { error: message.error } : {}),
+          }),
+        );
+        return;
+      }
+      if (
+        request.type === 'workspaceReadRequest' &&
+        message.type === 'workspaceReadResult'
+      ) {
+        finish(
+          JSON.stringify({
+            kind: 'workspace',
+            nodes: message.nodes,
+            ...(message.error ? { error: message.error } : {}),
+          }),
+        );
+        return;
+      }
+      if (request.type === 'proposedEdit' && message.type === 'editReviewResult') {
+        finish(
+          JSON.stringify({
+            kind: 'edit',
+            approved: message.approved,
+            ...(message.reason ? { reason: message.reason } : {}),
+          }),
+        );
+        return;
+      }
+      if (request.type !== 'commandRequest') return;
+      if (message.type === 'commandReviewResult' && !message.approved) {
+        finish(
+          JSON.stringify({
+            kind: 'command',
+            approved: false,
+            exitCode: 126,
+            stdout: '',
+            stderr: message.reason ?? 'user_denied',
+          }),
+        );
+        return;
+      }
+      if (message.type === 'commandOutput') {
+        (message.stream === 'stderr' ? stderr : stdout).push(message.chunk);
+        if (message.exitCode !== undefined && message.exitCode !== null) {
+          finish(
+            JSON.stringify({
+              kind: 'command',
+              approved: true,
+              exitCode: message.exitCode,
+              stdout: stdout.join('').slice(-12_000),
+              stderr: stderr.join('').slice(-8_000),
+            }),
+          );
+        }
+      }
+    };
+    const timer = setTimeout(() => {
+      client.send({
+        type: 'cancel',
+        requestId,
+        reason: 'remote_dispatch_timeout',
+        ...ipcEnvelope(),
+      });
+      cleanup();
+      reject(new Error('Founder IDE action timed out waiting for local review'));
+    }, timeoutMs);
+    client.on('message', onMessage);
+  });
+}
+
+async function executeFounderIdeDispatch(
+  apiBaseUrl: string,
+  nodeId: string,
+  nodeToken: string,
+  client: IdeIpcClient,
+  dispatch: PendingDispatch,
+): Promise<void> {
+  try {
+    const request = buildFounderIdeMessage(dispatch);
+    if (!client.send(request)) {
+      throw new Error('Founder IDE authenticated pipe is unavailable');
+    }
+    const result = await waitForFounderIdeResult(client, request);
+    await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, { result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, {
+      error: message,
+    }).catch(() => undefined);
   }
 }
 
@@ -809,7 +1037,10 @@ export async function executeCursorDispatch(
  * Pull pending dispatches, claim each atomically, and execute at most one per
  * cycle so overlapping sync loops cannot paste the same prompt multiple times.
  */
-export async function processPendingDispatches(vaultRoot: string): Promise<void> {
+export async function processPendingDispatches(
+  vaultRoot: string,
+  founderIdeClient?: IdeIpcClient | null,
+): Promise<void> {
   if (dispatchCycleInFlight) return;
   const config = readNodeConfig(vaultRoot);
   if (!config) return;
@@ -824,8 +1055,15 @@ export async function processPendingDispatches(vaultRoot: string): Promise<void>
       return;
     }
 
-    for (let i = 0; i < Math.min(dispatches.length, MAX_DISPATCHES_PER_CYCLE); i += 1) {
-      const candidate = dispatches[i]!;
+    let processed = 0;
+    for (const candidate of dispatches) {
+      if (processed >= MAX_DISPATCHES_PER_CYCLE) break;
+      if (
+        isFounderIdeProvider(candidate.ideProvider) &&
+        !founderIdeClient?.isHandshakeActive()
+      ) {
+        continue;
+      }
       const lastAt = lastDispatchBySession.get(candidate.sessionId) ?? 0;
       if (Date.now() - lastAt < SESSION_DISPATCH_COOLDOWN_MS) {
         continue;
@@ -837,6 +1075,7 @@ export async function processPendingDispatches(vaultRoot: string): Promise<void>
         await completeDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, candidate.id, {
           result: 'deduplicated (identical prompt recently dispatched)',
         }).catch(() => undefined);
+        processed += 1;
         continue;
       }
 
@@ -848,8 +1087,19 @@ export async function processPendingDispatches(vaultRoot: string): Promise<void>
       );
       if (!claimed) continue;
 
+      processed += 1;
       lastDispatchBySession.set(claimed.sessionId, Date.now());
-      await executeCursorDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, claimed);
+      if (isFounderIdeProvider(claimed.ideProvider) && founderIdeClient) {
+        await executeFounderIdeDispatch(
+          config.apiBaseUrl,
+          config.nodeId,
+          config.nodeToken,
+          founderIdeClient,
+          claimed,
+        );
+      } else {
+        await executeCursorDispatch(config.apiBaseUrl, config.nodeId, config.nodeToken, claimed);
+      }
     }
   } finally {
     dispatchCycleInFlight = false;

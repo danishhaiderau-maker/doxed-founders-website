@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { Activity, BrainCircuit, Landmark, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
@@ -21,16 +22,14 @@ import {
   updateGlobalShareFooter,
 } from '@/lib/api';
 
-const SECTIONS = [
-  { id: 'ai-keys', label: 'AI Keys' },
-  { id: 'builders', label: 'Builders' },
-  { id: 'research', label: 'Research Dashboard' },
-  { id: 'social', label: 'Social Messaging' },
-  { id: 'platform', label: 'Platform & Treasury' },
-  { id: 'moderation', label: 'Moderation' },
+const SECTIONS: { id: SectionId; label: string; detail: string; icon: LucideIcon }[] = [
+  { id: 'operations', label: 'Operations', detail: 'Health, agents, incidents, communications', icon: Activity },
+  { id: 'ai-usage', label: 'AI & Usage', detail: 'Founder Brain, builders, budgets', icon: BrainCircuit },
+  { id: 'treasury-launch', label: 'Treasury & Launch', detail: 'Authorities, policy, fees, settlement', icon: Landmark },
+  { id: 'trust-safety', label: 'Trust & Safety', detail: 'Listings, moderation, investigations', icon: ShieldCheck },
 ] as const;
 
-type SectionId = (typeof SECTIONS)[number]['id'];
+type SectionId = 'operations' | 'ai-usage' | 'treasury-launch' | 'trust-safety';
 
 export default function AdminControlPage() {
   const { data: session, status } = useSession();
@@ -41,7 +40,7 @@ export default function AdminControlPage() {
   const isAdmin = sessionAdmin || accountAdmin;
   const { reload: reloadShareFooter } = useShareFooterActions();
 
-  const [section, setSection] = useState<SectionId>('platform');
+  const [section, setSection] = useState<SectionId>('operations');
   const [overview, setOverview] = useState<AdminControlOverview | null>(null);
   const [footer, setFooter] = useState(PLATFORM_X_SHARE_FOOTER);
   const [msg, setMsg] = useState<string | null>(null);
@@ -161,7 +160,7 @@ export default function AdminControlPage() {
   }, [overview?.showcase?.agentShowcaseDefaultSettings, overview?.showcase?.subscriberMaxMarginUsd]);
 
   useEffect(() => {
-    if (section !== 'research' || !researchAutoRefresh || !token) return;
+    if (section !== 'operations' || !researchAutoRefresh || !token) return;
     const id = setInterval(() => void refreshResearch(), 5000);
     return () => clearInterval(id);
   }, [section, researchAutoRefresh, token, refreshResearch]);
@@ -193,28 +192,35 @@ export default function AdminControlPage() {
         </div>
       </header>
 
-      <main className={`mx-auto flex flex-col gap-6 px-6 py-8 lg:flex-row ${section === 'research' ? 'max-w-[90rem]' : 'max-w-5xl'}`}>
-        <aside className="lg:w-48 lg:shrink-0">
+      <main className={`mx-auto flex flex-col gap-6 px-6 py-8 lg:flex-row ${section === 'operations' ? 'max-w-[90rem]' : 'max-w-6xl'}`}>
+        <aside className="lg:w-60 lg:shrink-0">
           <nav className="flex flex-wrap gap-1 lg:flex-col">
             {SECTIONS.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => setSection(item.id)}
-                className={`rounded-lg px-3 py-2 text-left text-sm transition ${
+                className={`rounded-lg px-3 py-2.5 text-left transition ${
                   section === item.id
-                    ? 'bg-amber-500/20 font-semibold text-amber-100 ring-1 ring-amber-500/40'
+                    ? 'bg-blue-500/15 text-blue-50 ring-1 ring-blue-400/35'
                     : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
                 }`}
               >
-                {item.label}
+                <span className="flex items-start gap-2.5">
+                  <item.icon className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.8} />
+                  <span>
+                    <span className="block text-sm font-semibold">{item.label}</span>
+                    <span className="mt-0.5 block text-xs font-normal leading-4 text-zinc-500">{item.detail}</span>
+                  </span>
+                </span>
               </button>
             ))}
           </nav>
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
-          <div className="rounded-xl border border-amber-500/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100">
+          {section === 'operations' && <>
+          <div className="rounded-lg border border-amber-500/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100">
             <p className="font-semibold text-amber-50">Neon database compute</p>
             <p className="mt-1 text-xs text-amber-200/90">
               If Neon emailed that your monthly CU-hours are exhausted, admin panels and DB writes may fail until you
@@ -232,11 +238,12 @@ export default function AdminControlPage() {
             </p>
           </div>
 
-          <div className="rounded-xl border border-violet-500/40 bg-violet-950/20 px-4 py-3 text-sm text-violet-100">
-            <Link href="/agent-hub/conservative-btc" className="font-semibold text-violet-50 hover:underline">
+          <div className="rounded-lg border border-blue-500/30 bg-blue-950/15 px-4 py-3 text-sm text-blue-100">
+            <Link href="/agent-hub/conservative-btc" className="font-semibold text-blue-50 hover:underline">
               Showcase + live copy control → Agent Hub
             </Link>
           </div>
+          </>}
 
           {msg && (
             <p className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-sm text-emerald-200">
@@ -249,9 +256,9 @@ export default function AdminControlPage() {
             </p>
           )}
 
-          {section === 'research' && (
+          {section === 'operations' && (
             <section className="space-y-6">
-              <div className="rounded-xl border border-red-500/30 bg-red-950/15 p-5">
+              <div className="rounded-lg border border-red-500/30 bg-red-950/15 p-5">
                 <h2 className="text-lg font-semibold text-red-100">Research dashboard (admin only)</h2>
                 <p className="mt-1 text-sm text-zinc-400">
                   Full pipeline state, AI inputs, and debug data. Never exposed on public agent pages.
@@ -301,15 +308,15 @@ export default function AdminControlPage() {
                   onAutoRefreshChange={setResearchAutoRefresh}
                 />
               ) : (
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-8 text-center text-sm text-zinc-500">
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-8 text-center text-sm text-zinc-500">
                   Bot not connected — configure TRADING_AGENT_BOT_URL and ensure Railway runtime is online.
                 </div>
               )}
             </section>
           )}
 
-          {section === 'social' && (
-            <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+          {section === 'operations' && (
+            <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <h2 className="text-lg font-semibold">Social Messaging</h2>
               <p className="mt-1 text-sm text-zinc-500">
                 One footer appended to every Share on X button — portfolio, agents, listings, feed, trust center.
@@ -341,10 +348,9 @@ export default function AdminControlPage() {
             </section>
           )}
 
-          {section === 'platform' && (
+          {section === 'treasury-launch' && (
             <section className="space-y-4">
-              {token && <AdminFounderPromoPanel accessToken={token} hideKeyCards />}
-              <form onSubmit={handleSaveDefaultSettings} className="rounded-xl border border-amber-500/25 bg-amber-950/10 p-6">
+              <form onSubmit={handleSaveDefaultSettings} className="rounded-lg border border-amber-500/25 bg-amber-950/10 p-6">
                 <h2 className="font-semibold text-amber-200">Hire rules & public message</h2>
                 <p className="mt-1 text-sm text-zinc-500">
                   Max margin per trade is enforced server-side on every Bitfinex copy order. Users cannot override
@@ -380,7 +386,7 @@ export default function AdminControlPage() {
                   {busy === 'default-settings' ? 'Saving…' : 'Save hire rules'}
                 </button>
               </form>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Treasury & top-ups</h2>
                 <p className="mt-1 text-sm text-zinc-500">
                   Connect Phantom under Account → Security first, then save that address as the Solana treasury.
@@ -397,7 +403,7 @@ export default function AdminControlPage() {
                   </Link>
                 </div>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Demo Mode (E2E testing)</h2>
                 <p className="mt-1 text-sm text-zinc-500">
                   Seed synthetic users, projects, Raise Room data, and run API smoke checks — admin only.
@@ -406,13 +412,13 @@ export default function AdminControlPage() {
                   Open Demo Control Panel →
                 </Link>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Listing inbox</h2>
                 <Link href="/admin/applications" className="mt-2 inline-block text-sm text-violet-400 hover:underline">
                   Review applications →
                 </Link>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Platform announcements</h2>
                 <Link href="/feed?view=announcements" className="mt-2 inline-block text-sm text-violet-400 hover:underline">
                   Town Hall → Feed announcements →
@@ -421,8 +427,8 @@ export default function AdminControlPage() {
             </section>
           )}
 
-          {section === 'moderation' && (
-            <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+          {section === 'trust-safety' && (
+            <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <h2 className="font-semibold">Moderation</h2>
               <p className="mt-2 text-sm text-zinc-500">
                 Trust Center investigations, listing decisions, and delist requests.
@@ -432,14 +438,17 @@ export default function AdminControlPage() {
               </Link>
             </section>
           )}
-          {section === 'ai-keys' && token && (
-            <AdminAiKeysPanel
-              token={token}
-              overview={overview}
-              onOverviewChange={setOverview}
-            />
+          {section === 'ai-usage' && token && (
+            <section className="space-y-4">
+              <AdminFounderPromoPanel accessToken={token} hideKeyCards />
+              <AdminAiKeysPanel
+                token={token}
+                overview={overview}
+                onOverviewChange={setOverview}
+              />
+            </section>
           )}
-          {section === 'builders' && token && <AdminBuilderBreakdownPanel accessToken={token} />}
+          {section === 'ai-usage' && token && <AdminBuilderBreakdownPanel accessToken={token} />}
         </div>
       </main>
     </div>

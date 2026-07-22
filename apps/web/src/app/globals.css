@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #0a0a0f;
-  --color-foreground: #f4f4f5;
-  --color-muted: #71717a;
-  --color-border: #27272a;
-  --color-card: #111118;
-  --color-accent: #6366f1;
-  --color-accent-hover: #818cf8;
-  --color-success: #22c55e;
-  --color-danger: #ef4444;
+  --color-background: #0b0c0e;
+  --color-foreground: #f5f5f7;
+  --color-muted: #8e8e93;
+  --color-border: #2c2c2e;
+  --color-card: #161618;
+  --color-accent: #0a84ff;
+  --color-accent-hover: #409cff;
+  --color-success: #30d158;
+  --color-danger: #ff453a;
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -26,7 +26,27 @@ body {
   background: var(--color-background);
   color: var(--color-foreground);
   font-family: var(--font-sans);
+  letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  transition-duration: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @keyframes flash-in {

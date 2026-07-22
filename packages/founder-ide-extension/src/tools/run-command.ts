@@ -1,18 +1,13 @@
 /**
- * `founder.runCommand` — LanguageModelTool.
+ * `founder-run-command` — LanguageModelTool.
  *
- * Creates a terminal, sends the command text, and captures output by writing
- * stdout+stderr to a temp file and reading it back — the documented workaround
- * for the limited terminal-read API (see design report §4.3 / §8.4).
- *
- * The command is shown to the user in a real terminal so they can see what ran.
- * We append `> tmpfile 2>&1` to capture combined output, then read the temp file
- * and return it to the model as a `LanguageModelToolResult`.
+ * Runs one reviewed command at a time and streams stdout/stderr into a visible
+ * output channel while returning bounded output to the model.
  */
 import * as vscode from 'vscode';
-import * as os from 'node:os';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 export interface RunCommandInput {
   command: string;
@@ -22,23 +17,42 @@ export interface RunCommandInput {
   timeoutMs?: number;
 }
 
-function isWindows(): boolean {
-  return /^win/i.test(os.platform());
-}
+let commandOutput: vscode.OutputChannel | null = null;
+let activeCommand: ChildProcess | null = null;
 
-function makeTempOutputPath(): string {
-  const dir = os.tmpdir();
-  const name = `founder-os-cmd-${Date.now()}-${Math.round(Math.random() * 1e6)}.log`;
-  return path.join(dir, name);
-}
-
-function resolveCwd(cwd: string | undefined): string | undefined {
-  if (!cwd) {
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  }
-  if (path.isAbsolute(cwd)) return cwd;
+function resolveCwd(cwd: string | undefined): string | null {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  return root ? path.join(root, cwd) : cwd;
+  if (!root) return null;
+  const candidate = !cwd
+    ? path.resolve(root)
+    : path.isAbsolute(cwd)
+      ? path.resolve(cwd)
+      : path.resolve(root, cwd);
+  const relative = path.relative(path.resolve(root), candidate);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  try {
+    const realRoot = fs.realpathSync(root);
+    const realCandidate = fs.realpathSync(candidate);
+    const realRelative = path.relative(realRoot, realCandidate);
+    return realRelative.startsWith('..') || path.isAbsolute(realRelative)
+      ? null
+      : realCandidate;
+  } catch {
+    return null;
+  }
+}
+
+function terminateCommand(child: ChildProcess): void {
+  if (process.platform === 'win32' && child.pid) {
+    const killer = spawn(
+      'taskkill',
+      ['/pid', String(child.pid), '/t', '/f'],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+    killer.unref();
+    return;
+  }
+  child.kill('SIGTERM');
 }
 
 export const runCommandTool: vscode.LanguageModelTool<RunCommandInput> = {
@@ -67,80 +81,86 @@ export const runCommandTool: vscode.LanguageModelTool<RunCommandInput> = {
       ]);
     }
 
-    const tmp = makeTempOutputPath();
     const cwd = resolveCwd(input.cwd);
+    if (!cwd) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          'Error: command working directory must be inside the open workspace.',
+        ),
+      ]);
+    }
+    if (activeCommand) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          'Error: another Founder OS command is already running.',
+        ),
+      ]);
+    }
     const timeoutMs = Math.max(1000, Math.min(300_000, input.timeoutMs ?? 30_000));
+    commandOutput ??= vscode.window.createOutputChannel('Founder OS');
+    commandOutput.show(true);
+    commandOutput.appendLine(`\n> ${input.command}`);
+    commandOutput.appendLine(`  cwd: ${cwd}`);
 
-    // Wrap the user command so combined stdout+stderr lands in the temp file,
-    // and append a unique sentinel so we know when the command finished.
-    const sentinel = `__FOUNDER_OS_DONE_${Date.now()}__`;
-    const redirect = isWindows()
-      ? `> "${tmp}" 2>&1` // Windows cmd supports `> file 2>&1`
-      : `> "${tmp}" 2>&1`;
-    const doneMarker = isWindows()
-      ? `echo ${sentinel} >> "${tmp}"`
-      : `echo ${sentinel} >> "${tmp}"`;
-    const fullCommand = `${input.command} ${redirect} ; ${doneMarker}`;
-
-    const terminal = vscode.window.createTerminal({
-      name: 'Founder OS',
-      cwd,
-    });
-    terminal.show(true);
-    terminal.sendText(fullCommand, true);
-
-    // Poll the temp file for the sentinel up to timeoutMs.
-    const start = Date.now();
-    let output = '';
-    let sawSentinel = false;
-    while (Date.now() - start < timeoutMs) {
+    const output: string[] = [];
+    const append = (text: string) => {
+      output.push(text);
+      commandOutput?.append(text);
+    };
+    const completion = await new Promise<{ exitCode: number; suffix?: string }>((resolve) => {
+      const child = spawn(input.command, {
+        cwd,
+        shell: true,
+        windowsHide: true,
+        env: process.env,
+      });
+      activeCommand = child;
+      let settled = false;
+      let timeout: NodeJS.Timeout | undefined;
+      let cancellation: vscode.Disposable | undefined;
+      const finish = (value: { exitCode: number; suffix?: string }) => {
+        if (settled) return;
+        settled = true;
+        if (activeCommand === child) activeCommand = null;
+        if (timeout) clearTimeout(timeout);
+        cancellation?.dispose();
+        resolve(value);
+      };
+      child.stdout?.on('data', (data: Buffer) => append(data.toString('utf8')));
+      child.stderr?.on('data', (data: Buffer) => append(data.toString('utf8')));
+      child.on('close', (code) => finish({ exitCode: code ?? 1 }));
+      child.on('error', (error) =>
+        finish({ exitCode: 1, suffix: `\n[Founder OS: ${error.message}]` }),
+      );
+      timeout = setTimeout(() => {
+        terminateCommand(child);
+        finish({
+          exitCode: 124,
+          suffix: `\n[Founder OS: command timed out after ${timeoutMs}ms]`,
+        });
+      }, timeoutMs);
+      cancellation = token.onCancellationRequested(() => {
+        terminateCommand(child);
+        finish({ exitCode: 130, suffix: '\n[Founder OS: command cancelled]' });
+      });
       if (token.isCancellationRequested) {
-        break;
+        terminateCommand(child);
+        finish({ exitCode: 130, suffix: '\n[Founder OS: command cancelled]' });
       }
-      await sleep(300);
-      try {
-        if (fs.existsSync(tmp)) {
-          const raw = fs.readFileSync(tmp, 'utf8');
-          if (raw.includes(sentinel)) {
-            sawSentinel = true;
-            // Strip the sentinel line.
-            output = raw.replace(new RegExp(`\\s*${sentinel}\\s*$`), '');
-            break;
-          }
-        }
-      } catch {
-        // file may be mid-write; keep polling.
-      }
-    }
-
-    if (!sawSentinel && !token.isCancellationRequested) {
-      // Timed out — read whatever is there and flag it.
-      try {
-        output = fs.existsSync(tmp) ? fs.readFileSync(tmp, 'utf8') : '';
-      } catch {
-        output = '';
-      }
-      output += `\n[Founder OS: command did not finish within ${timeoutMs}ms]`;
-    } else if (token.isCancellationRequested) {
-      output += `\n[Founder OS: command cancelled by user]`;
-    }
+    });
+    let body = `${output.join('')}${completion.suffix ?? ''}`;
+    body += `\n[exit code ${completion.exitCode}]`;
+    commandOutput.appendLine(`\n[exit code ${completion.exitCode}]`);
 
     // Truncate huge output so we don't blow the model's context window.
     const MAX = 20_000;
-    let body = output;
     if (body.length > MAX) {
-      body = body.slice(0, MAX) + `\n…[truncated, ${output.length - MAX} more chars]`;
+      body = body.slice(-MAX);
+      body = `…[truncated to last ${MAX} chars]\n${body}`;
     }
-
-    // Best-effort cleanup of the temp file.
-    fs.promises.unlink(tmp).catch(() => undefined);
 
     return new vscode.LanguageModelToolResult([
       new vscode.LanguageModelTextPart(body || '(no output)'),
     ]);
   },
 };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

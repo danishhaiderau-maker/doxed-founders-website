@@ -13,6 +13,16 @@ build/
 apps/founder-node/release/
 apps/founder-node/release-*/
 apps/founder-node/app.asar
+
+# Founder IDE installer output (multi-hundred-MB .exe artifacts from local/CI builds).
+# The top-level `dist/` rule above does NOT match nested paths in git's pattern language,
+# so installer/dist/ needs an explicit rule to prevent accidental commits.
+packages/founder-ide/installer/dist/
+packages/founder-ide/installer/final/
+packages/founder-ide/installer/staging/
+packages/founder-ide/dist/
+packages/founder-ide/staging/*.exe
+packages/founder-ide/staging/*.sha256
 .tools/
 apps/mobile-android/android/.gradle/
 apps/mobile-android/android/app/build/
@@ -63,6 +73,7 @@ prisma/*.db-journal
 .edge-analysis/
 
 # Local logs / agent artifacts (never publish)
+artifacts/
 *.log
 agent-restart-report*.txt
 restart-report.txt
@@ -338,6 +349,7 @@ services/btc-conservative-agent/pathway_lane_specs.json
 /PROJECT_CHECKLIST.md
 
 /founder-ide-window-*.png
+/staging/
 *.pkl
 /services/*.pkl
 .home-analyzer-user-stopped

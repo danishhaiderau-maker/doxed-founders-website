@@ -78,8 +78,8 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
 
   if (!settings && !err) {
     return (
-      <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 px-4 py-3 text-sm text-amber-100/80">
-        Loading Founder AI promo settings…
+      <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 px-4 py-3 text-sm text-amber-100/80">
+        Loading Founder Free controls...
       </div>
     );
   }
@@ -89,15 +89,14 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
   const keysMissing = settings.enabled && !settings.credentialsConfigured;
 
   return (
-    <div className="rounded-xl border border-amber-500/40 bg-gradient-to-br from-amber-950/30 to-zinc-950/50 p-5">
+    <div className="rounded-lg border border-amber-500/40 bg-amber-950/20 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Admin only</p>
-          <h3 className="mt-1 text-lg font-semibold text-white">Founder AI promo</h3>
+          <h3 className="mt-1 text-lg font-semibold text-white">Founder Free controls</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Offer all signed-up users 3 months of platform-billed AI (GLM 5.2, Gemini, DeepSeek — cheap &amp; best). Timer
-            starts at signup. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
-            tokens — users must connect their own keys to continue.
+            Founders see a simple quota percentage. Admins keep the exact metering cap, activation window, provider
+            availability, and cost controls here. Personal provider keys and local models remain separate.
           </p>
         </div>
         <button
@@ -149,7 +148,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
       </div>
 
       <label className="mt-3 block text-xs">
-        <span className="text-zinc-500">Flash message (signup / connected accounts)</span>
+        <span className="text-zinc-500">Internal eligibility message</span>
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -158,7 +157,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           }}
           rows={2}
           className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
-          placeholder="Join now — 1 month free GLM 5.2, Gemini & DeepSeek on Founder OS"
+          placeholder="Founder Free is available. Bring your own provider at any time."
         />
       </label>
 
@@ -175,7 +174,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           <p className="mt-2 text-[11px] text-zinc-500">
             These keys are managed on the consolidated{' '}
             <span className="text-zinc-300">Admin → AI Keys</span> panel. Promo
-            eligibility, token cap, free window, and the flash message below stay
+            eligibility, token cap, free window, and the internal message stay
             here.
           </p>
         ) : (

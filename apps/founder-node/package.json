@@ -14,11 +14,13 @@
     "pack:win": "electron-builder --win",
     "pack:mac": "electron-builder --mac",
     "pack:linux": "electron-builder --linux",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
   },
   "dependencies": {
     "@dcf/founder-vault": "*",
-    "@dcf/utils": "*"
+    "@dcf/utils": "*",
+    "founder-ide-extension": "*"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
@@ -37,7 +39,9 @@
     "files": [
       "dist/**/*",
       "package.json",
-      "node_modules/@dcf/**/*"
+      "node_modules/@dcf/**/*",
+      "node_modules/founder-ide-extension/out/ipc/protocol.js",
+      "node_modules/founder-ide-extension/package.json"
     ],
     "extraResources": [
       {
@@ -55,6 +59,21 @@
       {
         "from": "dist/pair-preload.js",
         "to": "pair/pair-preload.js"
+      },
+      {
+        "from": "companion-assets",
+        "to": "companion",
+        "filter": [
+          "companion.html",
+          "dragon-idle.png",
+          "dragon-working.png",
+          "dragon-success-v3.png",
+          "dragon-attention.png"
+        ]
+      },
+      {
+        "from": "dist/companion-preload.js",
+        "to": "companion/companion-preload.js"
       }
     ],
     "asar": true,
@@ -72,12 +91,7 @@
         }
       ],
       "icon": "build/icon.ico",
-      "signAndEditExecutable": false,
-      "signingHashAlgorithms": [
-        "sha256"
-      ],
-      "rfc3161TimeStampServer": "http://timestamp.digicert.com",
-      "sign": "build/sign.js"
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": [

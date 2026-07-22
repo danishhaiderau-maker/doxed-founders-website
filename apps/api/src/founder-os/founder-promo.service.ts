@@ -2,6 +2,10 @@ import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nes
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuilderScoreService } from './builder-score.service';
+import {
+  FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
+  FOUNDER_FREE_MANAGED_TOKEN_CAP,
+} from './founder-free.config';
 
 export type FounderPromoStatus = {
   enabled: boolean;
@@ -18,12 +22,7 @@ export type FounderPromoStatus = {
   providers: string[];
 };
 
-/**
- * Promo LLM providers — cost-optimized for onboarding new founders.
- * GLM 5.2 (ZhipuAI) is the default: cheapest $/token with strong coding ability.
- * DeepSeek + Gemini kept as cheap fallbacks. Cursor/OpenAI/Anthropic removed
- * from promo to protect margins — founders can still BYOK those in Settings.
- */
+/** Platform-managed providers. Production routing only enables health-verified models. */
 export type PromoCredentialProvider = 'glm' | 'gemini' | 'deepseek';
 
 export type PromoCredentialsMap = Partial<Record<PromoCredentialProvider, string>>;
@@ -56,11 +55,11 @@ export class FounderPromoService {
     const credentialsStatus = this.credentialsStatusFromRow(row?.founderPromoAiCredentialsEnc);
     return {
       enabled: row?.founderPromoAiEnabled ?? false,
-      tokenCap: row?.founderPromoTokenCap ?? 30_000_000,
-      windowDays: row?.founderPromoWindowDays ?? 90,
+      tokenCap: row?.founderPromoTokenCap ?? FOUNDER_FREE_MANAGED_TOKEN_CAP,
+      windowDays: row?.founderPromoWindowDays ?? FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
       message:
         row?.founderPromoMessage?.trim() ||
-        'Sign up — get 3 months free GLM 5.2, Gemini & DeepSeek on Founder OS. No credit card needed.',
+        'Founder Free is available. Connect your own provider or local model at any time.',
       credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
@@ -200,7 +199,7 @@ export class FounderPromoService {
       const upgradeHint =
         tier === 'VERIFIED_BUILDER'
           ? 'Daily builder token cap reached. Connect your own API key to continue.'
-          : 'Daily parasite-tier token cap reached. Connect GitHub + Cursor + push a commit to upgrade to Verified Builder.';
+          : 'Founder Free daily allowance reached. Connect GitHub and push a recent commit to increase your builder fair-use tier, or continue with personal or local AI.';
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
@@ -238,13 +237,16 @@ export class FounderPromoService {
   }
 
   promoEndedMessage(status: FounderPromoStatus): string {
+    if (status.enabled && status.founderRegistered && !status.exhausted) {
+      return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
+    }
     if (!status.enabled || !status.founderRegistered) {
-      return 'Connect your own API keys in Settings → Builder (Step 3) to use Founder Brain.';
+      return 'Connect personal AI in Founder Settings to use Founder AI.';
     }
     if (status.exhausted) {
-      return `You've used your free ${(status.tokenCap / 1_000_000).toFixed(0)}M token promo. Connect your own API keys in Settings → Builder (Step 3) to continue.`;
+      return 'You have used your Founder Free quota. Connect personal AI in Founder Settings to continue.';
     }
-    return `Your 3-month AI promo has ended. Connect your own API keys in Settings → Builder (Step 3) to keep building.`;
+    return 'Your Founder Free quota has ended. Connect personal AI in Founder Settings to keep building.';
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
@@ -262,12 +264,12 @@ export class FounderPromoService {
     ]);
 
     // Free-token eligibility gate: only accounts with a verified X/Twitter
-    // connection can draw from the 30M-token promo pool. Blocks signup-bonus
+    // connection can draw from the managed allowance. Blocks signup-bonus
     // farming and burner-account abuse. Uses the existing `xVerified` flag
     // (set on X OAuth + blue-verified flow) — no schema migration needed.
     const twitterVerified = Boolean(user?.xVerified);
     const TWITTER_GATE_MESSAGE =
-      'Free AI tokens require a verified Twitter account. Connect your X account in Settings → Connected Accounts to claim the promo.';
+      'Founder Free requires a verified X account. Connect X in Founder Settings to activate your quota.';
 
     // Promo is available to ALL signed-up users — use founder.createdAt OR user.createdAt
     const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
@@ -349,7 +351,7 @@ export class FounderPromoService {
 
     if (!settings.credentialsConfigured) {
       baseStatus.message =
-        'AI promo is enabled but platform API keys are not configured yet. Ask your admin to add keys in Connected Accounts.';
+        'Founder Free is enabled but platform AI capacity is not configured yet. Ask an admin to review AI & Usage.';
       return baseStatus;
     }
 

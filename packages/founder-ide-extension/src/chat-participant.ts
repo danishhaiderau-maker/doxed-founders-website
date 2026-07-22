@@ -1,17 +1,9 @@
 /**
  * `@Founder OS` chat participant — VS Code 1.93+ stable ChatParticipant API.
  *
- * On VS Code 1.104+ this extension also registers a `LanguageModelChatProvider`
- * so Founder OS models appear in the built-in model picker. That provider API
- * does not exist in VS Code 1.93.1, so on older builds the participant is the
- * primary surface: it streams responses straight from the Founder OS gateway
- * into the Chat view via `stream.markdown()`, using the OpenAI-compatible SSE
- * client in `gateway-client.ts`.
- *
- * The handler is intentionally tolerant: if `vscode.lm.selectChatModels` returns
- * Founder OS models (newer VS Code), it forwards through the model API; otherwise
- * it falls back to a direct gateway call. Either way the user sees streamed text
- * in the Chat box.
+ * It streams responses directly from the Founder OS gateway into the Chat view
+ * and uses VS Code's native tool confirmation flow for workspace reads,
+ * reviewed edits, and visible commands.
  */
 import * as vscode from 'vscode';
 import { findModelAlias, FOUNDER_OS_MODELS } from './models';
@@ -23,13 +15,71 @@ import { CostTracker } from './cost-tracker';
 import {
   type GatewayMessage,
   type GatewayClient,
+  type GatewayFounderOsMetadata,
+  type GatewayToolCall,
   callGateway,
+  gatewayUserMessage,
 } from './gateway-client';
+import { FOUNDER_TOOL_NAMES } from './tool-names';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
   profileManager: ProfileManager;
   costTracker: CostTracker;
+  onRequestStart?: (modelId: string) => void;
+  onMetadata?: (meta: GatewayFounderOsMetadata) => void;
+  onRequestEnd?: (
+    modelId: string,
+    ok: boolean,
+    errorMessage?: string,
+  ) => void;
+  coordination?: {
+    begin(prompt: string, provider: string): string;
+    contextFor(taskId: string): string;
+    end(taskId: string): void;
+  };
+}
+
+const MAX_TOOL_TURNS = 8;
+
+function availableFounderTools(): readonly vscode.LanguageModelToolInformation[] {
+  const tools = (vscode.lm as unknown as {
+    tools?: readonly vscode.LanguageModelToolInformation[];
+  }).tools;
+  return (tools ?? []).filter((tool) => FOUNDER_TOOL_NAMES.has(tool.name));
+}
+
+function toolResultText(result: vscode.LanguageModelToolResult): string {
+  const parts: string[] = [];
+  for (const part of result.content) {
+    if (
+      part &&
+      typeof part === 'object' &&
+      'value' in part &&
+      typeof (part as { value?: unknown }).value === 'string'
+    ) {
+      parts.push((part as { value: string }).value);
+    } else {
+      try {
+        parts.push(JSON.stringify(part));
+      } catch {
+        parts.push(String(part));
+      }
+    }
+  }
+  return parts.join('\n').slice(0, 40_000);
+}
+
+function parseToolInput(argumentsJson: string): object {
+  try {
+    const parsed = JSON.parse(argumentsJson) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as object;
+    }
+  } catch {
+    // The tool receives a visible error result below.
+  }
+  return { rawArguments: argumentsJson };
 }
 
 export function registerFounderOsChatParticipant(
@@ -72,6 +122,8 @@ async function handleParticipantRequest(
     const codeModel = findModelAlias('founder-os-code');
     if (codeModel) alias = codeModel;
   }
+  deps.onRequestStart?.(alias.id);
+  const coordinationTaskId = deps.coordination?.begin(prompt, alias.id);
 
   // Build the system prompt with Memory Engine context.
   let memoryText = '';
@@ -82,9 +134,11 @@ async function handleParticipantRequest(
     /* memory must never block chat */
   }
 
-  const systemContent = memoryText.length > 0
-    ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Be concise and direct.`
-    : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Be concise and direct.';
+  let coordinationText = coordinationTaskId
+    ? deps.coordination?.contextFor(coordinationTaskId) ?? ''
+    : '';
+  const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+  const systemContent = [memoryText, coordinationText, identity].filter(Boolean).join('\n\n');
 
   const gatewayMessages: GatewayMessage[] = [
     { role: 'system', content: systemContent },
@@ -102,36 +156,114 @@ async function handleParticipantRequest(
   let ok = false;
   let errorMessage: string | undefined;
   try {
-    await callGateway(
-      client,
-      {
-        model: alias.id,
-        messages: gatewayMessages,
-        executionProfile: alias.executionProfile,
-        founderOsMetadata: true,
-        timeoutMs,
-      },
-      {
-        onToken: (delta) => {
-          if (token.isCancellationRequested) return;
-          stream.markdown(delta);
+    const tools = availableFounderTools();
+    let completed = false;
+
+    for (let turn = 0; turn < MAX_TOOL_TURNS && !token.isCancellationRequested; turn += 1) {
+      if (turn > 0 && coordinationTaskId) {
+        const refreshed = deps.coordination?.contextFor(coordinationTaskId) ?? '';
+        if (refreshed && refreshed !== coordinationText) {
+          coordinationText = refreshed;
+          gatewayMessages.push({ role: 'system', content: refreshed });
+          stream.progress('Founder Agents: coordination refreshed');
+        }
+      }
+      const toolCalls: GatewayToolCall[] = [];
+      let assistantText = '';
+      await callGateway(
+        client,
+        {
+          model: alias.id,
+          messages: gatewayMessages,
+          executionProfile: alias.executionProfile,
+          founderOsMetadata: true,
+          timeoutMs,
+          tools: tools.map((tool) => ({
+            type: 'function',
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.inputSchema,
+            },
+          })),
+          toolChoice: 'auto',
         },
-        onMetadata: (meta) => {
-          deps.costTracker?.record(meta);
+        {
+          onToken: (delta) => {
+            if (token.isCancellationRequested) return;
+            assistantText += delta;
+            stream.markdown(delta);
+          },
+          onToolCall: (call) => toolCalls.push(call),
+          onMetadata: (meta) => {
+            deps.onMetadata?.(meta);
+          },
+          onError: (status, body) => {
+            errorMessage = gatewayUserMessage(status, body);
+          },
         },
-        onError: (_status, body) => {
-          errorMessage = body.slice(0, 300);
-        },
-      },
-      token,
-    );
-    ok = !token.isCancellationRequested;
+        token,
+      );
+
+      if (toolCalls.length === 0) {
+        completed = true;
+        break;
+      }
+
+      gatewayMessages.push({
+        role: 'assistant',
+        content: assistantText,
+        tool_calls: toolCalls.map((call) => ({
+          id: call.id,
+          type: 'function',
+          function: { name: call.name, arguments: call.arguments },
+        })),
+      });
+
+      for (const call of toolCalls) {
+        let resultText: string;
+        if (!FOUNDER_TOOL_NAMES.has(call.name)) {
+          resultText = `Error: tool "${call.name}" is not available.`;
+        } else {
+          stream.progress(`Founder OS: ${call.name}`);
+          try {
+            const result = await vscode.lm.invokeTool(
+              call.name,
+              {
+                input: parseToolInput(call.arguments),
+                toolInvocationToken: request.toolInvocationToken,
+              },
+              token,
+            );
+            resultText = toolResultText(result);
+          } catch (error) {
+            resultText = `Error: ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+          }
+        }
+        gatewayMessages.push({
+          role: 'tool',
+          name: call.name,
+          tool_call_id: call.id,
+          content: resultText,
+        });
+      }
+    }
+
+    if (!completed && !token.isCancellationRequested) {
+      stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
+    }
+    ok = completed && !token.isCancellationRequested;
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
     if (!token.isCancellationRequested) {
-      stream.markdown(`\n\n_Founder OS gateway error: ${errorMessage}_`);
+      stream.markdown(`\n\n_${errorMessage}_`);
     }
     return;
+  } finally {
+    if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
+    deps.onRequestEnd?.(alias.id, ok, errorMessage);
   }
 
   if (!ok && errorMessage) {

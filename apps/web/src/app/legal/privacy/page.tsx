@@ -55,7 +55,7 @@ export default function LegalPrivacyPage() {
                 <strong>Chat history:</strong> prompts and AI responses you send through the Founder
                 OS chat are stored so you can resume conversations and so we can bill AI usage
                 accurately. You can delete individual sessions or your full chat history from the
-                Founder Den.
+                Build workspace.
               </li>
               <li>
                 <strong>Cursor / Claude Code session metadata:</strong> build session titles, prompt
@@ -79,7 +79,7 @@ export default function LegalPrivacyPage() {
             <ul className="list-disc space-y-1.5 pl-5">
               <li>To operate the workspace — relay prompts to AI providers, render chat, sync repos.</li>
               <li>To compute your reputation tier, leaderboard rank, and DDollar balance.</li>
-              <li>To power the founder event graph and build history shown on your Founder Den.</li>
+              <li>To power the founder event graph and build history shown in your Build workspace.</li>
               <li>To generate AI responses when you use the platform brain or BYOK routing.</li>
               <li>To detect abuse, fraud, and coordinated inauthentic behavior.</li>
               <li>To improve features — aggregated, anonymized analytics guide product decisions.</li>
@@ -127,7 +127,7 @@ export default function LegalPrivacyPage() {
           <Section title="4. Data retention & deletion">
             <p>
               We retain account data for the life of your account. Chat history and IDE bridge
-              session metadata are kept until you delete them from the Founder Den. Anonymized,
+              session metadata are kept until you delete them from the Build workspace. Anonymized,
               aggregated analytics (counts, leaderboards, reputation rollups) may be retained
               indefinitely even after account deletion.
             </p>

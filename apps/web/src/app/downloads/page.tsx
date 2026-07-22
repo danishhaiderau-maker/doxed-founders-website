@@ -2,9 +2,9 @@ import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { DownloadsHub } from '@/components/downloads-hub';
 
 export const metadata = {
-  title: 'Downloads — Founder Stack (IDE + Node)',
+  title: 'Downloads — Founder IDE',
   description:
-    'Install Founder Stack — one desktop kit (Founder IDE + Founder Node). Founder Node standalone and mobile apps also available.',
+    'Install Founder IDE — one desktop application with the Founder Node relay built in. Mobile apps are also available.',
 };
 
 export default function DownloadsPage() {

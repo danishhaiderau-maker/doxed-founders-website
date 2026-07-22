@@ -2,8 +2,9 @@
 
 This directory contains the **branding patches, AI rewire, build scripts, and
 bundled installer** that turn a [Void](https://github.com/voideditor/void)
-checkout into **Founder IDE** and compose it with Founder Node into a single
-"Founder Stack" Windows installer.
+checkout into **Founder IDE**. The Founder Node runtime is embedded inside the
+IDE as its hidden website and local-infrastructure relay, so users install and
+manage one application.
 
 > **Foundation:** Void (a VS Code fork with full AI UX) — replaces the
 > VSCodium-based build from 0.8.0.
@@ -35,11 +36,12 @@ packages/founder-ide/
 │   ├── founder-stack-updates.schema.json
 │   └── validate-update-manifest.mjs
 ├── scripts/
+│   ├── embed-founder-relay.ps1            # embeds Node runtime inside the IDE
 │   └── smoke-pairing-and-gateway.mjs      # pairing + SSE smoke test
 ├── assets/
 │   └── product.json.template              # our GUIDs / name / data dir
 ├── installer/
-│   ├── founder-stack.iss                  # Inno Setup — bundles IDE + Node
+│   ├── founder-stack.iss                  # mode-aware one-app bootstrapper
 │   └── build-stack-installer.ps1          # orchestrator
 ├── legacy/                                # ARCHIVED 0.8.0 VSCodium material
 │   ├── dist/Founder-Stack-Lite-0.8.0.zip
@@ -64,9 +66,9 @@ a Gateway model alias:
 | Chat (normal) | `founder-os-auto` |
 | Chat (agent) | `founder-os-reasoning` |
 
-When a Founder Node is paired (`~/FounderVault/node-config.json`), every AI
-request flows through the Gateway. When unpaired, it falls through to Void's
-own dispatch (editor stays usable).
+When Founder IDE is connected (`~/FounderVault/node-config.json`), every AI
+request flows through the Gateway. When unpaired, the editor stays usable and
+offers the Founder ID connection flow.
 
 ## How a build works
 
@@ -76,13 +78,30 @@ own dispatch (editor stays usable).
    Open VSX, our URLs, our icon.
 3. `rewire-llm-to-gateway.sh` drops in `sendFounderOs.ts` and patches
    `sendLLMMessage.ts`.
-4. `gulp vscode-win32-x64-user-setup` compiles -> `Founder-IDE-Setup-x64.exe`.
-5. `installer/founder-stack.iss` bundles it with Founder Node.
+4. The Founder relay is packaged unpacked and copied to
+   `resources/founder-relay/` in the IDE payload.
+5. `gulp vscode-win32-x64-user-setup` creates the one Founder IDE installer.
+6. `installer/founder-stack.iss` optionally adds Private/Hybrid tooling without
+   registering a second installed product.
 
 ## Prerequisites (Windows)
 
-Node 24, Python 3.11, jq, 7-Zip, Inno Setup, Rustup, Git Bash — all installed.
-~140 GB free disk. Clean build: 60-90 min.
+Pinned by `packages/founder-ide/upstream/overlay/MANIFEST.json` and enforced by
+`.github/workflows/build-founder-ide.yml` on a `windows-2022` runner:
+
+- **Node 20.18.2** (NOT 24 — Electron 34.3.2 ABI mismatch breaks native modules)
+- **Python 3.12** (NOT 3.13+ — node-gyp has no wheel for 3.13/3.14)
+- **Inno Setup 6** (preinstalled on `windows-2022` runners at
+  `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`)
+- Git, jq, 7-Zip (only for the legacy VSCodium build path — see `legacy/`)
+
+~140 GB free disk. Clean CI build: 70–110 min (Electron download dominates).
+Warm-cache CI build: 30–45 min.
+
+For the Azure Trusted Signing step (release builds only), the 6 `AZURE_*`
+repo secrets documented in `docs/CODE-SIGNING-GUIDE.md` §0 must be set.
+Fork PRs without the secrets produce an unsigned exe (SmartScreen warns) —
+the `signtool verify` step is advisory-only on dev builds.
 
 ## Side-by-side install
 

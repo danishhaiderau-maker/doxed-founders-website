@@ -119,7 +119,12 @@ foreach ($entry in $manifest.files) {
         }
         "add" {
             if ($destExists) {
-                throw "mode=add but upstream already has $destAbs (already customized upstream? switch mode to replace)"
+                $marker = [string]$entry.marker
+                $existingContent = Get-Content $destAbs -Raw
+                if (-not $marker -or $existingContent -notmatch [regex]::Escape($marker)) {
+                    throw "mode=add but upstream already has $destAbs without the Founder overlay marker (upstream conflict; review before overwriting)"
+                }
+                Write-Host "[apply-founder]   reapply  $destRel" -ForegroundColor DarkCyan
             }
         }
         default { throw "Unknown mode '$mode' for $srcRel (expected 'replace' or 'add')" }
@@ -176,6 +181,27 @@ if ($sendFosLen -lt 5000) {
 }
 Write-Host "[apply-founder] Gateway rewire OK: sendLLMMessage.ts patched, sendFounderOs.ts present ($sendFosLen bytes)" -ForegroundColor Green
 
+# --- Verify clean-profile Founder AI defaults -------------------------------
+$modelCapabilities = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\modelCapabilities.ts"
+$settingsService = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\voidSettingsService.ts"
+if (-not (Test-Path $modelCapabilities) -or -not (Test-Path $settingsService)) {
+    throw "Founder AI default-model sources are missing after overlay application"
+}
+$modelCapabilitiesContent = Get-Content $modelCapabilities -Raw
+$settingsServiceContent = Get-Content $settingsService -Raw
+foreach ($modelAlias in @("founder-os-auto", "founder-os-fast", "founder-os-reasoning", "founder-os-code")) {
+    if ($modelCapabilitiesContent -notmatch [regex]::Escape($modelAlias)) {
+        throw "modelCapabilities.ts is missing managed model alias '$modelAlias'"
+    }
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-auto'") {
+    throw "voidSettingsService.ts does not select founder-os-auto for a clean profile"
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-code'") {
+    throw "voidSettingsService.ts does not select founder-os-code for clean-profile autocomplete"
+}
+Write-Host "[apply-founder] clean-profile Founder AI defaults OK: Auto chat + Code autocomplete" -ForegroundColor Green
+
 # --- Verify code.iss ---------------------------------------------------------
 $codeIss = Join-Path $VscodiumCheckout "build\win32\code.iss"
 if (-not (Test-Path $codeIss)) { throw "build/win32/code.iss missing at $codeIss" }
@@ -186,7 +212,14 @@ if ($codeIssContent -notmatch "OutputBaseFilename=FounderIDESetup") {
 if ($codeIssContent -notmatch "AppPublisher=Doxxed Crypto") {
     throw "build/win32/code.iss missing 'AppPublisher=Doxxed Crypto' - overlay did not apply"
 }
-Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto" -ForegroundColor Green
+# The tools\* Source line must be wrapped in #ifexist "tools\*" so the inner
+# installer compiles even when the open-source gulp targets omit tools/
+# (the remote-tunnel CLI is only produced by VS Code's official Azure pipeline).
+# Regression check for the 0.9.2 CI fix.
+if ($codeIssContent -notmatch '#ifexist "tools\\\*"') {
+    throw "build/win32/code.iss missing #ifexist `"tools\*`" guard on the tools Source line - overlay did not apply (regression of 0.9.2 CI fix)"
+}
+Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto, #ifexist tools guard present" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64-min-ci." -ForegroundColor Green

@@ -318,7 +318,7 @@ function AlreadyDoxxedCard() {
           href="/founder-den"
           className="rounded-lg border border-zinc-700 px-3 py-2 text-center text-zinc-200 hover:border-zinc-500 hover:text-white"
         >
-          Founder Den →
+          Build workspace →
         </Link>
         <Link
           href="/settings/ai-usage"
@@ -399,7 +399,7 @@ function QuickLinksGrid() {
   const links = [
     { href: '/phone', label: 'Phone Remote', desc: 'Control your IDE from your phone', accent: 'text-emerald-300' },
     { href: '/raise-room', label: 'Raise Room', desc: 'Discover founders · pledge DDollar', accent: 'text-amber-300' },
-    { href: '/founder-den', label: 'Founder Den', desc: 'Personal build dashboard', accent: 'text-violet-300' },
+    { href: '/founder-den', label: 'Build workspace', desc: 'Projects, tasks, and agents', accent: 'text-blue-300' },
     { href: '/settings/ai-usage', label: 'AI Usage', desc: 'Proxy stats · connect Cursor', accent: 'text-amber-300' },
     { href: '/founder-os/decisions', label: 'Decision Log', desc: 'Routing decisions · cache hits', accent: 'text-sky-300' },
   ];

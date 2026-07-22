@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { HUB_NAV_ROWS } from '@/components/hub-nav-config';
+import { HubNavIcon } from '@/components/hub-nav-icon';
 import { getActiveUserId } from '@/components/site-nav';
 import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 import { LandingHubPreviewWidgets } from '@/components/landing/landing-hub-preview-widgets';
@@ -22,7 +23,7 @@ function NavTile({
 }: {
   href: string;
   label: string;
-  icon: string;
+  icon: (typeof HUB_NAV_ROWS)[number]['items'][number]['icon'];
   badge?: string;
   accent: 'gray' | 'gold' | 'purple' | 'emerald';
 }) {
@@ -38,11 +39,9 @@ function NavTile({
   return (
     <Link
       href={href}
-      className={`group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 transition ${accentClass}`}
+      className={`group flex items-center gap-2.5 rounded-lg border px-3 py-2.5 transition ${accentClass}`}
     >
-      <span className="text-lg leading-none opacity-90" aria-hidden>
-        {icon}
-      </span>
+      <HubNavIcon name={icon} className="h-4 w-4 shrink-0 opacity-90" />
       <span className="min-w-0 flex-1 text-xs font-semibold text-zinc-100 group-hover:text-white">{label}</span>
       {badge ? (
         <span className="rounded-full bg-violet-500/90 px-1.5 py-0.5 text-[8px] font-bold text-white">{badge}</span>
@@ -68,23 +67,23 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
   }
 
   function rowAccent(id: string): 'gray' | 'gold' | 'purple' | 'emerald' {
-    if (id === 'community') return 'gold';
-    if (id === 'build') return 'purple';
+    if (id === 'discover') return 'gold';
+    if (id === 'build') return 'gray';
     if (id === 'trade') return 'emerald';
     return 'gray';
   }
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <section className="overflow-hidden rounded-lg border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="border-b border-zinc-800/70 px-4 py-3 sm:px-5">
         <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500">Platform hub</p>
-        <p className="mt-0.5 text-sm text-zinc-400">Trade · Community · Build — quick access to everything</p>
+        <p className="mt-0.5 text-sm text-zinc-400">Build, discover, and trade from one calm workspace.</p>
       </div>
       <div className="grid gap-3 p-3 sm:p-4 lg:grid-cols-3">
         {HUB_NAV_ROWS.map((row) => (
           <div
             key={row.id}
-            className={`flex flex-col rounded-xl border p-3 ${row.borderClass} ${row.rowBgClass}`}
+            className={`flex flex-col rounded-lg border p-3 ${row.borderClass} ${row.rowBgClass}`}
           >
             <div className="mb-3">
               <p className={`text-xs font-bold uppercase tracking-wide ${row.labelClass}`}>{row.label}</p>
@@ -122,7 +121,7 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
 /** Feed · Trust · DDollar previews (compact on landing). */
 export function LandingHubPreviews({ scoutPending = 0, platformStats = null, compact = false }: HubProps & { compact?: boolean }) {
   return (
-    <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <section className="overflow-hidden rounded-lg border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="border-b border-zinc-800/70 px-4 py-3 sm:px-5">
         <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500">Platform activity</p>
         <p className="mt-0.5 text-sm text-zinc-400">Live feed, trust signals, and DDollar — not marketing copy</p>

@@ -22,22 +22,40 @@ import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
 import type { Response } from 'express';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { FounderPromoService } from '../founder-os/founder-promo.service';
+import {
+  toFounderIdeEntitlements,
+  type FounderIdeEntitlements,
+} from './founder-node-entitlements';
 
-const MANIFEST_PATH =
-  process.env.FOUNDER_IDE_MANIFEST_PATH?.trim() ||
-  join(process.cwd(), '..', '..', 'packages', 'founder-ide', 'updates', 'founder-stack-updates.json');
+const MANIFEST_RELATIVE_PATH = [
+  'packages',
+  'founder-ide',
+  'updates',
+  'founder-stack-updates.json',
+];
 
 const MANIFEST_CACHE_TTL_MS = 60_000;
 let manifestCache: { at: number; body: unknown } | null = null;
+
+function resolveManifestPath(): string {
+  const configured = process.env.FOUNDER_IDE_MANIFEST_PATH?.trim();
+  if (configured) return configured;
+
+  const repoRootCandidate = join(process.cwd(), ...MANIFEST_RELATIVE_PATH);
+  if (existsSync(repoRootCandidate)) return repoRootCandidate;
+
+  return join(process.cwd(), '..', '..', ...MANIFEST_RELATIVE_PATH);
+}
 
 function readManifestBody(): unknown {
   const now = Date.now();
   if (manifestCache && now - manifestCache.at < MANIFEST_CACHE_TTL_MS) {
     return manifestCache.body;
   }
-  const raw = readFileSync(MANIFEST_PATH, 'utf8');
+  const raw = readFileSync(resolveManifestPath(), 'utf8');
   const body = JSON.parse(raw);
   manifestCache = { at: now, body };
   return body;
@@ -56,6 +74,7 @@ export class FounderNodeController {
     private readonly syncJobs: FounderNodeSyncService,
     private readonly vaultSync: FounderNodeVaultSyncService,
     private readonly ideBridge: IdeBridgeService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   @Post('pairing-code')
@@ -79,6 +98,29 @@ export class FounderNodeController {
   @Get('status')
   status(@CurrentUser() user: AuthUser) {
     return this.nodes.getStatus(user.id);
+  }
+
+  /**
+   * Phase 3 / Workstream C — truthful runtime status (canonical shape).
+   *
+   * Returns the `FounderStackRuntimeStatus` contract (10 fields, all required,
+   * flat object). Every field is derived from live/persisted authoritative
+   * signals — see `FounderNodeService.getRuntimeStatus()` JSDoc for the
+   * per-field source + staleness rules.
+   *
+   * `latestVersion` is sourced from the manifest cache (60s TTL) so the
+   * service stays I/O-free except for DB reads.
+   *
+   * Backwards-compat: the legacy `GET /status` endpoint is unchanged. New
+   * surfaces (IDE status bar, web settings) should consume this endpoint;
+   * legacy surfaces continue to consume `/status` until they migrate.
+   */
+  @Get('runtime-status')
+  async runtimeStatus(@CurrentUser() user: AuthUser) {
+    const manifest = readManifestBody() as { latestVersion?: string } | null;
+    const latestVersion =
+      typeof manifest?.latestVersion === 'string' ? manifest.latestVersion : '';
+    return this.nodes.getRuntimeStatus(user.id, latestVersion);
   }
 
   @Public()
@@ -155,12 +197,173 @@ export class FounderNodeController {
       label: string;
       platform?: string;
       appVersion?: string;
+      installId?: string;
+      ipcSecret?: string;
     },
   ) {
     if (!body.code?.trim() || !body.nodeId?.trim()) {
       throw new BadRequestException('code and nodeId required');
     }
     return this.nodes.pair(body);
+  }
+
+  // ─── Phase 2 — device-code (RFC 8628) first-run flow ──────────────────────
+
+  /**
+   * Start a device-authorization grant. The Founder Node tray calls this on
+   * first run (no node-config.json present). Returns the RFC 8628 shape:
+   *   { deviceCode, userCode, verificationUri, verificationUriComplete,
+   *     expiresAt, interval }
+   * The tray displays the userCode and polls /device-code/poll with deviceCode.
+   *
+   * Public endpoint per RFC 8628 §3.1 — the device isn't authenticated yet
+   * (that's the point of the flow). The userId is bound to the grant only
+   * when the founder authorizes in the browser via /device-code/authorize.
+   *
+   * The installId is stashed on the grant row so authorize() can pair a
+   * fresh node with the caller's installId in one shot. The founderId /
+   * nodeId / nodeToken are minted at authorize time, not here.
+   */
+  @Public()
+  @Post('device-code')
+  createDeviceCode(
+    @Body() body?: { installId?: string; ipcSecret?: string },
+  ) {
+    // Anonymous grant: userId stays null on the row until the founder
+    // authorizes in the browser. ipcSecret (if provided) is hashed and
+    // stored on the eventual FounderNode at authorize time — not on the
+    // grant, because the grant is single-use and short-lived.
+    return this.nodes.createDeviceCode({
+      installId: body?.installId,
+    });
+  }
+
+  /**
+   * Poll a device-authorization grant. The Founder Node tray calls this every
+   * `interval` seconds with the deviceCode until status === 'authorized'.
+   *
+   * RFC 8628 §3.5 status mapping:
+   *   - pending     → HTTP 202 + Retry-After: <interval>
+   *   - slow_down   → HTTP 429 + Retry-After: <interval + 5>
+   *   - authorized  → HTTP 200 + token body
+   *   - expired     → HTTP 400 + { status, error }
+   *   - denied      → HTTP 403 + { status, error }
+   */
+  @Public()
+  @Post('device-code/poll')
+  async pollDeviceCode(
+    @Body() body: { deviceCode: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!body.deviceCode?.trim()) {
+      throw new BadRequestException('deviceCode required');
+    }
+    const result = await this.nodes.pollDeviceCode(body.deviceCode.trim());
+    if (result.status === 'pending') {
+      res.status(202);
+      res.setHeader('Retry-After', String(FounderNodeService.DEVICE_CODE_INTERVAL_S));
+    } else if (result.status === 'slow_down') {
+      // RFC 8628 §3.5: slow_down requires the client to increase its polling
+      // interval by 5 seconds. Retry-After carries the new (larger) interval.
+      res.status(429);
+      res.setHeader('Retry-After', String(FounderNodeService.DEVICE_CODE_INTERVAL_S + 5));
+    } else if (result.status === 'expired') {
+      res.status(400);
+    } else if (result.status === 'denied') {
+      res.status(403);
+    }
+    // authorized falls through to default 200.
+    return result;
+  }
+
+  /**
+   * Web app calls this when the founder clicks "Authorize" on the verification
+   * page. Requires a logged-in Founder OS user (CurrentUser). Pairs a fresh
+   * node, flips the grant to 'authorized', stashes the tokens for the next
+   * /device-code/poll to return.
+   *
+   * The web UI (apps/web/) is Worker 1's territory if it lives there; this is
+   * just the API. The web page calls POST /founder-node/device-code/authorize
+   * with { userCode, label }. The API mints nodeId when older clients do not
+   * supply one, keeping the browser flow free of local secrets.
+   */
+  @Post('device-code/authorize')
+  authorizeDeviceCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { userCode: string; nodeId?: string; label?: string; platform?: string; appVersion?: string },
+  ) {
+    if (!body.userCode?.trim()) {
+      throw new BadRequestException('userCode required');
+    }
+    return this.nodes.authorizeDeviceCode(user.id, body.userCode, {
+      nodeId: body.nodeId,
+      label: body.label ?? 'Founder IDE',
+      platform: body.platform,
+      appVersion: body.appVersion,
+    });
+  }
+
+  /** Web app calls this when the founder clicks "Deny". */
+  @Post('device-code/deny')
+  denyDeviceCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { userCode: string },
+  ) {
+    if (!body.userCode?.trim()) {
+      throw new BadRequestException('userCode required');
+    }
+    return this.nodes.denyDeviceCode(user.id, body.userCode);
+  }
+
+  // ─── Phase 2 — token lifecycle: rotate / revoke / logout ──────────────────
+
+  /**
+   * Issue a new nodeToken, invalidate the old one. Called by Founder Node
+   * proactively when within 7 days of expiry, or by the user via "Rotate
+   * token" in the tray. Requires the current valid token.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('rotate-token')
+  rotateToken(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.nodes.rotateToken(req.founderNode.nodeId);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('ide-entitlements')
+  async ideEntitlements(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+  ): Promise<FounderIdeEntitlements> {
+    const status = await this.founderPromo.getUserPromoStatus(
+      req.founderNode.userId,
+    );
+    return toFounderIdeEntitlements(status);
+  }
+
+  /**
+   * Revoke a node identity — server-side, permanent. Called by the user via
+   * "Revoke this node" in Founder OS settings. The DELETE :nodeId endpoint
+   * below already does this; this is the explicit /revoke alias for clarity
+   * and so the tray can call POST /revoke (some corporate proxies block
+   * DELETE bodies).
+   */
+  @Post('revoke')
+  revokeAlias(@CurrentUser() user: AuthUser, @Body() body: { nodeId: string }) {
+    if (!body.nodeId?.trim()) {
+      throw new BadRequestException('nodeId required');
+    }
+    return this.nodes.revokeNode(user.id, body.nodeId);
+  }
+
+  /**
+   * Logout — local-only invalidation. The server-side identity stays revocable
+   * separately. The tray calls this when the user clicks "Sign out"; the API
+   * records the timestamp so the status panel shows "logged out" rather than
+   * "revoked". The actual node-config.json deletion happens client-side.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('logout')
+  logout(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.nodes.logout(req.founderNode.nodeId);
   }
 
   @UseGuards(FounderNodeGuard)
@@ -170,6 +373,22 @@ export class FounderNodeController {
     @Body() body: FounderNodeHeartbeat,
   ) {
     return this.nodes.heartbeat(req.founderNode.nodeDbId, body);
+  }
+
+  /**
+   * Phase 3 — IDE↔node named-pipe IPC handshake state report. The Founder
+   * Node tray POSTs to this endpoint when its IPC client emits 'connected'
+   * or 'disconnected'. The API keeps the latest state in memory so the
+   * FounderIdeAdapter can decide isConnected() in real time.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Post('ide-handshake')
+  reportIdeHandshake(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: { active: boolean },
+  ) {
+    this.nodes.setIdeHandshakeState(req.founderNode.nodeId, Boolean(body?.active));
+    return { ok: true, active: Boolean(body?.active) };
   }
 
   @UseGuards(FounderNodeGuard)
@@ -305,7 +524,10 @@ export class FounderNodeController {
   @UseGuards(FounderNodeGuard)
   @Get('pending-dispatches')
   pendingDispatches(@Req() req: { founderNode: FounderNodeRequestUser }) {
-    return this.ideBridge.getPendingDispatches(req.founderNode.userId);
+    return this.ideBridge.getPendingDispatches(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
   }
 
   /** Claim one pending dispatch before executing — prevents double paste races. */
@@ -315,7 +537,11 @@ export class FounderNodeController {
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('id') id: string,
   ) {
-    return this.ideBridge.claimDispatch(req.founderNode.userId, id);
+    return this.ideBridge.claimDispatch(
+      req.founderNode.userId,
+      id,
+      req.founderNode.nodeId,
+    );
   }
 
   /**
@@ -331,6 +557,11 @@ export class FounderNodeController {
     @Body() body: { result?: string; error?: string },
   ) {
     const result = body.error ? `error: ${body.error}` : body.result;
-    return this.ideBridge.markDispatched(id, result);
+    return this.ideBridge.markDispatched(
+      id,
+      result,
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
   }
 }

@@ -254,6 +254,9 @@ export class AiProxyRuntimeService {
         content: body.fim
           ? this.buildFimPrompt(body.fim.prefix, body.fim.suffix)
           : m.content,
+        ...(m.name ? { name: m.name } : {}),
+        ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+        ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
       })),
       stream: body.stream ?? false,
       ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
@@ -262,6 +265,10 @@ export class AiProxyRuntimeService {
         : {}),
       ...(body.response_format ? { response_format: body.response_format } : {}),
       ...(body.stop ? { stop: body.stop } : {}),
+      ...(body.tools?.length ? { tools: body.tools } : {}),
+      ...(body.tools?.length && body.tool_choice
+        ? { tool_choice: body.tool_choice }
+        : {}),
     };
 
     const promptTokensEstimate = this.estimateTokens(payload.messages);

@@ -389,11 +389,11 @@ export function LandingHubPreviewWidgets({
       </WidgetShell>
 
       <WidgetShell
-        title="Founder Stack"
-        subtitle="The vault + IDE — your data stays yours."
+        title="Founder IDE"
+        subtitle="IDE, private vault, and remote Node in one install."
         headerClass="bg-emerald-950/35"
         href="/settings/builder"
-        footerLabel="Download Founder Stack →"
+        footerLabel="Download Founder IDE →"
       >
         <ul className="space-y-1.5">
           {FOUNDER_NODE_ITEMS.map((item) => (

@@ -12,24 +12,20 @@ import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
 import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { FounderChatLauncher } from '@/components/founder-chat-launcher';
+import { HubNavIcon } from '@/components/hub-nav-icon';
 import { HUB_NAV_ROWS, type HubNavItem, type HubNavRow } from '@/components/hub-nav-config';
 import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 
 const PROFILE_LINKS = [
-  { href: '/account', label: 'Overview' },
-  { href: '/account?tab=messages', label: 'Messages' },
-  { href: '/account?tab=security', label: 'Security' },
-  { href: '/account?tab=notifications', label: 'Notification Settings' },
-  { href: '/account?tab=connected', label: 'Connected Accounts' },
-  { href: '/account?tab=reputation', label: 'Reputation' },
-  { href: '/account?tab=activity', label: 'Activity History' },
+  { href: '/account?tab=profile', label: 'Profile' },
+  { href: '/account?tab=security', label: 'Security & Connections' },
+  { href: '/account?tab=plan', label: 'Plan & Usage' },
+  { href: '/account?tab=inbox', label: 'Inbox & History' },
 ] as const;
 
 const ADMIN_PROFILE_LINKS = [
-  { href: '/admin/control', label: 'Admin Control' },
-  { href: '/admin/applications', label: 'Listing inbox' },
-  { href: '/admin/agent-registrations', label: 'Agent registrations' },
-  { href: '/account?tab=security', label: 'Connect Phantom wallet' },
+  { href: '/admin/control', label: 'Admin workspace' },
+  { href: '/admin/applications', label: 'Trust review' },
 ] as const;
 
 function sectionAccent(id: string) {
@@ -42,7 +38,7 @@ function sectionAccent(id: string) {
       itemActive: 'bg-emerald-500/15 border-emerald-400/40 text-emerald-50',
     };
   }
-  if (id === 'community') {
+  if (id === 'discover') {
     return {
       trigger: 'text-amber-200/90 hover:bg-amber-500/10 hover:text-amber-50',
       triggerActive: 'bg-amber-500/20 text-amber-50 ring-1 ring-amber-400/40',
@@ -53,11 +49,11 @@ function sectionAccent(id: string) {
   }
   if (id === 'build') {
     return {
-      trigger: 'text-violet-200/90 hover:bg-violet-500/10 hover:text-violet-50',
-      triggerActive: 'bg-violet-500/20 text-violet-50 ring-1 ring-violet-400/40',
-      panel: 'border-violet-500/20',
-      itemHover: 'hover:bg-violet-500/10 hover:border-violet-500/30',
-      itemActive: 'bg-violet-500/15 border-violet-400/40 text-violet-50',
+      trigger: 'text-blue-200/90 hover:bg-blue-500/10 hover:text-blue-50',
+      triggerActive: 'bg-blue-500/20 text-blue-50 ring-1 ring-blue-400/40',
+      panel: 'border-blue-500/20',
+      itemHover: 'hover:bg-blue-500/10 hover:border-blue-500/30',
+      itemActive: 'bg-blue-500/15 border-blue-400/40 text-blue-50',
     };
   }
   return {
@@ -182,7 +178,7 @@ function ProfileMenu({
         <span className="md:hidden">Profile</span>
       </button>
       {profileOpen && (
-        <div className="absolute right-0 top-full z-[60] mt-1.5 min-w-[220px] rounded-xl border border-zinc-700/80 bg-zinc-950/95 py-1 shadow-2xl backdrop-blur-md">
+        <div className="absolute right-0 top-full z-[60] mt-1.5 min-w-[220px] rounded-lg border border-zinc-700/80 bg-zinc-950/95 py-1 shadow-2xl backdrop-blur-md">
           {accountPreview && (
             <div className="border-b border-zinc-800 px-3 py-2">
               <p className="truncate text-sm font-medium text-white">{accountPreview.username}</p>
@@ -259,9 +255,11 @@ function NavDropdown({
       {isOpen && (
         <div
           className={cn(
-            'absolute left-0 top-full z-50 mt-1.5 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/95 shadow-2xl backdrop-blur-md',
+            'absolute left-0 top-full z-50 mt-1.5 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-lg border bg-zinc-950/95 shadow-2xl backdrop-blur-md',
             accent.panel,
           )}
+          role="menu"
+          aria-label={`${row.label} menu`}
         >
           <div className="border-b border-zinc-800/80 px-4 py-3">
             <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">{row.subtitle}</p>
@@ -283,14 +281,12 @@ function NavDropdown({
                     active ? accent.itemActive : cn('text-zinc-300', accent.itemHover),
                   )}
                 >
-                  <span className="mt-0.5 text-base leading-none" aria-hidden>
-                    {item.icon}
-                  </span>
+                  <HubNavIcon name={item.icon} className="mt-0.5 h-4 w-4 shrink-0" />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5 text-sm font-medium">
                       {item.label}
                       {badge ? (
-                        <span className="rounded-full bg-violet-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                        <span className="rounded-full bg-blue-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
                           {badge}
                         </span>
                       ) : null}
@@ -396,7 +392,7 @@ function MobileNavDrawer({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Find a page…"
-              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder:text-zinc-600"
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder:text-zinc-600"
             />
           </div>
         </div>
@@ -406,7 +402,7 @@ function MobileNavDrawer({
             const accent = sectionAccent(row.id);
             const isExpanded = expanded.has(row.id) || query.length > 0;
             return (
-              <div key={row.id} className="mb-2 overflow-hidden rounded-xl border border-zinc-800/80">
+              <div key={row.id} className="mb-2 overflow-hidden rounded-lg border border-zinc-800/80">
                 <button
                   type="button"
                   onClick={() =>
@@ -429,8 +425,8 @@ function MobileNavDrawer({
                       className={cn(
                         'inline-block h-2 w-2 rounded-full',
                         row.id === 'trade' && 'bg-emerald-400',
-                        row.id === 'community' && 'bg-amber-400',
-                        row.id === 'build' && 'bg-violet-400',
+                        row.id === 'discover' && 'bg-amber-400',
+                        row.id === 'build' && 'bg-blue-400',
                       )}
                       aria-hidden
                     />
@@ -455,7 +451,7 @@ function MobileNavDrawer({
                             active ? accent.itemActive : cn('text-zinc-300', accent.itemHover),
                           )}
                         >
-                          <span aria-hidden>{item.icon}</span>
+                          <HubNavIcon name={item.icon} className="h-4 w-4 shrink-0" />
                           <span className="flex-1">{item.label}</span>
                           {badge ? (
                             <span className="rounded-full bg-violet-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
@@ -521,7 +517,7 @@ function MobileSectionDropdown({
   return (
     <div
       className={cn(
-        'absolute right-0 top-full z-[65] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md md:hidden',
+        'absolute left-1/2 top-full z-[65] mt-1.5 w-[min(24rem,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-lg border bg-zinc-950/97 shadow-2xl backdrop-blur-md md:hidden',
         accent.panel,
       )}
       role="menu"
@@ -532,8 +528,8 @@ function MobileSectionDropdown({
           className={cn(
             'text-[10px] font-bold uppercase tracking-[0.18em]',
             row.id === 'trade' && 'text-emerald-300',
-            row.id === 'community' && 'text-amber-300',
-            row.id === 'build' && 'text-violet-300',
+            row.id === 'discover' && 'text-amber-300',
+            row.id === 'build' && 'text-blue-300',
           )}
         >
           {row.label}
@@ -556,10 +552,10 @@ function MobileSectionDropdown({
                 active ? accent.itemActive : cn('text-zinc-200', accent.itemHover),
               )}
             >
-              <span className="text-base leading-none" aria-hidden>{item.icon}</span>
+              <HubNavIcon name={item.icon} className="h-4 w-4 shrink-0" />
               <span className="flex-1 font-medium">{item.label}</span>
               {badge ? (
-                <span className="rounded-full bg-violet-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                <span className="rounded-full bg-blue-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
                   {badge}
                 </span>
               ) : null}
@@ -655,9 +651,21 @@ function SiteNavInner() {
 
   return (
     <>
-      <div ref={navRef} className="relative flex flex-col items-end gap-1">
+      <div
+        ref={navRef}
+        className="relative flex w-full shrink-0 basis-full flex-col items-end gap-1 md:w-auto md:shrink md:basis-auto"
+      >
         <nav className="flex items-center gap-1 text-sm">
-        {/* Founder Chat launcher — placed before nav dropdowns (between brand and section links) */}
+        <Link
+          href="/discover"
+          aria-label="Search"
+          title="Search"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
+        >
+          <Search className="h-4 w-4" />
+        </Link>
+
+        {/* Founder Chat launcher - placed before the three product intents. */}
         <FounderChatLauncher />
 
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
@@ -726,7 +734,7 @@ function SiteNavInner() {
               aria-expanded={isOpen}
               onClick={() => setOpenDropdown(isOpen ? null : row.id)}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition',
+                'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition',
                 isOpen || active
                   ? cn(accent.triggerActive, accent.panel)
                   : cn('text-zinc-300 border-zinc-700/70 bg-zinc-900/60', accent.itemHover),
@@ -736,12 +744,12 @@ function SiteNavInner() {
                 className={cn(
                   'inline-block h-1.5 w-1.5 rounded-full',
                   row.id === 'trade' && 'bg-emerald-400',
-                  row.id === 'community' && 'bg-amber-400',
-                  row.id === 'build' && 'bg-violet-400',
+                  row.id === 'discover' && 'bg-amber-400',
+                  row.id === 'build' && 'bg-blue-400',
                 )}
                 aria-hidden
               />
-              {row.id === 'trade' ? 'Trade' : row.id === 'community' ? 'Community' : 'Build'}
+              {row.label}
               <ChevronDown className={cn('h-3 w-3 opacity-60 transition', isOpen && 'rotate-180')} />
             </button>
           );

@@ -47,7 +47,7 @@ const GROUPS: ProviderGroup[] = [
     id: 'promo',
     label: 'Founder promo pool',
     blurb:
-      'Keys the platform lends to eligible founders during their free 1-month AI window. Billed as platform_promo. Toggle / cap / window live in the Platform & Treasury tab.',
+      'Keys used for Founder Free managed quota. Billed as platform_promo. Toggle, cap, and activation window live in AI & Usage.',
     keys: ['glm', 'gemini', 'deepseek'],
   },
 ];
@@ -81,7 +81,7 @@ const KEY_META: Record<
       'WallService.runSummarizerLlm — the Chat Summarizer agent that summarizes + sentiment-analyzes each project wall (getDecryptedPlatformGlmKey).',
       'BuilderService copilot_forced_promo path + Quick Build — GLM is the default promo provider for eligible founders (resolvePromoApiKey).',
       'Streaming Copilot promo path (completionWithProviderStream for glm).',
-      'Only served to eligible users inside their 1-month promo window; billed as platform_promo.',
+      'Only served to eligible Founder Free users; billed as platform_promo.',
     ],
   },
   gemini: {
@@ -90,7 +90,7 @@ const KEY_META: Record<
     whereUsed: [
       'BuilderService copilot_forced_promo fallback + Quick Build — Gemini is tried after GLM/DeepSeek in the promo provider order (resolvePromoApiKey for gemini).',
       'Streaming Copilot promo path (completionWithProviderStream for gemini).',
-      'Only served to eligible users inside their 1-month promo window; billed as platform_promo.',
+      'Only served to eligible Founder Free users; billed as platform_promo.',
     ],
   },
   deepseek: {

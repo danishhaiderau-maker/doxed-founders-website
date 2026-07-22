@@ -1,0 +1,182 @@
+# Founder Product Direction — IDE, Providers, Website, and DEX
+
+| Field | Value |
+|---|---|
+| Status | Working direction — founder confirmation required where marked **Proposal** |
+| Updated | 2026-07-21 |
+| Scope | Founder IDE, Founder Node, AI providers, commercial plans, website information architecture, token launch, DEX |
+| Supersedes | The “no subscription / no BYOK” assumptions in `BILLING.md` and `PRODUCT.md` |
+
+## 1. Product promise
+
+Founder is one connected product across desktop, web, and mobile:
+
+- **Founder IDE** is where work is visible: code, conversation, diffs, agents, tests, Git, and shipping.
+- **Founder Node** is bundled into the same desktop installation and performs approved local work in the background.
+- **Founder web/mobile** is the remote control, community, discovery, launch, and trading surface.
+- **Founder AI Gateway** is the default AI route and selects the right provider for the task.
+- **Founder Vault** remembers user connections and secrets securely across sessions.
+
+The user should never need to understand the internal split between the IDE, Node, Gateway, Event Bus, or provider adapters.
+
+## 2. Identity tiers and commercial plans are different
+
+Do not mix trust with billing.
+
+### Identity and trust
+
+- **Visitor:** X account exists. Can evaluate the product but cannot launch a token.
+- **Doxxed Builder:** X + GitHub + founder video, reviewed by DoxxedCrypto. Can earn full builder rights and become eligible for token launch.
+
+### Commercial plans
+
+| Plan | Working offer |
+|---|---|
+| Free | Founder-managed evaluation allowance, local models, and a simple path to connect a personal provider. Exact allowance is configurable. |
+| Founder Pro | **Proposal: USD 35/month**, Founder-managed allowance, remote control, automatic routing/fallback, and up to **five active personal cloud providers**. |
+| Launch Partner | Contracted founders receive managed build and launch support, higher fair-use allowances, launch-readiness workflows, and access to the token-launch pipeline when trust and product gates are satisfied. |
+| Team / Studio | Later: shared workspaces, roles, approvals, consolidated usage, and organization billing. |
+
+Price, provider-slot count, included managed usage, and launch-partner commercial terms must be configuration-backed entitlements. Do not hard-code them into the IDE.
+
+## 3. AI provider model
+
+Founder supports three routes at the same time.
+
+### Founder Managed — default
+
+- Appears first as **Founder Auto**.
+- Uses capability-based choices such as Fast, Balanced, Architect, and Autonomous.
+- Routes through the Founder Gateway with health checks, usage controls, caching, and fallback.
+- Launch Partners can receive a contract-specific managed allowance.
+- Raw provider names remain available in request details, not as the primary everyday UI.
+
+### Personal Provider Vault
+
+- A user connects a provider once and Founder remembers it until revoked.
+- Multiple providers remain connected simultaneously; changing the active route must not require re-entering a key.
+- Initial provider set: OpenAI, Anthropic, Gemini, DeepSeek, GLM, OpenRouter, Ollama, and other existing adapters that pass security review.
+- Each credential has: provider, friendly label, masked identity, verification status, last health check, last used time, and revoke control.
+- A Pro slot counts an active cloud credential. Local Ollama does not consume a paid cloud-provider slot.
+- The user can set a preferred provider or leave Founder Auto selected. Founder may fail over only to providers the user has enabled for that workspace.
+
+The existing `IntegrationCredential` contract already stores one encrypted credential per `userId + provider`, so the backend can remember several providers today. The missing work is a clean entitlement-aware API and IDE experience around it.
+
+### Local and private
+
+- Ollama and approved local runtimes execute through Founder Node.
+- Local mode must fail closed: no prompt, code, attachment, or derived context is sent to a cloud provider.
+- Hybrid mode may use only the services explicitly enabled for the workspace.
+- Cloud mode uses Founder Managed or selected personal providers.
+
+## 4. IDE experience
+
+Everyday navigation is limited to three stable destinations:
+
+1. **Founder** — account, workspace, infrastructure mode, Node health, and current objective.
+2. **Work** — Build, Agents, and Ship as focused subsections with visible edits, tests, approvals, and receipts.
+3. **Connect** — AI, code, deploy, data, communications, calendar, wallet, Node, and remote-session connections.
+
+Settings are secondary and contain only:
+
+- Account and plan
+- AI and provider connections
+- Privacy mode
+- Founder Node
+- Notifications
+- Advanced controls
+
+The default model control is an intent selector, not a catalogue of model version strings. Advanced users can inspect the exact provider/model and override routing in Advanced controls.
+
+## 5. Website information architecture
+
+The current hub exposes too many destinations at once. Replace the permanent multi-row menu with three top-level intents:
+
+| Top level | Contains |
+|---|---|
+| **Build** | Founder workspace, Agents, Ship, Founder Node, downloads, remote sessions, provider connections |
+| **Discover** | Projects, founders, trust, scout signals, community updates, reputation |
+| **Trade** | DEX, portfolio, watchlist, market feed, predictions, Raise Room activity |
+
+Account, plan, notifications, privacy, security, connections, and downloads live in the user menu. DDollar is a balance/control, not a permanent top-level destination.
+
+Token launch is contextual:
+
+- Eligible founder sees **Prepare launch** in Ship.
+- Community sees Raise Room progress on the project page.
+- Traders see the graduated token in Trade/DEX.
+- Users who are not eligible are not shown a dead launch navigation item.
+
+### Visual direction
+
+- One dominant action per state.
+- Progressive disclosure instead of dashboards full of controls.
+- Strong typography, generous spacing, stable layout, and quiet motion that explains state.
+- Compact contextual sheets for details; advanced configuration stays out of the main workspace.
+- No decorative gradients, floating sections, nested cards, or a palette dominated by one dark hue.
+- Desktop, mobile, and IDE use the same language and state names.
+
+## 6. Token launch and DEX
+
+The DEX is part of the long-term revenue loop, but it is not the first screen of Founder OS.
+
+Latest founder direction, with security interpretation in `DCF-SWAP-FEES-CUSTODY-AND-AUTHORITY.md`:
+
+- Raise Room graduates launch on the platform bonding curve.
+- **1% pre-graduation fee, collected in the quote asset:** 0.5% founder revenue + 0.25% platform USDC operating reserve + 0.25% platform Growth Reserve.
+- The earlier Fair Launch remains fixed at 1 billion, 80% curve + 20% graduated liquidity, with 0% unlocked founder/platform allocation.
+- **Latest Founder Enterprise proposal:** 50% Founder Stewardship Vault, 40% bonding curve, and 10% graduated-liquidity reserve. The 50% vests continuously over ten years to the verified working founder/team; it is never a day-one allocation or automatic sale route. This is a distinct regulated launch template, not a silent change to the Fair Launch.
+- For a 1 billion supply, the stewardship grant is 500 million tokens. Illustratively it accrues about 136,893 tokens per average day, or 0.01369% of total supply, but the contract uses exact start/end timestamps and linear integer math rather than daily batch unlocks.
+- Founder beneficiary rotation uses a two-step, delayed authority change and preserves the vesting schedule. The original launch wallet is not an irreplaceable ten-year dependency.
+- Acquisition interest is opt-in. A verified buyer may submit a non-binding offer after reviewing source-labelled project and on-chain intelligence. Private contact and data-room access require founder acceptance.
+- If a signed acquisition allocates proceeds to token holders, a fully funded Acquisition Settlement Vault may snapshot eligible ownership and let verified holders burn/surrender tokens for stablecoin. The acquisition waterfall, treatment of locked founder tokens and LP/treasury balances, claim deadline, and unclaimed funds must be agreed before launch or in a legally approved transaction.
+- Token-to-share conversion is not an ordinary smart-contract feature. It requires a legally recognised security/share registry and licensed advice; do not market it before that structure exists.
+- DCF fee vaults do not receive or sell the launched project token.
+- **Proposal under review:** an explicit Aligned Launch may reserve 2% of fixed supply for a public DCF Conviction Vault (78% curve + 20% liquidity + 2% vault), vested linearly over ten months. Vesting never triggers an automatic sale; any disposal of vested tokens is a delayed, multisig-approved, volume-bounded public proposal.
+- The Growth Reserve is liquidity-first. Buyback and burn remain disabled until a sustained USD 1 million platform-token market-cap gate plus price, liquidity, volume, and runway checks; they remain proposal-only after activation.
+- Vested Conviction Vault positions form an internal transparent Launch Basket. A rebalance is capped at 1% of each eligible vested position per cycle and further bounded by organic volume, liquidity, and price impact. Do not market or tokenize it as an ETF without licensed legal structure.
+- Emergency control means immediate pause plus a governed snapshot/claim migration. It never means a server, founder key, permanent delegate, or AI can forcibly replace assets in holder wallets.
+- Graduated liquidity moves to the platform AMM.
+- **0.25% post-graduation founder creator fee:** all goes to the launching founder; the platform takes 0%. The underlying LP/venue fee remains separate and disclosed, producing a 0.50% total when the base pool fee is 0.25%.
+- Founder payout is in USDC or the relevant native asset.
+- Founders use self-custody wallets or transferable fee-claim authorities; the platform never stores their private keys.
+- Platform treasury changes, conversions, buybacks, burns, and authority rotation use proposal, simulation, multisig approval, on-chain execution, and immutable receipts.
+- Launch rights require Doxxed Builder status and product/trust gates.
+
+This design conflicts with older screens and `BILLING.md`, which still say 0.1%. Treat the schedule as unavailable in user-facing production copy until legal/security review, contracts, and audits are complete. Smart contracts, custody assumptions, geofencing, liquidity migration, and rollback/incident plans are mandatory release gates.
+
+## 7. Next engineering milestones
+
+The desktop now needs a Founder-owned shell before a broad website redesign. Follow [`FOUNDER-IDE-COMPLETION-BLUEPRINT-2026-07.md`](./FOUNDER-IDE-COMPLETION-BLUEPRINT-2026-07.md):
+
+1. Replace the stock startup experience with Founder Home and the Build, Agents, and Ship desks.
+2. Remove visible Void wording, duplicate chat/settings entry points, and default upstream empty states.
+3. Introduce shared Founder design tokens and deliberate light/dark workbench themes.
+4. Keep the existing editor, inline edit, autocomplete, diff, extension host, terminal, and Open VSX engine underneath.
+5. Reuse the current upstream checkout during development and make one installer build at the milestone gate; do not re-fork/recompile for each extension or webview iteration.
+
+Then complete **Provider Vault and Routing** inside that shell:
+
+1. Add an authenticated provider-connections endpoint for the IDE that returns capability, connection, health, entitlement, and masked credential state.
+2. Add configurable entitlements for plan, managed allowance, and active provider slots.
+3. Replace the IDE's external Connections launcher with a native Founder Connections panel.
+4. Keep Founder Auto selected by default; show personal providers and Local beneath it.
+5. Support connect, verify, rename, enable per workspace, preferred route, fallback order, and revoke.
+6. Never place raw keys in VS Code settings, logs, webview state, or IPC messages.
+7. Enforce Local/Hybrid/Cloud in the Gateway and Node, not only in the UI.
+8. Add tests for multi-provider persistence, slot limits, provider switching, fallback, revoked keys, and local-mode cloud blocking.
+
+After this contract is stable, both the IDE and redesigned website can consume the same provider and entitlement model.
+
+The complete website/IDE parity, Daily Founder Review, connection taxonomy, project-intelligence, acquisition-inquiry, and settlement contracts are maintained in [`FOUNDER-END-TO-END-UX-AUDIT-2026-07-21.md`](./FOUNDER-END-TO-END-UX-AUDIT-2026-07-21.md).
+
+SOAR's DRP launch model, verification ladder, company-profile UX, acquisition mechanics, contradictions, and selective Founder adaptations are reviewed in [`SOAR-COMPETITIVE-RESEARCH-2026-07-21.md`](./SOAR-COMPETITIVE-RESEARCH-2026-07-21.md). Founder should adopt progressive evidence, disclosed supply actions, and a first-class acquisition lifecycle, while avoiding discretionary settlement proceeds, contradictory ownership disclaimers, and arbitrary post-freeze dilution.
+
+## 8. Decisions to lock
+
+1. Confirm Founder Pro at **USD 35/month**.
+2. Confirm **five** active personal cloud providers for Pro.
+3. Decide whether Free includes one personal cloud provider or unlimited BYOK with fewer managed features.
+4. Define the monthly/daily Founder Managed allowance by plan and for Launch Partners.
+5. Choose the Solana v1 graduation venue after a Raydium LaunchLab versus Meteora DBC proof of concept.
+6. Obtain legal and security approval before presenting launch/DEX economics as available production functionality.

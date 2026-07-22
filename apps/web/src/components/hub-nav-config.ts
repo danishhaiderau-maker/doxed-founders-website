@@ -1,4 +1,4 @@
-/** Paths that use minimal hub navigation (Home + notifications + profile). */
+/** Paths that use the shared Founder product navigation. */
 const HUB_PREFIXES = [
   '/discover',
   '/projects',
@@ -39,7 +39,7 @@ export function isHubWorkspacePath(pathname: string): boolean {
   if (pathname.startsWith('/admin')) return false;
   if (pathname === '/privacy' || pathname === '/rules' || pathname === '/busted') return false;
   return HUB_PREFIXES.some(
-    (p) => pathname === p || pathname.startsWith(`${p}/`) || pathname.startsWith(p),
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`) || pathname.startsWith(prefix),
   );
 }
 
@@ -50,41 +50,54 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/trust-center')) return 'Trust Center';
   if (pathname.startsWith('/scout-votes')) return 'Scout Voting';
   if (pathname.startsWith('/agent-hub') || pathname.startsWith('/agents')) return 'Agents';
-  if (pathname.startsWith('/airdrop') || pathname.startsWith('/builder-rewards'))
-    return 'Builder Rewards';
-  if (pathname.startsWith('/feed') || pathname.startsWith('/build-feed') || pathname.startsWith('/town-hall'))
-    return 'Feed';
+  if (pathname.startsWith('/airdrop') || pathname.startsWith('/builder-rewards')) return 'Builder Rewards';
+  if (pathname.startsWith('/feed') || pathname.startsWith('/build-feed') || pathname.startsWith('/town-hall')) return 'Updates';
   if (pathname.startsWith('/ddollar')) return 'DDollar';
-  if (pathname.startsWith('/paper-trading')) return 'Trading Alpha';
+  if (pathname.startsWith('/paper-trading')) return 'Trading Desk';
   if (pathname.startsWith('/watchlist')) return 'Watchlist';
   if (pathname.startsWith('/portfolio')) return 'Portfolio';
-  if (pathname.startsWith('/founder-os')) return 'Founder OS';
-  if (pathname.startsWith('/founder-den')) return 'Founder Den';
-  if (pathname.startsWith('/phone')) return 'Phone Remote';
-  if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations'))
-    return 'Integrations';
-  if (pathname.startsWith('/downloads')) return 'Downloads';
+  if (pathname.startsWith('/founder-os') || pathname.startsWith('/founder-den')) return 'Build';
+  if (pathname.startsWith('/phone')) return 'Remote Work';
+  if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations')) return 'Connections';
+  if (pathname.startsWith('/downloads')) return 'Founder IDE';
   if (pathname.startsWith('/raise-room')) return 'Raise Room';
   if (pathname.startsWith('/founder-economics')) return 'Founder Economics';
-  if (pathname.startsWith('/list-your-project')) return 'List Project';
+  if (pathname.startsWith('/list-your-project')) return 'Launch Readiness';
   if (pathname.startsWith('/notifications')) return 'Notifications';
   if (pathname.startsWith('/reputation')) return 'Reputation';
-  if (pathname.startsWith('/predict')) return 'Predict';
+  if (pathname.startsWith('/predict')) return 'Predictions';
   if (pathname.startsWith('/founders')) return 'Founders';
   if (pathname.startsWith('/founder/')) return 'Founder';
   if (pathname.startsWith('/project/')) return 'Project';
   return 'Doxxed Crypto';
 }
 
+export type HubNavIconName =
+  | 'workspace'
+  | 'ide'
+  | 'remote'
+  | 'connections'
+  | 'launch'
+  | 'capital'
+  | 'projects'
+  | 'founders'
+  | 'agents'
+  | 'updates'
+  | 'trust'
+  | 'rankings'
+  | 'markets'
+  | 'swap'
+  | 'predictions';
+
 export type HubNavItem = {
   href: string;
   label: string;
-  icon: string;
+  icon: HubNavIconName;
   auth?: boolean;
 };
 
 export type HubNavRow = {
-  id: string;
+  id: 'build' | 'discover' | 'trade';
   rowNumber: string;
   label: string;
   subtitle: string;
@@ -97,63 +110,57 @@ export type HubNavRow = {
 
 export const HUB_NAV_ROWS: HubNavRow[] = [
   {
-    id: 'trade',
+    id: 'build',
     rowNumber: 'Row 1',
-    label: 'Trade & Agents',
-    subtitle: 'Live agent · Paper desk · Rankings',
-    sidebarDescription: 'Copy-trade the showcase BTC agent, paper trade with DDollar, climb the leaderboard.',
-    borderClass: 'border-emerald-500/25',
-    labelClass: 'text-emerald-200',
-    rowBgClass: 'bg-emerald-950/20',
+    label: 'Build',
+    subtitle: 'Workspace · IDE · Connect · Ship',
+    sidebarDescription: 'Create, connect your tools, work remotely, and prepare a responsible launch.',
+    borderClass: 'border-blue-500/25',
+    labelClass: 'text-blue-200',
+    rowBgClass: 'bg-blue-950/20',
     items: [
-      { href: '/agent-hub', label: 'Agents', icon: '🤖' },
-      { href: '/paper-trading', label: 'Trading Alpha', icon: '📈' },
-      { href: '/predict?tab=rules', label: 'Predictions', icon: '🎯' },
-      { href: '/leaderboard', label: 'Rankings', icon: '🏅' },
-      { href: '/watchlist', label: 'Watchlist', icon: '★', auth: true },
-      { href: '__portfolio__', label: 'Portfolio', icon: '💼', auth: true },
+      { href: '/founder-den', label: 'Workspace', icon: 'workspace', auth: true },
+      { href: '/downloads', label: 'Founder IDE', icon: 'ide' },
+      { href: '/phone', label: 'Remote work', icon: 'remote', auth: true },
+      { href: '/settings/builder', label: 'Connections', icon: 'connections', auth: true },
+      { href: '/list-your-project', label: 'Launch readiness', icon: 'launch' },
+      { href: '/raise-room', label: 'Raise Room', icon: 'capital' },
     ],
   },
   {
-    id: 'community',
+    id: 'discover',
     rowNumber: 'Row 2',
-    label: 'Community',
-    subtitle: 'Feed · Trust · DDollar · Rewards',
-    sidebarDescription: 'Follow shipping founders, validate projects, earn DDollar, claim builder rewards.',
+    label: 'Discover',
+    subtitle: 'Projects · Founders · Agents · Trust',
+    sidebarDescription: 'Evaluate real builders, projects, agents, evidence, and long-term progress.',
     borderClass: 'border-amber-500/25',
     labelClass: 'text-amber-200',
     rowBgClass: 'bg-amber-950/20',
     items: [
-      { href: '/feed', label: 'Feed', icon: '📰' },
-      { href: '/ddollar', label: 'DDollar', icon: '💵' },
-      { href: '/discover', label: 'Discover', icon: '🔍' },
-      { href: '/projects', label: 'Projects', icon: '📦' },
-      { href: '/trust-center', label: 'Trust Center', icon: '🛡' },
-      { href: '/builder-rewards', label: 'Builder Rewards', icon: '🏗' },
+      { href: '/projects', label: 'Projects', icon: 'projects' },
+      { href: '/founders', label: 'Founders', icon: 'founders' },
+      { href: '/agent-hub', label: 'Agents', icon: 'agents' },
+      { href: '/feed', label: 'Updates', icon: 'updates' },
+      { href: '/trust-center', label: 'Trust Center', icon: 'trust' },
+      { href: '/leaderboard', label: 'Rankings', icon: 'rankings' },
     ],
   },
   {
-    id: 'build',
+    id: 'trade',
     rowNumber: 'Row 3',
-    label: 'Build',
-    subtitle: 'Founder OS · Downloads · Ship',
-    sidebarDescription: 'Development Workspace, install apps, connect AI and infra, raise capital, list your project.',
-    borderClass: 'border-violet-500/25',
-    labelClass: 'text-violet-200',
-    rowBgClass: 'bg-violet-950/20',
+    label: 'Trade',
+    subtitle: 'Markets · Positions · Predictions',
+    sidebarDescription: 'Use the current trading tools, follow positions, and evaluate graduated markets.',
+    borderClass: 'border-emerald-500/25',
+    labelClass: 'text-emerald-200',
+    rowBgClass: 'bg-emerald-950/20',
     items: [
-      { href: '/founder-os', label: 'Founder OS', icon: '⚡', auth: true },
-      { href: '/founder-den', label: 'Founder Den', icon: '🛠', auth: true },
-      { href: '/settings/builder?tab=downloads', label: 'Founder Stack', icon: '🖥', auth: true },
-      { href: '/settings/builder?tab=downloads', label: 'Pair Node', icon: '🔗', auth: true },
-      { href: '/phone', label: 'Phone Remote', icon: '📱', auth: true },
-      { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
-      { href: '/founder-economics', label: 'Founder Economics', icon: '🪙' },
-      { href: '/list-your-project', label: 'List Project', icon: '📋' },
-      { href: '/downloads', label: 'Downloads', icon: '⬇️' },
-      { href: '/downloads#mobile', label: 'Android app', icon: '📱' },
-      { href: '/settings/builder?tab=ai', label: 'AI Providers', icon: '🧠', auth: true },
-      { href: '/settings/builder?tab=infra', label: 'Infrastructure', icon: '☁️', auth: true },
+      { href: '/paper-trading', label: 'Trading desk', icon: 'markets' },
+      { href: '/predict?tab=rules', label: 'Predictions', icon: 'predictions' },
+      { href: '/watchlist', label: 'Watchlist', icon: 'trust', auth: true },
+      { href: '__portfolio__', label: 'Portfolio', icon: 'markets', auth: true },
+      { href: '/raise-room', label: 'Raise activity', icon: 'capital' },
+      { href: '/ddollar', label: 'DDollar', icon: 'swap' },
     ],
   },
 ];

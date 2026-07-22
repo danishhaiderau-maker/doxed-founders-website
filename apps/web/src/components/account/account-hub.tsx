@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
+import { Gauge, Inbox, ShieldCheck, UserRound, type LucideIcon } from 'lucide-react';
 import {
   contributorLevelLabel,
   formatDdollar,
@@ -23,33 +24,27 @@ import { ReferralPanel } from '@/components/account/referral-panel';
 import { AccountAgentTradeExports } from '@/components/account/account-agent-trade-exports';
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
+import { FounderFreeQuotaCard } from '@/components/account/founder-free-quota-card';
 import {
   AccountActivityItem,
   AccountOverview,
   fetchAccountActivity,
   fetchAccountOverview,
+  fetchFounderPromoStatus,
+  FounderPromoUserStatus,
 } from '@/lib/api';
 
 export type AccountTab =
-  | 'overview'
+  | 'profile'
   | 'security'
-  | 'notifications'
-  | 'connected'
-  | 'messages'
-  | 'points'
-  | 'reputation'
-  | 'activity'
-  | 'topup';
+  | 'plan'
+  | 'inbox';
 
-const TABS: { id: AccountTab; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'messages', label: 'Messages' },
-  { id: 'topup', label: 'Top up' },
-  { id: 'security', label: 'Security' },
-  { id: 'notifications', label: 'Notifications' },
-  { id: 'connected', label: 'Connected Accounts' },
-  { id: 'reputation', label: 'Reputation' },
-  { id: 'activity', label: 'Activity History' },
+const TABS: { id: AccountTab; label: string; detail: string; icon: LucideIcon }[] = [
+  { id: 'profile', label: 'Profile', detail: 'Identity and trust', icon: UserRound },
+  { id: 'security', label: 'Security & Connections', detail: 'Access, wallets, and services', icon: ShieldCheck },
+  { id: 'plan', label: 'Plan & Usage', detail: 'Allowance, balance, and billing', icon: Gauge },
+  { id: 'inbox', label: 'Inbox & History', detail: 'Messages, alerts, and receipts', icon: Inbox },
 ];
 
 function formatDate(iso: string) {
@@ -61,7 +56,7 @@ function formatDate(iso: string) {
 }
 
 export function AccountHub({
-  initialTab = 'overview',
+  initialTab = 'profile',
   initialMessageWithUserId = null,
 }: {
   initialTab?: AccountTab;
@@ -72,6 +67,7 @@ export function AccountHub({
   const [tab, setTab] = useState<AccountTab>(initialTab);
   const [overview, setOverview] = useState<AccountOverview | null>(null);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
+  const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unreadMessages = useUnreadMessageCount(token);
 
@@ -79,12 +75,14 @@ export function AccountHub({
     if (!token) return;
     setError(null);
     try {
-      const [ov, act] = await Promise.all([
+      const [ov, act, promo] = await Promise.all([
         fetchAccountOverview(token),
         fetchAccountActivity(token),
+        fetchFounderPromoStatus(token).catch(() => null),
       ]);
       setOverview(ov);
       setActivity(act);
+      setPromoStatus(promo);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
     }
@@ -100,7 +98,7 @@ export function AccountHub({
 
   if (!token) {
     return (
-      <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100">
+      <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100">
         <Link href="/login?callbackUrl=/account" className="font-semibold underline">
           Sign in
         </Link>{' '}
@@ -122,40 +120,28 @@ export function AccountHub({
               key={item.id}
               type="button"
               onClick={() => setTab(item.id)}
-              className={`rounded-lg px-3 py-2 text-left text-sm transition ${
+              className={`rounded-lg px-3 py-2.5 text-left transition ${
                 tab === item.id
-                  ? 'bg-emerald-500/20 font-semibold text-emerald-100 ring-1 ring-emerald-500/40'
+                  ? 'bg-blue-500/15 text-blue-50 ring-1 ring-blue-400/35'
                   : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
               }`}
             >
-              <span className="flex items-center gap-2">
-                {item.label}
-                {item.id === 'messages' && unreadMessages > 0 && (
-                  <span className="rounded-full bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                    {unreadMessages > 9 ? '9+' : unreadMessages}
+              <span className="flex items-start gap-2.5">
+                <item.icon className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.8} />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-2 text-sm font-semibold">
+                    {item.label}
+                    {item.id === 'inbox' && unreadMessages > 0 && (
+                      <span className="rounded-full bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        {unreadMessages > 9 ? '9+' : unreadMessages}
+                      </span>
+                    )}
                   </span>
-                )}
+                  <span className="mt-0.5 block text-xs font-normal text-zinc-500">{item.detail}</span>
+                </span>
               </span>
             </button>
           ))}
-          <Link
-            href="/ddollar"
-            className="rounded-lg px-3 py-2 text-sm font-medium text-amber-300/90 hover:bg-zinc-900"
-          >
-            Ddollar wallet →
-          </Link>
-          <Link
-            href="/notifications"
-            className="rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-900 hover:text-white"
-          >
-            Notification Inbox →
-          </Link>
-          <Link
-            href="/leaderboard"
-            className="rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-900 hover:text-white"
-          >
-            Public Leaderboard →
-          </Link>
           {session?.user?.role === 'ADMIN' && (
             <div className="mt-2 w-full border-t border-amber-500/25 pt-2 lg:mt-3">
               <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
@@ -165,29 +151,23 @@ export function AccountHub({
                 href="/admin/control"
                 className="block rounded-lg px-3 py-2 text-sm font-semibold text-amber-300/95 hover:bg-zinc-900"
               >
-                Admin Control
-              </Link>
-              <Link
-                href="/admin/applications"
-                className="block rounded-lg px-3 py-2 text-sm font-medium text-amber-300/90 hover:bg-zinc-900"
-              >
-                Listing inbox
+                Admin workspace
               </Link>
             </div>
           )}
         </nav>
       </aside>
 
-      <div className="min-w-0 flex-1">
-        {tab === 'overview' && overview && (
+      <div className="min-w-0 flex-1 space-y-8">
+        {tab === 'profile' && overview && (
           <section className="space-y-6">
             {overview.adminBanner && (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm font-medium text-rose-100">
+              <div className="rounded-lg border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm font-medium text-rose-100">
                 {overview.adminBanner}
               </div>
             )}
 
-            <div className="flex flex-wrap items-start gap-4 rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+            <div className="flex flex-wrap items-start gap-4 rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-800 text-2xl font-bold text-white">
                 {overview.username.charAt(0).toUpperCase()}
               </div>
@@ -240,7 +220,7 @@ export function AccountHub({
               </div>
             </div>
 
-            <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-6">
+            <div className="rounded-lg border border-cyan-500/25 bg-cyan-950/20 p-6">
               <h3 className="font-semibold text-white">Public messaging address</h3>
               <PublicMessagingAddress
                 messagingAddress={overview.messagingAddress}
@@ -249,7 +229,7 @@ export function AccountHub({
               />
             </div>
 
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <h3 className="font-semibold text-white">Technical user ID</h3>
               <UserIdField
                 userId={overview.userId}
@@ -258,7 +238,7 @@ export function AccountHub({
               />
             </div>
 
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <h3 className="font-semibold text-white">Platform handle</h3>
               {token && (
                 <PlatformHandleEditor
@@ -275,7 +255,7 @@ export function AccountHub({
               )}
             </div>
 
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-6">
               <h3 className="font-semibold text-white">Signed in with</h3>
               <ul className="mt-3 space-y-2">
                 {overview.authMethods.length === 0 ? (
@@ -292,7 +272,7 @@ export function AccountHub({
             </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
-              <Link href="/ddollar" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4 transition hover:border-amber-500/40">
+              <Link href="/ddollar" className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 transition hover:border-amber-500/40">
                 <p className="text-xs uppercase tracking-wide text-zinc-500">Ddollar balance</p>
                 <p className="mt-1 text-xl font-bold text-amber-200">
                   {formatDdollar(overview.reputation.reputationPoints, 0)}
@@ -315,13 +295,13 @@ export function AccountHub({
 
         {tab === 'security' && token && <SecuritySettingsPanel accessToken={token} />}
 
-        {tab === 'notifications' && token && (
+        {tab === 'inbox' && token && (
           <NotificationSettingsPanel accessToken={token} />
         )}
 
-        {tab === 'connected' && token && <ConnectedAccountsPanel accessToken={token} />}
+        {tab === 'security' && token && <ConnectedAccountsPanel accessToken={token} />}
 
-        {tab === 'messages' && token && (
+        {tab === 'inbox' && token && (
           <AccountMessagesPanel
             accessToken={token}
             initialOtherUserId={initialMessageWithUserId}
@@ -329,7 +309,7 @@ export function AccountHub({
           />
         )}
 
-        {tab === 'reputation' && overview && (
+        {tab === 'profile' && overview && (
           <section className="space-y-6">
             <div className="flex flex-wrap items-center gap-3">
               <ReputationBadge
@@ -358,13 +338,29 @@ export function AccountHub({
           </section>
         )}
 
-        {tab === 'topup' && token && (
-          <section>
+        {tab === 'plan' && token && (
+          <section className="space-y-6">
+            <div className="border-b border-zinc-800 pb-6">
+              <h2 className="text-lg font-semibold text-white">Plan & Usage</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-zinc-400">
+                Founder-managed usage, personal AI connections, DDollar, and billing share one account view.
+                Live allowances always come from your entitlement instead of promotional copy.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Link href="/settings/builder?tab=ai" className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500">
+                  Manage AI
+                </Link>
+                <Link href="/ddollar" className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 transition hover:border-zinc-500 hover:text-white">
+                  View DDollar
+                </Link>
+              </div>
+            </div>
+            <FounderFreeQuotaCard status={promoStatus} />
             <TopUpPanel accessToken={token} />
           </section>
         )}
 
-        {tab === 'activity' && (
+        {tab === 'inbox' && (
           <section>
             <h3 className="font-semibold text-white">Recent activity</h3>
             <p className="mt-1 text-xs text-zinc-500">
@@ -373,7 +369,7 @@ export function AccountHub({
             {activity.length === 0 ? (
               <p className="mt-4 text-sm text-zinc-500">No activity yet.</p>
             ) : (
-              <ul className="mt-4 divide-y divide-zinc-800 rounded-xl border border-zinc-800">
+              <ul className="mt-4 divide-y divide-zinc-800 rounded-lg border border-zinc-800">
                 {activity.map((item) => (
                   <li key={item.id} className="px-4 py-3">
                     <p className="text-sm font-medium text-white">{item.title}</p>
@@ -397,7 +393,7 @@ export function AccountHub({
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
       <p className="text-xs uppercase tracking-wide text-zinc-500">{label}</p>
       <p className="mt-1 text-xl font-bold text-white">{value}</p>
     </div>
