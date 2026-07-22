@@ -57,13 +57,14 @@ class PastAnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "run analyzer"):
                 seal_past_analysis(tmp)
 
-    def test_latest_prefers_meaningful_analysis_over_newer_empty_receipt(self):
+    def test_latest_prefers_complete_analysis_over_newer_small_receipts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             parent = root / "past_analysis"
             meaningful = parent / "2026-07-22_100000Z_meaningful"
+            small = parent / "2026-07-22_105000Z_small"
             empty = parent / "2026-07-22_110000Z_empty"
-            for archive in (meaningful, empty):
+            for archive in (meaningful, small, empty):
                 archive.mkdir(parents=True)
                 (archive / "past_analysis_manifest.json").write_text("{}", encoding="utf-8")
             (parent / "index.json").write_text(
@@ -73,6 +74,10 @@ class PastAnalysisTests(unittest.TestCase):
                         {
                             "archive_id": empty.name,
                             "performance": {"trades": 0, "net_pnl_usd": None},
+                        },
+                        {
+                            "archive_id": small.name,
+                            "performance": {"trades": 1, "net_pnl_usd": 0.1},
                         },
                         {
                             "archive_id": meaningful.name,
