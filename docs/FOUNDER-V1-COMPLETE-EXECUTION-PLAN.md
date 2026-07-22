@@ -56,10 +56,10 @@ installer hashes, soak log.
 - [x] Persist files, symbols, imports, decisions, tasks, goals, and receipts.
 - [x] Build cold-start context without rereading the full repository.
 - [x] Exclude secrets, dependencies, generated files, and large binaries.
-- [ ] Add decision provenance and negative memory: rejected approaches are not
+- [x] Add decision provenance and negative memory: rejected approaches are not
   suggested again unless the founder reopens them.
 - [ ] Detect repeated solutions and reuse verified prior work.
-- [ ] Surface dependency impact before an agent edits shared modules.
+- [x] Surface dependency impact before an agent edits shared modules.
 
 Evidence: graph tests, cold-start benchmark, provenance examples, secret-scan
 result.

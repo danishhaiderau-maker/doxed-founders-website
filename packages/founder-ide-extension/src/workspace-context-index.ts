@@ -4,11 +4,14 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   buildWorkspaceContextIndex,
+  extractImportSpecifiers,
   formatWorkspaceContextForPrompt,
+  parseDecisionLedger,
   parseWorkspaceContextIndex,
   workspaceContextFileNeedsRefresh,
   type WorkspaceContextFile,
   type WorkspaceContextIndexState,
+  type WorkspaceDecisionRecord,
 } from './workspace-context-state';
 
 const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,java,kt,swift,cs,cpp,c,h,hpp,css,scss,html,yml,yaml,toml,sql,prisma,sol,sh,ps1}';
@@ -120,6 +123,7 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     const uris = await vscode.workspace.findFiles(INDEXABLE_GLOB, EXCLUDE_GLOB, MAX_FILES);
     const previous = new Map(this.state?.files.map((file) => [file.path, file]) ?? []);
     const next: WorkspaceContextFile[] = [];
+    const decisions: WorkspaceDecisionRecord[] = [];
     const symbolQueue: Array<{ uri: vscode.Uri; file: WorkspaceContextFile }> = [];
     let symbolBudget = INITIAL_SYMBOL_BUDGET;
 
@@ -134,7 +138,8 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       }
       if (stat.size > MAX_FILE_BYTES) continue;
       const old = previous.get(relativePath);
-      if (!force && !workspaceContextFileNeedsRefresh(old, {
+      const isDecisionLedger = relativePath.toLowerCase() === '.github/founder-os/decisions.md';
+      if (!force && !isDecisionLedger && !workspaceContextFileNeedsRefresh(old, {
         path: relativePath,
         size: stat.size,
         mtimeMs: stat.mtime,
@@ -148,15 +153,21 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       } catch {
         continue;
       }
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const source = Buffer.from(bytes).toString('utf8');
       const file: WorkspaceContextFile = {
         path: relativePath,
         languageId: languageIdForPath(relativePath),
         size: stat.size,
         mtimeMs: stat.mtime,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
+        sha256,
         symbols: [],
+        imports: extractImportSpecifiers(source, languageIdForPath(relativePath)),
       };
       next.push(file);
+      if (isDecisionLedger) {
+        decisions.push(...parseDecisionLedger(source, relativePath, sha256));
+      }
       if (symbolBudget > 0 && supportsSymbols(relativePath)) {
         symbolQueue.push({ uri, file });
         symbolBudget -= 1;
@@ -174,7 +185,12 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       this.scheduleRefresh(true);
       return;
     }
-    this.state = buildWorkspaceContextIndex(workspaceId, next);
+    this.state = buildWorkspaceContextIndex(
+      workspaceId,
+      next,
+      new Date().toISOString(),
+      decisions,
+    );
     this.writePersisted(this.state, indexFile);
   }
 
