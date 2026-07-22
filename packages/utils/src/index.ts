@@ -162,3 +162,6 @@ export * from './founder-identity';
 export * from './ai-proxy';
 export * from './deployment-modes';
 export * from './founder-economics';
+export * from './founder-ai-metering';
+export * from './founder-proof-receipt';
+export * from './founder-release-gates';
