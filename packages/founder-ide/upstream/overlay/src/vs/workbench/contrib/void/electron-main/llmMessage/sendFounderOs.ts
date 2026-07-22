@@ -35,10 +35,12 @@ import type {
 	OnFinalMessage,
 	OnError,
 	RawToolCallObj,
+	RawToolParamsObj,
 	AnthropicReasoning,
 } from '../../common/sendLLMMessageTypes.js';
 import type { ModelSelection, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import type { ChatMode } from '../../common/voidSettingsTypes.js';
+import { availableTools, type InternalToolInfo } from '../../common/prompt/prompts.js';
 import { beginNativeCoordination } from './founderNativeCoordination.js';
 
 // ---------------------------------------------------------------------------
@@ -172,7 +174,14 @@ function findEventBoundary(buf: string): number {
 
 interface StreamHandlers {
 	onDelta: (delta: string) => void;
+	onReasoningDelta?: (delta: string) => void;
+	onToolDelta?: (tool: {
+		index: number;
+		id?: string;
+		function?: { name?: string; arguments?: string };
+	}) => void;
 	onMetadata?: (meta: FounderOsMetadata) => void;
+	onDone?: () => void;
 }
 
 function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
@@ -184,7 +193,11 @@ function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
 	}
 	if (dataLines.length === 0) return;
 	const payload = dataLines.join('\n').trim();
-	if (payload === '[DONE]' || payload.length === 0) return;
+	if (payload === '[DONE]') {
+		handlers.onDone?.();
+		return;
+	}
+	if (payload.length === 0) return;
 
 	try {
 		const evt = JSON.parse(payload) as Record<string, unknown>;
@@ -193,11 +206,27 @@ function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
 			handlers.onMetadata?.(evt.founderOs as FounderOsMetadata);
 			return;
 		}
-		const choices = evt.choices as Array<{ delta?: { content?: string } }> | undefined;
-		const delta = choices?.[0]?.delta?.content;
+		const choices = evt.choices as Array<{
+			delta?: {
+				content?: string;
+				reasoning_content?: string;
+				tool_calls?: Array<{
+					index: number;
+					id?: string;
+					function?: { name?: string; arguments?: string };
+				}>;
+			};
+		}> | undefined;
+		const choiceDelta = choices?.[0]?.delta;
+		const delta = choiceDelta?.content;
 		if (typeof delta === 'string' && delta.length > 0) {
 			handlers.onDelta(delta);
 		}
+		const reasoningDelta = choiceDelta?.reasoning_content;
+		if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+			handlers.onReasoningDelta?.(reasoningDelta);
+		}
+		for (const tool of choiceDelta?.tool_calls ?? []) handlers.onToolDelta?.(tool);
 	} catch {
 		/* ignore malformed/keepalive chunk */
 	}
@@ -207,7 +236,7 @@ async function pumpSseStream(
 	body: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
 	handlers: StreamHandlers,
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
 	// The Gateway returns a web ReadableStream via fetch; handle both web and
 	// node stream shapes defensively.
 	const reader: { read(): Promise<{ done: boolean; value?: Uint8Array | Buffer }> } =
@@ -230,10 +259,18 @@ async function pumpSseStream(
 
 	const decoder = new TextDecoder();
 	let buffer = '';
+	let sawDone = false;
+	const trackedHandlers: StreamHandlers = {
+		...handlers,
+		onDone: () => {
+			sawDone = true;
+			handlers.onDone?.();
+		},
+	};
 
 	try {
 		for (;;) {
-			if (signal.aborted) return;
+			if (signal.aborted) return false;
 			const { done, value } = await reader.read();
 			if (done) break;
 			if (!value) continue;
@@ -243,10 +280,10 @@ async function pumpSseStream(
 			while ((sepIndex = findEventBoundary(buffer)) !== -1) {
 				const rawEvent = buffer.slice(0, sepIndex);
 				buffer = buffer.slice(sepIndex).replace(/^(\r?\n){2}/, '');
-				handleSseEvent(rawEvent, handlers);
+				handleSseEvent(rawEvent, trackedHandlers);
 			}
 		}
-		if (buffer.trim().length > 0) handleSseEvent(buffer, handlers);
+		if (buffer.trim().length > 0) handleSseEvent(buffer, trackedHandlers);
 	} finally {
 		try {
 			// @ts-ignore - releaseLock exists on web readers only
@@ -255,6 +292,7 @@ async function pumpSseStream(
 			/* noop */
 		}
 	}
+	return sawDone;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +303,11 @@ interface OpenAiMsg {
 	role: 'system' | 'user' | 'assistant' | 'tool';
 	content: string;
 	tool_call_id?: string;
+	tool_calls?: Array<{
+		id: string;
+		type: 'function';
+		function: { name: string; arguments: string };
+	}>;
 }
 
 function toOpenAiMessages(
@@ -288,6 +331,7 @@ function toOpenAiMessages(
 			const msg: OpenAiMsg = { role: role as OpenAiMsg['role'], content };
 			// @ts-ignore - tool_call_id lives on the tool role variant
 			if (role === 'tool' && raw.tool_call_id) msg.tool_call_id = raw.tool_call_id;
+			if (role === 'assistant' && Array.isArray(raw.tool_calls)) msg.tool_calls = raw.tool_calls;
 			out.push(msg);
 		} else if (role === 'model') {
 			// Gemini shape -> assistant
@@ -366,6 +410,40 @@ function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: num
 	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}`;
 }
 
+function gatewayTools(chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined): Array<Record<string, unknown>> {
+	return (availableTools(chatMode, mcpTools) ?? []).map((tool) => ({
+		type: 'function',
+		function: {
+			name: tool.name,
+			description: tool.description,
+			parameters: {
+				type: 'object',
+				properties: Object.fromEntries(
+					Object.entries(tool.params).map(([name, info]) => [name, { type: 'string', ...info }]),
+				),
+			},
+		},
+	}));
+}
+
+function completedToolCall(name: string, argumentsJson: string, id: string): RawToolCallObj | null {
+	if (!name) return null;
+	try {
+		const parsed = JSON.parse(argumentsJson) as unknown;
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+		const rawParams = parsed as RawToolParamsObj;
+		return {
+			id,
+			name,
+			rawParams,
+			doneParams: Object.keys(rawParams),
+			isDone: true,
+		};
+	} catch {
+		return null;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Chat path (chatMessages) - used by Chat, Ctrl+K, Apply, SCM.
 // ---------------------------------------------------------------------------
@@ -375,6 +453,7 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 	settingsOfProvider: SettingsOfProvider;
 	separateSystemMessage: string | undefined;
 	chatMode: ChatMode | null;
+	mcpTools: InternalToolInfo[] | undefined;
 	coordination?: {
 		threadId: string;
 		workspacePath: string;
@@ -382,7 +461,7 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 }
 
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
-	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode } = params;
+	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode, mcpTools } = params;
 
 	const requestedModel = modelSelection?.modelName;
 	const model = typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
@@ -415,6 +494,11 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		stream: true,
 		founder_os_metadata: true,
 	};
+	const tools = gatewayTools(chatMode, mcpTools);
+	if (tools.length > 0) {
+		body.tools = tools;
+		body.tool_choice = 'auto';
+	}
 
 	const got = await gatewayFetch(body, onError);
 	if (!got) {
@@ -429,12 +513,45 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	let fullText = '';
 	let fullReasoning = '';
 	let routeMetadata: FounderOsMetadata | undefined;
+	let toolName = '';
+	let toolId = '';
+	let toolArguments = '';
+	let sawDone = false;
 
 	try {
-		await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
+		sawDone = await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
 			onDelta: (delta) => {
 				fullText += delta;
-				onText({ fullText, fullReasoning, toolCall: undefined });
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
+			},
+			onReasoningDelta: (delta) => {
+				fullReasoning += delta;
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
+			},
+			onToolDelta: (tool) => {
+				if (tool.index !== 0) return;
+				toolName += tool.function?.name ?? '';
+				toolArguments += tool.function?.arguments ?? '';
+				toolId += tool.id ?? '';
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
 			},
 			onMetadata: (meta) => {
 				routeMetadata = meta;
@@ -448,23 +565,36 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
 	}
 
-	if (!fullText && !fullReasoning) {
+	if (!sawDone) {
+		coordination?.fail();
+		onError({ message: 'Founder OS: Stream ended before the completion marker.', fullError: null });
+		return;
+	}
+
+	if (!fullText && !fullReasoning && !toolName) {
 		coordination?.fail();
 		onError({ message: 'Founder OS: Response from gateway was empty.', fullError: null });
 		return;
 	}
 
-	const finalText = `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt)}`;
+	const toolCall = completedToolCall(toolName, toolArguments, toolId);
+	if (toolName && !toolCall) {
+		coordination?.fail();
+		onError({ message: 'Founder OS: The model returned an incomplete tool request.', fullError: null });
+		return;
+	}
+	const finalText = toolCall
+		? fullText
+		: `${fullText}${founderRouteReceipt(routeMetadata, Date.now() - startedAt)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
 		fullText: finalText,
 		fullReasoning,
-		anthropicReasoning: null,
+	anthropicReasoning: null,
+		...(toolCall ? { toolCall } : {}),
 	};
 	onFinalMessage(finalParams);
 	coordination?.settle();
 
-	// satisfy RawToolCallObj import (unused but keeps the type graph intact)
-	void (null as unknown as RawToolCallObj);
 	void (null as unknown as AnthropicReasoning);
 }
 
@@ -502,10 +632,14 @@ export async function sendFounderOsFIM(params: FounderOsFIMParams): Promise<void
 	// FIM doesn't stream incremental text in Void's design (onText is unused
 	// for FIMMessage - see autocompleteService.ts); collect then onFinalMessage.
 	let fullText = '';
-	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
+	const sawDone = await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
 		onDelta: (delta) => { fullText += delta; },
 	}, controller.signal);
 
+	if (!sawDone) {
+		onError({ message: 'Founder OS: Autocomplete stream ended before the completion marker.', fullError: null });
+		return;
+	}
 	if (!fullText) {
 		onError({ message: 'Founder OS: Autocomplete response from gateway was empty.', fullError: null });
 		return;

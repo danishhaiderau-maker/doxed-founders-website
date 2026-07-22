@@ -106,6 +106,19 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(coordination, /COORDINATE: goals substantially overlap/);
   });
 
+  it('preserves native tools, reasoning, and the terminal completion marker', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    assert.match(source, /availableTools\(chatMode, mcpTools\)/);
+    assert.match(source, /body\.tools = tools/);
+    assert.match(source, /choiceDelta\?\.tool_calls/);
+    assert.match(source, /reasoning_content/);
+    assert.match(source, /completedToolCall/);
+    assert.match(source, /Stream ended before the completion marker/);
+    assert.match(source, /tool_calls = raw\.tool_calls/);
+  });
+
   it('patches native chat metadata with the active workspace root', () => {
     const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
     assert.match(applyScript, /native chat workspace coordination/);

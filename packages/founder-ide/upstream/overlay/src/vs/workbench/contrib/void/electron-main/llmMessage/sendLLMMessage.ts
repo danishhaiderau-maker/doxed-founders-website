@@ -114,7 +114,7 @@ export const sendLLMMessage = async ({
 			const workspacePath = typeof loggingExtras?.workspacePath === 'string' ? loggingExtras.workspacePath : '';
 			await sendFounderOsChat({
 				messages: messages_, onText, onFinalMessage, onError, _setAborter,
-				loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode,
+				loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode, mcpTools,
 				coordination: threadId && workspacePath ? { threadId, workspacePath } : undefined,
 			});
 			return
