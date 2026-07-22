@@ -192,10 +192,13 @@ async function callGateway(client, options, callbacks, token, extra = {}) {
         const attemptTimeout = setTimeout(() => attemptController.abort(), timeoutMs);
         try {
             const headers = {
+                ...client.headers,
                 'Content-Type': 'application/json',
-                Authorization: authorizationHeader(client.bearer),
                 Accept: 'text/event-stream',
             };
+            if (client.bearer?.trim()) {
+                headers.Authorization = authorizationHeader(client.bearer);
+            }
             if (options.executionProfile && options.executionProfile !== 'auto') {
                 headers['X-Execution-Profile'] = options.executionProfile;
             }
@@ -443,6 +446,11 @@ function handleSseEvent(rawEvent, callbacks, log, toolCalls) {
         callbacks.onMetadata?.(meta);
         return;
     }
+    if ('usage' in evt && evt.usage && typeof evt.usage === 'object') {
+        const usage = providerUsage(evt.usage);
+        if (usage)
+            callbacks.onUsage?.(usage);
+    }
     const choices = evt.choices;
     const delta = choices?.[0]?.delta;
     if (delta && typeof delta === 'object') {
@@ -459,6 +467,23 @@ function handleSseEvent(rawEvent, callbacks, log, toolCalls) {
             }
         }
     }
+}
+function providerUsage(value) {
+    const promptTokens = nonNegativeInteger(value.prompt_tokens);
+    const outputTokens = nonNegativeInteger(value.completion_tokens);
+    const cachedInputTokens = Math.min(promptTokens, nonNegativeInteger(value.prompt_cache_hit_tokens));
+    const reportedMiss = nonNegativeInteger(value.prompt_cache_miss_tokens);
+    const uncachedInputTokens = reportedMiss > 0
+        ? Math.min(promptTokens, reportedMiss)
+        : Math.max(0, promptTokens - cachedInputTokens);
+    if (promptTokens === 0 && outputTokens === 0)
+        return null;
+    return { promptTokens, cachedInputTokens, uncachedInputTokens, outputTokens };
+}
+function nonNegativeInteger(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? Math.floor(value)
+        : 0;
 }
 function isToolCallDelta(v) {
     if (!v || typeof v !== 'object')

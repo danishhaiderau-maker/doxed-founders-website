@@ -48,6 +48,10 @@ exports.editFileTool = void 0;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("node:path"));
 const fs = __importStar(require("node:fs"));
+const node_crypto_1 = require("node:crypto");
+const agent_path_leases_1 = require("../agent-path-leases");
+const agent_task_context_1 = require("../agent-task-context");
+const agent_coordination_cloud_1 = require("../agent-coordination-cloud");
 function resolveUri(filePath) {
     if (!filePath || typeof filePath !== 'string')
         return null;
@@ -166,29 +170,68 @@ exports.editFileTool = {
                 new vscode.LanguageModelTextPart(`Error: ${input.filePath} changed while the edit was being prepared. Read it again before editing.`),
             ]);
         }
-        const we = new vscode.WorkspaceEdit();
-        if (!exists && input.createIfMissing) {
-            // Create the file with the new content, then we still record a replace
-            // for the (empty) range so undo restores the prior (nonexistent) state.
-            we.createFile(uri, { ignoreIfExists: false, overwrite: false });
-        }
-        we.replace(uri, range, input.newText);
-        const ok = await vscode.workspace.applyEdit(we);
-        if (!ok) {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) {
             return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+                new vscode.LanguageModelTextPart('Error: no workspace is open.'),
             ]);
         }
-        // Persist so the editor shows it.
+        const activeTaskId = (0, agent_task_context_1.currentFounderTaskId)();
+        const taskId = activeTaskId ?? `standalone-edit-${(0, node_crypto_1.randomUUID)()}`;
+        const claim = agent_path_leases_1.founderPathLeases.claim(workspaceRoot, uri.fsPath, taskId);
+        if (!claim.ok) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error: ${claim.reason} Coordinate with that task before editing.`),
+            ]);
+        }
+        const releaseStandaloneClaim = () => {
+            if (!activeTaskId)
+                agent_path_leases_1.founderPathLeases.releaseTask(taskId);
+        };
+        const validation = agent_path_leases_1.founderPathLeases.validate(claim.lease);
+        if (!validation.ok) {
+            releaseStandaloneClaim();
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error: ${validation.reason} Read the file and retry.`),
+            ]);
+        }
+        if (activeTaskId) {
+            const cloudClaim = await agent_coordination_cloud_1.founderCoordinationCloud.claim(activeTaskId, path.relative(workspaceRoot, uri.fsPath).replaceAll('\\', '/'));
+            if (!cloudClaim.ok) {
+                agent_path_leases_1.founderPathLeases.release(claim.lease);
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Error: ${cloudClaim.ownerTitle ?? 'Another Founder task'} already owns this path. Coordinate before editing.`),
+                ]);
+            }
+        }
         try {
-            await vscode.workspace.save(uri);
+            const we = new vscode.WorkspaceEdit();
+            if (!exists && input.createIfMissing) {
+                // Create the file with the new content, then we still record a replace
+                // for the (empty) range so undo restores the prior (nonexistent) state.
+                we.createFile(uri, { ignoreIfExists: false, overwrite: false });
+            }
+            we.replace(uri, range, input.newText);
+            const ok = await vscode.workspace.applyEdit(we);
+            if (!ok) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+                ]);
+            }
+            // Persist so the editor shows it.
+            try {
+                await vscode.workspace.save(uri);
+            }
+            catch {
+                /* save is best-effort */
+            }
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`),
+            ]);
         }
-        catch {
-            /* save is best-effort */
+        finally {
+            releaseStandaloneClaim();
         }
-        return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart(`Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`),
-        ]);
     },
 };
 /** Convert an absolute offset within `text` to a {line, character} Position. */

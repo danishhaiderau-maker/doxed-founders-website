@@ -4,6 +4,7 @@ exports.DEFAULT_TOOL_RESULT_CHAR_BUDGET = void 0;
 exports.estimateTokensFromText = estimateTokensFromText;
 exports.estimateMessagesTokens = estimateMessagesTokens;
 exports.composeFounderSystemPrompt = composeFounderSystemPrompt;
+exports.composeFounderPromptMessages = composeFounderPromptMessages;
 exports.planPromptEfficiency = planPromptEfficiency;
 const node_crypto_1 = require("node:crypto");
 exports.DEFAULT_TOOL_RESULT_CHAR_BUDGET = 16_000;
@@ -18,10 +19,32 @@ function estimateMessagesTokens(messages) {
     }, 0);
 }
 function composeFounderSystemPrompt(input) {
-    return [input.identity, input.memory, input.projectContext, input.coordination]
+    return [
+        input.identity,
+        input.memory,
+        input.projectContext,
+        input.additionalStableContext,
+        input.coordination,
+    ]
         .map((block) => block?.trim() ?? '')
         .filter(Boolean)
         .join('\n\n');
+}
+function composeFounderPromptMessages(input) {
+    const identity = input.identity.trim();
+    const context = [
+        input.memory,
+        input.projectContext,
+        input.additionalStableContext,
+        input.coordination,
+    ]
+        .map((block) => block?.trim() ?? '')
+        .filter(Boolean)
+        .join('\n\n');
+    return [
+        ...(identity ? [{ role: 'system', content: identity }] : []),
+        ...(context ? [{ role: 'system', content: context }] : []),
+    ];
 }
 function compactToolResult(content, budget) {
     if (content.length <= budget)

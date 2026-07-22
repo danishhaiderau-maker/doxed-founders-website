@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.__testHooks = exports.FounderWorkspaceContextIndex = void 0;
 const node_crypto_1 = require("node:crypto");
+const node_child_process_1 = require("node:child_process");
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const vscode = __importStar(require("vscode"));
@@ -53,13 +54,15 @@ class FounderWorkspaceContextIndex {
     watcher;
     workspaceId;
     indexFile;
+    invalidationEmitter = new vscode.EventEmitter();
+    onDidInvalidate = this.invalidationEmitter.event;
     constructor(context) {
         this.context = context;
         this.workspaceId = currentWorkspaceId();
         this.indexFile = this.indexFileFor(this.workspaceId);
         this.state = this.readPersisted(this.workspaceId, this.indexFile);
         this.watcher = vscode.workspace.createFileSystemWatcher(INDEXABLE_GLOB);
-        context.subscriptions.push(this.watcher, this.watcher.onDidCreate(() => this.scheduleRefresh()), this.watcher.onDidChange(() => this.scheduleRefresh()), this.watcher.onDidDelete(() => this.scheduleRefresh()), vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        context.subscriptions.push(this.watcher, this.watcher.onDidCreate((uri) => this.invalidateAndSchedule(uri)), this.watcher.onDidChange((uri) => this.invalidateAndSchedule(uri)), this.watcher.onDidDelete((uri) => this.invalidateAndSchedule(uri)), vscode.workspace.onDidChangeWorkspaceFolders(() => {
             this.switchWorkspace();
             this.scheduleRefresh(true);
         }));
@@ -67,6 +70,39 @@ class FounderWorkspaceContextIndex {
     }
     contextFor(prompt) {
         return (0, workspace_context_state_1.formatWorkspaceContextForPrompt)(this.state, prompt);
+    }
+    cacheContextFor(prompt) {
+        return (0, workspace_context_state_1.workspaceCacheContext)(this.state, prompt);
+    }
+    workspaceIdValue() {
+        return this.state?.workspaceId ?? this.workspaceId;
+    }
+    allFileHashes() {
+        return this.state?.files.map((file) => ({
+            path: file.path,
+            sha256: file.sha256,
+        })) ?? [];
+    }
+    fileHashes(paths) {
+        const requested = new Set(paths.map((file) => this.normalizeWorkspaceFile(file)).filter(Boolean));
+        return this.allFileHashes().filter((file) => requested.has(file.path));
+    }
+    headCommit() {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!root)
+            return null;
+        try {
+            const value = (0, node_child_process_1.execFileSync)('git', ['rev-parse', 'HEAD'], {
+                cwd: root,
+                encoding: 'utf8',
+                timeout: 2_000,
+                windowsHide: true,
+            }).trim();
+            return /^[a-f0-9]{40,64}$/i.test(value) ? value : null;
+        }
+        catch {
+            return null;
+        }
     }
     summary() {
         return {
@@ -87,7 +123,19 @@ class FounderWorkspaceContextIndex {
     dispose() {
         if (this.refreshTimer)
             clearTimeout(this.refreshTimer);
+        this.invalidationEmitter.dispose();
         this.watcher.dispose();
+    }
+    invalidateAndSchedule(uri) {
+        const workspaceId = this.workspaceId;
+        this.state = null;
+        if (workspaceId) {
+            this.invalidationEmitter.fire({
+                workspaceId,
+                ...(uri ? { path: relativeWorkspacePath(uri) ?? undefined } : {}),
+            });
+        }
+        this.scheduleRefresh(true);
     }
     scheduleRefresh(force = false) {
         if (this.refreshTimer)
@@ -99,6 +147,22 @@ class FounderWorkspaceContextIndex {
         return workspaceId
             ? path.join(this.context.globalStorageUri.fsPath, 'workspace-context', `${workspaceId}.json`)
             : null;
+    }
+    normalizeWorkspaceFile(file) {
+        if (!path.isAbsolute(file)) {
+            return file.replaceAll('\\', '/').replace(/^\.\//, '');
+        }
+        for (const folder of vscode.workspace.workspaceFolders ?? []) {
+            const relative = path.relative(folder.uri.fsPath, file);
+            if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+                continue;
+            }
+            const normalized = relative.replaceAll('\\', '/');
+            return (vscode.workspace.workspaceFolders?.length ?? 0) > 1
+                ? `${folder.name}/${normalized}`
+                : normalized;
+        }
+        return '';
     }
     switchWorkspace() {
         const workspaceId = currentWorkspaceId();
@@ -127,6 +191,7 @@ class FounderWorkspaceContextIndex {
         const uris = await vscode.workspace.findFiles(INDEXABLE_GLOB, EXCLUDE_GLOB, MAX_FILES);
         const previous = new Map(this.state?.files.map((file) => [file.path, file]) ?? []);
         const next = [];
+        const decisions = [];
         const symbolQueue = [];
         let symbolBudget = INITIAL_SYMBOL_BUDGET;
         for (const uri of uris) {
@@ -143,7 +208,8 @@ class FounderWorkspaceContextIndex {
             if (stat.size > MAX_FILE_BYTES)
                 continue;
             const old = previous.get(relativePath);
-            if (!force && !(0, workspace_context_state_1.workspaceContextFileNeedsRefresh)(old, {
+            const isDecisionLedger = relativePath.toLowerCase() === '.github/founder-os/decisions.md';
+            if (!force && !isDecisionLedger && !(0, workspace_context_state_1.workspaceContextFileNeedsRefresh)(old, {
                 path: relativePath,
                 size: stat.size,
                 mtimeMs: stat.mtime,
@@ -158,15 +224,21 @@ class FounderWorkspaceContextIndex {
             catch {
                 continue;
             }
+            const sha256 = (0, node_crypto_1.createHash)('sha256').update(bytes).digest('hex');
+            const source = Buffer.from(bytes).toString('utf8');
             const file = {
                 path: relativePath,
                 languageId: languageIdForPath(relativePath),
                 size: stat.size,
                 mtimeMs: stat.mtime,
-                sha256: (0, node_crypto_1.createHash)('sha256').update(bytes).digest('hex'),
+                sha256,
                 symbols: [],
+                imports: (0, workspace_context_state_1.extractImportSpecifiers)(source, languageIdForPath(relativePath)),
             };
             next.push(file);
+            if (isDecisionLedger) {
+                decisions.push(...(0, workspace_context_state_1.parseDecisionLedger)(source, relativePath, sha256));
+            }
             if (symbolBudget > 0 && supportsSymbols(relativePath)) {
                 symbolQueue.push({ uri, file });
                 symbolBudget -= 1;
@@ -182,7 +254,7 @@ class FounderWorkspaceContextIndex {
             this.scheduleRefresh(true);
             return;
         }
-        this.state = (0, workspace_context_state_1.buildWorkspaceContextIndex)(workspaceId, next);
+        this.state = (0, workspace_context_state_1.buildWorkspaceContextIndex)(workspaceId, next, new Date().toISOString(), decisions);
         this.writePersisted(this.state, indexFile);
     }
     writePersisted(state, indexFile) {

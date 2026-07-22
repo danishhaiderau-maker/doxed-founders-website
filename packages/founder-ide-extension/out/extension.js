@@ -74,6 +74,10 @@ const founder_shortcuts_1 = require("./founder-shortcuts");
 const founder_companion_1 = require("./founder-companion");
 const agent_awareness_1 = require("./agent-awareness");
 const workspace_context_index_1 = require("./workspace-context-index");
+const safe_result_cache_1 = require("./safe-result-cache");
+const verified_solution_memory_1 = require("./verified-solution-memory");
+const project_activity_1 = require("./project-activity");
+const personal_ai_profiles_1 = require("./personal-ai-profiles");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -89,6 +93,10 @@ let founderShortcuts;
 let founderCompanion;
 let founderAgentAwareness;
 let founderWorkspaceContext;
+let founderSafeResultCache;
+let founderVerifiedSolutionMemory;
+let founderProjectActivity;
+let personalAiProfiles;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -103,8 +111,8 @@ function activate(context) {
     founderShortcuts = new founder_shortcuts_1.FounderShortcutRegistry();
     context.subscriptions.push(founderShortcuts);
     founderCompanion = new founder_companion_1.FounderCompanionViewProvider(context);
-    context.subscriptions.push(founderCompanion, vscode.window.registerWebviewViewProvider(founder_companion_1.FounderCompanionViewProvider.viewId, founderCompanion, { webviewOptions: { retainContextWhenHidden: true } }), vscode.tasks.onDidStartTask((event) => {
-        founderCompanion?.setWorking(`Running ${event.execution.task.name}`, 'Local workspace task');
+    context.subscriptions.push(founderCompanion, vscode.tasks.onDidStartTask((event) => {
+        founderCompanion?.setVerifying(`Checking ${event.execution.task.name}`, 'Running a local workspace task');
     }), vscode.tasks.onDidEndTaskProcess((event) => {
         if (event.exitCode === 0) {
             founderCompanion?.setSuccess(event.execution.task.name, 'Task completed with exit code 0');
@@ -118,11 +126,17 @@ function activate(context) {
     context.subscriptions.push(founderAgentAwareness, founderAgentAwareness.onDidChange((summary) => {
         founderHub?.setAgentAwareness(summary);
         if (summary.conflictCount > 0) {
-            founderCompanion?.setAttention('Agents are coordinating', `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`);
+            founderCompanion?.setCoordinating('Agents are coordinating', `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`);
         }
     }));
     founderWorkspaceContext = new workspace_context_index_1.FounderWorkspaceContextIndex(context);
     context.subscriptions.push(founderWorkspaceContext);
+    founderSafeResultCache = new safe_result_cache_1.FounderSafeResultCache(path.join(context.globalStorageUri.fsPath, 'safe-result-cache'));
+    context.subscriptions.push(founderWorkspaceContext.onDidInvalidate(({ workspaceId }) => {
+        founderSafeResultCache?.invalidateWorkspace(workspaceId);
+    }));
+    founderVerifiedSolutionMemory = new verified_solution_memory_1.FounderVerifiedSolutionMemory(path.join(context.globalStorageUri.fsPath, 'verified-solutions'));
+    founderProjectActivity = new project_activity_1.FounderProjectActivityStore(path.join(context.globalStorageUri.fsPath, 'project-activity.json'));
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
         onDidSignIn: async () => {
             await (0, credentials_1.syncVaultIntoSettings)();
@@ -140,21 +154,49 @@ function activate(context) {
             founderHub?.refresh();
             founderSettings?.refresh();
             founderShortcuts?.refresh();
-            founderCompanion?.setAttention('Sign in required', 'Connect Founder to use managed AI and remote control');
+            founderCompanion?.setOffline('Sign in required', 'Connect Founder to use managed AI and remote control');
         },
     });
     context.subscriptions.push(founderAuthenticationProvider, vscode.authentication.registerAuthenticationProvider(founder_authentication_1.FOUNDER_AUTH_PROVIDER_ID, 'Founder', founderAuthenticationProvider, { supportsMultipleAccounts: false }));
     // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
     profileManager = new profile_manager_1.ProfileManager(context, { showStatusBar: false });
+    personalAiProfiles = new personal_ai_profiles_1.PersonalAiProfileStore(context, {
+        save: async (profile) => {
+            await vscode.commands.executeCommand('founder.personalAi.save', profile);
+        },
+        select: async (id) => {
+            await vscode.commands.executeCommand('founder.personalAi.select', id);
+        },
+        setEnabled: async (id, enabled) => {
+            await vscode.commands.executeCommand('founder.personalAi.enable', { id, enabled });
+        },
+        delete: async (id) => {
+            await vscode.commands.executeCommand('founder.personalAi.delete', id);
+        },
+    });
     costTracker = new cost_tracker_1.CostTracker();
     gatewayMetadataUi = new gateway_metadata_ui_1.GatewayMetadataUi();
-    context.subscriptions.push(profileManager, costTracker, gatewayMetadataUi);
+    context.subscriptions.push(profileManager, personalAiProfiles, costTracker, gatewayMetadataUi);
     profileManager.show();
     founderSettings = new founder_settings_1.FounderSettingsPanel({
         getProfile: () => profileManager.profile,
         setProfile: (id) => profileManager.setProfile(id),
+        getManagedAlias: () => profileManager.alias,
+        setManagedAlias: async (id) => {
+            await profileManager.setAlias(id);
+            await vscode.commands.executeCommand('founder.managedAi.select', id);
+        },
+        personalAiProfiles,
     });
     context.subscriptions.push(founderSettings);
+    context.subscriptions.push(personalAiProfiles.onDidChange(() => {
+        founderSettings?.refresh();
+        founderHub?.refresh();
+    }));
+    void personalAiProfiles.ready().then(() => {
+        founderSettings?.refresh();
+        registerOrNotify(context);
+    });
     // Agentic tools (registered once; available to any chat participant / model).
     // `vscode.lm.registerTool` only exists on VS Code 1.96+ (proposed `lmTools`
     // API, later stable). Guard so activation does not crash on 1.93.1, where the
@@ -188,7 +230,47 @@ function activate(context) {
     }), vscode.commands.registerCommand('founderOs.connectFounderOs', () => signInWithFounderId(context)), vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig), vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias), vscode.commands.registerCommand('founderOs.selectProfile', () => profileManager?.selectProfile()), vscode.commands.registerCommand('founderOs.showCostBreakdown', () => costTracker?.showBreakdown()), vscode.commands.registerCommand('founderOs.resetCost', () => {
         costTracker?.reset();
         void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
-    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openCompanion', () => revealFounderView('founderOs', founder_companion_1.FounderCompanionViewProvider.viewId)), vscode.commands.registerCommand('founderOs.openAgents', async () => {
+    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openCompanion', async () => {
+        await vscode.workspace.getConfiguration('founderOs').update('companion.enabled', true, vscode.ConfigurationTarget.Global);
+        founderCompanion?.syncEnabled();
+    }), vscode.commands.registerCommand('founderOs.companionState', (state, title, detail) => {
+        const safeTitle = typeof title === 'string' ? title.slice(0, 96) : 'Founder Dragon';
+        const safeDetail = typeof detail === 'string' ? detail.slice(0, 220) : '';
+        switch (state) {
+            case 'listening':
+                founderCompanion?.setListening(safeTitle, safeDetail);
+                break;
+            case 'planning':
+                founderCompanion?.setPlanning(safeTitle, safeDetail);
+                break;
+            case 'working':
+                founderCompanion?.setWorking(safeTitle, safeDetail);
+                break;
+            case 'coordinating':
+                founderCompanion?.setCoordinating(safeTitle, safeDetail);
+                break;
+            case 'verifying':
+                founderCompanion?.setVerifying(safeTitle, safeDetail);
+                break;
+            case 'success':
+                founderCompanion?.setSuccess(safeTitle, safeDetail);
+                break;
+            case 'attention':
+                founderCompanion?.setAttention(safeTitle, safeDetail);
+                break;
+            case 'error':
+                founderCompanion?.setError(safeTitle, safeDetail);
+                break;
+            case 'offline':
+                founderCompanion?.setOffline(safeTitle, safeDetail);
+                break;
+            case 'update':
+                founderCompanion?.setUpdate(safeTitle, safeDetail);
+                break;
+            default:
+                founderCompanion?.setIdle();
+        }
+    }), vscode.commands.registerCommand('founderOs.openAgents', async () => {
         await vscode.commands.executeCommand('workbench.view.extension.founderOs');
         await vscode.commands.executeCommand(`${founder_hub_1.FounderHubProvider.viewId}.focus`);
     }), vscode.commands.registerCommand('founderOs.openShip', () => revealFounderView('founderOs', 'founderOs.ship')), vscode.commands.registerCommand('founderOs.openNodeView', () => revealFounderView('founderOs', 'founderOs.node')), vscode.commands.registerCommand('founderOs.openConnectionsView', () => revealFounderView('founderOs', 'founderOs.connections')), vscode.commands.registerCommand('founderOs.openRemoteView', () => revealFounderView('founderOs', 'founderOs.remote')), vscode.commands.registerCommand('founderOs.openRemoteControl', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/founder-den?onboard=sovereign'))), vscode.commands.registerCommand('founderOs.openChat', async () => {
@@ -204,7 +286,7 @@ function activate(context) {
         void vscode.window.showInformationMessage(summary
             ? `Founder project map refreshed: ${summary.files} files, ${summary.symbols} symbols.`
             : 'Open a folder to build the Founder project map.');
-    }));
+    }), vscode.commands.registerCommand('founderOs.openProjectBrief', openProjectBrief));
     void applyFounderNavigationDefaults(context);
     // First-pass registration (synchronous so the model picker populates fast).
     registerOrNotify(context);
@@ -315,23 +397,12 @@ function deactivate() {
 /** Register the chat participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context) {
     const creds = (0, credentials_1.resolveCredentials)();
-    if (!creds) {
-        registeredParticipant?.dispose();
-        registeredParticipant = undefined;
-        debugSquasherDisposable?.dispose();
-        debugSquasherDisposable = undefined;
-        currentCreds = null;
-        pairingStatusBar?.refresh();
-        founderHub?.refresh();
-        founderSettings?.refresh();
-        founderShortcuts?.refresh();
-        void showPairPrompt(context);
-        return;
-    }
-    if (currentCreds &&
-        currentCreds.apiBaseUrl === creds.apiBaseUrl &&
-        currentCreds.nodeId === creds.nodeId &&
-        currentCreds.nodeToken === creds.nodeToken) {
+    if (registeredParticipant
+        && ((!currentCreds && !creds)
+            || (currentCreds && creds
+                && currentCreds.apiBaseUrl === creds.apiBaseUrl
+                && currentCreds.nodeId === creds.nodeId
+                && currentCreds.nodeToken === creds.nodeToken))) {
         pairingStatusBar?.refresh();
         founderShortcuts?.refresh();
         return;
@@ -340,14 +411,18 @@ function registerOrNotify(context) {
     registeredParticipant?.dispose();
     debugSquasherDisposable?.dispose();
     registeredParticipant = (0, chat_participant_1.registerFounderOsChatParticipant)(context, {
-        creds,
+        creds: creds ?? undefined,
         profileManager: profileManager,
+        personalAiProfiles,
         costTracker: costTracker,
         coordination: founderAgentAwareness,
         projectContext: founderWorkspaceContext,
+        resultCache: founderSafeResultCache,
+        solutionMemory: founderVerifiedSolutionMemory,
+        projectActivity: founderProjectActivity,
         onRequestStart: (modelId) => {
             pairingStatusBar?.setRequestInFlight(modelId);
-            founderCompanion?.setWorking('Flying to Founder AI', modelId);
+            founderCompanion?.setPlanning('Planning the route', modelId);
         },
         onMetadata: (meta) => {
             const tier = meta.tier ?? '?';
@@ -363,6 +438,9 @@ function registerOrNotify(context) {
             gatewayMetadataUi?.record(meta);
             founderCompanion?.setWorking(`Reaching ${provider2 || 'the selected provider'}`, model || tier);
         },
+        onCacheHit: (estimatedTokensAvoided) => {
+            founderCompanion?.setSuccess('Verified context reused', `Provider skipped; about ${estimatedTokensAvoided.toLocaleString()} tokens avoided`);
+        },
         onRequestEnd: (_modelId, ok, errorMessage) => {
             pairingStatusBar?.setRequestResult(ok, errorMessage);
             if (ok) {
@@ -374,8 +452,14 @@ function registerOrNotify(context) {
         },
     });
     // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
-    debugSquasherDisposable = (0, debug_squasher_status_1.createDebugSquasherStatus)(context, () => (0, credentials_1.resolveCredentials)(), { showStatusBar: false });
-    context.subscriptions.push(debugSquasherDisposable);
+    if (creds) {
+        debugSquasherDisposable = (0, debug_squasher_status_1.createDebugSquasherStatus)(context, () => (0, credentials_1.resolveCredentials)(), { showStatusBar: false });
+        context.subscriptions.push(debugSquasherDisposable);
+    }
+    else {
+        debugSquasherDisposable = undefined;
+        void showPairPrompt(context);
+    }
     currentCreds = creds;
     pairingStatusBar?.refresh();
     founderHub?.refresh();
@@ -515,21 +599,57 @@ async function openVaultConfig() {
     const doc = await vscode.workspace.openTextDocument(file);
     await vscode.window.showTextDocument(doc);
 }
+async function openProjectBrief() {
+    const workspaceId = founderWorkspaceContext?.workspaceIdValue();
+    const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'Founder project';
+    if (!workspaceId || !founderProjectActivity) {
+        void vscode.window.showInformationMessage('Open a project to view its Founder brief.');
+        return;
+    }
+    const document = await vscode.workspace.openTextDocument({
+        language: 'markdown',
+        content: founderProjectActivity.dailyBrief(workspaceId, workspaceName),
+    });
+    await vscode.window.showTextDocument(document, { preview: true });
+}
 async function selectModelAlias() {
-    const items = models_1.FOUNDER_OS_MODELS.map((m) => ({
-        label: m.name,
-        description: m.id,
-        detail: m.detail,
-        picked: m.isDefault,
-    }));
+    await personalAiProfiles?.ready();
+    const activePersonalId = personalAiProfiles?.activeId();
+    const items = [
+        ...models_1.FOUNDER_OS_MODELS.map((model) => ({
+            label: `$(sparkle) ${model.name}`,
+            description: model.id,
+            detail: model.detail,
+            picked: !activePersonalId && profileManager?.alias.id === model.id,
+            routeKind: 'managed',
+            id: model.id,
+        })),
+        ...(personalAiProfiles?.list().filter((profile) => profile.enabled).map((profile) => ({
+            label: `${profile.kind === 'ollama' ? '$(device-desktop)' : '$(key)'} ${profile.name}`,
+            description: profile.kind === 'ollama' ? 'Local | outside managed quota' : 'Personal AI | outside managed quota',
+            detail: `${profile.model} | ${profile.baseUrl}`,
+            picked: activePersonalId === profile.id,
+            routeKind: 'personal',
+            id: profile.id,
+        })) ?? []),
+    ];
     const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Select a Founder OS model alias (changes the chat model dropdown selection)',
+        title: 'Choose AI for Founder Chat',
+        placeHolder: 'Founder managed, Personal AI, or local Ollama',
     });
     if (!picked)
         return;
-    // Open the chat model picker so the user can apply the selection. The
-    // underlying provider is already registered; this is a UX hint.
-    void vscode.window.showInformationMessage(`Selected ${picked.label}. Pick it from the model dropdown in Chat to apply.`);
+    if (picked.routeKind === 'managed') {
+        await personalAiProfiles?.select(null);
+        const aliasId = picked.id;
+        await profileManager?.setAlias(aliasId);
+        await vscode.commands.executeCommand('founder.managedAi.select', aliasId);
+    }
+    else {
+        await personalAiProfiles?.select(picked.id);
+        void vscode.window.showInformationMessage(`${picked.label.replace(/^\$\([^)]+\)\s*/, '')} is now active.`);
+    }
+    founderSettings?.refresh();
 }
 /**
  * Watch `~/FounderVault/node-config.json` for create/change so pairing done
