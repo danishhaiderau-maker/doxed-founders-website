@@ -281,6 +281,47 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       founderCompanion?.syncEnabled();
     }),
+    vscode.commands.registerCommand(
+      'founderOs.companionState',
+      (state: unknown, title: unknown, detail: unknown) => {
+        const safeTitle = typeof title === 'string' ? title.slice(0, 96) : 'Founder Dragon';
+        const safeDetail = typeof detail === 'string' ? detail.slice(0, 220) : '';
+        switch (state) {
+          case 'listening':
+            founderCompanion?.setListening(safeTitle, safeDetail);
+            break;
+          case 'planning':
+            founderCompanion?.setPlanning(safeTitle, safeDetail);
+            break;
+          case 'working':
+            founderCompanion?.setWorking(safeTitle, safeDetail);
+            break;
+          case 'coordinating':
+            founderCompanion?.setCoordinating(safeTitle, safeDetail);
+            break;
+          case 'verifying':
+            founderCompanion?.setVerifying(safeTitle, safeDetail);
+            break;
+          case 'success':
+            founderCompanion?.setSuccess(safeTitle, safeDetail);
+            break;
+          case 'attention':
+            founderCompanion?.setAttention(safeTitle, safeDetail);
+            break;
+          case 'error':
+            founderCompanion?.setError(safeTitle, safeDetail);
+            break;
+          case 'offline':
+            founderCompanion?.setOffline(safeTitle, safeDetail);
+            break;
+          case 'update':
+            founderCompanion?.setUpdate(safeTitle, safeDetail);
+            break;
+          default:
+            founderCompanion?.setIdle();
+        }
+      },
+    ),
     vscode.commands.registerCommand('founderOs.openAgents', async () => {
       await vscode.commands.executeCommand('workbench.view.extension.founderOs');
       await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);

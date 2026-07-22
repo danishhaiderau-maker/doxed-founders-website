@@ -94,6 +94,10 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
     this.set({ state: 'working', title, detail });
   }
 
+  setListening(title: string, detail: string): void {
+    this.set({ state: 'listening', title, detail });
+  }
+
   setPlanning(title: string, detail: string): void {
     this.set({ state: 'planning', title, detail });
   }
@@ -116,6 +120,10 @@ export class FounderCompanionViewProvider implements vscode.WebviewViewProvider,
 
   setAttention(title: string, detail: string): void {
     this.set({ state: 'attention', title, detail });
+  }
+
+  setUpdate(title: string, detail: string): void {
+    this.set({ state: 'update', title, detail });
   }
 
   setError(title: string, detail: string): void {

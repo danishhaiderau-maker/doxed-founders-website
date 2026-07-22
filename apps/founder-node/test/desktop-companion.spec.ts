@@ -37,6 +37,10 @@ describe('Founder desktop companion', () => {
     assert.match(windowSource, /setShape\(/);
     assert.match(windowSource, /founder-companion-drag-move/);
     assert.match(windowSource, /snapToNearbyEdge/);
+    assert.match(windowSource, /lastDisplayId/);
+    assert.match(windowSource, /positions\[String\(display\.id\)\]/);
+    assert.match(windowSource, /Hide until next task/);
+    assert.match(windowSource, /hiddenUntilNextTask/);
     assert.match(windowSource, /Reduce motion/);
     assert.match(html, /setPointerCapture/);
     assert.match(html, /planning/);

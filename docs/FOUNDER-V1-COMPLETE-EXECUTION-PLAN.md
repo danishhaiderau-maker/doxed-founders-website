@@ -259,21 +259,23 @@ zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
 
 - [x] Build one transparent, frameless, always-on-top companion owned by Founder
   IDE; remove duplicate Dragon/IDE launch identities.
-- [ ] Make it draggable across screens and remember its position per display.
+- [x] Make it draggable across screens and remember its position per display.
 - [x] States: resting in nest, listening, planning, flying/working, coordinating,
   blocked, verifying, delivered/fire, failed, offline, and update available.
-- [ ] Drive states from real task, network, coordination, verification, usage,
-  and update events rather than a cosmetic timer.
-- [ ] Show compact task cards, measured savings, current agent count, and result
+- [x] Drive listening, task, network, coordination, verification, and usage
+  states from real events rather than a cosmetic timer.
+- [ ] Connect updater availability and install/rollback transitions to the
+  desktop companion without overwriting a more urgent active-task state.
+- [x] Show compact task cards, measured savings, current agent count, and result
   receipts without exposing secrets.
-- [ ] Click opens the relevant task; context menu provides usage, hide/show,
+- [x] Click opens the relevant task; context menu provides usage, hide/show,
   pause, settings, sign in/out, and reduced motion.
-- [ ] Keep transparent assets free of baked-in backgrounds and provide a quiet
+- [x] Keep transparent assets free of baked-in backgrounds and provide a quiet
   non-animated accessibility state.
 - [x] Ensure the companion never steals typing focus or blocks essential UI.
-- [ ] Keep one recognisable dragon across every state, with transparent
+- [x] Keep one recognisable dragon across every state, with transparent
   animation assets sized for a desktop companion rather than a video panel.
-- [ ] Support snap-to-edge, multi-monitor work areas, temporary click-through,
+- [x] Support snap-to-edge, multi-monitor work areas, temporary click-through,
   hide until next task, and recovery when a saved display is disconnected.
 - [x] Announce delivered work with a compact two-line result card and a brief
   fire state; resting returns the dragon to its nest without visual noise.

@@ -53,6 +53,15 @@ let hitTestTimer: NodeJS.Timeout | null = null;
 let mouseInteractive = false;
 let dragOffset: { x: number; y: number } | null = null;
 let actionHandler: ((action: DesktopCompanionAction) => void) | null = null;
+let hiddenUntilNextTask = false;
+
+interface StoredCompanionPositions {
+  lastDisplayId?: string;
+  positions?: Record<string, { x: number; y: number }>;
+  /** Legacy single-position format kept for a safe migration. */
+  x?: number;
+  y?: number;
+}
 
 function assetRoot(): string {
   return app.isPackaged
@@ -73,13 +82,15 @@ function defaultPosition(): { x: number; y: number } {
 }
 
 function restoredPosition(): { x: number; y: number } {
+  const displays = screen.getAllDisplays();
   let candidate = defaultPosition();
   try {
-    const parsed = JSON.parse(fs.readFileSync(positionFile(), 'utf8')) as {
-      x?: number;
-      y?: number;
-    };
-    if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
+    const parsed = JSON.parse(fs.readFileSync(positionFile(), 'utf8')) as StoredCompanionPositions;
+    const selectedDisplay = displays.find(display => String(display.id) === parsed.lastDisplayId);
+    const perDisplay = selectedDisplay && parsed.positions?.[String(selectedDisplay.id)];
+    if (perDisplay && Number.isFinite(perDisplay.x) && Number.isFinite(perDisplay.y)) {
+      candidate = { x: Math.round(perDisplay.x), y: Math.round(perDisplay.y) };
+    } else if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
       candidate = { x: Math.round(parsed.x!), y: Math.round(parsed.y!) };
     }
   } catch {
@@ -102,9 +113,21 @@ function restoredPosition(): { x: number; y: number } {
 function persistPosition(): void {
   if (!companionWindow || companionWindow.isDestroyed()) return;
   try {
-    const { x, y } = companionWindow.getBounds();
+    const bounds = companionWindow.getBounds();
+    const display = screen.getDisplayMatching(bounds);
+    let stored: StoredCompanionPositions = {};
+    try {
+      stored = JSON.parse(fs.readFileSync(positionFile(), 'utf8')) as StoredCompanionPositions;
+    } catch {
+      // The first persisted position creates the file below.
+    }
+    const positions = stored.positions ?? {};
+    positions[String(display.id)] = { x: bounds.x, y: bounds.y };
     fs.mkdirSync(path.dirname(positionFile()), { recursive: true });
-    fs.writeFileSync(positionFile(), JSON.stringify({ x, y }, null, 2), 'utf8');
+    fs.writeFileSync(positionFile(), JSON.stringify({
+      lastDisplayId: String(display.id),
+      positions,
+    } satisfies StoredCompanionPositions, null, 2), 'utf8');
   } catch {
     // Position persistence is optional; the companion still works without it.
   }
@@ -240,6 +263,14 @@ function registerIpc(): void {
       { label: 'Founder Settings', click: () => send('openSettings') },
       { type: 'separator' },
       {
+        label: 'Hide until next task',
+        click: () => {
+          hiddenUntilNextTask = true;
+          setMouseInteractive(false);
+          companionWindow?.hide();
+        },
+      },
+      {
         label: 'Reduce motion',
         type: 'checkbox',
         checked: lastSnapshot.reducedMotion,
@@ -312,8 +343,11 @@ export function updateDesktopCompanion(snapshot: DesktopCompanionSnapshot): void
     detail: snapshot.detail.slice(0, 220),
     reducedMotion: snapshot.reducedMotion,
   };
+  if (hiddenUntilNextTask && snapshot.state !== 'idle' && snapshot.state !== 'offline') {
+    hiddenUntilNextTask = false;
+  }
   if (!companionWindow || companionWindow.isDestroyed()) createDesktopCompanion();
-  if (!lastSnapshot.visible) {
+  if (!lastSnapshot.visible || hiddenUntilNextTask) {
     setMouseInteractive(false);
     companionWindow?.hide();
     return;
@@ -330,4 +364,5 @@ export function destroyDesktopCompanion(): void {
   if (companionWindow && !companionWindow.isDestroyed()) companionWindow.destroy();
   companionWindow = null;
   actionHandler = null;
+  hiddenUntilNextTask = false;
 }

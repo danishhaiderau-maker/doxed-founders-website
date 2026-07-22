@@ -103,6 +103,8 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /Start voice input/);
     assert.match(source, /founderSpeechRecognitionConstructor/);
     assert.match(source, /founderOs\.openSettings/);
+    assert.match(source, /founderOs\.companionState/);
+    assert.match(source, /Voice text is ready/);
   });
 
   it('coordinates the native chat with other active Founder tasks', () => {

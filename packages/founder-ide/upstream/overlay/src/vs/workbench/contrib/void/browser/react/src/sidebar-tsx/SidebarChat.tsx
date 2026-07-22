@@ -2934,6 +2934,7 @@ export const SidebarChat = () => {
 	const textAreaFnsRef = useRef<TextAreaFns | null>(null)
 	const speechRecognitionRef = useRef<FounderSpeechRecognition | null>(null)
 	const speechBaseTextRef = useRef('')
+	const voiceFailedRef = useRef(false)
 	const [voicePhase, setVoicePhase] = useState<'idle' | 'starting' | 'listening' | 'processing'>('idle')
 	const [voiceError, setVoiceError] = useState<string | null>(null)
 
@@ -3004,10 +3005,19 @@ export const SidebarChat = () => {
 		recognition.interimResults = true
 		recognition.lang = navigator.language || 'en-US'
 		speechBaseTextRef.current = textAreaRef.current?.value.trimEnd() ?? ''
+		voiceFailedRef.current = false
 		setVoiceError(null)
 		setVoicePhase('starting')
 
-		recognition.onstart = () => setVoicePhase('listening')
+		recognition.onstart = () => {
+			setVoicePhase('listening')
+			void commandService.executeCommand(
+				'founderOs.companionState',
+				'listening',
+				'Listening',
+				'Speak naturally. Your words stay in the composer until you send them.',
+			)
+		}
 		recognition.onresult = (event) => {
 			let transcript = ''
 			for (let index = 0; index < event.results.length; index += 1) {
@@ -3018,13 +3028,24 @@ export const SidebarChat = () => {
 			textAreaFnsRef.current?.setValue(`${base}${separator}${transcript}`.trimStart())
 		}
 		recognition.onerror = (event) => {
-			setVoiceError(founderSpeechErrorMessage(event.error))
+			const message = founderSpeechErrorMessage(event.error)
+			voiceFailedRef.current = true
+			setVoiceError(message)
 			setVoicePhase('idle')
+			void commandService.executeCommand('founderOs.companionState', 'error', 'Voice input was blocked', message)
 		}
 		recognition.onend = () => {
 			speechRecognitionRef.current = null
 			setVoicePhase('idle')
 			textAreaRef.current?.focus()
+			if (!voiceFailedRef.current) {
+				void commandService.executeCommand(
+					'founderOs.companionState',
+					'success',
+					'Voice text is ready',
+					'Review the transcription in Founder Chat, then send when ready.',
+				)
+			}
 		}
 
 		speechRecognitionRef.current = recognition
@@ -3035,7 +3056,7 @@ export const SidebarChat = () => {
 			setVoicePhase('idle')
 			setVoiceError('Founder could not start the microphone. Wait a moment and try again.')
 		}
-	}, [isRunning, stopVoiceInput, voicePhase])
+	}, [commandService, isRunning, stopVoiceInput, voicePhase])
 
 	useEffect(() => () => {
 		speechRecognitionRef.current?.abort()
