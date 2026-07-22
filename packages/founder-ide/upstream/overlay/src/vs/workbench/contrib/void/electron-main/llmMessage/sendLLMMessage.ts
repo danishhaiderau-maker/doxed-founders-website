@@ -110,7 +110,13 @@ export const sendLLMMessage = async ({
 	const isFounderManagedSelection = modelName.startsWith('founder-os-')
 	if (founderOsEnabled() && isFounderManagedSelection) {
 		if (messagesType === 'chatMessages') {
-			await sendFounderOsChat({ messages: messages_, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode });
+			const threadId = typeof loggingExtras?.threadId === 'string' ? loggingExtras.threadId : '';
+			const workspacePath = typeof loggingExtras?.workspacePath === 'string' ? loggingExtras.workspacePath : '';
+			await sendFounderOsChat({
+				messages: messages_, onText, onFinalMessage, onError, _setAborter,
+				loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode,
+				coordination: threadId && workspacePath ? { threadId, workspacePath } : undefined,
+			});
 			return
 		}
 		if (messagesType === 'FIMMessage') {

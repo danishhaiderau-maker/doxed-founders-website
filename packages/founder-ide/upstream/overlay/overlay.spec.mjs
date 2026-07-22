@@ -88,6 +88,30 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /founderSpeechRecognitionConstructor/);
   });
 
+  it('coordinates the native chat with other active Founder tasks', () => {
+    const sender = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts',
+    );
+    const gateway = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    const coordination = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCoordination.ts',
+    );
+    assert.match(sender, /loggingExtras\?\.workspacePath/);
+    assert.match(gateway, /beginNativeCoordination/);
+    assert.match(gateway, /coordination\.refresh\(\)/);
+    assert.match(coordination, /Live agent coordination/);
+    assert.match(coordination, /\.founder-ide', 'coordination/);
+    assert.match(coordination, /COORDINATE: goals substantially overlap/);
+  });
+
+  it('patches native chat metadata with the active workspace root', () => {
+    const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
+    assert.match(applyScript, /native chat workspace coordination/);
+    assert.match(applyScript, /workspacePath: this\._workspaceContextService/);
+  });
+
   it('adds the seven focused Founder actions above the native composer', () => {
     const source = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',

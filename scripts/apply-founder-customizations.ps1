@@ -140,6 +140,25 @@ foreach ($entry in $manifest.files) {
 }
 Write-Host "[apply-founder] applied $copied overlay file(s)" -ForegroundColor Green
 
+# The native chat already carries a stable thread id. Add the active workspace
+# root to its logging metadata so the Electron-side Founder coordination bridge
+# can scope awareness to the correct project without replacing the large
+# upstream chatThreadService.ts file in our overlay.
+$chatThreadService = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\browser\chatThreadService.ts"
+if (-not (Test-Path $chatThreadService)) { throw "chatThreadService.ts missing at $chatThreadService" }
+$chatThreadContent = Get-Content $chatThreadService -Raw
+$coordinationOld = 'logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },'
+$coordinationNew = 'logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode, workspacePath: this._workspaceContextService.getWorkspace().folders[0]?.uri.fsPath ?? '''' } },'
+if ($chatThreadContent.Contains($coordinationOld)) {
+    $chatThreadContent = $chatThreadContent.Replace($coordinationOld, $coordinationNew)
+    [System.IO.File]::WriteAllText($chatThreadService, $chatThreadContent, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "[apply-founder]   patch    native chat workspace coordination" -ForegroundColor Cyan
+} elseif (-not $chatThreadContent.Contains($coordinationNew)) {
+    throw "Native chat logging signature changed upstream; workspace coordination was not applied"
+} else {
+    Write-Host "[apply-founder]   reapply  native chat workspace coordination" -ForegroundColor DarkCyan
+}
+
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
 try {
@@ -169,11 +188,16 @@ Write-Host "[apply-founder] product.json OK: nameLong='$($product.nameLong)' app
 # --- Verify the Gateway rewire landed ----------------------------------------
 $sendLlm = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendLLMMessage.ts"
 $sendFos = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendFounderOs.ts"
+$nativeCoordination = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\founderNativeCoordination.ts"
 if (-not (Test-Path $sendLlm)) { throw "sendLLMMessage.ts missing at $sendLlm" }
 if (-not (Test-Path $sendFos)) { throw "sendFounderOs.ts missing at $sendFos" }
+if (-not (Test-Path $nativeCoordination)) { throw "founderNativeCoordination.ts missing at $nativeCoordination" }
 $sendLlmContent = Get-Content $sendLlm -Raw
 if ($sendLlmContent -notmatch "FOUNDER_OS_GATEWAY_REWIRE") {
     throw "sendLLMMessage.ts is missing the FOUNDER_OS_GATEWAY_REWIRE marker - overlay did not apply"
+}
+if ((Get-Content $chatThreadService -Raw) -notmatch 'workspacePath: this\._workspaceContextService') {
+    throw "Native chat is missing workspace-scoped coordination metadata"
 }
 $sendFosLen = (Get-Item $sendFos).Length
 if ($sendFosLen -lt 5000) {

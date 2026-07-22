@@ -39,6 +39,7 @@ import type {
 } from '../../common/sendLLMMessageTypes.js';
 import type { ModelSelection, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import type { ChatMode } from '../../common/voidSettingsTypes.js';
+import { beginNativeCoordination } from './founderNativeCoordination.js';
 
 // ---------------------------------------------------------------------------
 // Credential discovery - mirrors credentials.ts. Reads the vault file that
@@ -374,6 +375,10 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 	settingsOfProvider: SettingsOfProvider;
 	separateSystemMessage: string | undefined;
 	chatMode: ChatMode | null;
+	coordination?: {
+		threadId: string;
+		workspacePath: string;
+	};
 }
 
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
@@ -388,6 +393,21 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		role: 'system',
 		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the exact provider and model for this request appear in the Founder route receipt below the answer. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
 	});
+	const coordination = params.coordination
+		? beginNativeCoordination({
+			threadId: params.coordination.threadId,
+			workspacePath: params.coordination.workspacePath,
+			provider: model,
+			messages: openAiMessages,
+		})
+		: undefined;
+	if (coordination?.context) {
+		openAiMessages.splice(1, 0, { role: 'system', content: coordination.context });
+	}
+	const coordinationHeartbeat = coordination
+		? setInterval(() => coordination.refresh(), 60_000)
+		: undefined;
+	coordinationHeartbeat?.unref?.();
 
 	const body: Record<string, unknown> = {
 		model,
@@ -397,7 +417,11 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	};
 
 	const got = await gatewayFetch(body, onError);
-	if (!got) return;
+	if (!got) {
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+		coordination?.fail();
+		return;
+	}
 	const { res, controller } = got;
 	_setAborter(() => controller.abort());
 
@@ -406,18 +430,26 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	let fullReasoning = '';
 	let routeMetadata: FounderOsMetadata | undefined;
 
-	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
-		onDelta: (delta) => {
-			fullText += delta;
-			onText({ fullText, fullReasoning, toolCall: undefined });
-		},
-		onMetadata: (meta) => {
-			routeMetadata = meta;
-			console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
-		},
-	}, controller.signal);
+	try {
+		await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
+			onDelta: (delta) => {
+				fullText += delta;
+				onText({ fullText, fullReasoning, toolCall: undefined });
+			},
+			onMetadata: (meta) => {
+				routeMetadata = meta;
+				console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
+			},
+		}, controller.signal);
+	} catch (error) {
+		coordination?.fail();
+		throw error;
+	} finally {
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+	}
 
 	if (!fullText && !fullReasoning) {
+		coordination?.fail();
 		onError({ message: 'Founder OS: Response from gateway was empty.', fullError: null });
 		return;
 	}
@@ -429,6 +461,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		anthropicReasoning: null,
 	};
 	onFinalMessage(finalParams);
+	coordination?.settle();
 
 	// satisfy RawToolCallObj import (unused but keeps the type graph intact)
 	void (null as unknown as RawToolCallObj);
