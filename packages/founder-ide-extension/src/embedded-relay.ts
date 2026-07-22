@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +21,10 @@ interface EmbeddedRelayDeps {
   existsSync?: typeof fs.existsSync;
   homedir?: () => string;
   isProcessAlive?: (pid: number) => boolean;
+  processExecutablePath?: (
+    pid: number,
+    platform: NodeJS.Platform,
+  ) => string | null;
   readLockFile?: (file: string) => string;
   runtimeExecutable?: string;
   spawnProcess?: (
@@ -73,11 +77,34 @@ function defaultIsProcessAlive(pid: number): boolean {
   }
 }
 
+function defaultProcessExecutablePath(
+  pid: number,
+  platform: NodeJS.Platform,
+): string | null {
+  try {
+    if (platform === 'win32') {
+      const command = `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop).ExecutablePath`;
+      return execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', command],
+        { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
+      ).trim() || null;
+    }
+    if (platform === 'linux') {
+      return fs.readlinkSync(`/proc/${pid}/exe`);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function activeRelayPid(
   vaultRoot: string,
   executable: string,
   platform: NodeJS.Platform,
   isProcessAlive: (pid: number) => boolean,
+  processExecutablePath: (pid: number, platform: NodeJS.Platform) => string | null,
   readLockFile: (file: string) => string,
 ): number | null {
   try {
@@ -90,7 +117,12 @@ function activeRelayPid(
       return platform === 'win32' ? resolved.toLowerCase() : resolved;
     };
     if (normalize(lock.exePath) !== normalize(executable)) return null;
-    return isProcessAlive(lock.pid) ? lock.pid : null;
+    if (!isProcessAlive(lock.pid)) return null;
+    const liveExecutable = processExecutablePath(lock.pid, platform);
+    if (!liveExecutable || normalize(liveExecutable) !== normalize(executable)) {
+      return null;
+    }
+    return lock.pid;
   } catch {
     return null;
   }
@@ -121,6 +153,7 @@ export function launchEmbeddedRelay(
     executable,
     platform,
     deps.isProcessAlive ?? defaultIsProcessAlive,
+    deps.processExecutablePath ?? defaultProcessExecutablePath,
     deps.readLockFile ?? ((file) => fs.readFileSync(file, 'utf8')),
   );
   if (runningPid) {

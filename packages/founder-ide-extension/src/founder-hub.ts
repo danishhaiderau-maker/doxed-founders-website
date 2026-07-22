@@ -244,16 +244,17 @@ export class FounderHubProvider
       color-scheme: light dark;
       --founder-green: #35b779;
       --founder-amber: #e4a853;
-      --surface: color-mix(in srgb, var(--vscode-sideBar-background) 88%, var(--vscode-foreground) 12%);
-      --border: color-mix(in srgb, var(--vscode-sideBar-foreground) 18%, transparent);
-      --muted: color-mix(in srgb, var(--vscode-sideBar-foreground) 62%, transparent);
+      --foreground: var(--vscode-sideBar-foreground, var(--vscode-foreground, #f2f2f2));
+      --surface: color-mix(in srgb, var(--vscode-sideBar-background) 88%, var(--foreground) 12%);
+      --border: color-mix(in srgb, var(--foreground) 18%, transparent);
+      --muted: color-mix(in srgb, var(--foreground) 62%, transparent);
     }
 
     * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      color: var(--vscode-sideBar-foreground);
+      color: var(--foreground);
       background: var(--vscode-sideBar-background);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
@@ -262,7 +263,7 @@ export class FounderHubProvider
 
     button {
       min-width: 0;
-      color: inherit;
+      color: var(--foreground);
       font: inherit;
       letter-spacing: 0;
     }
@@ -406,6 +407,7 @@ export class FounderHubProvider
       background: transparent;
       cursor: pointer;
       text-align: left;
+      color: var(--foreground);
     }
 
     .tool-item:hover { background: var(--vscode-list-hoverBackground); }
@@ -421,6 +423,7 @@ export class FounderHubProvider
       font-size: 11px;
       font-weight: 600;
       list-style: none;
+      color: var(--foreground);
     }
     summary::-webkit-details-marker { display: none; }
     .summary-value { color: var(--muted); font-weight: 400; }
@@ -547,7 +550,7 @@ export class FounderHubProvider
       font-size: 10px;
       text-transform: uppercase;
     }
-    .agent-awareness header strong { color: var(--vscode-foreground); font-size: 11px; }
+    .agent-awareness header strong { color: var(--foreground); font-size: 11px; }
     .agent-list { display: grid; gap: 1px; }
     .agent-row {
       display: grid;
@@ -557,13 +560,13 @@ export class FounderHubProvider
       min-height: 38px;
       padding: 4px 2px;
     }
-    .agent-signal { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-    .agent-row.conflict .agent-signal { background: var(--amber); }
+    .agent-signal { width: 7px; height: 7px; border-radius: 50%; background: var(--founder-green); }
+    .agent-row.conflict .agent-signal { background: var(--founder-amber); }
     .agent-copy { min-width: 0; }
     .agent-copy strong, .agent-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .agent-copy strong { font-size: 11px; font-weight: 600; }
     .agent-copy span, .agent-state { color: var(--muted); font-size: 9px; }
-    .agent-row.conflict .agent-state { color: var(--amber); }
+    .agent-row.conflict .agent-state { color: var(--founder-amber); }
 
     .account-footer {
       margin-top: auto;

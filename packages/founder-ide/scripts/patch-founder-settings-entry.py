@@ -18,6 +18,10 @@ from pathlib import Path
 
 DEFAULT_APP = Path(r"C:\Users\user\AppData\Local\Programs\Founder IDE\resources\app")
 WORKBENCH_KEY = "vs/workbench/workbench.desktop.main.js"
+AUXILIARY_BUNDLE_KEYS = (
+    "vs/code/node/cliProcessMain.js",
+    "vs/code/electron-utility/sharedProcess/sharedProcessMain.js",
+)
 
 
 def checksum(path: Path) -> str:
@@ -38,9 +42,7 @@ def patch(app: Path) -> None:
         raise SystemExit(f"Expected one inherited settings action, found {data.count(marker)}")
 
     start = data.index(marker)
-    end = data.find("),X(", start)
-    if end < 0 or end - start > 1_200:
-        raise SystemExit("Could not isolate the inherited settings action")
+    end = min(len(data), start + 2_000)
     action = data[start:end]
     redirected = 'executeCommand("founderOs.openSettings")'
     if redirected in action:
@@ -57,6 +59,11 @@ def patch(app: Path) -> None:
     data = data[:start] + rewritten + data[end:]
 
     replacements = {
+        "Welcome to Void": "Welcome to Founder IDE",
+        "Open Void Settings": "Open Personal AI",
+        "Void Settings": "Personal AI",
+        "Void Side Bar": "Founder AI",
+        "Void Version": "Founder IDE Version",
         "Void's Settings": "Founder Settings",
         "Void: ": "Founder: ",
         "Void Agent": "Founder Agent",
@@ -71,6 +78,8 @@ def patch(app: Path) -> None:
         "comes packaged with Void": "comes packaged with Founder IDE",
         "Void recognizes": "Founder recognizes",
         "Void metrics": "Founder metrics",
+        "before using Vertex with Void": "before using Vertex in Founder IDE",
+        "Create a .voidrules file for me": "Create project instructions for me",
     }
     for old, new in replacements.items():
         data = data.replace(old, new)
@@ -79,27 +88,52 @@ def patch(app: Path) -> None:
     for old, new in replacements.items():
         message_data = message_data.replace(old, new)
 
+    auxiliary_bundles: list[tuple[str, Path, str]] = []
+    for relative_key in AUXILIARY_BUNDLE_KEYS:
+        bundle = app / "out" / Path(relative_key)
+        if not bundle.is_file():
+            continue
+        bundle_data = bundle.read_text(encoding="utf-8")
+        for old, new in replacements.items():
+            bundle_data = bundle_data.replace(old, new)
+        auxiliary_bundles.append((relative_key, bundle, bundle_data))
+
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = Path.home() / "FounderVault" / "ide-settings-backups" / stamp
     backup_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy2(workbench, backup_dir / workbench.name)
     shutil.copy2(messages, backup_dir / messages.name)
     shutil.copy2(product, backup_dir / product.name)
+    for _, bundle, _ in auxiliary_bundles:
+        shutil.copy2(bundle, backup_dir / bundle.name)
 
     workbench.write_text(data, encoding="utf-8", newline="")
     messages.write_text(message_data, encoding="utf-8", newline="")
-    manifest = json.loads(product.read_text(encoding="utf-8"))
+    for _, bundle, bundle_data in auxiliary_bundles:
+        bundle.write_text(bundle_data, encoding="utf-8", newline="")
+    # utf-8-sig accepts an accidental BOM left by an older PowerShell
+    # checksum rewrite; write_text below always normalizes back to UTF-8.
+    manifest = json.loads(product.read_text(encoding="utf-8-sig"))
     checksums = manifest.setdefault("checksums", {})
     checksums[WORKBENCH_KEY] = checksum(workbench)
+    for relative_key, bundle, _ in auxiliary_bundles:
+        if relative_key in checksums:
+            checksums[relative_key] = checksum(bundle)
     product.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     verify = workbench.read_text(encoding="utf-8")
     if 'executeCommand("founderOs.openSettings")' not in verify:
         raise SystemExit("Founder Settings redirect did not verify")
-    if "Void's Settings" in verify:
-        raise SystemExit("A user-visible Void Settings label remains")
-    if "Void's Settings" in messages.read_text(encoding="utf-8"):
+    visible_void_phrases = ("Void's Settings", "Vertex with Void")
+    if any(phrase in verify for phrase in visible_void_phrases):
+        raise SystemExit("A user-visible Void label remains")
+    if "Create a .voidrules file for me" in verify:
+        raise SystemExit("The inherited .voidrules chat suggestion remains")
+    if any(phrase in messages.read_text(encoding="utf-8") for phrase in visible_void_phrases):
         raise SystemExit("A localized Void Settings label remains")
+    for _, bundle, _ in auxiliary_bundles:
+        if any(phrase in bundle.read_text(encoding="utf-8") for phrase in visible_void_phrases):
+            raise SystemExit(f"A user-visible Void Settings label remains in {bundle}")
     print(f"Founder Settings redirect installed; backup: {backup_dir}")
 
 

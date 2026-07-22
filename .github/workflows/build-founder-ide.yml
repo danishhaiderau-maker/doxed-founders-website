@@ -60,7 +60,7 @@ on:
       version:
         description: 'Founder IDE version to build (e.g. 0.9.3)'
         required: true
-        default: '0.9.3'
+        default: '0.9.4'
       skip_release:
         description: 'Skip the GitHub Release upload (artifact-only build)'
         required: false

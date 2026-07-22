@@ -41,7 +41,11 @@ def patch(app: Path) -> None:
 
     data, count = raw_error.subn(safe_error, data, count=1)
     already_safe = "const founderMessage=" in data
-    if count != 1 and not already_safe:
+    source_safe = (
+        "Founder AI is temporarily unavailable. Your workspace and local files are unaffected." in data
+        and "Founder could not send this request. Check the active model in Founder Connections." in data
+    )
+    if count != 1 and not already_safe and not source_safe:
         raise SystemExit("Native gateway error signature changed; no patch applied")
 
     data = data.replace("Void's Settings", "Founder Settings")
@@ -57,7 +61,7 @@ def patch(app: Path) -> None:
     verify = main_js.read_text(encoding="utf-8")
     if "Founder OS gateway returned ${" in verify:
         raise SystemExit("Raw native gateway error still remains")
-    if "const founderMessage=" not in verify:
+    if "const founderMessage=" not in verify and not source_safe:
         raise SystemExit("Safe native gateway message did not verify")
     print(f"Founder native AI errors hardened; backup: {backup_dir}")
 

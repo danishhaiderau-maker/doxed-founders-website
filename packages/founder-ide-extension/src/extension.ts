@@ -307,6 +307,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('founderOs')) {
         registerOrNotify(context);
+        founderCompanion?.syncEnabled();
         founderHub?.refresh();
         founderSettings?.refresh();
         founderShortcuts?.refresh();

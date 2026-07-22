@@ -54,9 +54,10 @@ describe('Founder IDE extension manifest', () => {
     assert.equal(hub?.name, 'Founder');
     assert.equal(hub?.type, 'webview');
     for (const asset of [
-      'dragon-1-clouds-fire.mp4',
-      'dragon-2-nest.mp4',
-      'dragon-3-fast-dive.mp4',
+      'dragon-idle.png',
+      'dragon-working.png',
+      'dragon-success-v3.png',
+      'dragon-attention.png',
     ]) {
       assert.ok(
         existsSync(join(__dirname, '..', 'resources', 'dragon', asset)),

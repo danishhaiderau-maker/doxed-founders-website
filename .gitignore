@@ -18,6 +18,8 @@ apps/founder-node/app.asar
 # The top-level `dist/` rule above does NOT match nested paths in git's pattern language,
 # so installer/dist/ needs an explicit rule to prevent accidental commits.
 packages/founder-ide/installer/dist/
+packages/founder-ide/installer/final/
+packages/founder-ide/installer/staging/
 packages/founder-ide/dist/
 packages/founder-ide/staging/*.exe
 packages/founder-ide/staging/*.sha256
@@ -337,6 +339,7 @@ services/btc-conservative-agent/research/downloads/
 /PROJECT_CHECKLIST.md
 
 /founder-ide-window-*.png
+/staging/
 *.pkl
 /services/*.pkl
 .home-analyzer-user-stopped

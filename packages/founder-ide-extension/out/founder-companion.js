@@ -36,17 +36,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.FounderCompanionViewProvider = void 0;
 const node_crypto_1 = require("node:crypto");
 const vscode = __importStar(require("vscode"));
+const protocol_1 = require("./ipc/protocol");
+const server_1 = require("./ipc/server");
 const IDLE = {
     state: 'idle',
     title: 'Resting in the nest',
     detail: 'Watching this workspace and ready for the next mission.',
 };
 const MEDIA_BY_STATE = {
-    idle: 'dragon-2-nest.mp4',
-    working: 'dragon-3-fast-dive.mp4',
-    success: 'dragon-1-clouds-fire.mp4',
-    attention: 'dragon-3-fast-dive.mp4',
-    error: 'dragon-2-nest.mp4',
+    idle: 'dragon-idle.png',
+    working: 'dragon-working.png',
+    success: 'dragon-success-v3.png',
+    attention: 'dragon-attention.png',
+    error: 'dragon-attention.png',
 };
 class FounderCompanionViewProvider {
     context;
@@ -56,6 +58,7 @@ class FounderCompanionViewProvider {
     settleTimer;
     constructor(context) {
         this.context = context;
+        this.broadcast();
     }
     resolveWebviewView(view) {
         this.view = view;
@@ -103,6 +106,9 @@ class FounderCompanionViewProvider {
     setIdle() {
         this.set(IDLE);
     }
+    syncEnabled() {
+        this.broadcast();
+    }
     dispose() {
         if (this.settleTimer)
             clearTimeout(this.settleTimer);
@@ -114,12 +120,23 @@ class FounderCompanionViewProvider {
             clearTimeout(this.settleTimer);
         this.snapshot = snapshot;
         this.render();
+        this.broadcast();
         if (settleAfterMs) {
             this.settleTimer = setTimeout(() => {
                 this.snapshot = IDLE;
                 this.render();
+                this.broadcast();
             }, settleAfterMs);
         }
+    }
+    broadcast() {
+        (0, server_1.broadcastCompanionState)({
+            type: 'companionState',
+            nonce: (0, protocol_1.generateNonce)(),
+            ts: new Date().toISOString(),
+            visible: vscode.workspace.getConfiguration('founderOs').get('companion.enabled', true),
+            ...this.snapshot,
+        });
     }
     render() {
         if (!this.view)
@@ -127,13 +144,12 @@ class FounderCompanionViewProvider {
         const nonce = (0, node_crypto_1.randomBytes)(16).toString('hex');
         const { state, title, detail } = this.snapshot;
         const mediaUri = this.view.webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'dragon', MEDIA_BY_STATE[state]));
-        const loops = state === 'idle' || state === 'working' || state === 'attention';
         this.view.description = labelFor(state);
         this.view.webview.html = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; media-src ${this.view.webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src ${this.view.webview.cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style nonce="${nonce}">
     :root {
@@ -178,30 +194,32 @@ class FounderCompanionViewProvider {
       aspect-ratio: 4 / 3;
       overflow: hidden;
       border-radius: 7px;
-      background: #080a0d;
-      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 26%, transparent);
+      background: transparent;
+      box-shadow: none;
       isolation: isolate;
     }
     .stage::after {
       position: absolute;
       inset: 0;
       z-index: 2;
-      background: linear-gradient(180deg, rgba(0,0,0,.12), transparent 42%, rgba(0,0,0,.25));
+      display: none;
       content: '';
       pointer-events: none;
     }
-    .dragon-video {
+    .dragon-image {
       display: block;
       width: 100%;
       height: 100%;
-      object-fit: cover;
+      object-fit: contain;
       object-position: center;
-      transform: scale(1.05);
+      filter: drop-shadow(0 8px 10px rgba(0,0,0,.24));
+      transform: scale(.96);
     }
-    .working .dragon-video { animation: flight-pulse 900ms ease-in-out infinite alternate; }
-    .attention .dragon-video { filter: saturate(.82) sepia(.18); }
-    .error .dragon-video { filter: grayscale(.34) sepia(.3) hue-rotate(315deg) saturate(1.5); }
-    .success .stage { box-shadow: inset 0 0 0 1px rgba(53,183,121,.65), 0 0 18px rgba(255,118,47,.14); }
+    .idle .dragon-image { animation: nest-breathe 3.6s ease-in-out infinite; }
+    .working .dragon-image { animation: flight-pulse 760ms ease-in-out infinite alternate; }
+    .attention .dragon-image { animation: attention-pulse 1.2s ease-in-out infinite; }
+    .error .dragon-image { filter: grayscale(.24) sepia(.2) hue-rotate(315deg) saturate(1.25); }
+    .success .stage { filter: none; }
     .state-tabs {
       position: absolute;
       top: 5px;
@@ -236,7 +254,7 @@ class FounderCompanionViewProvider {
       text-align: center;
       font-size: 10px;
     }
-    .stage.media-error .dragon-video { display: none; }
+    .stage.media-error .dragon-image { display: none; }
     .stage.media-error .media-fallback { display: grid; }
     .copy { min-width: 0; }
     .eyebrow { color: var(--tone); font-size: 10px; font-weight: 650; text-transform: uppercase; }
@@ -285,23 +303,25 @@ class FounderCompanionViewProvider {
     .menu-item:hover { background: var(--vscode-list-hoverBackground); }
     .menu-hint { color: var(--muted); font-size: 10px; }
     @keyframes flight-pulse {
-      from { transform: scale(1.05) translate3d(-1px, 1px, 0); }
-      to { transform: scale(1.1) translate3d(2px, -1px, 0); }
+      from { transform: scale(.93) translate3d(-2px, 3px, 0) rotate(-1deg); }
+      to { transform: scale(1) translate3d(3px, -4px, 0) rotate(1deg); }
     }
+    @keyframes nest-breathe { 0%, 100% { transform: scale(.95); } 50% { transform: scale(.985) translateY(-1px); } }
+    @keyframes attention-pulse { 0%, 100% { transform: scale(.94) rotate(-1deg); } 50% { transform: scale(.99) rotate(1deg); } }
     @media (max-width: 280px) {
       .companion { grid-template-columns: 96px minmax(0, 1fr); gap: 8px; }
       .stage { min-width: 96px; }
       .state-tab:first-child { display: none; }
     }
     @media (prefers-reduced-motion: reduce) {
-      .dragon-video { animation: none !important; }
+      .dragon-image { animation: none !important; }
     }
   </style>
 </head>
 <body>
   <button class="companion ${state}" type="button" aria-expanded="false" aria-controls="pet-menu" aria-label="${escapeHtml(title)}. ${escapeHtml(detail)}" data-toggle-menu>
     <span class="stage" data-stage aria-hidden="true">
-      <video class="dragon-video" muted autoplay playsinline ${loops ? 'loop' : ''} preload="auto" src="${mediaUri}"></video>
+      <img class="dragon-image" alt="" src="${mediaUri}">
       <span class="state-tabs"><span class="state-tab">Dragon</span><span class="state-tab live">${escapeHtml(labelFor(state))}</span></span>
       <span class="media-fallback">Founder Dragon is waking up</span>
     </span>
@@ -324,14 +344,8 @@ class FounderCompanionViewProvider {
     const companion = document.querySelector('[data-toggle-menu]');
     const menu = document.querySelector('#pet-menu');
     const stage = document.querySelector('[data-stage]');
-    const video = document.querySelector('video');
-    if (video) {
-      video.playbackRate = ${state === 'working' ? '1.25' : state === 'idle' ? '0.8' : '1'};
-      video.addEventListener('error', () => stage?.classList.add('media-error'));
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        video.pause();
-      }
-    }
+    const image = document.querySelector('img');
+    image?.addEventListener('error', () => stage?.classList.add('media-error'));
     companion?.addEventListener('click', () => {
       const open = menu?.classList.toggle('open') ?? false;
       companion.setAttribute('aria-expanded', String(open));

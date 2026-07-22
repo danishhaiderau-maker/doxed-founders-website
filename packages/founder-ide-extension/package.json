@@ -337,7 +337,7 @@
         "founderOs.companion.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the Founder Dragon companion in the Founder sidebar."
+          "description": "Show the draggable Founder Dragon on the desktop and its status controls in Founder IDE."
         },
         "founderOs.advancedIdeTools": {
           "type": "boolean",

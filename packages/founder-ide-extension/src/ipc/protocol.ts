@@ -61,6 +61,7 @@ export type IpcCapability =
   | 'gatewayHealth'
   | 'memoryHealth'
   | 'versionState'
+  | 'companionState'
   | 'heartbeat';
 
 /** Auth states the extension can report. Mirrors `PairingState` in founder-vault. */
@@ -320,6 +321,15 @@ export interface IpcVersionState extends IpcEnvelope {
   updateState: 'idle' | 'downloading' | 'verifying' | 'installing' | 'rolling_back' | 'failed';
 }
 
+/** Transparent desktop companion state emitted by the IDE extension. */
+export interface IpcCompanionState extends IpcEnvelope {
+  type: 'companionState';
+  visible: boolean;
+  state: 'idle' | 'working' | 'success' | 'attention' | 'error';
+  title: string;
+  detail: string;
+}
+
 /** Heartbeat — both sides emit this every 15s to keep the pipe alive. */
 export interface IpcHeartbeat extends IpcEnvelope {
   type: 'heartbeat';
@@ -352,6 +362,7 @@ export type IpcMessage =
   | IpcGatewayHealth
   | IpcMemoryHealth
   | IpcVersionState
+  | IpcCompanionState
   | IpcHeartbeat;
 
 /**
@@ -395,6 +406,7 @@ export type IpcEvent =
   | IpcGatewayHealth
   | IpcMemoryHealth
   | IpcVersionState
+  | IpcCompanionState
   | IpcHeartbeat;
 
 // ---------------------------------------------------------------------------
@@ -501,6 +513,7 @@ export function isIpcMessage(value: unknown): value is IpcMessage {
     'gatewayHealth',
     'memoryHealth',
     'versionState',
+    'companionState',
     'heartbeat',
   ]);
   return validTypes.has(v.type);

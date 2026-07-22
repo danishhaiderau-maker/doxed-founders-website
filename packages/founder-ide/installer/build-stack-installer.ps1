@@ -32,7 +32,7 @@
 param(
     [string]$MonorepoRoot     = "",
     [string]$VscodiumCheckout = (Get-Location).Path,
-    [string]$Version          = "0.1.0",
+    [string]$Version          = "0.9.4",
     [switch]$SkipExtensionBuild,
     [switch]$SkipIdeBuild,
     [switch]$SkipFounderNodeBuild,
@@ -124,6 +124,24 @@ if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
     throw "Founder IDE application payload not found at $ideRoot"
 }
 
+# Embed the Founder extension into the application payload even when the
+# expensive IDE compilation is skipped. A staged VSIX alone is not installed
+# on a clean machine by the inner setup executable.
+$builtinExtension = Join-Path $ideRoot "resources\app\extensions\founder-ide-extension"
+$extensionUnpack = Join-Path $staging "founder-ide-extension-unpacked"
+if (Test-Path $extensionUnpack) { Remove-Item $extensionUnpack -Recurse -Force }
+New-Item -ItemType Directory -Path $extensionUnpack -Force | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory($vsixDest, $extensionUnpack)
+$unpackedExtension = Join-Path $extensionUnpack "extension"
+if (-not (Test-Path (Join-Path $unpackedExtension "package.json"))) {
+    throw "Staged Founder extension VSIX is malformed: $vsixDest"
+}
+if (Test-Path $builtinExtension) { Remove-Item $builtinExtension -Recurse -Force }
+Copy-Item $unpackedExtension $builtinExtension -Recurse -Force
+Remove-Item $extensionUnpack -Recurse -Force
+Write-Host "[stack]   embedded Founder extension -> $builtinExtension"
+
 # Patch the compiled shell after the downstream build and before installer
 # packaging. Both scripts fail closed if an upstream minified signature moves.
 $ideAppRoot = Join-Path $ideRoot "resources\app"
@@ -157,6 +175,13 @@ if (-not $SkipFounderNodeBuild) {
         # with a cert that isn't present in CI. Signing is done by a later
         # dedicated step (Azure Trusted Signing) on the outer bundle.
         $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+        # electron-builder --dir can retain files from a previous unpacked
+        # payload. Start clean so renamed or retired assets cannot survive in
+        # the one-app installer after their source references are removed.
+        if (Test-Path $relayRoot) {
+            Write-Host "[stack]   removing stale Founder relay payload"
+            Remove-Item $relayRoot -Recurse -Force
+        }
         Write-Host "[stack]   electron-builder --win --dir"
         npx electron-builder --win --x64 --dir --publish never
         if ($LASTEXITCODE -ne 0) { throw "electron-builder --win failed (exit $LASTEXITCODE)" }
@@ -175,8 +200,16 @@ $embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-found
 $vscodeSource = Join-Path $VscodiumCheckout "VSCode"
 Push-Location $vscodeSource
 try {
-    npx gulp vscode-win32-x64-user-setup
-    if ($LASTEXITCODE -ne 0) { throw "Founder IDE installer packaging failed (exit $LASTEXITCODE)" }
+    # Inno prints one line per compressed file (thousands of lines for the
+    # Electron payload). Capture that noise so CI and agent shells do not
+    # terminate an otherwise healthy compiler when their output buffer fills.
+    $packagingLog = Join-Path $staging "founder-ide-inner-installer.log"
+    & cmd.exe /d /c "npx.cmd gulp vscode-win32-x64-user-setup > `"$packagingLog`" 2>&1"
+    $packagingExit = $LASTEXITCODE
+    Get-Content $packagingLog -Tail 30
+    if ($packagingExit -ne 0) {
+        throw "Founder IDE installer packaging failed (exit $packagingExit; log: $packagingLog)"
+    }
 } finally { Pop-Location }
 
 $innerDir = Join-Path $vscodeSource ".build\win32-x64\user-setup"
@@ -208,12 +241,23 @@ $ideSetupAbs = ((Resolve-Path $ideSetup).Path) -replace '\\','/'
     $iss
 if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
 
-# Locate the produced bundle.
-$bundleDir = Join-Path $VscodiumCheckout "dist"
-if (-not (Test-Path $bundleDir)) { $bundleDir = (Split-Path -Parent $iss) }
-$bundle = Get-ChildItem -Path $bundleDir -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue |
-          Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $bundle) { throw "Founder IDE installer not found in $bundleDir after iscc." }
+# Locate the produced bundle. OutputDir in founder-stack.iss is relative to
+# the script location, while downstream builds may carry their own dist dir.
+$bundleDirs = @(
+    (Join-Path $VscodiumCheckout "dist"),
+    (Join-Path (Split-Path -Parent $iss) "dist"),
+    (Split-Path -Parent $iss)
+) | Select-Object -Unique
+$bundle = $bundleDirs |
+          Where-Object { Test-Path $_ } |
+          ForEach-Object {
+              Get-ChildItem -Path $_ -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue
+          } |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+if (-not $bundle) {
+    throw "Founder IDE installer not found after iscc. Searched: $($bundleDirs -join ', ')"
+}
 
 Write-Host "`n[stack] DONE - one Founder IDE installer:" -ForegroundColor Green
 Write-Host "        $($bundle.FullName)" -ForegroundColor Green

@@ -15,7 +15,7 @@
     "pack:mac": "electron-builder --mac",
     "pack:linux": "electron-builder --linux",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test test/deployment-mode-status.spec.ts test/founder-ide-agent-discovery.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
+    "test": "tsx --test test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
   },
   "dependencies": {
     "@dcf/founder-vault": "*",
@@ -59,6 +59,21 @@
       {
         "from": "dist/pair-preload.js",
         "to": "pair/pair-preload.js"
+      },
+      {
+        "from": "companion-assets",
+        "to": "companion",
+        "filter": [
+          "companion.html",
+          "dragon-idle.png",
+          "dragon-working.png",
+          "dragon-success-v3.png",
+          "dragon-attention.png"
+        ]
+      },
+      {
+        "from": "dist/companion-preload.js",
+        "to": "companion/companion-preload.js"
       }
     ],
     "asar": true,

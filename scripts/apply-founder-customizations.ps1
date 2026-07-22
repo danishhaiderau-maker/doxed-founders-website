@@ -181,6 +181,27 @@ if ($sendFosLen -lt 5000) {
 }
 Write-Host "[apply-founder] Gateway rewire OK: sendLLMMessage.ts patched, sendFounderOs.ts present ($sendFosLen bytes)" -ForegroundColor Green
 
+# --- Verify clean-profile Founder AI defaults -------------------------------
+$modelCapabilities = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\modelCapabilities.ts"
+$settingsService = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\voidSettingsService.ts"
+if (-not (Test-Path $modelCapabilities) -or -not (Test-Path $settingsService)) {
+    throw "Founder AI default-model sources are missing after overlay application"
+}
+$modelCapabilitiesContent = Get-Content $modelCapabilities -Raw
+$settingsServiceContent = Get-Content $settingsService -Raw
+foreach ($modelAlias in @("founder-os-auto", "founder-os-fast", "founder-os-reasoning", "founder-os-code")) {
+    if ($modelCapabilitiesContent -notmatch [regex]::Escape($modelAlias)) {
+        throw "modelCapabilities.ts is missing managed model alias '$modelAlias'"
+    }
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-auto'") {
+    throw "voidSettingsService.ts does not select founder-os-auto for a clean profile"
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-code'") {
+    throw "voidSettingsService.ts does not select founder-os-code for clean-profile autocomplete"
+}
+Write-Host "[apply-founder] clean-profile Founder AI defaults OK: Auto chat + Code autocomplete" -ForegroundColor Green
+
 # --- Verify code.iss ---------------------------------------------------------
 $codeIss = Join-Path $VscodiumCheckout "build\win32\code.iss"
 if (-not (Test-Path $codeIss)) { throw "build/win32/code.iss missing at $codeIss" }

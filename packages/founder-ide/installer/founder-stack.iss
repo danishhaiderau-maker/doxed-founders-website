@@ -153,6 +153,9 @@ Filename: "{localappdata}\Programs\Founder IDE\resources\founder-tools\bin\forge
 [InstallDelete]
 ; One-app migration: remove legacy user-facing products after their standalone
 ; Node uninstaller has run in PrepareToInstall. FounderVault is never touched.
+; Replace the embedded relay atomically on upgrades. Inno Setup otherwise
+; preserves files removed from later relay builds, including retired artwork.
+Type: filesandordirs; Name: "{localappdata}\Programs\Founder IDE\resources\founder-relay"
 Type: filesandordirs; Name: "{localappdata}\Programs\Founder Node"
 Type: filesandordirs; Name: "{localappdata}\Founder Stack"
 Type: filesandordirs; Name: "{localappdata}\FounderIDE"
@@ -218,7 +221,8 @@ var
 begin
   // Three-card mode selection (doc §7). Index 0 = Private, 1 = Public,
   // 2 = Hybrid (recommended). Hybrid is the default — it matches the project
-  // setup-wizard recommendation ("build privately, publish to cloud when ready").
+  // setup-wizard recommendation ("build privately, publish to cloud when ready")
+  // only when the required private-mode binaries are actually bundled.
   ModePage := CreateInputOptionPage(wpWelcome,
     'Which mode will you primarily use?',
     'You can change this per-project later in Founder OS.',
@@ -235,12 +239,16 @@ begin
 
   // Default to Hybrid (index 2). If Private binaries are missing we also
   // silently fall back to Hybrid (the user can still pick Public).
-  ModePage.SelectedValueIndex := 2;
+  if PrivateModeBinariesAvailable() then begin
+    ModePage.SelectedValueIndex := 2;
+  end else begin
+    ModePage.SelectedValueIndex := 1;
+  end;
 
   // If the Private binaries are missing, pop a one-time info dialog so the
   // user understands why Private is unavailable.
-  if not PrivateModeBinariesAvailable() then begin
-    MsgBox('Private mode requires Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Choose Hybrid or Public. You can add Private-mode tooling later via Founder IDE.', mbInformation, MB_OK);
+  if (not WizardSilent()) and (not PrivateModeBinariesAvailable()) then begin
+    MsgBox('Private and Hybrid modes require Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Public mode is fully available. You can add private-mode tooling later from Founder IDE.', mbInformation, MB_OK);
   end;
 end;
 
@@ -262,8 +270,8 @@ begin
     // Refuse to proceed if the user somehow selected Private but the binaries
     // are missing. (The option is annotated [UNAVAILABLE] and an info dialog
     // explained why at page entry, but this is the belt-and-suspenders check.)
-    if (SelectedDeploymentMode = 'PRIVATE') and (not PrivateModeBinariesAvailable()) then begin
-      MsgBox('Private mode requires Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Choose Hybrid or Public.', mbError, MB_OK);
+    if ((SelectedDeploymentMode = 'PRIVATE') or (SelectedDeploymentMode = 'HYBRID')) and (not PrivateModeBinariesAvailable()) then begin
+      MsgBox('Private and Hybrid modes require Forgejo + cloudflared binaries which are not bundled in this build.'#13#10#13#10'Choose Public mode for this installer.', mbError, MB_OK);
       Result := False;
       Exit;
     end;

@@ -125,7 +125,15 @@ export type GlobalLockResult = 'acquired' | 'stale-replaced' | 'blocked';
 export function acquireGlobalInstanceLock(): GlobalLockResult {
   const vaultRoot = defaultVaultRoot();
   const existing = readLock(vaultRoot);
-  if (existing && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+  const pidIsFounderNode =
+    process.platform !== 'win32' ||
+    (existing ? listMainFounderNodePids().includes(existing.pid) : false);
+  if (
+    existing &&
+    existing.pid !== process.pid &&
+    isPidAlive(existing.pid) &&
+    pidIsFounderNode
+  ) {
     return 'blocked';
   }
   writeLock(vaultRoot);

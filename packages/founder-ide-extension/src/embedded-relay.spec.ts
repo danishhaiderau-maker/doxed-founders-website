@@ -53,6 +53,7 @@ describe('embedded Founder relay', () => {
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
       isProcessAlive: () => false,
+      processExecutablePath: () => null,
       spawnProcess: (executable, args, options) => {
         captured = { executable, args, options };
         return fakeChild;
@@ -78,6 +79,8 @@ describe('embedded Founder relay', () => {
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
       isProcessAlive: () => true,
+      processExecutablePath: () =>
+        'C:\\Users\\founder\\AppData\\Local\\Programs\\Founder Node\\Founder Node.exe',
       readLockFile: () =>
         JSON.stringify({
           pid: 99,
@@ -91,5 +94,40 @@ describe('embedded Founder relay', () => {
 
     assert.equal(result.state, 'started');
     assert.equal(spawned, true);
+  });
+
+  it('replaces an embedded lock when Windows reused the pid for another process', () => {
+    let spawned = false;
+    const executable = 'C:\\Founder IDE\\resources\\founder-relay\\Founder Node.exe';
+    const fakeChild = { pid: 4244, unref() {} } as ChildProcess;
+
+    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+      existsSync: () => true,
+      homedir: () => 'C:\\Users\\founder',
+      isProcessAlive: () => true,
+      processExecutablePath: () => 'C:\\Windows\\System32\\unrelated.exe',
+      readLockFile: () => JSON.stringify({ pid: 99, exePath: executable }),
+      spawnProcess: () => {
+        spawned = true;
+        return fakeChild;
+      },
+    });
+
+    assert.equal(result.state, 'started');
+    assert.equal(spawned, true);
+  });
+
+  it('keeps the running embedded relay when pid and executable both match', () => {
+    const executable = 'C:\\Founder IDE\\resources\\founder-relay\\Founder Node.exe';
+    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+      existsSync: () => true,
+      homedir: () => 'C:\\Users\\founder',
+      isProcessAlive: () => true,
+      processExecutablePath: () => executable,
+      readLockFile: () => JSON.stringify({ pid: 99, exePath: executable }),
+    });
+
+    assert.equal(result.state, 'already-running');
+    assert.equal(result.pid, 99);
   });
 });

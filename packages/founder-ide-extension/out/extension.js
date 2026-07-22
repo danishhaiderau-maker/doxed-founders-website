@@ -228,6 +228,7 @@ function activate(context) {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('founderOs')) {
             registerOrNotify(context);
+            founderCompanion?.syncEnabled();
             founderHub?.refresh();
             founderSettings?.refresh();
             founderShortcuts?.refresh();

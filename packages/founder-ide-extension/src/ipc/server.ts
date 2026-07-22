@@ -37,6 +37,7 @@ import {
   isIpcMessage,
   type IpcAuthState,
   type IpcCapability,
+  type IpcCompanionState,
   type IpcHello,
   type IpcHeartbeat,
   type IpcMessage,
@@ -65,6 +66,7 @@ let server: net.Server | null = null;
 let installId: string | null = null;
 let ipcSecret: string | null = null;
 const clients = new Set<ActiveClient>();
+let lastCompanionState: IpcCompanionState | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 
 /**
@@ -204,6 +206,14 @@ export function stopIpcServer(): void {
 /** Number of currently-authenticated clients. Exposed for diagnostics + tests. */
 export function connectedClientCount(): number {
   return clients.size;
+}
+
+/** Broadcast the latest companion state and retain it for newly connected Node clients. */
+export function broadcastCompanionState(message: IpcCompanionState): void {
+  lastCompanionState = message;
+  for (const client of clients) {
+    if (client.capabilities.has('companionState')) send(client.socket, message);
+  }
 }
 
 /** True if at least one client has an active handshake (used by isConnected). */
@@ -381,6 +391,9 @@ function handleHello(socket: Socket, hello: IpcHello): void {
   clients.add(client);
 
   send(socket, makeAuthState('connected', 'handshake accepted'));
+  if (lastCompanionState && client.capabilities.has('companionState')) {
+    send(socket, lastCompanionState);
+  }
 }
 
 /** Send a single IpcMessage as a newline-delimited JSON frame. */

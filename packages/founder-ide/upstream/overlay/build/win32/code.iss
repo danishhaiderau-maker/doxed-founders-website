@@ -76,6 +76,9 @@ Type: filesandordirs; Name: "{app}\resources\app\node_modules"; Check: IsNotBack
 Type: filesandordirs; Name: "{app}\resources\app\node_modules.asar.unpacked"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\resources\app\node_modules.asar"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\resources\app\Credits_45.0.2454.85.html"; Check: IsNotBackgroundUpdate
+; Founder IDE upgrades replace the embedded relay as one immutable payload.
+; Without this, removed files from an earlier relay can survive the upgrade.
+Type: filesandordirs; Name: "{app}\resources\founder-relay"; Check: IsNotBackgroundUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_"

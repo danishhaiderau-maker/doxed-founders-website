@@ -122,6 +122,11 @@ import {
 } from './founder-cloud';
 import { startDeploymentRuntimeStatusServer } from './deployment-mode-status';
 import { isEmbeddedRelayMode } from './runtime-mode';
+import {
+  createDesktopCompanion,
+  destroyDesktopCompanion,
+  updateDesktopCompanion,
+} from './desktop-companion';
 // Phase 2 — device-code first-run + pairing state machine.
 import {
   newInstallId,
@@ -297,6 +302,15 @@ function ensureIdeIpcClient(vaultRoot: string): boolean {
         false,
       );
     }
+  });
+  ideIpcClient.on('message', (message) => {
+    if (message.type !== 'companionState') return;
+    updateDesktopCompanion({
+      visible: message.visible,
+      state: message.state,
+      title: message.title,
+      detail: message.detail,
+    });
   });
   return true;
 }
@@ -1160,6 +1174,8 @@ app.whenReady().then(() => {
   const backgroundKeeper = new BrowserWindow({ show: false });
   backgroundKeeper.hide();
 
+  if (EMBEDDED_RELAY_MODE) createDesktopCompanion();
+
   const vaultRoot = defaultVaultRoot();
   const nodeId = loadOrCreateNodeId(vaultRoot);
   ensureVault(vaultRoot, nodeId);
@@ -1560,6 +1576,7 @@ app.on('before-quit', () => {
   }
   deploymentStatusServer?.close();
   deploymentStatusServer = null;
+  destroyDesktopCompanion();
   tray?.destroy();
   tray = null;
   releaseGlobalInstanceLock();

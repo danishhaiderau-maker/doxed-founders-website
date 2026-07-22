@@ -22,6 +22,8 @@
     { "src": "src/vs/workbench/contrib/void/browser/voidSettingsPane.ts",                                "dest": "src/vs/workbench/contrib/void/browser/voidSettingsPane.ts",                                "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx",           "dest": "src/vs/workbench/contrib/void/browser/react/src/void-settings-tsx/Settings.tsx",           "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx",              "dest": "src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx",              "mode": "replace" },
+    { "src": "src/vs/workbench/contrib/void/common/modelCapabilities.ts",                              "dest": "src/vs/workbench/contrib/void/common/modelCapabilities.ts",                              "mode": "replace" },
+    { "src": "src/vs/workbench/contrib/void/common/voidSettingsService.ts",                            "dest": "src/vs/workbench/contrib/void/common/voidSettingsService.ts",                            "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "mode": "add", "marker": "sendFounderOs.ts - Founder OS Gateway rewire" }
   ]
