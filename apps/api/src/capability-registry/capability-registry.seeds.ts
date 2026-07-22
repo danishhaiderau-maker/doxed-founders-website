@@ -15,6 +15,7 @@
  */
 import type { CapabilitySeed } from './capability-registry.types';
 import {
+  DEEPSEEK_V4_CONTEXT_WINDOW,
   DEEPSEEK_V4_FLASH_MODEL,
   DEEPSEEK_V4_PRO_MODEL,
 } from '../ai-proxy/deepseek-model-policy';
@@ -69,10 +70,10 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     simpleQaScore: 0.72,
     agentScore: 0.6,
     visionScore: 0.0,
-    toolUse: false,
+    toolUse: true,
     jsonMode: true,
-    largeContext: false,
-    largeContextWindow: null,
+    largeContext: true,
+    largeContextWindow: DEEPSEEK_V4_CONTEXT_WINDOW,
   },
   {
     provider: 'deepseek',
@@ -86,10 +87,10 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
     simpleQaScore: 0.82,
     agentScore: 0.45,
     visionScore: 0.0,
-    toolUse: false,
+    toolUse: true,
     jsonMode: true,
-    largeContext: false,
-    largeContextWindow: null,
+    largeContext: true,
+    largeContextWindow: DEEPSEEK_V4_CONTEXT_WINDOW,
   },
   {
     provider: 'kimi',

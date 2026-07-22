@@ -9,6 +9,8 @@ import type { FounderPlanName } from '../founder-os/founder-plan-entitlements.se
  */
 export const DEEPSEEK_V4_FLASH_MODEL = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL = 'deepseek-v4-pro';
+export const DEEPSEEK_V4_CONTEXT_WINDOW = 1_000_000;
+export const DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 384_000;
 
 export type ForcedAliasIntent = 'simple_qa' | 'reasoning' | 'code';
 

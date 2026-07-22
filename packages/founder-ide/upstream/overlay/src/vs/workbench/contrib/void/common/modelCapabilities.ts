@@ -1254,21 +1254,21 @@ const ollamaSettings: VoidStaticProviderInfo = {
 const founderManagedModelOptions = {
 	'founder-os-auto': {
 		...defaultModelOptions,
-		contextWindow: 131_072,
+		contextWindow: 1_000_000,
 		reservedOutputTokenSpace: 16_384,
 		supportsSystemMessage: 'system-role',
 		specialToolFormat: 'openai-style',
 	},
 	'founder-os-fast': {
 		...defaultModelOptions,
-		contextWindow: 131_072,
+		contextWindow: 1_000_000,
 		reservedOutputTokenSpace: 8_192,
 		supportsSystemMessage: 'system-role',
 		specialToolFormat: 'openai-style',
 	},
 	'founder-os-reasoning': {
 		...defaultModelOptions,
-		contextWindow: 131_072,
+		contextWindow: 1_000_000,
 		reservedOutputTokenSpace: 16_384,
 		supportsSystemMessage: 'system-role',
 		specialToolFormat: 'openai-style',
@@ -1280,7 +1280,7 @@ const founderManagedModelOptions = {
 	},
 	'founder-os-code': {
 		...defaultModelOptions,
-		contextWindow: 131_072,
+		contextWindow: 1_000_000,
 		reservedOutputTokenSpace: 16_384,
 		supportsSystemMessage: 'system-role',
 		specialToolFormat: 'openai-style',

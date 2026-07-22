@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DEEPSEEK_V4_CONTEXT_WINDOW,
   DEEPSEEK_V4_FLASH_MODEL,
+  DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
   DEEPSEEK_V4_PRO_MODEL,
   forcedIntentForAlias,
   normalizeFounderAliasRoute,
@@ -10,6 +12,11 @@ import {
   normalizeProxyRoute,
   tierForFounderAlias,
 } from './deepseek-model-policy';
+
+test('DeepSeek V4 capability limits match the current provider contract', () => {
+  assert.equal(DEEPSEEK_V4_CONTEXT_WINDOW, 1_000_000);
+  assert.equal(DEEPSEEK_V4_MAX_OUTPUT_TOKENS, 384_000);
+});
 
 test('Founder OS aliases force their advertised routing intent', () => {
   assert.equal(forcedIntentForAlias('founder-os-fast'), 'simple_qa');
