@@ -671,6 +671,61 @@ export function flatSignedFastPathPreflight(input: {
 }
 
 /**
+ * A fresh signed limit may bypass the slow full reconciliation pass while the
+ * account already has same-direction resting copy limits. This remains
+ * fail-closed: every exchange order must be owned by a current pending virtual
+ * lot, no position may be open, and the configured capacity must have room.
+ */
+export function sameDirectionPendingSignedFastPathPreflight(input: {
+  status: TradingAgentInstanceStatus;
+  simActive: boolean;
+  hireExpired: boolean;
+  relayArmed: boolean;
+  exchangePositionQty: number;
+  candidateDirection: 'LONG' | 'SHORT';
+  maxConcurrent: number;
+  virtualLots: Array<{
+    status: SignalCycleStatus;
+    direction?: 'LONG' | 'SHORT';
+    bitfinexOrderId?: number;
+  }>;
+  exchangeActiveOrderIds: number[];
+}): boolean {
+  if (
+    input.status !== TradingAgentInstanceStatus.ACTIVE ||
+    input.simActive ||
+    input.hireExpired ||
+    !input.relayArmed ||
+    Math.abs(input.exchangePositionQty) !== 0 ||
+    input.virtualLots.length === 0 ||
+    input.virtualLots.length >= input.maxConcurrent
+  ) {
+    return false;
+  }
+
+  const ownedOrderIds = new Set<number>();
+  for (const lot of input.virtualLots) {
+    if (
+      lot.status !== SignalCycleStatus.PENDING_ENTRY ||
+      lot.direction !== input.candidateDirection ||
+      !Number.isInteger(lot.bitfinexOrderId) ||
+      (lot.bitfinexOrderId ?? 0) <= 0
+    ) {
+      return false;
+    }
+    ownedOrderIds.add(lot.bitfinexOrderId!);
+  }
+
+  if (
+    ownedOrderIds.size !== input.virtualLots.length ||
+    input.exchangeActiveOrderIds.length !== ownedOrderIds.size
+  ) {
+    return false;
+  }
+  return input.exchangeActiveOrderIds.every((orderId) => ownedOrderIds.has(orderId));
+}
+
+/**
  * Phase 2 — exit convergence master switch. Default ON (same pattern as
  * MIRROR_CONVERGENCE_ENABLED). When ON in showcase-mirror mode: wide disaster
  * stop only, no profit-lock trail, no local HARD_STOP — exits follow showcase
@@ -1479,9 +1534,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Low-latency entry path for the only state that can be proven safe cheaply:
-   * an ACTIVE, armed hire with no exchange position/order and no virtual lot,
-   * consuming a fresh HMAC-verified exact showcase limit. Any ambiguity returns
+   * Low-latency entry path for states that can be proven safe cheaply: either
+   * a fully flat account, or an account whose complete exchange order book is
+   * already owned by same-direction pending virtual lots. Any ambiguity returns
    * false and the unchanged full reconciliation path runs immediately after.
    */
   private async tryFreshSignedFlatEntry(
@@ -1530,7 +1585,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
           cycle: { agentId },
         },
-        select: { id: true },
+        select: { id: true, status: true },
       }),
       this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
     ]);
@@ -1539,8 +1594,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return false;
     }
 
-    if (
-      !flatSignedFastPathPreflight({
+    const flatPreflight = flatSignedFastPathPreflight({
         status: freshInstance.status,
         simActive: isCopyRelaySimActive(freshInstance.dashboardState),
         hireExpired: Boolean(
@@ -1550,13 +1604,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         virtualOpenOrPending: virtualLots.length,
         exchangeActiveOrders: activeOrders.length,
         exchangePositionQty: exchangePosition?.amount ?? 0,
-      })
-    ) {
-      return false;
-    }
+      });
 
-    // The live exchange book above is authoritative; clear only a stale cached
-    // orphan warning before the normal eligibility gate reads dashboardState.
+    const intentDirection = (cycle.intentEnvelope as SignalIntentEnvelope).direction;
+    if (!intentDirection) return false;
+    const cachedState = this.botBridge.getCachedExecutionState();
+    // A non-flat fast path also needs the current canonical capacity snapshot;
+    // falling back to the default could overbook if the dashboard cap was
+    // lowered. The full reconciliation path will fetch it authoritatively.
+    if (!flatPreflight && !cachedState) return false;
+    const maxConcurrent = resolveMaxConcurrentCopySignals({
+      botMaxActiveSignals: cachedState?.max_active_signals,
+      envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
+    });
+    const virtualLotMeta = flatPreflight
+      ? []
+      : await Promise.all(
+          virtualLots.map(async (lot) => ({
+            status: lot.status,
+            ...(await this.loadExecutionMeta(lot.id)),
+          })),
+        );
+    const sameDirectionPendingPreflight = flatPreflight
+      ? false
+      : sameDirectionPendingSignedFastPathPreflight({
+          status: freshInstance.status,
+          simActive: isCopyRelaySimActive(freshInstance.dashboardState),
+          hireExpired: Boolean(
+            freshInstance.expiresAt && freshInstance.expiresAt.getTime() <= Date.now(),
+          ),
+          relayArmed: relayArmTimestampMs(freshInstance.dashboardState) != null,
+          exchangePositionQty: exchangePosition?.amount ?? 0,
+          candidateDirection: intentDirection,
+          maxConcurrent,
+          virtualLots: virtualLotMeta,
+          exchangeActiveOrderIds: activeOrders.map((order) => order.id),
+        });
+    if (!flatPreflight && !sameDirectionPendingPreflight) return false;
+
+    // The live exchange book above is authoritative and every non-flat order
+    // was matched to an owned virtual lot. Clear only a stale cached orphan
+    // warning before the normal eligibility gate reads dashboardState.
     await this.clearOrphanOrderIds(freshInstance.id).catch(() => {});
     const cleanInstance = {
       ...freshInstance,
@@ -1566,13 +1654,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       ) as TradingAgentInstance['dashboardState'],
     };
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
+    const managedOrderIds = new Set(activeOrders.map((order) => order.id));
     const eligibility = await this.evaluateEntryEligibility(
       creds,
-      { open: 0, pending: 0, direction: null },
-      new Set<number>(),
+      {
+        open: 0,
+        pending: virtualLots.length,
+        direction: flatPreflight ? null : intentDirection,
+      },
+      managedOrderIds,
       marginCap,
-      1,
-      (cycle.intentEnvelope as SignalIntentEnvelope).direction,
+      flatPreflight ? 1 : maxConcurrent,
+      intentDirection,
       cleanInstance,
     );
     if (!eligibility.canEnter) return false;
@@ -1589,7 +1682,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
     if (placed) {
       this.logger.log(
-        `[SIGNED-FLAT-FAST] placed trade=${cycle.tradeId} user=${instance.userId}`,
+        `[SIGNED-${flatPreflight ? 'FLAT' : 'SAME-DIR'}-FAST] placed trade=${cycle.tradeId} user=${instance.userId}`,
       );
     }
     return placed;

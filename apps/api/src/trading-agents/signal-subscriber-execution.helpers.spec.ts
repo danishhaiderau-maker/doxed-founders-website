@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { SignalCycleStatus } from '@prisma/client';
 import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
   flatSignedFastPathPreflight,
+  sameDirectionPendingSignedFastPathPreflight,
   readPersistedRelayExecutorHealth,
   isBenignShowcaseEntryWait,
   isRecoveredShowcaseOutageError,
@@ -258,6 +260,62 @@ test('signed flat fast path requires an armed and exchange-proven flat hire', ()
   assert.equal(flatSignedFastPathPreflight({ ...safe, exchangeActiveOrders: 1 }), false);
   assert.equal(flatSignedFastPathPreflight({ ...safe, exchangePositionQty: 0.000001 }), false);
   assert.equal(flatSignedFastPathPreflight({ ...safe, exchangePositionQty: 0.01 }), false);
+});
+
+test('signed pending fast path allows only fully attributed same-direction resting orders', () => {
+  const safe = {
+    status: 'ACTIVE' as const,
+    simActive: false,
+    hireExpired: false,
+    relayArmed: true,
+    exchangePositionQty: 0,
+    candidateDirection: 'SHORT' as const,
+    maxConcurrent: 3,
+    virtualLots: [
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        direction: 'SHORT' as const,
+        bitfinexOrderId: 101,
+      },
+    ],
+    exchangeActiveOrderIds: [101],
+  };
+  assert.equal(sameDirectionPendingSignedFastPathPreflight(safe), true);
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({
+      ...safe,
+      candidateDirection: 'LONG',
+    }),
+    false,
+  );
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({
+      ...safe,
+      exchangeActiveOrderIds: [101, 999],
+    }),
+    false,
+  );
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({
+      ...safe,
+      virtualLots: [{ ...safe.virtualLots[0], status: SignalCycleStatus.OPEN }],
+    }),
+    false,
+  );
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({
+      ...safe,
+      exchangePositionQty: -0.03,
+    }),
+    false,
+  );
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({
+      ...safe,
+      maxConcurrent: 1,
+    }),
+    false,
+  );
 });
 
 test('showcase fill cap permits improvement but never a worse copied entry', () => {
