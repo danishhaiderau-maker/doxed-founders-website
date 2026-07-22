@@ -273,6 +273,10 @@ $assistantPanelSources = @(
 foreach ($assistantPanelSource in $assistantPanelSources) {
     Set-FounderSourceLiteral $assistantPanelSource "Void Side Bar" "Assistant Panel"
 }
+Set-FounderSourceLiteral `
+    "src\vs\workbench\browser\workbench.contribution.ts" `
+    "The Void side bar will show on the opposite side of the workbench." `
+    "The Assistant Panel will show on the opposite side of the workbench."
 
 $fileActions = "src\vs\workbench\contrib\files\browser\fileActions.contribution.ts"
 Set-FounderSourceLiteral $fileActions "&&Open Void Settings" "&&Open Founder Settings"
