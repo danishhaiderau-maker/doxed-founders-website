@@ -24361,10 +24361,17 @@ DASHBOARD_JS = """(function () {
     }
     async function toggleFreshCollection() {
       if (freshCollectionInFlight) return;
-      const turningOn = document.getElementById('freshCollectionLabel').innerText.includes('OFF');
+      const freshLabelEl = document.getElementById('freshCollectionLabel');
+      const currentIsOn = freshLabelEl && freshLabelEl.innerText.trim() === 'ON';
+      const turningOn = !currentIsOn;
       if (turningOn) {
         const ok = confirm(
           'Fresh Collection will DELETE all research CSVs, jsonl logs, debug/log files, and clear open/pending trades in memory.\\n\\nThe bot keeps running and starts collecting from zero.\\n\\nContinue?'
+        );
+        if (!ok) return;
+      } else {
+        const ok = confirm(
+          'Fresh Collection is currently ON. Turning it OFF stops automatic retention checks, but does not delete Past Analysis archives.\\n\\nTurn Fresh Collection OFF?'
         );
         if (!ok) return;
       }
@@ -24372,7 +24379,10 @@ DASHBOARD_JS = """(function () {
       const freshBtn = document.getElementById('freshCollectionBtn');
       if (freshBtn) freshBtn.disabled = true;
       try {
-        const res = await post('/api/toggle_fresh_collection', {enabled: turningOn});
+        const res = await post('/api/toggle_fresh_collection', {
+          enabled: turningOn,
+          expected_current: currentIsOn,
+        });
         const body = await res.json();
         if (body.error) {
           alert('Fresh Collection blocked: ' + body.error);
@@ -24387,6 +24397,9 @@ DASHBOARD_JS = """(function () {
             msg += '\\n\\nNote: some files were locked (usually analyzer log) and will be trimmed on next run:\\n' + body.reset.errors.slice(0, 5).join('\\n');
           }
           alert(msg);
+        }
+        if (!body.error && freshLabelEl) {
+          freshLabelEl.innerText = turningOn ? 'ON' : 'OFF';
         }
       } catch (e) {
         alert('Fresh Collection request failed: ' + e);
@@ -27457,6 +27470,23 @@ def api_reset_showcase():
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
     data = request.get_json() or {}
+    expected_current = data.get("expected_current")
+    with state_lock:
+        current_mode = bool(state.get("fresh_collection_mode", False))
+    if expected_current is not None:
+        if not isinstance(expected_current, bool):
+            return jsonify({"error": "expected_current must be a JSON boolean"}), 400
+        if expected_current != current_mode:
+            logger.warning(
+                "[FRESH COLLECTION] Rejected stale/replayed toggle "
+                f"expected_current={expected_current} actual={current_mode} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+            return jsonify({
+                "error": "Fresh Collection state changed; refresh before trying again",
+                "fresh_collection_mode": current_mode,
+                "stale_request": True,
+            }), 409
     want_on = data.get("enabled")
     if want_on is None:
         want_on = not state.get("fresh_collection_mode", False)
