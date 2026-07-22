@@ -93,6 +93,7 @@ jobs:
     env:
       HAS_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       HAS_AZURE_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+      NODE_OPTIONS: --max-old-space-size=4096
 
     steps:
       # ── 1. Checkout the monorepo (this repo) ───────────────────────────────
