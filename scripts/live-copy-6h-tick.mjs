@@ -212,8 +212,15 @@ try {
       : null,
     mirrorDiff: dash.mirrorDiff
       ? {
+          at: dash.mirrorDiff.at ?? null,
+          entryPolicy: dash.mirrorDiff.entryPolicy ?? null,
+          suppressedExpectedSourceOnly:
+            dash.mirrorDiff.suppressedExpectedSourceOnly ?? 0,
           total: dash.mirrorDiff.counts?.total ?? 0,
           byType: dash.mirrorDiff.counts?.byType ?? {},
+          divergences: Array.isArray(dash.mirrorDiff.divergences)
+            ? dash.mirrorDiff.divergences.slice(0, 20)
+            : [],
         }
       : null,
   };

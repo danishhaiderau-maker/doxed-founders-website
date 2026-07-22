@@ -182,6 +182,36 @@ export function untrackedActiveOrderIds(
 }
 
 /**
+ * A live exchange position must first be reconciled against current pending
+ * entries. Autonomous orphan adoption is valid only when no same-direction
+ * pending participant can own the fill.
+ */
+export function pendingEntryMayOwnExchangePosition(
+  direction: 'LONG' | 'SHORT',
+  pendingMeta: Iterable<Pick<ExecutionPayload, 'direction' | 'qty'>>,
+): boolean {
+  for (const meta of pendingMeta) {
+    if (meta.direction !== direction) continue;
+    if ((meta.qty ?? 0) >= MIN_QTY_BTC) return true;
+  }
+  return false;
+}
+
+/** A market close is complete only after the exchange position reflects it. */
+export function marketCloseReductionConfirmed(input: {
+  direction: 'LONG' | 'SHORT';
+  beforeQty: number;
+  closeQty: number;
+  afterAmount: number;
+}): boolean {
+  if (input.beforeQty < MIN_QTY_BTC || input.closeQty < MIN_QTY_BTC) return false;
+  if (input.direction === 'LONG' && input.afterAmount < -MIN_QTY_BTC) return false;
+  if (input.direction === 'SHORT' && input.afterAmount > MIN_QTY_BTC) return false;
+  const expectedMaxQty = Math.max(0, input.beforeQty - input.closeQty) + MIN_QTY_BTC;
+  return Math.abs(input.afterAmount) <= expectedMaxQty;
+}
+
+/**
  * Live relay arming boundary. `relayArmedAt` is written on every explicit
  * Start; `realTradingConfirmedAt` is retained as a migration fallback.
  */
@@ -1648,6 +1678,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // that the legacy reconcile path refused to heal. Guardrailed by env flag,
     // per-session budget cap, size sanity, conservative stop, idempotency, and
     // a full audit trail. See reconcileAdoptOrphans for the decision tree.
+    // A vanished LIMIT may have filled between listActiveOrders and this
+    // tick. Attribute the exchange-position delta to a current PENDING_ENTRY
+    // before autonomous orphan adoption searches terminal history. Production
+    // incident 2026-07-22: the reverse order matched a fresh cont-d48fc fill
+    // to prior closed cont-68a8 and mirror-closed it immediately.
+    this.currentStage = 'RECONCILE_UNATTRIBUTED_FILLS';
+    await this.reconcileUnattributedExchangeFills(
+      agentId,
+      instance.userId,
+      creds,
+      activeOrderIdSet,
+      participantSince,
+    );
+
     this.currentStage = 'RECONCILE_ADOPT_ORPHANS';
     await this.reconcileAdoptOrphans(
       agentId,
@@ -1723,15 +1767,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       cycleById.set(c.id, c);
     }
     const allCycles = [...cycleById.values()];
-
-    this.currentStage = 'RECONCILE_UNATTRIBUTED_FILLS';
-    await this.reconcileUnattributedExchangeFills(
-      agentId,
-      instance.userId,
-      creds,
-      activeOrderIdSet,
-      participantSince,
-    );
 
     let managedOpenTrade = false;
 
@@ -5917,6 +5952,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
   }
 
+  private async waitForMarketCloseConfirmation(
+    creds: ExchangeCredentials,
+    direction: 'LONG' | 'SHORT',
+    beforeQty: number,
+    closeQty: number,
+  ): Promise<boolean> {
+    for (const delayMs of [0, 200, 400, 800, 1_200]) {
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+      try {
+        const after = await this.activeTrading.getOpenPositionDetail(creds);
+        if (
+          marketCloseReductionConfirmed({
+            direction,
+            beforeQty,
+            closeQty,
+            afterAmount: after?.amount ?? 0,
+          })
+        ) {
+          return true;
+        }
+      } catch {
+        // A failed observation is not confirmation; retry within this tick.
+      }
+    }
+    return false;
+  }
+
   /**
    * Phase 2c — market-close copy lot on showcase closure with observability fields.
    * Idempotent via exitingLots + hasParticipantExited (unless forceMirrorExit).
@@ -6012,6 +6076,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       let exitPrice = fillPrice ?? 0;
       const leverage =
         resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
+      const beforeQty = Math.abs(position.amount);
+      const closeQty = Math.min(meta.qty, beforeQty);
       try {
         if (meta.stopOrderId) {
           try {
@@ -6021,19 +6087,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           }
         }
         exitPrice = await this.activeTrading.getMarkPrice();
-        const closeQty = position
-          ? Math.min(meta.qty, Math.abs(position.amount))
-          : meta.qty;
         if (closeQty >= MIN_QTY_BTC) {
           await this.activeTrading.submitMarketClose(creds, {
             positionDirection: meta.direction,
             qty: closeQty,
             leverage,
           });
+          const confirmed = await this.waitForMarketCloseConfirmation(
+            creds,
+            meta.direction,
+            beforeQty,
+            closeQty,
+          );
+          if (!confirmed) {
+            throw new Error('MARKET_CLOSE_NOT_CONFIRMED_BY_EXCHANGE_POSITION');
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${msg}`);
+        await this.ensureProtectiveStop(
+          agentId,
+          userId,
+          cycle.id,
+          participant.id,
+          meta,
+          creds,
+          cycle.intentEnvelope as SignalIntentEnvelope,
+          fillPrice || undefined,
+        ).catch(() => {});
+        return false;
       }
 
       const direction = meta.direction;
@@ -7192,7 +7275,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(
         `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${cycle.tradeId} — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
       );
-      await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
+      const closed = await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
         reason: 'SHOWCASE_VANISHED',
         mark,
         fillPrice,
@@ -7201,7 +7284,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         unrealMarginPct,
         stopLossMarginPct,
       });
-      this.positionRuntime.delete(participant.id);
+      if (closed) this.positionRuntime.delete(participant.id);
       return;
     }
 
@@ -7214,7 +7297,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
 
     if (exitReason) {
-      await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
+      const closed = await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
         reason: exitReason,
         mark,
         fillPrice,
@@ -7224,7 +7307,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         unrealMarginPct,
         stopLossMarginPct,
       });
-      this.positionRuntime.delete(participant.id);
+      if (closed) this.positionRuntime.delete(participant.id);
       return;
     }
 
@@ -7492,15 +7575,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       lockFloor?: number;
       stopLossMarginPct: number;
     },
-  ) {
-    if (!meta.qty || !meta.direction || !opts.reason) return;
-    if (this.exitingLots.has(participantId)) return;
-    if (await this.hasParticipantExited(participantId)) return;
+  ): Promise<boolean> {
+    if (!meta.qty || !meta.direction || !opts.reason) return false;
+    if (this.exitingLots.has(participantId)) return false;
+    if (await this.hasParticipantExited(participantId)) return true;
 
     this.exitingLots.add(participantId);
     try {
     const positionAmount = (await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0;
-    const closeQty = Math.min(meta.qty, Math.abs(positionAmount));
+    const beforeQty = Math.abs(positionAmount);
+    const closeQty = Math.min(meta.qty, beforeQty);
 
     try {
       // Option A — cancel BOTH the persisted meta.stopOrderId AND any tracked
@@ -7526,11 +7610,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           qty: closeQty,
           leverage: opts.leverage,
         });
+        const confirmed = await this.waitForMarketCloseConfirmation(
+          creds,
+          meta.direction,
+          beforeQty,
+          closeQty,
+        );
+        if (!confirmed) {
+          throw new Error('MARKET_CLOSE_NOT_CONFIRMED_BY_EXCHANGE_POSITION');
+        }
       }
     } catch (err) {
       this.logger.warn(
         `Lot close ${userId} cycle=${cycleId} ${opts.reason}: ${err instanceof Error ? err.message : err}`,
       );
+      const cycleRecord = await this.prisma.signalCycle.findUnique({
+        where: { id: cycleId },
+        select: { intentEnvelope: true },
+      }).catch(() => null);
+      if (cycleRecord) {
+        await this.ensureProtectiveStop(
+          agentId,
+          userId,
+          cycleId,
+          participantId,
+          meta,
+          creds,
+          cycleRecord.intentEnvelope as SignalIntentEnvelope,
+          opts.fillPrice,
+        ).catch(() => {});
+      }
+      return false;
     }
 
     const direction = meta.direction;
@@ -7590,6 +7700,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     this.logger.log(
       `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)} pnl_source=${pnlSource}`,
     );
+    return true;
     } finally {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
@@ -8651,7 +8762,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
       const fillPrice = meta.fillPrice ?? mark;
-      await this.closeVirtualLot(agent.id, userId, row.cycleId, row.id, meta, creds, {
+      const closed = await this.closeVirtualLot(agent.id, userId, row.cycleId, row.id, meta, creds, {
         reason: 'HARD_STOP',
         mark: mark || fillPrice,
         fillPrice,
@@ -8660,7 +8771,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         unrealMarginPct: 0,
         stopLossMarginPct: meta.stopLossMarginPct ?? 0,
       });
-      flattened += 1;
+      if (closed) flattened += 1;
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -8826,6 +8937,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(
         `[RECONCILE-ADOPT] S6b refuse ${instance.userId}: exchange position has no basePrice — cannot verify fill`,
       );
+      return 0;
+    }
+
+    // A just-filled entry can appear at the exchange one tick before its
+    // participant is promoted from PENDING_ENTRY to OPEN. Never let orphan
+    // recovery steal that position and attach it to an older terminal trade.
+    const pendingRows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+        ...participantScope,
+      },
+      select: { id: true },
+    });
+    const pendingMeta: ExecutionPayload[] = [];
+    for (const row of pendingRows) {
+      pendingMeta.push(await this.loadExecutionMeta(row.id));
+    }
+    if (pendingEntryMayOwnExchangePosition(direction, pendingMeta)) {
+      this.logger.warn(
+        `[RECONCILE-ADOPT] S6b defer ${instance.userId}: ${pendingRows.length} current pending participant(s) may own ${exchangeQty.toFixed(5)} BTC ${direction}`,
+      );
+      await this.persistReconcileAdoptAudit(instance.id, {
+        kind: 'DEFERRED_PENDING_FILL_OWNER',
+        scenario: 'S6b',
+        exchangeQty,
+        direction,
+        pendingCandidates: pendingRows.length,
+        at: new Date().toISOString(),
+      }).catch(() => {});
       return 0;
     }
 

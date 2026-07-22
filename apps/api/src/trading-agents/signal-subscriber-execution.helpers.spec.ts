@@ -9,7 +9,9 @@ import {
   isBenignShowcaseEntryWait,
   isRecoveredShowcaseOutageError,
   isCycleFreshForRelayArm,
+  marketCloseReductionConfirmed,
   mergedDirectionCompatible,
+  pendingEntryMayOwnExchangePosition,
   relayEntryOrderIsCompletelyUnfilled,
   relayWatchdogShouldRestart,
   untrackedActiveOrderIds,
@@ -19,6 +21,67 @@ import {
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
 } from './signal-subscriber-execution.service';
+
+test('orphan adoption defers to a same-direction pending entry that may own the fill', () => {
+  assert.equal(
+    pendingEntryMayOwnExchangePosition('SHORT', [
+      { direction: 'SHORT', qty: 0.03033 },
+    ]),
+    true,
+  );
+  assert.equal(
+    pendingEntryMayOwnExchangePosition('SHORT', [
+      { direction: 'LONG', qty: 0.03033 },
+    ]),
+    false,
+  );
+  assert.equal(
+    pendingEntryMayOwnExchangePosition('SHORT', [
+      { direction: 'SHORT', qty: 0.000001 },
+      { direction: 'SHORT' },
+    ]),
+    false,
+  );
+});
+
+test('market close is recorded only after the exchange position is reduced', () => {
+  assert.equal(
+    marketCloseReductionConfirmed({
+      direction: 'SHORT',
+      beforeQty: 0.03033,
+      closeQty: 0.03033,
+      afterAmount: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    marketCloseReductionConfirmed({
+      direction: 'SHORT',
+      beforeQty: 0.06066,
+      closeQty: 0.03033,
+      afterAmount: -0.03033,
+    }),
+    true,
+  );
+  assert.equal(
+    marketCloseReductionConfirmed({
+      direction: 'SHORT',
+      beforeQty: 0.03033,
+      closeQty: 0.03033,
+      afterAmount: -0.03033,
+    }),
+    false,
+  );
+  assert.equal(
+    marketCloseReductionConfirmed({
+      direction: 'SHORT',
+      beforeQty: 0.03033,
+      closeQty: 0.03033,
+      afterAmount: 0.03033,
+    }),
+    false,
+  );
+});
 
 test('watchdog cleanup cancels only exchange orders with zero reported fill', () => {
   assert.equal(
