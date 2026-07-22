@@ -34,7 +34,9 @@ import {
 import {
   FounderAgentCoordinationService,
   type ClaimFounderPathInput,
+  type DecomposeFounderTaskInput,
   type StartFounderTaskInput,
+  type VerifyFounderMergeInput,
 } from '../founder-os/founder-agent-coordination.service';
 
 const MANIFEST_RELATIVE_PATH = [
@@ -370,13 +372,33 @@ export class FounderNodeController {
   heartbeatCoordinationTask(
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('taskId') taskId: string,
-    @Body() body: { status?: 'ACTIVE' | 'WAITING' },
+    @Body() body: { status?: 'RUNNING' | 'WAITING' | 'BLOCKED' | 'VERIFYING' },
   ) {
     return this.coordination.heartbeat(
       req.founderNode.userId,
       taskId,
-      body?.status ?? 'ACTIVE',
+      body?.status ?? 'RUNNING',
     );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('coordination/tasks/:taskId/specialists')
+  decomposeCoordinationTask(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Body() body: DecomposeFounderTaskInput,
+  ) {
+    return this.coordination.decomposeTask(req.founderNode.userId, taskId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('coordination/tasks/:taskId/verify-merge')
+  verifyCoordinationMerge(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('taskId') taskId: string,
+    @Body() body: VerifyFounderMergeInput,
+  ) {
+    return this.coordination.verifyMerge(req.founderNode.userId, taskId, body);
   }
 
   @UseGuards(FounderNodeGuard)

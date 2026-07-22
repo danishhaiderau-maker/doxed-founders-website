@@ -127,7 +127,7 @@ screenshots, quota tests, native final-response screenshots.
 ## Stage 6 - Coordinated agents across chats
 
 - [x] Persist a workspace coordination ledger shared by every connected chat.
-- [ ] Broadcast goal, scope, branch, files, dependencies, and expected output
+- [x] Broadcast goal, scope, branch, files, dependencies, and expected output
   before work starts.
 - [x] Acquire short-lived file/path leases with fencing tokens before edits.
 - [x] Detect path overlap and require ownership resolution before agents write.
@@ -135,9 +135,9 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Refresh awareness on events and at a bounded heartbeat while working.
 - [x] Allow independent work to continue quietly when scopes do not overlap.
 - [ ] Add Focus and Team modes; Team creates bounded specialist tasks.
-- [ ] Show a task graph with running, waiting, blocked, verifying, and complete
+- [x] Show a task graph with running, waiting, blocked, verifying, and complete
   states plus a compact coordination indicator.
-- [ ] Require a verified merge step for cross-agent output.
+- [x] Require a verified merge step for cross-agent output.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
 merge receipt, multi-agent task graph screenshots.

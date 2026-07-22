@@ -19,11 +19,26 @@ export type StartFounderTaskInput = {
   clientTaskId: string;
   workspaceKey: string;
   title: string;
+  goal?: string;
+  mode?: 'FOCUS' | 'TEAM';
   scope?: unknown;
+  expectedOutput?: unknown;
+  dependencies?: unknown;
   branch?: string;
   provider?: string;
   permissions?: unknown;
   budgetWeightedUnits?: number;
+};
+
+export type DecomposeFounderTaskInput = {
+  specialists: Array<Omit<StartFounderTaskInput, 'workspaceKey' | 'mode'>>;
+};
+
+export type VerifyFounderMergeInput = {
+  commit: string;
+  changedFiles: string[];
+  checks: Array<{ name: string; passed: boolean; detail?: string }>;
+  summary?: string;
 };
 
 export type ClaimFounderPathInput = {
@@ -42,6 +57,8 @@ export class FounderAgentCoordinationService {
     const clientTaskId = bounded(input.clientTaskId, 'clientTaskId', 160);
     const workspaceKey = workspaceKeyOf(input.workspaceKey);
     const title = bounded(input.title, 'title', 200);
+    const goal = bounded(input.goal ?? input.title, 'goal', 4_000);
+    const mode = input.mode === 'TEAM' ? 'TEAM' : 'FOCUS';
     const expiresAt = leaseExpiry(now);
     const task = await this.prisma.founderCoordinationTask.upsert({
       where: { ownerUserId_clientTaskId: { ownerUserId: userId, clientTaskId } },
@@ -51,12 +68,16 @@ export class FounderAgentCoordinationService {
         teamId: entitlement.teamId,
         workspaceKey,
         title,
+        goal,
+        mode,
         scope: jsonOrNull(input.scope),
+        expectedOutput: jsonOrNull(input.expectedOutput),
+        dependencies: jsonOrNull(input.dependencies),
         branch: optionalBounded(input.branch, 200),
         provider: optionalBounded(input.provider, 120),
         permissions: jsonOrNull(input.permissions),
         budgetWeightedUnits: optionalBudget(input.budgetWeightedUnits),
-        status: 'ACTIVE',
+        status: 'RUNNING',
         heartbeatAt: now,
         expiresAt,
       },
@@ -64,12 +85,16 @@ export class FounderAgentCoordinationService {
         teamId: entitlement.teamId,
         workspaceKey,
         title,
+        goal,
+        mode,
         scope: jsonOrNull(input.scope),
+        expectedOutput: jsonOrNull(input.expectedOutput),
+        dependencies: jsonOrNull(input.dependencies),
         branch: optionalBounded(input.branch, 200),
         provider: optionalBounded(input.provider, 120),
         permissions: jsonOrNull(input.permissions),
         budgetWeightedUnits: optionalBudget(input.budgetWeightedUnits),
-        status: 'ACTIVE',
+        status: 'RUNNING',
         heartbeatAt: now,
         expiresAt,
         completedAt: null,
@@ -78,6 +103,7 @@ export class FounderAgentCoordinationService {
     });
     await this.audit(userId, entitlement.teamId, task.id, 'TASK_STARTED', {
       workspaceKey,
+      mode,
       branch: task.branch,
     });
     return task;
@@ -89,14 +115,24 @@ export class FounderAgentCoordinationService {
     return this.prisma.founderCoordinationTask.findMany({
       where: {
         workspaceKey,
-        status: { in: ['ACTIVE', 'WAITING'] },
-        expiresAt: { gt: now },
+        OR: [
+          {
+            status: { in: ['ACTIVE', 'RUNNING', 'WAITING', 'BLOCKED', 'VERIFYING'] },
+            expiresAt: { gt: now },
+          },
+          {
+            status: 'COMPLETE',
+            completedAt: { gte: new Date(now.getTime() - 24 * 60 * 60_000) },
+          },
+        ],
         ...(entitlement.teamId
           ? { teamId: entitlement.teamId }
           : { ownerUserId: userId, teamId: null }),
       },
       include: {
         claims: { where: { expiresAt: { gt: now } }, orderBy: { path: 'asc' } },
+        parent: { select: { id: true, title: true } },
+        children: { select: { id: true, title: true, status: true } },
       },
       orderBy: { heartbeatAt: 'desc' },
       take: 100,
@@ -106,7 +142,7 @@ export class FounderAgentCoordinationService {
   async heartbeat(
     userId: string,
     taskId: string,
-    status: 'ACTIVE' | 'WAITING' = 'ACTIVE',
+    status: 'RUNNING' | 'WAITING' | 'BLOCKED' | 'VERIFYING' = 'RUNNING',
     now = new Date(),
   ) {
     const { task, entitlement } = await this.ownedTask(userId, taskId);
@@ -123,6 +159,170 @@ export class FounderAgentCoordinationService {
       }),
     ]);
     await this.audit(userId, entitlement.teamId, task.id, 'TASK_HEARTBEAT', { status });
+    return updated;
+  }
+
+  async decomposeTask(
+    userId: string,
+    taskId: string,
+    input: DecomposeFounderTaskInput,
+    now = new Date(),
+  ) {
+    const { task, entitlement } = await this.ownedTask(userId, taskId);
+    if (task.mode !== 'TEAM') {
+      throw new BadRequestException('Only a Team-mode goal can create specialist tasks.');
+    }
+    if (task.status === 'COMPLETE' || task.status === 'CANCELED') {
+      throw new ConflictException('A finished goal cannot create new specialist tasks.');
+    }
+    if (!Array.isArray(input.specialists) || input.specialists.length < 2 || input.specialists.length > 5) {
+      throw new BadRequestException('Team mode requires between 2 and 5 bounded specialist tasks.');
+    }
+    const ids = new Set<string>();
+    const specialists = input.specialists.map((specialist) => {
+      const clientTaskId = bounded(specialist.clientTaskId, 'clientTaskId', 160);
+      if (ids.has(clientTaskId)) throw new BadRequestException('Specialist clientTaskId values must be unique.');
+      ids.add(clientTaskId);
+      return {
+        clientTaskId,
+        title: bounded(specialist.title, 'title', 200),
+        goal: bounded(specialist.goal ?? specialist.title, 'goal', 4_000),
+        scope: jsonOrNull(specialist.scope),
+        expectedOutput: jsonOrNull(specialist.expectedOutput),
+        dependencies: jsonOrNull(specialist.dependencies),
+        branch: optionalBounded(specialist.branch, 200),
+        provider: optionalBounded(specialist.provider, 120),
+        permissions: jsonOrNull(specialist.permissions),
+        budgetWeightedUnits: optionalBudget(specialist.budgetWeightedUnits),
+      };
+    });
+    const requestedBudget = specialists.reduce(
+      (total, specialist) => total + (specialist.budgetWeightedUnits ?? 0),
+      0,
+    );
+    if (task.budgetWeightedUnits != null && requestedBudget > task.budgetWeightedUnits) {
+      throw new BadRequestException('Specialist budgets exceed the parent goal budget.');
+    }
+    const expiresAt = leaseExpiry(now);
+    return this.prisma.$transaction(async (tx) => {
+      const children = [];
+      for (const specialist of specialists) {
+        children.push(await tx.founderCoordinationTask.upsert({
+          where: {
+            ownerUserId_clientTaskId: {
+              ownerUserId: userId,
+              clientTaskId: specialist.clientTaskId,
+            },
+          },
+          create: {
+            ...specialist,
+            ownerUserId: userId,
+            teamId: entitlement.teamId,
+            workspaceKey: task.workspaceKey,
+            parentTaskId: task.id,
+            mode: 'FOCUS',
+            status: 'RUNNING',
+            heartbeatAt: now,
+            expiresAt,
+          },
+          update: {
+            ...specialist,
+            teamId: entitlement.teamId,
+            workspaceKey: task.workspaceKey,
+            parentTaskId: task.id,
+            mode: 'FOCUS',
+            status: 'RUNNING',
+            heartbeatAt: now,
+            expiresAt,
+            completedAt: null,
+            resultCommit: null,
+            verification: Prisma.JsonNull,
+          },
+          include: { claims: true },
+        }));
+      }
+      await tx.founderCoordinationTask.update({
+        where: { id: task.id },
+        data: { status: 'RUNNING', heartbeatAt: now, expiresAt },
+      });
+      await tx.founderCoordinationAudit.create({
+        data: {
+          actorUserId: userId,
+          teamId: entitlement.teamId,
+          taskId: task.id,
+          action: 'TASK_DECOMPOSED',
+          details: { childTaskIds: children.map((child) => child.id), count: children.length },
+        },
+      });
+      return children;
+    });
+  }
+
+  async verifyMerge(
+    userId: string,
+    taskId: string,
+    input: VerifyFounderMergeInput,
+    now = new Date(),
+  ) {
+    const { task, entitlement } = await this.ownedTask(userId, taskId);
+    const commit = bounded(input.commit, 'commit', 64).toLowerCase();
+    if (!/^[0-9a-f]{7,64}$/.test(commit)) {
+      throw new BadRequestException('commit must be a Git commit hash.');
+    }
+    if (!Array.isArray(input.checks) || input.checks.length === 0 || input.checks.length > 100) {
+      throw new BadRequestException('At least one bounded verification check is required.');
+    }
+    const checks = input.checks.map((check) => ({
+      name: bounded(check.name, 'check.name', 200),
+      passed: check.passed === true,
+      detail: optionalBounded(check.detail, 500),
+    }));
+    if (checks.some((check) => !check.passed)) {
+      throw new ConflictException('Every verification check must pass before merge completion.');
+    }
+    const changedFiles = [...new Set((input.changedFiles ?? []).map(normalizedClaimPath))].slice(0, 500);
+    const children = await this.prisma.founderCoordinationTask.findMany({
+      where: { parentTaskId: task.id },
+      select: { id: true, title: true, status: true },
+    });
+    const incomplete = children.filter((child) => child.status !== 'COMPLETE');
+    if (incomplete.length > 0) {
+      throw new ConflictException({
+        error: 'specialists_incomplete',
+        tasks: incomplete,
+      });
+    }
+    const verification = {
+      version: 1,
+      verifiedAt: now.toISOString(),
+      summary: optionalBounded(input.summary, 1_000),
+      checks,
+      changedFiles,
+      specialistTaskIds: children.map((child) => child.id),
+    };
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.founderCoordinationTask.update({
+        where: { id: task.id },
+        data: {
+          status: 'COMPLETE',
+          resultCommit: commit,
+          verification,
+          completedAt: now,
+          heartbeatAt: now,
+          expiresAt: now,
+        },
+      }),
+      this.prisma.founderCoordinationPathClaim.deleteMany({ where: { taskId: task.id } }),
+      this.prisma.founderCoordinationAudit.create({
+        data: {
+          actorUserId: userId,
+          teamId: entitlement.teamId,
+          taskId: task.id,
+          action: 'MERGE_VERIFIED',
+          details: { commit, checks: checks.length, changedFiles: changedFiles.length },
+        },
+      }),
+    ]);
     return updated;
   }
 
@@ -232,6 +432,9 @@ export class FounderAgentCoordinationService {
     now = new Date(),
   ) {
     const { task, entitlement } = await this.ownedTask(userId, taskId);
+    if (status === 'COMPLETE' && task.mode === 'TEAM') {
+      throw new ConflictException('Team goals require a verified merge receipt before completion.');
+    }
     const [updated] = await this.prisma.$transaction([
       this.prisma.founderCoordinationTask.update({
         where: { id: task.id },

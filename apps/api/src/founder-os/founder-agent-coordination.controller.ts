@@ -4,7 +4,9 @@ import type { AuthUser } from '../auth/auth.types';
 import {
   FounderAgentCoordinationService,
   type ClaimFounderPathInput,
+  type DecomposeFounderTaskInput,
   type StartFounderTaskInput,
+  type VerifyFounderMergeInput,
 } from './founder-agent-coordination.service';
 
 @Controller('founder-coordination')
@@ -25,9 +27,27 @@ export class FounderAgentCoordinationController {
   heartbeat(
     @CurrentUser() user: AuthUser,
     @Param('taskId') taskId: string,
-    @Body() body: { status?: 'ACTIVE' | 'WAITING' },
+    @Body() body: { status?: 'RUNNING' | 'WAITING' | 'BLOCKED' | 'VERIFYING' },
   ) {
-    return this.coordination.heartbeat(user.id, taskId, body?.status ?? 'ACTIVE');
+    return this.coordination.heartbeat(user.id, taskId, body?.status ?? 'RUNNING');
+  }
+
+  @Post('tasks/:taskId/specialists')
+  decompose(
+    @CurrentUser() user: AuthUser,
+    @Param('taskId') taskId: string,
+    @Body() body: DecomposeFounderTaskInput,
+  ) {
+    return this.coordination.decomposeTask(user.id, taskId, body);
+  }
+
+  @Post('tasks/:taskId/verify-merge')
+  verifyMerge(
+    @CurrentUser() user: AuthUser,
+    @Param('taskId') taskId: string,
+    @Body() body: VerifyFounderMergeInput,
+  ) {
+    return this.coordination.verifyMerge(user.id, taskId, body);
   }
 
   @Post('tasks/:taskId/claims')

@@ -486,9 +486,17 @@ enum FounderTeamRole {
 
 enum FounderCoordinationTaskStatus {
   ACTIVE
+  RUNNING
   WAITING
+  BLOCKED
+  VERIFYING
   COMPLETE
   CANCELED
+}
+
+enum FounderCoordinationMode {
+  FOCUS
+  TEAM
 }
 
 // ─── Users & Auth ────────────────────────────────────────────────────────────
@@ -842,7 +850,12 @@ model FounderCoordinationTask {
   teamId              String?
   workspaceKey        String
   title               String
+  goal                String                        @db.Text
+  mode                FounderCoordinationMode       @default(FOCUS)
   scope               Json?
+  expectedOutput      Json?
+  dependencies        Json?
+  parentTaskId        String?
   branch              String?
   provider            String?
   permissions         Json?
@@ -851,6 +864,8 @@ model FounderCoordinationTask {
   heartbeatAt         DateTime                      @default(now())
   expiresAt           DateTime
   completedAt         DateTime?
+  resultCommit        String?
+  verification        Json?
   createdAt           DateTime                      @default(now())
   updatedAt           DateTime                      @updatedAt
 
@@ -858,10 +873,13 @@ model FounderCoordinationTask {
   team   FounderPlanTeam?             @relation(fields: [teamId], references: [id], onDelete: Cascade)
   claims FounderCoordinationPathClaim[]
   audit  FounderCoordinationAudit[]
+  parent FounderCoordinationTask?  @relation("FounderCoordinationChildren", fields: [parentTaskId], references: [id], onDelete: Cascade)
+  children FounderCoordinationTask[] @relation("FounderCoordinationChildren")
 
   @@unique([ownerUserId, clientTaskId])
   @@index([workspaceKey, status, expiresAt])
   @@index([teamId, workspaceKey, status])
+  @@index([parentTaskId, status])
 }
 
 model FounderCoordinationPathClaim {

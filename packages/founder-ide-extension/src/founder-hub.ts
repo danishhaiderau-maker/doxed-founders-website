@@ -216,7 +216,7 @@ export class FounderHubProvider
       <div class="agent-row ${task.conflict ? 'conflict' : ''}">
         <span class="agent-signal" aria-hidden="true"></span>
         <span class="agent-copy"><strong>${escapeHtml(task.title)}</strong><span>${escapeHtml(task.branch ?? 'No branch')} | ${escapeHtml(task.files.slice(0, 2).join(', ') || 'Reading workspace')}</span></span>
-        <span class="agent-state">${task.conflict ? 'Coordinate' : 'Working'}</span>
+        <span class="agent-state">${task.conflict ? 'Coordinate' : escapeHtml(task.status[0]!.toUpperCase() + task.status.slice(1))}</span>
       </div>
     `).join('');
 

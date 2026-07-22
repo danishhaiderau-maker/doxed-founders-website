@@ -7,8 +7,11 @@ export interface FounderAgentPresence {
   workspaceName: string;
   branch?: string;
   title: string;
+  goal?: string;
+  expectedOutput?: string;
+  dependencies?: string[];
   provider: string;
-  status: 'working' | 'waiting';
+  status: 'working' | 'waiting' | 'blocked' | 'verifying' | 'complete';
   ownedFiles: string[];
   startedAt: string;
   heartbeatAt: string;
@@ -115,7 +118,9 @@ export function coordinationPrompt(
   for (const peer of activePeers.slice(0, 6)) {
     const risk = risks.find((item) => item.peer.id === peer.id);
     const files = peer.ownedFiles.slice(0, 5).join(', ') || 'no files claimed yet';
-    lines.push(`- ${peer.title} [${peer.branch ?? 'no branch'}]: ${files}${risk ? `; COORDINATE: ${risk.reason}` : ''}`);
+    const expected = peer.expectedOutput ? `; output: ${peer.expectedOutput}` : '';
+    const dependencies = peer.dependencies?.length ? `; depends on: ${peer.dependencies.slice(0, 4).join(', ')}` : '';
+    lines.push(`- ${peer.title} [${peer.status}; ${peer.branch ?? 'no branch'}]: ${files}${expected}${dependencies}${risk ? `; COORDINATE: ${risk.reason}` : ''}`);
   }
   lines.push(
     'Before mutating an overlapping file, declare ownership or choose a non-overlapping task. Re-read this coordination block between tool turns. Do not duplicate work already in progress.',
@@ -133,7 +138,7 @@ export function parsePresence(value: unknown): FounderAgentPresence | null {
     || typeof input.workspaceName !== 'string'
     || typeof input.title !== 'string'
     || typeof input.provider !== 'string'
-    || (input.status !== 'working' && input.status !== 'waiting')
+    || !['working', 'waiting', 'blocked', 'verifying', 'complete'].includes(String(input.status))
     || !Array.isArray(input.ownedFiles)
     || typeof input.startedAt !== 'string'
     || typeof input.heartbeatAt !== 'string'
@@ -141,6 +146,11 @@ export function parsePresence(value: unknown): FounderAgentPresence | null {
   return {
     ...input,
     version: 1,
+    goal: typeof input.goal === 'string' ? input.goal.slice(0, 4_000) : undefined,
+    expectedOutput: typeof input.expectedOutput === 'string' ? input.expectedOutput.slice(0, 500) : undefined,
+    dependencies: Array.isArray(input.dependencies)
+      ? input.dependencies.filter((item): item is string => typeof item === 'string').slice(0, 20)
+      : undefined,
     ownedFiles: input.ownedFiles.filter((file): file is string => typeof file === 'string').slice(0, 80),
   } as FounderAgentPresence;
 }

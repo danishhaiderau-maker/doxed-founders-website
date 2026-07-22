@@ -23,6 +23,7 @@ export interface FounderAgentAwarenessSummary {
     title: string;
     branch?: string;
     files: string[];
+    status: FounderAgentPresence['status'];
     conflict: boolean;
   }>;
 }
@@ -63,9 +64,13 @@ export class FounderAgentAwareness implements vscode.Disposable {
         clientTaskId: taskId,
         workspaceKey: workspaceKeyFor(presence.workspacePath),
         title: presence.title,
+        goal: presence.goal,
+        mode: 'FOCUS',
         branch: presence.branch,
         provider,
         scope: { openFiles: presence.ownedFiles.slice(0, 20) },
+        expectedOutput: presence.expectedOutput,
+        dependencies: presence.dependencies,
         permissions: { workspaceEdits: true, commandsRequireConfirmation: true },
       });
       void this.syncCloudPeers(taskId);
@@ -132,6 +137,9 @@ export class FounderAgentAwareness implements vscode.Disposable {
       workspaceName: folder?.name ?? 'Untitled workspace',
       branch: readGitBranch(workspacePath),
       title: taskTitle(prompt),
+      goal: prompt.replace(/\s+/g, ' ').trim().slice(0, 4_000),
+      expectedOutput: 'A verified change with tests and a concise completion receipt.',
+      dependencies: [],
       provider,
       status: 'working',
       ownedFiles: openWorkspaceFiles(workspacePath),
@@ -150,7 +158,14 @@ export class FounderAgentAwareness implements vscode.Disposable {
 
   private refreshLease(lease: ActiveLease): void {
     founderPathLeases.refreshTask(lease.presence.id);
-    void founderCoordinationCloud.heartbeat(lease.presence.id, lease.presence.status === 'waiting' ? 'WAITING' : 'ACTIVE');
+    const cloudStatus = lease.presence.status === 'waiting'
+      ? 'WAITING'
+      : lease.presence.status === 'blocked'
+        ? 'BLOCKED'
+        : lease.presence.status === 'verifying'
+          ? 'VERIFYING'
+          : 'RUNNING';
+    void founderCoordinationCloud.heartbeat(lease.presence.id, cloudStatus);
     const claimedFiles = founderPathLeases
       .claimsForTask(lease.presence.id)
       .map((claim) => claim.relativePath);
@@ -213,6 +228,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
         title: presence.title,
         branch: presence.branch,
         files: presence.ownedFiles.slice(0, 5),
+        status: presence.status,
         conflict: presence.id === local?.id ? risks.length > 0 : conflictingIds.has(presence.id),
       })),
     };
@@ -332,7 +348,20 @@ function cloudPresence(task: FounderCloudTask, workspacePath: string): FounderAg
     branch: task.branch,
     title: task.title,
     provider: task.provider ?? 'Founder AI',
-    status: task.status === 'WAITING' ? 'waiting' : 'working',
+    status: task.status === 'WAITING'
+      ? 'waiting'
+      : task.status === 'BLOCKED'
+        ? 'blocked'
+        : task.status === 'VERIFYING'
+          ? 'verifying'
+          : task.status === 'COMPLETE'
+            ? 'complete'
+            : 'working',
+    goal: task.goal,
+    expectedOutput: typeof task.expectedOutput === 'string' ? task.expectedOutput : undefined,
+    dependencies: Array.isArray(task.dependencies)
+      ? task.dependencies.filter((item): item is string => typeof item === 'string')
+      : undefined,
     ownedFiles: task.claims.map((claim) => claim.path).slice(0, 80),
     startedAt: task.heartbeatAt,
     heartbeatAt: task.heartbeatAt,

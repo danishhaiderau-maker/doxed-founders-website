@@ -8,21 +8,39 @@ export type FounderCloudTaskCard = {
   clientTaskId: string;
   workspaceKey: string;
   title: string;
+  goal?: string;
+  mode?: 'FOCUS' | 'TEAM';
   branch?: string;
   provider?: string;
   scope?: unknown;
+  expectedOutput?: unknown;
+  dependencies?: unknown;
   permissions?: unknown;
   budgetWeightedUnits?: number;
 };
+
+export type FounderCloudTaskStatus =
+  | 'ACTIVE'
+  | 'RUNNING'
+  | 'WAITING'
+  | 'BLOCKED'
+  | 'VERIFYING'
+  | 'COMPLETE'
+  | 'CANCELED';
 
 export type FounderCloudTask = FounderCloudTaskCard & {
   id: string;
   ownerUserId: string;
   teamId?: string | null;
-  status: 'ACTIVE' | 'WAITING' | 'COMPLETE' | 'CANCELED';
+  status: FounderCloudTaskStatus;
   heartbeatAt: string;
   expiresAt: string;
   claims: Array<{ path: string; generation: number; fencingToken: string }>;
+  parentTaskId?: string | null;
+  parent?: { id: string; title: string } | null;
+  children?: Array<{ id: string; title: string; status: FounderCloudTaskStatus }>;
+  resultCommit?: string | null;
+  verification?: unknown;
 };
 
 export type FounderCloudClaimResult =
@@ -54,13 +72,49 @@ export class FounderCoordinationCloud {
     this.registrations.set(card.clientTaskId, registration);
   }
 
-  async heartbeat(localTaskId: string, status: 'ACTIVE' | 'WAITING' = 'ACTIVE'): Promise<void> {
+  async heartbeat(
+    localTaskId: string,
+    status: 'RUNNING' | 'WAITING' | 'BLOCKED' | 'VERIFYING' = 'RUNNING',
+  ): Promise<void> {
     const registration = this.registrations.get(localTaskId);
     const task = await registration?.task;
     if (!registration || !task) return;
     await this.request(registration.credentials, `/coordination/tasks/${encodeURIComponent(task.id)}/heartbeat`, {
       method: 'POST', body: JSON.stringify({ status }),
     }).catch(() => undefined);
+  }
+
+  async decompose(
+    localTaskId: string,
+    specialists: Array<Omit<FounderCloudTaskCard, 'workspaceKey' | 'mode'>>,
+  ): Promise<FounderCloudTask[]> {
+    const registration = this.registrations.get(localTaskId);
+    const task = await registration?.task;
+    if (!registration || !task) return [];
+    return this.request<FounderCloudTask[]>(
+      registration.credentials,
+      `/coordination/tasks/${encodeURIComponent(task.id)}/specialists`,
+      { method: 'POST', body: JSON.stringify({ specialists }) },
+    );
+  }
+
+  async verifyMerge(
+    localTaskId: string,
+    receipt: {
+      commit: string;
+      changedFiles: string[];
+      checks: Array<{ name: string; passed: boolean; detail?: string }>;
+      summary?: string;
+    },
+  ): Promise<FounderCloudTask | null> {
+    const registration = this.registrations.get(localTaskId);
+    const task = await registration?.task;
+    if (!registration || !task) return null;
+    return this.request<FounderCloudTask>(
+      registration.credentials,
+      `/coordination/tasks/${encodeURIComponent(task.id)}/verify-merge`,
+      { method: 'POST', body: JSON.stringify(receipt) },
+    );
   }
 
   async peers(localTaskId: string): Promise<FounderCloudTask[]> {

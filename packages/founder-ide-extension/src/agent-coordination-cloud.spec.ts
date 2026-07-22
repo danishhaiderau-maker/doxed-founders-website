@@ -47,4 +47,39 @@ describe('Founder coordination cloud client', () => {
     cloud.begin(credentials, card);
     assert.deepEqual(await cloud.claim('local-1', 'src/settings.ts'), { ok: true, synced: false });
   });
+
+  it('creates bounded specialists and submits a verified merge receipt', async () => {
+    const requests: Array<{ url: string; body?: string }> = [];
+    const cloud = new FounderCoordinationCloud(async (url, init) => {
+      requests.push({ url: String(url), body: String(init?.body ?? '') });
+      if (String(url).endsWith('/specialists')) {
+        return new Response(JSON.stringify([{ id: 'child-1', status: 'RUNNING', claims: [] }]), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (String(url).endsWith('/verify-merge')) {
+        return new Response(JSON.stringify({ id: 'server-1', status: 'COMPLETE', claims: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: 'server-1', ownerUserId: 'user-1', status: 'RUNNING',
+        heartbeatAt: new Date().toISOString(), expiresAt: new Date().toISOString(), claims: [], ...card,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    cloud.begin(credentials, { ...card, mode: 'TEAM', goal: 'Ship a verified settings release' });
+    const specialists = await cloud.decompose('local-1', [
+      { clientTaskId: 'ui', title: 'Build UI' },
+      { clientTaskId: 'qa', title: 'Verify UI', dependencies: ['ui'] },
+    ]);
+    const verified = await cloud.verifyMerge('local-1', {
+      commit: 'abcdef1', changedFiles: ['src/ui.ts'], checks: [{ name: 'tests', passed: true }],
+    });
+    assert.equal(specialists[0]?.id, 'child-1');
+    assert.equal(verified?.status, 'COMPLETE');
+    assert.match(requests[1]!.url, /\/specialists$/);
+    assert.match(requests[2]!.url, /\/verify-merge$/);
+    assert.deepEqual(JSON.parse(requests[1]!.body!).specialists[1].dependencies, ['ui']);
+    assert.equal(JSON.parse(requests[2]!.body!).checks[0].passed, true);
+  });
 });
