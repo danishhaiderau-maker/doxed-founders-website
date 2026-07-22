@@ -409,6 +409,20 @@ jobs:
             throw "Launcher suspiciously small ($len bytes) - Electron binary missing"
           }
 
+          # Guard against warm/incremental builds packaging an obsolete nested
+          # React bundle even though the current source and tsup output are new.
+          $workbenchBundle = Join-Path $root "resources\app\out\vs\workbench\workbench.desktop.main.js"
+          if (-not (Test-Path $workbenchBundle)) {
+            throw "Workbench bundle missing: $workbenchBundle"
+          }
+          $workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
+          $expectedFounderToolbar = "void-flex void-min-w-0 void-flex-wrap void-gap-1 void-pb-0.5"
+          $staleFounderToolbar = "void-flex void-min-w-0 void-gap-1 void-overflow-x-auto void-pb-0.5"
+          if (-not $workbenchText.Contains($expectedFounderToolbar) -or $workbenchText.Contains($staleFounderToolbar)) {
+            throw "Packaged workbench contains a stale Founder action toolbar"
+          }
+          Write-Host "Founder action toolbar payload OK"
+
           # Critical native modules that have regressed in past builds.
           # NOTE on paths/names:
           #  - Void uses @vscode/policy-watcher (Microsoft's official package),

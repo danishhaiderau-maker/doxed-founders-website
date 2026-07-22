@@ -22,6 +22,14 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.ok(packageInner > embed);
   });
 
+  it('rejects a stale compiled Founder action toolbar', () => {
+    assert.match(source, /expectedFounderToolbar/);
+    assert.match(source, /void-flex-wrap void-gap-1 void-pb-0\.5/);
+    assert.match(source, /staleFounderToolbar/);
+    assert.match(source, /void-overflow-x-auto void-pb-0\.5/);
+    assert.match(source, /remove out-vscode before packaging/);
+  });
+
   it('persists a deployment mode during silent installation', () => {
     assert.match(
       installerSource,

@@ -142,6 +142,21 @@ if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
     throw "Founder IDE application payload not found at $ideRoot"
 }
 
+# A warm VS Code checkout can retain out-vscode from an earlier React build
+# because the upstream gulp dependency graph does not track the nested tsup
+# bundle. Refuse to ship a payload whose Founder action toolbar is stale.
+$workbenchBundle = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.desktop.main.js"
+if (-not (Test-Path $workbenchBundle)) {
+    throw "Founder IDE workbench bundle not found at $workbenchBundle"
+}
+$workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
+$expectedFounderToolbar = "void-flex void-min-w-0 void-flex-wrap void-gap-1 void-pb-0.5"
+$staleFounderToolbar = "void-flex void-min-w-0 void-gap-1 void-overflow-x-auto void-pb-0.5"
+if (-not $workbenchText.Contains($expectedFounderToolbar) -or $workbenchText.Contains($staleFounderToolbar)) {
+    throw "Founder IDE payload contains a stale chat toolbar. Rebuild the React bundle and remove out-vscode before packaging."
+}
+Write-Host "[stack]   Founder action toolbar payload verified"
+
 # Embed the Founder extension into the application payload even when the
 # expensive IDE compilation is skipped. A staged VSIX alone is not installed
 # on a clean machine by the inner setup executable.

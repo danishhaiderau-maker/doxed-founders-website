@@ -4,6 +4,7 @@ import path from 'node:path';
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
 const nonce = process.env.FOUNDER_IDE_QA_NONCE || `QA-${Date.now()}`;
+const evidenceId = nonce.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 96);
 fs.mkdirSync(outputDir, { recursive: true });
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
@@ -60,7 +61,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 
 await send('Runtime.enable');
 await send('Page.enable');
-const composer = await evaluate(`(() => {
+let composer = await evaluate(`(() => {
   const element = [...document.querySelectorAll('textarea')]
     .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
   if (!element) return null;
@@ -68,6 +69,18 @@ const composer = await evaluate(`(() => {
   const rect = element.getBoundingClientRect();
   return rect.toJSON();
 })()`);
+if (!composer) {
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'l', code: 'KeyL', modifiers: 2 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'l', code: 'KeyL', modifiers: 2 });
+  await wait(1_500);
+  composer = await evaluate(`(() => {
+    const element = [...document.querySelectorAll('textarea')]
+      .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
+    if (!element) return null;
+    element.focus();
+    return element.getBoundingClientRect().toJSON();
+  })()`);
+}
 if (!composer) throw new Error('Founder Chat composer was not found.');
 
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 });
@@ -116,7 +129,8 @@ const screenshot = await send('Page.captureScreenshot', {
   fromSurface: true,
   captureBeyondViewport: false,
 });
-fs.writeFileSync(path.join(outputDir, 'installed-founder-chat-native-final.png'), Buffer.from(screenshot.data, 'base64'));
+const screenshotPath = path.join(outputDir, `installed-founder-chat-native-${evidenceId}.png`);
+fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
 const route = chatText.match(/Founder route\s*[·.]\s*([^\r\n]+(?:\r?\n[^\r\n]+){0,2})/i)?.[1]?.replace(/\s+/g, ' ').trim() || null;
 const evidence = {
@@ -128,13 +142,14 @@ const evidence = {
     responseVisible: responseCount >= 2,
     founderRoute: /Founder route/i.test(chatText),
     deepSeekV4: /deepseek\/deepseek-v4-(?:pro|flash)/i.test(chatText),
-    errorVisible: /Founder OS gateway returned|Authentication Fails|Bad gateway|invalid_request_error/i.test(chatText),
+    errorVisible: /Founder OS gateway returned|Authentication Fails|Bad gateway|invalid_request_error|Founder could not (?:send|reach)|Founder AI is temporarily unavailable|Founder session needs to be renewed/i.test(chatText),
   },
   chatTail: chatText,
   consoleErrors,
   pageErrors,
 };
-fs.writeFileSync(path.join(outputDir, 'installed-founder-chat-native-evidence-final.json'), `${JSON.stringify(evidence, null, 2)}\n`);
-process.stdout.write(`${JSON.stringify({ nonce, latencyMs, route, checks: evidence.checks, consoleErrors, pageErrors }, null, 2)}\n`);
+const evidencePath = path.join(outputDir, `installed-founder-chat-native-${evidenceId}.json`);
+fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({ nonce, latencyMs, route, checks: evidence.checks, screenshotPath, evidencePath, consoleErrors, pageErrors }, null, 2)}\n`);
 socket.close();
 if (!evidence.checks.responseVisible || !evidence.checks.founderRoute || evidence.checks.errorVisible) process.exitCode = 1;
