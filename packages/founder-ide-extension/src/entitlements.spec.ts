@@ -24,9 +24,11 @@ describe('fetchFounderIdeEntitlements', () => {
           JSON.stringify({
             plan: 'free',
             managedTokens: {
-              cap: 5_000_000,
+              unit: 'weighted_tokens',
+              weightsVersion: 'founder-wtu-v1',
+              cap: 200_000,
               used: 20,
-              remaining: 4_999_980,
+              remaining: 199_980,
               eligible: true,
               resetsOrExpiresAt: null,
               daysRemaining: null,
@@ -49,7 +51,7 @@ describe('fetchFounderIdeEntitlements', () => {
     );
     assert.equal(requestedAuthorization, 'FounderNode node-1:secret-token');
     assert.equal(result.source, 'live');
-    assert.equal(result.value.managedTokens.remaining, 4_999_980);
+    assert.equal(result.value.managedTokens.remaining, 199_980);
   });
 
   it('returns a truthful signed-out state without a network request', async () => {

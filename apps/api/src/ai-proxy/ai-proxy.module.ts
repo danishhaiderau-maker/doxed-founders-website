@@ -13,12 +13,14 @@ import { CapabilityRegistryModule } from '../capability-registry/capability-regi
 import { FlightRecorderModule } from '../flight-recorder/flight-recorder.module';
 import { LearningEngineModule } from '../learning-engine/learning-engine.module';
 import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
+import { FounderOsModule } from '../founder-os/founder-os.module';
 
 @Module({
   imports: [
     PrismaModule,
     AiRoutingModule,
     FounderAiRuntimeModule,
+    FounderOsModule,
     FounderNodeModule,
     DdollarModule,
     CapabilityRegistryModule,

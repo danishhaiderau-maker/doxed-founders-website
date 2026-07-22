@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   FOUNDER_BENCHMARK_PROTOCOL,
   FOUNDER_FREE_WEEKLY_WEIGHTED_UNITS,
+  estimateFounderManagedReservation,
+  founderQuotaWindow,
   founderPrivateBetaReady,
   founderPublicReleaseReady,
   measureFounderTokenUsage,
@@ -119,6 +121,20 @@ describe('Founder weighted token units', () => {
       }),
     );
   });
+});
+
+it('weekly quota windows recur from registration instead of expiring permanently', () => {
+  const registeredAt = new Date('2026-01-01T00:00:00.000Z');
+  const window = founderQuotaWindow(registeredAt, new Date('2026-01-17T12:00:00.000Z'));
+  assert.equal(window.startsAt.toISOString(), '2026-01-15T00:00:00.000Z');
+  assert.equal(window.resetsAt.toISOString(), '2026-01-22T00:00:00.000Z');
+});
+
+it('managed reservations conservatively include the full output budget', () => {
+  assert.equal(
+    estimateFounderManagedReservation({ inputTokens: 1_000, maxOutputTokens: 2_000 }),
+    7_000,
+  );
 });
 
 describe('Founder proof receipts', () => {

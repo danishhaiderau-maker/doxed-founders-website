@@ -13,6 +13,8 @@ export const FOUNDER_MANAGED_TOKEN_WEIGHTS = {
 
 export const FOUNDER_FREE_WEEKLY_WEIGHTED_UNITS = 200_000;
 export const FOUNDER_FREE_WINDOW_DAYS = 7;
+export const FOUNDER_MANAGED_RESERVATION_TTL_MINUTES = 10;
+export const FOUNDER_DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 
 export type FounderUsageBillingSource =
   | 'platform_managed'
@@ -36,6 +38,11 @@ export interface FounderUsageMeasurement {
   rawTokens: number;
   managed: boolean;
   weightsVersion: 'founder-wtu-v1';
+}
+
+export interface FounderQuotaWindow {
+  startsAt: Date;
+  resetsAt: Date;
 }
 
 function nonNegativeInteger(value: number | undefined, field: string): number {
@@ -93,4 +100,43 @@ export function founderQuotaPercentUsed(
     throw new Error('capWeightedUnits must be greater than zero');
   }
   return Math.min(100, (usedWeightedUnits / capWeightedUnits) * 100);
+}
+
+/** Return the recurring allowance window anchored to the account creation time. */
+export function founderQuotaWindow(
+  registeredAt: Date,
+  now = new Date(),
+  windowDays = FOUNDER_FREE_WINDOW_DAYS,
+): FounderQuotaWindow {
+  if (!Number.isFinite(registeredAt.getTime()) || !Number.isFinite(now.getTime())) {
+    throw new Error('registeredAt and now must be valid dates');
+  }
+  if (!Number.isInteger(windowDays) || windowDays <= 0) {
+    throw new Error('windowDays must be a positive integer');
+  }
+  const windowMs = windowDays * 24 * 60 * 60 * 1_000;
+  const elapsed = Math.max(0, now.getTime() - registeredAt.getTime());
+  const windowIndex = Math.floor(elapsed / windowMs);
+  const startsAt = new Date(registeredAt.getTime() + windowIndex * windowMs);
+  return { startsAt, resetsAt: new Date(startsAt.getTime() + windowMs) };
+}
+
+/**
+ * Reserve conservatively: prompt tokens are treated as uncached and the full
+ * requested output budget is charged at the output weight. Reconciliation
+ * returns unused capacity after the provider reports real usage.
+ */
+export function estimateFounderManagedReservation(input: {
+  inputTokens: number;
+  maxOutputTokens?: number;
+}): number {
+  const inputTokens = nonNegativeInteger(input.inputTokens, 'inputTokens');
+  const maxOutputTokens = nonNegativeInteger(
+    input.maxOutputTokens ?? FOUNDER_DEFAULT_MAX_OUTPUT_TOKENS,
+    'maxOutputTokens',
+  );
+  return Math.ceil(
+    inputTokens * FOUNDER_MANAGED_TOKEN_WEIGHTS.input +
+      maxOutputTokens * FOUNDER_MANAGED_TOKEN_WEIGHTS.output,
+  );
 }

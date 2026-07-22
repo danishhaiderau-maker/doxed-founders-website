@@ -3,6 +3,8 @@ import type { FounderPromoStatus } from '../founder-os/founder-promo.service';
 export type FounderIdeEntitlements = {
   plan: 'free' | 'founder_pro' | 'launch_partner';
   managedTokens: {
+    unit: 'weighted_tokens';
+    weightsVersion: 'founder-wtu-v1';
     cap: number;
     used: number;
     remaining: number;
@@ -24,6 +26,8 @@ export function toFounderIdeEntitlements(
   return {
     plan: 'free',
     managedTokens: {
+      unit: status.unit,
+      weightsVersion: status.weightsVersion,
       cap: status.tokenCap,
       used: status.tokensUsed,
       remaining: status.tokensRemaining,

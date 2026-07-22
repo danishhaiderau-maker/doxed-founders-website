@@ -17,6 +17,8 @@ import { RoutingEngineService } from '../routing-engine/routing-engine.service';
 import { RetryDetectorService } from '../learning-engine/retry-detector.service';
 import { ContextBuilderService } from '../founder-ai-runtime/context-builder.service';
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
+import { FounderPromoService } from '../founder-os/founder-promo.service';
+import type { ProviderTokenUsage } from '../founder-os/founder-managed-quota';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
 import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
@@ -114,6 +116,7 @@ export class AiProxyRuntimeService {
     private readonly retryDetector: RetryDetectorService,
     private readonly intentClassifier: IntentClassifierService,
     private readonly contextBuilder: ContextBuilderService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -235,15 +238,6 @@ export class AiProxyRuntimeService {
     body: ChatCompletionRequestDto,
     route: ResolvedRoute,
   ): Promise<ProxyInvokeResult> {
-    const apiKey = await this.brainProviders.resolveApiKey(
-      route.providerKey as 'glm' | 'deepseek',
-    );
-    if (!apiKey) {
-      throw new ServiceUnavailableException(
-        `No API key configured for provider "${route.providerKey}"`,
-      );
-    }
-
     const url =
       route.providerKey === 'glm'
         ? `${getGlmApiBaseUrl()}/chat/completions`
@@ -268,6 +262,7 @@ export class AiProxyRuntimeService {
         ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
       })),
       stream: body.stream ?? false,
+      ...(body.stream ? { stream_options: { include_usage: true } } : {}),
       ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
       ...(body.temperature !== undefined
         ? { temperature: body.temperature }
@@ -287,22 +282,55 @@ export class AiProxyRuntimeService {
       );
     }
 
-    const started = Date.now();
-    const upstream = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: body.stream ? 'text/event-stream' : 'application/json',
-      },
-      body: JSON.stringify(payload),
+    const reservation = await this.founderPromo.reserveManagedUsage({
+      userId: auth.userId,
+      requestId: route.requestId,
+      provider: route.providerKey,
+      model: route.model,
+      tier: route.tier,
+      estimatedInputTokens: promptTokensEstimate,
+      maxOutputTokens: body.max_tokens,
     });
+    const apiKey = await this.brainProviders.resolveApiKey(
+      route.providerKey as 'glm' | 'deepseek',
+    );
+    if (!apiKey) {
+      await this.founderPromo.releaseManagedReservation(auth.userId, route.requestId);
+      throw new ServiceUnavailableException(
+        `No API key configured for provider "${route.providerKey}"`,
+      );
+    }
+
+    const started = Date.now();
+    await this.founderPromo.markManagedReservationStarted(auth.userId, route.requestId);
+    let upstream: Response;
+    try {
+      upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: body.stream ? 'text/event-stream' : 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      await this.founderPromo.markManagedReservationUncertain(auth.userId, route.requestId);
+      throw new ServiceUnavailableException(
+        `Managed provider request did not complete: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');
       this.logger.error(
         `Upstream ${route.providerKey} ${upstream.status}: ${errText.slice(0, 240)}`,
       );
+      if (upstream.status >= 400 && upstream.status < 500) {
+        await this.founderPromo.releaseManagedReservation(auth.userId, route.requestId);
+      } else {
+        await this.founderPromo.markManagedReservationUncertain(auth.userId, route.requestId);
+      }
       return {
         ok: false,
         status: upstream.status,
@@ -322,7 +350,13 @@ export class AiProxyRuntimeService {
     // background hooks fire after the response completes.
     if (body.stream && upstream.body) {
       const [a, b] = upstream.body.tee();
-      void this.afterStreamingRequest(auth, route, b, started, promptTokensEstimate);
+      void this.afterStreamingRequest(
+        auth,
+        route,
+        b,
+        started,
+        promptTokensEstimate,
+      );
       return {
         ok: true,
         status: 200,
@@ -345,18 +379,22 @@ export class AiProxyRuntimeService {
     const latencyMs = Date.now() - started;
     let promptTokens: number | undefined;
     let completionTokens: number | undefined;
+    let providerUsage: ProviderTokenUsage | undefined;
     try {
       const parsed = JSON.parse(text);
-      promptTokens = parsed?.usage?.prompt_tokens;
-      completionTokens = parsed?.usage?.completion_tokens;
+      providerUsage = parsed?.usage;
+      promptTokens = providerUsage?.prompt_tokens as number | undefined;
+      completionTokens = providerUsage?.completion_tokens as number | undefined;
     } catch {
       // provider returned malformed JSON — leave token counts undefined
     }
 
-    void this.afterRequest(auth, route, {
+    await this.afterRequest(auth, route, {
       promptTokens: promptTokens ?? promptTokensEstimate,
       completionTokens: completionTokens ?? 0,
       latencyMs,
+      providerUsage,
+      reservationRequestId: route.requestId,
     });
 
     return {
@@ -379,9 +417,37 @@ export class AiProxyRuntimeService {
   private async afterRequest(
     auth: ProxyAuth,
     route: ResolvedRoute,
-    usage: { promptTokens: number; completionTokens: number; latencyMs: number },
+    usage: {
+      promptTokens: number;
+      completionTokens: number;
+      latencyMs: number;
+      providerUsage?: ProviderTokenUsage;
+      reservationRequestId: string;
+    },
   ): Promise<void> {
     const ddollarCost = AI_PROXY_DDOLLAR_COST[route.tier];
+
+    try {
+      await this.founderPromo.reconcileManagedReservation({
+        userId: auth.userId,
+        requestId: usage.reservationRequestId,
+        usage: usage.providerUsage,
+      });
+    } catch (err) {
+      try {
+        await this.founderPromo.markManagedReservationUncertain(
+          auth.userId,
+          usage.reservationRequestId,
+        );
+      } catch {
+        // The existing reservation remains chargeable if the database recovers.
+      }
+      this.logger.error(
+        `Managed quota reconciliation failed user=${auth.userId} request=${usage.reservationRequestId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
 
     try {
       await this.spendingEngine.spend(auth.userId, ddollarCost, DDOLLAR_ACTION_KEYS.AI_SPEND, {
@@ -399,8 +465,8 @@ export class AiProxyRuntimeService {
           userId: auth.userId,
           provider: route.providerKey,
           source: `ai-proxy:${route.model}`,
-          billingSource: 'platform_promo',
-          cacheLevel: 'miss',
+          billingSource: 'platform_managed',
+          cacheLevel: route.cacheLevel,
           localToolUsed: false,
           confidenceScore: 1,
           promptTokens: usage.promptTokens,
@@ -500,6 +566,8 @@ export class AiProxyRuntimeService {
     let promptTokens = 0;
     let completionTokens = 0;
     let buffer = '';
+    let providerUsage: ProviderTokenUsage | undefined;
+    let streamCompleted = false;
 
     try {
       for (;;) {
@@ -516,6 +584,7 @@ export class AiProxyRuntimeService {
             const evt = JSON.parse(payload);
             const u = evt?.usage;
             if (u) {
+              providerUsage = u;
               promptTokens = u.prompt_tokens ?? promptTokens;
               completionTokens = u.completion_tokens ?? completionTokens;
             }
@@ -524,6 +593,14 @@ export class AiProxyRuntimeService {
           }
         }
       }
+      streamCompleted = true;
+    } catch (err) {
+      await this.founderPromo.markManagedReservationUncertain(auth.userId, route.requestId);
+      this.logger.error(
+        `Managed stream accounting became uncertain user=${auth.userId} request=${route.requestId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     } finally {
       try {
         await reader.cancel();
@@ -532,10 +609,14 @@ export class AiProxyRuntimeService {
       }
     }
 
+    if (!streamCompleted) return;
+
     await this.afterRequest(auth, route, {
       promptTokens: promptTokens || promptTokensEstimate || 0,
       completionTokens,
       latencyMs: Date.now() - startedAt,
+      providerUsage,
+      reservationRequestId: route.requestId,
     });
   }
 

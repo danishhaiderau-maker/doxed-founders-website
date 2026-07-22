@@ -122,7 +122,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block text-xs">
-          <span className="text-zinc-500">Token cap (total promo usage)</span>
+          <span className="text-zinc-500">Weekly managed allowance (WTU)</span>
           <input
             type="number"
             defaultValue={settings.tokenCap}
@@ -134,7 +134,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           />
         </label>
         <label className="block text-xs">
-          <span className="text-zinc-500">Free window (days from founder signup)</span>
+          <span className="text-zinc-500">Recurring allowance window (days)</span>
           <input
             type="number"
             defaultValue={settings.windowDays}
@@ -174,14 +174,15 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           <p className="mt-2 text-[11px] text-zinc-500">
             These keys are managed on the consolidated{' '}
             <span className="text-zinc-300">Admin → AI Keys</span> panel. Promo
-            eligibility, token cap, free window, and the internal message stay
+            eligibility, weighted-unit allowance, recurring window, and the internal message stay
             here.
           </p>
         ) : (
           <>
             <p className="mt-1 text-[11px] text-zinc-500">
-              These keys are used only for eligible founders during the promo window. Never shared with users. Usage is logged
-              as <code className="text-zinc-400">platform_promo</code> billing.
+              These keys are used only for eligible founders. They are never shared with users. Founder gateway calls are
+              reserved as <code className="text-zinc-400">platform_managed</code>; legacy website copilot calls remain{' '}
+              <code className="text-zinc-400">platform_promo</code> until gateway consolidation.
             </p>
             <ul className="mt-3 space-y-3">
               {PROMO_KEY_FIELDS.map((field) => {

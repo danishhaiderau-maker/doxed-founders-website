@@ -1,8 +1,10 @@
-export const FOUNDER_FREE_MANAGED_TOKEN_CAP = 5_000_000;
+export const FOUNDER_FREE_MANAGED_TOKEN_CAP = 200_000;
 
 export interface FounderIdeEntitlements {
   plan: 'free' | 'founder_pro' | 'launch_partner';
   managedTokens: {
+    unit: 'weighted_tokens';
+    weightsVersion: 'founder-wtu-v1';
     cap: number;
     used: number;
     remaining: number;
@@ -37,6 +39,8 @@ export function defaultFounderEntitlements(
     value: {
       plan: 'free',
       managedTokens: {
+        unit: 'weighted_tokens',
+        weightsVersion: 'founder-wtu-v1',
         cap: FOUNDER_FREE_MANAGED_TOKEN_CAP,
         used: 0,
         remaining: FOUNDER_FREE_MANAGED_TOKEN_CAP,
@@ -101,5 +105,7 @@ function isFounderIdeEntitlements(value: unknown): value is FounderIdeEntitlemen
     Number.isFinite(managed?.used) &&
     Number.isFinite(managed?.remaining) &&
     typeof managed?.eligible === 'boolean'
+    && managed?.unit === 'weighted_tokens'
+    && managed?.weightsVersion === 'founder-wtu-v1'
   );
 }

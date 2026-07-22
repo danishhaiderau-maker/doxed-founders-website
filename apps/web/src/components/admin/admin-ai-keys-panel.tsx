@@ -47,7 +47,7 @@ const GROUPS: ProviderGroup[] = [
     id: 'promo',
     label: 'Founder promo pool',
     blurb:
-      'Keys used for Founder Free managed quota. Billed as platform_promo. Toggle, cap, and activation window live in AI & Usage.',
+      'Keys used for Founder Free managed quota. Gateway calls use durable platform_managed reservations; legacy copilot calls use platform_promo.',
     keys: ['glm', 'gemini', 'deepseek'],
   },
 ];
@@ -408,7 +408,7 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
           <div>
             <p className="font-semibold text-white">{meta.label}</p>
             <p className="mt-0.5 text-[11px] text-zinc-500">
-              Lent to eligible founders during their free window. Billed as <code>platform_promo</code>.
+              Lent to eligible founders. Gateway usage is reserved as <code>platform_managed</code>.
             </p>
           </div>
           <StatusPill configured={configured} lastUpdated={promo?.credentialsUpdatedAt ?? null} />

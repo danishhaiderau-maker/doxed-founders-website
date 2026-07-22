@@ -157,7 +157,7 @@ export class BuilderScoreService {
   }
 
   /**
-   * Sum of a user's platform-promo + platform-brain tokens in the last 24h.
+   * Sum of a user's platform-managed + legacy promo/brain tokens in the last 24h.
    * Used by the tier-cap gate in FounderPromoService and PointsService.spend.
    */
   async dailyTokenUsage(userId: string): Promise<number> {
@@ -166,7 +166,7 @@ export class BuilderScoreService {
       where: {
         userId,
         createdAt: { gte: since },
-        billingSource: { in: ['platform_promo', 'platform_brain'] },
+        billingSource: { in: ['platform_promo', 'platform_brain', 'platform_managed'] },
       },
       _sum: { promptTokens: true, completionTokens: true },
     });
@@ -207,8 +207,8 @@ export class BuilderScoreService {
   }> {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    // Pool stats (re-uses the promo aggregation logic without needing the
-    // promo service — sum of all platform_promo tokens vs the configured cap).
+    // Legacy shared-pool stats. Founder gateway calls use per-user recurring
+    // reservations and expose their balance through FounderPromoService.
     const settings = await this.prisma.platformSettings.findFirst();
     const poolCap = settings?.founderPromoTokenCap ?? FOUNDER_FREE_MANAGED_TOKEN_CAP;
     const poolAgg = await this.prisma.aiTokenUsageLog.aggregate({
@@ -245,7 +245,7 @@ export class BuilderScoreService {
                COUNT(*) AS calls
         FROM "AiTokenUsageLog" t
         JOIN "User" u ON u.id = t."userId"
-        WHERE t."billingSource" IN ('platform_promo', 'platform_brain')
+        WHERE t."billingSource" IN ('platform_promo', 'platform_brain', 'platform_managed')
           AND t."createdAt" >= ${since}
         GROUP BY u."builderTier"
       `) as Array<{ tier: string; tokens: bigint; calls: bigint }>;
@@ -271,7 +271,7 @@ export class BuilderScoreService {
                COALESCE(u."builderScore", 0) AS "builderScore"
         FROM "AiTokenUsageLog" t
         JOIN "User" u ON u.id = t."userId"
-        WHERE t."billingSource" IN ('platform_promo', 'platform_brain')
+        WHERE t."billingSource" IN ('platform_promo', 'platform_brain', 'platform_managed')
           AND t."createdAt" >= ${since}
           AND (u."builderTier" IS NULL OR u."builderTier" = 'PARASITE')
         GROUP BY u.id, u.email, u."twitterHandle", u."builderScore"

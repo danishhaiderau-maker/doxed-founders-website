@@ -1,13 +1,25 @@
 import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  estimateFounderManagedReservation,
+  founderQuotaWindow,
+  FOUNDER_MANAGED_RESERVATION_TTL_MINUTES,
+} from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuilderScoreService } from './builder-score.service';
+import {
+  chargeForManagedReservation,
+  reconcileProviderUsage,
+  type ProviderTokenUsage,
+} from './founder-managed-quota';
 import {
   FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS,
   FOUNDER_FREE_MANAGED_TOKEN_CAP,
 } from './founder-free.config';
 
 export type FounderPromoStatus = {
+  unit: 'weighted_tokens';
+  weightsVersion: 'founder-wtu-v1';
   enabled: boolean;
   eligible: boolean;
   founderRegistered: boolean;
@@ -20,6 +32,13 @@ export type FounderPromoStatus = {
   exhausted: boolean;
   message: string | null;
   providers: string[];
+};
+
+export type FounderManagedReservation = {
+  id: string;
+  requestId: string;
+  reservedWeightedUnits: number;
+  expiresAt: string;
 };
 
 /** Platform-managed providers. Production routing only enables health-verified models. */
@@ -134,19 +153,217 @@ export class FounderPromoService {
   }
 
   /**
-   * Platform-hosted key for promo users — never returns a key unless promo is eligible.
-   *
-   * Acquires a per-user Postgres advisory lock around the eligibility check so
-   * parallel requests for the same user serialize instead of all reading the
-   * same `tokensUsed < cap` snapshot before any of them logs usage. This shrinks
-   * the promo-cap overshoot window dramatically when combined with the
-   * per-user rate limiter (10/hr) now applied to every AI route.
-   *
-   * TODO(full-reservation): for a hard cap, insert a `platform_promo` row into
-   * `aiTokenUsageLog` with estimated prompt tokens inside this same lock BEFORE
-   * returning the key, then update it with real completion tokens after the LLM
-   * call. That requires plumbing the reservation id through the invoker — left
-   * for a follow-up; the rate limiter + advisory lock already bound the burst.
+   * Atomically reserve managed weighted units before any provider request.
+   * The transaction-level advisory lock makes the user's remaining balance a
+   * single-writer decision even when several IDE sessions submit together.
+   */
+  async reserveManagedUsage(input: {
+    userId: string;
+    requestId: string;
+    provider: string;
+    model: string;
+    tier: string;
+    estimatedInputTokens: number;
+    maxOutputTokens?: number;
+  }): Promise<FounderManagedReservation> {
+    const reservedWeightedUnits = estimateFounderManagedReservation({
+      inputTokens: input.estimatedInputTokens,
+      maxOutputTokens: input.maxOutputTokens,
+    });
+    const estimatedOutputTokens = input.maxOutputTokens ?? 4_096;
+    const now = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.userId}))`;
+
+      const existing = await tx.aiManagedReservation.findUnique({
+        where: { requestId: input.requestId },
+      });
+      if (existing) {
+        if (existing.userId !== input.userId) {
+          throw new HttpException('Reservation request id is already in use', HttpStatus.CONFLICT);
+        }
+        return {
+          id: existing.id,
+          requestId: existing.requestId,
+          reservedWeightedUnits: existing.reservedWeightedUnits,
+          expiresAt: existing.expiresAt.toISOString(),
+        };
+      }
+
+      const [settings, founder, user] = await Promise.all([
+        tx.platformSettings.findUnique({ where: { id: 'default' } }),
+        tx.founder.findUnique({
+          where: { userId: input.userId },
+          select: { createdAt: true },
+        }),
+        tx.user.findUnique({
+          where: { id: input.userId },
+          select: { createdAt: true, xVerified: true },
+        }),
+      ]);
+      const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
+      const enabled = settings?.founderPromoAiEnabled ?? false;
+      if (!enabled || !registeredAt || !user?.xVerified) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.PAYMENT_REQUIRED,
+            message: !user?.xVerified
+              ? 'Founder Free requires a verified X account. Connect X or use a personal/local model.'
+              : 'Founder managed AI is unavailable. Continue with a personal or local model.',
+            code: 'FOUNDER_MANAGED_NOT_ELIGIBLE',
+          },
+          HttpStatus.PAYMENT_REQUIRED,
+        );
+      }
+
+      const tokenCap = settings?.founderPromoTokenCap ?? FOUNDER_FREE_MANAGED_TOKEN_CAP;
+      const windowDays = settings?.founderPromoWindowDays ?? FOUNDER_FREE_ALLOWANCE_WINDOW_DAYS;
+      const window = founderQuotaWindow(registeredAt, now, windowDays);
+
+      await tx.aiManagedReservation.updateMany({
+        where: {
+          userId: input.userId,
+          status: 'RESERVED',
+          upstreamStartedAt: null,
+          expiresAt: { lt: now },
+        },
+        data: { status: 'RELEASED', reconciledAt: now },
+      });
+
+      const [reservations, legacyUsage] = await Promise.all([
+        tx.aiManagedReservation.findMany({
+          where: {
+            userId: input.userId,
+            createdAt: { gte: window.startsAt, lt: window.resetsAt },
+            status: { in: ['RESERVED', 'RECONCILED', 'UNCERTAIN'] },
+          },
+          select: {
+            status: true,
+            reservedWeightedUnits: true,
+            actualWeightedUnits: true,
+          },
+        }),
+        tx.aiTokenUsageLog.aggregate({
+          where: {
+            userId: input.userId,
+            billingSource: { in: ['platform_promo', 'platform_brain'] },
+            createdAt: { gte: window.startsAt, lt: window.resetsAt },
+          },
+          _sum: { promptTokens: true, completionTokens: true },
+        }),
+      ]);
+      const reservationUsage = reservations.reduce(
+        (sum, row) => sum + chargeForManagedReservation(row),
+        0,
+      );
+      const legacyWeightedUsage =
+        (legacyUsage._sum.promptTokens ?? 0) +
+        (legacyUsage._sum.completionTokens ?? 0) * 3;
+      const usedWeightedUnits = reservationUsage + legacyWeightedUsage;
+      const remainingWeightedUnits = Math.max(0, tokenCap - usedWeightedUnits);
+      if (reservedWeightedUnits > remainingWeightedUnits) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.TOO_MANY_REQUESTS,
+            code: 'FOUNDER_MANAGED_QUOTA_EXCEEDED',
+            message:
+              'This request exceeds the remaining Founder Free quota. Reduce the output limit or switch to a personal/local model.',
+            unit: 'weighted_tokens',
+            weightsVersion: 'founder-wtu-v1',
+            cap: tokenCap,
+            used: usedWeightedUnits,
+            remaining: remainingWeightedUnits,
+            requested: reservedWeightedUnits,
+            resetsAt: window.resetsAt.toISOString(),
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
+      const expiresAt = new Date(
+        now.getTime() + FOUNDER_MANAGED_RESERVATION_TTL_MINUTES * 60_000,
+      );
+      const reservation = await tx.aiManagedReservation.create({
+        data: {
+          requestId: input.requestId,
+          userId: input.userId,
+          provider: input.provider,
+          model: input.model,
+          tier: input.tier,
+          reservedWeightedUnits,
+          estimatedInputTokens: input.estimatedInputTokens,
+          estimatedOutputTokens,
+          expiresAt,
+        },
+      });
+      return {
+        id: reservation.id,
+        requestId: reservation.requestId,
+        reservedWeightedUnits: reservation.reservedWeightedUnits,
+        expiresAt: reservation.expiresAt.toISOString(),
+      };
+    });
+  }
+
+  async markManagedReservationStarted(userId: string, requestId: string): Promise<void> {
+    await this.prisma.aiManagedReservation.updateMany({
+      where: { userId, requestId, status: 'RESERVED' },
+      data: { upstreamStartedAt: new Date() },
+    });
+  }
+
+  async releaseManagedReservation(userId: string, requestId: string): Promise<void> {
+    await this.prisma.aiManagedReservation.updateMany({
+      where: { userId, requestId, status: 'RESERVED' },
+      data: { status: 'RELEASED', reconciledAt: new Date() },
+    });
+  }
+
+  async markManagedReservationUncertain(userId: string, requestId: string): Promise<void> {
+    await this.prisma.aiManagedReservation.updateMany({
+      where: { userId, requestId, status: 'RESERVED' },
+      data: { status: 'UNCERTAIN' },
+    });
+  }
+
+  async reconcileManagedReservation(input: {
+    userId: string;
+    requestId: string;
+    usage?: ProviderTokenUsage | null;
+  }): Promise<number> {
+    const reservation = await this.prisma.aiManagedReservation.findFirst({
+      where: { userId: input.userId, requestId: input.requestId },
+    });
+    if (!reservation) {
+      throw new Error(`Managed reservation ${input.requestId} was not found`);
+    }
+    if (reservation.status === 'RECONCILED') {
+      return reservation.actualWeightedUnits ?? reservation.reservedWeightedUnits;
+    }
+    if (reservation.status === 'RELEASED') return 0;
+
+    const usage = reconcileProviderUsage(input.usage, reservation.reservedWeightedUnits);
+    await this.prisma.aiManagedReservation.update({
+      where: { id: reservation.id },
+      data: {
+        status: 'RECONCILED',
+        actualWeightedUnits: usage.weightedUnits,
+        actualInputTokens: usage.inputTokens,
+        actualCachedTokens: usage.cachedInputTokens,
+        actualOutputTokens: usage.outputTokens,
+        actualReasoningTokens: usage.reasoningTokens,
+        reconciledAt: new Date(),
+      },
+    });
+    return usage.weightedUnits;
+  }
+
+  /**
+   * Legacy website copilot key lookup. Founder IDE and the Founder AI gateway
+   * use reserveManagedUsage(), which writes a durable reservation before any
+   * provider call. BuilderService keeps this serialized fallback only until
+   * its older copilot paths are consolidated onto the gateway contract.
    */
   async resolvePromoApiKey(
     userId: string,
@@ -250,16 +467,12 @@ export class FounderPromoService {
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
-    const [settings, founder, user, usageAgg] = await Promise.all([
+    const [settings, founder, user] = await Promise.all([
       this.getPlatformPromoSettings(),
       this.prisma.founder.findUnique({ where: { userId }, select: { createdAt: true } }),
       this.prisma.user.findUnique({
         where: { id: userId },
         select: { createdAt: true, xVerified: true, twitterHandle: true },
-      }),
-      this.prisma.aiTokenUsageLog.aggregate({
-        where: { userId, billingSource: 'platform_promo' },
-        _sum: { promptTokens: true, completionTokens: true },
       }),
     ]);
 
@@ -275,68 +488,107 @@ export class FounderPromoService {
     const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
 
     const tokenCap = settings.tokenCap;
-    const tokensUsed =
-      (usageAgg._sum.promptTokens ?? 0) + (usageAgg._sum.completionTokens ?? 0);
+    const now = new Date();
+    const window = registeredAt
+      ? founderQuotaWindow(registeredAt, now, settings.windowDays)
+      : null;
+
+    if (window) {
+      await this.prisma.aiManagedReservation.updateMany({
+        where: {
+          userId,
+          status: 'RESERVED',
+          upstreamStartedAt: null,
+          expiresAt: { lt: now },
+        },
+        data: { status: 'RELEASED', reconciledAt: now },
+      });
+    }
+
+    const [reservations, legacyUsage] = window
+      ? await Promise.all([
+          this.prisma.aiManagedReservation.findMany({
+            where: {
+              userId,
+              createdAt: { gte: window.startsAt, lt: window.resetsAt },
+              status: { in: ['RESERVED', 'RECONCILED', 'UNCERTAIN'] },
+            },
+            select: {
+              status: true,
+              reservedWeightedUnits: true,
+              actualWeightedUnits: true,
+            },
+          }),
+          this.prisma.aiTokenUsageLog.aggregate({
+            where: {
+              userId,
+              billingSource: { in: ['platform_promo', 'platform_brain'] },
+              createdAt: { gte: window.startsAt, lt: window.resetsAt },
+            },
+            _sum: { promptTokens: true, completionTokens: true },
+          }),
+        ])
+      : [[], { _sum: { promptTokens: null, completionTokens: null } }];
+
+    const tokensUsed = Math.ceil(
+      reservations.reduce((sum, row) => sum + chargeForManagedReservation(row), 0) +
+        (legacyUsage._sum.promptTokens ?? 0) +
+        (legacyUsage._sum.completionTokens ?? 0) * 3,
+    );
     const tokensRemaining = Math.max(0, tokenCap - tokensUsed);
     const exhausted = tokensUsed >= tokenCap;
 
+    const statusBase = {
+      unit: 'weighted_tokens' as const,
+      weightsVersion: 'founder-wtu-v1' as const,
+      tokenCap,
+      tokensUsed,
+      tokensRemaining,
+      exhausted,
+      providers: [...PROMO_PROVIDERS],
+    };
+
     if (!settings.enabled) {
       return {
+        ...statusBase,
         enabled: false,
         eligible: false,
         founderRegistered: Boolean(registeredAt),
         promoStartedAt: null,
         expiresAt: null,
         daysRemaining: null,
-        tokenCap,
-        tokensUsed,
-        tokensRemaining,
-        exhausted,
         message: null,
-        providers: [...PROMO_PROVIDERS],
       };
     }
 
-    if (!registeredAt) {
+    if (!registeredAt || !window) {
       return {
+        ...statusBase,
         enabled: true,
         eligible: false,
         founderRegistered: false,
         promoStartedAt: null,
         expiresAt: null,
         daysRemaining: null,
-        tokenCap,
-        tokensUsed: 0,
-        tokensRemaining: tokenCap,
-        exhausted: false,
         message: settings.message,
-        providers: [...PROMO_PROVIDERS],
       };
     }
 
-    const startedAt = registeredAt;
-    const expiresAt = new Date(startedAt);
-    expiresAt.setUTCDate(expiresAt.getUTCDate() + settings.windowDays);
-    const now = Date.now();
-    const withinWindow = now <= expiresAt.getTime();
-    const daysRemaining = withinWindow
-      ? Math.max(0, Math.ceil((expiresAt.getTime() - now) / (24 * 60 * 60 * 1000)))
-      : 0;
-    const eligible = withinWindow && !exhausted && settings.credentialsConfigured && twitterVerified;
+    const daysRemaining = Math.max(
+      0,
+      Math.ceil((window.resetsAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)),
+    );
+    const eligible = !exhausted && settings.credentialsConfigured && twitterVerified;
 
     const baseStatus: FounderPromoStatus = {
+      ...statusBase,
       enabled: true,
       eligible,
       founderRegistered: Boolean(registeredAt),
-      promoStartedAt: startedAt.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      daysRemaining: withinWindow ? daysRemaining : 0,
-      tokenCap,
-      tokensUsed,
-      tokensRemaining,
-      exhausted,
+      promoStartedAt: window.startsAt.toISOString(),
+      expiresAt: window.resetsAt.toISOString(),
+      daysRemaining,
       message: eligible ? settings.message : null,
-      providers: [...PROMO_PROVIDERS],
     };
 
     if (eligible) {
@@ -360,14 +612,57 @@ export class FounderPromoService {
   }
 
   async getPromoUsageByProvider(userId: string) {
-    const logs = await this.prisma.aiTokenUsageLog.groupBy({
-      by: ['provider'],
-      where: { userId, billingSource: 'platform_promo' },
-      _sum: { promptTokens: true, completionTokens: true },
-    });
-    return logs.map((l) => ({
-      provider: l.provider,
-      tokens: (l._sum.promptTokens ?? 0) + (l._sum.completionTokens ?? 0),
+    const status = await this.getUserPromoStatus(userId);
+    if (!status.promoStartedAt || !status.expiresAt) return [];
+    const [reservations, logs] = await Promise.all([
+      this.prisma.aiManagedReservation.findMany({
+        where: {
+          userId,
+          createdAt: {
+            gte: new Date(status.promoStartedAt),
+            lt: new Date(status.expiresAt),
+          },
+          status: { in: ['RESERVED', 'RECONCILED', 'UNCERTAIN'] },
+        },
+        select: {
+          provider: true,
+          status: true,
+          reservedWeightedUnits: true,
+          actualWeightedUnits: true,
+        },
+      }),
+      this.prisma.aiTokenUsageLog.groupBy({
+        by: ['provider'],
+        where: {
+          userId,
+          billingSource: { in: ['platform_promo', 'platform_brain'] },
+          createdAt: {
+            gte: new Date(status.promoStartedAt),
+            lt: new Date(status.expiresAt),
+          },
+        },
+        _sum: { promptTokens: true, completionTokens: true },
+      }),
+    ]);
+    const byProvider = new Map<string, number>();
+    for (const row of reservations) {
+      byProvider.set(
+        row.provider,
+        (byProvider.get(row.provider) ?? 0) + chargeForManagedReservation(row),
+      );
+    }
+    for (const row of logs) {
+      byProvider.set(
+        row.provider,
+        (byProvider.get(row.provider) ?? 0) +
+          (row._sum.promptTokens ?? 0) +
+          (row._sum.completionTokens ?? 0) * 3,
+      );
+    }
+    return [...byProvider.entries()].map(([provider, weightedUnits]) => ({
+      provider,
+      weightedUnits,
+      unit: 'weighted_tokens' as const,
     }));
   }
 

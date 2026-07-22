@@ -459,6 +459,13 @@ enum TokenLaunchStatus {
   CLOSED
 }
 
+enum AiManagedReservationStatus {
+  RESERVED
+  RECONCILED
+  RELEASED
+  UNCERTAIN
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -567,6 +574,7 @@ model User {
   founderEvents            FounderEvent[]
   topUpPayments            TopUpPayment[]
   aiTokenUsageLogs         AiTokenUsageLog[]
+  aiManagedReservations    AiManagedReservation[]
   messagesSent             PlatformMessage[]            @relation("MessageFrom")
   messagesReceived         PlatformMessage[]            @relation("MessageTo")
   wallMessages             ProjectWallMessage[]
@@ -693,7 +701,7 @@ model AiTokenUsageLog {
   provider         String
   source           String
   /**
-   * byok | platform_promo | rule_based
+   * byok | platform_managed | platform_promo | platform_brain | founder_os_local | rule_based
    */
   billingSource    String?
   /**
@@ -712,6 +720,35 @@ model AiTokenUsageLog {
   @@index([createdAt])
   @@index([projectId, createdAt])
   @@index([userId, createdAt])
+}
+
+model AiManagedReservation {
+  id                    String                     @id @default(cuid())
+  requestId             String                     @unique
+  userId                String
+  provider              String
+  model                 String
+  tier                  String
+  status                AiManagedReservationStatus @default(RESERVED)
+  weightsVersion        String                     @default("founder-wtu-v1")
+  reservedWeightedUnits Int
+  actualWeightedUnits   Int?
+  estimatedInputTokens  Int
+  estimatedOutputTokens Int
+  actualInputTokens     Int?
+  actualCachedTokens    Int?
+  actualOutputTokens    Int?
+  actualReasoningTokens Int?
+  expiresAt             DateTime
+  upstreamStartedAt     DateTime?
+  reconciledAt          DateTime?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
+  @@index([status, expiresAt])
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
@@ -1475,8 +1512,8 @@ model PlatformSettings {
   showcaseRuntimePushedAt       DateTime?
   /** Admin: offer platform-managed AI to eligible founders. */
   founderPromoAiEnabled         Boolean   @default(false)
-  founderPromoTokenCap          Int       @default(5000000)
-  founderPromoWindowDays        Int       @default(30)
+  founderPromoTokenCap          Int       @default(200000)
+  founderPromoWindowDays        Int       @default(7)
   founderPromoMessage           String?   @db.Text
   /** Encrypted JSON map of managed provider credentials. */
   founderPromoAiCredentialsEnc  String?   @db.Text
