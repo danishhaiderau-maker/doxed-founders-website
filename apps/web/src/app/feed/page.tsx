@@ -229,7 +229,7 @@ function FeedHubPage() {
                   </Link>
                 ) : (
                   <Link href="/founder-den" className="text-amber-300 hover:underline">
-                    Founder Den →
+                    Build workspace →
                   </Link>
                 )}
               </div>

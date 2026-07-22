@@ -111,7 +111,7 @@ export default function FounderDetailPage() {
                         </a>
                       )}
                       <Link href="/founder-den" className="rounded-lg border border-emerald-500/40 px-4 py-2 text-emerald-300">
-                        Founder Den →
+                        Build workspace →
                       </Link>
                     </div>
                   </div>

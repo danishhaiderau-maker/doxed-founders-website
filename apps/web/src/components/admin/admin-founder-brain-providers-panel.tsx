@@ -193,7 +193,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       </div>
 
       <div>
-        <p className="text-[11px] uppercase tracking-wider text-zinc-500">Default Founder Den mode</p>
+        <p className="text-[11px] uppercase tracking-wider text-zinc-500">Default Founder Brain mode</p>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {FOUNDER_BRAIN_MODES.map((mode) => (
             <button

@@ -77,17 +77,19 @@ Status: Complete for local release acceptance. Production signing remains an ext
 
 ## 7. Redesign the whole product shell
 
-Status: Next.
+Status: In progress. The shared shell and primary account/admin information architecture are complete; signed-in deep-route redesign remains.
 
-- Replace the website's competing menus with Build, Discover, and Trade.
-- Keep Search, Founder Chat, Notifications, and Account as the only permanent utilities.
-- Merge Founder OS and Founder Den into Build; present Founder IDE as the downloadable product and hide standalone Node details under Advanced.
-- Merge Account into Profile, Security and Connections, Plan and Usage, and Inbox and History.
-- Merge Admin into Operations, AI and Usage, Treasury and Launch, and Trust and Safety.
+- Completed: replaced the website's competing menus with Build, Discover, and Trade.
+- Completed: kept Search, Founder Chat, Notifications, and Account as the permanent utilities.
+- Completed: merged Founder OS and Founder Den language into Build and now presents Founder IDE as the single downloadable desktop product with embedded Founder Node.
+- Completed: merged Account into Profile, Security and Connections, Plan and Usage, and Inbox and History.
+- Completed: merged Admin into Operations, AI and Usage, Treasury and Launch, and Trust and Safety.
+- Completed: applied neutral system colors, 8px maximum shell/card radii, consistent motion, and reduced-motion handling to the shared shell and redesigned primary surfaces.
+- Completed: passed a 15-screen signed-out production-build sweep across 1440x900, 1024x768, and 390x844 with no viewport overflow, console errors, page errors, or failed network responses; every Build menu remained inside its viewport.
 - Unify Founder Brain credentials, routing, health, budgets, tests, and receipts without exposing provider complexity to ordinary founders.
-- Apply the shared neutral visual system to Build, Discover, Trade, Account, Connect, Admin, launch, DCF Swap, acquisition, and responsive views.
+- Remaining: apply the shared neutral visual system route by route inside Build, Discover, Trade, Connect, launch, and future DCF Swap/acquisition surfaces without changing truthful product capabilities.
 - Preserve working APIs and use compatibility redirects while removing duplicate navigation, dead actions, hard-coded promo copy, raw provider errors, obsolete product names, and unnecessary panels.
-- Finish with signed-in and signed-out route sweeps at desktop, tablet, and mobile sizes, including screenshots, accessibility, console, network, and error-state evidence.
+- Remaining: run the same route sweep with authenticated founder and admin sessions after the redesigned deep routes are complete.
 
 ## Completion rule
 

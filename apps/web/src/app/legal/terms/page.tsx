@@ -142,7 +142,7 @@ export default function TermsPage() {
               </li>
               <li>
                 We may retain session metadata to power the founder event graph and your build
-                history; you can delete sessions from your Founder Den at any time.
+                history; you can delete sessions from your Build workspace at any time.
               </li>
             </ul>
           </Section>

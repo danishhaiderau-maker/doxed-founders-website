@@ -15,7 +15,7 @@ import {
  * launch eligibility, and offers a one-click jump into the project-specific
  * launch flow.
  *
- * If the founder has no project yet, points them at Founder Den to create one.
+ * If the founder has no project yet, points them at the Build workspace to create one.
  */
 export function LaunchTeaserCard({ accessToken }: { accessToken: string }) {
   const [elig, setElig] = useState<TokenLaunchEligibility | null>(null);

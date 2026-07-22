@@ -36,7 +36,7 @@ export default function FounderOsPage() {
             AI Usage →
           </Link>
           <Link href="/founder-den" className="text-zinc-500 hover:text-white">
-            Founder Den →
+            Build workspace →
           </Link>
         </div>
 

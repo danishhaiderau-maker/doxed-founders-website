@@ -89,7 +89,7 @@ export function IdeSwitchButton({ nodes, activeNode, onSelect }: Props) {
 
           {onlineNodes.length === 0 && offlineNodes.length === 0 ? (
             <div className="px-3 py-3 text-xs text-zinc-500">
-              <p>Connect another IDE in Founder Stack on desktop.</p>
+              <p>Connect another editor from Founder IDE on your desktop.</p>
               <p className="mt-1 text-zinc-600">
                 Pair Founder Node from your machine and it will show up here.
               </p>

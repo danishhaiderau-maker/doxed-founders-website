@@ -29,7 +29,7 @@ export default function AiUsagePage() {
             ← AI providers
           </Link>
           <Link href="/settings/builder?tab=founder-node" className="text-zinc-500 hover:text-white">
-            Founder Stack →
+            Founder IDE →
           </Link>
         </div>
 

@@ -2025,7 +2025,7 @@ export function markAllNotificationsRead(token: string) {
   return apiFetch('/notifications/read-all', { method: 'PATCH' }, token);
 }
 
-// ─── Founder Den / Public Founder Presence ───────────────────────────────────
+// ─── Build workspace / Public Founder Presence ───────────────────────────────
 
 export interface FounderVideo {
   id: string;
