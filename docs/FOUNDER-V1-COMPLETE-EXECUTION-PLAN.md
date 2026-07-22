@@ -50,7 +50,9 @@ only when its acceptance evidence exists. Chat claims are not evidence.
 - [x] Preserve dirty legacy source and dragon assets until inventoried.
 - [x] Keep trading/analyzer ownership outside the IDE release.
 - [ ] Salvage unique evidence, then archive obsolete clean worktrees.
-- [ ] Confirm zero unexplained uncommitted changes before release.
+- [x] Confirm zero unexplained uncommitted changes in the canonical release
+  worktree. Dirty legacy/bot checkouts are inventoried and preserved for their
+  owning workstreams rather than mixed into this release.
 
 Evidence: merge commit, clean status, dirty-file inventory, preserved artifact
 manifest.
@@ -264,7 +266,7 @@ zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
   blocked, verifying, delivered/fire, failed, offline, and update available.
 - [x] Drive listening, task, network, coordination, verification, and usage
   states from real events rather than a cosmetic timer.
-- [ ] Connect updater availability and install/rollback transitions to the
+- [x] Connect updater availability and install/rollback transitions to the
   desktop companion without overwriting a more urgent active-task state.
 - [x] Show compact task cards, measured savings, current agent count, and result
   receipts without exposing secrets.
