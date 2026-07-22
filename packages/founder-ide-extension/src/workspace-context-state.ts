@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const WORKSPACE_CONTEXT_INDEX_VERSION = 2 as const;
 
 export interface WorkspaceContextFile {
@@ -31,6 +33,12 @@ export interface WorkspaceContextFileStat {
   path: string;
   size: number;
   mtimeMs: number;
+}
+
+export interface WorkspaceCacheContext {
+  workspaceId: string;
+  contextHash: string;
+  files: Array<{ path: string; sha256: string }>;
 }
 
 const IMPORTANT_FILES = new Set([
@@ -194,6 +202,25 @@ export function rankWorkspaceContextFiles(
     .sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path))
     .slice(0, Math.max(1, limit))
     .map((entry) => entry.file);
+}
+
+export function workspaceCacheContext(
+  index: WorkspaceContextIndexState | null,
+  query: string,
+  limit = 14,
+): WorkspaceCacheContext | null {
+  if (!index) return null;
+  const ranked = rankWorkspaceContextFiles(index, query, limit);
+  if (ranked.length === 0) return null;
+  const files = ranked.map((file) => ({ path: file.path, sha256: file.sha256 }));
+  const relevantDecisionHashes = index.decisions
+    .filter((decision) => decisionScore(decision, terms(query)) > 0)
+    .map((decision) => `${decision.id}:${decision.sourceHash}`)
+    .sort();
+  const contextHash = createHash('sha256')
+    .update(JSON.stringify({ files, relevantDecisionHashes }))
+    .digest('hex');
+  return { workspaceId: index.workspaceId, contextHash, files };
 }
 
 export function formatWorkspaceContextForPrompt(

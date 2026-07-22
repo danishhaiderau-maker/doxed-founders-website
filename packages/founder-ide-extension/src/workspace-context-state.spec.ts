@@ -8,6 +8,7 @@ import {
   parseDecisionLedger,
   parseWorkspaceContextIndex,
   rankWorkspaceContextFiles,
+  workspaceCacheContext,
   workspaceContextFileNeedsRefresh,
   type WorkspaceContextFile,
 } from './workspace-context-state';
@@ -114,5 +115,29 @@ describe('Founder workspace context index', () => {
     const prompt = formatWorkspaceContextForPrompt(index, 'store api keys');
     assert.match(prompt, /REJECTED: Store API keys in project files/);
     assert.match(prompt, /unless the founder explicitly reopens/);
+  });
+
+  it('invalidates reusable answers when a relevant file hash changes', () => {
+    const first = buildWorkspaceContextIndex('workspace-1', [
+      { ...file('src/auth/session.ts', ['rotateSessionToken']), sha256: 'a'.repeat(64) },
+      { ...file('src/unrelated.ts', ['unrelated']), sha256: 'b'.repeat(64) },
+    ]);
+    const changedRelevant = buildWorkspaceContextIndex('workspace-1', [
+      { ...file('src/auth/session.ts', ['rotateSessionToken']), sha256: 'c'.repeat(64) },
+      { ...file('src/unrelated.ts', ['unrelated']), sha256: 'b'.repeat(64) },
+    ]);
+    const changedUnrelated = buildWorkspaceContextIndex('workspace-1', [
+      { ...file('src/auth/session.ts', ['rotateSessionToken']), sha256: 'a'.repeat(64) },
+      { ...file('src/unrelated.ts', ['unrelated']), sha256: 'd'.repeat(64) },
+    ]);
+    const original = workspaceCacheContext(first, 'explain session token rotation');
+    assert.notEqual(
+      original?.contextHash,
+      workspaceCacheContext(changedRelevant, 'explain session token rotation')?.contextHash,
+    );
+    assert.equal(
+      original?.contextHash,
+      workspaceCacheContext(changedUnrelated, 'explain session token rotation')?.contextHash,
+    );
   });
 });

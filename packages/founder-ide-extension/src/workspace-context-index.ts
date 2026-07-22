@@ -9,9 +9,11 @@ import {
   parseDecisionLedger,
   parseWorkspaceContextIndex,
   workspaceContextFileNeedsRefresh,
+  workspaceCacheContext,
   type WorkspaceContextFile,
   type WorkspaceContextIndexState,
   type WorkspaceDecisionRecord,
+  type WorkspaceCacheContext,
 } from './workspace-context-state';
 
 const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,java,kt,swift,cs,cpp,c,h,hpp,css,scss,html,yml,yaml,toml,sql,prisma,sol,sh,ps1}';
@@ -56,6 +58,10 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
 
   contextFor(prompt: string): string {
     return formatWorkspaceContextForPrompt(this.state, prompt);
+  }
+
+  cacheContextFor(prompt: string): WorkspaceCacheContext | null {
+    return workspaceCacheContext(this.state, prompt);
   }
 
   summary(): FounderWorkspaceContextSummary {

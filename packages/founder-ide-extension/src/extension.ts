@@ -51,6 +51,7 @@ import { FounderShortcutRegistry } from './founder-shortcuts';
 import { FounderCompanionViewProvider } from './founder-companion';
 import { FounderAgentAwareness } from './agent-awareness';
 import { FounderWorkspaceContextIndex } from './workspace-context-index';
+import { FounderSafeResultCache } from './safe-result-cache';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -67,6 +68,7 @@ let founderShortcuts: FounderShortcutRegistry | undefined;
 let founderCompanion: FounderCompanionViewProvider | undefined;
 let founderAgentAwareness: FounderAgentAwareness | undefined;
 let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
+let founderSafeResultCache: FounderSafeResultCache | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -124,6 +126,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   founderWorkspaceContext = new FounderWorkspaceContextIndex(context);
   context.subscriptions.push(founderWorkspaceContext);
+  founderSafeResultCache = new FounderSafeResultCache(
+    path.join(context.globalStorageUri.fsPath, 'safe-result-cache'),
+  );
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
     onDidSignIn: async () => {
@@ -454,6 +459,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     costTracker: costTracker!,
     coordination: founderAgentAwareness,
     projectContext: founderWorkspaceContext,
+    resultCache: founderSafeResultCache,
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setWorking('Flying to Founder AI', modelId);
@@ -473,6 +479,12 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
       founderCompanion?.setWorking(
         `Reaching ${provider2 || 'the selected provider'}`,
         model || tier,
+      );
+    },
+    onCacheHit: (estimatedTokensAvoided) => {
+      founderCompanion?.setSuccess(
+        'Verified context reused',
+        `Provider skipped; about ${estimatedTokensAvoided.toLocaleString()} tokens avoided`,
       );
     },
     onRequestEnd: (_modelId, ok, errorMessage) => {

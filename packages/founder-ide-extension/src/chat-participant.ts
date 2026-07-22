@@ -21,8 +21,10 @@ import {
   gatewayUserMessage,
 } from './gateway-client';
 import { FOUNDER_TOOL_NAMES } from './tool-names';
-import { composeFounderSystemPrompt, planPromptEfficiency } from './prompt-efficiency';
+import { composeFounderSystemPrompt, estimateTokensFromText, planPromptEfficiency } from './prompt-efficiency';
 import { runWithFounderTask } from './agent-task-context';
+import type { FounderSafeResultCache } from './safe-result-cache';
+import type { WorkspaceCacheContext } from './workspace-context-state';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -30,6 +32,7 @@ export interface ParticipantDeps {
   costTracker: CostTracker;
   onRequestStart?: (modelId: string) => void;
   onMetadata?: (meta: GatewayFounderOsMetadata) => void;
+  onCacheHit?: (estimatedTokensAvoided: number) => void;
   onRequestEnd?: (
     modelId: string,
     ok: boolean,
@@ -42,7 +45,9 @@ export interface ParticipantDeps {
   };
   projectContext?: {
     contextFor(prompt: string): string;
+    cacheContextFor(prompt: string): WorkspaceCacheContext | null;
   };
+  resultCache?: FounderSafeResultCache;
 }
 
 const MAX_TOOL_TURNS = 8;
@@ -145,6 +150,7 @@ async function handleParticipantRequest(
     ? deps.coordination?.contextFor(coordinationTaskId) ?? ''
     : '';
   const projectContextText = deps.projectContext?.contextFor(prompt) ?? '';
+  const cacheContext = deps.projectContext?.cacheContextFor(prompt) ?? null;
   const identity = 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
   const systemContent = composeFounderSystemPrompt({
     identity,
@@ -157,6 +163,21 @@ async function handleParticipantRequest(
     { role: 'system', content: systemContent },
     { role: 'user', content: prompt },
   ];
+
+  const cacheInput = cacheContext
+    ? { prompt, model: alias.id, context: cacheContext }
+    : null;
+  const cached = cacheInput ? deps.resultCache?.get(cacheInput) : null;
+  if (cached) {
+    stream.markdown(cached.text);
+    stream.markdown(
+      `\n\n---\n**Founder reuse** | safe read-only result | no provider request | ~${cached.estimatedTokensAvoided.toLocaleString()} tokens avoided (estimated)`,
+    );
+    if (coordinationTaskId) deps.coordination?.end(coordinationTaskId);
+    deps.onRequestEnd?.(alias.id, true);
+    deps.onCacheHit?.(cached.estimatedTokensAvoided);
+    return;
+  }
 
   const client: GatewayClient = {
     baseUrl: proxyBaseUrl(deps.creds.apiBaseUrl),
@@ -171,6 +192,9 @@ async function handleParticipantRequest(
   try {
     const tools = availableFounderTools();
     let completed = false;
+    let usedTools = false;
+    let reusableAnswer = '';
+    let reusableTokenEstimate = 0;
 
     for (let turn = 0; turn < MAX_TOOL_TURNS && !token.isCancellationRequested; turn += 1) {
       if (turn > 0 && coordinationTaskId) {
@@ -225,8 +249,12 @@ async function handleParticipantRequest(
 
       if (toolCalls.length === 0) {
         completed = true;
+        reusableAnswer = assistantText;
+        reusableTokenEstimate = efficiency.estimate.sentTokens + estimateTokensFromText(assistantText);
         break;
       }
+
+      usedTools = true;
 
       gatewayMessages.push({
         role: 'assistant',
@@ -276,6 +304,9 @@ async function handleParticipantRequest(
       stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
     }
     ok = completed && !token.isCancellationRequested;
+    if (ok && !usedTools && cacheInput && reusableAnswer) {
+      deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
+    }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
     if (!token.isCancellationRequested) {
