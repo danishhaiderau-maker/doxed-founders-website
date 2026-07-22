@@ -121,7 +121,11 @@ if (-not $SkipExtensionBuild) {
 
 # --- Step 2: build Founder IDE application payload ---------------------------
 $ideSetup = Join-Path $staging "Founder-IDE-Setup-x64.exe"
-$ideRoot = Join-Path $VscodiumCheckout "VSCode-win32-x64"
+# VS Code's gulp package tasks always emit beside the source directory. That
+# is `$VscodiumCheckout\VSCode-win32-x64` for the historical nested layout and
+# the checkout parent for a direct `...\void-builder\vscode` source tree.
+$ideRoot = Join-Path (Split-Path -Parent $vscodeSource) "VSCode-win32-x64"
+Write-Host "[stack] IDE payload: $ideRoot"
 if (-not $SkipIdeBuild) {
     Write-Host "`n[stack] STEP 2/4 - building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
     $buildPs1 = Join-Path $VscodiumCheckout "build\build-founder-ide.ps1"
