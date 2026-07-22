@@ -42,6 +42,14 @@ import type { ModelSelection, SettingsOfProvider } from '../../common/voidSettin
 import type { ChatMode } from '../../common/voidSettingsTypes.js';
 import { availableTools, type InternalToolInfo } from '../../common/prompt/prompts.js';
 import { beginNativeCoordination } from './founderNativeCoordination.js';
+import {
+	formatNativeTeamAdvice,
+	latestFounderRequest,
+	nativeTeamAdvisers,
+	readNativeAgentMode,
+	shouldAssembleNativeTeam,
+	type FounderTeamAdviser,
+} from './founderNativeTeam.js';
 
 // ---------------------------------------------------------------------------
 // Credential discovery - mirrors credentials.ts. Reads the vault file that
@@ -356,6 +364,7 @@ interface FounderOsCommonParams {
 async function gatewayFetch(
 	body: Record<string, unknown>,
 	onError: OnError,
+	onController?: (controller: AbortController) => void,
 ): Promise<{ res: Response; controller: AbortController } | null> {
 	const cfg = readVaultConfig();
 	if (!cfg) {
@@ -363,6 +372,7 @@ async function gatewayFetch(
 		return null;
 	}
 	const controller = new AbortController();
+	onController?.(controller);
 	const url = `${proxyBaseUrl(cfg.apiBaseUrl)}/chat/completions`;
 	try {
 		const res = await fetch(url, {
@@ -408,6 +418,49 @@ function founderRouteReceipt(meta: FounderOsMetadata | undefined, latencyMs: num
 		: '';
 	const policy = meta.routePolicy === 'free_flash_only' ? ' | Free: Flash' : '';
 	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}`;
+}
+
+async function requestNativeTeamAdvice(
+	adviser: FounderTeamAdviser,
+	request: string,
+	controllers: Set<AbortController>,
+): Promise<{ adviser: FounderTeamAdviser; text: string }> {
+	let registeredController: AbortController | undefined;
+	const got = await gatewayFetch(
+		{
+			model: 'founder-os-fast',
+			messages: [
+				{ role: 'system', content: adviser.system },
+				{ role: 'user', content: request },
+			],
+			stream: true,
+			max_tokens: 450,
+			founder_os_metadata: true,
+			metadata: { founder_agent_role: adviser.id, founder_agent_mode: 'team' },
+		},
+		() => undefined,
+		(controller) => {
+			registeredController = controller;
+			controllers.add(controller);
+		},
+	);
+	if (!got) {
+		if (registeredController) controllers.delete(registeredController);
+		return { adviser, text: '' };
+	}
+	let text = '';
+	try {
+		const done = await pumpSseStream(
+			got.res.body as ReadableStream<Uint8Array>,
+			{ onDelta: (delta) => { text += delta; } },
+			got.controller.signal,
+		);
+		return { adviser, text: done ? text : '' };
+	} catch {
+		return { adviser, text: '' };
+	} finally {
+		controllers.delete(got.controller);
+	}
 }
 
 function gatewayTools(chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined): Array<Record<string, unknown>> {
@@ -487,6 +540,31 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		? setInterval(() => coordination.refresh(), 60_000)
 		: undefined;
 	coordinationHeartbeat?.unref?.();
+	const activeControllers = new Set<AbortController>();
+	let requestAborted = false;
+	_setAborter(() => {
+		requestAborted = true;
+		for (const controller of activeControllers) controller.abort();
+	});
+
+	const founderRequest = latestFounderRequest(openAiMessages);
+	if (shouldAssembleNativeTeam(readNativeAgentMode(), chatMode, founderRequest)) {
+		const adviserResults = await Promise.all(
+			nativeTeamAdvisers().map((adviser) =>
+				requestNativeTeamAdvice(adviser, founderRequest, activeControllers),
+			),
+		);
+		const handoff = formatNativeTeamAdvice(adviserResults);
+		if (handoff) {
+			const insertAt = coordination?.context ? 2 : 1;
+			openAiMessages.splice(insertAt, 0, { role: 'system', content: handoff });
+		}
+	}
+	if (requestAborted) {
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+		coordination?.settle();
+		return;
+	}
 
 	const body: Record<string, unknown> = {
 		model,
@@ -500,14 +578,13 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		body.tool_choice = 'auto';
 	}
 
-	const got = await gatewayFetch(body, onError);
+	const got = await gatewayFetch(body, onError, (controller) => activeControllers.add(controller));
 	if (!got) {
 		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
 		coordination?.fail();
 		return;
 	}
 	const { res, controller } = got;
-	_setAborter(() => controller.abort());
 
 	const startedAt = Date.now();
 	let fullText = '';
@@ -562,6 +639,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		coordination?.fail();
 		throw error;
 	} finally {
+		activeControllers.delete(controller);
 		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
 	}
 

@@ -14,6 +14,7 @@ import {
 import { founderPathLeases } from './agent-path-leases';
 import { founderCoordinationCloud, type FounderCloudTask } from './agent-coordination-cloud';
 import { resolveCredentials } from './credentials';
+import type { FounderAgentMode } from './founder-agent-mode';
 
 export interface FounderAgentAwarenessSummary {
   activeCount: number;
@@ -52,9 +53,9 @@ export class FounderAgentAwareness implements vscode.Disposable {
     this.pruneStaleFiles();
   }
 
-  begin(prompt: string, provider: string): string {
+  begin(prompt: string, provider: string, mode: FounderAgentMode = 'focus'): string {
     const taskId = `${this.instanceId}-${randomUUID()}`;
-    const presence = this.createPresence(taskId, prompt, provider);
+    const presence = this.createPresence(taskId, prompt, provider, mode);
     const file = path.join(coordinationRoot(), `${safeFileName(taskId)}.json`);
     this.leases.set(taskId, { file, presence });
     this.writeLease(file, presence);
@@ -65,7 +66,7 @@ export class FounderAgentAwareness implements vscode.Disposable {
         workspaceKey: workspaceKeyFor(presence.workspacePath),
         title: presence.title,
         goal: presence.goal,
-        mode: 'FOCUS',
+        mode: mode === 'team' ? 'TEAM' : 'FOCUS',
         branch: presence.branch,
         provider,
         scope: { openFiles: presence.ownedFiles.slice(0, 20) },
@@ -126,7 +127,12 @@ export class FounderAgentAwareness implements vscode.Disposable {
     this.changeEmitter.dispose();
   }
 
-  private createPresence(taskId: string, prompt: string, provider: string): FounderAgentPresence {
+  private createPresence(
+    taskId: string,
+    prompt: string,
+    provider: string,
+    mode: FounderAgentMode,
+  ): FounderAgentPresence {
     const folder = vscode.workspace.workspaceFolders?.[0];
     const workspacePath = folder?.uri.fsPath ?? '';
     const now = new Date().toISOString();
@@ -138,7 +144,9 @@ export class FounderAgentAwareness implements vscode.Disposable {
       branch: readGitBranch(workspacePath),
       title: taskTitle(prompt),
       goal: prompt.replace(/\s+/g, ' ').trim().slice(0, 4_000),
-      expectedOutput: 'A verified change with tests and a concise completion receipt.',
+      expectedOutput: mode === 'team'
+        ? 'One edit owner integrates bounded adviser findings, then verifies the result.'
+        : 'A verified change with tests and a concise completion receipt.',
       dependencies: [],
       provider,
       status: 'working',

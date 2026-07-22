@@ -8,6 +8,13 @@ import {
   type FounderWorkspaceMode,
 } from './founder-hub-state';
 import type { FounderAgentAwarenessSummary } from './agent-awareness';
+import {
+  FOUNDER_AGENT_MODES,
+  founderAgentModeDefinition,
+  normalizeFounderAgentMode,
+  writeFounderAgentMode,
+  type FounderAgentMode,
+} from './founder-agent-mode';
 
 type FounderHubAction =
   | 'signIn'
@@ -33,9 +40,10 @@ type FounderHubAction =
   | 'toggleCompanion';
 
 interface FounderHubMessage {
-  type: 'action' | 'selectMode';
+  type: 'action' | 'selectMode' | 'selectAgentMode';
   action?: FounderHubAction;
   mode?: FounderWorkspaceMode;
+  agentMode?: FounderAgentMode;
 }
 
 export class FounderHubProvider
@@ -83,6 +91,16 @@ export class FounderHubProvider
   }
 
   private async handleMessage(message: FounderHubMessage): Promise<void> {
+    if (message.type === 'selectAgentMode' && message.agentMode) {
+      const agentMode = normalizeFounderAgentMode(message.agentMode);
+      await vscode.workspace
+        .getConfiguration('founderOs')
+        .update('agentMode', agentMode, vscode.ConfigurationTarget.Global);
+      writeFounderAgentMode(agentMode);
+      this.refresh();
+      return;
+    }
+
     if (message.type === 'selectMode' && message.mode) {
       const mode = normalizeWorkspaceMode(message.mode);
       await vscode.workspace
@@ -191,6 +209,8 @@ export class FounderHubProvider
     const config = vscode.workspace.getConfiguration('founderOs');
     const mode = normalizeWorkspaceMode(config.get<string>('workspaceMode'));
     const modeDefinition = workspaceModeDefinition(mode);
+    const agentMode = normalizeFounderAgentMode(config.get<string>('agentMode'));
+    const agentModeDefinition = founderAgentModeDefinition(agentMode);
     const companionEnabled = config.get<boolean>('companion.enabled', true);
     const advancedToolsVisible =
       vscode.workspace
@@ -227,6 +247,15 @@ export class FounderHubProvider
           type="button"
           data-mode="${candidate.id}"
           aria-pressed="${candidate.id === mode}"
+        >${escapeHtml(candidate.label)}</button>`,
+    ).join('');
+    const agentModeButtons = FOUNDER_AGENT_MODES.map(
+      (candidate) => `
+        <button
+          class="mode-button ${candidate.id === agentMode ? 'selected' : ''}"
+          type="button"
+          data-agent-mode="${candidate.id}"
+          aria-pressed="${candidate.id === agentMode}"
         >${escapeHtml(candidate.label)}</button>`,
     ).join('');
 
@@ -540,6 +569,23 @@ export class FounderHubProvider
       padding: 3px 0 10px;
       border-bottom: 1px solid var(--border);
     }
+    .agent-mode {
+      display: grid;
+      gap: 7px;
+      padding: 4px 0 11px;
+      border-bottom: 1px solid var(--border);
+    }
+    .agent-mode-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .agent-mode-head strong { color: var(--foreground); font-size: 11px; }
+    .agent-mode .mode-switch { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .agent-mode-copy { color: var(--muted); font-size: 10px; line-height: 1.4; }
     .agent-awareness header {
       display: flex;
       align-items: center;
@@ -617,6 +663,12 @@ export class FounderHubProvider
       </button>
     </nav>
 
+    <section class="agent-mode" aria-label="Agent mode">
+      <div class="agent-mode-head"><strong>Agent mode</strong><span>${escapeHtml(agentModeDefinition.label)}</span></div>
+      <div class="mode-switch" role="group" aria-label="Founder agent mode">${agentModeButtons}</div>
+      <p class="agent-mode-copy">${escapeHtml(agentModeDefinition.summary)}</p>
+    </section>
+
     ${this.agentAwareness.activeCount > 0 ? `
       <section class="agent-awareness" aria-label="Active agent work">
         <header><strong>Active work</strong><span>${escapeHtml(agentLabel)}</span></header>
@@ -688,6 +740,11 @@ export class FounderHubProvider
     for (const button of document.querySelectorAll('[data-mode]')) {
       button.addEventListener('click', () => {
         vscode.postMessage({ type: 'selectMode', mode: button.dataset.mode });
+      });
+    }
+    for (const button of document.querySelectorAll('[data-agent-mode]')) {
+      button.addEventListener('click', () => {
+        vscode.postMessage({ type: 'selectAgentMode', agentMode: button.dataset.agentMode });
       });
     }
   </script>

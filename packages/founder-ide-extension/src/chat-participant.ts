@@ -25,6 +25,7 @@ import { composeFounderSystemPrompt, estimateTokensFromText, planPromptEfficienc
 import { runWithFounderTask } from './agent-task-context';
 import type { FounderSafeResultCache } from './safe-result-cache';
 import type { WorkspaceCacheContext } from './workspace-context-state';
+import { normalizeFounderAgentMode } from './founder-agent-mode';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -39,7 +40,7 @@ export interface ParticipantDeps {
     errorMessage?: string,
   ) => void;
   coordination?: {
-    begin(prompt: string, provider: string): string;
+    begin(prompt: string, provider: string, mode?: 'focus' | 'team'): string;
     contextFor(taskId: string): string;
     end(taskId: string): void;
   };
@@ -135,7 +136,10 @@ async function handleParticipantRequest(
     if (codeModel) alias = codeModel;
   }
   deps.onRequestStart?.(alias.id);
-  const coordinationTaskId = deps.coordination?.begin(prompt, alias.id);
+  const agentMode = normalizeFounderAgentMode(
+    vscode.workspace.getConfiguration('founderOs').get<string>('agentMode'),
+  );
+  const coordinationTaskId = deps.coordination?.begin(prompt, alias.id, agentMode);
 
   // Build the system prompt with Memory Engine context.
   let memoryText = '';

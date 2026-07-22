@@ -106,6 +106,21 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(coordination, /COORDINATE: goals substantially overlap/);
   });
 
+  it('keeps Team mode bounded to read-only advisers and one editing owner', () => {
+    const gateway = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    const team = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts',
+    );
+    assert.match(gateway, /Promise\.all/);
+    assert.match(gateway, /model: 'founder-os-fast'/);
+    assert.match(gateway, /formatNativeTeamAdvice/);
+    assert.match(team, /Two read-only advisers|read-only Context Scout/i);
+    assert.match(team, /sole editing owner/i);
+    assert.match(team, /mode !== 'team' \|\| chatMode !== 'agent'/);
+  });
+
   it('preserves native tools, reasoning, and the terminal completion marker', () => {
     const source = read(
       'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',

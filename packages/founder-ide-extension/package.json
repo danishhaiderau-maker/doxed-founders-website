@@ -338,6 +338,19 @@
           "default": "hybrid",
           "description": "Where this workspace runs and which connected services it may use."
         },
+        "founderOs.agentMode": {
+          "type": "string",
+          "enum": [
+            "focus",
+            "team"
+          ],
+          "enumItemLabels": [
+            "Focus",
+            "Team"
+          ],
+          "default": "focus",
+          "description": "Focus uses one editing owner. Team adds bounded read-only advisers while one agent retains edit ownership."
+        },
         "founderOs.companion.enabled": {
           "type": "boolean",
           "default": true,
@@ -373,7 +386,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/manifest.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/manifest.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

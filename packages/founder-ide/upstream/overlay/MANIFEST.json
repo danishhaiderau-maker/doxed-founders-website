@@ -27,6 +27,7 @@
     { "src": "src/vs/workbench/contrib/void/common/voidSettingsService.ts",                            "dest": "src/vs/workbench/contrib/void/common/voidSettingsService.ts",                            "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts",                  "mode": "replace" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCoordination.ts",       "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCoordination.ts",       "mode": "add", "marker": "Founder IDE native chat coordination presence" },
+    { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts",               "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts",               "mode": "add", "marker": "Founder IDE bounded native Team mode" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "mode": "add", "marker": "sendFounderOs.ts - Founder OS Gateway rewire" }
   ]
 }
