@@ -1,6 +1,6 @@
 # Founder OS V1 Complete Execution Plan
 
-Status date: 2026-07-22
+Status date: 2026-07-23
 
 This is the canonical implementation checklist for Founder IDE, embedded
 Founder Node, the Founder website, and the V1 release. A feature is complete
@@ -9,6 +9,9 @@ only when its acceptance evidence exists. Chat claims are not evidence.
 ## Product decisions locked for V1
 
 - Founder-managed AI uses DeepSeek only.
+- `founder-os-auto` and `founder-os-fast` prefer DeepSeek V4 Flash;
+  `founder-os-reasoning` and `founder-os-code` use DeepSeek V4 Pro. Auto may
+  escalate to Pro only from recorded task evidence and plan entitlement.
 - Founder Free always uses DeepSeek V4 Flash while preserving the requested
   task intent. Builder and Team use Flash by default and may explicitly route
   coding, reasoning, and verification escalation to DeepSeek V4 Pro.
@@ -31,6 +34,13 @@ only when its acceptance evidence exists. Chat claims are not evidence.
 - Founder Team uses a pooled allowance, roles, and audit. Final price and pool
   size must be approved before public checkout.
 - Provider pooling across third-party free tiers is rejected for V1.
+- The supported managed boundary uses only `deepseek-v4-flash` and
+  `deepseek-v4-pro`. Retiring aliases such as `deepseek-chat` and
+  `deepseek-reasoner` are never sent upstream after 2026-07-24.
+- DeepSeek advertises a 1,000,000-token context and up to 384,000 output
+  tokens for these routes. Founder OS still applies smaller task-specific
+  output limits, quota reservations, and context retrieval rather than
+  treating the provider maximum as a safe default.
 - Usage and savings claims must be measured against a named baseline and must
   never be invented.
 - Managed cost receipts use the versioned DeepSeek price card supplied for
@@ -170,6 +180,15 @@ admin and user usage screenshots.
   keys are redacted from logs and visible route receipts.
 - [x] Show a native Personal/Local route receipt with profile, configured model,
   latency, and outside-managed-quota status without exposing credentials.
+- [ ] Deploy the focused production Agent-tool gateway repair from PR `#41`
+  (`2d293f85`). The patch admits validated `tools`/`tool_choice`, preserves
+  tool-call history, and forwards both to DeepSeek; API build and the complete
+  158-test API suite pass, but installed Agent execution remains blocked until
+  the coordinated production deployment boundary.
+- [ ] Prove one complete installed Agent loop after that deployment: model
+  selects a tool, the IDE obtains local approval where required, the tool runs,
+  the tool result returns to the same conversation, and the final answer plus
+  Founder route receipt and `[DONE]` are visible.
 - [ ] Run authenticated native tests for Auto, Fast, Reasoning, Code, BYOK,
   Ollama, streaming content, completion marker, cancellation, and quota errors.
 - [ ] Make model identity truthful in the native answer and receipt: managed
@@ -380,6 +399,9 @@ gates.
   capture screenshots and check console, network errors, overflow, focus,
   loading, empty, error, offline, and success states.
 - [ ] Build one Founder IDE installer containing Founder Node.
+- [x] Reject a warm-build payload when its compiled Founder action toolbar is
+  older than the reviewed React source; the installer and CI now fail instead
+  of silently shipping stale UI.
 - [ ] Remove old installed Founder IDE/Node/Stack variants only after inventory
   and explicit preservation of user data.
 - [ ] Install the release candidate, create one desktop shortcut, pin the single
