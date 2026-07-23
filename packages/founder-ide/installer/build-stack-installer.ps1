@@ -150,7 +150,12 @@ $workbenchBundle = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.
 if (-not (Test-Path $workbenchBundle)) {
     throw "Founder IDE workbench bundle not found at $workbenchBundle"
 }
+$electronMainBundle = Join-Path $ideRoot "resources\app\out\main.js"
+if (-not (Test-Path $electronMainBundle)) {
+    throw "Founder IDE Electron main bundle not found at $electronMainBundle"
+}
 $workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
+$founderPayloadText = $workbenchText + [System.IO.File]::ReadAllText($electronMainBundle)
 $expectedFounderComposer = @(
     "Founder Second brain",
     "Run an independent read-only review",
@@ -162,9 +167,9 @@ $expectedFounderComposer = @(
     "Founder work mode: Team"
 )
 $staleFounderComposer = @("label:`"Verify`"", "label:`"Challenge`"", "Founder actions")
-if ($expectedFounderComposer.Where({ -not $workbenchText.Contains($_) }).Count -gt 0 -or
+if ($expectedFounderComposer.Where({ -not $founderPayloadText.Contains($_) }).Count -gt 0 -or
     $staleFounderComposer.Where({ $workbenchText.Contains($_) }).Count -gt 0) {
-    throw "Founder IDE payload contains a stale chat composer. Rebuild the React bundle and remove out-vscode before packaging."
+    throw "Founder IDE payload is stale or incomplete. Rebuild the React and Electron bundles before packaging."
 }
 Write-Host "[stack]   Founder work modes, Second brain, and voice composer payload verified"
 

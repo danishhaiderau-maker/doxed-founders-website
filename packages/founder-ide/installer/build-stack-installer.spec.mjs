@@ -37,9 +37,11 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /Founder work mode: Build/);
     assert.match(source, /Founder work mode: Debug/);
     assert.match(source, /Founder work mode: Team/);
+    assert.match(source, /resources\\app\\out\\main\.js/);
+    assert.match(source, /\$founderPayloadText = \$workbenchText \+ \[System\.IO\.File\]::ReadAllText\(\$electronMainBundle\)/);
     assert.match(source, /staleFounderComposer/);
     assert.match(source, /Founder actions/);
-    assert.match(source, /remove out-vscode before packaging/);
+    assert.match(source, /Founder IDE payload is stale or incomplete/);
   });
 
   it('routes personal AI affordances directly to the AI settings tab', () => {
