@@ -237,34 +237,35 @@ merge receipt, multi-agent task graph screenshots.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 
-- [ ] Replace icon-only primary navigation with a calm labelled hierarchy:
+- [x] Replace icon-only primary navigation with a calm labelled hierarchy:
   New chat, Projects, Chats, Agents, Graph, Connect, and Settings.
 - [ ] Give Projects and Chats first-class persistent navigation, searchable
   history, useful names, pin/archive controls, and a clear new-chat action.
-- [ ] Widen the primary navigation enough for readable labels and project/chat
+- [x] Widen the primary navigation enough for readable labels and project/chat
   context; use compact icons only for familiar secondary editor tools.
-- [ ] Keep coding tools available through progressive disclosure rather than
+- [x] Keep coding tools available through progressive disclosure rather than
   removing essential editor capability.
-- [ ] Remove every visible Void name, action, settings title, and legacy logo.
-- [ ] Make Founder settings one coherent surface for account, plans and usage,
+- [x] Remove every visible Void name, action, settings title, and legacy logo
+  from the installed routes covered by the release screenshot matrix.
+- [x] Make Founder settings one coherent surface for account, plans and usage,
   Personal AI, local AI, connections, privacy, remote control, and companion.
-- [ ] Remove duplicate settings entry points and route the global settings icon
+- [x] Remove duplicate settings entry points and route the global settings icon
   to the coherent Founder surface; keep advanced editor settings progressively
   disclosed inside it.
-- [ ] Put provider selection, mode, attachments, microphone, and send in one
+- [x] Put provider selection, mode, attachments, microphone, and send in one
   stable composer without overlap.
-- [ ] Preserve and elevate the source-control graph as a Founder differentiator.
-- [ ] Use the left activity space for small, labelled Founder shortcuts.
-- [ ] Make Chat the primary founder workflow while retaining Explorer, Search,
+- [x] Preserve and elevate the source-control graph as a Founder differentiator.
+- [x] Use the left activity space for small, labelled Founder shortcuts.
+- [x] Make Chat the primary founder workflow while retaining Explorer, Search,
   Source Control/Graph, Run, Extensions, and debugging capabilities under a
   clear Build and ship section.
 - [ ] Apply the same Overview / Work and Decisions / Connect and Data hierarchy
   to IDE, Founder account, admin, Agent Hub, trading, and analyzer surfaces.
-- [ ] Use restrained radii, clear typography, consistent status colors,
+- [x] Use restrained radii, clear typography, consistent status colors,
   purposeful motion, reduced-motion support, and responsive layouts.
-- [ ] Remove obsolete website controls and match visible features to production
+- [x] Remove obsolete website controls and match visible features to production
   capability.
-- [ ] Use a restrained multi-color status language: neutral surfaces, one clear
+- [x] Use a restrained multi-color status language: neutral surfaces, one clear
   action accent, green healthy/success, amber attention/verification, red only
   for destructive/error, and blue for active navigation.
 - [ ] Add short purposeful transitions for state changes, loading, task travel,
@@ -316,7 +317,7 @@ state-transition recording, reduced-motion and focus tests.
   idempotency, leases, and receipts.
 - [ ] Prove remote control through the production website with a real installed
   device while preserving local control and revocation.
-- [ ] Keep one installer, one application identity, one tray/taskbar identity,
+- [x] Keep one installer, one application identity, one tray/taskbar identity,
   one updater, and one uninstall entry; Founder Node runs as an embedded
   background capability with no second founder-facing app.
 - [ ] Show device online/offline, current workspace, pending approval, last
@@ -393,7 +394,7 @@ gates.
 - [ ] Add a cheap independent self-critique pass against the original goal.
 - [ ] Auto-repair failed QA; use scoped rollback only when the agent owns the
   entire change and can prove it will not remove founder work.
-- [ ] Run API, web, Founder Node, extension, overlay, installer, updater, IPC,
+- [x] Run API, web, Founder Node, extension, overlay, installer, updater, IPC,
   coordination, quota, and security suites.
 - [ ] Visually inspect all states at 1440x900, 1280x720, and a narrow layout;
   capture screenshots and check console, network errors, overflow, focus,
@@ -402,11 +403,11 @@ gates.
 - [x] Reject a warm-build payload when its compiled Founder action toolbar is
   older than the reviewed React source; the installer and CI now fail instead
   of silently shipping stale UI.
-- [ ] Remove old installed Founder IDE/Node/Stack variants only after inventory
+- [x] Remove old installed Founder IDE/Node/Stack variants only after inventory
   and explicit preservation of user data.
 - [ ] Install the release candidate, create one desktop shortcut, pin the single
   Founder IDE identity to the taskbar, and verify restart/update/uninstall.
-- [ ] Publish only when signing and clean-machine gates pass. Otherwise label
+- [x] Publish only when signing and clean-machine gates pass. Otherwise label
   the artifact internal testing and report the exact blocker.
 - [ ] Add an opt-in daily self-QA run that checks the last 24 hours of owned
   changes, builds/tests affected modules, probes configured links and services,
@@ -420,3 +421,24 @@ gates.
 
 Evidence: signed artifact/hash, clean-machine matrix, installed-app screenshots,
 test report, visual audit bundle, release receipt, and blocker register.
+
+## Current release checkpoint
+
+- 450 scoped automated checks pass across the IDE extension, Founder Node,
+  vault, updater, installer, IPC, coordination, quota, API, and website layers.
+- API and website typechecks pass. The production-style website build completed
+  route generation after the quota-policy and admin-language repair.
+- The installed one-app candidate passed screenshots at 1440x900, 1280x720,
+  1187x739, and 768x900 with no critical page errors in the tested routes.
+- Desktop, Start, taskbar, uninstall, application identity, embedded relay,
+  version marker, preserved FounderVault, preserved profile, and managed normal
+  chat are proven on the local Windows machine.
+- `V1-INSTALLED-20260723-1503` produced a visible DeepSeek response and route
+  receipt. It also proved the remaining production policy defect: Founder Auto
+  resolved to Pro, so the coordinated Auto-to-Flash deployment remains open.
+- API PR `#41` is tested but deliberately held until the trading owner proves a
+  simultaneous full-flat boundary. Installed Agent-tool QA therefore remains
+  open rather than being reported as complete.
+- Trusted signing, a separate clean Windows VM, production remote-control
+  proof, live connected-service proofs, and the soak period are external or
+  manual gates and remain open.

@@ -1,5 +1,85 @@
 # Founder IDE — releases
 
+## 0.9.4 (Void-derived foundation) - INTERNAL TEST CANDIDATE
+
+> **Status: locally installed and verified; unsigned and not approved for
+> public distribution.** Founder IDE is one user-facing Windows application.
+> Founder Node is an embedded background relay owned by that application.
+
+### What changed
+
+- **Founder-native workflow.** A labelled Founder home surface provides New
+  chat, Projects, Chats, Agents, Graph, Connect, Settings, and progressively
+  disclosed build-and-ship tools while preserving the editor, terminal,
+  debugger, extensions, and source-control graph.
+- **One coherent settings surface.** Account, plan and weekly usage, managed
+  DeepSeek routes, unlimited named Personal AI profiles, Ollama, connections,
+  infrastructure, privacy, remote control, and advanced editor settings are
+  reachable from Founder Settings. No credential is returned to a webview.
+- **DeepSeek-only managed AI.** Free uses a 200,000 weighted-token weekly
+  allowance. Builder uses a 5,000,000 weighted-token weekly allowance. Local
+  Ollama and personal keys remain outside managed quota. The legacy hidden
+  daily classification gate was removed so one server-authoritative plan
+  ledger governs customer allowance.
+- **Coordinated work.** Active chats publish bounded awareness, scope, file
+  leases, dependencies, blockers, verification, and merge state. Focus and
+  Team modes use bounded workers rather than an arbitrary agent count.
+- **Living Founder Dragon.** The transparent companion is draggable across
+  displays, remembers its position, follows real task and coordination states,
+  shows compact receipts, honors reduced motion, and belongs to the IDE rather
+  than creating a second installed product identity.
+- **Embedded relay and remote actions.** The hidden relay is packaged under
+  `resources/founder-relay`; authenticated IPC covers read, proposed edit,
+  command, cancel, status, approval, and result receipts.
+- **Updater release identity.** The installed application writes
+  `founder-release.json`, so the embedded relay compares update manifests
+  against Founder IDE 0.9.4 instead of its own internal package version.
+- **Website product truth.** Founder account and plan screens use live plan and
+  usage endpoints, Builder checkout and billing-portal actions, current weekly
+  quota language, DeepSeek V4 route names, and one-app pairing instructions.
+
+### Verification completed locally
+
+- 450 scoped automated checks pass across the extension, embedded relay,
+  vault, updater manifest, overlay, installer, IPC, coordination, quota, API,
+  and website layers. The separate trading strategy suite was intentionally
+  excluded from this IDE release boundary.
+- API and website typechecks pass. The production-style website build completed
+  route generation after the final quota-policy and admin-language repair.
+- A clean local uninstall/install preserved `FounderVault` and Founder IDE
+  profile data, removed obsolete Founder Node/Stack/Void shortcuts, and left
+  one Founder IDE application, uninstall entry, desktop shortcut, Start item,
+  and taskbar identity.
+- Installed UI screenshots pass at 1440x900, 1280x720, 1187x739, and 768x900
+  without critical page errors or visible Void branding in the tested routes.
+- Installed managed chat completed with nonce `V1-INSTALLED-20260723-1503`, a
+  visible final response, a DeepSeek route receipt, and no critical native
+  errors. This also exposed the remaining Auto-to-Flash production policy gate
+  listed below.
+
+### Expected artifact
+
+- `Founder-IDE-Setup-0.9.4.exe` - one-app Windows installer; unsigned internal
+  testing only until the signing and clean-machine gates pass.
+
+The stable public update manifest intentionally remains on the last published
+release. It must not advertise this unsigned internal candidate.
+
+### Open release gates
+
+- Activate and verify the trusted Windows signing identity.
+- Run install, update, rollback, and uninstall on a clean Windows VM.
+- Complete the installed-application soak period.
+- Deploy API PR `#41` only at the coordinated trading full-flat boundary, then
+  prove one complete installed Agent tool loop.
+- Deploy the fail-closed Founder Auto/Free to DeepSeek V4 Flash policy and
+  repeat the installed Auto, Fast, Reasoning, and Code route matrix.
+- Prove production website remote control with a real installed device and
+  finish live GitHub, Vercel, Railway, Neon, email, and Telegram connection
+  flows.
+
+---
+
 ## 0.9.3 (Void fork) — ONE-APP TEST CANDIDATE
 
 > **Status: locally verified, pending CI/signing/production deployment.**
