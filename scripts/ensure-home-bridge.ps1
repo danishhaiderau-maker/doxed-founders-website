@@ -8,9 +8,12 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$ensureLog = Join-Path $repoRoot ".home-ensure-bridge.log"
 . (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port
 
 function Log([string]$msg) {
+  $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ensure[$PID] $msg"
+  Add-Content -LiteralPath $ensureLog -Value $line -ErrorAction SilentlyContinue
   if (-not $Quiet) { Write-Host $msg }
 }
 
@@ -38,17 +41,7 @@ if ($Force -and (Test-BridgeHealthy)) {
   Log "Force restart requested - recycling bridge on :$Port"
 }
 
-Log "Stopping stale bridge + supervisor (fast path, no WMI)..."
-$supervisorPidFile = Join-Path $repoRoot ".home-stack-supervisor.pid"
-if (Test-Path $supervisorPidFile) {
-  $stoppedSupervisor = @(
-    Stop-RecordedProcess $supervisorPidFile @("powershell", "pwsh", "cmd")
-  )
-  foreach ($stoppedPid in $stoppedSupervisor) {
-    Log "  stop supervisor pid $stoppedPid"
-  }
-}
-Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
+Log "Stopping stale bridge only (fast path, no WMI)..."
 
 # Bridge reload must not depend on WMI/CIM. Win32_Process queries can hang for
 # minutes on this home PC, leaving :7810 down after the old bridge exits. The
@@ -96,20 +89,11 @@ if (Test-BridgeHealthy) {
   exit 0
 }
 
-Start-VisibleConsole $launcher @() -Title "Doxed Home Bridge :$Port"
-
-$deadline = (Get-Date).AddSeconds(35)
-while ((Get-Date) -lt $deadline) {
-  if (Test-BridgeHealthy) {
-    Log "Bridge OK on :$Port"
-    exit 0
-  }
-  Start-Sleep -Seconds 1
-}
-
-$errLog = Join-Path $repoRoot ".home-bridge.err.log"
-if (Test-Path $errLog) {
-  Write-Host (Get-Content $errLog -Raw) -ForegroundColor Red
-}
-Write-Host "Bridge failed to start on :$Port - check Doxed Home Bridge window for errors." -ForegroundColor Red
-exit 1
+# The watchdog already launched this script in a detached owner process. Keep
+# that process as the one durable listener instead of starting another nested
+# console whose lifetime and elevation are ambiguous.
+Log "Starting bridge listener in recovery owner pid=$PID"
+& $launcher
+$code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+Log "Bridge listener exited code=$code"
+exit $code

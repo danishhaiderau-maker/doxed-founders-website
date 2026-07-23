@@ -17,6 +17,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".home-analyzer-start.lock"
+$starterPidFile = Join-Path $repoRoot ".home-analyzer-starter.pid"
 
 function Test-PortOpen([int]$P) {
   try {
@@ -67,6 +68,7 @@ try {
     exit 0
   }
 }
+Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
 
 Set-Location $agentDir
 Get-Content $vaultEnv | ForEach-Object {

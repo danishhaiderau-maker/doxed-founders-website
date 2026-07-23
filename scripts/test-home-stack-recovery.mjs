@@ -46,6 +46,13 @@ assert.match(launcher, /Timeout = 7000/);
 assert.match(watchdog, /Timeout = 7000/);
 assert.match(ensureBridge, /Timeout = 7000/);
 assert.match(ensureBridge, /Stop-RecordedProcess \$bridgePidFile/);
+assert.match(ensureBridge, /\.home-ensure-bridge\.log/);
+assert.match(ensureBridge, /& \$launcher/);
+assert.doesNotMatch(
+  executableLines(ensureBridge),
+  /\bStart-VisibleConsole\b/,
+  "bridge recovery process must remain the durable listener owner",
+);
 assert.match(startEverything, /Timeout = 7000/);
 
 assert.doesNotMatch(
@@ -61,6 +68,8 @@ assert.doesNotMatch(
   "bot startup must not block on process/TCP-table providers",
 );
 assert.match(startBot, /Test-ProcessIdAliveFast \$monitorPid/);
+assert.match(startBot, /\.home-bot-starter\.pid/);
+assert.match(read("start-home-analyzer.ps1"), /\.home-analyzer-starter\.pid/);
 assert.doesNotMatch(
   executableLines(providerFreeRecovery),
   /\bGet-(?:Process|CimInstance)\b|\bWin32_Process\b/,
@@ -68,16 +77,27 @@ assert.doesNotMatch(
 );
 assert.match(providerFreeRecovery, /Doxed Bot :\$BotPort/);
 assert.match(providerFreeRecovery, /ensure-home-bridge\.ps1/);
+assert.match(providerFreeRecovery, /Start-Process/);
+assert.match(providerFreeRecovery, /\$bridgeDeadline/);
+assert.match(providerFreeRecovery, /Test-LockAvailable/);
+assert.match(providerFreeRecovery, /\.home-bot-starter\.pid/);
+assert.match(providerFreeRecovery, /\.home-analyzer-starter\.pid/);
+assert.match(
+  providerFreeRecovery,
+  /refusing an unsafe duplicate launch/,
+);
 
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 25,
+    checks: 36,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
       "serialized bridge health probes allow bounded status work",
       "background helper starts are single-owner",
+      "bridge recovery retains one durable listener owner",
+      "startup locks identify their exact recoverable owner",
     ],
   }),
 );

@@ -23,6 +23,7 @@ $env:BOT_STARTUP_STDERR_LOG = $startupStderrLog
 # without a durable owner. The exclusive handle is released automatically
 # when this short-lived starter process exits; the file itself may remain.
 $startLockFile = Join-Path $repoRoot ".home-bot-start.lock"
+$starterPidFile = Join-Path $repoRoot ".home-bot-starter.pid"
 try {
   $script:StartLockHandle = [System.IO.File]::Open(
     $startLockFile,
@@ -34,6 +35,7 @@ try {
   Write-Host "Another bot startup is already in progress - leaving it as the sole starter." -ForegroundColor Yellow
   exit 0
 }
+Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
 
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode
