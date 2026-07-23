@@ -4,6 +4,13 @@ import path from 'node:path';
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
 const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
+const requestedWidth = Number.parseInt(process.env.FOUNDER_IDE_QA_WIDTH || '', 10);
+const requestedHeight = Number.parseInt(process.env.FOUNDER_IDE_QA_HEIGHT || '', 10);
+const hasRequestedViewport = Number.isFinite(requestedWidth)
+  && Number.isFinite(requestedHeight)
+  && requestedWidth >= 360
+  && requestedHeight >= 480;
+const viewportSuffix = hasRequestedViewport ? `-${requestedWidth}x${requestedHeight}` : '';
 fs.mkdirSync(outputDir, { recursive: true });
 
 const initialTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
@@ -84,6 +91,16 @@ async function runCommandPalette(command) {
 
 await send('Runtime.enable');
 await send('Page.enable');
+if (hasRequestedViewport) {
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: requestedWidth,
+    height: requestedHeight,
+    screenWidth: requestedWidth,
+    screenHeight: requestedHeight,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+}
 await send('Page.bringToFront');
 if (process.env.FOUNDER_IDE_QA_TRUST === '1') {
   const trusted = await evaluate(`(() => {
@@ -123,7 +140,10 @@ const screenshot = await send('Page.captureScreenshot', {
   fromSurface: true,
   captureBeyondViewport: false,
 });
-fs.writeFileSync(path.join(outputDir, 'installed-workbench.png'), Buffer.from(screenshot.data, 'base64'));
+fs.writeFileSync(
+  path.join(outputDir, `installed-workbench${viewportSuffix}.png`),
+  Buffer.from(screenshot.data, 'base64'),
+);
 
 const ui = await evaluate(`(() => {
   const visible = (element) => {
@@ -217,7 +237,10 @@ const evidence = {
   criticalConsoleErrors,
   pageErrors,
 };
-fs.writeFileSync(path.join(outputDir, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`);
+fs.writeFileSync(
+  path.join(outputDir, `evidence${viewportSuffix}.json`),
+  `${JSON.stringify(evidence, null, 2)}\n`,
+);
 process.stdout.write(`${JSON.stringify({
   title: evidence.title,
   viewport: evidence.viewport,
