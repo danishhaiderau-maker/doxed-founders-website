@@ -34,8 +34,8 @@ function Test-BridgeHealthyQuick {
   try {
     $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:7810/health")
     $req.Method = "GET"
-    $req.Timeout = 2000
-    $req.ReadWriteTimeout = 2000
+    $req.Timeout = 7000
+    $req.ReadWriteTimeout = 7000
     $resp = $req.GetResponse()
     $ok = ($resp.StatusCode -eq 200)
     $resp.Close()
@@ -164,18 +164,21 @@ if (-not (Test-AnalyzerHealthy)) {
 
 # Step 3 — tunnel (named = hidden background; quick = visible console)
 $tunnelUrl = if (Use-NamedTunnel) { $stableUrl } else { Get-TunnelUrl }
-$tunnelOk = if ($tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
-$cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+$tunnelProbe = if ($tunnelUrl) {
+  Test-TunnelHttpSmart -Url $tunnelUrl -TimeoutSec 6 -UserAgent "dcf-start-everything/1.0"
+} else {
+  @{ Healthy = $false; StatusCode = 0; RateLimited = $false; Error = "no-url" }
+}
+$tunnelOk = [bool]$tunnelProbe.Healthy
+$cfRunning = Test-TunnelConnectorPresent $tunnelProbe
 
 if ($tunnelOk) {
   Write-Step "[3/4] Tunnel already live: $tunnelUrl"
   $messages.Add("[3/4] Tunnel already live: $tunnelUrl")
+} elseif ($cfRunning) {
+  Write-Step "[3/4] Tunnel connector is up; waiting for bot origin: $tunnelUrl"
+  $messages.Add("[3/4] Tunnel connector preserved while bot origin recovers")
 } else {
-  if ($cfRunning) {
-    Write-Step "[3/4] Restarting cloudflared..."
-    Stop-Cloudflared | Out-Null
-    Start-Sleep -Seconds 2
-  }
   if (Use-NamedTunnel) {
     Write-Step "[3/4] Starting named tunnel hidden (stable URL)..."
     Start-HomeTunnel -Port $BotPort -Force
@@ -191,18 +194,14 @@ if ($tunnelOk) {
 
 # Step 4 — background helpers (wire + supervisor + bridge watchdog; user-facing consoles above)
 Write-Step "[4/4] Starting auto-wire + health supervisor + bridge watchdog (hidden)..."
-if (-not (Test-HomeScriptRunning "auto-wire-after-tunnel.ps1")) {
-  Start-HiddenPs1 (Join-Path $scriptDir "auto-wire-after-tunnel.ps1") @("-Quiet")
-  $messages.Add("Auto-wire (hidden)")
-}
-if (-not (Test-HomeScriptRunning "home-stack-supervisor.ps1")) {
-  Start-HiddenPs1 (Join-Path $scriptDir "home-stack-supervisor.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort")
-  $messages.Add("Supervisor (hidden, 24/7 health)")
-}
-if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
-  Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
-  $messages.Add("Relay state pusher (hidden, 4s → Railway)")
-}
+# These helpers are lock-protected. Starting them unconditionally is bounded
+# and avoids the Win32_Process command-line provider that can hang this PC.
+Start-HiddenPs1 (Join-Path $scriptDir "auto-wire-after-tunnel.ps1") @("-Quiet")
+$messages.Add("Auto-wire (hidden)")
+Start-HiddenPs1 (Join-Path $scriptDir "home-stack-supervisor.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort")
+$messages.Add("Supervisor (hidden, 24/7 health)")
+Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
+$messages.Add("Relay state pusher (hidden, 4s → Railway)")
 # Bridge :7810 auto-respawn watchdog — survives terminal closure (detached hidden loop).
 # Best-effort: also registers the DoxxedBridgeWatch scheduled task when run as admin.
 & (Join-Path $scriptDir "register-bridge-watchdog.ps1") -Quiet

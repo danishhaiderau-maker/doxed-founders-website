@@ -43,8 +43,11 @@ function Test-BridgeAlreadyBound([int]$ProbePort) {
   try {
     $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ProbePort/health")
     $req.Method = "GET"
-    $req.Timeout = 1500
-    $req.ReadWriteTimeout = 1500
+    # /status is serialized and can hold the listener for up to ~5.5s while
+    # bounded bot/analyzer/tunnel probes finish. Wait long enough to avoid
+    # misclassifying that bounded work as a dead bridge.
+    $req.Timeout = 7000
+    $req.ReadWriteTimeout = 7000
     $resp = $req.GetResponse()
     $ok = ($resp.StatusCode -eq 200)
     $resp.Close()
@@ -57,10 +60,8 @@ function Test-BridgeAlreadyBound([int]$ProbePort) {
 if (Test-BridgeAlreadyBound $Port) {
   $Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port (already running)"
   Write-Host "Bridge already OK on :$Port (skipping second listener) - auto-closing duplicate window." -ForegroundColor Green
-  try {
-    $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
-    if ($parent -gt 0) { Stop-Process -Id $parent -Force -ErrorAction SilentlyContinue }
-  } catch { }
+  # The launcher is invoked through cmd /c, so exiting here also closes its
+  # short-lived parent. Avoid Win32_Process: that provider can stall the bridge.
   exit 0
 }
 
@@ -120,20 +121,28 @@ function Get-FullStatus {
   $analyzerRunning = $live[$anUrl]
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
-  $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  # Tunnel is "live" when cloudflared is running AND the public URL answers /api/ping.
-  # Probe at most every 120s so /status stays fast (the bridge listener must not block).
+  # Never enumerate Windows processes here. On this host the process provider can
+  # stall for minutes, and the bridge deliberately serializes requests; one stuck
+  # /status would therefore block /health and every recovery command behind it.
+  # Probe the public route at most every 120s and distinguish an answering
+  # connector with a temporarily unavailable bot origin (502/504) from no route.
   $tunnelLive = $false
-  if ($tunnelUrl -and $cloudflaredRunning) {
-    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 120) {
-      $tunnelLive = $script:TunnelLiveCache.live
+  $cloudflaredRunning = $false
+  if ($tunnelUrl) {
+    if ($script:BridgeTunnelCache.url -eq $tunnelUrl -and ($now - $script:BridgeTunnelCache.at).TotalSeconds -lt 120) {
+      $tunnelLive = [bool]$script:BridgeTunnelCache.live
+      $cloudflaredRunning = [bool]$script:BridgeTunnelCache.connector
     } else {
-      $tunnelLive = (Test-TunnelLive $tunnelUrl)
-      $script:TunnelLiveCache = @{ url = $tunnelUrl; live = $tunnelLive; at = $now }
+      $probe = Test-TunnelHttpSmart -Url $tunnelUrl -TimeoutSec 4 -UserAgent "dcf-home-bridge/1.0"
+      $tunnelLive = [bool]$probe.Healthy
+      $cloudflaredRunning = Test-TunnelConnectorPresent $probe
+      $script:BridgeTunnelCache = @{
+        url = $tunnelUrl
+        live = $tunnelLive
+        connector = $cloudflaredRunning
+        at = $now
+      }
     }
-  } elseif (-not $cloudflaredRunning) {
-    # cloudflared gone -> invalidate cache so a restart re-probes immediately.
-    $script:TunnelLiveCache = @{ url = ""; live = $false; at = [datetime]::MinValue }
   }
   $payload = @{
     ok = $true
@@ -169,6 +178,12 @@ function Get-FullStatus {
 }
 
 $script:StatusCache = @{ at = [datetime]::MinValue; payload = $null }
+$script:BridgeTunnelCache = @{
+  url = ""
+  live = $false
+  connector = $false
+  at = [datetime]::MinValue
+}
 
 function Invoke-HomeCommandBackground([string]$Action) {
   $modeArg = if ($stackMode.Mode -eq "local-collection") { "local-collection" } else { "production" }

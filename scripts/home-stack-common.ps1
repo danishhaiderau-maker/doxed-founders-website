@@ -13,6 +13,7 @@ if (-not $repoRoot) {
 }
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
+$cloudflaredPidFile = Join-Path $repoRoot ".home-cloudflared.pid"
 $userStoppedFile = Join-Path $repoRoot ".home-stack-user-stopped"
 
 function Get-ResearchStackVersion {
@@ -49,6 +50,31 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class HomeStackNativeProcess {
+  public const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct PROCESSENTRY32 {
+    public uint dwSize;
+    public uint cntUsage;
+    public uint th32ProcessID;
+    public IntPtr th32DefaultHeapID;
+    public uint th32ModuleID;
+    public uint cntThreads;
+    public uint th32ParentProcessID;
+    public int pcPriClassBase;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)]
+    public string szExeFile;
+  }
+
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32 entry);
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
   [DllImport("kernel32.dll", SetLastError=true)]
@@ -80,6 +106,39 @@ function Test-ProcessIdAliveFast([int]$ProcessId) {
   } finally {
     [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
   }
+}
+
+function Get-ProcessIdsByExecutableNameFast([string]$ExecutableName) {
+  Initialize-HomeStackNativeProcess
+  $ids = @()
+  if (-not $ExecutableName) { return $ids }
+  $target = [System.IO.Path]::GetFileName($ExecutableName).ToLowerInvariant()
+  if (-not $target.EndsWith(".exe")) { $target += ".exe" }
+  $snapshot = [HomeStackNativeProcess]::CreateToolhelp32Snapshot(
+    [HomeStackNativeProcess]::TH32CS_SNAPPROCESS,
+    0
+  )
+  if ($snapshot -eq [IntPtr]::Zero -or $snapshot -eq [IntPtr](-1)) { return $ids }
+  try {
+    $entry = New-Object "HomeStackNativeProcess+PROCESSENTRY32"
+    $entry.dwSize = [Runtime.InteropServices.Marshal]::SizeOf(
+      [type]"HomeStackNativeProcess+PROCESSENTRY32"
+    )
+    $ok = [HomeStackNativeProcess]::Process32FirstW($snapshot, [ref]$entry)
+    while ($ok) {
+      if ($entry.szExeFile -and $entry.szExeFile.ToLowerInvariant() -eq $target) {
+        $ids += [int]$entry.th32ProcessID
+      }
+      $ok = [HomeStackNativeProcess]::Process32NextW($snapshot, [ref]$entry)
+    }
+  } finally {
+    [HomeStackNativeProcess]::CloseHandle($snapshot) | Out-Null
+  }
+  return $ids
+}
+
+function Test-ExecutableRunningFast([string]$ExecutableName) {
+  return @((Get-ProcessIdsByExecutableNameFast $ExecutableName)).Count -gt 0
 }
 
 function Get-ProcessExecutableNameFast([int]$ProcessId) {
@@ -314,6 +373,15 @@ function Test-TunnelHttpSmart {
   return $result
 }
 
+function Test-TunnelConnectorPresent([object]$Probe) {
+  if (-not $Probe) { return $false }
+  if ([bool]$Probe.Healthy) { return $true }
+  $code = [int]$Probe.StatusCode
+  # A 4xx response, or Cloudflare's origin-side 502/504, proves that the
+  # connector/route answered even when the local bot origin is still down.
+  return (($code -ge 200 -and $code -lt 500) -or $code -in @(502, 504))
+}
+
 # Shared cross-process backoff state. Both bridge-watchdog.ps1 and
 # home-stack-supervisor.ps1 dot-source this file, so the $script: scope
 # gives each its own copy. That's fine — what we actually want is for a
@@ -379,7 +447,11 @@ function Stop-ListenPortFast([int]$ListenPort) {
   return $killed
 }
 
-function Stop-RecordedProcess([string]$PidFile, [string[]]$AllowedNames = @()) {
+function Stop-RecordedProcess(
+  [string]$PidFile,
+  [string[]]$AllowedNames = @(),
+  [int]$MaxStartSkewMinutes = 5
+) {
   $killed = @()
   if (-not (Test-Path -LiteralPath $PidFile)) { return $killed }
   try {
@@ -395,7 +467,7 @@ function Stop-RecordedProcess([string]$PidFile, [string[]]$AllowedNames = @()) {
       # A valid owner starts immediately before its PID file is written.  The
       # skew guard prevents a stale PID file from killing an unrelated process
       # after Windows has reused the numeric PID.
-      if ($started -and [math]::Abs(($stamp - $started).TotalMinutes) -le 5) {
+      if ($started -and [math]::Abs(($stamp - $started).TotalMinutes) -le $MaxStartSkewMinutes) {
         Stop-ProcessIdFast $recordedPid | Out-Null
         $killed += $recordedPid
       }
@@ -617,10 +689,14 @@ function Stop-PythonMatching([string]$Pattern) {
 
 function Stop-Cloudflared {
   $killed = @()
-  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    $killed += $_.Id
+  $killed += @(Stop-RecordedProcess $cloudflaredPidFile @("cloudflared"))
+  foreach ($processId in @(Get-ProcessIdsByExecutableNameFast "cloudflared")) {
+    if ($processId -le 0) { continue }
+    if (Stop-ProcessIdFast $processId) {
+      $killed += $processId
+    }
   }
+  Remove-Item -LiteralPath $cloudflaredPidFile -Force -ErrorAction SilentlyContinue
   return $killed
 }
 
@@ -1014,7 +1090,7 @@ function Start-CloudflaredNamedHidden {
     throw "cloudflared not installed"
   }
 
-  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Stop-Cloudflared | Out-Null
   Start-Sleep -Seconds 2
 
   # Force --protocol http2 (or whatever $Protocol resolves to). Without this
@@ -1067,6 +1143,8 @@ function Start-CloudflaredNamedHidden {
     [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
   }
 
-  Start-Process -FilePath "cloudflared" -ArgumentList $args -WindowStyle Hidden `
-    -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WorkingDirectory $repoRoot
+  $cloudflared = Start-Process -FilePath "cloudflared" -ArgumentList $args -WindowStyle Hidden `
+    -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WorkingDirectory $repoRoot -PassThru
+  if (-not $cloudflared) { throw "cloudflared failed to launch" }
+  Set-Content -LiteralPath $cloudflaredPidFile -Value $cloudflared.Id -NoNewline
 }

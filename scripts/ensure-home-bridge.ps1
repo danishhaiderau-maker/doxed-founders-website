@@ -18,8 +18,8 @@ function Test-BridgeHealthy {
   try {
     $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/health")
     $req.Method = "GET"
-    $req.Timeout = 1500
-    $req.ReadWriteTimeout = 1500
+    $req.Timeout = 7000
+    $req.ReadWriteTimeout = 7000
     $resp = $req.GetResponse()
     $ok = ($resp.StatusCode -eq 200)
     $resp.Close()
@@ -41,12 +41,12 @@ if ($Force -and (Test-BridgeHealthy)) {
 Log "Stopping stale bridge + supervisor (fast path, no WMI)..."
 $supervisorPidFile = Join-Path $repoRoot ".home-stack-supervisor.pid"
 if (Test-Path $supervisorPidFile) {
-  $supervisorPid = [int](Get-Content $supervisorPidFile -ErrorAction SilentlyContinue)
-  if ($supervisorPid -gt 0) {
-    Log "  stop supervisor pid $supervisorPid"
-    Stop-Process -Id $supervisorPid -Force -ErrorAction SilentlyContinue
+  $stoppedSupervisor = @(
+    Stop-RecordedProcess $supervisorPidFile @("powershell", "pwsh", "cmd")
+  )
+  foreach ($stoppedPid in $stoppedSupervisor) {
+    Log "  stop supervisor pid $stoppedPid"
   }
-  Remove-Item $supervisorPidFile -Force -ErrorAction SilentlyContinue
 }
 Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
 
@@ -55,21 +55,18 @@ Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAct
 # launcher records its own PID, so a direct Stop-Process is deterministic.
 $bridgePidFile = Join-Path $repoRoot ".home-bridge.pid"
 if (Test-Path -LiteralPath $bridgePidFile) {
-  try {
-    $bridgePid = [int](Get-Content -LiteralPath $bridgePidFile -ErrorAction Stop)
-    if ($bridgePid -gt 0 -and $bridgePid -ne $PID) {
-      Log "  stop launcher pid $bridgePid"
-      Stop-Process -Id $bridgePid -Force -ErrorAction SilentlyContinue
-    }
-  } catch { }
-  Remove-Item -LiteralPath $bridgePidFile -Force -ErrorAction SilentlyContinue
-}
-# Clean up a visible orphan console by title without recursive WMI traversal.
-Get-Process powershell, pwsh -ErrorAction SilentlyContinue |
-  Where-Object { $_.MainWindowTitle -like "Doxed Home Bridge :$Port*" -or $_.MainWindowTitle -like "TEST Bridge*" } |
-  ForEach-Object {
-    if ($_.Id -ne $PID) { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+  # The bridge writes its PID only after loading helpers and binding http.sys.
+  # Allow the observed startup-to-PID-file delay while still checking exact
+  # executable name and start time before terminating a reused numeric PID.
+  $stoppedBridge = @(
+    Stop-RecordedProcess $bridgePidFile @("powershell", "pwsh") 20
+  )
+  foreach ($stoppedPid in $stoppedBridge) {
+    if ($stoppedPid -ne $PID) { Log "  stop launcher pid $stoppedPid" }
   }
+}
+# The exact bridge PID above is authoritative. Do not enumerate PowerShell
+# windows here: Get-Process has also stalled on this host during recovery.
 Stop-ListenPortFast $Port | Out-Null
 Start-Sleep -Seconds 3
 

@@ -64,23 +64,10 @@ try {
     [System.IO.FileAccess]::ReadWrite,
     [System.IO.FileShare]::None)
 } catch {
-  # Lock held by another instance - confirm it is actually alive (not a stale handle
-  # from a crashed process) before backing off.
-  $alive = $false
-  if (Test-Path $pidFile) {
-    $otherPid = 0
-    [int]::TryParse((Get-Content $pidFile -Raw -ErrorAction SilentlyContinue), [ref]$otherPid) | Out-Null
-    if ($otherPid -gt 0) {
-      $p = Get-Process -Id $otherPid -ErrorAction SilentlyContinue
-      if ($p -and $p.Name -match 'powershell|pwsh') { $alive = $true }
-    }
-  }
-  if ($alive) { exit 0 }
-  # Stale lock - force clear and retry once.
-  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-  try {
-    $script:LockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-  } catch { exit 0 }
+  # A crashed process releases its file handle automatically. If opening with
+  # FileShare.None fails, a live watchdog still owns it; exit immediately
+  # without consulting the hanging Windows process provider.
+  exit 0
 }
 
 Set-Content -Path $pidFile -Value $PID -NoNewline
@@ -89,20 +76,13 @@ function Test-BridgeUp {
   try {
     $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$BridgePort/health")
     $req.Method = "GET"
-    $req.Timeout = 2000
-    $req.ReadWriteTimeout = 2000
+    $req.Timeout = 7000
+    $req.ReadWriteTimeout = 7000
     $resp = $req.GetResponse()
     $ok = ($resp.StatusCode -eq 200)
     $resp.Close()
     return $ok
   } catch { return $false }
-}
-
-# Cloudflared process presence (cheap, runs every poll).
-function Test-CloudflaredRunning {
-  $p = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*cloudflared*" }
-  return [bool]$p
 }
 
 # Tunnel end-to-end reachability (heavier; called less often). Returns true only
@@ -210,11 +190,11 @@ while ((Get-Date) -lt $deadline) {
     }
   }
 
-  # Cloudflare tunnel guard - only when the stack expects a tunnel. Catches both
-  # a dead cloudflared process (cheap check every poll) and a wedged tunnel that
-  # answers 530 (end-to-end probe). Respawn via the bridge so the launch config
-  # stays single-sourced. This is what stops the recurring 530 popups after a
-  # bot crash takes cloudflared down.
+  # Cloudflare tunnel guard - only when the stack expects a tunnel. Use the
+  # bounded end-to-end probe rather than enumerating Windows processes. Both
+  # WMI/CIM and Get-Process have stalled on this host; even the native fallback
+  # has a one-time Add-Type cost in each short-lived scheduled invocation.
+  # Respawn via the bridge so the launch config stays single-sourced.
   #
   # F4c-429 (2026-07-08 incident) — end-to-end probe cadence dropped from
   # every ~60s to every ~3 min. Combined with the supervisor's own 60s tick,
@@ -226,14 +206,12 @@ while ((Get-Date) -lt $deadline) {
   # Test-TunnelUp above) kills the loop.
   if ($TunnelEnabled) {
     $tunnelNeedsRespawn = $false
-    if (-not (Test-CloudflaredRunning)) {
-      $tunnelNeedsRespawn = $true
-      Wd-Log "cloudflared process MISSING"
-    } elseif (($ticks % 18) -eq 0) {
-      # End-to-end probe every ~3 min - cloudflared may be alive but tunnel wedged.
+    if ($ticks -eq 1 -or ($ticks % 18) -eq 0) {
+      # Probe immediately, then every ~3 min. A dead process and a wedged
+      # connector have the same actionable result: the public route is down.
       if (-not (Test-TunnelUp)) {
         $tunnelNeedsRespawn = $true
-        Wd-Log "tunnel $TunnelUrl NOT reachable (530/wedged)"
+        Wd-Log "tunnel $TunnelUrl NOT reachable (missing/530/wedged)"
       } elseif (($ticks % 36) -eq 0) {
         Wd-Log "tick #$ticks tunnel UP"
       }

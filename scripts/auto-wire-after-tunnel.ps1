@@ -10,7 +10,20 @@ $repoRoot = Split-Path -Parent $scriptDir
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
 $namedTunnelFlag = Join-Path $repoRoot ".home-use-named-tunnel"
 $logFile = Join-Path $repoRoot ".home-wire.log"
+$lockFile = Join-Path $repoRoot ".home-auto-wire.lock"
 $deadline = (Get-Date).AddSeconds($MaxWaitSec)
+
+try {
+  $script:AutoWireLockHandle = [System.IO.File]::Open(
+    $lockFile,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+} catch {
+  if (-not $Quiet) { Write-Host "Auto-wire is already running - exit" }
+  exit 0
+}
 
 function Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
