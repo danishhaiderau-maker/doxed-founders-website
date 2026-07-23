@@ -73,6 +73,12 @@ try {
   # Script port wins over anything in home-bot.env (vault must not override :7002).
   $env:PORT = "$Port"
   $env:DASHBOARD_PORT = "$Port"
+  # Every locally supervised showcase process is paper-only. The website relay
+  # is the sole component permitted to place real Bitfinex orders.
+  $env:FORCE_PAPER_MODE = "1"
+  $env:LIVE_TRADING_ENABLED = "0"
+  $env:BITFINEX_LIVE_ENABLED = "0"
+  $env:LIVE_ARMED = "0"
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {
@@ -124,20 +130,21 @@ try {
     }
     $env:PORT = "$Port"
     $env:DASHBOARD_PORT = "$Port"
+    $env:FORCE_PAPER_MODE = "1"
+    $env:LIVE_TRADING_ENABLED = "0"
+    $env:BITFINEX_LIVE_ENABLED = "0"
+    $env:LIVE_ARMED = "0"
   }
 
   function Start-BotHidden {
-    # Clear any stale listener on the port before relaunch (common cause of bind fail).
-    try {
-      Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique |
-        ForEach-Object {
-          $procId = [int]$_
-          if ($procId -gt 0 -and $procId -ne 4) {
-            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-          }
-        }
-    } catch { }
+    # Native netstat-based cleanup remains responsive even when the Windows TCP
+    # provider blocks on a zombie listener.
+    Stop-ListenPortFast $Port | Out-Null
+    Start-Sleep -Milliseconds 250
+    if (Test-PortBound $Port) {
+      Write-RestartLog "relaunch_blocked_port_still_bound	port=$Port"
+      return 0
+    }
 
     Import-VaultEnv
 
@@ -154,11 +161,30 @@ try {
     return 0
   }
 
+  function Test-BotPingQuick {
+    if (-not (Test-PortBound $Port)) { return $false }
+    try {
+      $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/ping")
+      $req.Method = "GET"
+      $req.Timeout = 2000
+      $req.ReadWriteTimeout = 2000
+      $req.KeepAlive = $false
+      $resp = $req.GetResponse()
+      $ok = ([int]$resp.StatusCode -eq 200)
+      $resp.Close()
+      return $ok
+    } catch {
+      return $false
+    }
+  }
+
   # --- Main watch/restart loop ------------------------------------------------
   $currentPid = $BotPid
   $restartTimes = [System.Collections.Generic.List[datetime]]::new()
   $consecutiveCrashes = 0
   $lastHeartbeat = [datetime]::MinValue
+  $lastLivenessCheck = [datetime]::MinValue
+  $consecutiveLivenessFailures = 0
 
   while ($true) {
     try {
@@ -187,6 +213,28 @@ try {
         $code = -1
         Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"
       } else {
+        # Process existence alone is not health. A Python startup once remained
+        # alive for minutes without binding :7002, so the old monitor watched a
+        # dead dashboard forever. After a 45s boot grace, three consecutive
+        # failed 10s liveness checks force a supervised restart.
+        $livenessNow = Get-Date
+        $forcedLivenessRestart = $false
+        if (($livenessNow - $lastLivenessCheck).TotalSeconds -ge 10) {
+          $lastLivenessCheck = $livenessNow
+          if (Test-BotPingQuick) {
+            $consecutiveLivenessFailures = 0
+          } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 45) {
+            $consecutiveLivenessFailures++
+            Write-RestartLog "liveness_failed	pid=$currentPid	count=$consecutiveLivenessFailures"
+            if ($consecutiveLivenessFailures -ge 3) {
+              $code = -2
+              Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process alive but /api/ping unavailable"
+              Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue
+              $forcedLivenessRestart = $true
+            }
+          }
+        }
+
         # Timed wait (2s) instead of blocking WaitForExit(). The blocking form
         # never returned while the bot was alive, so the watch loop never
         # iterated and the heartbeat block above went stale — causing
@@ -194,7 +242,9 @@ try {
         # a healthy monitor. With a 2s timeout, WaitForExit returns $true if
         # the bot died within 2s (fall through to crash/restart path) or
         # $false if still alive (continue the loop, refreshing heartbeat).
-        if ($p.WaitForExit(2000)) {
+        if ($forcedLivenessRestart) {
+          Start-Sleep -Milliseconds 500
+        } elseif ($p.WaitForExit(2000)) {
           $code = $p.ExitCode
         } else {
           # Bot still alive — re-loop so heartbeat + pid liveness refresh regularly.
@@ -246,6 +296,8 @@ try {
       $restartTimes.Add((Get-Date))
       Write-RestartLog "restarted	old_pid=$currentPid	new_pid=$newPid	code=$code	cooldown=${cooldown}s"
       $currentPid = $newPid
+      $lastLivenessCheck = [datetime]::MinValue
+      $consecutiveLivenessFailures = 0
       # Give the new process a moment to settle before we start watching it.
       Start-Sleep -Seconds 2
     } catch {

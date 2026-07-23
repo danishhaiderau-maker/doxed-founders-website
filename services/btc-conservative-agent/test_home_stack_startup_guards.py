@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 COMMON = (ROOT / "scripts" / "home-stack-common.ps1").read_text(encoding="utf-8")
 START = (ROOT / "scripts" / "start-home-bot.ps1").read_text(encoding="utf-8")
 HEALTH = (ROOT / "scripts" / "home-stack-health.ps1").read_text(encoding="utf-8")
+MONITOR = (ROOT / "scripts" / "bot-auto-restart.ps1").read_text(encoding="utf-8")
 BOT_HUNG = HEALTH.split("function Test-BotHung", 1)[1].split(
     "function Test-AnalyzerHung", 1
 )[0]
@@ -40,6 +41,17 @@ def main() -> None:
         "hung detection includes bound-but-unconnectable listeners",
         "Test-PortBound $BotPort" in BOT_HUNG
         and 'Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20' in BOT_HUNG,
+    )
+    check(
+        "auto-restart supervises liveness instead of process existence only",
+        "function Test-BotPingQuick" in MONITOR
+        and "consecutiveLivenessFailures -ge 3" in MONITOR
+        and "bot process alive but /api/ping unavailable" in MONITOR,
+    )
+    check(
+        "auto-restart never calls the blocking TCP provider",
+        "Stop-ListenPortFast $Port" in MONITOR
+        and "Get-NetTCPConnection -LocalPort $Port" not in MONITOR,
     )
     print("PASS: home stack one-owner startup guards")
 
