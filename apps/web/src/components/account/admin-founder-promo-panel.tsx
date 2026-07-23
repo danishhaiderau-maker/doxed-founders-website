@@ -17,8 +17,6 @@ type Props = {
 };
 
 const PROMO_KEY_FIELDS = [
-  { key: 'glm' as const, label: 'GLM 5.2 API key (ZhipuAI)', placeholder: 'xxx.xxx' },
-  { key: 'gemini' as const, label: 'Google Gemini API key', placeholder: 'AIza…' },
   { key: 'deepseek' as const, label: 'DeepSeek API key', placeholder: 'sk-…' },
 ];
 
@@ -115,8 +113,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
 
       {keysMissing && (
         <div className="mt-4 rounded-lg border border-amber-500/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-100">
-          Promo is ON but no platform API keys are saved yet. Add at least one key below — founders cannot use free AI
-          until keys are configured.
+          Founder Free is ON but no managed DeepSeek key is saved. Add the key below before enabling customer traffic.
         </div>
       )}
 
@@ -163,7 +160,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
 
       <div className="mt-5 border-t border-zinc-800 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs font-semibold text-white">Platform API keys (promo pool)</p>
+          <p className="text-xs font-semibold text-white">Founder-managed DeepSeek key</p>
           {hideKeyCards && (
             <span className="text-[11px] text-violet-300">
               Managed in Admin → AI Keys
@@ -187,7 +184,6 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
             <ul className="mt-3 space-y-3">
               {PROMO_KEY_FIELDS.map((field) => {
                 const configured = settings.credentialsStatus?.[field.key] ?? false;
-                const isGlm = field.key === 'glm';
                 return (
                   <li key={field.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -200,15 +196,6 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
                         {configured ? 'Saved' : 'Not set'}
                       </span>
                     </div>
-                    {isGlm && (
-                      <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
-                        This is your <span className="text-zinc-200">Z.ai API key</span> (not a Cursor key). Get it from{' '}
-                        <a href="https://z.ai" target="_blank" rel="noreferrer" className="text-violet-300 underline hover:text-violet-200">z.ai</a>
-                        {' '}— GLM 5.2 is accessed through Z.ai&apos;s OpenAI-compatible API at{' '}
-                        <code className="text-zinc-300">https://api.z.ai/api/coding/paas/v4</code>. A Cursor subscription does
-                        <span className="text-zinc-200"> not</span> provide external API access; you need a separate Z.ai key.
-                      </p>
-                    )}
                     <div className="mt-2 flex flex-wrap gap-2">
                       <input
                         type="password"

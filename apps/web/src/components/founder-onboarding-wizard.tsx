@@ -308,9 +308,9 @@ export function FounderOnboardingWizard({
                 <div className="space-y-3 px-4 py-3 text-xs leading-relaxed text-zinc-300">
                   <p>
                     <span className="font-semibold text-emerald-300">No paid IDE subscription needed.</span>{' '}
-                    You can start coding right now using the platform&apos;s free{' '}
-                    <span className="font-semibold text-emerald-300">GLM 5.2</span> brain — it handles code
-                    generation, specs, and chat without any IDE subscription.
+                    You can start coding right now with{' '}
+                    <span className="font-semibold text-emerald-300">Founder Free</span>. Managed DeepSeek V4
+                    Flash handles everyday chat, planning, and coding within the weekly allowance.
                   </p>
                   <p>
                     <span className="font-semibold text-white">What the IDE connection does:</span> It bridges
@@ -342,7 +342,8 @@ export function FounderOnboardingWizard({
                   <div className="mt-2 rounded-md border border-zinc-700/50 bg-black/20 px-3 py-2">
                     <p>
                       <span className="font-semibold text-violet-300">Founder IDE is recommended</span> — it ships
-                      as one download with Founder Node, AI chat, routing, and memory injection through
+                      as one application with its Founder Node relay embedded in the background, plus AI chat,
+                      routing, and memory injection through
                       the Founder OS AI Gateway. Cursor is also fully tested and battle-ready (use it if you have a
                       paid Cursor subscription). OpenHands and Claude Code are available too. Windsurf and VS Code are
                       in the pipeline — being tested now. You can start with Founder IDE today and switch later

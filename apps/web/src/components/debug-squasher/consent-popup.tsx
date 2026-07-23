@@ -97,7 +97,7 @@ export function ConsentPopup() {
 
         <p className="mb-5 text-sm leading-relaxed text-zinc-400">
           Each day at 06:00 UTC, Debug Squasher runs the full platform demo harness, sends any
-          failures to the AI Gateway (GLM 5.2 for reasoning, DeepSeek for fast triage), and produces
+          failures to Founder AI (DeepSeek V4 Pro for reasoning and V4 Flash for fast triage), and produces
           a diagnosis + suggested fix. You can disable it any time from{' '}
           <span className="text-zinc-200">Admin → Debug Squasher</span>.
         </p>

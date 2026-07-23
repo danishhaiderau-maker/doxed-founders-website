@@ -118,11 +118,9 @@ export function FounderOnboardingAiStack({
         <div className="rounded-lg border border-amber-500/35 bg-amber-950/25 p-3 text-xs text-amber-100">
           <strong className="text-amber-300">Founder Free is active.</strong> Managed AI is ready for questions,
           planning, and small edits.
-          {promo.daysRemaining != null && (
-            <span className="mt-1 block text-amber-200/80">
-              {promo.daysRemaining} days remaining. Add your own keys at any time.
-            </span>
-          )}
+          <span className="mt-1 block text-amber-200/80">
+            Your managed allowance renews weekly. Add Personal AI or Ollama at any time.
+          </span>
         </div>
       )}
 
@@ -138,12 +136,12 @@ export function FounderOnboardingAiStack({
         {llmConnected ? (
           <p className="mt-2 text-sm text-emerald-300">
             Connected
-            {promo?.hasLlm ? ' · platform promo' : ''}
+            {promo?.hasLlm ? ' · Founder Free managed DeepSeek' : ''}
             {defaultProvider !== 'RULE_BASED' ? ` · default: ${defaultProvider}` : ''}.
           </p>
         ) : promo?.eligible && promo?.hasLlm ? (
           <p className="mt-2 text-sm text-emerald-300">
-            Covered by AI promo — ask Brain a question to verify it works.
+            Founder Free managed DeepSeek is ready. Ask Founder AI a question to verify the route.
           </p>
         ) : (
           <div className="mt-3 space-y-3">

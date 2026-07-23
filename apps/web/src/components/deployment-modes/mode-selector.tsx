@@ -128,7 +128,7 @@ export function DeploymentModeSelector({
 }
 
 const SHARED_FEATURES = [
-  'AI Gateway (GLM 5.2 / DeepSeek routing)',
+  'Founder AI (managed DeepSeek, Personal AI, or Ollama)',
   'Real git history',
   'Real database (SQLite or Postgres)',
   'Real HTTPS URL',
