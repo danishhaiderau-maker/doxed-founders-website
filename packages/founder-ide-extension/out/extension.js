@@ -79,6 +79,7 @@ const verified_solution_memory_1 = require("./verified-solution-memory");
 const project_activity_1 = require("./project-activity");
 const personal_ai_profiles_1 = require("./personal-ai-profiles");
 const daily_quality_review_1 = require("./daily-quality-review");
+const founder_agent_mode_1 = require("./founder-agent-mode");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -292,7 +293,15 @@ function activate(context) {
         catch {
             await vscode.commands.executeCommand('workbench.action.chat.open');
         }
-    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', (tab) => founderSettings?.show(tab === 'ai' ? 'ai' : 'account')), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', (tab) => founderSettings?.show(tab === 'ai' ? 'ai' : 'account')), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.getWorkMode', () => (0, founder_agent_mode_1.readFounderWorkMode)()), vscode.commands.registerCommand('founderOs.setWorkMode', async (value) => {
+        const workMode = (0, founder_agent_mode_1.normalizeFounderWorkMode)(value);
+        (0, founder_agent_mode_1.writeFounderWorkMode)(workMode);
+        await vscode.workspace
+            .getConfiguration('founderOs')
+            .update('agentMode', workMode === 'team' ? 'team' : 'focus', vscode.ConfigurationTarget.Global);
+        founderHub?.refresh();
+        return workMode;
+    }), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
         await founderWorkspaceContext?.refresh(true);
         const summary = founderWorkspaceContext?.summary();
         void vscode.window.showInformationMessage(summary
@@ -354,16 +363,17 @@ function activate(context) {
     });
 }
 async function applyFounderNavigationDefaults(context) {
-    // V4 reopens the labeled Founder navigation once for existing installs that
-    // already completed V3 but persisted with the primary sidebar collapsed.
-    const migrationKey = 'founderOs.navigationV4Applied';
+    // V5 makes the installed default Founder-first without removing the
+    // inspectable editor tools. Alt reveals the native menu, while Build and
+    // ship can restore the advanced IDE rail at any time.
+    const migrationKey = 'founderOs.navigationV5Applied';
     if (context.globalState.get(migrationKey, false))
         return;
     const workbench = vscode.workspace.getConfiguration('workbench');
-    const location = workbench.get('activityBar.location', 'default');
-    if (location === 'default') {
-        await workbench.update('activityBar.location', 'hidden', vscode.ConfigurationTarget.Global);
-    }
+    await workbench.update('activityBar.location', 'hidden', vscode.ConfigurationTarget.Global);
+    await vscode.workspace
+        .getConfiguration('window')
+        .update('menuBarVisibility', 'toggle', vscode.ConfigurationTarget.Global);
     await vscode.workspace
         .getConfiguration('founderOs')
         .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
