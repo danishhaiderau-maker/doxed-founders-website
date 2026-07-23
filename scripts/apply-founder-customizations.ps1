@@ -299,6 +299,31 @@ Set-FounderSourceLiteral `
     "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
     "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
 
+# Void pins Electron 29.4.0 while this VS Code snapshot's checksum inventory
+# contains only the later upstream Electron release. Keep checksum validation
+# enabled and add the exact official v29.4.0 Windows x64 entry used by this
+# checkout. A pin change must be reviewed together with its new official hash.
+$npmrc = Join-Path $VscodiumCheckout ".npmrc"
+$electronChecksums = Join-Path $VscodiumCheckout "build\checksums\electron.txt"
+$electronPin = 'target="29.4.0"'
+$electronChecksumLine = "e4ef85aa3608221f8a3e011c1b1c2d2d36093ad19bda12d16b3816929fb6c99b *electron-v29.4.0-win32-x64.zip"
+if (-not (Test-Path $npmrc) -or -not (Test-Path $electronChecksums)) {
+    throw "Pinned Electron metadata is missing from the upstream checkout"
+}
+$npmrcContent = Get-Content $npmrc -Raw
+if (-not $npmrcContent.Contains($electronPin)) {
+    throw "Electron pin changed; review the official checksum before packaging"
+}
+$electronChecksumContent = Get-Content $electronChecksums -Raw
+if (-not $electronChecksumContent.Contains($electronChecksumLine)) {
+    $separator = if ($electronChecksumContent.EndsWith("`n")) { "" } else { "`r`n" }
+    $electronChecksumContent += "$separator$electronChecksumLine`r`n"
+    [System.IO.File]::WriteAllText($electronChecksums, $electronChecksumContent, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "[apply-founder]   checksum Electron v29.4.0 Windows x64" -ForegroundColor Cyan
+} else {
+    Write-Host "[apply-founder]   reapply  Electron v29.4.0 Windows x64 checksum" -ForegroundColor DarkCyan
+}
+
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
 try {
