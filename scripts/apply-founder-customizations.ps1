@@ -285,6 +285,20 @@ $dialogHandler = "src\vs\workbench\electron-sandbox\parts\dialogs\dialogHandler.
 Set-FounderSourceLiteral $dialogHandler "VSCode Version: {0}" "Editor Core Version: {0}"
 Set-FounderSourceLiteral $dialogHandler "Void Version: {1}" "Founder IDE Version: {1}"
 
+# Electron's generated Process declaration narrows `off` to its own `loaded`
+# event, hiding Node's generic EventEmitter overload during the pinned VS Code
+# compile. The runtime is still Node's Process EventEmitter, so keep behavior
+# unchanged and make only the two cleanup calls explicit.
+$parcelWatcher = "src\vs\platform\files\node\watcher\parcel\parcelWatcher.ts"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "(process as NodeJS.Process).off('uncaughtException', onUncaughtException);" `
+    "(process as NodeJS.EventEmitter).off('uncaughtException', onUncaughtException);"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
+    "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
+
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
 try {

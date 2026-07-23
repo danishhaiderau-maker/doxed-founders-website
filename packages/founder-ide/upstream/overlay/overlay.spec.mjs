@@ -218,6 +218,13 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(applyScript, /workspacePath: this\._workspaceContextService/);
   });
 
+  it('keeps the pinned Electron and Node process typings build-compatible', () => {
+    const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
+    assert.match(applyScript, /parcelWatcher\.ts/);
+    assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('uncaughtException'/);
+    assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('unhandledRejection'/);
+  });
+
   it('owns every visible upstream brand boundary and disables the legacy updater', () => {
     const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
     for (const founderLabel of [
