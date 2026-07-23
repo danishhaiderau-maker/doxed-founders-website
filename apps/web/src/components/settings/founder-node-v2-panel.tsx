@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 import { founderNodeNeedsUpdate, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
-/** Founder Node desktop tray — single instance, pairing dialog, hourly updates */
+/** Founder IDE embedded relay — one app, one identity, automatic background sync. */
 function formatLastSeen(iso: string | null | undefined): string {
   if (!iso) return 'never (no heartbeat yet)';
   const ms = Date.now() - new Date(iso).getTime();
@@ -102,8 +102,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
   if (!isFounderNodeMode && !v2?.paired) {
     return embedded ? (
       <p className="text-sm text-zinc-500">
-        Enable <strong className="text-zinc-300">Founder Vault (Founder Node)</strong> in Step 2 above, then pair
-        your desktop app.
+        Enable <strong className="text-zinc-300">Founder Vault</strong> above, then connect Founder IDE.
       </p>
     ) : null;
   }
@@ -112,7 +111,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
     <>
       {!embedded && (
         <>
-          <h2 className="text-lg font-semibold text-white">Founder Node v2 (Step 4)</h2>
+          <h2 className="text-lg font-semibold text-white">Founder IDE connection</h2>
           <p className="mt-1 text-sm text-zinc-500">
             Local vector index, bidirectional sync, and on-device agents — cloud pushes goals; your vault stays on the desktop.
           </p>
@@ -125,7 +124,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             Node paired{v2.nodeLabel ? ` · ${v2.nodeLabel}` : ''}
           </span>
         ) : (
-          <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-amber-100">Pair Founder Node first</span>
+          <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-amber-100">Connect Founder IDE first</span>
         )}
         {v2?.online ? (
           <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-emerald-200">● online</span>
@@ -149,24 +148,24 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to {FOUNDER_NODE_MIN_VERSION_LABEL}</p>
+          <p className="font-medium">Update Founder IDE</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing one-click Windows firewall fix, hourly auto-updates, and Linux downloads.
-            Tray menu → <strong className="text-cyan-200">Check for updates</strong> (or download from Step 1), install, then leave the tray app open.
+            The embedded relay{v2.appVersion ? ` (v${v2.appVersion})` : ''} predates the current connection contract ({FOUNDER_NODE_MIN_VERSION_LABEL}).
+            Install the latest Founder IDE build; the relay updates with the IDE.
           </p>
         </div>
       )}
 
       {!v2?.paired && !embedded && (
         <p className="mt-4 text-sm text-zinc-400">
-          Enable <strong>Founder Vault (Founder Node)</strong> in Step 2 and install the tray app from Step 1.
+          Enable <strong>Founder Vault</strong>, install Founder IDE, and connect this computer.
         </p>
       )}
 
       {!v2?.paired && (
         <p className="mt-3 text-xs text-amber-200/90">
           Complete <strong className="text-amber-100">Step 2</strong> first — generate a pairing code and enter it in the
-          Founder Node tray app on this PC.
+          Founder IDE on this PC.
         </p>
       )}
 
@@ -175,9 +174,9 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
           <p className="font-semibold text-amber-200">Paired on Founder OS, but desktop app is offline</p>
           <p className="mt-2 text-xs leading-relaxed text-zinc-300">
             <strong className="text-white">Paired</strong> means this browser account is linked to your machine (one-time
-            setup). <strong className="text-white">Online</strong> means the Founder Node tray app is running on your PC
-            and sending a heartbeat to Founder OS — about every 45 seconds when v0.5.4+ is running. The website cannot index your vault by
-            itself; <strong className="text-white">Rebuild vector index</strong> is disabled until the tray app is online.
+            setup). <strong className="text-white">Online</strong> means Founder IDE's embedded relay is running on your PC
+            and sending a heartbeat to Founder OS. The website cannot index your vault by
+            itself; <strong className="text-white">Rebuild vector index</strong> is disabled until Founder IDE is online.
           </p>
           <p className="mt-2 text-[11px] text-zinc-500">
             Last heartbeat from your node: <span className="text-zinc-400">{formatLastSeen(v2.lastSeenAt)}</span>
@@ -196,17 +195,13 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             </p>
             <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs leading-relaxed text-zinc-300">
               <li>
-                Open <strong className="text-white">Founder Node</strong> from the Windows Start Menu (search “Founder
-                Node”). Do not use <strong className="text-white">Quit</strong> on the tray menu — that stops heartbeats.
+                Open <strong className="text-white">Founder IDE</strong> from the Windows Start Menu.
               </li>
               <li>
-                Find the tray icon near the clock (bottom-right). If you do not see it, click the{' '}
-                <strong className="text-white">^</strong> arrow to show hidden icons.
+                Open Founder settings and confirm this computer is connected to the same account.
               </li>
               <li>
-                Right-click the Founder Node tray icon → <strong className="text-white">Sync now</strong>. Wait until the
-                badge here shows <strong className="text-emerald-300">● online</strong> (within ~3 minutes of the last
-                heartbeat).
+                Keep Founder IDE open until this badge shows <strong className="text-emerald-300">● online</strong>.
               </li>
               <li>
                 Then click <strong className="text-white">Rebuild vector index</strong> once (first run can take 30–60s).
@@ -216,15 +211,12 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
           <div className="mt-3 space-y-1.5 text-[11px] text-zinc-500">
             <p>
-              <strong className="text-zinc-400">Closing the pairing popup is OK.</strong> “Pair this machine” is only for
-              entering your code. After pairing, only the tray app needs to stay open — not the popup window.
+              <strong className="text-zinc-400">Pairing is one time.</strong> After approval, Founder IDE starts the
+              encrypted background relay automatically.
             </p>
             <p>
-              <strong className="text-zinc-400">Still offline?</strong> On Windows, the tray app should pop up{' '}
-              <strong className="text-zinc-300">Allow Founder Node</strong> if the firewall blocked sync — or use tray →{' '}
-              <strong className="text-zinc-300">Allow through Windows Firewall</strong>. Confirm the same Founder OS
-              account, Step 2 = <strong className="text-zinc-300">Founder Vault (Founder Node)</strong>, then tray →{' '}
-              <strong className="text-zinc-300">Sync now</strong>.
+              <strong className="text-zinc-400">Still offline?</strong> Confirm the same Founder account, reopen Founder
+              IDE, then review this computer under Founder settings. Windows may ask once for firewall permission.
             </p>
           </div>
         </div>
@@ -243,7 +235,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             <p className="text-sm font-medium text-cyan-100">After pairing — do this next</p>
             <ol className="mt-2 space-y-1.5 text-xs text-zinc-400">
               <li className={v2.online ? 'text-emerald-300' : 'text-amber-200'}>
-                {v2.online ? '✓' : '○'} Keep Founder Node tray app open on your desktop (popup can close; tray stays)
+                {v2.online ? '✓' : '○'} Keep Founder IDE open while local work or remote control is active
               </li>
               <li className={(v2.vectorChunks ?? 0) > 0 ? 'text-emerald-300' : 'text-zinc-300'}>
                 {(v2.vectorChunks ?? 0) > 0 ? '✓' : '○'} Click <strong className="font-medium">Rebuild vector index</strong>{' '}
@@ -260,7 +252,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
           {!v2.online && (
             <p className="text-[11px] text-zinc-500">
-              Buttons below unlock when the tray app is <strong className="text-zinc-400">● online</strong>.
+              Buttons below unlock when Founder IDE is <strong className="text-zinc-400">● online</strong>.
             </p>
           )}
 
@@ -271,7 +263,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
               title={
                 v2.online
                   ? 'Queue index rebuild on your desktop (vault-index agent)'
-                  : 'Start Founder Node tray app and wait for ● online'
+                  : 'Open Founder IDE and wait for ● online'
               }
               onClick={() => runAgent('vault-index')}
               className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -281,7 +273,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             <button
               type="button"
               disabled={Boolean(busy) || !v2.online}
-              title={v2.online ? undefined : 'Requires desktop app online'}
+              title={v2.online ? undefined : 'Requires Founder IDE online'}
               onClick={() => runAgent('goal-align')}
               className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -292,7 +284,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
               disabled={Boolean(busy) || !v2.online || !settings.currentGoalFocus?.trim()}
               title={
                 !v2.online
-                  ? 'Requires desktop app online'
+                  ? 'Requires Founder IDE online'
                   : !settings.currentGoalFocus?.trim()
                     ? 'Set current goal focus in Step 3 first'
                     : undefined
@@ -354,9 +346,9 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             <div className="rounded-lg border border-red-500/25 bg-red-950/20 p-3 text-xs text-zinc-400">
               <p className="font-medium text-red-200">Founder Node did not respond in time</p>
               <ul className="mt-2 list-disc space-y-1 pl-4">
-                <li>Confirm the tray app shows connected (not just “paired” in the browser)</li>
-                <li>Restart Founder Node, then try Rebuild vector index again</li>
-                <li>On Windows, allow Founder Node through firewall if prompted</li>
+                <li>Confirm Founder IDE shows this computer as connected</li>
+                <li>Restart Founder IDE, then try Rebuild vector index again</li>
+                <li>On Windows, allow Founder IDE through the firewall if prompted</li>
                 <li>First index build can take 30–60s — keep the app in the foreground</li>
               </ul>
             </div>

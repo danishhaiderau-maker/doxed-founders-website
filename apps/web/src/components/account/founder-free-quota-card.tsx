@@ -24,6 +24,11 @@ export function FounderFreeQuotaCard({ status }: Props) {
     ? Math.min(100, Math.max(0, Math.round((status.tokensUsed / status.tokenCap) * 100)))
     : 0;
   const state = quotaState(status);
+  const planLabel = status?.plan === 'builder'
+    ? 'Builder'
+    : status?.plan === 'team'
+      ? status.teamName ?? 'Team'
+      : 'Free';
 
   return (
     <section className="border-b border-zinc-800 pb-6">
@@ -33,10 +38,10 @@ export function FounderFreeQuotaCard({ status }: Props) {
             <Sparkles className="h-4 w-4" aria-hidden />
           </span>
           <div>
-            <h3 className="font-semibold text-white">Founder Free</h3>
+            <h3 className="font-semibold text-white">Founder {planLabel} usage</h3>
             <p className="mt-1 max-w-xl text-sm leading-6 text-zinc-400">
-              A managed quota for questions, planning, code explanations, and small edits. Longer autonomous builds,
-              repeated test loops, and parallel agents use paid or personal capacity.
+              Managed DeepSeek usage is measured in weighted units. Personal provider profiles and local Ollama
+              remain outside this allowance.
             </p>
           </div>
         </div>
@@ -47,12 +52,17 @@ export function FounderFreeQuotaCard({ status }: Props) {
         <div className="mt-5">
           <div className="flex items-center justify-between gap-3 text-xs text-zinc-400">
             <span>{usedPercent}% used</span>
-            <span>{status.daysRemaining != null ? `${status.daysRemaining} days remaining` : 'No expiry shown'}</span>
+            <span>{status.expiresAt ? `Renews ${new Date(status.expiresAt).toLocaleDateString()}` : 'Recurring weekly allowance'}</span>
           </div>
           <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-800" aria-label={`${usedPercent}% of free quota used`}>
             <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${usedPercent}%` }} />
           </div>
           {!status.eligible && status.message && <p className="mt-3 text-xs text-amber-200/90">{status.message}</p>}
+          {status.reservedWeightedUnits > 0 && (
+            <p className="mt-2 text-xs text-zinc-500">
+              {status.reservedWeightedUnits.toLocaleString()} units are reserved by work currently running.
+            </p>
+          )}
         </div>
       )}
 

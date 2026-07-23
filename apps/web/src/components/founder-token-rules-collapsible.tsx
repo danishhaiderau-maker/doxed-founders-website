@@ -18,9 +18,9 @@ export function FounderTokenRulesCollapsible() {
           <p className="mt-1 text-xs text-emerald-200/70">Activate with your verified X account</p>
           <ul className="mt-3 space-y-1.5 text-xs text-zinc-300">
             <li>Managed quota for questions, planning, and small edits</li>
-            <li>30-day activation window</li>
-            <li>Clear quota percentage and expiry in Founder IDE and your account</li>
-            <li>Builder activity can increase the daily fair-use allowance</li>
+            <li>200,000 weighted units in a recurring seven-day window</li>
+            <li>DeepSeek V4 Flash for managed everyday work</li>
+            <li>Clear used, reserved, remaining, and renewal values</li>
             <li>Your own provider keys remain available at any time</li>
           </ul>
         </div>
@@ -42,7 +42,7 @@ export function FounderTokenRulesCollapsible() {
       </div>
 
       <p className="mt-4 border-t border-zinc-700/60 pt-3 text-center text-xs text-zinc-400">
-        Verify X to activate Founder Free, or use your own provider or local model without waiting.
+        Sign in to activate Founder Free, or use your own provider or local model without waiting.
       </p>
     </details>
   );

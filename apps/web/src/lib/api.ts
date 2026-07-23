@@ -3852,6 +3852,16 @@ export type FounderPromoPlatformSettings = {
 };
 
 export type FounderPromoUserStatus = {
+  plan: 'free' | 'builder' | 'team';
+  priceCentsMonthly: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  teamRole: 'owner' | 'admin' | 'member' | null;
+  coordination: boolean;
+  remoteControl: boolean;
+  rolesAndAudit: boolean;
+  unit: 'weighted_tokens';
+  weightsVersion: 'founder-wtu-v1';
   enabled: boolean;
   eligible: boolean;
   founderRegistered: boolean;
@@ -3860,11 +3870,63 @@ export type FounderPromoUserStatus = {
   daysRemaining: number | null;
   tokenCap: number;
   tokensUsed: number;
+  reservedWeightedUnits: number;
   tokensRemaining: number;
   exhausted: boolean;
   message: string | null;
   providers: string[];
 };
+
+export type FounderPlanCatalog = {
+  currency: 'usd';
+  plans: Array<{
+    id: 'free' | 'builder' | 'team';
+    priceCentsMonthly: number | null;
+    weeklyWeightedUnits: number | null;
+    checkoutAvailable: boolean;
+    message?: string;
+  }>;
+};
+
+export type FounderPlanEntitlement = {
+  plan: 'free' | 'builder' | 'team';
+  quotaOwnerKey: string;
+  weeklyWeightedUnitCap: number;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  priceCentsMonthly: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  teamRole: 'owner' | 'admin' | 'member' | null;
+  coordination: boolean;
+  remoteControl: boolean;
+  rolesAndAudit: boolean;
+  requiresXVerification: boolean;
+};
+
+export function fetchFounderPlanCatalog() {
+  return apiFetch<FounderPlanCatalog>('/founder-plans');
+}
+
+export function fetchFounderPlanEntitlement(token: string) {
+  return apiFetch<FounderPlanEntitlement>('/founder-plans/me', undefined, token);
+}
+
+export function createFounderBuilderCheckout(token: string) {
+  return apiFetch<{ url: string; sessionId: string }>(
+    '/founder-plans/builder/checkout',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function createFounderBillingPortal(token: string) {
+  return apiFetch<{ url: string }>(
+    '/founder-plans/portal',
+    { method: 'POST' },
+    token,
+  );
+}
 
 export function fetchFounderPromoStatus(token: string) {
   return apiFetch<FounderPromoUserStatus>('/account/founder-promo', undefined, token);

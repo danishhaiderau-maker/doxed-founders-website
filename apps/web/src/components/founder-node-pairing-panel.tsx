@@ -8,7 +8,6 @@ import {
   type FounderNodeStatusRow,
 } from '@/lib/api';
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
-import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 type Props = {
   accessToken: string;
@@ -58,7 +57,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         setMsg(
           online
             ? 'Vault connected on your desktop. The pairing code stays hidden until you disconnect or pair another device.'
-            : 'Account linked in the cloud, but your PC is not heartbeating. Open Founder Node from the Start Menu (tray icon), click Sync now, or generate a new code below and enter it in the tray app. Your old desktop token only stops working after you pair again with a new code — generating a code alone does not break the link.',
+            : 'Account linked in the cloud, but your PC is not heartbeating. Open Founder IDE, review this computer connection, or generate a new code below. Your old device token only stops working after a new pairing succeeds.',
         );
       }
       setErr(null);
@@ -87,7 +86,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
       setMsg(
         target === 'mobile'
           ? `Enter this code in the Doxxed Crypto Android app (Settings → vault) within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}).`
-          : `Enter this one-time code in Founder Node on desktop within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}). After pairing succeeds, the code is cleared automatically.`,
+          : `Enter this one-time code in Founder IDE within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}). After pairing succeeds, the code is cleared automatically.`,
       );
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not create pairing code');
@@ -116,21 +115,21 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
 
   return (
     <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-4">
-      <h4 className="text-sm font-semibold text-cyan-100">Founder Node pairing</h4>
+      <h4 className="text-sm font-semibold text-cyan-100">Connect Founder IDE</h4>
       <p className="mt-1 text-xs text-cyan-100/70">
-        Install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL} on your PC. Your vault stays local — Founder OS only receives tiny metadata
+        Install Founder IDE on your PC. Its embedded Founder Node relay keeps your vault local while Founder OS receives only bounded metadata
         snapshots.
       </p>
 
       {isPaired && !showNewPairing && anyOnline && (
         <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
-          ✓ Desktop vault connected — tray app must keep running (icon near the clock).
+          ✓ Desktop vault connected through Founder IDE.
         </div>
       )}
 
       {isPaired && !showNewPairing && !anyOnline && (
         <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
-          Paired in cloud, but desktop offline — generate a new code below or open the tray app.
+          Paired in cloud, but desktop offline — generate a new code below or open Founder IDE.
         </div>
       )}
 
@@ -172,7 +171,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
 
       {pairingCode && pairingTarget === 'desktop' && (
         <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
-          <p className="text-xs text-zinc-400">Paste in Founder Node tray app (desktop)</p>
+          <p className="text-xs text-zinc-400">Enter in Founder IDE on this computer</p>
           <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">{pairingCode}</p>
           {expiresAt && (
             <p className="mt-1 text-[10px] text-zinc-500">
@@ -228,8 +227,8 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                   <span className="ml-2 text-zinc-500">
                     — last heartbeat {formatLastSeen(node.lastSeenAt)}
                     {node.lastSeenAt
-                      ? ' · tray lost its link — generate a new code above and paste in Founder Node'
-                      : ' · start Founder Node tray app'}
+                      ? ' · device lost its link — generate a new code above and reconnect Founder IDE'
+                      : ' · open Founder IDE'}
                   </span>
                 )}
                 {node.ramGb != null && <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>}
@@ -283,10 +282,9 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
 
         <CollapsibleInfo title="How to pair" hint="3 steps">
           <ol className="list-inside list-decimal space-y-1 text-xs text-zinc-300">
-            <li>Download and open Founder Node (tray app).</li>
+            <li>Download and open Founder IDE.</li>
             <li>
-              Generate a pairing code above and paste it once into the <strong>Founder Node tray popup</strong>{' '}
-              (Pair this machine — not a browser tab).
+              Generate a pairing code above and enter it once in <strong>Founder IDE</strong>.
             </li>
             <li>When connected, this code disappears — you will not re-enter it every 15 minutes.</li>
           </ol>
@@ -312,20 +310,18 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
           <CollapsibleInfo title="Paired on website but desktop not syncing" hint="Troubleshooting" accent="emerald">
             <p className="text-xs leading-relaxed text-zinc-300">
               The cloud only knows your machine was linked before. Sync stays offline until the{' '}
-              <strong className="text-white">Founder Node tray app</strong> is open and heartbeating (~every 60s).
+              <strong className="text-white">Founder IDE</strong> is open and its embedded relay is heartbeating.
             </p>
             <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-zinc-300">
               <li>
-                Open <strong className="text-white">Founder Node</strong> from the Start Menu — quit extra tray copies
-                if you see more than one icon.
+                Open <strong className="text-white">Founder IDE</strong> from the Start Menu.
               </li>
               <li>
                 Click <strong className="text-white">Pair another desktop device</strong> above, generate a{' '}
-                <strong className="text-white">new</strong> code, and paste it in the tray app.
+                <strong className="text-white">new</strong> code, and enter it in Founder IDE.
               </li>
               <li>
-                Right-click the tray icon → <strong className="text-white">Sync now</strong>, then wait for{' '}
-                <strong className="text-emerald-300">● online</strong> in status.
+                Keep Founder IDE open, then wait for <strong className="text-emerald-300">● online</strong> in status.
               </li>
             </ol>
           </CollapsibleInfo>

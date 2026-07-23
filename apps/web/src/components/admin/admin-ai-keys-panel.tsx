@@ -45,10 +45,10 @@ const GROUPS: ProviderGroup[] = [
   },
   {
     id: 'promo',
-    label: 'Founder promo pool',
+    label: 'Founder managed AI',
     blurb:
-      'Keys used for Founder Free managed quota. Gateway calls use durable platform_managed reservations; legacy copilot calls use platform_promo.',
-    keys: ['glm', 'gemini', 'deepseek'],
+      'DeepSeek powers Founder Free, Builder, and Team managed inference through durable reservations. Other providers are BYOK only.',
+    keys: ['deepseek'],
   },
 ];
 
@@ -75,31 +75,29 @@ const KEY_META: Record<
     ],
   },
   glm: {
-    label: 'GLM 5.2 (ZhipuAI) — promo',
+    label: 'GLM (legacy managed key — disabled)',
     placeholder: 'xxx.xxx',
     whereUsed: [
       'WallService.runSummarizerLlm — the Chat Summarizer agent that summarizes + sentiment-analyzes each project wall (getDecryptedPlatformGlmKey).',
-      'BuilderService copilot_forced_promo path + Quick Build — GLM is the default promo provider for eligible founders (resolvePromoApiKey).',
-      'Streaming Copilot promo path (completionWithProviderStream for glm).',
-      'Only served to eligible Founder Free users; billed as platform_promo.',
+      'Retained only for migration and secret rotation. Managed V1 routing does not select GLM.',
+      'Founders can connect GLM through a personal BYOK profile in Founder IDE.',
     ],
   },
   gemini: {
-    label: 'Google Gemini — promo',
+    label: 'Google Gemini (legacy managed key — disabled)',
     placeholder: 'AIza…',
     whereUsed: [
-      'BuilderService copilot_forced_promo fallback + Quick Build — Gemini is tried after GLM/DeepSeek in the promo provider order (resolvePromoApiKey for gemini).',
-      'Streaming Copilot promo path (completionWithProviderStream for gemini).',
-      'Only served to eligible Founder Free users; billed as platform_promo.',
+      'Retained only for migration and secret rotation. Managed V1 routing does not select Gemini.',
+      'Founders can connect Gemini through a personal BYOK profile in Founder IDE.',
     ],
   },
   deepseek: {
-    label: 'DeepSeek — promo',
+    label: 'Managed DeepSeek',
     placeholder: 'sk-…',
     whereUsed: [
-      'BuilderService copilot_forced_promo fallback + Quick Build — DeepSeek is tried in the promo provider order (resolvePromoApiKey for deepseek).',
-      'Streaming Copilot promo path (completionWithProviderStream for deepseek).',
-      'Distinct from the Platform Brain key: this one is only spent on eligible promo users (platform_promo), not the always-on fallback (platform_brain).',
+      'Founder Free and paid managed inference, with durable platform-managed reservations.',
+      'Founder Auto and Fast route to DeepSeek V4 Flash; explicit Code and Reasoning route to V4 Pro.',
+      'Personal keys and local Ollama never consume this managed allowance.',
     ],
   },
 };

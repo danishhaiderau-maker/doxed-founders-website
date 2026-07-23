@@ -1,35 +1,29 @@
-'use client';
-
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { fetchPublicFounderPromo } from '@/lib/api';
-
-type Promo = { enabled: boolean; message: string | null; windowDays?: number };
 
 const WHY_BULLETS = [
   {
-    icon: '🤖',
-    text: 'Platform-funded AI tokens — we cover inference so you build.',
+    icon: '01',
+    text: 'Founder Free includes 200K managed weighted units every week.',
   },
   {
-    icon: '🚀',
-    text: '1 year to ship your token — use the free tier, apply for full access when ready.',
+    icon: '02',
+    text: 'DeepSeek V4 Flash handles everyday work; Pro is reserved for explicit hard tasks.',
   },
   {
-    icon: '🎥',
-    text: 'Priority access for founders who submit a video walkthrough + active GitHub.',
+    icon: '03',
+    text: 'Project memory and coordination keep agents aware of verified prior work.',
   },
   {
-    icon: '🔑',
-    text: 'Bring your own API keys — or use platform credits. Your choice.',
+    icon: '04',
+    text: 'Add unlimited personal AI profiles with your own key, model, and base URL.',
   },
   {
-    icon: '🛡️',
-    text: 'Only doxxed founders — show your face, earn real trust.',
+    icon: '05',
+    text: 'Run Ollama locally for private, offline-capable work without managed quota.',
   },
   {
-    icon: '💻',
-    text: 'Your PC does the heavy lifting — cloud AI is optional glue.',
+    icon: '06',
+    text: 'Every managed task shows the route, usage, cache result, and measured savings.',
   },
 ];
 
@@ -55,17 +49,6 @@ const PATHS = [
 ];
 
 export function LandingFounderOsPromo() {
-  const [promo, setPromo] = useState<Promo | null>(null);
-
-  useEffect(() => {
-    fetchPublicFounderPromo()
-      .then(setPromo)
-      .catch(() => setPromo(null));
-  }, []);
-
-  const offerDays = promo?.windowDays && promo.windowDays > 0 ? promo.windowDays : 90;
-  const offerActive = promo?.enabled === true;
-
   return (
     <section className="overflow-hidden rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/30 via-[#0a0a12] to-black shadow-[0_0_60px_rgba(139,92,246,0.08)]">
       {/* Headline + pitch */}
@@ -75,13 +58,12 @@ export function LandingFounderOsPromo() {
           Your laptop is the compute.
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-300 sm:text-base">
-          Stop paying for cloud AI before you know your idea is worth building.
+          A coordinated workspace that spends context on the work that matters.
         </p>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-          Platform-funded AI tokens let you build without burning your own API keys. Bring your idea,
-          prototype fast with local compute, and use our cloud inference credits when you need them.
-          Only doxxed founders get full access — show your face, ship in public, and earn priority.
-          You have one year to launch your token once verified.
+          Start with a weekly Founder Free allowance, bring any OpenAI-compatible key, or work
+          privately through Ollama. Founder OS keeps project memory, agents, receipts, and local
+          infrastructure in one installed application.
         </p>
       </div>
 
@@ -136,47 +118,27 @@ export function LandingFounderOsPromo() {
 
       {/* Two offers */}
       <div className="grid gap-3 px-4 py-5 sm:px-6 lg:grid-cols-2 lg:px-8">
-        {/* GLM 5.2 limited-time offer */}
-        {offerActive ? (
-          <div className="rounded-xl border border-amber-500/40 bg-gradient-to-br from-amber-950/30 via-black/40 to-black p-4">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-300">
-                Limited-Time Offer
-              </p>
-              <span className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[9px] font-bold uppercase text-amber-200">
-                {offerDays} days free
-              </span>
-            </div>
-            <p className="mt-2 text-base font-bold text-white">GLM 5.2 — Free for {offerDays} Days</p>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-amber-100/80">
-              {promo?.message ??
-                'Every new account receives three months of complimentary access to GLM 5.2. Experiment, build, and validate your ideas before deciding what AI stack to invest in.'}
+        <div className="rounded-xl border border-cyan-500/35 bg-cyan-950/15 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-300">
+              Founder Free
             </p>
-            <Link
-              href="/founder-den?onboard=sovereign"
-              className="mt-3 inline-flex rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-1.5 text-xs font-bold text-amber-200 transition hover:bg-amber-500/20"
-            >
-              Start Founder OS →
-            </Link>
+            <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[9px] font-bold uppercase text-cyan-100">
+              200K weekly
+            </span>
           </div>
-        ) : (
-          <div className="rounded-xl border border-dashed border-zinc-700/60 bg-black/30 p-4">
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">
-              Limited-Time Offer
-            </p>
-            <p className="mt-2 text-base font-bold text-zinc-300">GLM 5.2 — Free for {offerDays} Days</p>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-zinc-500">
-              Every new account receives complimentary access to GLM 5.2. Experiment, build, and validate
-              your ideas before deciding what AI stack to invest in.
-            </p>
-            <Link
-              href="/founder-den?onboard=sovereign"
-              className="mt-3 inline-flex rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-bold text-violet-200 transition hover:bg-violet-500/20"
-            >
-              Start Founder OS →
-            </Link>
-          </div>
-        )}
+          <p className="mt-2 text-base font-bold text-white">Build with managed DeepSeek</p>
+          <p className="mt-1.5 text-[12px] leading-relaxed text-zinc-300">
+            Use Founder-managed DeepSeek V4 Flash for everyday work. Personal provider profiles
+            and local Ollama remain available without consuming the managed allowance.
+          </p>
+          <Link
+            href="/founder-den?onboard=sovereign"
+            className="mt-3 inline-flex rounded-lg border border-cyan-500/45 bg-cyan-500/10 px-3 py-1.5 text-xs font-bold text-cyan-100 transition hover:bg-cyan-500/20"
+          >
+            Open Founder OS →
+          </Link>
+        </div>
 
         {/* Hire an AI Agent — Free (DDollar) */}
         <div className="rounded-xl border border-emerald-500/40 bg-gradient-to-br from-emerald-950/30 via-black/40 to-black p-4">

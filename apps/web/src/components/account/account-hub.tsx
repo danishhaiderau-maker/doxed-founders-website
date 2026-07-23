@@ -25,12 +25,17 @@ import { AccountAgentTradeExports } from '@/components/account/account-agent-tra
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import { FounderFreeQuotaCard } from '@/components/account/founder-free-quota-card';
+import { FounderPlanSummary } from '@/components/account/founder-plan-summary';
 import {
   AccountActivityItem,
   AccountOverview,
   fetchAccountActivity,
   fetchAccountOverview,
   fetchFounderPromoStatus,
+  fetchFounderPlanCatalog,
+  fetchFounderPlanEntitlement,
+  FounderPlanCatalog,
+  FounderPlanEntitlement,
   FounderPromoUserStatus,
 } from '@/lib/api';
 
@@ -68,6 +73,8 @@ export function AccountHub({
   const [overview, setOverview] = useState<AccountOverview | null>(null);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
   const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
+  const [planCatalog, setPlanCatalog] = useState<FounderPlanCatalog | null>(null);
+  const [planEntitlement, setPlanEntitlement] = useState<FounderPlanEntitlement | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unreadMessages = useUnreadMessageCount(token);
 
@@ -75,14 +82,18 @@ export function AccountHub({
     if (!token) return;
     setError(null);
     try {
-      const [ov, act, promo] = await Promise.all([
+      const [ov, act, promo, catalog, entitlement] = await Promise.all([
         fetchAccountOverview(token),
         fetchAccountActivity(token),
         fetchFounderPromoStatus(token).catch(() => null),
+        fetchFounderPlanCatalog().catch(() => null),
+        fetchFounderPlanEntitlement(token).catch(() => null),
       ]);
       setOverview(ov);
       setActivity(act);
       setPromoStatus(promo);
+      setPlanCatalog(catalog);
+      setPlanEntitlement(entitlement);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
     }
@@ -355,6 +366,11 @@ export function AccountHub({
                 </Link>
               </div>
             </div>
+            <FounderPlanSummary
+              token={token}
+              catalog={planCatalog}
+              entitlement={planEntitlement}
+            />
             <FounderFreeQuotaCard status={promoStatus} />
             <TopUpPanel accessToken={token} />
           </section>

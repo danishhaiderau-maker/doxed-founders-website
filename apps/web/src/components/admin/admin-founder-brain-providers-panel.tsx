@@ -18,11 +18,6 @@ type Props = {
   token: string;
 };
 
-const PROVIDER_LABELS: Record<'deepseek' | 'glm', string> = {
-  deepseek: 'DeepSeek',
-  glm: 'GLM z.ai',
-};
-
 function KeyStatusRow({
   label,
   status,
@@ -47,7 +42,7 @@ function KeyStatusRow({
   );
 }
 
-/** Admin panel for Founder Brain 4-model routing (DeepSeek Flash/Pro + GLM Flash/5.2). */
+/** Admin panel for the managed DeepSeek-only Founder Brain boundary. */
 export function AdminFounderBrainProvidersPanel({ token }: Props) {
   const [settings, setSettings] = useState<FounderBrainProvidersSettings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -82,7 +77,10 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
   async function save(patch: Parameters<typeof updateFounderBrainProviders>[1]) {
     setBusy('save');
     try {
-      const next = await updateFounderBrainProviders(token, patch);
+      const next = await updateFounderBrainProviders(token, {
+        ...patch,
+        twoModelRoutingEnabled: false,
+      });
       setSettings(next);
       flash('ok', 'Founder Brain routing saved.');
     } catch (e) {
@@ -92,13 +90,13 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
     }
   }
 
-  async function runTests(provider?: 'deepseek' | 'glm') {
+  async function runTests() {
     setBusy('test');
     setTestResults(null);
     try {
-      const results = await testFounderBrainProviders(token, provider);
-      setTestResults(results);
-      flash('ok', provider ? `Tested ${provider}` : 'Tested both providers');
+      const results = await testFounderBrainProviders(token, 'deepseek');
+      setTestResults(results.filter((result) => result.provider === 'deepseek'));
+      flash('ok', 'Tested managed DeepSeek');
     } catch (e) {
       flash('err', e instanceof Error ? e.message : 'Test failed');
     } finally {
@@ -119,32 +117,28 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       <div>
         <h3 className="text-lg font-semibold text-white">Founder Brain Providers</h3>
         <p className="mt-1 text-sm text-zinc-400">
-          4-model routing: fast tier (DeepSeek Flash / GLM Flash) for Q&A and social drafts;
-          coding tier (DeepSeek Pro / GLM 5.2) for implementation and reasoning.
-          Keys stay in env / encrypted columns — this panel toggles policy only.
-        </p>
-        <p className="mt-1 text-[11px] text-zinc-500">
-          GLM base: <code className="text-zinc-300">{settings.glmApiBase}</code>
+          Managed V1 routing uses DeepSeek V4 Flash for everyday work and DeepSeek V4 Pro for
+          explicit code or reasoning tasks. Other providers belong to personal BYOK profiles.
         </p>
       </div>
 
       {msg && <p className="text-sm text-emerald-300">{msg}</p>}
       {err && <p className="text-sm text-red-300">{err}</p>}
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        <KeyStatusRow label={PROVIDER_LABELS.deepseek} status={settings.keys.deepseek} />
-        <KeyStatusRow label={PROVIDER_LABELS.glm} status={settings.keys.glm} />
+      <div className="grid gap-2">
+        <KeyStatusRow label="DeepSeek" status={settings.keys.deepseek} />
       </div>
 
-      <label className="flex items-center gap-2 text-sm text-zinc-300">
-        <input
-          type="checkbox"
-          checked={settings.twoModelRoutingEnabled}
+      {settings.twoModelRoutingEnabled ? (
+        <button
+          type="button"
           disabled={busy != null}
-          onChange={(e) => void save({ twoModelRoutingEnabled: e.target.checked })}
-        />
-        Enable two-model routing
-      </label>
+          onClick={() => void save({ twoModelRoutingEnabled: false })}
+          className="w-fit rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-100"
+        >
+          Disable legacy multi-provider routing
+        </button>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <div>
@@ -164,29 +158,6 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
             disabled={busy != null}
             onChange={(e) => setSettings({ ...settings, deepseekCodingModel: e.target.value })}
             onBlur={() => void save({ deepseekCodingModel: settings.deepseekCodingModel })}
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
-          />
-        </div>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Fast Model</p>
-          <input
-            value={settings.glmFastModel}
-            disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, glmFastModel: e.target.value })}
-            onBlur={() => void save({ glmFastModel: settings.glmFastModel })}
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
-          />
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Coding Model</p>
-          <input
-            value={settings.glmCodingModel}
-            disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, glmCodingModel: e.target.value })}
-            onBlur={() => void save({ glmCodingModel: settings.glmCodingModel })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
           />
         </div>
@@ -220,23 +191,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
           onClick={() => void runTests()}
           className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-600 disabled:opacity-40"
         >
-          Test both providers
-        </button>
-        <button
-          type="button"
-          disabled={busy != null}
-          onClick={() => void runTests('deepseek')}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-40"
-        >
-          Test DeepSeek
-        </button>
-        <button
-          type="button"
-          disabled={busy != null}
-          onClick={() => void runTests('glm')}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-40"
-        >
-          Test GLM
+          Test managed DeepSeek
         </button>
       </div>
 
