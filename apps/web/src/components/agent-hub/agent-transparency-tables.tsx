@@ -103,7 +103,13 @@ export function AgentTransparencyTables({
     s.exitReason ?? '—',
   ]);
 
-  const positionRows = book.positions.slice(0, cap).map((p) => [
+  const actualExchangePositions = book.positions.filter(
+    (position) =>
+      position.leg === 'Exchange net (actual)' ||
+      position.leg === 'Bitfinex net',
+  );
+  const visiblePositions = executionOnly ? actualExchangePositions : book.positions;
+  const positionRows = visiblePositions.slice(0, cap).map((p) => [
     p.leg,
     p.side,
     p.qty.toFixed(4),
@@ -122,14 +128,25 @@ export function AgentTransparencyTables({
     ? 'Exchange net is the one real Bitfinex position. Tracked lots are virtual showcase allocations for independent exits — do not add their P&L to exchange P&L.'
     : undefined;
 
-  const pendingRows = book.pendingOrders.slice(0, cap).map((o) => [
-    String(o.ageMin),
-    o.side,
-    o.status,
-    o.qty.toFixed(4),
-    fmtPrice(o.limitPrice),
-    fmtPrice(o.signalPrice),
-  ]);
+  const pendingRows = book.pendingOrders.slice(0, cap).map((o) =>
+    executionOnly
+      ? [
+          o.tradeId ?? 'Exchange order',
+          o.side,
+          o.status === 'ACTIVE' ? 'RESTING' : o.status,
+          o.qty.toFixed(5),
+          fmtPrice(o.limitPrice),
+          String(o.ageMin),
+        ]
+      : [
+          String(o.ageMin),
+          o.side,
+          o.status,
+          o.qty.toFixed(4),
+          fmtPrice(o.limitPrice),
+          fmtPrice(o.signalPrice),
+        ],
+  );
 
   const expiredRows = book.expiredOrders.slice(0, cap).map((o) => [
     displayMelbourneTime(o.createdTime ?? o.time),
@@ -167,23 +184,35 @@ export function AgentTransparencyTables({
   if (executionOnly) {
     return (
       <div className="space-y-4">
+        {positionRows.length === 0 && pendingRows.length === 0 ? (
+          <div className="rounded-2xl border border-zinc-800/90 bg-zinc-950/50 px-4 py-5">
+            <p className="text-xs font-semibold text-zinc-300">No active Bitfinex trade</p>
+            <p className="mt-1 text-[11px] text-zinc-500">
+              There is no open position or resting entry order on your exchange.
+            </p>
+          </div>
+        ) : null}
+        {positionRows.length > 0 ? (
+          <MiniTable
+            title="Open Bitfinex position"
+            subtitle="One exchange position — virtual relay lots are not repeated here"
+            headers={['Position', 'Side', 'Qty', 'Entry', 'Current', 'SL', 'TP', 'P/L']}
+            rows={positionRows}
+            emptyMessage="No open position."
+          />
+        ) : null}
+        {pendingRows.length > 0 ? (
+          <MiniTable
+            title="Resting Bitfinex order"
+            subtitle="One row per real exchange order"
+            headers={['Trade ID', 'Side', 'State', 'Qty', 'Limit price', 'Age min']}
+            rows={pendingRows}
+            emptyMessage="No resting order."
+          />
+        ) : null}
         <MiniTable
-          title="Open positions"
-          subtitle={positionSubtitle}
-          headers={['Leg', 'Side', 'Qty', 'Entry', 'Current', 'SL', 'TP', 'PnL']}
-          rows={positionRows}
-          emptyMessage="No open positions."
-        />
-        <MiniTable
-          title="Pending orders"
-          subtitle="Limit orders waiting for fill"
-          headers={['Age min', 'Side', 'Status', 'Qty', 'Limit price', 'Signal price']}
-          rows={pendingRows}
-          emptyMessage="No pending limit orders."
-        />
-        <MiniTable
-          title="Closed trades"
-          subtitle="Session history — execution results only"
+          title="Completed trades & P/L"
+          subtitle="Realized Bitfinex results — one row per completed trade"
           headers={[
             'Time (Melbourne)',
             'Trade ID',

@@ -35,6 +35,137 @@ test('does not render a protective stop as a pending entry order', () => {
   assert.equal(book.pendingOrders[0]?.limitPrice, 64_424);
 });
 
+test('renders one pending row when Bitfinex rounds the relay quantity', () => {
+  const now = new Date('2026-07-23T10:55:53.717Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [
+      {
+        id: 241025573521,
+        symbol: 'tBTCF0:USTF0',
+        amount: -0.03038,
+        amountOrig: -0.03038,
+        price: 65_812.58,
+        status: 'ACTIVE',
+        orderType: 'LIMIT',
+      },
+    ],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 65_812.58,
+        qty: 0.0304131628,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: null,
+        createdAt: now,
+        updatedAt: now,
+        cycle: {
+          tradeId: 'cont-6aec65edb25c',
+          status: SignalCycleStatus.PENDING_ENTRY,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.equal(book.pendingOrders.length, 1);
+  assert.equal(book.pendingOrders[0]?.tradeId, 'cont-6aec65edb25c');
+  assert.equal(book.pendingOrders[0]?.status, 'ACTIVE');
+});
+
+test('keeps genuinely separate pending orders visible', () => {
+  const now = new Date('2026-07-23T10:55:53.717Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [
+      {
+        id: 1,
+        symbol: 'tBTCF0:USTF0',
+        amount: -0.03038,
+        amountOrig: -0.03038,
+        price: 65_812.58,
+        status: 'ACTIVE',
+        orderType: 'LIMIT',
+      },
+      {
+        id: 2,
+        symbol: 'tBTCF0:USTF0',
+        amount: -0.03038,
+        amountOrig: -0.03038,
+        price: 66_100,
+        status: 'ACTIVE',
+        orderType: 'LIMIT',
+      },
+    ],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 66_100,
+        qty: 0.03038,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: null,
+        createdAt: now,
+        updatedAt: now,
+        cycle: {
+          tradeId: 'cont-separate',
+          status: SignalCycleStatus.PENDING_ENTRY,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.equal(book.pendingOrders.length, 2);
+  assert.equal(book.pendingOrders[1]?.tradeId, 'cont-separate');
+});
+
+test('does not render a relay-only pending row as a Bitfinex order', () => {
+  const now = new Date('2026-07-23T10:55:53.717Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 65_812.58,
+        qty: 0.0304131628,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: null,
+        createdAt: now,
+        updatedAt: now,
+        cycle: {
+          tradeId: 'cont-ledger-only',
+          status: SignalCycleStatus.PENDING_ENTRY,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.equal(book.pendingOrders.length, 0);
+});
+
 test('labels the actual exchange net separately from its virtual tracked lot', () => {
   const now = new Date('2026-07-19T12:51:04Z');
   const book = mapSubscriberExchangeLiveBook({
@@ -90,6 +221,26 @@ test('session P&L uses one exchange accounting basis without virtual-lot double 
     }),
     -4.59,
   );
+});
+
+test('does not invent trade direction from a Bitfinex ledger win or loss', () => {
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [],
+    ledgerCloses: [
+      {
+        ledgerId: '12345',
+        closedAt: new Date('2026-07-23T10:55:53.717Z'),
+        pnlUsd: 2.25,
+        description: 'Position closed',
+      },
+    ],
+  });
+
+  assert.equal(book.trades.length, 1);
+  assert.equal(book.trades[0]?.direction, '—');
+  assert.equal(book.trades[0]?.netUsd, 2.25);
 });
 
 test('expired copy rows expose creation, cancellation, and terminal reason separately', () => {

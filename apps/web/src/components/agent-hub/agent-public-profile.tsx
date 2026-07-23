@@ -978,6 +978,7 @@ export function AgentPublicProfile({
                 instanceStatus={instanceStatus}
                 instanceLastError={instanceLastError}
                 botConnected={botConnected}
+                liveBook={exchangeLiveBook}
               />
             ) : null}
             {resolvedDesk === 'relay-sim' ? null : resolvedDesk === 'live' && isLiveSession ? (
@@ -991,26 +992,16 @@ export function AgentPublicProfile({
                 <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
               ) : null
             ) : null}
-            <AiHistoryDetail activity={deskActivity} />
-            {resolvedDesk !== 'relay-sim' && (
+            {resolvedDesk === 'showcase' ? <AiHistoryDetail activity={deskActivity} /> : null}
+            {resolvedDesk === 'showcase' && (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
-                  title={
-                    resolvedDesk === 'live' && isLiveSession
-                      ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
-                      : 'Showcase bot feed'
-                  }
+                  title="Showcase bot feed"
                 />
                 <AgentPerformanceChart
-                  agentReturnPct={
-                    resolvedDesk === 'live' && isLiveSession
-                      ? agent.netReturnPct
-                      : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
-                  }
-                  label={
-                    resolvedDesk === 'live' && isLiveSession ? 'Your session' : 'Showcase bot'
-                  }
+                  agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
+                  label="Showcase bot"
                 />
               </div>
             )}

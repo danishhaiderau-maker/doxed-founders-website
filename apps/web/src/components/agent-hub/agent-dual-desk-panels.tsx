@@ -230,7 +230,7 @@ export function AgentDeskView({
       badgeClassName="text-emerald-300"
       borderClassName="border-emerald-500/45"
       title={`Your ${exchange} live session`}
-      subtitle="Real Bitfinex copy trades only — open orders, positions, expired limits, and closed trades from your exchange account. Not the admin showcase bot."
+      subtitle="Your real exchange state only — one row per Bitfinex order, position, or completed trade."
     >
       {slug ? (
         <AgentLiveTradeExportButton
@@ -246,15 +246,7 @@ export function AgentDeskView({
           within seconds once your first mirrored signal fires.
         </p>
       ) : null}
-      <AgentTransparencyTables liveBook={liveBook} maxRows={5} />
-      <AgentTradeJourney
-        activity={userActivity}
-        liveBook={liveBook}
-        layout="horizontal"
-        showBalance
-        windowMinutes={30}
-        liveExchangeOnly={isLive}
-      />
+      <AgentTransparencyTables liveBook={liveBook} maxRows={5} executionOnly />
     </DeskPanel>
   );
 }

@@ -71,6 +71,27 @@ function orderSide(amount: number): string {
   return amount > 0 ? 'LONG' : 'SHORT';
 }
 
+function pendingOrderMatchScore(
+  exchangeOrder: TradingAgentDashboardState['liveBook']['pendingOrders'][number],
+  participantOrder: {
+    side: string;
+    qty: number;
+    limitPrice: number;
+  },
+): number | null {
+  if (exchangeOrder.side !== participantOrder.side) return null;
+  // Bitfinex rounds submitted BTC quantity to instrument precision while the
+  // relay ledger keeps its pre-rounded quantity. Exact keys therefore render
+  // the same resting order twice. Match within one price tick and a small
+  // quantity tolerance without merging genuinely separate resting limits.
+  const priceTolerance = Math.max(0.5, Math.abs(exchangeOrder.limitPrice) * 0.00001);
+  const qtyTolerance = Math.max(0.0001, Math.abs(exchangeOrder.qty) * 0.005);
+  const priceDelta = Math.abs(exchangeOrder.limitPrice - participantOrder.limitPrice);
+  const qtyDelta = Math.abs(exchangeOrder.qty - participantOrder.qty);
+  if (priceDelta > priceTolerance || qtyDelta > qtyTolerance) return null;
+  return priceDelta / priceTolerance + qtyDelta / qtyTolerance;
+}
+
 /** Map Bitfinex REST + signal-cycle DB into the same liveBook shape as the showcase bot. */
 export function mapSubscriberExchangeLiveBook(input: {
   orders: BitfinexActiveOrder[];
@@ -114,7 +135,7 @@ export function mapSubscriberExchangeLiveBook(input: {
     });
   }
 
-  const exchangePending = input.orders
+  const exchangePending: TradingAgentDashboardState['liveBook']['pendingOrders'] = input.orders
     .filter((o) => {
       const orderType = String(o.orderType ?? '').toUpperCase();
       return (
@@ -135,9 +156,7 @@ export function mapSubscriberExchangeLiveBook(input: {
     }));
 
   const pendingOrders = [...exchangePending];
-  const seenPending = new Set(
-    exchangePending.map((o) => `${o.side}:${o.limitPrice}:${o.qty}`),
-  );
+  const matchedExchangePending = new Set<number>();
 
   const expiredOrders: TradingAgentDashboardState['liveBook']['expiredOrders'] = [];
   const activeSignals: TradingAgentDashboardState['liveBook']['activeSignals'] = [];
@@ -214,17 +233,28 @@ export function mapSubscriberExchangeLiveBook(input: {
         0,
         Math.round((Date.now() - row.createdAt.getTime()) / 60_000),
       );
-      const pendingKey = `${direction}:${limitPrice}:${qty}`;
-      if (limitPrice > 0 && !seenPending.has(pendingKey)) {
-        pendingOrders.push({
+      const participantOrder = {
+        side: direction === 'LONG' || direction === 'SHORT' ? direction : 'SHORT',
+        qty: qty > 0 ? qty : 0,
+        limitPrice,
+      };
+      let exchangeMatchIndex = -1;
+      let bestMatchScore = Number.POSITIVE_INFINITY;
+      pendingOrders.forEach((order, index) => {
+        if (matchedExchangePending.has(index)) return;
+        const score = pendingOrderMatchScore(order, participantOrder);
+        if (score != null && score < bestMatchScore) {
+          exchangeMatchIndex = index;
+          bestMatchScore = score;
+        }
+      });
+      if (exchangeMatchIndex >= 0) {
+        matchedExchangePending.add(exchangeMatchIndex);
+        pendingOrders[exchangeMatchIndex] = {
+          ...pendingOrders[exchangeMatchIndex],
+          tradeId: row.cycle.tradeId,
           ageMin,
-          side: direction === 'LONG' || direction === 'SHORT' ? direction : 'SHORT',
-          status: 'PENDING',
-          qty: qty > 0 ? qty : 0,
-          limitPrice,
-          signalPrice: limitPrice,
-        });
-        seenPending.add(pendingKey);
+        };
       }
       activeSignals.push({
         time: fmtTime(row.createdAt),
@@ -292,7 +322,9 @@ export function mapSubscriberExchangeLiveBook(input: {
     trades.push({
       time: fmtTime(row.closedAt),
       tradeId: `bfx-${row.ledgerId}`,
-      direction: row.pnlUsd >= 0 ? 'LONG' : 'SHORT',
+      // Bitfinex close-ledger rows contain cash P/L but not entry direction.
+      // A win is not necessarily LONG and a loss is not necessarily SHORT.
+      direction: '—',
       entry: 0,
       exit: 0,
       durationMin: 1,

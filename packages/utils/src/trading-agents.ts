@@ -25,6 +25,8 @@ export type AgentLivePositionRow = {
 };
 
 export type AgentLivePendingOrderRow = {
+  /** Showcase trade id associated with this exchange order when known. */
+  tradeId?: string;
   ageMin: number;
   side: string;
   status: string;
