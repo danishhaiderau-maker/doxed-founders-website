@@ -105,7 +105,18 @@ def main() -> None:
     check(
         "crash notification cannot block supervised restart",
         'Start-Process -FilePath "msg.exe"' in MONITOR
-        and 'msg * /TIME:30' not in MONITOR,
+        and 'msg * /TIME:30' not in MONITOR
+        and 'Start-Process -FilePath "msg.exe"' in START
+        and 'msg * /TIME:30' not in START,
+    )
+    check(
+        "detached startup errors remain inspectable",
+        "bot-startup.stdout.log" in START
+        and "bot-startup.stderr.log" in START
+        and "-RedirectStandardOutput $startupStdoutLog" in START
+        and "-RedirectStandardError $startupStderrLog" in START
+        and "-RedirectStandardOutput $startupStdoutLog" in MONITOR
+        and "-RedirectStandardError $startupStderrLog" in MONITOR,
     )
     print("PASS: home stack one-owner startup guards")
 

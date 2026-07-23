@@ -8,6 +8,12 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$logsDir = Join-Path $repoRoot "logs"
+$startupStdoutLog = Join-Path $logsDir "bot-startup.stdout.log"
+$startupStderrLog = Join-Path $logsDir "bot-startup.stderr.log"
+if (-not (Test-Path $logsDir)) {
+  New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+}
 
 # Serialize every startup path (dashboard button, supervisor, scheduled task,
 # or operator shell). Two concurrent starters both performed cleanup before
@@ -81,8 +87,12 @@ function Write-CrashReport([int]$Code, [string]$Message) {
       try { Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null } catch { }
     }
 
-    # Windows toast (best-effort)
-    try { msg * /TIME:30 "Doxed bot crashed (exit $Code) on port $BotListenPort. See logs\last_crash.json" 2>$null } catch { }
+    # Windows toast (best-effort and non-blocking).
+    try {
+      Start-Process -FilePath "msg.exe" `
+        -ArgumentList @("*", "/TIME:30", "Doxed bot crashed (exit $Code) on port $BotListenPort. See logs\last_crash.json") `
+        -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+    } catch { }
   } catch { Write-Host "Write-CrashReport failed: $($_.Exception.Message)" -ForegroundColor DarkGray }
 }
 
@@ -164,7 +174,11 @@ Write-Host ""
 
 if ($NoWait) {
   Write-Host "Starting bot detached on port $BotListenPort ..."
-  $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+  $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") `
+    -WorkingDirectory $agentDir -WindowStyle Hidden `
+    -RedirectStandardOutput $startupStdoutLog `
+    -RedirectStandardError $startupStderrLog `
+    -PassThru
   if ($botProc -and $botProc.Id -gt 0) {
     Set-Content -Path (Join-Path $repoRoot ".home-bot.pid") -Value "$($botProc.Id)" -NoNewline
     # Background auto-restart monitor: writes logs/last_crash.json when the detached
