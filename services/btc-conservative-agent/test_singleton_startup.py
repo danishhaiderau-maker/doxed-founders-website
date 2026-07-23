@@ -74,6 +74,20 @@ def run():
         listener.close()
     check("dashboard bind failure is process-fatal", fatal)
 
+    server_source = inspect.getsource(bot._create_dashboard_server)
+    check(
+        "dashboard overload never blocks the accept loop",
+        "acquire(blocking=False)" in server_source
+        and "503 Service Unavailable" in server_source
+        and "dashboard_busy" in server_source,
+    )
+
+    snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
+    check(
+        "dashboard snapshot funding uses cached exchange state",
+        "accrue_position_funding(pos, now_ts, refresh=False)" in snapshot_source,
+    )
+
     print(f"PASS: {passed} singleton startup checks")
 
 

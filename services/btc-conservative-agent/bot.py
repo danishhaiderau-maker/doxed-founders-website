@@ -4915,12 +4915,13 @@ def projected_funding_to_next_settlement(pos: dict, funding: dict = None) -> flo
     hours = max(0.0, (next_ts - time.time()) / 3600.0)
     return funding_cost_for_position(pos, float(funding.get("rate") or 0.0), hours)
 
-def accrue_position_funding(pos: dict, now: float = None):
+def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = True):
     if not FUNDING_SIMULATION_ENABLED:
         return
     if now is None:
         now = time.time()
-    refresh_funding_state()
+    if refresh:
+        refresh_funding_state()
     with state_lock:
         rate = state.get("funding", {}).get("rate", 0.0)
     last = pos.get("last_funding_accrual_ts") or pos.get("entry_ts") or now
@@ -4940,7 +4941,7 @@ def process_funding_accrual():
         for pos in list(open_positions):
             if pos.get("status") != "OPEN":
                 continue
-            accrue_position_funding(pos, now)
+            accrue_position_funding(pos, now, refresh=False)
 
 def get_funding_snapshot_for_ai():
     refresh_funding_state()
@@ -26774,7 +26775,11 @@ def _build_api_state_snapshot():
             expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
-                    accrue_position_funding(pos, now_ts)
+                    # Snapshot construction must never perform exchange I/O.
+                    # A Bitfinex TLS outage previously held trade_lock through
+                    # several retry ladders for 15+ minutes, starving the
+                    # dashboard and making its listener appear dead.
+                    accrue_position_funding(pos, now_ts, refresh=False)
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
             active_list, exposure_count = _collect_dashboard_active_signals(
@@ -30195,9 +30200,10 @@ def _create_dashboard_server():
     # spawns one uncapped OS thread per request. When /api/state slowed to ~8s,
     # threads piled up to 720+ over ~2h and the bot got hard OOM-killed. We host
     # the app on a bounded werkzeug server instead — at most 8 concurrent request
-    # threads (BoundedSemaphore); the socket backlog (request_queue_size=64)
-    # queues overflow in the OS before accept(). waitress is NOT available on
-    # Python 3.14 here, so we use werkzeug (ships with Flask, no new dependency).
+    # threads (BoundedSemaphore); requests above the cap receive a fast 503 so
+    # the accept loop and health endpoint cannot be starved. waitress is NOT
+    # available on Python 3.14 here, so we use werkzeug (ships with Flask, no
+    # new dependency).
     from werkzeug.serving import ThreadedWSGIServer
 
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
@@ -30205,10 +30211,27 @@ def _create_dashboard_server():
         _thread_cap = threading.BoundedSemaphore(8)
 
         def process_request(self, request, client_address):
-            # Block until a thread slot is free; the socket backlog holds the
-            # pending connection so the client waits instead of the server
-            # spawning a new thread per request (the OOM root cause).
-            self._thread_cap.acquire()
+            # Never block the accept loop waiting for a worker. If slow clients
+            # hold all eight slots, blocking here fills the socket backlog and
+            # eventually makes even /api/ping connection-refused. Reject
+            # overload quickly so health probes remain truthful.
+            if not self._thread_cap.acquire(blocking=False):
+                body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
+                response = (
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json; charset=utf-8\r\n"
+                    + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                    + b"Connection: close\r\n"
+                    + b"Retry-After: 1\r\n\r\n"
+                    + body
+                )
+                try:
+                    request.sendall(response)
+                except OSError:
+                    pass
+                finally:
+                    self.shutdown_request(request)
+                return
             try:
                 t = threading.Thread(
                     target=self._release_and_process,

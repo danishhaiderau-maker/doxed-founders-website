@@ -17,7 +17,7 @@ function Test-HttpOk {
 
 function Test-BotHealthyQuick {
   # Bridge /status must stay under ~2s — single-threaded HttpListener blocks all buttons.
-  if (-not (Test-PortOpen $BotPort)) { return $false }
+  if (-not (Test-PortBound $BotPort)) { return $false }
   return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 2)
 }
 
@@ -171,7 +171,7 @@ function Test-ProductionSiteApiHealthy {
 
 function Test-BotHung {
   # Port open but /api/ping dead after generous retries — true hung listener.
-  if (-not (Test-PortOpen $BotPort)) { return $false }
+  if (-not (Test-PortBound $BotPort)) { return $false }
   if (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20) { return $false }
   Start-Sleep -Seconds 2
   return -not (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20)
@@ -179,5 +179,5 @@ function Test-BotHung {
 
 function Test-AnalyzerHung {
   if (Test-AnalyzerHealthy) { return $false }
-  return (Test-PortOpen $AnalyzerPort)
+  return (Test-PortBound $AnalyzerPort)
 }

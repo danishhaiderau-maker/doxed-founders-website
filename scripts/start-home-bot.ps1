@@ -114,7 +114,7 @@ if ($recordedBotRunning) {
   Stop-BotPidFile | Out-Null
   Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 2
-} elseif (Test-PortOpen $BotListenPort) {
+} elseif (Test-PortBound $BotListenPort) {
   Write-Host ("Port :" + $BotListenPort + " in use - clearing listener...") -ForegroundColor Yellow
   Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 1
@@ -124,11 +124,11 @@ if ($recordedBotRunning) {
 # coexist briefly with a stale SO_REUSEADDR listener on Windows, producing two
 # apparent dashboard owners and non-deterministic responses. A failed cleanup
 # is safer than a duplicate bot, so abort and let the existing owner continue.
-if (Test-PortOpen $BotListenPort) {
+if (Test-PortBound $BotListenPort) {
   Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 2
 }
-if (Test-PortOpen $BotListenPort) {
+if (Test-PortBound $BotListenPort) {
   Write-Host "ERROR: Port $BotListenPort still has a listener after cleanup; refusing duplicate bot start." -ForegroundColor Red
   exit 1
 }

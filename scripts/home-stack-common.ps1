@@ -243,16 +243,10 @@ function Get-TunnelBackoffState {
   return $script:TunnelBackoff
 }
 
-function Stop-ListenPortFast([int]$ListenPort) {
-  $killed = @()
+function Get-ListenPortOwners([int]$ListenPort) {
+  # Native netstat stays responsive when Get-NetTCPConnection blocks on a
+  # zombie Windows listener, and it reports every SO_REUSEADDR owner.
   $owners = @()
-  try {
-    $owners += @(Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty OwningProcess -Unique)
-  } catch { }
-  # Always merge native netstat results. Get-NetTCPConnection can return only
-  # one of multiple SO_REUSEADDR listeners, which previously left an orphan
-  # owner alive and let Start create a second :7002 bot.
   try {
     & netstat.exe -ano -p TCP 2>$null | ForEach-Object {
       if ($_ -match "^\s*TCP\s+\S+:$ListenPort\s+\S+\s+LISTENING\s+(\d+)\s*$") {
@@ -260,7 +254,16 @@ function Stop-ListenPortFast([int]$ListenPort) {
       }
     }
   } catch { }
-  $owners | Select-Object -Unique | ForEach-Object {
+  return @($owners | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+}
+
+function Test-PortBound([int]$ListenPort) {
+  return @(Get-ListenPortOwners $ListenPort).Count -gt 0
+}
+
+function Stop-ListenPortFast([int]$ListenPort) {
+  $killed = @()
+  @(Get-ListenPortOwners $ListenPort) | ForEach-Object {
     $procId = [int]$_
     if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
       Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
@@ -268,7 +271,12 @@ function Stop-ListenPortFast([int]$ListenPort) {
       if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
         & taskkill.exe /PID $procId /T /F 2>$null | Out-Null
       }
-      $killed += $procId
+      Start-Sleep -Milliseconds 100
+      if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+        Write-Warning "Unable to stop listener PID $procId on port $ListenPort."
+      } else {
+        $killed += $procId
+      }
     }
   }
   return $killed
