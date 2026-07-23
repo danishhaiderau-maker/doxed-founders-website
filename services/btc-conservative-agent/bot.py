@@ -20626,12 +20626,25 @@ def _emergency_api_guard():
 
     # Bind the bounded Flask server at the start of main() so /api/ping stays
     # responsive while persistent paper state is restored. Never expose a
-    # partially restored relay/dashboard snapshot during that handoff.
-    if (
-        not _DASHBOARD_BOOTSTRAP_COMPLETE
-        and path
-        not in ("/", "/health", "/status", "/api/ping", "/api/status", "/api/build")
-    ):
+    # partially restored relay/dashboard snapshot during that handoff. The
+    # regular /health and dashboard handlers acquire state_lock; allowing them
+    # through while main() is restoring state can consume every bounded worker
+    # and starve /api/ping. Return a minimal boot response here instead.
+    if not _DASHBOARD_BOOTSTRAP_COMPLETE:
+        if path in ("/", "/health", "/status", "/api/status"):
+            return jsonify(
+                {
+                    "ok": True,
+                    "status": "starting",
+                    "boot": "starting",
+                    "bot_pid": os.getpid(),
+                    **_dashboard_owner_metadata(),
+                    "bot_version": EXECUTION_FIX_VERSION,
+                    "server_ts": utc_iso(),
+                }
+            ), 200
+        if path in ("/api/ping", "/api/build"):
+            return None
         response = jsonify(
             {
                 "ok": False,

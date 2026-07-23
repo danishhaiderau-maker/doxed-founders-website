@@ -109,7 +109,14 @@ try {
           Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null
         } catch { }
       }
-      try { msg * /TIME:30 "Doxed bot crashed (exit $Code) on port $Port. Auto-restarting. See logs\last_crash.json" 2>$null } catch { }
+      # Never block the restart path on an interactive desktop notification.
+      # msg.exe can remain attached indefinitely when no interactive session is
+      # available, which previously prevented Stop-Process and relaunch.
+      try {
+        Start-Process -FilePath "msg.exe" `
+          -ArgumentList @("*", "/TIME:30", "Doxed bot crashed (exit $Code) on port $Port. Auto-restarting. See logs\last_crash.json") `
+          -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+      } catch { }
     } catch { }
   }
 

@@ -96,6 +96,17 @@ def main() -> None:
         and '"error": "dashboard state is restoring"' in BOT
         and '"boot": "ready" if _DASHBOARD_BOOTSTRAP_COMPLETE else "starting"' in BOT,
     )
+    check(
+        "boot health bypasses state-locking handlers",
+        'if path in ("/", "/health", "/status", "/api/status"):' in BOT
+        and '"status": "starting"' in BOT
+        and 'if path in ("/api/ping", "/api/build"):' in BOT,
+    )
+    check(
+        "crash notification cannot block supervised restart",
+        'Start-Process -FilePath "msg.exe"' in MONITOR
+        and 'msg * /TIME:30' not in MONITOR,
+    )
     print("PASS: home stack one-owner startup guards")
 
 
