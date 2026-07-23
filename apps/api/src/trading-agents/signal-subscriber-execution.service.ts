@@ -652,6 +652,96 @@ function mirrorDiffEnabled(): boolean {
 }
 
 /**
+ * A copied entry may rest only while the matching showcase order is still
+ * pending. Once the showcase has filled, a later copy fill would be a
+ * different trade at a potentially worse price, so the managed copy order
+ * must enter the cancel-race reconciliation path immediately.
+ */
+export function pendingCopyShowcaseDisposition(
+  bot: BotApiState | null,
+  tradeId: string,
+): 'SOURCE_UNAVAILABLE' | 'SHOWCASE_PENDING' | 'MISSED_SHOWCASE_FILL' | 'SHOWCASE_ABSENT' {
+  if (!bot || !tradeId) return 'SOURCE_UNAVAILABLE';
+  const pending = (bot.orders ?? []).some(
+    (order) =>
+      order.trade_id === tradeId &&
+      (order.status === 'PENDING' || order.status === 'ORDERED') &&
+      (order.limit_price ?? 0) > 0,
+  );
+  if (pending) return 'SHOWCASE_PENDING';
+  const filled = (bot.positions ?? []).some(
+    (position) => String(position.trade_id ?? '') === tradeId,
+  );
+  return filled ? 'MISSED_SHOWCASE_FILL' : 'SHOWCASE_ABSENT';
+}
+
+export type MissedShowcaseFillResolution =
+  | { outcome: 'FILL_RECORDED' }
+  | { outcome: 'PENDING_RETRY_AFTER_FILL' }
+  | { outcome: 'PENDING_FILL_CHECK_FAILED'; phase: 'BEFORE_CANCEL' | 'AFTER_CANCEL'; error: string }
+  | { outcome: 'EXPIRE_UNFILLED'; cancelReason?: string; cancelAttempts: number }
+  | { outcome: 'PENDING_CANCEL_FAILED'; cancelReason?: string; cancelAttempts: number };
+
+/**
+ * Deterministic money-path ordering for a showcase fill that the copy missed:
+ * reconcile a full/partial cancel-race fill first; only an exchange-proven
+ * zero-fill managed order may be cancelled and expired.
+ */
+export async function resolveMissedShowcaseFill<TFill>(input: {
+  managedOrderId: number;
+  detectFill: () => Promise<TFill | null>;
+  recordFill: (fill: TFill) => Promise<boolean>;
+  cancelManagedOrder: (
+    orderId: number,
+  ) => Promise<{ gone: boolean; reason?: string; attempts: number }>;
+}): Promise<MissedShowcaseFillResolution> {
+  let fill: TFill | null;
+  try {
+    fill = await input.detectFill();
+  } catch (err) {
+    return {
+      outcome: 'PENDING_FILL_CHECK_FAILED',
+      phase: 'BEFORE_CANCEL',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (fill != null) {
+    return (await input.recordFill(fill))
+      ? { outcome: 'FILL_RECORDED' }
+      : { outcome: 'PENDING_RETRY_AFTER_FILL' };
+  }
+  const cancel = await input.cancelManagedOrder(input.managedOrderId);
+  if (!cancel.gone) {
+    return {
+        outcome: 'PENDING_CANCEL_FAILED',
+        cancelReason: cancel.reason,
+        cancelAttempts: cancel.attempts,
+    };
+  }
+  // A fill can land between the pre-cancel inspection and the exchange
+  // acknowledging cancellation. Reconcile once more before expiring the lot.
+  try {
+    fill = await input.detectFill();
+  } catch (err) {
+    return {
+      outcome: 'PENDING_FILL_CHECK_FAILED',
+      phase: 'AFTER_CANCEL',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (fill != null) {
+    return (await input.recordFill(fill))
+      ? { outcome: 'FILL_RECORDED' }
+      : { outcome: 'PENDING_RETRY_AFTER_FILL' };
+  }
+  return {
+    outcome: 'EXPIRE_UNFILLED',
+    cancelReason: cancel.reason,
+    cancelAttempts: cancel.attempts,
+  };
+}
+
+/**
  * Source-only gaps are expected while a relay is explicitly stopped.  Keep
  * copy-side exposure mismatches visible in exit-only mode, but do not present
  * a fresh showcase order/position as a relay failure when entries are
@@ -660,12 +750,24 @@ function mirrorDiffEnabled(): boolean {
 export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
   divergences: T[],
   entryEnabled: boolean,
+  copyDirection?: 'LONG' | 'SHORT' | null,
 ): T[] {
-  if (entryEnabled) return divergences;
   return divergences.filter(
-    (d) =>
-      d.type !== 'SHOWCASE_ORDER_NOT_MIRRORED' &&
-      d.type !== 'SHOWCASE_POSITION_NOT_MIRRORED',
+    (d) => {
+      const sourceOnly =
+        d.type === 'SHOWCASE_ORDER_NOT_MIRRORED' ||
+        d.type === 'SHOWCASE_POSITION_NOT_MIRRORED';
+      if (!sourceOnly) return true;
+      if (!entryEnabled) return false;
+      const showcaseDirection = String(
+        (d as T & { showcaseDir?: string }).showcaseDir ?? '',
+      ).toUpperCase();
+      return !(
+        copyDirection &&
+        (showcaseDirection === 'LONG' || showcaseDirection === 'SHORT') &&
+        showcaseDirection !== copyDirection
+      );
+    },
   );
 }
 
@@ -2481,15 +2583,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): { abandoned: boolean; reason?: string } {
     if (!bot || !tradeId) return { abandoned: false };
 
-    const pending = this.showcasePendingOrder(bot, tradeId);
-    if (pending?.limit_price && pending.limit_price > 0) return { abandoned: false };
-
-    // Showcase already filled this trade — keep the copy limit alive so it can
-    // still fill and mirror; do not treat a missing pending as abandon.
-    const showcasePos = (bot.positions ?? []).find(
-      (p) => String(p.trade_id ?? '') === tradeId,
-    );
-    if (showcasePos) return { abandoned: false };
+    const disposition = pendingCopyShowcaseDisposition(bot, tradeId);
+    if (disposition === 'SHOWCASE_PENDING') return { abandoned: false };
+    if (disposition === 'MISSED_SHOWCASE_FILL') {
+      return { abandoned: true, reason: 'MISSED_SHOWCASE_FILL' };
+    }
 
     const expired = (bot.expired_orders ?? []).find((e) => e.trade_id === tradeId);
     if (expired) {
@@ -2708,9 +2806,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
 
+    const copyDirections = new Set(
+      [...copyPending, ...copyOpen]
+        .map((participant) => metaById.get(participant.id)?.direction)
+        .filter(
+          (direction): direction is 'LONG' | 'SHORT' =>
+            direction === 'LONG' || direction === 'SHORT',
+        ),
+    );
+    const copyDirection = copyDirections.size === 1 ? [...copyDirections][0] : null;
     const reportableDivergences = reportableMirrorDiffsForRelayMode(
       divergences,
       entryEnabled,
+      copyDirection,
     );
 
     // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
@@ -4053,6 +4161,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async detectEntryFillBeforeCancel(
     creds: ExchangeCredentials,
     meta: ExecutionPayload,
+    failClosedOnExchangeError = false,
   ): Promise<{
     filledQty: number;
     fillPrice: number;
@@ -4062,7 +4171,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const orderId = meta.bitfinexOrderId;
     if (!orderId || !meta.direction) return null;
 
-    const order = await this.activeTrading.findOrder(creds, orderId).catch(() => null);
+    const order = failClosedOnExchangeError
+      ? await this.activeTrading.findOrder(creds, orderId)
+      : await this.activeTrading.findOrder(creds, orderId).catch(() => null);
     if (order) {
       const filled = Math.abs(order.amountOrig) - Math.abs(order.amount);
       if (filled > MIN_QTY_BTC) {
@@ -4078,7 +4189,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     // Order gone from the active book — filled or cancelled. Discriminate via
     // the merged-position delta against the at-order baseline.
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const position = failClosedOnExchangeError
+      ? await this.activeTrading.getOpenPositionDetail(creds)
+      : await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     const expectedLong = meta.direction === 'LONG';
     const hasPosition =
       position &&
@@ -4408,6 +4521,108 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
+        if (abandon.reason === 'MISSED_SHOWCASE_FILL') {
+          const resolution = await resolveMissedShowcaseFill({
+            managedOrderId: orderId,
+            detectFill: () =>
+              this.detectEntryFillBeforeCancel(creds, meta, true),
+            recordFill: (fill) =>
+              this.recordCancelRaceFill(
+                agentId,
+                userId,
+                cycle,
+                participant.id,
+                meta,
+                creds,
+                intent,
+                fill,
+                'MISSED_SHOWCASE_FILL',
+              ),
+            cancelManagedOrder: (managedOrderId) =>
+              this.cancelManagedOrderGone(
+                creds,
+                managedOrderId,
+                `Hire expire ${userId} cycle=${cycle.id} (missed showcase fill) cancel relay limit ${managedOrderId}`,
+              ),
+          });
+          if (
+            resolution.outcome === 'FILL_RECORDED' ||
+            resolution.outcome === 'PENDING_RETRY_AFTER_FILL'
+          ) {
+            return;
+          }
+          if (resolution.outcome === 'PENDING_FILL_CHECK_FAILED') {
+            this.logger.error(
+              `Missed showcase fill ${userId} cycle=${cycle.id}: fill verification failed ${resolution.phase} (${resolution.error}) — leaving PENDING_ENTRY and blocking relay`,
+            );
+            await this.setInstanceLastError(
+              userId,
+              agentId,
+              'MISSED_SHOWCASE_FILL_VERIFICATION_FAILED',
+            );
+            await this.cycles.recordHireExecutionEvent(
+              userId,
+              agentId,
+              cycle.id,
+              'RECONCILE_CANCEL_FAILED',
+              {
+                venue: 'bitfinex',
+                source: 'hire',
+                event: 'MISSED_SHOWCASE_FILL',
+                reason: 'FILL_VERIFICATION_FAILED',
+                verification_phase: resolution.phase,
+                bitfinex_order_id: orderId,
+              },
+            );
+            return;
+          }
+          if (resolution.outcome === 'PENDING_CANCEL_FAILED') {
+            this.logger.error(
+              `Missed showcase fill ${userId} cycle=${cycle.id}: cancel failed (attempts=${resolution.cancelAttempts}, reason=${resolution.cancelReason}) and managed order ${orderId} remains live — leaving PENDING_ENTRY and blocking relay`,
+            );
+            await this.setInstanceLastError(
+              userId,
+              agentId,
+              'MISSED_SHOWCASE_FILL_CANCEL_FAILED_ORDER_STILL_LIVE',
+            );
+            await this.cycles.recordHireExecutionEvent(
+              userId,
+              agentId,
+              cycle.id,
+              'RECONCILE_CANCEL_FAILED',
+              {
+                venue: 'bitfinex',
+                source: 'hire',
+                event: 'MISSED_SHOWCASE_FILL',
+                reason: 'CANCEL_FAILED_ORDER_STILL_LIVE',
+                bitfinex_order_id: orderId,
+                cancel_attempts: resolution.cancelAttempts,
+                cancel_reason: resolution.cancelReason ?? 'unknown',
+              },
+            );
+            return;
+          }
+          this.logger.warn(
+            `Missed showcase fill ${userId} cycle=${cycle.id}: exchange-proven unfilled managed order ${orderId} cancelled — copy expired without market catch-up`,
+          );
+          await this.cycles.recordHireExecutionEvent(
+            userId,
+            agentId,
+            cycle.id,
+            'EXPIRED',
+            {
+              venue: 'bitfinex',
+              pnl_usd: 0,
+              source: 'hire',
+              event: 'MISSED_SHOWCASE_FILL',
+              reason: 'MISSED_SHOWCASE_FILL',
+              bitfinex_order_id: orderId,
+              cancel_attempts: resolution.cancelAttempts,
+              cancel_reason: resolution.cancelReason ?? 'unknown',
+            },
+          );
+          return;
+        }
         // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
         {
           const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);

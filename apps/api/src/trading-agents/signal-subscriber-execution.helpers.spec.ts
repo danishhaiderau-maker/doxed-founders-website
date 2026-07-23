@@ -14,8 +14,10 @@ import {
   marketCloseReductionConfirmed,
   mergedDirectionCompatible,
   pendingEntryMayOwnExchangePosition,
+  pendingCopyShowcaseDisposition,
   relayEntryOrderIsCompletelyUnfilled,
   relayWatchdogShouldRestart,
+  resolveMissedShowcaseFill,
   untrackedActiveOrderIds,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
@@ -242,6 +244,189 @@ test('paused relay suppresses expected source-only mirror gaps but keeps exposur
   ];
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, false), diffs.slice(2));
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true), diffs);
+});
+
+test('active merged book suppresses only the expected opposing showcase leg', () => {
+  const diffs = [
+    { type: 'SHOWCASE_ORDER_NOT_MIRRORED', tradeId: 'short', showcaseDir: 'SHORT' },
+    { type: 'SHOWCASE_ORDER_NOT_MIRRORED', tradeId: 'long', showcaseDir: 'LONG' },
+    { type: 'COPY_ORDER_NO_SHOWCASE', tradeId: 'owned-long' },
+  ];
+  assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true, 'LONG'), diffs.slice(1));
+});
+
+test('showcase fill makes a still-pending copy fail closed even while relay is paused', () => {
+  const bot = {
+    orders: [],
+    positions: [{ trade_id: 'cont-filled' }],
+  } as never;
+  assert.equal(
+    pendingCopyShowcaseDisposition(bot, 'cont-filled'),
+    'MISSED_SHOWCASE_FILL',
+  );
+  assert.equal(pendingCopyShowcaseDisposition(null, 'cont-filled'), 'SOURCE_UNAVAILABLE');
+});
+
+test('a still-resting showcase limit remains eligible for exact-price chase', () => {
+  const bot = {
+    orders: [
+      {
+        trade_id: 'cont-pending',
+        status: 'PENDING',
+        limit_price: 66_000,
+      },
+    ],
+    positions: [],
+  } as never;
+  assert.equal(
+    pendingCopyShowcaseDisposition(bot, 'cont-pending'),
+    'SHOWCASE_PENDING',
+  );
+});
+
+test('full cancel-race fill is recorded and the managed order is not cancelled', async () => {
+  let cancelCalls = 0;
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 101,
+    detectFill: async () => ({ source: 'POSITION_DELTA', qty: 0.03 }),
+    recordFill: async () => true,
+    cancelManagedOrder: async () => {
+      cancelCalls += 1;
+      return { gone: true, attempts: 1 };
+    },
+  });
+  assert.deepEqual(result, { outcome: 'FILL_RECORDED' });
+  assert.equal(cancelCalls, 0);
+});
+
+test('partial cancel-race fill is recorded before its resting remainder is resolved', async () => {
+  let seenSource = '';
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 102,
+    detectFill: async () => ({ source: 'ORDER_PARTIAL', qty: 0.01 }),
+    recordFill: async (fill) => {
+      seenSource = fill.source;
+      return true;
+    },
+    cancelManagedOrder: async () => {
+      throw new Error('must not bypass partial-fill reconciliation');
+    },
+  });
+  assert.equal(seenSource, 'ORDER_PARTIAL');
+  assert.deepEqual(result, { outcome: 'FILL_RECORDED' });
+});
+
+test('fill arriving during cancellation is reconciled before the participant can expire', async () => {
+  let checks = 0;
+  let recordedQty = 0;
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 106,
+    detectFill: async () => {
+      checks += 1;
+      return checks === 1 ? null : { source: 'POSITION_DELTA', qty: 0.03 };
+    },
+    recordFill: async (fill) => {
+      recordedQty = fill.qty;
+      return true;
+    },
+    cancelManagedOrder: async () => ({ gone: true, reason: 'CANCELLED', attempts: 1 }),
+  });
+  assert.equal(checks, 2);
+  assert.equal(recordedQty, 0.03);
+  assert.deepEqual(result, { outcome: 'FILL_RECORDED' });
+});
+
+test('failed partial-fill remainder cancellation leaves the participant pending', async () => {
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 103,
+    detectFill: async () => ({ source: 'ORDER_PARTIAL' }),
+    recordFill: async () => false,
+    cancelManagedOrder: async () => {
+      throw new Error('outer resolver must not perform a second cancellation');
+    },
+  });
+  assert.deepEqual(result, { outcome: 'PENDING_RETRY_AFTER_FILL' });
+});
+
+test('zero-fill missed showcase entry cancels only its managed order then expires', async () => {
+  const cancelled: number[] = [];
+  const unrelatedManualOrderId = 999;
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 104,
+    detectFill: async () => null,
+    recordFill: async () => {
+      throw new Error('no fill must be recorded');
+    },
+    cancelManagedOrder: async (orderId) => {
+      cancelled.push(orderId);
+      return { gone: true, reason: 'CANCELLED', attempts: 1 };
+    },
+  });
+  assert.deepEqual(cancelled, [104]);
+  assert.equal(cancelled.includes(unrelatedManualOrderId), false);
+  assert.deepEqual(result, {
+    outcome: 'EXPIRE_UNFILLED',
+    cancelReason: 'CANCELLED',
+    cancelAttempts: 1,
+  });
+});
+
+test('failed zero-fill cancellation stays pending with a blocking outcome', async () => {
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 105,
+    detectFill: async () => null,
+    recordFill: async () => false,
+    cancelManagedOrder: async () => ({
+      gone: false,
+      reason: 'STILL_LIVE',
+      attempts: 3,
+    }),
+  });
+  assert.deepEqual(result, {
+    outcome: 'PENDING_CANCEL_FAILED',
+    cancelReason: 'STILL_LIVE',
+    cancelAttempts: 3,
+  });
+});
+
+test('exchange verification failure before cancellation cannot expire or cancel the order', async () => {
+  let cancelCalls = 0;
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 107,
+    detectFill: async () => {
+      throw new Error('exchange timeout');
+    },
+    recordFill: async () => false,
+    cancelManagedOrder: async () => {
+      cancelCalls += 1;
+      return { gone: true, attempts: 1 };
+    },
+  });
+  assert.equal(cancelCalls, 0);
+  assert.deepEqual(result, {
+    outcome: 'PENDING_FILL_CHECK_FAILED',
+    phase: 'BEFORE_CANCEL',
+    error: 'exchange timeout',
+  });
+});
+
+test('exchange verification failure after cancellation leaves an auditable pending retry', async () => {
+  let checks = 0;
+  const result = await resolveMissedShowcaseFill({
+    managedOrderId: 108,
+    detectFill: async () => {
+      checks += 1;
+      if (checks === 2) throw new Error('position history unavailable');
+      return null;
+    },
+    recordFill: async () => false,
+    cancelManagedOrder: async () => ({ gone: true, attempts: 1 }),
+  });
+  assert.deepEqual(result, {
+    outcome: 'PENDING_FILL_CHECK_FAILED',
+    phase: 'AFTER_CANCEL',
+    error: 'position history unavailable',
+  });
 });
 
 test('signed flat fast path requires an armed and exchange-proven flat hire', () => {
