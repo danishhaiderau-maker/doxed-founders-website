@@ -342,7 +342,9 @@ function activate(context) {
     });
 }
 async function applyFounderNavigationDefaults(context) {
-    const migrationKey = 'founderOs.navigationV3Applied';
+    // V4 reopens the labeled Founder navigation once for existing installs that
+    // already completed V3 but persisted with the primary sidebar collapsed.
+    const migrationKey = 'founderOs.navigationV4Applied';
     if (context.globalState.get(migrationKey, false))
         return;
     const workbench = vscode.workspace.getConfiguration('workbench');
