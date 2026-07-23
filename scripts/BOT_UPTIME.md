@@ -92,7 +92,7 @@ overnight reboots from Windows Update are still caught within 24 h. For true
 `-LogonType S4U` (runs as SYSTEM without a saved password) — see
 `register-bot-autostart.ps1` and re-run as admin if needed.
 
-### `DoxedSupervisorWatchdog` (optional, recommended)
+### `DoxedSupervisorWatchdog` (required)
 
 - A separate Task Scheduler entry that runs `home-stack-supervisor-watchdog.ps1`
   every 5 min and relaunches the supervisor if its PID file points at a dead
@@ -157,14 +157,13 @@ cd C:\Users\user\Desktop\Final Bots\doxedcryptofounder
 powershell -ExecutionPolicy Bypass -File scripts\register-bot-autostart.ps1
 powershell -ExecutionPolicy Bypass -File scripts\register-bridge-watchdog.ps1
 powershell -ExecutionPolicy Bypass -File scripts\register-tidy-orphan-shells.ps1
-# Optional belt-and-suspenders (supervisor respawn):
-# powershell -ExecutionPolicy Bypass -File scripts\register-supervisor-watchdog.ps1
+powershell -ExecutionPolicy Bypass -File scripts\register-supervisor-watchdog.ps1
 ```
 
 Verify:
 
 ```powershell
-Get-ScheduledTask -TaskName 'DcfShowcaseBotAutostart','DcfTidyOrphanShells','DoxxedBridgeWatch' |
+Get-ScheduledTask -TaskName 'DcfShowcaseBotAutostart','DoxedSupervisorWatchdog','DcfTidyOrphanShells','DoxxedBridgeWatch' |
   Select-Object TaskName, State
 ```
 

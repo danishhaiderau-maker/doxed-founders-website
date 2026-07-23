@@ -17,6 +17,9 @@ SUPERVISOR = (ROOT / "scripts" / "home-stack-supervisor.ps1").read_text(
 SUPERVISOR_WATCHDOG = (
     ROOT / "scripts" / "home-stack-supervisor-watchdog.ps1"
 ).read_text(encoding="utf-8")
+REGISTER_SUPERVISOR_WATCHDOG = (
+    ROOT / "scripts" / "register-supervisor-watchdog.ps1"
+).read_text(encoding="utf-8")
 BOT = (
     ROOT / "services" / "btc-conservative-agent" / "bot.py"
 ).read_text(encoding="utf-8")
@@ -184,6 +187,17 @@ def main() -> None:
         and "Get-Process -Id" not in SUPERVISOR_WATCHDOG
         and "Test-ProcessIdAliveFast" in SUPERVISOR_WATCHDOG
         and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
+    )
+    check(
+        "supervisor watchdog has a durable recurring task installer",
+        '"DoxedSupervisorWatchdog"' in REGISTER_SUPERVISOR_WATCHDOG
+        and "New-ScheduledTaskTrigger" in REGISTER_SUPERVISOR_WATCHDOG
+        and "-Once" in REGISTER_SUPERVISOR_WATCHDOG
+        and "-RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)"
+        in REGISTER_SUPERVISOR_WATCHDOG
+        and '"home-stack-supervisor-watchdog.ps1"' in REGISTER_SUPERVISOR_WATCHDOG
+        and "Register-ScheduledTask" in REGISTER_SUPERVISOR_WATCHDOG
+        and "-MultipleInstances IgnoreNew" in REGISTER_SUPERVISOR_WATCHDOG,
     )
     check(
         "recovery health loops avoid blocking process-table enumeration",
