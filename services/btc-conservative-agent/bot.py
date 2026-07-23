@@ -20708,10 +20708,12 @@ bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
 
 
 def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.0):
-    """load_markets() at import time is fragile — a single transient SSL/network
-    hiccup to api-pub.bitfinex.com (SSLEOFError, ConnectionReset, timeout) would
-    crash the bot with exit 1 before main() runs. Retry with backoff instead so
-    the bot survives transient Bitfinex/ISP/Python-3.14 TLS quirks at boot."""
+    """Load exchange metadata when explicitly requested.
+
+    The normal bot path leaves this lazy so the dashboard can bind and become
+    healthy before an external Bitfinex metadata request. CCXT loads markets on
+    demand in the market-data workers, where normal retry handling applies.
+    """
     if (os.getenv("SKIP_EXCHANGE_MARKET_LOAD") or "").strip().lower() in (
         "1", "true", "yes", "on",
     ):
@@ -20727,7 +20729,15 @@ def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.
     raise last_err
 
 
-MARKETS = _load_markets_with_retry(bitfinex_public)
+EAGER_EXCHANGE_MARKET_LOAD = (
+    (os.getenv("EAGER_EXCHANGE_MARKET_LOAD") or "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+MARKETS = (
+    _load_markets_with_retry(bitfinex_public)
+    if EAGER_EXCHANGE_MARKET_LOAD
+    else {}
+)
 bitfinex_private = ccxt.bitfinex({
     "apiKey": api_key,
     "secret": api_secret,

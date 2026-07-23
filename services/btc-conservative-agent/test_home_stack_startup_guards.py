@@ -8,6 +8,12 @@ COMMON = (ROOT / "scripts" / "home-stack-common.ps1").read_text(encoding="utf-8"
 START = (ROOT / "scripts" / "start-home-bot.ps1").read_text(encoding="utf-8")
 HEALTH = (ROOT / "scripts" / "home-stack-health.ps1").read_text(encoding="utf-8")
 MONITOR = (ROOT / "scripts" / "bot-auto-restart.ps1").read_text(encoding="utf-8")
+AUTOSTART = (ROOT / "scripts" / "register-bot-autostart.ps1").read_text(
+    encoding="utf-8"
+)
+BOT = (
+    ROOT / "services" / "btc-conservative-agent" / "bot.py"
+).read_text(encoding="utf-8")
 BOT_HUNG = HEALTH.split("function Test-BotHung", 1)[1].split(
     "function Test-AnalyzerHung", 1
 )[0]
@@ -52,6 +58,23 @@ def main() -> None:
         "auto-restart never calls the blocking TCP provider",
         "Stop-ListenPortFast $Port" in MONITOR
         and "Get-NetTCPConnection -LocalPort $Port" not in MONITOR,
+    )
+    check(
+        "autostart has a current-user fallback when admin rights are unavailable",
+        "$runLevel = if ($isAdministrator) { 'Highest' } else { 'Limited' }"
+        in AUTOSTART
+        and "-RunLevel $runLevel" in AUTOSTART,
+    )
+    check(
+        "autostart preserves an existing administrator-owned task",
+        "Existing administrator-owned task" in AUTOSTART
+        and "if ($_.Exception.Message -match 'Access is denied')" in AUTOSTART,
+    )
+    check(
+        "Bitfinex market metadata cannot block normal bot import",
+        "EAGER_EXCHANGE_MARKET_LOAD = (" in BOT
+        and "if EAGER_EXCHANGE_MARKET_LOAD" in BOT
+        and "else {}" in BOT,
     )
     print("PASS: home stack one-owner startup guards")
 

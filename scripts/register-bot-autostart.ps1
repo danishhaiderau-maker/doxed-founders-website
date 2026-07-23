@@ -2,18 +2,20 @@
 #
 # Registers the DcfShowcaseBotAutostart scheduled task: launches
 # scripts/start-showcase-bot.cmd on every user logon (30s delay) and once
-# daily as a safety net, with RunLevel Highest so cloudflared can bind its
-# tunnel. This is the missing link that lets the showcase bot survive a
-# Windows reboot / Windows Update restart / power failure without a human
-# having to click "Start everything".
+# daily as a safety net. Elevated installs use RunLevel Highest; standard-user
+# installs use a current-user Limited fallback that can still start the paper
+# bot, analyzer, tunnel, and recovery supervisor. This is the missing link that
+# lets the showcase bot survive a Windows reboot / Windows Update restart /
+# power failure without a human having to click "Start everything".
 #
 # Uptime contract (see scripts/BOT_UPTIME.md):
 #   - Crash / python.exe dies        -> bot-auto-restart.ps1 + home-stack-supervisor.ps1
 #   - Windows reboot / power failure -> THIS task (AtLogon) + start-showcase-bot.cmd
 #   - Manual Stop (dashboard)        -> .home-stack-user-stopped flag, respected everywhere
 #
-# MUST BE RUN AS ADMINISTRATOR (one-time setup).
-#   Right-click PowerShell -> Run as administrator -> run this script.
+# Administrator is preferred (one-time setup) but no longer mandatory.
+#   Run from an Administrator console for Highest process-control privileges,
+#   or run normally to install the current-user Limited recovery task.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\register-bot-autostart.ps1            # install
@@ -81,12 +83,19 @@ if ($Uninstall) {
   exit 0
 }
 
-# ---- Install mode: elevation required ----
+# ---- Install mode -----------------------------------------------------------
+# Prefer Highest when this script is run from an elevated console. A standard
+# desktop session can still register a current-user Limited task, which is
+# enough to keep the paper showcase bot/analyzer/supervisor alive. Previously
+# we aborted outright for non-admin users, leaving machines with no durable
+# recovery task at all.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Write-Error "This script must be run as Administrator. Right-click PowerShell -> Run as administrator, then re-run."
-  exit 1
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$runLevel = if ($isAdministrator) { 'Highest' } else { 'Limited' }
+if (-not $isAdministrator) {
+  Log "Administrator rights are unavailable; registering a current-user recovery task (Limited run level)."
+  Log "Run this installer from an Administrator console later to upgrade process-control privileges."
 }
 
 # Build the action: cmd /c start-showcase-bot.cmd
@@ -109,7 +118,7 @@ $dailyTrigger.RandomDelay = 'PT5M'
 $taskPrincipal = New-ScheduledTaskPrincipal `
   -UserId $identity.Name `
   -LogonType Interactive `
-  -RunLevel Highest
+  -RunLevel $runLevel
 
 $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
@@ -123,8 +132,21 @@ $settings = New-ScheduledTaskSettingsSet `
 # Unregister any prior version, then register fresh.
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing) {
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-  Log "Updated existing task '$TaskName'."
+  try {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+    Log "Updated existing task '$TaskName'."
+  } catch [System.UnauthorizedAccessException] {
+    Log "Existing administrator-owned task '$TaskName' is already installed; preserving it."
+    Log "Run this installer from an Administrator console only when you need to update that task."
+    exit 0
+  } catch {
+    if ($_.Exception.Message -match 'Access is denied') {
+      Log "Existing administrator-owned task '$TaskName' is already installed; preserving it."
+      Log "Run this installer from an Administrator console only when you need to update that task."
+      exit 0
+    }
+    throw
+  }
 }
 
 Register-ScheduledTask `
@@ -140,7 +162,7 @@ Log ""
 Log "Registered scheduled task '$TaskName'." -ForegroundColor Green
 Log "  Entry     : $startCmd"
 Log "  Triggers  : AtLogon (+${LogonDelaySec}s delay) + daily 4:00 AM"
-Log "  Elevation : Highest (RunLevel Highest)"
+Log "  Run level : $runLevel"
 Log "  User      : $($identity.Name)"
 Log "  Restart   : up to 3 retries @ 5min if the launch fails"
 Log ""
