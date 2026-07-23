@@ -248,16 +248,30 @@ const ReasoningOptionSlider = ({ featureName }: { featureName: FeatureName }) =>
 
 
 
-const nameOfChatMode = {
-	'normal': 'Chat',
-	'gather': 'Gather',
-	'agent': 'Agent',
+type FounderWorkMode = 'ask' | 'plan' | 'build' | 'debug' | 'team'
+
+const nameOfFounderWorkMode: Record<FounderWorkMode, string> = {
+	ask: 'Ask',
+	plan: 'Plan',
+	build: 'Build',
+	debug: 'Debug',
+	team: 'Team',
 }
 
-const detailOfChatMode = {
-	'normal': 'Normal chat',
-	'gather': 'Reads files, but can\'t edit',
-	'agent': 'Edits files and uses tools',
+const detailOfFounderWorkMode: Record<FounderWorkMode, string> = {
+	ask: 'Answer without reading or editing files',
+	plan: 'Inspect the workspace and propose a plan without edits',
+	build: 'One agent owns edits and verifies the result',
+	debug: 'Reproduce, find the root cause, fix, and verify',
+	team: 'Two read-only advisers support one editing owner',
+}
+
+const chatModeOfFounderWorkMode: Record<FounderWorkMode, ChatMode> = {
+	ask: 'normal',
+	plan: 'gather',
+	build: 'agent',
+	debug: 'agent',
+	team: 'agent',
 }
 
 
@@ -265,22 +279,39 @@ const ChatModeDropdown = ({ className }: { className: string }) => {
 	const accessor = useAccessor()
 
 	const voidSettingsService = accessor.get('IVoidSettingsService')
+	const commandService = accessor.get('ICommandService')
 	const settingsState = useSettingsState()
 
-	const options: ChatMode[] = useMemo(() => ['normal', 'gather', 'agent'], [])
+	const options: FounderWorkMode[] = useMemo(() => ['ask', 'plan', 'build', 'debug', 'team'], [])
+	const [workMode, setWorkMode] = useState<FounderWorkMode>(
+		settingsState.globalSettings.chatMode === 'normal'
+			? 'ask'
+			: settingsState.globalSettings.chatMode === 'gather'
+				? 'plan'
+				: 'build',
+	)
+	useEffect(() => {
+		let alive = true
+		void commandService.executeCommand<FounderWorkMode>('founderOs.getWorkMode').then(value => {
+			if (alive && options.includes(value)) setWorkMode(value)
+		}, () => undefined)
+		return () => { alive = false }
+	}, [commandService, options])
 
-	const onChangeOption = useCallback((newVal: ChatMode) => {
-		voidSettingsService.setGlobalSetting('chatMode', newVal)
-	}, [voidSettingsService])
+	const onChangeOption = useCallback((newVal: FounderWorkMode) => {
+		setWorkMode(newVal)
+		voidSettingsService.setGlobalSetting('chatMode', chatModeOfFounderWorkMode[newVal])
+		void commandService.executeCommand('founderOs.setWorkMode', newVal)
+	}, [commandService, voidSettingsService])
 
 	return <VoidCustomDropdownBox
 		className={className}
 		options={options}
-		selectedOption={settingsState.globalSettings.chatMode}
+		selectedOption={workMode}
 		onChangeOption={onChangeOption}
-		getOptionDisplayName={(val) => nameOfChatMode[val]}
-		getOptionDropdownName={(val) => nameOfChatMode[val]}
-		getOptionDropdownDetail={(val) => detailOfChatMode[val]}
+		getOptionDisplayName={(val) => nameOfFounderWorkMode[val]}
+		getOptionDropdownName={(val) => nameOfFounderWorkMode[val]}
+		getOptionDropdownDetail={(val) => detailOfFounderWorkMode[val]}
 		getOptionsEqual={(a, b) => a === b}
 	/>
 

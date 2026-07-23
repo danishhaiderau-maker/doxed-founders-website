@@ -32,6 +32,11 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /expectedFounderComposer/);
     assert.match(source, /Founder Second brain/);
     assert.match(source, /founder\.personalAi\.transcribe/);
+    assert.match(source, /Founder work mode: Ask/);
+    assert.match(source, /Founder work mode: Plan/);
+    assert.match(source, /Founder work mode: Build/);
+    assert.match(source, /Founder work mode: Debug/);
+    assert.match(source, /Founder work mode: Team/);
     assert.match(source, /staleFounderComposer/);
     assert.match(source, /Founder actions/);
     assert.match(source, /remove out-vscode before packaging/);

@@ -151,13 +151,22 @@ if (-not (Test-Path $workbenchBundle)) {
     throw "Founder IDE workbench bundle not found at $workbenchBundle"
 }
 $workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
-$expectedFounderComposer = @("Founder Second brain", "Run an independent read-only review", "founder.personalAi.transcribe")
+$expectedFounderComposer = @(
+    "Founder Second brain",
+    "Run an independent read-only review",
+    "founder.personalAi.transcribe",
+    "Founder work mode: Ask",
+    "Founder work mode: Plan",
+    "Founder work mode: Build",
+    "Founder work mode: Debug",
+    "Founder work mode: Team"
+)
 $staleFounderComposer = @("label:`"Verify`"", "label:`"Challenge`"", "Founder actions")
 if ($expectedFounderComposer.Where({ -not $workbenchText.Contains($_) }).Count -gt 0 -or
     $staleFounderComposer.Where({ $workbenchText.Contains($_) }).Count -gt 0) {
     throw "Founder IDE payload contains a stale chat composer. Rebuild the React bundle and remove out-vscode before packaging."
 }
-Write-Host "[stack]   Founder Second brain and voice composer payload verified"
+Write-Host "[stack]   Founder work modes, Second brain, and voice composer payload verified"
 
 # Search and the context index use VS Code's pinned ripgrep executable. A
 # cached dependency install can retain the package while omitting its

@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 export type FounderAgentMode = 'focus' | 'team';
+export type FounderWorkMode = 'ask' | 'plan' | 'build' | 'debug' | 'team';
 
 export interface FounderAgentModeDefinition {
   id: FounderAgentMode;
@@ -27,6 +28,15 @@ export function normalizeFounderAgentMode(value: unknown): FounderAgentMode {
   return value === 'team' ? 'team' : 'focus';
 }
 
+export function normalizeFounderWorkMode(value: unknown): FounderWorkMode {
+  return value === 'ask'
+    || value === 'plan'
+    || value === 'debug'
+    || value === 'team'
+    ? value
+    : 'build';
+}
+
 export function founderAgentModeDefinition(mode: FounderAgentMode): FounderAgentModeDefinition {
   return FOUNDER_AGENT_MODES.find((candidate) => candidate.id === mode)
     ?? FOUNDER_AGENT_MODES[0];
@@ -45,6 +55,15 @@ export function readFounderAgentMode(file = founderPreferencesPath()): FounderAg
   }
 }
 
+export function readFounderWorkMode(file = founderPreferencesPath()): FounderWorkMode {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { workMode?: unknown };
+    return normalizeFounderWorkMode(parsed.workMode);
+  } catch {
+    return 'build';
+  }
+}
+
 export function writeFounderAgentMode(
   mode: FounderAgentMode,
   file = founderPreferencesPath(),
@@ -59,6 +78,33 @@ export function writeFounderAgentMode(
     // A missing or invalid preference file is replaced atomically below.
   }
   const next = { ...current, version: 1, agentMode: mode };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.rmSync(file, { force: true });
+  fs.renameSync(temp, file);
+}
+
+export function writeFounderWorkMode(
+  mode: FounderWorkMode,
+  file = founderPreferencesPath(),
+): void {
+  let current: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      current = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // A missing or invalid preference file is replaced atomically below.
+  }
+  const normalized = normalizeFounderWorkMode(mode);
+  const next = {
+    ...current,
+    version: 1,
+    workMode: normalized,
+    agentMode: normalized === 'team' ? 'team' : 'focus',
+  };
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });

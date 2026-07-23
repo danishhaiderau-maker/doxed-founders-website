@@ -7,6 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 export type FounderNativeAgentMode = 'focus' | 'team';
+export type FounderNativeWorkMode = 'ask' | 'plan' | 'build' | 'debug' | 'team';
 
 export interface FounderTeamAdviser {
 	id: 'context' | 'verification';
@@ -35,6 +36,32 @@ export function readNativeAgentMode(): FounderNativeAgentMode {
 	} catch {
 		return 'focus';
 	}
+}
+
+export function readNativeWorkMode(): FounderNativeWorkMode {
+	try {
+		const file = path.join(os.homedir(), '.founder-ide', 'preferences.json');
+		const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { workMode?: unknown };
+		return parsed.workMode === 'ask'
+			|| parsed.workMode === 'plan'
+			|| parsed.workMode === 'debug'
+			|| parsed.workMode === 'team'
+			? parsed.workMode
+			: 'build';
+	} catch {
+		return 'build';
+	}
+}
+
+export function nativeWorkModeSystem(mode: FounderNativeWorkMode): string {
+	const contracts: Record<FounderNativeWorkMode, string> = {
+		ask: 'Founder work mode: Ask. Answer the question directly. Do not inspect or edit workspace files and do not use tools.',
+		plan: 'Founder work mode: Plan. Inspect only the smallest relevant workspace context, then return a concrete plan. Do not edit files or run mutating tools.',
+		build: 'Founder work mode: Build. You are the sole editing owner. Implement the requested result, run decisive checks, and report evidence.',
+		debug: 'Founder work mode: Debug. Reproduce the failure, identify evidence for the root cause, apply the smallest complete correction, and rerun the failing check. You are the sole editing owner.',
+		team: 'Founder work mode: Team. Read-only advisers may provide bounded context and verification notes. You remain the sole editing owner and must verify every adviser claim.',
+	};
+	return contracts[mode];
 }
 
 export function shouldAssembleNativeTeam(

@@ -249,4 +249,22 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /Second brain review/);
     assert.match(source, /Run an independent read-only review/);
   });
+
+  it('maps five clear Founder work modes onto the safe native engine', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
+    );
+    for (const mode of ['Ask', 'Plan', 'Build', 'Debug', 'Team']) {
+      assert.match(source, new RegExp(`${mode.toLowerCase()}: '${mode}'`));
+    }
+    assert.match(source, /founderOs\.getWorkMode/);
+    assert.match(source, /founderOs\.setWorkMode/);
+    assert.match(source, /team: 'agent'/);
+    const team = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts',
+    );
+    assert.match(team, /nativeWorkModeSystem/);
+    assert.match(team, /Reproduce the failure/);
+    assert.match(team, /sole editing owner/);
+  });
 });

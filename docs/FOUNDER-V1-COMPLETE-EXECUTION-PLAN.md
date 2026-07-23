@@ -1,6 +1,6 @@
 # Founder OS V1 Complete Execution Plan
 
-Status date: 2026-07-23
+Status date: 2026-07-24
 
 This is the canonical implementation checklist for Founder IDE, embedded
 Founder Node, the Founder website, and the V1 release. A feature is complete
@@ -31,6 +31,20 @@ only when its acceptance evidence exists. Chat claims are not evidence.
   an authenticated completion probe, a recorded escalation reason, entitlement
   and budget checks, and a truthful receipt. A configured-but-unproven admin
   key never makes a route eligible.
+- DeepSeek V4 Flash remains the ordinary managed route and DeepSeek V4 Pro
+  remains the explicit Code/Reasoning route. A future managed expert lane such
+  as GLM may be enabled only behind a feature flag after a live authenticated
+  provider/model probe, a repeatable quality-versus-cost benchmark, plan and
+  budget enforcement, a recorded reason, and fail-closed fallback. It is not
+  part of the public V1 promise while those gates remain unproven.
+- The native composer has five founder-readable work modes: Ask, Plan, Build,
+  Debug, and Team. Ask is read-only; Plan inspects and proposes without edits;
+  Build has one editing owner; Debug follows reproduce, isolate, fix, verify;
+  Team adds bounded read-only specialists around one editing owner.
+- Skills are reusable, versioned workflows selected inside a work mode. They
+  do not become a new permanent activity icon each time a capability is added.
+  Every skill declares tools, permissions, budget, evidence, and output
+  contract.
 - Independent review is a first-class "Second brain" workflow, not seven
   generic prompt chips. The founder chooses an enabled Personal AI profile and
   one review goal: QA the result, audit the approach, check competitive
@@ -171,10 +185,11 @@ admin and user usage screenshots.
 - [x] Keep unsupported or unhealthy models fail-closed.
 - [x] Add encrypted named personal provider profiles with no arbitrary limit.
 - [x] Keep local Ollama and direct BYOK outside Founder quota.
-- [ ] Deliver working microphone/speech-to-text in the installed application.
-  The current Web Speech affordance is not accepted because its remote speech
-  service fails in the packaged Electron runtime.
-- [ ] Capture microphone audio locally as a bounded WAV recording, show
+- [x] Replace the browser speech dependency in source with bounded local WAV
+  capture and an explicit Personal AI GLM transcription command.
+- [ ] Deliver working microphone/speech-to-text in the refreshed installed
+  application.
+- [x] Capture microphone audio locally as a bounded WAV recording, show
   permission/listening/preview/error states, and transcribe it through an
   explicitly selected speech provider. For V1, an enabled Personal AI GLM
   profile may use the official `glm-asr-2512` transcription boundary; typed
@@ -190,7 +205,7 @@ admin and user usage screenshots.
   failed health probe removes it from customer routing until recovery.
 - [x] Escalate Flash to Pro only on measured difficulty or failed QA and record
   the escalation reason in the task receipt.
-- [ ] Replace Verify, Challenge, Research, Panel, Test, Explain, and Optimize
+- [x] Replace Verify, Challenge, Research, Panel, Test, Explain, and Optimize
   chips with one compact Second brain control. It must select an enabled BYOK
   or local reviewer and provide QA, architecture audit, competition check, and
   custom-review intents without crowding the composer.
@@ -206,9 +221,12 @@ admin and user usage screenshots.
   defects from opinion, propose the smallest correction, preserve dissent in
   the receipt, and never apply reviewer output without the normal approval and
   ownership gates.
-- [ ] Add a simple work-mode menu modelled on the useful parts of modern AI
+- [x] Add a simple work-mode menu modelled on the useful parts of modern AI
   workspaces: Ask (read only), Plan (no edits), Build (one editing owner),
   Debug (focused diagnosis), and Team (bounded coordinated specialists).
+- [ ] Prove all five work modes in the refreshed installed application,
+  including that Ask and Plan cannot edit, Build and Debug keep one editing
+  owner, and Team exposes the bounded coordination receipt.
 - [ ] Treat skills as reusable, versioned workflows attached to these five
   modes rather than adding another permanent icon for every capability.
   Skills declare tools, permissions, evidence requirements, budget, and output
@@ -285,9 +303,12 @@ merge receipt, multi-agent task graph screenshots.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 
-- [ ] Replace icon-only primary navigation in the installed default layout with
+- [x] Replace icon-only primary navigation in source with
   a calm labelled hierarchy:
   New chat, Projects, Chats, Agents, Graph, Remote, Connect, and Settings.
+- [ ] Prove that labelled hierarchy as the refreshed installed default layout
+  at every release viewport, with no duplicate generic activity rail competing
+  for primary navigation.
 - [ ] Give Projects and Chats first-class persistent navigation, searchable
   history, useful names, pin/archive controls, and a clear new-chat action.
 - [x] Widen the primary navigation enough for readable labels and project/chat
@@ -322,16 +343,23 @@ merge receipt, multi-agent task graph screenshots.
   animation in dense work surfaces.
 - [ ] Audit empty, loading, partial, offline, unauthorized, quota-exhausted,
   error, success, and long-content states in every changed surface.
-- [ ] Make the default shell Founder-native and Apple-inspired: hide the legacy
+- [x] Migrate the source default shell to the Founder-native Apple-inspired
+  layout: hide the legacy
   menu bar and generic activity rail by default, use a calm labelled Founder
   rail, reduce visual borders and competing controls, keep typography and
   spacing consistent, and expose advanced editor commands through Build,
   shortcuts, and the command palette.
+- [ ] Prove the Apple-inspired shell in the refreshed installed application.
+  Acceptance requires calm hierarchy, readable labels, deliberate spacing,
+  restrained radii, no visible upstream identity, no control overlap, and
+  predictable keyboard/focus behavior. A source theme or screenshot from an
+  older payload is not acceptance.
 - [ ] Keep Terminal, Explorer, Search, Graph/Source Control, Extensions, Run,
   and Debug as advanced capabilities rather than deleting them. AI automates
   the common path, while these tools remain the inspectable escape hatch for
   real repositories, local services, tests, and recovery.
-- [ ] Add Remote as a visible Founder navigation destination in IDE and web.
+- [x] Add Remote as a visible Founder navigation destination in IDE source.
+- [ ] Align and prove Remote in the refreshed installed IDE and production web.
   Show this device, online state, workspace, last activity, pending approvals,
   rename, revoke, reconnect, and an explicit "Pair another device" action.
 - [ ] Treat a human-readable pairing code only as a short-lived authorization
@@ -370,6 +398,19 @@ zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
   hide until next task, and recovery when a saved display is disconnected.
 - [x] Announce delivered work with a compact two-line result card and a brief
   fire state; resting returns the dragon to its nest without visual noise.
+- [ ] Replace the current placeholder/copy-like visual treatment with one
+  recognisable Founder Dragon designed for the desktop companion: transparent
+  body-only frames, no rectangular video background, a convincing nest/rest
+  pose, purposeful flight/effort, listening, verification, blocking, and
+  delivery/fire reactions.
+- [ ] Make the final companion feel alive without becoming distracting:
+  breathing and eye motion at rest, task-linked motion only, compact result
+  cards above it, drag anywhere on any monitor, edge snap, and a quiet
+  reduced-motion fallback.
+- [ ] Prove the final Dragon outside the IDE window, including drag, persistence,
+  click-through, focus safety, task-state transitions, one-launch identity,
+  and recovery after IDE restart. The earlier embedded panel and generated
+  video preview are reference material, not release evidence.
 
 Evidence: transparent pixel checks, multi-monitor drag test, restart persistence,
 state-transition recording, reduced-motion and focus tests.
@@ -504,34 +545,61 @@ gates.
 
 ## Immediate completion sequence from this checkpoint
 
-1. **Repair the core loop.** Prove managed Founder Auto, Fast, Reasoning, and
-   Code; make Auto/Free resolve to Flash; repair real voice capture and
-   transcription; restore the packaged terminal runtime; keep route identity
-   and errors truthful.
-2. **Build the modern composer.** Replace the seven prompt chips with the
-   Second brain workflow, add the five work modes, keep one clear primary model
-   picker, and make every Personal AI or Ollama profile instantly selectable.
-3. **Finish the Founder shell.** Ship the Apple-inspired default layout,
-   labelled Founder navigation, persistent Projects and Chats, progressive
-   disclosure for legacy engineering tools, Graph as a first-class view, and
-   the living Dragon without duplicate launch identities.
-4. **Finish secure Remote.** Surface device pairing in IDE and web, verify the
-   existing short-lived code and 256-bit secret boundary, add device detail,
-   approval, revoke, rename, reconnect, and audit states, then prove a real
-   website-to-installed-IDE action.
-5. **Make inexpensive models perform like a system.** Require the project and
-   decision graph, scoped retrieval, stable prompt prefix, tool execution,
-   coordination, verified memory, independent review, and evidence
-   reconciliation on every applicable task. Market only measured savings.
-6. **Align the website.** Complete fail-closed Plan/Usage, Team membership,
-   connected services, projects, chats, agents, graph, receipts, remote
-   devices, and the same Founder visual language. Remove or hide controls not
-   backed by live capability.
-7. **Freeze and prove the product.** Run source suites, build one installer,
-   install over preserved Founder data, test all viewports and states, complete
-   managed/BYOK/Ollama/voice/terminal/coordination/Dragon/remote loops, validate
-   the canonical receipt, then hold public release until signing, clean-VM,
-   rollback, uninstall, and soak gates pass.
+1. **Freeze the product contract.** Keep one Founder AI, five work modes,
+   Personal AI/Ollama profiles, one Second brain workflow, one embedded Node,
+   one Dragon, one labelled navigation hierarchy, and one evidence standard.
+   Reject duplicate settings, launch identities, generic prompt-chip clutter,
+   and public claims unsupported by measured receipts.
+2. **Finish the core AI loop.** Prove managed Auto/Fast on Flash and explicit
+   Code/Reasoning on Pro; keep any premium expert lane feature-flagged until its
+   probe and benchmark pass; finish installed voice; restore the packaged
+   terminal; keep model, quota, latency, cache, and error receipts truthful.
+3. **Finish reliable work orchestration.** Prove Ask, Plan, Build, Debug, and
+   Team; require the project and decision graph, stable prefix, scoped
+   retrieval, ownership leases, verified memory, and 10-15 minute cross-chat
+   awareness. Team uses useful specialists, never an arbitrary swarm count.
+4. **Finish independent review.** Complete the bounded reviewer context pack,
+   structured Second brain result, evidence-linked reconciliation, dissent
+   receipt, and approval gate. A reviewer can inspect everything relevant but
+   remains read-only.
+5. **Finish the Founder experience.** Ship the installed Apple-inspired shell,
+   labelled New chat/Projects/Chats/Agents/Graph/Remote/Connect/Settings
+   navigation, progressive disclosure for expert coding tools, persistent
+   projects/chats, Graph as a first-class view, and the accepted living
+   desktop Dragon.
+6. **Finish secure Remote and website parity.** Prove short-lived pairing,
+   account/install binding, 256-bit device secret protection, explicit device
+   approval, rate limits, expiry, single consumption, revoke, rename,
+   reconnect, pending approvals, and a real web-to-installed-IDE action. Apply
+   the same plans, usage, AI, projects, chats, agents, graph, services,
+   receipts, settings, and visual language to the website.
+7. **Freeze, package, install, and prove.** Rebuild the exact payload and
+   one-app installer, preserve Founder data, remove stale app identities,
+   install, and execute the full functional, visual, failure-state, security,
+   accessibility, update/rollback/uninstall, and clean-machine matrix. Public
+   release remains held until signing, clean-VM, and soak gates pass.
+
+## Focused questions for an independent GLM review
+
+Ask GLM to challenge implementation contracts rather than re-decide the
+product. Request one structured answer covering:
+
+1. What is the smallest complete JSON schema for a read-only Second brain
+   request and result, including evidence references, dissent, confidence,
+   risks, competition analysis, and proposed corrections?
+2. What deterministic arbitration rules should Founder AI use when the primary
+   answer and reviewer disagree, without letting either model silently edit?
+3. Which tests prove Ask and Plan cannot mutate files or run risky tools, while
+   Build, Debug, and Team preserve exactly one editing owner?
+4. Which prompt-prefix, retrieval, cache, and tool-result boundaries maximize
+   DeepSeek cache reuse without serving stale repository or remote-state data?
+5. Which threat cases remain in the Remote pairing design despite short-lived
+   codes, account/install binding, a 256-bit secret, throttling, expiry,
+   single consumption, explicit approval, revoke, and audit?
+
+Require GLM to return: `verdict`, `verified_gaps`, `evidence`, `better_option`,
+`required_tests`, `residual_risks`, and `confidence`. Reject generic planning
+or acknowledgement as an incomplete review.
 
 Evidence: signed artifact/hash, clean-machine matrix, installed-app screenshots,
 test report, visual audit bundle, release receipt, and blocker register.

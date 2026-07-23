@@ -6,8 +6,11 @@ import { afterEach, describe, it } from 'node:test';
 import {
   founderAgentModeDefinition,
   normalizeFounderAgentMode,
+  normalizeFounderWorkMode,
   readFounderAgentMode,
+  readFounderWorkMode,
   writeFounderAgentMode,
+  writeFounderWorkMode,
 } from './founder-agent-mode';
 
 const roots: string[] = [];
@@ -28,6 +31,26 @@ describe('Founder agent mode', () => {
     const file = path.join(root, 'preferences.json');
     fs.writeFileSync(file, JSON.stringify({ companion: true }), 'utf8');
     writeFounderAgentMode('team', file);
+    assert.equal(readFounderAgentMode(file), 'team');
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).companion, true);
+  });
+
+  it('maps five founder work modes onto one safe editing owner', () => {
+    assert.equal(normalizeFounderWorkMode('ask'), 'ask');
+    assert.equal(normalizeFounderWorkMode('plan'), 'plan');
+    assert.equal(normalizeFounderWorkMode('debug'), 'debug');
+    assert.equal(normalizeFounderWorkMode('team'), 'team');
+    assert.equal(normalizeFounderWorkMode('unknown'), 'build');
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-work-mode-'));
+    roots.push(root);
+    const file = path.join(root, 'preferences.json');
+    fs.writeFileSync(file, JSON.stringify({ companion: true, agentMode: 'team' }), 'utf8');
+    writeFounderWorkMode('debug', file);
+    assert.equal(readFounderWorkMode(file), 'debug');
+    assert.equal(readFounderAgentMode(file), 'focus');
+    writeFounderWorkMode('team', file);
+    assert.equal(readFounderWorkMode(file), 'team');
     assert.equal(readFounderAgentMode(file), 'team');
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).companion, true);
   });

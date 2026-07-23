@@ -56,6 +56,11 @@ import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
 import { FounderProjectActivityStore } from './project-activity';
 import { PersonalAiProfileStore } from './personal-ai-profiles';
 import { createDailyQualityReview } from './daily-quality-review';
+import {
+  normalizeFounderWorkMode,
+  readFounderWorkMode,
+  writeFounderWorkMode,
+} from './founder-agent-mode';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -376,6 +381,22 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
       founderShortcuts?.refresh(),
     ),
+    vscode.commands.registerCommand('founderOs.getWorkMode', () =>
+      readFounderWorkMode(),
+    ),
+    vscode.commands.registerCommand('founderOs.setWorkMode', async (value: unknown) => {
+      const workMode = normalizeFounderWorkMode(value);
+      writeFounderWorkMode(workMode);
+      await vscode.workspace
+        .getConfiguration('founderOs')
+        .update(
+          'agentMode',
+          workMode === 'team' ? 'team' : 'focus',
+          vscode.ConfigurationTarget.Global,
+        );
+      founderHub?.refresh();
+      return workMode;
+    }),
     vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
       await founderWorkspaceContext?.refresh(true);
       const summary = founderWorkspaceContext?.summary();

@@ -47,7 +47,9 @@ import {
 	latestFounderRequest,
 	nativeTeamAdvisers,
 	readNativeAgentMode,
+	readNativeWorkMode,
 	shouldAssembleNativeTeam,
+	nativeWorkModeSystem,
 	type FounderTeamAdviser,
 } from './founderNativeTeam.js';
 import {
@@ -540,6 +542,10 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	openAiMessages.unshift({
 		role: 'system',
 		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the exact provider and model for this request appear in the Founder route receipt below the answer. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
+	});
+	openAiMessages.splice(1, 0, {
+		role: 'system',
+		content: nativeWorkModeSystem(readNativeWorkMode()),
 	});
 	const coordination = params.coordination
 		? beginNativeCoordination({
