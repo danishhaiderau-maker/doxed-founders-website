@@ -25,7 +25,14 @@ describe('Founder personal provider profiles', () => {
       [profile(1)],
     );
     assert.deepEqual(readFounderProviderProfiles(encoded), [
-      { ...profile(1), baseUrl: 'https://provider-1.test/v1' },
+      {
+        ...profile(1),
+        baseUrl: 'https://provider-1.test/v1',
+        kind: 'openai-compatible',
+        enabled: true,
+        createdAt: undefined,
+        updatedAt: undefined,
+      },
     ]);
     assert.deepEqual(JSON.parse(headersWithoutFounderProviderProfiles(encoded)), {
       'X-Legacy': 'kept',
