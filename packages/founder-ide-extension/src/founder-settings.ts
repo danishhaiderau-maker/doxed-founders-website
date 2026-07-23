@@ -445,14 +445,16 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .subtitle, .section-copy, .choice span, .connection-row span, .note { color: var(--muted); }
     .subtitle { padding-top: 4px; font-size: 12px; }
     .tabs {
-      display: flex; gap: 3px; padding: 3px; border: 1px solid var(--border);
-      width: 100%; border-radius: 7px; background: var(--surface); overflow: hidden;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 3px; padding: 3px; border: 1px solid var(--border);
+      width: 100%; border-radius: 7px; background: var(--surface);
     }
     .tab, .segment {
       min-height: 30px; border: 0; border-radius: 5px; background: transparent;
-      flex: 1 1 0; min-width: 0; color: var(--muted); cursor: pointer;
-      padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      min-width: 0; color: var(--muted); cursor: pointer; padding: 0 8px;
     }
+    .tab { min-height: 36px; line-height: 1.25; white-space: normal; }
+    .segment { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tab.selected, .segment.selected { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
     .panel { display: none; }
     .panel.selected { display: block; animation: panel-in 160ms ease-out; }
@@ -549,8 +551,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       .field.wide { grid-column: auto; }
       .profile-row { align-items: flex-start; flex-direction: column; }
       .profile-actions { justify-content: flex-start; }
-      .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .tab { width: 100%; }
+      .tabs { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }
     }
   </style>
 </head>
