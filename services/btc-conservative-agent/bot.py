@@ -20477,6 +20477,7 @@ expired_orders: List[Dict] = []
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
+_DASHBOARD_BOOTSTRAP_COMPLETE = False
 
 # ============================================================================
 # EMERGENCY HARDENING — AI-key drain protection (2026-07-03)
@@ -20622,6 +20623,25 @@ def _admin_authed_strict() -> bool:
 def _emergency_api_guard():
     path = request.path or ""
     method = (request.method or "GET").upper()
+
+    # Bind the bounded Flask server at the start of main() so /api/ping stays
+    # responsive while persistent paper state is restored. Never expose a
+    # partially restored relay/dashboard snapshot during that handoff.
+    if (
+        not _DASHBOARD_BOOTSTRAP_COMPLETE
+        and path
+        not in ("/", "/health", "/status", "/api/ping", "/api/status", "/api/build")
+    ):
+        response = jsonify(
+            {
+                "ok": False,
+                "boot": "starting",
+                "error": "dashboard state is restoring",
+            }
+        )
+        response.status_code = 503
+        response.headers["Retry-After"] = "1"
+        return response
 
     # Only police /api/* (plus /debug_state and /). Static assets untouched.
     is_api = path.startswith("/api/") or path in ("/debug_state",)
@@ -26049,6 +26069,7 @@ def api_ping():
     """Lightweight liveness probe — returns immediately without heavy analytics."""
     return jsonify({
         "ok": True,
+        "boot": "ready" if _DASHBOARD_BOOTSTRAP_COMPLETE else "starting",
         "bot_pid": os.getpid(),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
@@ -30544,7 +30565,7 @@ def apply_trade_pnl(trade_row):
 
 def main():
     global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
-    global _PROCESS_SINGLETON, BOT_INSTANCE_ID
+    global _PROCESS_SINGLETON, BOT_INSTANCE_ID, _DASHBOARD_BOOTSTRAP_COMPLETE
     try:
         # The lock directory must be machine-wide, not relative to this repo.
         # The command center can coexist with archived/alternate checkouts; a
@@ -30567,6 +30588,7 @@ def main():
     # Bind before loading state, starting market feeds, or making any AI call.
     # A port conflict is therefore fatal to the entire bot, never just a web thread.
     dashboard_httpd = _create_dashboard_server()
+    threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
     prune_aux_logs_on_startup()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
@@ -30638,7 +30660,7 @@ def main():
     except Exception as exc:
         logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
-    threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
+    _DASHBOARD_BOOTSTRAP_COMPLETE = True
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"

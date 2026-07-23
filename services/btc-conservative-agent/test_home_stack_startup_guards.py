@@ -17,6 +17,7 @@ BOT = (
 BOT_HUNG = HEALTH.split("function Test-BotHung", 1)[1].split(
     "function Test-AnalyzerHung", 1
 )[0]
+BOT_MAIN = BOT.split("def main():", 1)[1]
 
 
 def check(name: str, condition: bool) -> None:
@@ -42,6 +43,12 @@ def main() -> None:
         "start refuses an occupied port after cleanup",
         "refusing duplicate bot start" in START
         and START.count("Test-PortBound $BotListenPort") >= 3,
+    )
+    check(
+        "all bot startup paths share one exclusive starter lock",
+        '".home-bot-start.lock"' in START
+        and "[System.IO.FileShare]::None" in START
+        and "Another bot startup is already in progress" in START,
     )
     check(
         "hung detection includes bound-but-unconnectable listeners",
@@ -75,6 +82,19 @@ def main() -> None:
         "EAGER_EXCHANGE_MARKET_LOAD = (" in BOT
         and "if EAGER_EXCHANGE_MARKET_LOAD" in BOT
         and "else {}" in BOT,
+    )
+    check(
+        "dashboard ping remains live throughout persistent-state restoration",
+        BOT_MAIN.index("threading.Thread(target=run_flask")
+        < BOT_MAIN.index("prune_aux_logs_on_startup()")
+        and BOT_MAIN.count("threading.Thread(target=run_flask") == 1
+        and "_DASHBOARD_BOOTSTRAP_COMPLETE = True" in BOT_MAIN,
+    )
+    check(
+        "partially restored dashboard and relay snapshots fail closed",
+        "not _DASHBOARD_BOOTSTRAP_COMPLETE" in BOT
+        and '"error": "dashboard state is restoring"' in BOT
+        and '"boot": "ready" if _DASHBOARD_BOOTSTRAP_COMPLETE else "starting"' in BOT,
     )
     print("PASS: home stack one-owner startup guards")
 

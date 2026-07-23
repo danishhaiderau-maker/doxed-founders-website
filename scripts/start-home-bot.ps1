@@ -8,6 +8,25 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+# Serialize every startup path (dashboard button, supervisor, scheduled task,
+# or operator shell). Two concurrent starters both performed cleanup before
+# either wrote .home-bot.pid, then blocked/raced each other and left :7002
+# without a durable owner. The exclusive handle is released automatically
+# when this short-lived starter process exits; the file itself may remain.
+$startLockFile = Join-Path $repoRoot ".home-bot-start.lock"
+try {
+  $script:StartLockHandle = [System.IO.File]::Open(
+    $startLockFile,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+} catch {
+  Write-Host "Another bot startup is already in progress - leaving it as the sole starter." -ForegroundColor Yellow
+  exit 0
+}
+
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode
 if ($Port -le 0) { $Port = [int]$stackMode.BotPort }
