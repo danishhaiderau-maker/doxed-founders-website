@@ -30,6 +30,15 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /remove out-vscode before packaging/);
   });
 
+  it('rejects payloads missing supported Windows startup bindings', () => {
+    assert.match(source, /requiredNativeBindings/);
+    assert.match(source, /@parcel\\watcher-win32-x64\\watcher\.node/);
+    assert.match(source, /node-pty\\build\\Release\\conpty\.node/);
+    assert.match(source, /node-pty\\build\\Release\\conpty_console_list\.node/);
+    assert.doesNotMatch(source, /node-pty\\build\\Release\\pty\.node/);
+    assert.match(source, /Founder IDE native binding is missing/);
+  });
+
   it('persists a deployment mode during silent installation', () => {
     assert.match(
       installerSource,

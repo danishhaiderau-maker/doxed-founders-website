@@ -157,6 +157,37 @@ if (-not $workbenchText.Contains($expectedFounderToolbar) -or $workbenchText.Con
 }
 Write-Host "[stack]   Founder action toolbar payload verified"
 
+# Verify the bindings used during a supported Windows 10/11 startup before
+# spending time building the inner and outer installers. Parcel intentionally
+# ships its watcher through a platform package, and node-pty uses ConPTY on
+# every Windows build supported by this release.
+$requiredNativeBindings = @(
+    "resources\app\node_modules\@parcel\watcher-win32-x64\watcher.node",
+    "resources\app\node_modules\@vscode\deviceid\build\Release\*.node",
+    "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
+    "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-ca-certs\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-mutex\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-process-tree\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-registry\build\Release\*.node",
+    "resources\app\node_modules\@*\policy-watcher\build\Release\*.node",
+    "resources\app\node_modules\kerberos\build\Release\*.node",
+    "resources\app\node_modules\native-is-elevated\build\Release\*.node",
+    "resources\app\node_modules\native-keymap\build\Release\*.node",
+    "resources\app\node_modules\native-watchdog\build\Release\*.node",
+    "resources\app\node_modules\node-pty\build\Release\conpty.node",
+    "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node",
+    "resources\app\node_modules\windows-foreground-love\build\Release\*.node"
+)
+foreach ($bindingPattern in $requiredNativeBindings) {
+    $binding = Get-ChildItem -Path (Join-Path $ideRoot $bindingPattern) -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+    if (-not $binding) {
+        throw "Founder IDE native binding is missing: $bindingPattern"
+    }
+}
+Write-Host "[stack]   all supported Windows startup bindings verified"
+
 # Embed the Founder extension into the application payload even when the
 # expensive IDE compilation is skipped. A staged VSIX alone is not installed
 # on a clean machine by the inner setup executable.

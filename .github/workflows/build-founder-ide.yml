@@ -441,7 +441,9 @@ jobs:
           # The policy watcher namespace differs between Void/VSCodium builds,
           # so that one deliberately uses an @* wildcard.
           $requiredNode = @(
-            "resources\app\node_modules\@parcel\watcher\build\Release\*.node",
+            # Parcel ships its supported Windows binding as a platform package.
+            # Root postinstall deliberately removes duplicate local prebuilds.
+            "resources\app\node_modules\@parcel\watcher-win32-x64\watcher.node",
             "resources\app\node_modules\@vscode\deviceid\build\Release\*.node",
             "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
             "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
@@ -456,7 +458,6 @@ jobs:
             "resources\app\node_modules\native-watchdog\build\Release\*.node",
             "resources\app\node_modules\node-pty\build\Release\conpty.node",
             "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node",
-            "resources\app\node_modules\node-pty\build\Release\pty.node",
             "resources\app\node_modules\windows-foreground-love\build\Release\*.node"
           )
           foreach ($n in $requiredNode) {
@@ -571,13 +572,14 @@ jobs:
             }
 
             $nativePatterns = @(
-              "resources\app\node_modules\@parcel\watcher\build\Release\*.node",
+              "resources\app\node_modules\@parcel\watcher-win32-x64\watcher.node",
               "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
               "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
               "resources\app\node_modules\@vscode\windows-registry\build\Release\*.node",
               "resources\app\node_modules\@*\policy-watcher\build\Release\*.node",
               "resources\app\node_modules\native-keymap\build\Release\*.node",
-              "resources\app\node_modules\node-pty\build\Release\pty.node"
+              "resources\app\node_modules\node-pty\build\Release\conpty.node",
+              "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node"
             )
             foreach ($pattern in $nativePatterns) {
               $match = Get-ChildItem -Path (Join-Path $smokeDir $pattern) -ErrorAction SilentlyContinue | Select-Object -First 1
