@@ -52,15 +52,27 @@
   and taskbar identity.
 - Installed UI screenshots pass at 1440x900, 1280x720, 1187x739, and 768x900
   without critical page errors or visible Void branding in the tested routes.
-- Installed managed chat completed with nonce `V1-INSTALLED-20260723-1503`, a
-  visible final response, a DeepSeek route receipt, and no critical native
-  errors. This also exposed the remaining Auto-to-Flash production policy gate
-  listed below.
+- The final installed settings pass keeps Account, AI, Local & Cloud,
+  Connections, and Advanced readable in the narrow layout instead of
+  truncating the tab labels.
+- Installed managed chat completed on the final artifact with nonce
+  `V1-CORRECTED-20260723-1848`, a visible final response, route
+  `reasoning / deepseek-v4-pro`, 1,908 ms provider latency, 7.84 s total
+  latency, and no critical native errors. This also confirms the remaining
+  Auto-to-Flash production policy gate listed below.
+- The source and installed Founder Settings bundles have the same SHA-256
+  (`370CC211A2E4F0DBFF0C9C7AC03B48F254B5AC3F2E64ACBEBABBC0E978F94730`),
+  and the installed embedded relay matches the reviewed payload SHA-256
+  (`37B97EDC6B6E081914E33FF2E40CA31CC497060432AF989C11B0F8FCF3101C63`).
+- Draft PR `#42` carries the release branch and its Vercel preview checks pass.
 
 ### Expected artifact
 
-- `Founder-IDE-Setup-0.9.4.exe` - one-app Windows installer; unsigned internal
-  testing only until the signing and clean-machine gates pass.
+- `Founder-IDE-Setup-0.9.4.exe` - one-app Windows installer, 214,115,394 bytes,
+  SHA-256
+  `F3E829D43B144DDD98FB5B5FF29AD9AF36AD9238C4F5273C2983F28CEE372A30`;
+  unsigned internal testing only until the signing and clean-machine gates
+  pass.
 
 The stable public update manifest intentionally remains on the last published
 release. It must not advertise this unsigned internal candidate.

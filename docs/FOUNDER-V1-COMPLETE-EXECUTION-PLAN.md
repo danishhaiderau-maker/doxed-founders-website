@@ -430,12 +430,20 @@ test report, visual audit bundle, release receipt, and blocker register.
   route generation after the quota-policy and admin-language repair.
 - The installed one-app candidate passed screenshots at 1440x900, 1280x720,
   1187x739, and 768x900 with no critical page errors in the tested routes.
+- The final narrow settings pass keeps every section label readable, and the
+  installed Founder Settings bundle exactly matches the reviewed source bundle.
 - Desktop, Start, taskbar, uninstall, application identity, embedded relay,
   version marker, preserved FounderVault, preserved profile, and managed normal
   chat are proven on the local Windows machine.
-- `V1-INSTALLED-20260723-1503` produced a visible DeepSeek response and route
-  receipt. It also proved the remaining production policy defect: Founder Auto
-  resolved to Pro, so the coordinated Auto-to-Flash deployment remains open.
+- Final artifact `Founder-IDE-Setup-0.9.4.exe` is 214,115,394 bytes with
+  SHA-256
+  `F3E829D43B144DDD98FB5B5FF29AD9AF36AD9238C4F5273C2983F28CEE372A30`.
+  It is intentionally unsigned and restricted to internal testing.
+- `V1-CORRECTED-20260723-1848` produced a visible DeepSeek response and route
+  receipt from the final installed artifact. It also proved the remaining
+  production policy defect: Founder Auto resolved to Pro, so the coordinated
+  Auto-to-Flash deployment remains open.
+- Draft PR `#42` contains this release branch and its Vercel preview checks pass.
 - API PR `#41` is tested but deliberately held until the trading owner proves a
   simultaneous full-flat boundary. Installed Agent-tool QA therefore remains
   open rather than being reported as complete.
