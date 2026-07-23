@@ -206,9 +206,20 @@ def main() -> None:
         "function Test-ProcessIdAliveFast" in COMMON
         and "OpenProcess" in COMMON
         and "WaitForSingleObject" in COMMON
+        and "QueryFullProcessImageName" in COMMON
+        and "GetProcessTimes" in COMMON
+        and "TerminateProcess" in COMMON
         and "Get-Process -Id" not in SUPERVISOR
         and "Get-Process cloudflared" not in SUPERVISOR
         and "Get-Process -Id" not in MONITOR,
+    )
+    check(
+        "supervisor detection and recovery avoid blocking maintenance scans",
+        "Test-BotHung" not in SUPERVISOR
+        and "Invoke-HomeTerminalHygiene" not in SUPERVISOR
+        and "Stop-PythonMatching" not in SUPERVISOR
+        and "Test-PortOpen $BotPort" in SUPERVISOR
+        and "if (-not (Test-PortOpen $ListenPort))" in COMMON,
     )
     check(
         "authoritative listener repairs stale bot pid before monitor attach",

@@ -120,7 +120,6 @@ function Restart-BotComponent {
   Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid") @("powershell", "pwsh", "cmd") | Out-Null
   Remove-Item (Join-Path $repoRoot ".home-bot-auto-restart.lock") -Force -ErrorAction SilentlyContinue
   Remove-Item (Join-Path $repoRoot ".home-bot-auto-restart.heartbeat") -Force -ErrorAction SilentlyContinue
-  Stop-PythonMatching "btc_conservative_agent" | Out-Null
   Stop-ListenPortFast $BotPort | Out-Null
   Start-Sleep -Seconds 3
   Start-HiddenPs1 -ScriptPath (Join-Path $scriptDir "start-home-bot.ps1") -ExtraArgs @("-Port", "$BotPort", "-NoWait")
@@ -130,7 +129,6 @@ function Restart-AnalyzerComponent {
   Log "RECOVER analyzer - replace monitor + analyzer with one detached owner on :$AnalyzerPort"
   Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") @("powershell", "pwsh", "cmd") | Out-Null
   Remove-Item (Join-Path $repoRoot ".home-analyzer-auto-restart.lock") -Force -ErrorAction SilentlyContinue
-  Stop-PythonMatching "analyzer_research_engine" | Out-Null
   Stop-ListenPortFast $AnalyzerPort | Out-Null
   Remove-Item (Join-Path $repoRoot ".home-analyzer-dashboard.pid") -Force -ErrorAction SilentlyContinue
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
@@ -293,8 +291,6 @@ Set-Content -Path $heartbeatFile -Value (Get-Date -Format o) -NoNewline -Encodin
 Prevent-Sleep
 Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Use-NamedTunnel)"
 
-$hygieneTick = 0
-
 $fail = @{
   bot = 0; analyzer = 0; tunnel = 0; bridge = 0
 }
@@ -313,17 +309,6 @@ while ($true) {
   # making progress without the Windows CIM/WMI provider, which can hang for
   # minutes under process-table contention.
   Set-Content -Path $heartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
-  $hygieneTick++
-  if ($hygieneTick -ge 6) {
-    $hygieneTick = 0
-    try {
-      $hygiene = Invoke-HomeTerminalHygiene -BotPort $BotPort -AnalyzerPort $AnalyzerPort
-      if ($hygiene -and $hygiene.Count -gt 0) {
-        Log ("hygiene " + ($hygiene -join " | "))
-      }
-    } catch { }
-  }
-
   $tunnelUrl = Get-TunnelPublicUrl
   $botOk = Test-BotHealthy
   $analyzerOk = Test-AnalyzerHealthy
@@ -342,7 +327,9 @@ while ($true) {
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
 
-  $botHung = Test-BotHung
+  # Diagnostic only: a bounded accepting socket with a failed HTTP probe is
+  # sufficient evidence of a hung server. Never enumerate the TCP table here.
+  $botHung = (-not $botOk -and (Test-PortOpen $BotPort))
   # F4c-429 — surface the rate-limit-backoff state on the tick line so we can
   # see in the log when 429s are being absorbed (instead of causing flaps).
   $backoff = Get-TunnelBackoffState

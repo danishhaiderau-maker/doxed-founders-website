@@ -46,11 +46,21 @@ if (-not ("HomeStackNativeProcess" -as [type])) {
   Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class HomeStackNativeProcess {
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool QueryFullProcessImageName(IntPtr handle, int flags, StringBuilder path, ref int size);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool GetProcessTimes(IntPtr handle, out long creation, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool TerminateProcess(IntPtr handle, uint exitCode);
   [DllImport("kernel32.dll", SetLastError=true)]
   [return: MarshalAs(UnmanagedType.Bool)]
   public static extern bool CloseHandle(IntPtr handle);
@@ -65,6 +75,53 @@ function Test-ProcessIdAliveFast([int]$ProcessId) {
   try {
     # WAIT_TIMEOUT means the process has not signalled its exit handle.
     return ([HomeStackNativeProcess]::WaitForSingleObject($handle, 0) -eq 0x00000102)
+  } finally {
+    [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
+  }
+}
+
+function Get-ProcessExecutableNameFast([int]$ProcessId) {
+  if ($ProcessId -le 0) { return $null }
+  $handle = [HomeStackNativeProcess]::OpenProcess(0x00101000, $false, $ProcessId)
+  if ($handle -eq [IntPtr]::Zero) { return $null }
+  try {
+    $size = 32768
+    $path = New-Object System.Text.StringBuilder $size
+    if (-not [HomeStackNativeProcess]::QueryFullProcessImageName($handle, 0, $path, [ref]$size)) {
+      return $null
+    }
+    return [System.IO.Path]::GetFileNameWithoutExtension($path.ToString()).ToLowerInvariant()
+  } finally {
+    [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
+  }
+}
+
+function Get-ProcessStartTimeUtcFast([int]$ProcessId) {
+  if ($ProcessId -le 0) { return $null }
+  $handle = [HomeStackNativeProcess]::OpenProcess(0x00101000, $false, $ProcessId)
+  if ($handle -eq [IntPtr]::Zero) { return $null }
+  try {
+    [long]$created = 0
+    [long]$exited = 0
+    [long]$kernel = 0
+    [long]$user = 0
+    if (-not [HomeStackNativeProcess]::GetProcessTimes(
+      $handle, [ref]$created, [ref]$exited, [ref]$kernel, [ref]$user
+    )) {
+      return $null
+    }
+    return [datetime]::FromFileTimeUtc($created)
+  } finally {
+    [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
+  }
+}
+
+function Stop-ProcessIdFast([int]$ProcessId) {
+  if ($ProcessId -le 0) { return $false }
+  $handle = [HomeStackNativeProcess]::OpenProcess(0x00100001, $false, $ProcessId)
+  if ($handle -eq [IntPtr]::Zero) { return $false }
+  try {
+    return [HomeStackNativeProcess]::TerminateProcess($handle, 1)
   } finally {
     [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
   }
@@ -295,16 +352,19 @@ function Test-PortBound([int]$ListenPort) {
 
 function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
+  # Most recoveries have no listener. Avoid the Windows TCP table entirely in
+  # that common case; it is known to block for minutes on a degraded host.
+  if (-not (Test-PortOpen $ListenPort)) { return $killed }
   @(Get-ListenPortOwners $ListenPort) | ForEach-Object {
     $procId = [int]$_
     if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
-      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      Stop-ProcessIdFast $procId | Out-Null
       Start-Sleep -Milliseconds 100
-      if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+      if (Test-ProcessIdAliveFast $procId) {
         & taskkill.exe /PID $procId /T /F 2>$null | Out-Null
       }
       Start-Sleep -Milliseconds 100
-      if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+      if (Test-ProcessIdAliveFast $procId) {
         Write-Warning "Unable to stop listener PID $procId on port $ListenPort."
       } else {
         $killed += $procId
@@ -319,14 +379,19 @@ function Stop-RecordedProcess([string]$PidFile, [string[]]$AllowedNames = @()) {
   if (-not (Test-Path -LiteralPath $PidFile)) { return $killed }
   try {
     $recordedPid = [int]((Get-Content -LiteralPath $PidFile -Raw -ErrorAction Stop).Trim())
-    $proc = Get-Process -Id $recordedPid -ErrorAction SilentlyContinue
-    if ($proc -and ($AllowedNames.Count -eq 0 -or $AllowedNames -contains $proc.ProcessName)) {
-      $stamp = (Get-Item -LiteralPath $PidFile).LastWriteTime
+    if (Test-ProcessIdAliveFast $recordedPid) {
+      $processName = Get-ProcessExecutableNameFast $recordedPid
+      $normalizedAllowed = @($AllowedNames | ForEach-Object { "$_".ToLowerInvariant() })
+      if ($normalizedAllowed.Count -gt 0 -and $normalizedAllowed -notcontains $processName) {
+        return $killed
+      }
+      $stamp = (Get-Item -LiteralPath $PidFile).LastWriteTimeUtc
+      $started = Get-ProcessStartTimeUtcFast $recordedPid
       # A valid owner starts immediately before its PID file is written.  The
       # skew guard prevents a stale PID file from killing an unrelated process
       # after Windows has reused the numeric PID.
-      if ([math]::Abs(($stamp - $proc.StartTime).TotalMinutes) -le 5) {
-        Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
+      if ($started -and [math]::Abs(($stamp - $started).TotalMinutes) -le 5) {
+        Stop-ProcessIdFast $recordedPid | Out-Null
         $killed += $recordedPid
       }
     }
