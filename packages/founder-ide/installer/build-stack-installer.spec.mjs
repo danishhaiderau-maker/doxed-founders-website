@@ -22,12 +22,31 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.ok(packageInner > embed);
   });
 
+  it('refreshes the bundled Founder extension during a warm package run', () => {
+    assert.match(source, /founder-ide-extension-unpacked/);
+    assert.match(source, /ZipFile\]::ExtractToDirectory\(\$vsixDest/);
+    assert.match(source, /embedded Founder extension/);
+  });
+
   it('rejects a stale compiled Founder action toolbar', () => {
     assert.match(source, /expectedFounderToolbar/);
     assert.match(source, /void-flex-wrap void-gap-1 void-pb-0\.5/);
     assert.match(source, /staleFounderToolbar/);
     assert.match(source, /void-overflow-x-auto void-pb-0\.5/);
     assert.match(source, /remove out-vscode before packaging/);
+  });
+
+  it('routes personal AI affordances directly to the AI settings tab', () => {
+    const settingsPatch = fs.readFileSync(
+      path.join(root, '..', 'scripts', 'patch-founder-settings-entry.py'),
+      'utf8',
+    );
+    assert.match(
+      settingsPatch,
+      /executeCommand\("founderOs\.openSettings","ai"\)/,
+    );
+    assert.match(settingsPatch, /legacy_redirected/);
+    assert.match(settingsPatch, /personal AI settings action still opens the default tab/i);
   });
 
   it('rejects payloads missing supported Windows startup bindings', () => {

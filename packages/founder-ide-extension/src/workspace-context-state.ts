@@ -264,6 +264,20 @@ export function formatWorkspaceContextForPrompt(
   return result.join('\n');
 }
 
+export function symbolCandidateScore(file: string): number {
+  const normalized = file.replaceAll('\\', '/').toLowerCase();
+  const segments = normalized.split('/');
+  const name = segments.at(-1) ?? normalized;
+  let score = Math.max(0, 40 - segments.length * 4);
+  if (segments.includes('src')) score += 20;
+  if (segments.includes('apps') || segments.includes('packages')) score += 8;
+  if (/^(?:index|main|app|server|extension|router|routes)\./.test(name)) score += 30;
+  if (/(?:^|[.-])(?:spec|test)\./.test(name) || segments.some((part) => part === 'test' || part === 'tests')) {
+    score -= 30;
+  }
+  return score;
+}
+
 function decisionScore(decision: WorkspaceDecisionRecord, queryTerms: string[]): number {
   const haystack = new Set(terms(`${decision.title} ${decision.rationale}`));
   return queryTerms.reduce((score, term) => score + (haystack.has(term) ? 1 : 0), 0);

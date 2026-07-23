@@ -355,8 +355,8 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
       ),
     ),
-    vscode.commands.registerCommand('founderOs.openSettings', () =>
-      founderSettings?.show(),
+    vscode.commands.registerCommand('founderOs.openSettings', (tab?: unknown) =>
+      founderSettings?.show(tab === 'ai' ? 'ai' : 'account'),
     ),
     vscode.commands.registerCommand('founderOs.refreshHub', () =>
       founderHub?.refresh(),

@@ -3195,7 +3195,7 @@ export const SidebarChat = () => {
 					showDismiss={true}
 				/>
 
-				<WarningBox className='text-sm my-2 mx-4' onClick={() => { commandService.executeCommand('founderOs.openSettings') }} text='Open Founder Settings' />
+				<WarningBox className='text-sm my-2 mx-4' onClick={() => { commandService.executeCommand('founderOs.openSettings', 'ai') }} text='Open Founder Settings' />
 			</div>
 		}
 	</ScrollToBottomContainer>
@@ -3244,7 +3244,7 @@ export const SidebarChat = () => {
 				aria-label='Add or manage personal AI'
 				onClick={(event) => {
 					event.stopPropagation()
-					commandService.executeCommand('founderOs.openSettings')
+					commandService.executeCommand('founderOs.openSettings', 'ai')
 				}}
 			>
 				<Settings2 size={16} strokeWidth={1.8} />

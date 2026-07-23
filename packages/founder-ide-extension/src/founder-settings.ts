@@ -38,9 +38,12 @@ type FounderSettingsAction =
   | 'signIn'
   | 'signOut';
 
+type FounderSettingsTab = 'account' | 'ai' | 'infrastructure' | 'connections' | 'advanced';
+
 interface FounderSettingsMessage {
   type:
     | 'action'
+    | 'selectTab'
     | 'selectMode'
     | 'selectProfile'
     | 'selectManagedAlias'
@@ -50,6 +53,7 @@ interface FounderSettingsMessage {
     | 'togglePersonalProfile'
     | 'deletePersonalProfile';
   action?: FounderSettingsAction;
+  tab?: FounderSettingsTab;
   mode?: FounderWorkspaceMode;
   profile?: ExecutionProfileId;
   alias?: FounderOsModelAliasId;
@@ -82,10 +86,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
   private entitlementState: FounderEntitlementState =
     defaultFounderEntitlements('signed-out');
   private entitlementGeneration = 0;
+  private activeTab: FounderSettingsTab = 'account';
 
   constructor(private readonly dependencies: FounderSettingsDependencies) {}
 
-  show(): void {
+  show(tab: FounderSettingsTab = 'account'): void {
+    this.activeTab = tab;
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Active);
       this.refresh();
@@ -140,6 +146,11 @@ export class FounderSettingsPanel implements vscode.Disposable {
   }
 
   private async handleMessage(message: FounderSettingsMessage): Promise<void> {
+    if (message.type === 'selectTab' && isFounderSettingsTab(message.tab)) {
+      this.activeTab = message.tab;
+      return;
+    }
+
     if (message.type === 'selectMode' && message.mode) {
       const mode = normalizeWorkspaceMode(message.mode);
       await vscode.workspace
@@ -390,6 +401,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
           </div>`).join('')
       : '<div class="empty-state"><strong>No personal AI yet</strong><span>Add an OpenAI-compatible provider or local Ollama model below.</span></div>';
     const personalProfilesJson = JSON.stringify(personalProfiles).replaceAll('<', '\\u003c');
+    const activeTabJson = JSON.stringify(this.activeTab);
 
     return `<!doctype html>
 <html lang="en">
@@ -659,16 +671,18 @@ export class FounderSettingsPanel implements vscode.Disposable {
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const personalProfiles = ${personalProfilesJson};
+    const activeTab = ${activeTabJson};
     const tabs = [...document.querySelectorAll('[data-tab]')];
     const panels = [...document.querySelectorAll('[data-panel]')];
-    const showTab = (name) => {
+    const showTab = (name, notify = false) => {
       for (const item of tabs) item.classList.toggle('selected', item.dataset.tab === name);
       for (const panel of panels) panel.classList.toggle('selected', panel.dataset.panel === name);
       vscode.setState({ ...(vscode.getState() || {}), tab: name });
+      if (notify) vscode.postMessage({ type: 'selectTab', tab: name });
     };
-    showTab((vscode.getState() || {}).tab || 'account');
+    showTab(activeTab);
     for (const tab of tabs) {
-      tab.addEventListener('click', () => showTab(tab.dataset.tab));
+      tab.addEventListener('click', () => showTab(tab.dataset.tab, true));
     }
     for (const button of document.querySelectorAll('[data-action]')) {
       button.addEventListener('click', () => vscode.postMessage({ type: 'action', action: button.dataset.action }));
@@ -680,7 +694,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       button.addEventListener('click', () => vscode.postMessage({ type: 'selectManagedAlias', alias: button.dataset.alias }));
     }
     for (const button of document.querySelectorAll('[data-open-ai-tab]')) {
-      button.addEventListener('click', () => showTab('ai'));
+      button.addEventListener('click', () => showTab('ai', true));
     }
     for (const button of document.querySelectorAll('[data-personal-select]')) {
       button.addEventListener('click', () => vscode.postMessage({ type: 'selectPersonalProfile', profileId: button.dataset.personalSelect }));
@@ -724,7 +738,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       button.addEventListener('click', () => {
         const profile = personalProfiles.find((candidate) => candidate.id === button.dataset.personalEdit);
         if (!profile) return;
-        showTab('ai');
+        showTab('ai', true);
         profileId.value = profile.id;
         profileKind.value = profile.kind;
         profileName.value = profile.name;
@@ -768,6 +782,14 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function isFounderSettingsTab(value: unknown): value is FounderSettingsTab {
+  return value === 'account'
+    || value === 'ai'
+    || value === 'infrastructure'
+    || value === 'connections'
+    || value === 'advanced';
 }
 
 function personalDraftFromMessage(

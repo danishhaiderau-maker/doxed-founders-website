@@ -169,13 +169,13 @@ export class FounderHubProvider
         await vscode.commands.executeCommand('founderOs.openRemoteControl');
         break;
       case 'openSettings':
-        await vscode.commands.executeCommand('founderOs.openSettings');
+        await vscode.commands.executeCommand('founderOs.openSettings', 'account');
         break;
       case 'openNodeConfig':
         await vscode.commands.executeCommand('founderOs.openVaultConfig');
         break;
       case 'showUsage':
-        await vscode.commands.executeCommand('founderOs.openSettings');
+        await vscode.commands.executeCommand('founderOs.openSettings', 'account');
         break;
       case 'openProjectBrief':
         await vscode.commands.executeCommand('founderOs.openProjectBrief');

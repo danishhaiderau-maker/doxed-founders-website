@@ -100,6 +100,16 @@ async function connectFounderSettingsWebview(required = true) {
   return null;
 }
 
+async function waitForFounderSettingsWebview(timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const settings = await connectFounderSettingsWebview(false);
+    if (settings) return settings;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Founder Settings webview was not ready within ${timeoutMs}ms.`);
+}
+
 await send('Runtime.enable');
 let settings = await connectFounderSettingsWebview(false);
 let clicked = false;
@@ -111,8 +121,7 @@ if (!settings) {
     return Boolean(action);
   })()`);
   if (!clicked) throw new Error('Personal AI settings action was not found.');
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
-  settings = await connectFounderSettingsWebview();
+  settings = await waitForFounderSettingsWebview();
 }
 await capture('installed-personal-ai-settings-final.png');
 

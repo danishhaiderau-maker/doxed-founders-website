@@ -50,9 +50,12 @@ def patch(app: Path) -> None:
     start = marker_matches[0].start()
     end = min(len(data), start + 2_000)
     action = data[start:end]
-    redirected = 'executeCommand("founderOs.openSettings")'
+    redirected = 'executeCommand("founderOs.openSettings","ai")'
+    legacy_redirected = 'executeCommand("founderOs.openSettings")'
     if redirected in action:
         rewritten = action
+    elif legacy_redirected in action:
+        rewritten = action.replace(legacy_redirected, redirected, 1)
     else:
         rewritten, count = re.subn(
             r"executeCommand\([A-Za-z_$][A-Za-z0-9_$]*\)",
@@ -63,6 +66,11 @@ def patch(app: Path) -> None:
         if count != 1:
             raise SystemExit("Inherited settings handler signature changed; no patch applied")
     data = data[:start] + rewritten + data[end:]
+    data, legacy_redirects = re.subn(
+        r'executeCommand\(["\']founderOs\.openSettings["\']\)',
+        redirected,
+        data,
+    )
 
     replacements = {
         "Welcome to Void": "Welcome to Founder IDE",
@@ -128,8 +136,10 @@ def patch(app: Path) -> None:
     product.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     verify = workbench.read_text(encoding="utf-8")
-    if 'executeCommand("founderOs.openSettings")' not in verify:
+    if redirected not in verify:
         raise SystemExit("Founder Settings redirect did not verify")
+    if re.search(r'executeCommand\(["\']founderOs\.openSettings["\']\)', verify):
+        raise SystemExit("A personal AI settings action still opens the default tab")
     visible_void_phrases = ("Void's Settings", "Vertex with Void")
     if any(phrase in verify for phrase in visible_void_phrases):
         raise SystemExit("A user-visible Void label remains")
@@ -140,7 +150,10 @@ def patch(app: Path) -> None:
     for _, bundle, _ in auxiliary_bundles:
         if any(phrase in bundle.read_text(encoding="utf-8") for phrase in visible_void_phrases):
             raise SystemExit(f"A user-visible Void Settings label remains in {bundle}")
-    print(f"Founder Settings redirect installed; backup: {backup_dir}")
+    print(
+        "Founder Settings redirect installed "
+        f"({legacy_redirects} legacy entry points); backup: {backup_dir}"
+    )
 
 
 def main() -> None:

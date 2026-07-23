@@ -280,7 +280,7 @@ function activate(context) {
         catch {
             await vscode.commands.executeCommand('workbench.action.chat.open');
         }
-    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', () => founderSettings?.show()), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', (tab) => founderSettings?.show(tab === 'ai' ? 'ai' : 'account')), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
         await founderWorkspaceContext?.refresh(true);
         const summary = founderWorkspaceContext?.summary();
         void vscode.window.showInformationMessage(summary

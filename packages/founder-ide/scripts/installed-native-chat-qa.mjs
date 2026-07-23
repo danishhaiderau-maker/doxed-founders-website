@@ -182,6 +182,12 @@ const screenshotPath = path.join(outputDir, `installed-founder-chat-native-${evi
 fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
 const route = chatText.match(/Founder route\s*[·.]\s*([^\r\n]+(?:\r?\n[^\r\n]+){0,2})/i)?.[1]?.replace(/\s+/g, ' ').trim() || null;
+const ignoredConsoleErrors = consoleErrors.filter((message) =>
+  /Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
+);
+const criticalConsoleErrors = consoleErrors.filter((message) =>
+  !/Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
+);
 const evidence = {
   nonce,
   latencyMs,
@@ -195,10 +201,19 @@ const evidence = {
   },
   chatTail: chatText,
   consoleErrors,
+  ignoredConsoleErrors,
+  criticalConsoleErrors,
   pageErrors,
 };
 const evidencePath = path.join(outputDir, `installed-founder-chat-native-${evidenceId}.json`);
 fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
-process.stdout.write(`${JSON.stringify({ nonce, latencyMs, route, checks: evidence.checks, screenshotPath, evidencePath, consoleErrors, pageErrors }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({ nonce, latencyMs, route, checks: evidence.checks, screenshotPath, evidencePath, ignoredConsoleErrors, criticalConsoleErrors, pageErrors }, null, 2)}\n`);
 socket.close();
-if (!evidence.checks.responseVisible || !evidence.checks.founderRoute || evidence.checks.errorVisible) process.exitCode = 1;
+if (
+  !evidence.checks.responseVisible
+  || !evidence.checks.founderRoute
+  || !evidence.checks.deepSeekV4
+  || evidence.checks.errorVisible
+  || criticalConsoleErrors.length > 0
+  || pageErrors.length > 0
+) process.exitCode = 1;

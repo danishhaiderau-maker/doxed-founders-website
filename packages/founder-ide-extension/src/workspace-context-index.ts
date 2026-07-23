@@ -9,6 +9,7 @@ import {
   formatWorkspaceContextForPrompt,
   parseDecisionLedger,
   parseWorkspaceContextIndex,
+  symbolCandidateScore,
   workspaceContextFileNeedsRefresh,
   workspaceCacheContext,
   type WorkspaceContextFile,
@@ -22,7 +23,8 @@ const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,j
 const EXCLUDE_GLOB = '**/{.git,node_modules,dist,out,build,.next,.turbo,coverage,.cache,.venv,venv,__pycache__,artifacts}/**';
 const MAX_FILES = 5_000;
 const MAX_FILE_BYTES = 512_000;
-const INITIAL_SYMBOL_BUDGET = 250;
+const INITIAL_SYMBOL_BUDGET = 32;
+const SYMBOL_BATCH_SIZE = 4;
 const REFRESH_DEBOUNCE_MS = 1_500;
 
 export interface FounderWorkspaceContextSummary {
@@ -199,7 +201,6 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     const next: WorkspaceContextFile[] = [];
     const decisions: WorkspaceDecisionRecord[] = [];
     const symbolQueue: Array<{ uri: vscode.Uri; file: WorkspaceContextFile }> = [];
-    let symbolBudget = INITIAL_SYMBOL_BUDGET;
 
     for (const uri of uris) {
       const relativePath = relativeWorkspacePath(uri);
@@ -242,14 +243,18 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       if (isDecisionLedger) {
         decisions.push(...parseDecisionLedger(source, relativePath, sha256));
       }
-      if (symbolBudget > 0 && supportsSymbols(relativePath)) {
+      if (supportsSymbols(relativePath)) {
         symbolQueue.push({ uri, file });
-        symbolBudget -= 1;
       }
     }
 
-    for (let offset = 0; offset < symbolQueue.length; offset += 8) {
-      const batch = symbolQueue.slice(offset, offset + 8);
+    symbolQueue.sort((left, right) =>
+      symbolCandidateScore(right.file.path) - symbolCandidateScore(left.file.path)
+      || left.file.path.localeCompare(right.file.path),
+    );
+    const selectedSymbolFiles = symbolQueue.slice(0, INITIAL_SYMBOL_BUDGET);
+    for (let offset = 0; offset < selectedSymbolFiles.length; offset += SYMBOL_BATCH_SIZE) {
+      const batch = selectedSymbolFiles.slice(offset, offset + SYMBOL_BATCH_SIZE);
       await Promise.all(batch.map(async ({ uri, file }) => {
         file.symbols = await documentSymbols(uri);
       }));
@@ -337,4 +342,5 @@ async function documentSymbols(uri: vscode.Uri): Promise<string[]> {
 export const __testHooks = {
   languageIdForPath,
   supportsSymbols,
+  symbolCandidateScore,
 };

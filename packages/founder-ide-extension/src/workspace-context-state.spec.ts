@@ -8,6 +8,7 @@ import {
   parseDecisionLedger,
   parseWorkspaceContextIndex,
   rankWorkspaceContextFiles,
+  symbolCandidateScore,
   workspaceCacheContext,
   workspaceContextFileNeedsRefresh,
   type WorkspaceContextFile,
@@ -78,6 +79,17 @@ describe('Founder workspace context index', () => {
     assert.match(prompt, /src\/auth\/session\.ts/);
     assert.match(prompt, /rotateSessionToken/);
     assert.doesNotMatch(prompt, /secret source contents/);
+  });
+
+  it('prioritizes shallow source entry points over deep test files for symbol analysis', () => {
+    assert.ok(
+      symbolCandidateScore('apps/api/src/main.ts')
+      > symbolCandidateScore('apps/api/src/features/auth/session.spec.ts'),
+    );
+    assert.ok(
+      symbolCandidateScore('packages/extension/src/extension.ts')
+      > symbolCandidateScore('scripts/archive/legacy/helper.ts'),
+    );
   });
 
   it('extracts stable imports without storing source contents', () => {

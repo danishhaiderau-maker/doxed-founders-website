@@ -3,6 +3,7 @@ import path from 'node:path';
 
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
+const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
 fs.mkdirSync(outputDir, { recursive: true });
 
 async function connect(target) {
@@ -52,8 +53,16 @@ async function inspectWebview(target) {
 }
 
 const initialTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
+const initialWorkbenchTarget = initialTargets.find((candidate) =>
+  candidate.type === 'page'
+  && candidate.url?.includes('/workbench/workbench.html')
+  && (!requestedTitle || candidate.title?.toLowerCase().includes(requestedTitle)),
+) || initialTargets.find((candidate) => candidate.type === 'page' && candidate.url?.includes('/workbench/workbench.html'));
+if (!initialWorkbenchTarget) throw new Error('Founder IDE workbench page was not found.');
 let usageSource;
-for (const target of initialTargets.filter((candidate) => candidate.type === 'iframe')) {
+for (const target of initialTargets.filter((candidate) =>
+  candidate.type === 'iframe' && candidate.parentId === initialWorkbenchTarget.id,
+)) {
   const candidate = await inspectWebview(target);
   if (candidate.hasUsageAction) {
     usageSource = candidate;
@@ -68,24 +77,28 @@ await usageSource.evaluate(`(() => {
   return true;
 })()`);
 usageSource.socket.close();
-await new Promise((resolve) => setTimeout(resolve, 2_000));
-
-const currentTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
 let settingsText = '';
 let settingsClient;
-for (const target of currentTargets.filter((candidate) => candidate.type === 'iframe')) {
-  const candidate = await inspectWebview(target);
-  if (candidate.isFounderSettings) {
-    settingsText = candidate.text;
-    settingsClient = candidate;
-  } else {
+let currentTargets = [];
+const settingsDeadline = Date.now() + 12_000;
+while (!settingsClient && Date.now() < settingsDeadline) {
+  currentTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
+  for (const target of currentTargets.filter((candidate) =>
+    candidate.type === 'iframe' && candidate.parentId === initialWorkbenchTarget.id,
+  )) {
+    const candidate = await inspectWebview(target);
+    if (candidate.isFounderSettings) {
+      settingsText = candidate.text;
+      settingsClient = candidate;
+      break;
+    }
     candidate.socket.close();
   }
-  if (settingsText) break;
+  if (!settingsClient) await new Promise((resolve) => setTimeout(resolve, 500));
 }
 if (!settingsText || !settingsClient) throw new Error('Founder Settings webview did not open from Usage.');
 
-const workbenchTarget = currentTargets.find((candidate) => candidate.type === 'page' && candidate.url?.includes('/workbench/workbench.html'));
+const workbenchTarget = currentTargets.find((candidate) => candidate.id === initialWorkbenchTarget.id);
 if (!workbenchTarget) throw new Error('Founder IDE workbench page was not found.');
 const workbench = await connect(workbenchTarget);
 await workbench.send('Page.enable');

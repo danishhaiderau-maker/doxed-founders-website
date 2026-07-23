@@ -44,7 +44,8 @@ const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,j
 const EXCLUDE_GLOB = '**/{.git,node_modules,dist,out,build,.next,.turbo,coverage,.cache,.venv,venv,__pycache__,artifacts}/**';
 const MAX_FILES = 5_000;
 const MAX_FILE_BYTES = 512_000;
-const INITIAL_SYMBOL_BUDGET = 250;
+const INITIAL_SYMBOL_BUDGET = 32;
+const SYMBOL_BATCH_SIZE = 4;
 const REFRESH_DEBOUNCE_MS = 1_500;
 class FounderWorkspaceContextIndex {
     context;
@@ -193,7 +194,6 @@ class FounderWorkspaceContextIndex {
         const next = [];
         const decisions = [];
         const symbolQueue = [];
-        let symbolBudget = INITIAL_SYMBOL_BUDGET;
         for (const uri of uris) {
             const relativePath = relativeWorkspacePath(uri);
             if (!relativePath)
@@ -239,13 +239,15 @@ class FounderWorkspaceContextIndex {
             if (isDecisionLedger) {
                 decisions.push(...(0, workspace_context_state_1.parseDecisionLedger)(source, relativePath, sha256));
             }
-            if (symbolBudget > 0 && supportsSymbols(relativePath)) {
+            if (supportsSymbols(relativePath)) {
                 symbolQueue.push({ uri, file });
-                symbolBudget -= 1;
             }
         }
-        for (let offset = 0; offset < symbolQueue.length; offset += 8) {
-            const batch = symbolQueue.slice(offset, offset + 8);
+        symbolQueue.sort((left, right) => (0, workspace_context_state_1.symbolCandidateScore)(right.file.path) - (0, workspace_context_state_1.symbolCandidateScore)(left.file.path)
+            || left.file.path.localeCompare(right.file.path));
+        const selectedSymbolFiles = symbolQueue.slice(0, INITIAL_SYMBOL_BUDGET);
+        for (let offset = 0; offset < selectedSymbolFiles.length; offset += SYMBOL_BATCH_SIZE) {
+            const batch = selectedSymbolFiles.slice(offset, offset + SYMBOL_BATCH_SIZE);
             await Promise.all(batch.map(async ({ uri, file }) => {
                 file.symbols = await documentSymbols(uri);
             }));
@@ -328,5 +330,6 @@ async function documentSymbols(uri) {
 exports.__testHooks = {
     languageIdForPath,
     supportsSymbols,
+    symbolCandidateScore: workspace_context_state_1.symbolCandidateScore,
 };
 //# sourceMappingURL=workspace-context-index.js.map

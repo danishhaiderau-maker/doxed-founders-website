@@ -6,8 +6,8 @@ const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/inst
 const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
 fs.mkdirSync(outputDir, { recursive: true });
 
-const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
-const workbenchTargets = targets.filter((candidate) => candidate.url?.includes('/workbench/workbench.html'));
+const initialTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
+const workbenchTargets = initialTargets.filter((candidate) => candidate.url?.includes('/workbench/workbench.html'));
 const target = workbenchTargets.find((candidate) => requestedTitle && candidate.title?.toLowerCase().includes(requestedTitle))
   || workbenchTargets.find((candidate) => !/^Founder Settings\b/i.test(candidate.title || ''))
   || workbenchTargets[0];
@@ -74,9 +74,12 @@ async function runCommandPalette(command) {
   await wait(350);
   await send('Input.insertText', { text: command });
   await wait(500);
-  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
+  await send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown', key: 'Enter', code: 'Enter',
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+  });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
-  await wait(1_800);
+  await wait(4_000);
 }
 
 await send('Runtime.enable');
@@ -101,6 +104,12 @@ if (process.env.FOUNDER_IDE_QA_UNDO === '1') {
 }
 // Close any settings webview opened by a prior QA pass so the workbench owns
 // keyboard focus, then reveal the product's labeled navigation explicitly.
+await send('Input.dispatchKeyEvent', {
+  type: 'rawKeyDown', key: 'Escape', code: 'Escape',
+  windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27,
+});
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
+await wait(250);
 await send('Input.dispatchKeyEvent', {
   type: 'rawKeyDown', key: 'w', code: 'KeyW', modifiers: 2,
   windowsVirtualKeyCode: 87, nativeVirtualKeyCode: 87,
@@ -176,12 +185,19 @@ async function readWebviewText(candidate) {
   return text;
 }
 
+const currentTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
 const webviewTexts = await Promise.all(
-  targets
+  currentTargets
     .filter((candidate) => candidate.type === 'iframe' && candidate.webSocketDebuggerUrl)
     .map((candidate) => readWebviewText(candidate).catch(() => '')),
 );
 const visibleProductText = `${ui.bodyText}\n${webviewTexts.join('\n')}`;
+const ignoredConsoleErrors = consoleErrors.filter((message) =>
+  /Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
+);
+const criticalConsoleErrors = consoleErrors.filter((message) =>
+  !/Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
+);
 
 const evidence = {
   endpoint,
@@ -197,6 +213,8 @@ const evidence = {
     graphVisible: /Graph/i.test(visibleProductText),
   },
   consoleErrors,
+  ignoredConsoleErrors,
+  criticalConsoleErrors,
   pageErrors,
 };
 fs.writeFileSync(path.join(outputDir, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`);
@@ -205,13 +223,16 @@ process.stdout.write(`${JSON.stringify({
   viewport: evidence.viewport,
   checks: evidence.checks,
   labelCount: evidence.labels.length,
-  consoleErrors,
+  ignoredConsoleErrors,
+  criticalConsoleErrors,
   pageErrors,
 }, null, 2)}\n`);
 socket.close();
 if (
   evidence.checks.voidSettingsVisible
   || Object.entries(evidence.checks).some(([key, value]) => key !== 'voidSettingsVisible' && !value)
+  || criticalConsoleErrors.length > 0
+  || pageErrors.length > 0
 ) {
   process.exitCode = 1;
 }

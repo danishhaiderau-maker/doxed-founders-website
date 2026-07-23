@@ -10,6 +10,7 @@ exports.dependencyImpact = dependencyImpact;
 exports.rankWorkspaceContextFiles = rankWorkspaceContextFiles;
 exports.workspaceCacheContext = workspaceCacheContext;
 exports.formatWorkspaceContextForPrompt = formatWorkspaceContextForPrompt;
+exports.symbolCandidateScore = symbolCandidateScore;
 const node_crypto_1 = require("node:crypto");
 exports.WORKSPACE_CONTEXT_INDEX_VERSION = 2;
 const IMPORTANT_FILES = new Set([
@@ -195,6 +196,22 @@ function formatWorkspaceContextForPrompt(index, query, limit = 14) {
         result.push('## Relevant founder decisions', 'Respect rejected decisions unless the founder explicitly reopens them.', ...decisions);
     }
     return result.join('\n');
+}
+function symbolCandidateScore(file) {
+    const normalized = file.replaceAll('\\', '/').toLowerCase();
+    const segments = normalized.split('/');
+    const name = segments.at(-1) ?? normalized;
+    let score = Math.max(0, 40 - segments.length * 4);
+    if (segments.includes('src'))
+        score += 20;
+    if (segments.includes('apps') || segments.includes('packages'))
+        score += 8;
+    if (/^(?:index|main|app|server|extension|router|routes)\./.test(name))
+        score += 30;
+    if (/(?:^|[.-])(?:spec|test)\./.test(name) || segments.some((part) => part === 'test' || part === 'tests')) {
+        score -= 30;
+    }
+    return score;
 }
 function decisionScore(decision, queryTerms) {
     const haystack = new Set(terms(`${decision.title} ${decision.rationale}`));

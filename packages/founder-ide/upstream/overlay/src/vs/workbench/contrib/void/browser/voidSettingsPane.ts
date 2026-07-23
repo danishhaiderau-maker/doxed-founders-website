@@ -141,7 +141,7 @@ registerAction2(class extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		await accessor.get(ICommandService).executeCommand('founderOs.openSettings');
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'ai');
 	}
 })
 
@@ -158,7 +158,7 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		await accessor.get(ICommandService).executeCommand('founderOs.openSettings');
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'ai');
 	}
 })
 
