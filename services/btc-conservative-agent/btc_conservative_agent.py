@@ -117,11 +117,14 @@ start_early_ping_server(
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402
 
-stop_early_ping_server()
 register_showcase_ui(signal_engine.app, bot_module=signal_engine, block_warehouse=False)
 
 
 def main() -> None:
+    # Keep instant liveness available through the potentially slow route/UI
+    # registration above. Release :7002 only at the final handoff; bot.main()
+    # binds the full bounded server before it restores persistent state.
+    stop_early_ping_server()
     signal_engine.main()
 
 

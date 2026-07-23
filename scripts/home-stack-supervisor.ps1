@@ -216,6 +216,10 @@ function Restart-AutoRestartMonitor {
     Log "auto-restart monitor respawn skipped - pid $WatchPid not alive (would race a live bot); will retry next tick"
     return
   }
+  # The listener is authoritative. Repair a stale PID file before attaching
+  # the monitor so startup-age checks and operator tooling all name the same
+  # sole :7002 owner.
+  Set-Content -Path (Join-Path $repoRoot ".home-bot.pid") -Value "$WatchPid" -NoNewline -Encoding UTF8
   # Clear any stale single-instance lock from a previous dead monitor so the
   # fresh instance's Test-LockHeldByLive check does not exit silently.
   $lockFile = Join-Path $repoRoot ".home-bot-auto-restart.lock"

@@ -111,6 +111,15 @@ def main() -> None:
         and '"source_git_rev": _source_git_rev' in EARLY_BOOT,
     )
     check(
+        "temporary health stays bound through showcase route registration",
+        ENTRYPOINT.index("register_showcase_ui(signal_engine.app")
+        < ENTRYPOINT.index("def main() -> None:")
+        < ENTRYPOINT.index(
+            "stop_early_ping_server()", ENTRYPOINT.index("def main() -> None:")
+        )
+        < ENTRYPOINT.index("signal_engine.main()"),
+    )
+    check(
         "partially restored dashboard and relay snapshots fail closed",
         "not _DASHBOARD_BOOTSTRAP_COMPLETE" in BOT
         and '"error": "dashboard state is restoring"' in BOT
@@ -158,6 +167,14 @@ def main() -> None:
         and '".home-stack-supervisor.heartbeat"' in SUPERVISOR_WATCHDOG
         and "Get-CimInstance" not in SUPERVISOR_WATCHDOG
         and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
+    )
+    check(
+        "authoritative listener repairs stale bot pid before monitor attach",
+        'Set-Content -Path (Join-Path $repoRoot ".home-bot.pid")' in SUPERVISOR
+        and SUPERVISOR.index(
+            'Set-Content -Path (Join-Path $repoRoot ".home-bot.pid")'
+        )
+        < SUPERVISOR.index("# Clear any stale single-instance lock"),
     )
     print("PASS: home stack one-owner startup guards")
 
