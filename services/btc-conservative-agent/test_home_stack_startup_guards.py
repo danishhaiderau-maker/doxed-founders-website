@@ -120,6 +120,12 @@ def main() -> None:
         < ENTRYPOINT.index("signal_engine.main()"),
     )
     check(
+        "full-server handoff skips slow ownership scan when port is free",
+        'if not _port_is_open("127.0.0.1", int(port)):' in BOT
+        and BOT.index('if not _port_is_open("127.0.0.1", int(port)):')
+        < BOT.index('["netstat", "-ano"]', BOT.index("def _ensure_flask_port_available")),
+    )
+    check(
         "partially restored dashboard and relay snapshots fail closed",
         "not _DASHBOARD_BOOTSTRAP_COMPLETE" in BOT
         and '"error": "dashboard state is restoring"' in BOT

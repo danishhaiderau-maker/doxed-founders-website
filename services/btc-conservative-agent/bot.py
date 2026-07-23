@@ -30209,6 +30209,13 @@ def _ensure_flask_port_available(port: int = None):
     if sys.platform != "win32":
         logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
+    # The process singleton is already held. Avoid a full Windows process/TCP
+    # table scan when the socket is plainly free; netstat can take minutes on
+    # a busy host and previously turned a successful early-server handoff into
+    # a false fatal startup error. If something really answers, retain the
+    # fail-closed PID ownership check below.
+    if not _port_is_open("127.0.0.1", int(port)):
+        return
     try:
         out = subprocess.check_output(
             ["netstat", "-ano"],
