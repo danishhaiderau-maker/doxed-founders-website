@@ -223,12 +223,14 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(applyScript, /parcelWatcher\.ts/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('uncaughtException'/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('unhandledRejection'/);
-    assert.match(applyScript, /target="29\.4\.0"/);
+    assert.match(applyScript, /manifest\.upstream\.electron_version/);
+    assert.match(applyScript, /build_from_source="true"/);
+    assert.match(applyScript, /lock\.packages\?\.\['node_modules\/electron'\]\?\.version/);
     assert.match(
       applyScript,
-      /e4ef85aa3608221f8a3e011c1b1c2d2d36093ad19bda12d16b3816929fb6c99b \*electron-v29\.4\.0-win32-x64\.zip/,
+      /Electron package metadata does not match manifest version/,
     );
-    assert.match(applyScript, /review the official checksum before packaging/);
+    assert.match(applyScript, /Official Electron checksum is missing/);
   });
 
   it('owns every visible upstream brand boundary and disables the legacy updater', () => {

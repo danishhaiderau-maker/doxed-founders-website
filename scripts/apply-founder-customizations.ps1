@@ -299,30 +299,42 @@ Set-FounderSourceLiteral `
     "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
     "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
 
-# Void pins Electron 29.4.0 while this VS Code snapshot's checksum inventory
-# contains only the later upstream Electron release. Keep checksum validation
-# enabled and add the exact official v29.4.0 Windows x64 entry used by this
-# checkout. A pin change must be reviewed together with its new official hash.
+# Keep every Electron version boundary aligned with the pinned upstream
+# manifest. A stale local package mutation can otherwise assemble an
+# incompatible executable while the TypeScript build still succeeds.
 $npmrc = Join-Path $VscodiumCheckout ".npmrc"
+$packageJson = Join-Path $VscodiumCheckout "package.json"
+$packageLock = Join-Path $VscodiumCheckout "package-lock.json"
 $electronChecksums = Join-Path $VscodiumCheckout "build\checksums\electron.txt"
-$electronPin = 'target="29.4.0"'
-$electronChecksumLine = "e4ef85aa3608221f8a3e011c1b1c2d2d36093ad19bda12d16b3816929fb6c99b *electron-v29.4.0-win32-x64.zip"
-if (-not (Test-Path $npmrc) -or -not (Test-Path $electronChecksums)) {
+$electronVersion = [string]$manifest.upstream.electron_version
+$electronPin = "target=`"$electronVersion`""
+$electronChecksumName = "electron-v$electronVersion-win32-x64.zip"
+if (-not (Test-Path $npmrc) -or -not (Test-Path $packageJson) -or
+    -not (Test-Path $packageLock) -or -not (Test-Path $electronChecksums)) {
     throw "Pinned Electron metadata is missing from the upstream checkout"
 }
 $npmrcContent = Get-Content $npmrc -Raw
-if (-not $npmrcContent.Contains($electronPin)) {
-    throw "Electron pin changed; review the official checksum before packaging"
+if (-not $npmrcContent.Contains($electronPin) -or
+    -not $npmrcContent.Contains('build_from_source="true"')) {
+    throw "Electron npm pin changed; restore the manifest version and source-build policy before packaging"
+}
+$package = Get-Content $packageJson -Raw | ConvertFrom-Json
+$lockElectronVersions = @(
+    & node -e "const lock=require(process.argv[1]); console.log(lock.packages?.['']?.devDependencies?.electron ?? ''); console.log(lock.packages?.['node_modules/electron']?.version ?? '');" $packageLock
+)
+if ($LASTEXITCODE -ne 0 -or $lockElectronVersions.Count -ne 2) {
+    throw "Could not parse Electron versions from package-lock.json"
+}
+if ([string]$package.devDependencies.electron -ne $electronVersion -or
+    [string]$lockElectronVersions[0] -ne $electronVersion -or
+    [string]$lockElectronVersions[1] -ne $electronVersion) {
+    throw "Electron package metadata does not match manifest version $electronVersion"
 }
 $electronChecksumContent = Get-Content $electronChecksums -Raw
-if (-not $electronChecksumContent.Contains($electronChecksumLine)) {
-    $separator = if ($electronChecksumContent.EndsWith("`n")) { "" } else { "`r`n" }
-    $electronChecksumContent += "$separator$electronChecksumLine`r`n"
-    [System.IO.File]::WriteAllText($electronChecksums, $electronChecksumContent, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "[apply-founder]   checksum Electron v29.4.0 Windows x64" -ForegroundColor Cyan
-} else {
-    Write-Host "[apply-founder]   reapply  Electron v29.4.0 Windows x64 checksum" -ForegroundColor DarkCyan
+if ($electronChecksumContent -notmatch "(?m)^[a-f0-9]{64} \*$([regex]::Escape($electronChecksumName))$") {
+    throw "Official Electron checksum is missing for $electronChecksumName"
 }
+Write-Host "[apply-founder]   Electron $electronVersion package and checksum pins verified" -ForegroundColor Green
 
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
