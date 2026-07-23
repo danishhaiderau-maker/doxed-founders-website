@@ -17,6 +17,8 @@ const watchdog = read("bridge-watchdog.ps1");
 const ensureBridge = read("ensure-home-bridge.ps1");
 const startEverything = read("home-stack-start-everything.ps1");
 const autoWire = read("auto-wire-after-tunnel.ps1");
+const startBot = read("start-home-bot.ps1");
+const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 
 for (const [name, source] of Object.entries({
   "home-stack-launcher.ps1": launcher,
@@ -53,11 +55,24 @@ assert.doesNotMatch(
 );
 assert.match(autoWire, /\.home-auto-wire\.lock/);
 assert.match(autoWire, /FileShare\]::None/);
+assert.doesNotMatch(
+  executableLines(startBot),
+  /\bGet-(?:Process|CimInstance)\b|\bWin32_Process\b|\bTest-PortBound\b/,
+  "bot startup must not block on process/TCP-table providers",
+);
+assert.match(startBot, /Test-ProcessIdAliveFast \$monitorPid/);
+assert.doesNotMatch(
+  executableLines(providerFreeRecovery),
+  /\bGet-(?:Process|CimInstance)\b|\bWin32_Process\b/,
+  "elevated recovery must remain independent of stalled process providers",
+);
+assert.match(providerFreeRecovery, /Doxed Bot :\$BotPort/);
+assert.match(providerFreeRecovery, /ensure-home-bridge\.ps1/);
 
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 20,
+    checks: 25,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
