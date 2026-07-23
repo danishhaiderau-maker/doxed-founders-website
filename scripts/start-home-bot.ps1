@@ -14,6 +14,8 @@ $startupStderrLog = Join-Path $logsDir "bot-startup.stderr.log"
 if (-not (Test-Path $logsDir)) {
   New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 }
+$env:BOT_STARTUP_STDOUT_LOG = $startupStdoutLog
+$env:BOT_STARTUP_STDERR_LOG = $startupStderrLog
 
 # Serialize every startup path (dashboard button, supervisor, scheduled task,
 # or operator shell). Two concurrent starters both performed cleanup before
@@ -174,11 +176,13 @@ Write-Host ""
 
 if ($NoWait) {
   Write-Host "Starting bot detached on port $BotListenPort ..."
+  Set-Content -LiteralPath $startupStdoutLog -Value "" -NoNewline -Encoding UTF8
+  Set-Content -LiteralPath $startupStderrLog -Value "" -NoNewline -Encoding UTF8
+  # The host environment can contain both Path and PATH. PowerShell 5.1 throws
+  # while constructing a redirected ProcessStartInfo for that environment, so
+  # Python owns its startup log handles instead (see btc_conservative_agent.py).
   $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") `
-    -WorkingDirectory $agentDir -WindowStyle Hidden `
-    -RedirectStandardOutput $startupStdoutLog `
-    -RedirectStandardError $startupStderrLog `
-    -PassThru
+    -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   if ($botProc -and $botProc.Id -gt 0) {
     Set-Content -Path (Join-Path $repoRoot ".home-bot.pid") -Value "$($botProc.Id)" -NoNewline
     # Background auto-restart monitor: writes logs/last_crash.json when the detached

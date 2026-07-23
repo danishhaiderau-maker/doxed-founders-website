@@ -9,6 +9,36 @@ from __future__ import annotations
 import os
 import sys
 
+
+_STARTUP_LOG_HANDLES = []
+
+
+def _attach_startup_logs() -> None:
+    """Keep detached startup tracebacks inspectable on Windows.
+
+    PowerShell's RedirectStandardOutput/RedirectStandardError path rebuilds the
+    environment in a case-insensitive dictionary. Some Windows hosts expose
+    both ``Path`` and ``PATH``, causing Start-Process to fail before Python is
+    created. Opening the files inside Python avoids that launcher failure.
+    """
+    for stream_name, env_name in (
+        ("stdout", "BOT_STARTUP_STDOUT_LOG"),
+        ("stderr", "BOT_STARTUP_STDERR_LOG"),
+    ):
+        path = (os.getenv(env_name) or "").strip()
+        if not path:
+            continue
+        try:
+            handle = open(path, "a", encoding="utf-8", buffering=1)
+            _STARTUP_LOG_HANDLES.append(handle)
+            setattr(sys, stream_name, handle)
+        except OSError:
+            # Diagnostic logging must never prevent the trading bot from booting.
+            continue
+
+
+_attach_startup_logs()
+
 os.environ.setdefault("SHOWCASE_AGENT", "1")
 os.environ.setdefault("HOME_BOT_LOCAL", "1")
 os.environ.setdefault("HOME_RESEARCH_FULL", "1")

@@ -14,6 +14,9 @@ AUTOSTART = (ROOT / "scripts" / "register-bot-autostart.ps1").read_text(
 BOT = (
     ROOT / "services" / "btc-conservative-agent" / "bot.py"
 ).read_text(encoding="utf-8")
+ENTRYPOINT = (
+    ROOT / "services" / "btc-conservative-agent" / "btc_conservative_agent.py"
+).read_text(encoding="utf-8")
 BOT_HUNG = HEALTH.split("function Test-BotHung", 1)[1].split(
     "function Test-AnalyzerHung", 1
 )[0]
@@ -113,10 +116,16 @@ def main() -> None:
         "detached startup errors remain inspectable",
         "bot-startup.stdout.log" in START
         and "bot-startup.stderr.log" in START
-        and "-RedirectStandardOutput $startupStdoutLog" in START
-        and "-RedirectStandardError $startupStderrLog" in START
-        and "-RedirectStandardOutput $startupStdoutLog" in MONITOR
-        and "-RedirectStandardError $startupStderrLog" in MONITOR,
+        and "BOT_STARTUP_STDOUT_LOG" in START
+        and "BOT_STARTUP_STDERR_LOG" in START
+        and "BOT_STARTUP_STDOUT_LOG" in MONITOR
+        and "BOT_STARTUP_STDERR_LOG" in MONITOR
+        and "def _attach_startup_logs()" in ENTRYPOINT
+        and "setattr(sys, stream_name, handle)" in ENTRYPOINT
+        and "-RedirectStandardOutput" not in START
+        and "-RedirectStandardError" not in START
+        and "-RedirectStandardOutput" not in MONITOR
+        and "-RedirectStandardError" not in MONITOR,
     )
     print("PASS: home stack one-owner startup guards")
 

@@ -33,6 +33,8 @@ $heartbeatFile = Join-Path $repoRoot ".home-bot-auto-restart.heartbeat"
 $restartLog = Join-Path $logsDir "bot_restarts.log"
 $startupStdoutLog = Join-Path $logsDir "bot-startup.stdout.log"
 $startupStderrLog = Join-Path $logsDir "bot-startup.stderr.log"
+$env:BOT_STARTUP_STDOUT_LOG = $startupStdoutLog
+$env:BOT_STARTUP_STDERR_LOG = $startupStderrLog
 
 # Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
 # dot-sources the same file; we mirror it so this monitor stands down when the user
@@ -159,11 +161,10 @@ try {
 
     Push-Location $agentDir
     try {
+      Set-Content -LiteralPath $startupStdoutLog -Value "" -NoNewline -Encoding UTF8
+      Set-Content -LiteralPath $startupStderrLog -Value "" -NoNewline -Encoding UTF8
       $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") `
-        -WorkingDirectory $agentDir -WindowStyle Hidden `
-        -RedirectStandardOutput $startupStdoutLog `
-        -RedirectStandardError $startupStderrLog `
-        -PassThru
+        -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
     } finally { Pop-Location }
 
     if ($botProc -and $botProc.Id -gt 0) {
