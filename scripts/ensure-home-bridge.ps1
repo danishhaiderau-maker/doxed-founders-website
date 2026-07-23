@@ -58,6 +58,61 @@ if (Test-Path -LiteralPath $bridgePidFile) {
     if ($stoppedPid -ne $PID) { Log "  stop launcher pid $stoppedPid" }
   }
 }
+# A pre-PID-tracking or interrupted bridge can still own the HTTP.sys request
+# queue while .home-bridge.pid points elsewhere. Resolve only the launcher's
+# exact window title through user32 (no taskkill/process-provider scan), verify
+# its executable, and stop that exact owner.
+foreach ($windowOwnerPid in @(Get-ProcessIdsByExactWindowTitleFast "Doxed Home Bridge :$Port")) {
+  if ($windowOwnerPid -le 0 -or $windowOwnerPid -eq $PID) { continue }
+  $windowOwnerName = Get-ProcessExecutableNameFast $windowOwnerPid
+  if (@("powershell", "pwsh", "cmd") -notcontains $windowOwnerName) {
+    throw "Bridge window owner pid=$windowOwnerPid executable=$windowOwnerName is not an approved launcher host."
+  }
+  $stopped = Stop-ProcessIdFast $windowOwnerPid
+  if (-not $stopped) {
+    $stopped = Stop-ExactProcessViaRestartManagerFast $windowOwnerPid
+  }
+  $deadline = (Get-Date).AddSeconds(5)
+  while ((Test-ProcessIdAliveFast $windowOwnerPid) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+  }
+  if (Test-ProcessIdAliveFast $windowOwnerPid) {
+    throw "Unable to stop exact bridge window owner pid=$windowOwnerPid."
+  }
+  Log "  stop exact bridge window owner pid $windowOwnerPid"
+}
+# Hidden bridge owners have no user32 window title. Match only this repo's
+# exact ensure/launcher script paths from the native command-line query, then
+# stop that revalidated PID. This closes the HTTP.sys orphan case where the
+# TCP table correctly reports PID 4 and the recorded PID file is stale.
+$bridgeScriptNeedles = @(
+  [regex]::Escape((Join-Path $scriptDir "ensure-home-bridge.ps1")),
+  [regex]::Escape((Join-Path $scriptDir "home-stack-launcher.ps1"))
+)
+foreach ($executable in @("powershell.exe", "pwsh.exe")) {
+  foreach ($hiddenOwnerPid in @(Get-ProcessIdsByExecutableNameFast $executable)) {
+    if ($hiddenOwnerPid -le 0 -or $hiddenOwnerPid -eq $PID) { continue }
+    $commandLine = Get-ProcessCommandLineFast $hiddenOwnerPid
+    if (
+      -not $commandLine -or
+      @($bridgeScriptNeedles | Where-Object { $commandLine -match "(?i)$_" }).Count -eq 0
+    ) {
+      continue
+    }
+    $stopped = Stop-ProcessIdFast $hiddenOwnerPid
+    if (-not $stopped) {
+      $stopped = Stop-ExactProcessViaRestartManagerFast $hiddenOwnerPid
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Test-ProcessIdAliveFast $hiddenOwnerPid) -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Milliseconds 200
+    }
+    if (Test-ProcessIdAliveFast $hiddenOwnerPid) {
+      throw "Unable to stop exact hidden bridge owner pid=$hiddenOwnerPid."
+    }
+    Log "  stop exact hidden bridge owner pid $hiddenOwnerPid"
+  }
+}
 # The exact bridge PID above is authoritative. Do not enumerate PowerShell
 # windows here: Get-Process has also stalled on this host during recovery.
 Stop-ListenPortFast $Port | Out-Null

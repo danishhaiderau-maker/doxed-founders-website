@@ -53,33 +53,66 @@ function Stop-VerifiedLockOwners([string]$LockPath, [int]$ServicePort) {
     if (@("powershell", "pwsh") -notcontains $name) {
       throw "Lock owner pid=$ownerPid executable=$name is not an approved startup host; refusing termination."
     }
-    if (-not (Stop-ProcessIdFast $ownerPid)) {
+    $stoppedDirectly = Stop-ProcessIdFast $ownerPid
+    $stoppedByRestartManager = $false
+    if (-not $stoppedDirectly) {
+      # Restart Manager registered this exact PID plus its creation time. It
+      # can close a same-user process across a UAC integrity boundary without
+      # enumerating or terminating unrelated PowerShell processes.
+      $stoppedByRestartManager = Stop-ExactProcessViaRestartManagerFast $ownerPid
+    }
+    if (-not $stoppedDirectly -and -not $stoppedByRestartManager) {
       throw "Could not terminate verified lock owner pid=$ownerPid for $LockPath."
     }
-    Log "Stopped verified lock owner pid=$ownerPid executable=$name lock=$LockPath"
+    $method = if ($stoppedDirectly) { "native-process" } else { "restart-manager" }
+    Log "Stopped verified lock owner pid=$ownerPid executable=$name method=$method lock=$LockPath"
     $stopped += $ownerPid
   }
-  if ($stopped.Count -gt 0) { Start-Sleep -Seconds 2 }
+  if ($stopped.Count -gt 0) {
+    # TerminateProcess/RmShutdown can acknowledge before Windows closes the
+    # final file handle. Wait for both process exit and lock release so the
+    # clean replacement owner never races the legacy starter.
+    $releaseDeadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $releaseDeadline) {
+      $ownerAlive = @($stopped | Where-Object { Test-ProcessIdAliveFast $_ }).Count -gt 0
+      if (-not $ownerAlive -and (Test-LockAvailable $LockPath)) { break }
+      Start-Sleep -Milliseconds 250
+    }
+    $ownerAlive = @($stopped | Where-Object { Test-ProcessIdAliveFast $_ }).Count -gt 0
+    if ($ownerAlive -or -not (Test-LockAvailable $LockPath)) {
+      throw "Verified owner termination was acknowledged, but $LockPath did not release within 20 seconds."
+    }
+  }
   return $stopped
 }
 
-function Stop-ExactWindowTree([string]$Title) {
-  & taskkill.exe /F /T /FI "WINDOWTITLE eq $Title" 2>$null | Out-Null
-}
+Set-HomeStackUserStopped
+Log "Starting provider-free cleanup with watchdog respawn suppressed"
 
-# Close only the supported home-stack launch windows. Exact title filters
-# avoid touching unrelated PowerShell/cmd processes or any manual application.
-foreach ($title in @(
-  "Doxed Start Everything",
-  "Doxed Bot :$BotPort",
-  "Doxed Analyzer :$AnalyzerPort",
-  "Doxed Home Bridge :7810"
-)) {
-  Stop-ExactWindowTree $title
+# A scheduled watchdog can be alive but wedged before it acquires its own lock.
+# With the user-stopped sentinel already present, stop only watchdog processes
+# whose native command line names this repo's exact script.
+$watchdogScript = Join-Path $scriptDir "bridge-watchdog.ps1"
+$watchdogNeedle = [regex]::Escape($watchdogScript)
+foreach ($executable in @("powershell.exe", "pwsh.exe")) {
+  foreach ($watchdogPid in @(Get-ProcessIdsByExecutableNameFast $executable)) {
+    if ($watchdogPid -le 0 -or $watchdogPid -eq $PID) { continue }
+    $commandLine = Get-ProcessCommandLineFast $watchdogPid
+    if (-not $commandLine -or $commandLine -notmatch "(?i)$watchdogNeedle") { continue }
+    $stopped = Stop-ProcessIdFast $watchdogPid
+    if (-not $stopped) {
+      $stopped = Stop-ExactProcessViaRestartManagerFast $watchdogPid
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Test-ProcessIdAliveFast $watchdogPid) -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Milliseconds 200
+    }
+    if (Test-ProcessIdAliveFast $watchdogPid) {
+      throw "Unable to stop exact watchdog owner pid=$watchdogPid."
+    }
+    Log "Stopped exact watchdog owner pid=$watchdogPid"
+  }
 }
-Log "Requested exact-title cleanup for supported home-stack windows"
-
-Start-Sleep -Seconds 2
 
 # New startup owners record their PID before any potentially slow work. When a
 # service is offline, stop only that recorded PowerShell owner with executable
@@ -137,34 +170,34 @@ foreach ($requiredLock in @(
 }
 Log "Bot and analyzer startup locks are available"
 
-Remove-Item -LiteralPath (Join-Path $repoRoot ".home-stack-user-stopped") -Force -ErrorAction SilentlyContinue
-
-$bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
-$bridgeArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bridgeScript`" -Port 7810 -Force -Quiet"
-$bridgeOwner = Start-Process `
-  -FilePath "powershell.exe" `
-  -ArgumentList $bridgeArgString `
-  -WorkingDirectory $repoRoot `
-  -WindowStyle Hidden `
-  -PassThru
-Log "Launched bridge recovery owner pid=$($bridgeOwner.Id)"
-
-$bridgeDeadline = (Get-Date).AddSeconds(60)
-$bridgeHealthy = $false
-while ((Get-Date) -lt $bridgeDeadline) {
+function Test-BridgeHealthOnce {
   try {
     $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:7810/health")
     $request.Method = "GET"
     $request.Timeout = 7000
     $request.ReadWriteTimeout = 7000
     $response = $request.GetResponse()
-    $bridgeHealthy = ($response.StatusCode -eq 200)
+    $healthy = ($response.StatusCode -eq 200)
     $response.Close()
+    return $healthy
   } catch {
-    $bridgeHealthy = $false
+    return $false
   }
+}
+
+$bridgeHealthy = Test-BridgeHealthOnce
+if ($bridgeHealthy) {
+  Log "Existing bridge health confirmed; preserving its owner"
+} else {
+  $bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
+  Start-HiddenPs1 $bridgeScript @("-Port", "7810", "-Force", "-Quiet")
+  Log "Queued bridge recovery owner"
+}
+
+$bridgeDeadline = (Get-Date).AddSeconds(60)
+while (-not $bridgeHealthy -and (Get-Date) -lt $bridgeDeadline) {
+  $bridgeHealthy = Test-BridgeHealthOnce
   if ($bridgeHealthy) { break }
-  if ($bridgeOwner.HasExited) { break }
   Start-Sleep -Seconds 2
 }
 
@@ -173,10 +206,10 @@ if (-not $bridgeHealthy) {
 }
 Log "Bridge health confirmed"
 
-Log "Starting bot/analyzer/tunnel recovery"
-& (Join-Path $scriptDir "home-stack-start-everything.ps1") `
-  -BotPort $BotPort `
-  -AnalyzerPort $AnalyzerPort `
-  -SkipBridgeRestart `
-  -NoWait
-Log "Provider-free recovery finished"
+Start-HiddenPs1 (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
+  "-BotPort", "$BotPort",
+  "-AnalyzerPort", "$AnalyzerPort",
+  "-SkipBridgeRestart",
+  "-NoWait"
+)
+Log "Provider-free bot/analyzer/tunnel recovery queued"

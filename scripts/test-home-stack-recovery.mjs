@@ -20,6 +20,18 @@ const autoWire = read("auto-wire-after-tunnel.ps1");
 const startBot = read("start-home-bot.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
+const hiddenPs1 = common.slice(
+  common.indexOf("function Start-HiddenPs1"),
+  common.indexOf("function Start-VisibleConsole"),
+);
+const listenOwners = common.slice(
+  common.indexOf("function Get-ListenPortOwners"),
+  common.indexOf("function Test-PortBound"),
+);
+const stopListener = common.slice(
+  common.indexOf("function Stop-ListenPortFast"),
+  common.indexOf("function Stop-RecordedProcess"),
+);
 
 for (const [name, source] of Object.entries({
   "home-stack-launcher.ps1": launcher,
@@ -80,16 +92,49 @@ assert.doesNotMatch(
   /\bGet-(?:Process|CimInstance)\b|\bWin32_Process\b/,
   "elevated recovery must remain independent of stalled process providers",
 );
-assert.match(providerFreeRecovery, /Doxed Bot :\$BotPort/);
+assert.doesNotMatch(
+  executableLines(providerFreeRecovery),
+  /taskkill\.exe/,
+  "provider-free recovery must not enumerate window-title processes",
+);
 assert.match(providerFreeRecovery, /ensure-home-bridge\.ps1/);
-assert.match(providerFreeRecovery, /Start-Process/);
 assert.match(providerFreeRecovery, /\$bridgeDeadline/);
+assert.match(providerFreeRecovery, /Existing bridge health confirmed; preserving its owner/);
+assert.match(providerFreeRecovery, /Start-HiddenPs1 \(Join-Path \$scriptDir "home-stack-start-everything\.ps1"\)/);
 assert.match(providerFreeRecovery, /Test-LockAvailable/);
+assert.match(providerFreeRecovery, /Set-HomeStackUserStopped/);
+assert.match(providerFreeRecovery, /Stopped exact watchdog owner pid=\$watchdogPid/);
+assert.match(providerFreeRecovery, /Get-ProcessCommandLineFast \$watchdogPid/);
+assert.doesNotMatch(
+  providerFreeRecovery,
+  /Remove-Item.+\.home-stack-user-stopped/,
+);
 assert.match(providerFreeRecovery, /\.home-provider-free-recovery\.log/);
 assert.match(providerFreeRecovery, /FAILED:/);
 assert.match(providerFreeRecovery, /Stop-VerifiedLockOwners/);
 assert.match(providerFreeRecovery, /Get-FileLockOwnerProcessIdsFast/);
 assert.match(providerFreeRecovery, /Stop-ProcessIdFast/);
+assert.match(common, /RmShutdown/);
+assert.match(common, /ShutdownExactProcess/);
+assert.match(common, /observed\.ProcessStartTime/);
+assert.match(common, /GetExtendedTcpTable/);
+assert.doesNotMatch(executableLines(listenOwners), /netstat|Get-NetTCPConnection/);
+assert.doesNotMatch(executableLines(stopListener), /taskkill\.exe/);
+assert.match(common, /GetProcessIdsByExactWindowTitle/);
+assert.match(common, /NtQueryInformationProcess/);
+assert.match(common, /Get-ProcessCommandLineFast/);
+assert.match(ensureBridge, /Get-ProcessIdsByExactWindowTitleFast "Doxed Home Bridge :\$Port"/);
+assert.match(ensureBridge, /Bridge window owner pid=\$windowOwnerPid/);
+assert.match(ensureBridge, /stop exact hidden bridge owner pid \$hiddenOwnerPid/);
+assert.match(ensureBridge, /Get-ProcessCommandLineFast \$hiddenOwnerPid/);
+assert.match(hiddenPs1, /System\.Diagnostics\.ProcessStartInfo/);
+assert.match(hiddenPs1, /UseShellExecute = \$false/);
+assert.match(hiddenPs1, /CreateNoWindow = \$true/);
+assert.doesNotMatch(executableLines(hiddenPs1), /Start-Process|RedirectStandardError/);
+assert.match(providerFreeRecovery, /Stop-ExactProcessViaRestartManagerFast/);
+assert.match(providerFreeRecovery, /method=\$method/);
+assert.match(providerFreeRecovery, /Test-ProcessIdAliveFast/);
+assert.match(providerFreeRecovery, /did not release within 20 seconds/);
 assert.match(providerFreeRecovery, /\.home-bot-starter\.pid/);
 assert.match(providerFreeRecovery, /\.home-analyzer-starter\.pid/);
 assert.match(
@@ -101,7 +146,7 @@ assert.match(commandWorker, /recover-home-stack-provider-free\.ps1/);
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 46,
+    checks: 72,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -110,6 +155,18 @@ console.log(
       "bridge recovery retains one durable listener owner",
       "startup locks identify their exact recoverable owner",
       "legacy lock cleanup uses exact Restart Manager ownership",
+      "same-user UAC lock owners use exact PID and creation-time shutdown fallback",
+      "owner termination waits for both process exit and lock release",
+      "provider-free recovery avoids unbounded taskkill title scans",
+      "healthy bridge ownership is preserved during full recovery",
+      "slow bot and analyzer startup runs detached from the recovery caller",
+      "hidden launches tolerate duplicate Path/PATH environment keys",
+      "listener ownership uses native TCP tables without netstat or taskkill",
+      "orphan HTTP.sys bridge owners are resolved by exact native window title",
+      "native command-line diagnostics identify hidden script owners without WMI",
+      "recovery suppresses watchdog respawn until the successful start path clears it",
+      "wedged scheduled watchdog owners are cleared by exact native command line",
+      "hidden HTTP.sys bridge owners are cleared by exact repo script path",
     ],
   }),
 );
