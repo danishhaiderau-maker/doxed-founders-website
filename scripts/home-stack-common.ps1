@@ -38,6 +38,38 @@ function Test-HomeStackUserStopped {
   return Test-Path $userStoppedFile
 }
 
+# Windows process enumeration (Get-Process/Get-CimInstance) can block for
+# minutes when the process/TCP providers are contended.  Health and watchdog
+# loops only need a bounded yes/no liveness answer, so use the kernel process
+# handle directly instead of enumerating the process table.
+if (-not ("HomeStackNativeProcess" -as [type])) {
+  Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class HomeStackNativeProcess {
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool CloseHandle(IntPtr handle);
+}
+"@
+}
+
+function Test-ProcessIdAliveFast([int]$ProcessId) {
+  if ($ProcessId -le 0) { return $false }
+  $handle = [HomeStackNativeProcess]::OpenProcess(0x00100000, $false, $ProcessId)
+  if ($handle -eq [IntPtr]::Zero) { return $false }
+  try {
+    # WAIT_TIMEOUT means the process has not signalled its exit handle.
+    return ([HomeStackNativeProcess]::WaitForSingleObject($handle, 0) -eq 0x00000102)
+  } finally {
+    [HomeStackNativeProcess]::CloseHandle($handle) | Out-Null
+  }
+}
+
 function Test-PortOpen([int]$P) {
   try {
     $c = New-Object System.Net.Sockets.TcpClient

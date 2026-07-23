@@ -51,12 +51,9 @@ if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Fo
 # --- Single-instance lock -----------------------------------------------------
 # Only one auto-restart monitor should ever run. If a stale lock points at a dead
 # PID, reclaim it; if a live monitor is already running, exit silently.
-function Test-AnalyzerMonitorCommandLine([int]$ProcId) {
+function Test-AnalyzerMonitorAlive([int]$ProcId) {
   if ($ProcId -le 0) { return $false }
-  try {
-    $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
-    return [bool]($p -and $p.ProcessName -in @("powershell", "pwsh"))
-  } catch { return $false }
+  return (Test-ProcessIdAliveFast $ProcId)
 }
 
 function Stop-StaleAnalyzerCrashMonitors([int]$ExceptPid = 0) {
@@ -80,7 +77,7 @@ function Test-LockHeldByLive {
     $raw = (Get-Content $lockFile -Raw -ErrorAction SilentlyContinue)
     $lockPid = [int]"$raw".Trim()
     if ($lockPid -le 0) { return $false }
-    return (Test-AnalyzerMonitorCommandLine $lockPid)
+    return (Test-AnalyzerMonitorAlive $lockPid)
   } catch { return $false }
 }
 
@@ -224,8 +221,7 @@ try {
 
     Start-Sleep -Seconds $PollIntervalSec
 
-    $p = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
-    $processAlive = ($null -ne $p)
+    $processAlive = Test-ProcessIdAliveFast $currentPid
     $code = -1
 
     if (-not $processAlive) {
@@ -249,7 +245,9 @@ try {
       $code = -2
       Write-CrashReport -CrashedPid $currentPid -Code $code -Message "analyzer health probe failed (hung listener) - killing and restarting"
       try { Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue } catch { }
-      try { $p.WaitForExit(5000) | Out-Null } catch { }
+      for ($waitAttempt = 0; $waitAttempt -lt 50 -and (Test-ProcessIdAliveFast $currentPid); $waitAttempt++) {
+        Start-Sleep -Milliseconds 100
+      }
     }
 
     # Exit code 0 = intentional shutdown (e.g. user stop-home-analyzer). Don't restart.

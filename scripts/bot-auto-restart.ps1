@@ -54,8 +54,7 @@ function Test-LockHeldByLive {
     $raw = (Get-Content $lockFile -Raw -ErrorAction SilentlyContinue)
     $lockPid = [int]"$raw".Trim()
     if ($lockPid -le 0) { return $false }
-    $p = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-    return ($null -ne $p)
+    return (Test-ProcessIdAliveFast $lockPid)
   } catch { return $false }
 }
 if (Test-LockHeldByLive) { exit 0 }
@@ -225,8 +224,7 @@ try {
         break
       }
 
-      $p = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
-      if (-not $p) {
+      if (-not (Test-ProcessIdAliveFast $currentPid)) {
         # Already gone before we could attach. Treat as a crash with unknown exit code.
         $code = -1
         Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"

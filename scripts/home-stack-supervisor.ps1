@@ -62,14 +62,17 @@ function Log([string]$msg) {
 function Get-BotStartupAgeSeconds {
   # The crash monitor writes the new PID before Flask is ready to answer.
   # Treat a live, newly-spawned PID as starting instead of letting this slower
-  # HTTP supervisor kill it after two failed probes.
+  # HTTP supervisor kill it after two failed probes.  The PID file is written
+  # at spawn time, so its timestamp gives the required bounded age check
+  # without querying the process-table provider.
   $pidFile = Join-Path $repoRoot ".home-bot.pid"
   if (-not (Test-Path $pidFile)) { return [double]::PositiveInfinity }
   try {
     $botPid = [int]((Get-Content $pidFile -Raw -ErrorAction Stop).Trim())
-    if ($botPid -le 0) { return [double]::PositiveInfinity }
-    $process = Get-Process -Id $botPid -ErrorAction Stop
-    $age = ((Get-Date) - $process.StartTime).TotalSeconds
+    if ($botPid -le 0 -or -not (Test-ProcessIdAliveFast $botPid)) {
+      return [double]::PositiveInfinity
+    }
+    $age = ((Get-Date) - (Get-Item -LiteralPath $pidFile -ErrorAction Stop).LastWriteTime).TotalSeconds
     if ($age -lt 0) { return [double]::PositiveInfinity }
     return [double]$age
   } catch {
@@ -211,8 +214,7 @@ function Restart-AutoRestartMonitor {
   # monitor. If we hand it a dead PID, the monitor's first iteration will fire
   # Start-BotHidden which kills whatever holds :7002 - exactly the race we
   # are trying to avoid.
-  $live = Get-Process -Id $WatchPid -ErrorAction SilentlyContinue
-  if (-not $live) {
+  if (-not (Test-ProcessIdAliveFast $WatchPid)) {
     Log "auto-restart monitor respawn skipped - pid $WatchPid not alive (would race a live bot); will retry next tick"
     return
   }
@@ -227,8 +229,7 @@ function Restart-AutoRestartMonitor {
     try {
       $lockPid = [int]((Get-Content $lockFile -Raw).Trim())
       if ($lockPid -gt 0) {
-        $lockProc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-        if (-not $lockProc) {
+        if (-not (Test-ProcessIdAliveFast $lockPid)) {
           Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
           Log "auto-restart monitor stale lock (pid=$lockPid dead) - cleared"
         }
@@ -327,7 +328,10 @@ while ($true) {
   $botOk = Test-BotHealthy
   $analyzerOk = Test-AnalyzerHealthy
   $bridgeOk = Test-BridgeHealthy
-  $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+  # Do not enumerate Windows processes in the progress loop.  The public
+  # tunnel probe below is the authoritative health signal; this label records
+  # that a tunnel URL is configured, not an unbounded process-table lookup.
+  $cfState = "unprobed"
   $tunnelOk = if ($botOk -and $tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
 
   $botStartupAgeSec = Get-BotStartupAgeSeconds
@@ -349,7 +353,7 @@ while ($true) {
     $backoffTag = "rl-ok"
   }
   $startupTag = if ($botStarting) { "starting=$([int]$botStartupAgeSec)s/$($BotStartupGraceSec)s" } else { "starting=no" }
-  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfRunning hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $startupTag $backoffTag url=$tunnelUrl")
+  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $startupTag $backoffTag url=$tunnelUrl")
 
   if ($fail.bridge -ge $FailThreshold) {
     $lastRecover.bridge = Invoke-Recovery "bridge" { Restart-BridgeComponent } $lastRecover.bridge $BridgeCooldownSec
@@ -416,7 +420,7 @@ while ($true) {
       Log "RECOVER tunnel skipped - user stopped stack"
       $fail.tunnel = 0
     } else {
-      $reason = if ($cfRunning) { "zombie cloudflared (process up, public ping dead)" } else { "cloudflared not running" }
+      $reason = if ($tunnelUrl) { "configured tunnel public ping dead" } else { "tunnel not configured" }
       $lastRecover.tunnel = Invoke-Recovery "tunnel" { Restart-TunnelComponent $reason } $lastRecover.tunnel $TunnelCooldownSec
       $fail.tunnel = 0
       Start-Sleep -Seconds 45

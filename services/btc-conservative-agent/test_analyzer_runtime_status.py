@@ -137,8 +137,8 @@ checks = {
     ),
     "analyzer health requires both dashboard and analyzer owner": (
         '".home-analyzer.pid"' in health
-        and "Get-Process -Id $analyzerPid" in health
-        and '$analyzerProcess.ProcessName -notin @("python", "pythonw")' in health
+        and "Test-ProcessIdAliveFast $analyzerPid" in health
+        and "Get-Process -Id $analyzerPid" not in health
     ),
     "supervisor recovery replaces monitors with one hidden owner": (
         'Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid")' in stack_supervisor

@@ -93,8 +93,7 @@ function Test-AnalyzerHealthy {
   if (-not (Test-Path -LiteralPath $analyzerPidFile)) { return $false }
   try {
     $analyzerPid = [int]((Get-Content -LiteralPath $analyzerPidFile -Raw -ErrorAction Stop).Trim())
-    $analyzerProcess = Get-Process -Id $analyzerPid -ErrorAction Stop
-    if ($analyzerProcess.ProcessName -notin @("python", "pythonw")) { return $false }
+    if (-not (Test-ProcessIdAliveFast $analyzerPid)) { return $false }
   } catch {
     return $false
   }

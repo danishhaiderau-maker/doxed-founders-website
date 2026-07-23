@@ -181,7 +181,18 @@ def main() -> None:
         and "Set-Content -Path $heartbeatFile" in SUPERVISOR
         and '".home-stack-supervisor.heartbeat"' in SUPERVISOR_WATCHDOG
         and "Get-CimInstance" not in SUPERVISOR_WATCHDOG
+        and "Get-Process -Id" not in SUPERVISOR_WATCHDOG
+        and "Test-ProcessIdAliveFast" in SUPERVISOR_WATCHDOG
         and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
+    )
+    check(
+        "recovery health loops avoid blocking process-table enumeration",
+        "function Test-ProcessIdAliveFast" in COMMON
+        and "OpenProcess" in COMMON
+        and "WaitForSingleObject" in COMMON
+        and "Get-Process -Id" not in SUPERVISOR
+        and "Get-Process cloudflared" not in SUPERVISOR
+        and "Get-Process -Id" not in MONITOR,
     )
     check(
         "authoritative listener repairs stale bot pid before monitor attach",

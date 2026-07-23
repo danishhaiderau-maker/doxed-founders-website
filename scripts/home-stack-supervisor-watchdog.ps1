@@ -5,6 +5,7 @@ param([switch]$Quiet)
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort 7002 -AnalyzerPort 9001 -BridgePort 7810
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
 $supervisorPidFile = Join-Path $repoRoot ".home-stack-supervisor.pid"
 $supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
@@ -22,9 +23,7 @@ function Test-SupervisorAlive {
     $pidVal = (Get-Content $supervisorPidFile -Raw -ErrorAction SilentlyContinue).Trim()
   }
   if (-not $pidVal -or $pidVal -notmatch '^\d+$') { return $false }
-  $proc = Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue
-  if (-not $proc) { return $false }
-  if ($proc.ProcessName -notin @("powershell", "pwsh")) { return $false }
+  if (-not (Test-ProcessIdAliveFast ([int]$pidVal))) { return $false }
   if (-not (Test-Path -LiteralPath $supervisorHeartbeatFile)) { return $false }
   try {
     $raw = Get-Content -LiteralPath $supervisorHeartbeatFile -Raw -ErrorAction Stop
