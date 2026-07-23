@@ -68,6 +68,9 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /node_modules\\@vscode\\ripgrep\\bin\\rg\.exe/);
     assert.match(source, /Founder IDE ripgrep runtime is missing from both payload and source/);
     assert.match(source, /Founder IDE ripgrep runtime is unexpectedly small/);
+    assert.match(source, /5075519D24E22733AACDDDD218C7023FC94C49150397E1EDA5C4F6B866C3174E/);
+    assert.match(source, /Get-FileHash -LiteralPath \$ripgrepDest -Algorithm SHA256/);
+    assert.match(source, /Founder IDE ripgrep runtime checksum mismatch/);
   });
 
   it('restores the matching node-pty ConPTY runtime before packaging', () => {

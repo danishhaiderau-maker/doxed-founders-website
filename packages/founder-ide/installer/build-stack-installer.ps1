@@ -173,6 +173,7 @@ Write-Host "[stack]   Founder work modes, Second brain, and voice composer paylo
 # postinstall download, which only becomes visible as an ENOENT after launch.
 $ripgrepRelativePath = "node_modules\@vscode\ripgrep\bin\rg.exe"
 $ripgrepDest = Join-Path $ideAppRoot $ripgrepRelativePath
+$ripgrepSha256 = "5075519D24E22733AACDDDD218C7023FC94C49150397E1EDA5C4F6B866C3174E"
 if (-not (Test-Path $ripgrepDest)) {
     $ripgrepSource = Join-Path $vscodeSource $ripgrepRelativePath
     if (-not (Test-Path $ripgrepSource)) {
@@ -185,6 +186,11 @@ if (-not (Test-Path $ripgrepDest)) {
 if ((Get-Item $ripgrepDest).Length -lt 1000000) {
     throw "Founder IDE ripgrep runtime is unexpectedly small: $ripgrepDest"
 }
+$actualRipgrepSha256 = (Get-FileHash -LiteralPath $ripgrepDest -Algorithm SHA256).Hash
+if ($actualRipgrepSha256 -ne $ripgrepSha256) {
+    throw "Founder IDE ripgrep runtime checksum mismatch: expected $ripgrepSha256, got $actualRipgrepSha256"
+}
+Write-Host "[stack]   ripgrep runtime checksum verified"
 
 # Verify the bindings used during a supported Windows 10/11 startup before
 # spending time building the inner and outer installers. Parcel intentionally
