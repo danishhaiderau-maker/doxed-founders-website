@@ -42,7 +42,8 @@ function Test-HomeStackUserStopped {
 # minutes when the process/TCP providers are contended.  Health and watchdog
 # loops only need a bounded yes/no liveness answer, so use the kernel process
 # handle directly instead of enumerating the process table.
-if (-not ("HomeStackNativeProcess" -as [type])) {
+function Initialize-HomeStackNativeProcess {
+  if ("HomeStackNativeProcess" -as [type]) { return }
   Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -69,6 +70,7 @@ public static class HomeStackNativeProcess {
 }
 
 function Test-ProcessIdAliveFast([int]$ProcessId) {
+  Initialize-HomeStackNativeProcess
   if ($ProcessId -le 0) { return $false }
   $handle = [HomeStackNativeProcess]::OpenProcess(0x00100000, $false, $ProcessId)
   if ($handle -eq [IntPtr]::Zero) { return $false }
@@ -81,6 +83,7 @@ function Test-ProcessIdAliveFast([int]$ProcessId) {
 }
 
 function Get-ProcessExecutableNameFast([int]$ProcessId) {
+  Initialize-HomeStackNativeProcess
   if ($ProcessId -le 0) { return $null }
   $handle = [HomeStackNativeProcess]::OpenProcess(0x00101000, $false, $ProcessId)
   if ($handle -eq [IntPtr]::Zero) { return $null }
@@ -97,6 +100,7 @@ function Get-ProcessExecutableNameFast([int]$ProcessId) {
 }
 
 function Get-ProcessStartTimeUtcFast([int]$ProcessId) {
+  Initialize-HomeStackNativeProcess
   if ($ProcessId -le 0) { return $null }
   $handle = [HomeStackNativeProcess]::OpenProcess(0x00101000, $false, $ProcessId)
   if ($handle -eq [IntPtr]::Zero) { return $null }
@@ -117,6 +121,7 @@ function Get-ProcessStartTimeUtcFast([int]$ProcessId) {
 }
 
 function Stop-ProcessIdFast([int]$ProcessId) {
+  Initialize-HomeStackNativeProcess
   if ($ProcessId -le 0) { return $false }
   $handle = [HomeStackNativeProcess]::OpenProcess(0x00100001, $false, $ProcessId)
   if ($handle -eq [IntPtr]::Zero) { return $false }

@@ -204,6 +204,12 @@ def main() -> None:
     check(
         "recovery health loops avoid blocking process-table enumeration",
         "function Test-ProcessIdAliveFast" in COMMON
+        and "function Initialize-HomeStackNativeProcess" in COMMON
+        and COMMON.index("function Initialize-HomeStackNativeProcess")
+        < COMMON.index("function Test-ProcessIdAliveFast")
+        and "Initialize-HomeStackNativeProcess" in COMMON[
+            COMMON.index("function Test-ProcessIdAliveFast"):
+        ]
         and "OpenProcess" in COMMON
         and "WaitForSingleObject" in COMMON
         and "QueryFullProcessImageName" in COMMON
@@ -212,6 +218,12 @@ def main() -> None:
         and "Get-Process -Id" not in SUPERVISOR
         and "Get-Process cloudflared" not in SUPERVISOR
         and "Get-Process -Id" not in MONITOR,
+    )
+    check(
+        "supervisor startup never eagerly compiles native process support",
+        'if ("HomeStackNativeProcess" -as [type]) { return }' in COMMON
+        and "Test-ProcessIdAliveFast $botPid" not in SUPERVISOR
+        and "Test-ProcessIdAliveFast $analyzerPid" not in HEALTH,
     )
     check(
         "supervisor detection and recovery avoid blocking maintenance scans",

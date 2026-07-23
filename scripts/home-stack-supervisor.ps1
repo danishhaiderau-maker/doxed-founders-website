@@ -61,17 +61,15 @@ function Log([string]$msg) {
 
 function Get-BotStartupAgeSeconds {
   # The crash monitor writes the new PID before Flask is ready to answer.
-  # Treat a live, newly-spawned PID as starting instead of letting this slower
-  # HTTP supervisor kill it after two failed probes.  The PID file is written
-  # at spawn time, so its timestamp gives the required bounded age check
-  # without querying the process-table provider.
+  # Treat a newly-written PID marker as starting instead of letting this slower
+  # HTTP supervisor kill it after two failed probes. The marker is written at
+  # spawn time. A process that dies immediately may consume the bounded grace
+  # once, but startup never compiles or queries a process provider.
   $pidFile = Join-Path $repoRoot ".home-bot.pid"
   if (-not (Test-Path $pidFile)) { return [double]::PositiveInfinity }
   try {
     $botPid = [int]((Get-Content $pidFile -Raw -ErrorAction Stop).Trim())
-    if ($botPid -le 0 -or -not (Test-ProcessIdAliveFast $botPid)) {
-      return [double]::PositiveInfinity
-    }
+    if ($botPid -le 0) { return [double]::PositiveInfinity }
     $age = ((Get-Date) - (Get-Item -LiteralPath $pidFile -ErrorAction Stop).LastWriteTime).TotalSeconds
     if ($age -lt 0) { return [double]::PositiveInfinity }
     return [double]$age

@@ -93,7 +93,7 @@ function Test-AnalyzerHealthy {
   if (-not (Test-Path -LiteralPath $analyzerPidFile)) { return $false }
   try {
     $analyzerPid = [int]((Get-Content -LiteralPath $analyzerPidFile -Raw -ErrorAction Stop).Trim())
-    if (-not (Test-ProcessIdAliveFast $analyzerPid)) { return $false }
+    if ($analyzerPid -le 0) { return $false }
   } catch {
     return $false
   }

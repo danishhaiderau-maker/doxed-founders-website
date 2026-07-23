@@ -137,7 +137,7 @@ checks = {
     ),
     "analyzer health requires both dashboard and analyzer owner": (
         '".home-analyzer.pid"' in health
-        and "Test-ProcessIdAliveFast $analyzerPid" in health
+        and "if ($analyzerPid -le 0)" in health
         and "Get-Process -Id $analyzerPid" not in health
     ),
     "supervisor recovery replaces monitors with one hidden owner": (
