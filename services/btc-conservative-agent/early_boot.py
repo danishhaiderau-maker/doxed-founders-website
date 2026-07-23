@@ -14,6 +14,7 @@ from typing import Optional
 _server: Optional[ThreadingHTTPServer] = None
 _thread: Optional[threading.Thread] = None
 _boot_version = "booting"
+_source_git_rev = "unknown"
 
 
 def _utc_iso() -> str:
@@ -39,8 +40,14 @@ def _write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: 
         return
 
 
-def start_early_ping_server(port: int, *, version: str = "booting", host: str = "0.0.0.0") -> None:
-    global _server, _thread, _boot_version
+def start_early_ping_server(
+    port: int,
+    *,
+    version: str = "booting",
+    host: str = "0.0.0.0",
+    source_git_rev: str = "unknown",
+) -> None:
+    global _server, _thread, _boot_version, _source_git_rev
     if int(port) in _RESERVED_PORTS:
         raise RuntimeError(
             f"Port {port} is reserved for the home bridge (:7810). "
@@ -49,6 +56,7 @@ def start_early_ping_server(port: int, *, version: str = "booting", host: str = 
     if _server is not None:
         return
     _boot_version = version
+    _source_git_rev = (source_git_rev or "unknown").strip()[:12]
 
     class _Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:  # noqa: A003
@@ -66,6 +74,10 @@ def start_early_ping_server(port: int, *, version: str = "booting", host: str = 
                         "ok": True,
                         "boot": "starting",
                         "bot_pid": os.getpid(),
+                        "dashboard_pid": os.getpid(),
+                        "dashboard_port": int(self.server.server_address[1]),
+                        "dashboard_owner": True,
+                        "source_git_rev": _source_git_rev,
                         "bot_version": _boot_version,
                         "server_ts": _utc_iso(),
                     },

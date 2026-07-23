@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 
 _STARTUP_LOG_HANDLES = []
@@ -39,6 +40,40 @@ def _attach_startup_logs() -> None:
 
 _attach_startup_logs()
 
+
+def _read_boot_revision() -> str:
+    """Read the checkout revision before the full bot import.
+
+    The home supervisor validates owner + revision on every health probe. The
+    temporary boot server must therefore identify the same checkout as the
+    full Flask app or a correct, still-loading bot is mistaken for a stale one.
+    """
+    try:
+        git_dir = Path(_SERVICE_DIR).parents[1] / ".git"
+        if git_dir.is_file():
+            raw_git_dir = git_dir.read_text(encoding="utf-8").strip()
+            if raw_git_dir.lower().startswith("gitdir:"):
+                git_dir = (git_dir.parent / raw_git_dir.split(":", 1)[1].strip()).resolve()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:12] if head else "unknown"
+        ref_name = head.split(":", 1)[1].strip()
+        ref_path = git_dir / Path(ref_name)
+        if ref_path.is_file():
+            return ref_path.read_text(encoding="utf-8").strip()[:12]
+        packed_refs = git_dir / "packed-refs"
+        if packed_refs.is_file():
+            for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                if not line or line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name == ref_name:
+                    return sha.strip()[:12]
+    except OSError:
+        pass
+    return "unknown"
+
+
 os.environ.setdefault("SHOWCASE_AGENT", "1")
 os.environ.setdefault("HOME_BOT_LOCAL", "1")
 os.environ.setdefault("HOME_RESEARCH_FULL", "1")
@@ -63,6 +98,7 @@ if _port == 7810:
     )
 _bind_host = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 _boot_version = "booting"
+_boot_revision = _read_boot_revision()
 
 try:
     from combo_pathway_config import EXECUTION_FIX_VERSION as _boot_version  # noqa: E402
@@ -71,7 +107,12 @@ except Exception:
 
 from early_boot import start_early_ping_server, stop_early_ping_server  # noqa: E402
 
-start_early_ping_server(_port, version=_boot_version, host=_bind_host)
+start_early_ping_server(
+    _port,
+    version=_boot_version,
+    host=_bind_host,
+    source_git_rev=_boot_revision,
+)
 
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402

@@ -17,6 +17,9 @@ BOT = (
 ENTRYPOINT = (
     ROOT / "services" / "btc-conservative-agent" / "btc_conservative_agent.py"
 ).read_text(encoding="utf-8")
+EARLY_BOOT = (
+    ROOT / "services" / "btc-conservative-agent" / "early_boot.py"
+).read_text(encoding="utf-8")
 BOT_HUNG = HEALTH.split("function Test-BotHung", 1)[1].split(
     "function Test-AnalyzerHung", 1
 )[0]
@@ -92,6 +95,14 @@ def main() -> None:
         < BOT_MAIN.index("prune_aux_logs_on_startup()")
         and BOT_MAIN.count("threading.Thread(target=run_flask") == 1
         and "_DASHBOARD_BOOTSTRAP_COMPLETE = True" in BOT_MAIN,
+    )
+    check(
+        "temporary boot health proves current owner and revision",
+        "def _read_boot_revision()" in ENTRYPOINT
+        and "source_git_rev=_boot_revision" in ENTRYPOINT
+        and '"dashboard_owner": True' in EARLY_BOOT
+        and '"dashboard_pid": os.getpid()' in EARLY_BOOT
+        and '"source_git_rev": _source_git_rev' in EARLY_BOOT,
     )
     check(
         "partially restored dashboard and relay snapshots fail closed",

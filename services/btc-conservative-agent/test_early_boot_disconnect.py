@@ -1,6 +1,8 @@
 import importlib.util
 import io
+import json
 import unittest
+import urllib.request
 from pathlib import Path
 
 
@@ -31,6 +33,28 @@ class EarlyBootDisconnectTests(unittest.TestCase):
                 return None
 
         early_boot._write_json_response(Handler(), 503, {"boot": "starting"})
+
+    def test_boot_ping_reports_owner_and_revision(self):
+        early_boot.start_early_ping_server(
+            0,
+            host="127.0.0.1",
+            version="test-version",
+            source_git_rev="1234567890abcdef",
+        )
+        try:
+            port = early_boot._server.server_address[1]
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/ping", timeout=2
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["boot"], "starting")
+            self.assertTrue(payload["dashboard_owner"])
+            self.assertEqual(payload["dashboard_pid"], payload["bot_pid"])
+            self.assertEqual(payload["dashboard_port"], port)
+            self.assertEqual(payload["source_git_rev"], "1234567890ab")
+        finally:
+            early_boot.stop_early_ping_server()
 
 
 if __name__ == "__main__":
