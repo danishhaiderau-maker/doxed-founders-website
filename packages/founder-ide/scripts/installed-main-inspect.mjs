@@ -39,7 +39,6 @@ async function inspect(target) {
                 className: typeof element.className === 'string' ? element.className.slice(0, 180) : '',
                 rect: element.getBoundingClientRect().toJSON(),
               }))
-              .filter((entry) => entry.rect.x > innerWidth * 0.55)
               .slice(0, 200),
           };
         })()`,

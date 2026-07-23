@@ -119,7 +119,7 @@ const evidence = {
   checks: {
     founderSettings: /Founder Settings/i.test(settingsText),
     freePlan: /Founder Free/i.test(settingsText),
-    fiveMillionTokens: /5(?:,000,000| million)/i.test(settingsText),
+    freeWeeklyQuota: /200(?:,000|K) weighted tokens\/week/i.test(settingsText),
     planUsage: /Plan and usage/i.test(settingsText),
     byok: /Bring your own key/i.test(aiText),
     account: /Identity and Node/i.test(settingsText),

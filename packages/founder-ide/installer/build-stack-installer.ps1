@@ -141,6 +141,7 @@ if (-not $SkipIdeBuild) {
 if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
     throw "Founder IDE application payload not found at $ideRoot"
 }
+$ideAppRoot = Join-Path $ideRoot "resources\app"
 
 # A warm VS Code checkout can retain out-vscode from an earlier React build
 # because the upstream gulp dependency graph does not track the nested tsup
@@ -156,6 +157,24 @@ if (-not $workbenchText.Contains($expectedFounderToolbar) -or $workbenchText.Con
     throw "Founder IDE payload contains a stale chat toolbar. Rebuild the React bundle and remove out-vscode before packaging."
 }
 Write-Host "[stack]   Founder action toolbar payload verified"
+
+# Search and the context index use VS Code's pinned ripgrep executable. A
+# cached dependency install can retain the package while omitting its
+# postinstall download, which only becomes visible as an ENOENT after launch.
+$ripgrepRelativePath = "node_modules\@vscode\ripgrep\bin\rg.exe"
+$ripgrepDest = Join-Path $ideAppRoot $ripgrepRelativePath
+if (-not (Test-Path $ripgrepDest)) {
+    $ripgrepSource = Join-Path $vscodeSource $ripgrepRelativePath
+    if (-not (Test-Path $ripgrepSource)) {
+        throw "Founder IDE ripgrep runtime is missing from both payload and source: $ripgrepRelativePath"
+    }
+    New-Item -ItemType Directory -Path (Split-Path $ripgrepDest -Parent) -Force | Out-Null
+    Copy-Item $ripgrepSource $ripgrepDest -Force
+    Write-Host "[stack]   restored ripgrep runtime -> $ripgrepDest"
+}
+if ((Get-Item $ripgrepDest).Length -lt 1000000) {
+    throw "Founder IDE ripgrep runtime is unexpectedly small: $ripgrepDest"
+}
 
 # Verify the bindings used during a supported Windows 10/11 startup before
 # spending time building the inner and outer installers. Parcel intentionally
@@ -208,7 +227,6 @@ Write-Host "[stack]   embedded Founder extension -> $builtinExtension"
 
 # Patch the compiled shell after the downstream build and before installer
 # packaging. Both scripts fail closed if an upstream minified signature moves.
-$ideAppRoot = Join-Path $ideRoot "resources\app"
 
 # VS Code requires its Electron-targeted SQLite binding during main-process
 # startup. Cached payload builds can otherwise look healthy while omitting the

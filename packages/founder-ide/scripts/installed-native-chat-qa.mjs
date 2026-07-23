@@ -4,14 +4,18 @@ import path from 'node:path';
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
 const nonce = process.env.FOUNDER_IDE_QA_NONCE || `QA-${Date.now()}`;
+const requestedMode = process.env.FOUNDER_IDE_QA_MODE?.trim().toLowerCase() || '';
+const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
 const evidenceId = nonce.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 96);
 fs.mkdirSync(outputDir, { recursive: true });
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
-const target = targets.find((candidate) =>
+const workbenchTargets = targets.filter((candidate) =>
   candidate.type === 'page'
   && candidate.url?.includes('/workbench/workbench.html'),
 );
+const target = workbenchTargets.find((candidate) => requestedTitle && candidate.title?.toLowerCase().includes(requestedTitle))
+  || workbenchTargets[0];
 if (!target?.webSocketDebuggerUrl) throw new Error('Clean Founder IDE workspace window was not found.');
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
@@ -82,6 +86,51 @@ if (!composer) {
   })()`);
 }
 if (!composer) throw new Error('Founder Chat composer was not found.');
+
+if (requestedMode) {
+  const modeNames = { normal: 'Chat', gather: 'Gather', agent: 'Agent' };
+  const modeDetails = {
+    normal: 'Normal chat',
+    gather: "Reads files, but can't edit",
+    agent: 'Edits files and uses tools',
+  };
+  if (!modeNames[requestedMode]) throw new Error(`Unknown Founder chat mode: ${requestedMode}`);
+  const currentMode = await evaluate(`(() => {
+    const composer = [...document.querySelectorAll('textarea')]
+      .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
+    if (!composer) return null;
+    const composerRect = composer.getBoundingClientRect();
+    const button = [...document.querySelectorAll('button')]
+      .filter((candidate) => ['Chat', 'Gather', 'Agent'].includes(candidate.textContent?.trim() || ''))
+      .filter((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0
+          && rect.left >= composerRect.left
+          && rect.top >= composerRect.bottom - 90
+          && rect.top <= composerRect.bottom + 40;
+      })[0];
+    button?.click();
+    return button?.textContent?.trim() || null;
+  })()`);
+  if (!currentMode) throw new Error('Founder Chat mode control was not found.');
+  if (currentMode !== modeNames[requestedMode]) {
+    await wait(300);
+    const selected = await evaluate(`(() => {
+      const wanted = ${JSON.stringify(modeNames[requestedMode] + modeDetails[requestedMode])};
+      const option = [...document.querySelectorAll('div')]
+        .filter((candidate) => candidate.textContent?.replace(/\\s+/g, '').trim() === wanted.replace(/\\s+/g, ''))
+        .find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        });
+      option?.click();
+      return Boolean(option);
+    })()`);
+    if (!selected) throw new Error(`Founder Chat ${requestedMode} option was not found.`);
+    await wait(500);
+  }
+}
 
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2 });

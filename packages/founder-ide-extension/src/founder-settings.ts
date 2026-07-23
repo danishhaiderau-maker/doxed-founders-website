@@ -329,6 +329,16 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const reservationLabel = managedTokens.reserved > 0
       ? `${reservedPercent < 0.1 ? '<0.1' : reservedPercent.toFixed(1)}% reserved by work in progress`
       : 'No quota currently reserved';
+    const formatWeightedTokens = (value: number): string => new Intl.NumberFormat(
+      undefined,
+      { notation: 'compact', maximumFractionDigits: 1 },
+    ).format(Math.max(0, value));
+    const quotaLabel = managedTokens.cap > 0
+      ? `${formatWeightedTokens(managedTokens.cap)} weighted tokens/week`
+      : 'Managed quota';
+    const remainingLabel = managedTokens.cap > 0
+      ? `${formatWeightedTokens(managedTokens.remaining)} remaining (${remainingPercent.toFixed(0)}%)`
+      : `${remainingPercent.toFixed(0)}% available`;
 
     const modeButtons = FOUNDER_WORKSPACE_MODES.map(
       (candidate) => `
@@ -573,9 +583,9 @@ export class FounderSettingsPanel implements vscode.Disposable {
         <p class="section-copy">${escapeHtml(planSummary)} Personal API keys and local models remain separate.</p>
         <div class="usage-card">
           <div class="usage-head"><strong>${escapeHtml(planLabel)}</strong><span>${escapeHtml([planPrice, entitlementStatus].filter(Boolean).join(' | '))}</span></div>
-          <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>Managed quota</span></div>
+          <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>${escapeHtml(quotaLabel)}</span></div>
           <progress class="progress" aria-label="${escapeHtml(planLabel)} quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
-          <div class="usage-values"><span>${remainingPercent.toFixed(0)}% available</span><span>${escapeHtml(reservationLabel)}</span></div>
+          <div class="usage-values"><span>${escapeHtml(remainingLabel)}</span><span>${escapeHtml(reservationLabel)}</span></div>
           <div class="usage-values"><span>${escapeHtml(renewalLabel)}</span><span>Personal keys and local AI stay outside this quota</span></div>
           <div class="usage-values"><span>${entitlement.features.coordination ? 'Agent coordination' : 'Focused agent'}</span><span>${entitlement.features.remoteControl ? 'Remote control included' : 'Remote control on Builder'}</span></div>
           ${lowQuota ? '<p class="usage-warning">Managed quota is running low. Switch to personal or local AI, or upgrade before starting a large task.</p>' : ''}

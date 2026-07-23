@@ -3,10 +3,14 @@ import path from 'node:path';
 
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
+const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
 fs.mkdirSync(outputDir, { recursive: true });
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
-const target = targets.find((candidate) => candidate.url?.includes('/workbench/workbench.html'));
+const workbenchTargets = targets.filter((candidate) => candidate.url?.includes('/workbench/workbench.html'));
+const target = workbenchTargets.find((candidate) => requestedTitle && candidate.title?.toLowerCase().includes(requestedTitle))
+  || workbenchTargets.find((candidate) => !/^Founder Settings\b/i.test(candidate.title || ''))
+  || workbenchTargets[0];
 if (!target?.webSocketDebuggerUrl) throw new Error('Founder IDE workbench page was not found.');
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
@@ -59,9 +63,51 @@ async function evaluate(expression, awaitPromise = false) {
   return response.result?.value;
 }
 
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function runCommandPalette(command) {
+  await send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown', key: 'P', code: 'KeyP', modifiers: 10,
+    windowsVirtualKeyCode: 80, nativeVirtualKeyCode: 80,
+  });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'P', code: 'KeyP', modifiers: 10 });
+  await wait(350);
+  await send('Input.insertText', { text: command });
+  await wait(500);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
+  await wait(1_800);
+}
+
 await send('Runtime.enable');
 await send('Page.enable');
-await new Promise((resolve) => setTimeout(resolve, 1_000));
+await send('Page.bringToFront');
+if (process.env.FOUNDER_IDE_QA_TRUST === '1') {
+  const trusted = await evaluate(`(() => {
+    const button = [...document.querySelectorAll('button, a, [role="button"]')]
+      .find((candidate) => /Yes, I trust the authors/i.test(candidate.textContent?.trim() || ''));
+    button?.click();
+    return Boolean(button);
+  })()`);
+  if (trusted) await wait(2_500);
+}
+if (process.env.FOUNDER_IDE_QA_UNDO === '1') {
+  await send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown', key: 'z', code: 'KeyZ', modifiers: 2,
+    windowsVirtualKeyCode: 90, nativeVirtualKeyCode: 90,
+  });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'z', code: 'KeyZ', modifiers: 2 });
+  await wait(300);
+}
+// Close any settings webview opened by a prior QA pass so the workbench owns
+// keyboard focus, then reveal the product's labeled navigation explicitly.
+await send('Input.dispatchKeyEvent', {
+  type: 'rawKeyDown', key: 'w', code: 'KeyW', modifiers: 2,
+  windowsVirtualKeyCode: 87, nativeVirtualKeyCode: 87,
+});
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW', modifiers: 2 });
+await wait(500);
+await runCommandPalette('Founder: Open control center');
 
 const screenshot = await send('Page.captureScreenshot', {
   format: 'png',

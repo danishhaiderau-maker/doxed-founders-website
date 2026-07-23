@@ -39,6 +39,12 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /Founder IDE native binding is missing/);
   });
 
+  it('restores and validates the pinned ripgrep runtime', () => {
+    assert.match(source, /node_modules\\@vscode\\ripgrep\\bin\\rg\.exe/);
+    assert.match(source, /Founder IDE ripgrep runtime is missing from both payload and source/);
+    assert.match(source, /Founder IDE ripgrep runtime is unexpectedly small/);
+  });
+
   it('persists a deployment mode during silent installation', () => {
     assert.match(
       installerSource,

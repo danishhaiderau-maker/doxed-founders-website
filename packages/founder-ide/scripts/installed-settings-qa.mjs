@@ -3,10 +3,13 @@ import path from 'node:path';
 
 const endpoint = process.env.FOUNDER_IDE_CDP || 'http://127.0.0.1:9452';
 const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/installed-visual-qa');
+const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
 fs.mkdirSync(outputDir, { recursive: true });
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
-const target = targets.find((candidate) => candidate.url?.includes('/workbench/workbench.html'));
+const workbenchTargets = targets.filter((candidate) => candidate.url?.includes('/workbench/workbench.html'));
+const target = workbenchTargets.find((candidate) => requestedTitle && candidate.title?.toLowerCase().includes(requestedTitle))
+  || workbenchTargets[0];
 if (!target?.webSocketDebuggerUrl) throw new Error('Founder IDE workbench page was not found.');
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
