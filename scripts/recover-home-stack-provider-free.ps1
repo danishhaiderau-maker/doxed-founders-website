@@ -9,8 +9,20 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$recoveryLog = Join-Path $repoRoot ".home-provider-free-recovery.log"
 $Host.UI.RawUI.WindowTitle = "Doxed Provider-Free Recovery"
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort 7810
+
+function Log([string]$Message) {
+  $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') recovery[$PID] $Message"
+  Add-Content -LiteralPath $recoveryLog -Value $line -ErrorAction SilentlyContinue
+  Write-Host $Message
+}
+
+trap {
+  Log "FAILED: $($_.Exception.Message)"
+  throw
+}
 
 function Test-LockAvailable([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path)) { return $true }
@@ -30,6 +42,27 @@ function Test-LockAvailable([string]$Path) {
   }
 }
 
+function Stop-VerifiedLockOwners([string]$LockPath, [int]$ServicePort) {
+  $stopped = @()
+  if ((Test-PortOpen $ServicePort) -or -not (Test-Path -LiteralPath $LockPath)) {
+    return $stopped
+  }
+  foreach ($ownerPid in @(Get-FileLockOwnerProcessIdsFast $LockPath)) {
+    if ($ownerPid -le 0 -or $ownerPid -eq $PID) { continue }
+    $name = Get-ProcessExecutableNameFast $ownerPid
+    if (@("powershell", "pwsh") -notcontains $name) {
+      throw "Lock owner pid=$ownerPid executable=$name is not an approved startup host; refusing termination."
+    }
+    if (-not (Stop-ProcessIdFast $ownerPid)) {
+      throw "Could not terminate verified lock owner pid=$ownerPid for $LockPath."
+    }
+    Log "Stopped verified lock owner pid=$ownerPid executable=$name lock=$LockPath"
+    $stopped += $ownerPid
+  }
+  if ($stopped.Count -gt 0) { Start-Sleep -Seconds 2 }
+  return $stopped
+}
+
 function Stop-ExactWindowTree([string]$Title) {
   & taskkill.exe /F /T /FI "WINDOWTITLE eq $Title" 2>$null | Out-Null
 }
@@ -44,6 +77,7 @@ foreach ($title in @(
 )) {
   Stop-ExactWindowTree $title
 }
+Log "Requested exact-title cleanup for supported home-stack windows"
 
 Start-Sleep -Seconds 2
 
@@ -62,6 +96,23 @@ if (-not (Test-PortOpen $AnalyzerPort)) {
     @("powershell", "pwsh") `
     10 | Out-Null
 }
+
+# Legacy starters created before owner-PID tracking can still hold an exclusive
+# lock. Windows Restart Manager proves the exact file owner; executable
+# validation plus an offline service port keeps this cleanup tightly scoped.
+Stop-VerifiedLockOwners `
+  (Join-Path $repoRoot ".home-bot-start.lock") `
+  $BotPort | Out-Null
+Stop-VerifiedLockOwners `
+  (Join-Path $repoRoot ".home-analyzer-start.lock") `
+  $AnalyzerPort | Out-Null
+
+# A full provider-free recovery owns supervisor replacement too. Stop only the
+# timestamp-verified recorded owner; bridge-only recovery never does this.
+Stop-RecordedProcess `
+  (Join-Path $repoRoot ".home-stack-supervisor.pid") `
+  @("powershell", "pwsh", "cmd") `
+  10 | Out-Null
 
 # File locks are released by the terminated owners. Removing their now-stale
 # pathnames lets the replacement owners acquire a clean exclusive handle.
@@ -84,6 +135,7 @@ foreach ($requiredLock in @(
     throw "$requiredLock is still owned by an unverified legacy starter; refusing an unsafe duplicate launch."
   }
 }
+Log "Bot and analyzer startup locks are available"
 
 Remove-Item -LiteralPath (Join-Path $repoRoot ".home-stack-user-stopped") -Force -ErrorAction SilentlyContinue
 
@@ -95,6 +147,7 @@ $bridgeOwner = Start-Process `
   -WorkingDirectory $repoRoot `
   -WindowStyle Hidden `
   -PassThru
+Log "Launched bridge recovery owner pid=$($bridgeOwner.Id)"
 
 $bridgeDeadline = (Get-Date).AddSeconds(60)
 $bridgeHealthy = $false
@@ -118,9 +171,12 @@ while ((Get-Date) -lt $bridgeDeadline) {
 if (-not $bridgeHealthy) {
   throw "Bridge recovery failed; refusing to start dependent services."
 }
+Log "Bridge health confirmed"
 
+Log "Starting bot/analyzer/tunnel recovery"
 & (Join-Path $scriptDir "home-stack-start-everything.ps1") `
   -BotPort $BotPort `
   -AnalyzerPort $AnalyzerPort `
   -SkipBridgeRestart `
   -NoWait
+Log "Provider-free recovery finished"

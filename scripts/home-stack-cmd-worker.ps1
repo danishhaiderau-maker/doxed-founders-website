@@ -134,6 +134,12 @@ switch ($Action) {
   }
   "reset-home-stack" {
     Clear-HomeStackUserStopped
+    if (-not $isLocal) {
+      & (Join-Path $scriptDir "recover-home-stack-provider-free.ps1") `
+        -BotPort $BotPort `
+        -AnalyzerPort $AnalyzerPort
+      break
+    }
     Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 8
     Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(

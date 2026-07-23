@@ -19,6 +19,7 @@ const startEverything = read("home-stack-start-everything.ps1");
 const autoWire = read("auto-wire-after-tunnel.ps1");
 const startBot = read("start-home-bot.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
+const commandWorker = read("home-stack-cmd-worker.ps1");
 
 for (const [name, source] of Object.entries({
   "home-stack-launcher.ps1": launcher,
@@ -34,6 +35,10 @@ for (const [name, source] of Object.entries({
 }
 
 assert.match(common, /CreateToolhelp32Snapshot/);
+assert.match(common, /RmStartSession/);
+assert.match(common, /RmRegisterResources/);
+assert.match(common, /GetLockOwners/);
+assert.match(common, /Get-FileLockOwnerProcessIdsFast/);
 assert.match(common, /Get-ProcessIdsByExecutableNameFast/);
 assert.match(common, /\$MaxStartSkewMinutes/);
 assert.match(common, /Test-TunnelConnectorPresent/);
@@ -80,17 +85,23 @@ assert.match(providerFreeRecovery, /ensure-home-bridge\.ps1/);
 assert.match(providerFreeRecovery, /Start-Process/);
 assert.match(providerFreeRecovery, /\$bridgeDeadline/);
 assert.match(providerFreeRecovery, /Test-LockAvailable/);
+assert.match(providerFreeRecovery, /\.home-provider-free-recovery\.log/);
+assert.match(providerFreeRecovery, /FAILED:/);
+assert.match(providerFreeRecovery, /Stop-VerifiedLockOwners/);
+assert.match(providerFreeRecovery, /Get-FileLockOwnerProcessIdsFast/);
+assert.match(providerFreeRecovery, /Stop-ProcessIdFast/);
 assert.match(providerFreeRecovery, /\.home-bot-starter\.pid/);
 assert.match(providerFreeRecovery, /\.home-analyzer-starter\.pid/);
 assert.match(
   providerFreeRecovery,
   /refusing an unsafe duplicate launch/,
 );
+assert.match(commandWorker, /recover-home-stack-provider-free\.ps1/);
 
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 36,
+    checks: 46,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -98,6 +109,7 @@ console.log(
       "background helper starts are single-owner",
       "bridge recovery retains one durable listener owner",
       "startup locks identify their exact recoverable owner",
+      "legacy lock cleanup uses exact Restart Manager ownership",
     ],
   }),
 );

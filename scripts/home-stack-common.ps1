@@ -47,10 +47,15 @@ function Initialize-HomeStackNativeProcess {
   if ("HomeStackNativeProcess" -as [type]) { return }
   Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class HomeStackNativeProcess {
   public const uint TH32CS_SNAPPROCESS = 0x00000002;
+  const int CCH_RM_SESSION_KEY = 32;
+  const int CCH_RM_MAX_APP_NAME = 255;
+  const int CCH_RM_MAX_SVC_NAME = 63;
+  const int ERROR_MORE_DATA = 234;
 
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
   public struct PROCESSENTRY32 {
@@ -65,6 +70,36 @@ public static class HomeStackNativeProcess {
     public uint dwFlags;
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)]
     public string szExeFile;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RM_UNIQUE_PROCESS {
+    public int dwProcessId;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+  }
+
+  public enum RM_APP_TYPE {
+    RmUnknownApp = 0,
+    RmMainWindow = 1,
+    RmOtherWindow = 2,
+    RmService = 3,
+    RmExplorer = 4,
+    RmConsole = 5,
+    RmCritical = 1000
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct RM_PROCESS_INFO {
+    public RM_UNIQUE_PROCESS Process;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=CCH_RM_MAX_APP_NAME + 1)]
+    public string strAppName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=CCH_RM_MAX_SVC_NAME + 1)]
+    public string strServiceShortName;
+    public RM_APP_TYPE ApplicationType;
+    public uint AppStatus;
+    public uint TSSessionId;
+    [MarshalAs(UnmanagedType.Bool)]
+    public bool bRestartable;
   }
 
   [DllImport("kernel32.dll", SetLastError=true)]
@@ -91,6 +126,65 @@ public static class HomeStackNativeProcess {
   [DllImport("kernel32.dll", SetLastError=true)]
   [return: MarshalAs(UnmanagedType.Bool)]
   public static extern bool CloseHandle(IntPtr handle);
+
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)]
+  static extern int RmStartSession(out uint handle, int flags, StringBuilder key);
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)]
+  static extern int RmRegisterResources(
+    uint handle,
+    uint fileCount,
+    string[] files,
+    uint appCount,
+    RM_UNIQUE_PROCESS[] apps,
+    uint serviceCount,
+    string[] services
+  );
+  [DllImport("rstrtmgr.dll")]
+  static extern int RmGetList(
+    uint handle,
+    out uint needed,
+    ref uint count,
+    [In, Out] RM_PROCESS_INFO[] info,
+    ref uint reasons
+  );
+  [DllImport("rstrtmgr.dll")]
+  static extern int RmEndSession(uint handle);
+
+  public static int[] GetLockOwners(string path) {
+    uint handle;
+    var key = new StringBuilder(CCH_RM_SESSION_KEY + 1);
+    int result = RmStartSession(out handle, 0, key);
+    if (result != 0) {
+      throw new InvalidOperationException("RmStartSession=" + result);
+    }
+    try {
+      result = RmRegisterResources(handle, 1, new[] { path }, 0, null, 0, null);
+      if (result != 0) {
+        throw new InvalidOperationException("RmRegisterResources=" + result);
+      }
+      uint needed = 0;
+      uint count = 0;
+      uint reasons = 0;
+      result = RmGetList(handle, out needed, ref count, null, ref reasons);
+      if (result == 0) return new int[0];
+      if (result != ERROR_MORE_DATA) {
+        throw new InvalidOperationException("RmGetList(size)=" + result);
+      }
+      var info = new RM_PROCESS_INFO[needed];
+      count = needed;
+      result = RmGetList(handle, out needed, ref count, info, ref reasons);
+      if (result != 0) {
+        throw new InvalidOperationException("RmGetList(data)=" + result);
+      }
+      var ids = new List<int>();
+      for (int i = 0; i < count; i++) {
+        ids.Add(info[i].Process.dwProcessId);
+      }
+      return ids.ToArray();
+    } finally {
+      RmEndSession(handle);
+    }
+  }
 }
 "@
 }
@@ -135,6 +229,17 @@ function Get-ProcessIdsByExecutableNameFast([string]$ExecutableName) {
     [HomeStackNativeProcess]::CloseHandle($snapshot) | Out-Null
   }
   return $ids
+}
+
+function Get-FileLockOwnerProcessIdsFast([string]$Path) {
+  Initialize-HomeStackNativeProcess
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return @() }
+  try {
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    return @([HomeStackNativeProcess]::GetLockOwners($resolved))
+  } catch {
+    return @()
+  }
 }
 
 function Test-ExecutableRunningFast([string]$ExecutableName) {
