@@ -68,7 +68,6 @@ function serviceHarness(
     service: new FounderPromoService(
       prisma as never,
       {} as never,
-      {} as never,
       {
         resolve: async (userId: string) => resolvePlan?.(userId) ?? ({
           plan: 'free',
@@ -206,7 +205,6 @@ describe('FounderPromoService managed reservations', () => {
     const service = new FounderPromoService(
       prisma as never,
       crypto as never,
-      {} as never,
       {} as never,
     );
 

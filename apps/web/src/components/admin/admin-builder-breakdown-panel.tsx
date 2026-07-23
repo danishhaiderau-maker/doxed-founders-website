@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   fetchAdminBuilderBreakdown,
-  flagParasite,
+  flagParasite as resetAccountClassification,
   type BuilderTierBreakdown,
 } from '@/lib/api';
 
@@ -42,8 +42,8 @@ export function AdminBuilderBreakdownPanel({ accessToken }: Props) {
     setErr(null);
     setMsg(null);
     try {
-      await flagParasite(accessToken, userId);
-      setMsg(`Flagged ${email} as PARASITE (score reset to 0).`);
+      await resetAccountClassification(accessToken, userId);
+      setMsg(`Reset the activity classification for ${email}.`);
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Flag failed');
@@ -55,7 +55,7 @@ export function AdminBuilderBreakdownPanel({ accessToken }: Props) {
   if (!data && !err) {
     return (
       <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 px-4 py-3 text-sm text-amber-100/80">
-        Loading builder vs parasite breakdown…
+        Loading account activity breakdown...
       </div>
     );
   }
@@ -78,11 +78,10 @@ export function AdminBuilderBreakdownPanel({ accessToken }: Props) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-wider text-violet-400">Admin only</p>
-          <h3 className="mt-1 text-lg font-semibold text-white">Builder vs parasite breakdown</h3>
+          <h3 className="mt-1 text-lg font-semibold text-white">Account activity breakdown</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Two-tier pool protection. Verified builders (xVerified + GitHub/Cursor + recent commit) get
-            a higher daily token cap and reserved quota when the pool runs low. Parasites are cut off
-            below the preservation threshold.
+            Internal activity signals for support and fraud review. Customer AI allowance is governed
+            by the account plan and its server-authoritative weekly quota.
           </p>
         </div>
         <button
@@ -97,20 +96,20 @@ export function AdminBuilderBreakdownPanel({ accessToken }: Props) {
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Pool remaining" value={`${fmtTokens(data.poolRemaining)} / ${fmtTokens(data.poolCap)}`} sub={`${poolPct}%`} />
-        <Stat label="Today — parasite spend" value={fmtTokens(parasiteSpend)} sub="tokens" tone="amber" />
-        <Stat label="Today — builder spend" value={fmtTokens(builderSpend)} sub="tokens" tone="emerald" />
+        <Stat label="Today - standard spend" value={fmtTokens(parasiteSpend)} sub="tokens" tone="amber" />
+        <Stat label="Today - verified spend" value={fmtTokens(builderSpend)} sub="tokens" tone="emerald" />
         <Stat
           label="Accounts (P / V)"
           value={`${parasiteCount} / ${builderCount}`}
-          sub="parasite / builder"
+          sub="standard / verified"
         />
       </div>
 
       <div className="mt-5 rounded-lg border border-zinc-800 bg-black/30 p-3">
-        <p className="text-xs font-semibold text-zinc-300">Top parasite-tier accounts by 24h token spend</p>
+        <p className="text-xs font-semibold text-zinc-300">Highest standard-account usage in the last 24 hours</p>
         {data.topParasitesBy24h.length === 0 ? (
           <p className="mt-2 text-[11px] text-zinc-500">
-            No parasite-tier platform-token usage in the last 24h (or builderTier column not yet
+            No standard-account platform-token usage in the last 24h (or builderTier column not yet
             migrated — run `npx prisma migrate deploy` on Railway after this merge).
           </p>
         ) : (
@@ -141,7 +140,7 @@ export function AdminBuilderBreakdownPanel({ accessToken }: Props) {
                         onClick={() => void handleFlag(u.userId, u.email)}
                         className="rounded border border-red-500/40 bg-red-950/30 px-2 py-0.5 text-[10px] text-red-200 hover:bg-red-950/50 disabled:opacity-50"
                       >
-                        {busy === u.userId ? 'Flagging…' : 'Flag'}
+                        {busy === u.userId ? 'Resetting...' : 'Reset score'}
                       </button>
                     </td>
                   </tr>
