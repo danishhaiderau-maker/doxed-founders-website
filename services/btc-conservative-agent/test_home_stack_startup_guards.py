@@ -11,6 +11,12 @@ MONITOR = (ROOT / "scripts" / "bot-auto-restart.ps1").read_text(encoding="utf-8"
 AUTOSTART = (ROOT / "scripts" / "register-bot-autostart.ps1").read_text(
     encoding="utf-8"
 )
+SUPERVISOR = (ROOT / "scripts" / "home-stack-supervisor.ps1").read_text(
+    encoding="utf-8"
+)
+SUPERVISOR_WATCHDOG = (
+    ROOT / "scripts" / "home-stack-supervisor-watchdog.ps1"
+).read_text(encoding="utf-8")
 BOT = (
     ROOT / "services" / "btc-conservative-agent" / "bot.py"
 ).read_text(encoding="utf-8")
@@ -137,6 +143,21 @@ def main() -> None:
         and "-RedirectStandardError" not in START
         and "-RedirectStandardOutput" not in MONITOR
         and "-RedirectStandardError" not in MONITOR,
+    )
+    check(
+        "supervisor singleton never depends on blocking CIM enumeration",
+        "Get-CimInstance Win32_Process" not in SUPERVISOR
+        and "if (-not (Test-SupervisorLock))" in SUPERVISOR
+        and SUPERVISOR.index("if (-not (Test-SupervisorLock))")
+        < SUPERVISOR.index('".home-stack-supervisor.pid"'),
+    )
+    check(
+        "scheduled watchdog uses a progress heartbeat instead of CIM",
+        '".home-stack-supervisor.heartbeat"' in SUPERVISOR
+        and "Set-Content -Path $heartbeatFile" in SUPERVISOR
+        and '".home-stack-supervisor.heartbeat"' in SUPERVISOR_WATCHDOG
+        and "Get-CimInstance" not in SUPERVISOR_WATCHDOG
+        and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
     )
     print("PASS: home stack one-owner startup guards")
 

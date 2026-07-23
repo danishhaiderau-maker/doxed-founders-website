@@ -51,6 +51,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 
 $logFile = Join-Path $repoRoot ".home-stack-supervisor.log"
 $lockFile = Join-Path $repoRoot ".home-stack-supervisor.lock"
+$heartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
 $namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
 
 function Log([string]$msg) {
@@ -96,15 +97,6 @@ function Test-SupervisorLock {
   } catch {
     return $false
   }
-}
-
-function Stop-DuplicateSupervisors {
-  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.CommandLine -and $_.CommandLine -like "*home-stack-supervisor.ps1*" -and $_.ProcessId -ne $PID
-    } | ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    }
 }
 
 function Get-TunnelPublicUrl {
@@ -286,13 +278,13 @@ function Invoke-Recovery {
   return (Get-Date)
 }
 
-Stop-DuplicateSupervisors
 if (-not (Test-SupervisorLock)) {
   Log "Another supervisor is already running - exit"
   exit 0
 }
 
 Set-Content -Path (Join-Path $repoRoot ".home-stack-supervisor.pid") -Value $PID -NoNewline
+Set-Content -Path $heartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
 Prevent-Sleep
 Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Use-NamedTunnel)"
 
@@ -312,6 +304,10 @@ $botRestartTimes = [System.Collections.Generic.List[datetime]]::new()
 $botHalted = $false
 
 while ($true) {
+  # Native file heartbeat: the scheduled watchdog can prove this exact PID is
+  # making progress without the Windows CIM/WMI provider, which can hang for
+  # minutes under process-table contention.
+  Set-Content -Path $heartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
   $hygieneTick++
   if ($hygieneTick -ge 6) {
     $hygieneTick = 0

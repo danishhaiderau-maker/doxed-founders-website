@@ -7,6 +7,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
 $supervisorPidFile = Join-Path $repoRoot ".home-stack-supervisor.pid"
+$supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
 $supervisorScript = Join-Path $scriptDir "home-stack-supervisor.ps1"
 
 function Wd-Log([string]$msg) {
@@ -23,10 +24,20 @@ function Test-SupervisorAlive {
   if (-not $pidVal -or $pidVal -notmatch '^\d+$') { return $false }
   $proc = Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue
   if (-not $proc) { return $false }
-  # Confirm it is actually the supervisor, not a recycled PID.
-  $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$pidVal" -ErrorAction SilentlyContinue).CommandLine
-  if ($cmd -and $cmd -like "*home-stack-supervisor.ps1*") { return $true }
-  return $false
+  if ($proc.ProcessName -notin @("powershell", "pwsh")) { return $false }
+  if (-not (Test-Path -LiteralPath $supervisorHeartbeatFile)) { return $false }
+  try {
+    $raw = Get-Content -LiteralPath $supervisorHeartbeatFile -Raw -ErrorAction Stop
+    $heartbeat = [datetime]::Parse(
+      $raw.Trim(),
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [System.Globalization.DateTimeStyles]::RoundtripKind
+    )
+    $ageSeconds = ((Get-Date).ToUniversalTime() - $heartbeat.ToUniversalTime()).TotalSeconds
+    return ($ageSeconds -ge 0 -and $ageSeconds -le 300)
+  } catch {
+    return $false
+  }
 }
 
 if (Test-SupervisorAlive) {
