@@ -78,4 +78,13 @@ describe('Founder IDE one-app installer orchestrator', () => {
       /ModePage\.SelectedValueIndex := 1;\s*SelectedDeploymentMode := 'PUBLIC';/,
     );
   });
+
+  it('writes the installed IDE release identity after the inner installer', () => {
+    assert.match(installerSource, /AfterInstall: WriteFounderReleaseMarker/);
+    assert.match(installerSource, /Founder IDE\\founder-release\.json/);
+    assert.match(
+      installerSource,
+      /\{"version":"\{#FOUNDER_STACK_VERSION\}"\}/,
+    );
+  });
 });

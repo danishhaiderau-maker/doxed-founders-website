@@ -128,7 +128,8 @@ Source: "{#FOUNDER_IDE_SETUP}";  DestDir: "{tmp}"; Flags: deleteafterinstall noc
 Filename: "{tmp}\Founder-IDE-Setup-x64.exe"; \
   Parameters: "/SILENT /CURRENTUSER /NORESTART /SP-"; \
   StatusMsg: "Installing Founder IDE..."; \
-  Flags: waituntilterminated; Components: core
+  Flags: waituntilterminated; Components: core; \
+  AfterInstall: WriteFounderReleaseMarker
 
 ; --- Phase 7: Forgejo as a background service (Private/Hybrid only) ---------
 ; Registers Forgejo to run at login as a background process bound to
@@ -318,6 +319,23 @@ end;
 function FounderIdeExe(Param: string): string;
 begin
   Result := ExpandConstant('{localappdata}\Programs\Founder IDE\Founder IDE.exe');
+end;
+
+procedure WriteFounderReleaseMarker;
+var
+  MarkerPath: string;
+begin
+  MarkerPath := ExpandConstant(
+    '{localappdata}\Programs\Founder IDE\founder-release.json'
+  );
+  if not SaveStringToFile(
+    MarkerPath,
+    '{"version":"{#FOUNDER_STACK_VERSION}"}',
+    False
+  ) then begin
+    RaiseException('Could not write Founder IDE release identity: ' + MarkerPath);
+  end;
+  Log('Founder IDE release identity written: {#FOUNDER_STACK_VERSION}');
 end;
 
 function InitializeSetup(): Boolean;

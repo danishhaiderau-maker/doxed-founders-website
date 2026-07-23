@@ -198,10 +198,7 @@ let configuredInstallerLauncher: InstallerLauncher = defaultInstallerLauncher;
 let configuredManifestFetcher: (apiBaseUrl: string) => Promise<IdeUpdateManifest | null> =
   defaultManifestFetcher;
 let configuredUpdatesDir: string = ideUpdatesDir();
-let configuredInstalledVersionProvider: () => string = () => {
-  // Electron's app.getVersion() — lazily imported so this module can be
-  // imported outside Electron (tests, CLIs). Falls back to a sentinel that
-  // resolveIdeUpdate will treat as "always older" so tests can override.
+function electronAppVersion(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { app } = require('electron') as typeof import('electron');
@@ -209,7 +206,59 @@ let configuredInstalledVersionProvider: () => string = () => {
   } catch {
     return '0.0.0';
   }
-};
+}
+
+export interface InstalledIdeVersionOptions {
+  markerPaths?: string[];
+  fallbackVersion?: string;
+}
+
+/** Resolve the IDE release version rather than the embedded relay version. */
+export function resolveInstalledIdeVersion(
+  options: InstalledIdeVersionOptions = {},
+): string {
+  const inferredMarker = path.resolve(
+    path.dirname(process.execPath),
+    '..',
+    '..',
+    'founder-release.json',
+  );
+  const localAppDataMarker = process.env.LOCALAPPDATA
+    ? path.join(
+        process.env.LOCALAPPDATA,
+        'Programs',
+        'Founder IDE',
+        'founder-release.json',
+      )
+    : null;
+  const markerPaths = options.markerPaths ?? [
+    ...(process.env.FOUNDER_IDE_RELEASE_MARKER
+      ? [process.env.FOUNDER_IDE_RELEASE_MARKER]
+      : []),
+    inferredMarker,
+    ...(localAppDataMarker ? [localAppDataMarker] : []),
+  ];
+
+  for (const markerPath of markerPaths) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as {
+        version?: unknown;
+      };
+      if (
+        typeof parsed.version === 'string' &&
+        /^\d+\.\d+\.\d+$/.test(parsed.version)
+      ) {
+        return parsed.version;
+      }
+    } catch {
+      // Missing or malformed markers fall through to the next candidate.
+    }
+  }
+
+  return options.fallbackVersion ?? electronAppVersion();
+}
+
+let configuredInstalledVersionProvider: () => string = resolveInstalledIdeVersion;
 let configuredSkipPackagedGate = false;
 let configuredHandshakeTimeoutMs = HEALTH_HANDSHAKE_TIMEOUT_MS;
 let configuredHandshakePollMs = HEALTH_HANDSHAKE_POLL_MS;
@@ -975,15 +1024,7 @@ export function __resetIdeUpdaterForTests(): void {
   configuredAllowUnsigned = false;
   configuredManifestFetcher = defaultManifestFetcher;
   configuredUpdatesDir = ideUpdatesDir();
-  configuredInstalledVersionProvider = () => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { app } = require('electron') as typeof import('electron');
-      return app.getVersion();
-    } catch {
-      return '0.0.0';
-    }
-  };
+  configuredInstalledVersionProvider = resolveInstalledIdeVersion;
   configuredSkipPackagedGate = false;
   configuredHandshakeTimeoutMs = HEALTH_HANDSHAKE_TIMEOUT_MS;
   configuredHandshakePollMs = HEALTH_HANDSHAKE_POLL_MS;

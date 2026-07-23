@@ -26,6 +26,7 @@ import {
   type AuthenticodeResult,
   configureIdeUpdates,
   resolveIdeUpdate,
+  resolveInstalledIdeVersion,
   computeFileSha256,
   downloadVerifyInstallAndHandshake,
   getIdeUpdateState,
@@ -195,6 +196,34 @@ describe('resolveIdeUpdate — semver comparison', () => {
     });
     const r = resolveIdeUpdate(m, '0.9.10');
     assert.equal(r, null);
+  });
+});
+
+describe('installed Founder IDE release identity', () => {
+  it('prefers the one-app installer marker over the relay package version', () => {
+    const marker = path.join(scratchDir, 'founder-release.json');
+    fs.writeFileSync(marker, JSON.stringify({ version: '0.9.4' }));
+
+    assert.equal(
+      resolveInstalledIdeVersion({
+        markerPaths: [marker],
+        fallbackVersion: '0.8.0',
+      }),
+      '0.9.4',
+    );
+  });
+
+  it('falls back safely when the release marker is malformed', () => {
+    const marker = path.join(scratchDir, 'founder-release.json');
+    fs.writeFileSync(marker, JSON.stringify({ version: 'latest' }));
+
+    assert.equal(
+      resolveInstalledIdeVersion({
+        markerPaths: [marker],
+        fallbackVersion: '0.8.0',
+      }),
+      '0.8.0',
+    );
   });
 });
 
