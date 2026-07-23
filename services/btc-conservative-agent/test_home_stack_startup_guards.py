@@ -185,7 +185,9 @@ def main() -> None:
         and '".home-stack-supervisor.heartbeat"' in SUPERVISOR_WATCHDOG
         and "Get-CimInstance" not in SUPERVISOR_WATCHDOG
         and "Get-Process -Id" not in SUPERVISOR_WATCHDOG
-        and "Test-ProcessIdAliveFast" in SUPERVISOR_WATCHDOG
+        and "home-stack-common.ps1" not in SUPERVISOR_WATCHDOG
+        and "exclusive lock makes a healthy incumbent reject the duplicate"
+        in SUPERVISOR_WATCHDOG
         and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
     )
     check(

@@ -5,9 +5,7 @@ param([switch]$Quiet)
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort 7002 -AnalyzerPort 9001 -BridgePort 7810
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
-$supervisorPidFile = Join-Path $repoRoot ".home-stack-supervisor.pid"
 $supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
 $supervisorScript = Join-Path $scriptDir "home-stack-supervisor.ps1"
 
@@ -18,12 +16,11 @@ function Wd-Log([string]$msg) {
 }
 
 function Test-SupervisorAlive {
-  $pidVal = $null
-  if (Test-Path $supervisorPidFile) {
-    $pidVal = (Get-Content $supervisorPidFile -Raw -ErrorAction SilentlyContinue).Trim()
-  }
-  if (-not $pidVal -or $pidVal -notmatch '^\d+$') { return $false }
-  if (-not (Test-ProcessIdAliveFast ([int]$pidVal))) { return $false }
+  # The heartbeat is written only after the supervisor holds its exclusive
+  # lock and at the start of every progress loop.  It is sufficient proof of
+  # useful liveness and keeps this scheduled task independent of every Windows
+  # process provider.  If it is stale, launching another supervisor is safe:
+  # the exclusive lock makes a healthy incumbent reject the duplicate.
   if (-not (Test-Path -LiteralPath $supervisorHeartbeatFile)) { return $false }
   try {
     $raw = Get-Content -LiteralPath $supervisorHeartbeatFile -Raw -ErrorAction Stop
