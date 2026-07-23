@@ -89,8 +89,12 @@ try {
     try {
       $botLog = Join-Path $agentDir "bot_runtime.log"
       $tail = @()
-      if (Test-Path $botLog) {
-        $tail = @(Get-Content $botLog -Tail 60 -ErrorAction SilentlyContinue)
+      # Do not scan the multi-GB/MB runtime log on the restart critical path.
+      # Get-Content -Tail can block for minutes on Windows/antivirus, delaying
+      # the actual kill and relaunch. Startup stderr is bounded and contains
+      # the import/boot traceback; the full runtime log remains referenced.
+      if (Test-Path $startupStderrLog) {
+        $tail = @(Get-Content $startupStderrLog -Tail 40 -ErrorAction SilentlyContinue)
       }
       $report = [ordered]@{
         ts          = (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz")
@@ -99,6 +103,7 @@ try {
         port        = $Port
         pid         = $CrashedPid
         bot_version = $ResearchStackVersion
+        runtime_log = $botLog
         log_tail    = ($tail -join "`n")
       }
       $json = $report | ConvertTo-Json -Depth 4

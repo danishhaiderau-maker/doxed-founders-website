@@ -62,12 +62,10 @@ function Wait-ForKey {
 # toast. This is the record an AI agent (Cursor Automation) reads to investigate.
 function Write-CrashReport([int]$Code, [string]$Message) {
   try {
-    $logsDir = Join-Path $repoRoot "logs"
-    if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
     $botLog = Join-Path $agentDir "bot_runtime.log"
     $tail = @()
-    if (Test-Path $botLog) {
-      $tail = @(Get-Content $botLog -Tail 60 -ErrorAction SilentlyContinue)
+    if (Test-Path $startupStderrLog) {
+      $tail = @(Get-Content $startupStderrLog -Tail 40 -ErrorAction SilentlyContinue)
     }
     $report = [ordered]@{
       ts            = (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz")
@@ -76,6 +74,7 @@ function Write-CrashReport([int]$Code, [string]$Message) {
       port          = $BotListenPort
       pid           = $PID
       bot_version   = $ResearchStackVersion
+      runtime_log   = $botLog
       log_tail      = ($tail -join "`n")
     }
     $json = $report | ConvertTo-Json -Depth 4

@@ -139,6 +139,15 @@ def main() -> None:
         and 'msg * /TIME:30' not in START,
     )
     check(
+        "crash reporting never scans the large runtime log before restart",
+        "Get-Content $botLog -Tail" not in MONITOR
+        and "Get-Content $botLog -Tail" not in START
+        and "Get-Content $startupStderrLog -Tail 40" in MONITOR
+        and "Get-Content $startupStderrLog -Tail 40" in START
+        and "runtime_log = $botLog" in MONITOR
+        and "runtime_log   = $botLog" in START,
+    )
+    check(
         "detached startup errors remain inspectable",
         "bot-startup.stdout.log" in START
         and "bot-startup.stderr.log" in START
