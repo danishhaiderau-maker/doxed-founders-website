@@ -72,8 +72,8 @@ prisma/*.db-journal
 # and have zero value in any cloud environment. Keep them on the laptop only.
 .edge-analysis/
 
-# Local logs / agent artifacts (never publish)
-artifacts/
+# Local logs / agent artifacts (never publish outside the curated release receipt)
+/artifacts/*
 *.log
 agent-restart-report*.txt
 restart-report.txt
@@ -302,7 +302,13 @@ services/btc-conservative-agent/research/downloads/
 services/btc-conservative-agent/research/backups/
 services/btc-conservative-agent/research_retention/
 services/btc-conservative-agent/past_analysis/
-/artifacts/
+/artifacts/*
+!/artifacts/releases/
+/artifacts/releases/*
+!/artifacts/releases/0.9.4/
+/artifacts/releases/0.9.4/*
+!/artifacts/releases/0.9.4/*.json
+!/artifacts/releases/0.9.4/*.png
 /exports/
 /execution_funnel.jsonl*
 /lane_opportunity_capture.jsonl*

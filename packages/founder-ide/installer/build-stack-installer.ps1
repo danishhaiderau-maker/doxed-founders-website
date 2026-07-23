@@ -145,18 +145,19 @@ $ideAppRoot = Join-Path $ideRoot "resources\app"
 
 # A warm VS Code checkout can retain out-vscode from an earlier React build
 # because the upstream gulp dependency graph does not track the nested tsup
-# bundle. Refuse to ship a payload whose Founder action toolbar is stale.
+# bundle. Refuse to ship a payload whose Founder composer is stale.
 $workbenchBundle = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.desktop.main.js"
 if (-not (Test-Path $workbenchBundle)) {
     throw "Founder IDE workbench bundle not found at $workbenchBundle"
 }
 $workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
-$expectedFounderToolbar = "void-flex void-min-w-0 void-flex-wrap void-gap-1 void-pb-0.5"
-$staleFounderToolbar = "void-flex void-min-w-0 void-gap-1 void-overflow-x-auto void-pb-0.5"
-if (-not $workbenchText.Contains($expectedFounderToolbar) -or $workbenchText.Contains($staleFounderToolbar)) {
-    throw "Founder IDE payload contains a stale chat toolbar. Rebuild the React bundle and remove out-vscode before packaging."
+$expectedFounderComposer = @("Founder Second brain", "Run an independent read-only review", "founder.personalAi.transcribe")
+$staleFounderComposer = @("label:`"Verify`"", "label:`"Challenge`"", "Founder actions")
+if ($expectedFounderComposer.Where({ -not $workbenchText.Contains($_) }).Count -gt 0 -or
+    $staleFounderComposer.Where({ $workbenchText.Contains($_) }).Count -gt 0) {
+    throw "Founder IDE payload contains a stale chat composer. Rebuild the React bundle and remove out-vscode before packaging."
 }
-Write-Host "[stack]   Founder action toolbar payload verified"
+Write-Host "[stack]   Founder Second brain and voice composer payload verified"
 
 # Search and the context index use VS Code's pinned ripgrep executable. A
 # cached dependency install can retain the package while omitting its
@@ -206,6 +207,39 @@ foreach ($bindingPattern in $requiredNativeBindings) {
     }
 }
 Write-Host "[stack]   all supported Windows startup bindings verified"
+
+# node-pty's postinstall step copies its matching ConPTY runtime beside the
+# native bindings. Warm VS Code payloads can retain the .node files while
+# omitting this directory, which only becomes visible after install as a
+# terminal launch failure. Restore the runtime from the pinned node-pty source
+# used by this checkout and verify both files before packaging.
+$nodePtyRelease = Join-Path $ideAppRoot "node_modules\node-pty\build\Release"
+$conptyRuntime = Join-Path $nodePtyRelease "conpty"
+$conptyDll = Join-Path $conptyRuntime "conpty.dll"
+$openConsole = Join-Path $conptyRuntime "OpenConsole.exe"
+if (-not (Test-Path $conptyDll) -or -not (Test-Path $openConsole)) {
+    $conptyVersions = Join-Path $vscodeSource "node_modules\node-pty\third_party\conpty"
+    $conptyVersion = Get-ChildItem -Path $conptyVersions -Directory -ErrorAction SilentlyContinue |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+    if (-not $conptyVersion) {
+        throw "Founder IDE ConPTY runtime source is missing below $conptyVersions"
+    }
+    $conptySource = Join-Path $conptyVersion.FullName "win10-x64"
+    foreach ($runtimeFile in @("conpty.dll", "OpenConsole.exe")) {
+        $sourceFile = Join-Path $conptySource $runtimeFile
+        if (-not (Test-Path $sourceFile)) {
+            throw "Founder IDE ConPTY runtime source is missing: $sourceFile"
+        }
+    }
+    New-Item -ItemType Directory -Path $conptyRuntime -Force | Out-Null
+    Copy-Item (Join-Path $conptySource "conpty.dll") $conptyDll -Force
+    Copy-Item (Join-Path $conptySource "OpenConsole.exe") $openConsole -Force
+    Write-Host "[stack]   restored node-pty ConPTY runtime -> $conptyRuntime"
+}
+if ((Get-Item $conptyDll).Length -lt 50000 -or (Get-Item $openConsole).Length -lt 500000) {
+    throw "Founder IDE ConPTY runtime is unexpectedly small below $conptyRuntime"
+}
 
 # Embed the Founder extension into the application payload even when the
 # expensive IDE compilation is skipped. A staged VSIX alone is not installed

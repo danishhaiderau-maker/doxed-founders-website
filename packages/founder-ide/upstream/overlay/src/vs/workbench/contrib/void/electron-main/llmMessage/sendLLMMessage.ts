@@ -163,7 +163,16 @@ try {
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
-			await sendChat({ messages: messages_, onText, onFinalMessage: personalOnFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
+			const directMessages = personalProfile ? [{
+				role: 'system' as const,
+				content: [
+					`You are ${personalProfile.label}, a Personal AI connected to Founder IDE.`,
+					'Use the available workspace and engineering tools in the current turn when evidence is needed. Do not merely announce that you will inspect the codebase and stop.',
+					'Never claim to be Founder AI or a Founder-managed model. Your configured profile and model appear in the route receipt.',
+					'When the latest request begins [FOUNDER_SECOND_BRAIN_V1], act as an independent read-only reviewer: inspect evidence, do not edit files or deploy, distinguish verified defects from opinion, and return the requested verdict and concrete correction.',
+				].join(' '),
+			}, ...messages_] : messages_;
+			await sendChat({ messages: directMessages, onText, onFinalMessage: personalOnFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
 			return
 		}
 		if (messagesType === 'FIMMessage') {

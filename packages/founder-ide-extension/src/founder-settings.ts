@@ -35,6 +35,9 @@ type FounderSettingsAction =
   | 'openNodeConfig'
   | 'manageConnection'
   | 'upgradePlan'
+  | 'runDailyQualityReview'
+  | 'configureDailyQualityReview'
+  | 'toggleDailyQualityReview'
   | 'signIn'
   | 'signOut';
 
@@ -263,6 +266,21 @@ export class FounderSettingsPanel implements vscode.Disposable {
           vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
         );
         break;
+      case 'runDailyQualityReview':
+        await vscode.commands.executeCommand('founderOs.runDailyQualityReview');
+        break;
+      case 'configureDailyQualityReview':
+        await vscode.commands.executeCommand('founderOs.configureDailyQualityReview');
+        break;
+      case 'toggleDailyQualityReview': {
+        const quality = vscode.workspace.getConfiguration('founderOs.dailySelfQa');
+        const enabled = quality.get<boolean>('enabled', false);
+        await quality.update('enabled', !enabled, vscode.ConfigurationTarget.Global);
+        void vscode.window.showInformationMessage(
+          `Founder daily quality review ${enabled ? 'disabled' : 'enabled'}.`,
+        );
+        break;
+      }
       case 'signIn':
         await vscode.commands.executeCommand('founderOs.signIn');
         break;
@@ -279,6 +297,9 @@ export class FounderSettingsPanel implements vscode.Disposable {
   private renderHtml(): string {
     const nonce = randomBytes(16).toString('hex');
     const config = vscode.workspace.getConfiguration('founderOs');
+    const dailyQualityEnabled = vscode.workspace
+      .getConfiguration('founderOs.dailySelfQa')
+      .get<boolean>('enabled', false);
     const mode = normalizeWorkspaceMode(config.get<string>('workspaceMode'));
     const modeDefinition = workspaceModeDefinition(mode);
     const profile = this.dependencies.getProfile();
@@ -472,6 +493,12 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .status-copy span, .connection-row span { font-size: 11px; line-height: 1.4; }
     .dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--warning); }
     .dot.online { background: var(--positive); }
+    .status-pill {
+      flex: 0 0 auto; min-width: 54px; padding: 4px 8px; border: 1px solid var(--border);
+      border-radius: 999px; color: var(--muted); font-size: 10px; line-height: 1.2;
+      text-align: center; background: var(--vscode-editor-background);
+    }
+    .status-pill.healthy { border-color: color-mix(in srgb, var(--positive) 52%, var(--border)); color: var(--positive); }
     .status-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .segments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; max-width: 520px; margin-top: 18px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
     .mode-detail { display: grid; gap: 4px; padding-top: 14px; }
@@ -666,6 +693,15 @@ export class FounderSettingsPanel implements vscode.Disposable {
         <h2>Advanced controls</h2>
         <p class="section-copy">Editor preferences, raw connection overrides, and the local Node configuration.</p>
         <div class="button-row"><button class="secondary" type="button" data-action="openAdvancedSettings">Advanced settings</button><button class="secondary" type="button" data-action="openNodeConfig">Node configuration</button></div>
+      </section>
+      <section class="section">
+        <h2>Daily quality review</h2>
+        <p class="section-copy">Review the last 24 hours of Founder-owned work, run selected build and test tasks, probe safe health endpoints, and write an evidence report. The review waits whenever another Founder task is active and never edits or rolls back files.</p>
+        <div class="connection-row">
+          <div class="connection-copy"><strong>${dailyQualityEnabled ? 'Enabled' : 'Off'}</strong><span>${dailyQualityEnabled ? 'Runs at most once every 24 hours' : 'Opt in when you are ready'}</span></div>
+          <span class="status-pill ${dailyQualityEnabled ? 'healthy' : 'neutral'}">${dailyQualityEnabled ? 'Daily' : 'Manual'}</span>
+        </div>
+        <div class="button-row"><button class="primary" type="button" data-action="runDailyQualityReview">Run review now</button><button class="secondary" type="button" data-action="toggleDailyQualityReview">${dailyQualityEnabled ? 'Disable daily review' : 'Enable daily review'}</button><button class="secondary" type="button" data-action="configureDailyQualityReview">Review settings</button></div>
       </section>
     </div>
   </main>

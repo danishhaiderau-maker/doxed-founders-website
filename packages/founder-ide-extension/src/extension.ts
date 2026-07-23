@@ -55,6 +55,7 @@ import { FounderSafeResultCache } from './safe-result-cache';
 import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
 import { FounderProjectActivityStore } from './project-activity';
 import { PersonalAiProfileStore } from './personal-ai-profiles';
+import { createDailyQualityReview } from './daily-quality-review';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -75,6 +76,7 @@ let founderSafeResultCache: FounderSafeResultCache | undefined;
 let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
 let founderProjectActivity: FounderProjectActivityStore | undefined;
 let personalAiProfiles: PersonalAiProfileStore | undefined;
+let dailyQualityReviewDisposable: vscode.Disposable | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -141,6 +143,16 @@ export function activate(context: vscode.ExtensionContext): void {
   founderProjectActivity = new FounderProjectActivityStore(
     path.join(context.globalStorageUri.fsPath, 'project-activity.json'),
   );
+  dailyQualityReviewDisposable = createDailyQualityReview(context, {
+    activity: founderProjectActivity,
+    workspaceId: () => founderWorkspaceContext?.workspaceIdValue() ?? null,
+    awareness: () => founderAgentAwareness?.summary() ?? {
+      activeCount: 0,
+      conflictCount: 0,
+      tasks: [],
+    },
+  });
+  context.subscriptions.push(dailyQualityReviewDisposable);
 
   founderAuthenticationProvider = new FounderAuthenticationProvider({
     onDidSignIn: async () => {
@@ -441,20 +453,21 @@ export function activate(context: vscode.ExtensionContext): void {
 async function applyFounderNavigationDefaults(
   context: vscode.ExtensionContext,
 ): Promise<void> {
-  // V4 reopens the labeled Founder navigation once for existing installs that
-  // already completed V3 but persisted with the primary sidebar collapsed.
-  const migrationKey = 'founderOs.navigationV4Applied';
+  // V5 makes the installed default Founder-first without removing the
+  // inspectable editor tools. Alt reveals the native menu, while Build and
+  // ship can restore the advanced IDE rail at any time.
+  const migrationKey = 'founderOs.navigationV5Applied';
   if (context.globalState.get<boolean>(migrationKey, false)) return;
 
   const workbench = vscode.workspace.getConfiguration('workbench');
-  const location = workbench.get<string>('activityBar.location', 'default');
-  if (location === 'default') {
-    await workbench.update(
-      'activityBar.location',
-      'hidden',
-      vscode.ConfigurationTarget.Global,
-    );
-  }
+  await workbench.update(
+    'activityBar.location',
+    'hidden',
+    vscode.ConfigurationTarget.Global,
+  );
+  await vscode.workspace
+    .getConfiguration('window')
+    .update('menuBarVisibility', 'toggle', vscode.ConfigurationTarget.Global);
   await vscode.workspace
     .getConfiguration('founderOs')
     .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
@@ -508,6 +521,7 @@ export function deactivate(): void {
   founderHub?.dispose();
   founderSettings?.dispose();
   founderShortcuts?.dispose();
+  dailyQualityReviewDisposable?.dispose();
   // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
   stopIpcServer();
 }

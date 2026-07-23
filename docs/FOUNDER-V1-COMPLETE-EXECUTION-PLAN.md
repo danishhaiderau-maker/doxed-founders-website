@@ -21,6 +21,25 @@ only when its acceptance evidence exists. Chat claims are not evidence.
   Founder OS.
 - Personal provider profiles are unlimited and remember name, base URL, API
   key, model, and optional headers in encrypted IDE settings.
+- The native composer presents one primary Founder AI route by default.
+  Founder Auto uses managed DeepSeek Flash for ordinary work and may use Pro
+  only for explicit Code/Reasoning work or a recorded evidence-based
+  escalation. Personal and local profiles remain available from the same
+  model menu without turning the composer into a provider dashboard.
+- The customer sees one `Founder AI`, not an internal provider matrix. A
+  higher-cost managed model may handle an exceptional escalation only after
+  an authenticated completion probe, a recorded escalation reason, entitlement
+  and budget checks, and a truthful receipt. A configured-but-unproven admin
+  key never makes a route eligible.
+- Independent review is a first-class "Second brain" workflow, not seven
+  generic prompt chips. The founder chooses an enabled Personal AI profile and
+  one review goal: QA the result, audit the approach, check competitive
+  advantage, or write a custom review. The reviewer receives the original
+  goal, relevant project graph, current result, changed files, checks,
+  receipts, and unresolved risks before it answers.
+- A second-brain result never edits the workspace directly. Founder AI
+  reconciles the review with the evidence, shows agreements and disagreements,
+  and asks for approval before applying a proposed correction.
 - The managed model is infrastructure rather than the product moat. Founder OS
   competes on verified execution, project memory, coordination, retrieval,
   receipts, and a simpler workflow that can make an inexpensive model perform
@@ -152,7 +171,14 @@ admin and user usage screenshots.
 - [x] Keep unsupported or unhealthy models fail-closed.
 - [x] Add encrypted named personal provider profiles with no arbitrary limit.
 - [x] Keep local Ollama and direct BYOK outside Founder quota.
-- [x] Add microphone/speech-to-text control to the native composer.
+- [ ] Deliver working microphone/speech-to-text in the installed application.
+  The current Web Speech affordance is not accepted because its remote speech
+  service fails in the packaged Electron runtime.
+- [ ] Capture microphone audio locally as a bounded WAV recording, show
+  permission/listening/preview/error states, and transcribe it through an
+  explicitly selected speech provider. For V1, an enabled Personal AI GLM
+  profile may use the official `glm-asr-2512` transcription boundary; typed
+  composer text must survive every recording or provider failure.
 - [x] Put every platform-managed legacy website copilot call behind the same
   reservation ledger and enforce DeepSeek-only plus Free Flash policy at the
   final streaming and non-streaming provider boundaries.
@@ -164,10 +190,29 @@ admin and user usage screenshots.
   failed health probe removes it from customer routing until recovery.
 - [x] Escalate Flash to Pro only on measured difficulty or failed QA and record
   the escalation reason in the task receipt.
-- [x] Add the seven focused actions: Verify, Challenge, Research, Panel, Test,
-  Explain, Optimize. Each drafts a focused, editable instruction above the
-  native composer; the selected managed, personal, or local model remains
-  explicit in the model menu.
+- [ ] Replace Verify, Challenge, Research, Panel, Test, Explain, and Optimize
+  chips with one compact Second brain control. It must select an enabled BYOK
+  or local reviewer and provide QA, architecture audit, competition check, and
+  custom-review intents without crowding the composer.
+- [ ] Build a deterministic reviewer context pack containing the original
+  founder goal, project/decision graph, current answer or patch, changed files,
+  test and visual evidence, route receipts, and known risks. Bound and redact
+  the pack before sending it to the founder-selected reviewer.
+- [ ] Require a structured reviewer result with verdict, verified defects,
+  evidence references, opinion, proposed correction, confidence, competitive
+  analysis, and unanswered questions. Generic acknowledgements such as
+  "I will inspect the repository" are an incomplete result, not success.
+- [ ] Reconcile the independent review through Founder AI: distinguish verified
+  defects from opinion, propose the smallest correction, preserve dissent in
+  the receipt, and never apply reviewer output without the normal approval and
+  ownership gates.
+- [ ] Add a simple work-mode menu modelled on the useful parts of modern AI
+  workspaces: Ask (read only), Plan (no edits), Build (one editing owner),
+  Debug (focused diagnosis), and Team (bounded coordinated specialists).
+- [ ] Treat skills as reusable, versioned workflows attached to these five
+  modes rather than adding another permanent icon for every capability.
+  Skills declare tools, permissions, evidence requirements, budget, and output
+  contract; risky or destructive tools still require explicit approval.
 - [x] Implement the Founder Settings Personal AI manager with name, connection
   kind, base URL, key, model, optional headers, edit-with-secret-preservation,
   connectivity test, enable/disable, delete, and active selection. Secrets use
@@ -200,8 +245,11 @@ admin and user usage screenshots.
   optional headers, connectivity test, edit, disable, and delete controls in
   the installed IDE; source and unit coverage are complete, installed visual
   and live-provider proof remain.
-- [ ] Add input-device choice, permission/error states, transcription preview,
-  cancel, and keyboard-accessible microphone behavior.
+- [ ] Replace the unreliable browser speech dependency with a supported
+  Founder voice boundary: capture audio locally, show recording/permission and
+  input-device states, transcribe through an explicitly configured local or
+  managed service, preserve typed text on failure, preview before send, allow
+  cancel, and support keyboard-only operation.
 
 Evidence: provider/model/intent/latency receipts, streaming tests, settings
 screenshots, quota tests, native final-response screenshots.
@@ -237,13 +285,14 @@ merge receipt, multi-agent task graph screenshots.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 
-- [x] Replace icon-only primary navigation with a calm labelled hierarchy:
-  New chat, Projects, Chats, Agents, Graph, Connect, and Settings.
+- [ ] Replace icon-only primary navigation in the installed default layout with
+  a calm labelled hierarchy:
+  New chat, Projects, Chats, Agents, Graph, Remote, Connect, and Settings.
 - [ ] Give Projects and Chats first-class persistent navigation, searchable
   history, useful names, pin/archive controls, and a clear new-chat action.
 - [x] Widen the primary navigation enough for readable labels and project/chat
   context; use compact icons only for familiar secondary editor tools.
-- [x] Keep coding tools available through progressive disclosure rather than
+- [ ] Keep coding tools available through progressive disclosure rather than
   removing essential editor capability.
 - [x] Remove every visible Void name, action, settings title, and legacy logo
   from the installed routes covered by the release screenshot matrix.
@@ -273,6 +322,26 @@ merge receipt, multi-agent task graph screenshots.
   animation in dense work surfaces.
 - [ ] Audit empty, loading, partial, offline, unauthorized, quota-exhausted,
   error, success, and long-content states in every changed surface.
+- [ ] Make the default shell Founder-native and Apple-inspired: hide the legacy
+  menu bar and generic activity rail by default, use a calm labelled Founder
+  rail, reduce visual borders and competing controls, keep typography and
+  spacing consistent, and expose advanced editor commands through Build,
+  shortcuts, and the command palette.
+- [ ] Keep Terminal, Explorer, Search, Graph/Source Control, Extensions, Run,
+  and Debug as advanced capabilities rather than deleting them. AI automates
+  the common path, while these tools remain the inspectable escape hatch for
+  real repositories, local services, tests, and recovery.
+- [ ] Add Remote as a visible Founder navigation destination in IDE and web.
+  Show this device, online state, workspace, last activity, pending approvals,
+  rename, revoke, reconnect, and an explicit "Pair another device" action.
+- [ ] Treat a human-readable pairing code only as a short-lived authorization
+  handle. Keep the 256-bit device secret out of the renderer and URL, bind
+  approval to the signed-in account and install identity, rate-limit guesses,
+  expire and single-consume grants, require explicit device details before
+  approval, and expose immediate revoke plus an audit receipt.
+- [ ] Apply the same Founder shell, navigation names, state language, settings
+  structure, and remote pairing flow to the website before calling the
+  Apple-inspired redesign complete.
 
 Evidence: full route/tab screenshot matrix at desktop and narrow widths,
 zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
@@ -396,28 +465,73 @@ gates.
   entire change and can prove it will not remove founder work.
 - [x] Run API, web, Founder Node, extension, overlay, installer, updater, IPC,
   coordination, quota, and security suites.
-- [ ] Visually inspect all states at 1440x900, 1280x720, and a narrow layout;
-  capture screenshots and check console, network errors, overflow, focus,
-  loading, empty, error, offline, and success states.
-- [ ] Build one Founder IDE installer containing Founder Node.
+- [x] Visually inspect the installed primary workbench and settings routes at
+  1440x900, 1280x720, 1187x739, and 768x900; capture screenshots and reject
+  critical console errors, page errors, overflow, or visible Void branding.
+- [ ] Complete the installed loading, empty, error, offline, focus, reduced
+  motion, and success-state matrix after the final source freeze.
+- [x] Build and locally verify one Founder IDE installer containing Founder
+  Node. The verified `64178879` candidate is prior-candidate evidence because
+  later owned Stage 11 changes require one final refresh.
+- [ ] Rebuild the installer after the final owned changes, then regenerate and
+  validate the canonical release receipt against that exact artifact.
 - [x] Reject a warm-build payload when its compiled Founder action toolbar is
   older than the reviewed React source; the installer and CI now fail instead
   of silently shipping stale UI.
 - [x] Remove old installed Founder IDE/Node/Stack variants only after inventory
   and explicit preservation of user data.
-- [ ] Install the release candidate, create one desktop shortcut, pin the single
-  Founder IDE identity to the taskbar, and verify restart/update/uninstall.
+- [x] Install the local candidate, create one desktop shortcut, pin the single
+  Founder IDE identity to the taskbar, verify restart and uninstall inventory,
+  and preserve FounderVault and the Founder IDE profile.
+- [ ] Prove install, update, rollback, and uninstall for the refreshed candidate
+  on a separate clean Windows VM.
 - [x] Publish only when signing and clean-machine gates pass. Otherwise label
   the artifact internal testing and report the exact blocker.
-- [ ] Add an opt-in daily self-QA run that checks the last 24 hours of owned
+- [x] Add an opt-in daily self-QA run that checks the last 24 hours of owned
   changes, builds/tests affected modules, probes configured links and services,
   captures changed UI states, records failures, and proposes bounded repairs.
-- [ ] Require self-QA to respect ownership and active coordination leases so it
+- [x] Require self-QA to respect ownership and active coordination leases so it
   cannot undo a founder's or another agent's concurrent work.
-- [ ] Verify desktop shortcut, taskbar pin, app identity, installed version,
-  embedded Node lifecycle, sign-in, managed AI, personal AI, microphone,
-  navigation, Graph, coordination, Dragon, remote control, update, and uninstall
-  from the actual installed application.
+- [x] Verify desktop shortcut, taskbar pin, app identity, installed version,
+  embedded Node lifecycle, managed normal chat, personal AI settings,
+  microphone affordance, navigation, and Graph from the installed application.
+- [ ] Prove live sign-in, a personal-provider completion, speech capture, active
+  coordination, Dragon state transitions, website remote control, update,
+  rollback, and final uninstall from the refreshed installed application.
+- [x] Add a fail-closed, testable release-evidence verifier that checks the
+  installer bytes, SHA-256, Authenticode status, installed chat nonce and route,
+  required viewports, settings, screenshots, and release-note references.
+
+## Immediate completion sequence from this checkpoint
+
+1. **Repair the core loop.** Prove managed Founder Auto, Fast, Reasoning, and
+   Code; make Auto/Free resolve to Flash; repair real voice capture and
+   transcription; restore the packaged terminal runtime; keep route identity
+   and errors truthful.
+2. **Build the modern composer.** Replace the seven prompt chips with the
+   Second brain workflow, add the five work modes, keep one clear primary model
+   picker, and make every Personal AI or Ollama profile instantly selectable.
+3. **Finish the Founder shell.** Ship the Apple-inspired default layout,
+   labelled Founder navigation, persistent Projects and Chats, progressive
+   disclosure for legacy engineering tools, Graph as a first-class view, and
+   the living Dragon without duplicate launch identities.
+4. **Finish secure Remote.** Surface device pairing in IDE and web, verify the
+   existing short-lived code and 256-bit secret boundary, add device detail,
+   approval, revoke, rename, reconnect, and audit states, then prove a real
+   website-to-installed-IDE action.
+5. **Make inexpensive models perform like a system.** Require the project and
+   decision graph, scoped retrieval, stable prompt prefix, tool execution,
+   coordination, verified memory, independent review, and evidence
+   reconciliation on every applicable task. Market only measured savings.
+6. **Align the website.** Complete fail-closed Plan/Usage, Team membership,
+   connected services, projects, chats, agents, graph, receipts, remote
+   devices, and the same Founder visual language. Remove or hide controls not
+   backed by live capability.
+7. **Freeze and prove the product.** Run source suites, build one installer,
+   install over preserved Founder data, test all viewports and states, complete
+   managed/BYOK/Ollama/voice/terminal/coordination/Dragon/remote loops, validate
+   the canonical receipt, then hold public release until signing, clean-VM,
+   rollback, uninstall, and soak gates pass.
 
 Evidence: signed artifact/hash, clean-machine matrix, installed-app screenshots,
 test report, visual audit bundle, release receipt, and blocker register.
@@ -435,10 +549,16 @@ test report, visual audit bundle, release receipt, and blocker register.
 - Desktop, Start, taskbar, uninstall, application identity, embedded relay,
   version marker, preserved FounderVault, preserved profile, and managed normal
   chat are proven on the local Windows machine.
-- Final artifact `Founder-IDE-Setup-0.9.4.exe` is 214,115,394 bytes with
+- Prior installed artifact `Founder-IDE-Setup-0.9.4.exe` is 214,115,394 bytes with
   SHA-256
   `F3E829D43B144DDD98FB5B5FF29AD9AF36AD9238C4F5273C2983F28CEE372A30`.
   It is intentionally unsigned and restricted to internal testing.
+- A refreshed source candidate containing the ownership-aware daily review,
+  Plan/Team account repair, hardened web visual gate, and release-evidence
+  verifier was built on 2026-07-23. It is not the final candidate: the
+  founder's subsequent installed-app review reopened voice, Second brain,
+  default shell, terminal runtime, and secure Remote acceptance gates before
+  another install/release receipt is allowed.
 - `V1-CORRECTED-20260723-1848` produced a visible DeepSeek response and route
   receipt from the final installed artifact. It also proved the remaining
   production policy defect: Founder Auto resolved to Pro, so the coordinated

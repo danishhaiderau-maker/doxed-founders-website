@@ -26,6 +26,8 @@ import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import { FounderFreeQuotaCard } from '@/components/account/founder-free-quota-card';
 import { FounderPlanSummary } from '@/components/account/founder-plan-summary';
+import { FounderTeamMembers } from '@/components/account/founder-team-members';
+import type { FounderPlanLoadState } from '@/components/account/founder-plan-account-state';
 import {
   AccountActivityItem,
   AccountOverview,
@@ -75,6 +77,8 @@ export function AccountHub({
   const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
   const [planCatalog, setPlanCatalog] = useState<FounderPlanCatalog | null>(null);
   const [planEntitlement, setPlanEntitlement] = useState<FounderPlanEntitlement | null>(null);
+  const [planLoadState, setPlanLoadState] = useState<FounderPlanLoadState>('loading');
+  const [planLoadError, setPlanLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unreadMessages = useUnreadMessageCount(token);
 
@@ -82,26 +86,46 @@ export function AccountHub({
     if (!token) return;
     setError(null);
     try {
-      const [ov, act, promo, catalog, entitlement] = await Promise.all([
+      const [ov, act, promo] = await Promise.all([
         fetchAccountOverview(token),
         fetchAccountActivity(token),
         fetchFounderPromoStatus(token).catch(() => null),
-        fetchFounderPlanCatalog().catch(() => null),
-        fetchFounderPlanEntitlement(token).catch(() => null),
       ]);
       setOverview(ov);
       setActivity(act);
       setPromoStatus(promo);
-      setPlanCatalog(catalog);
-      setPlanEntitlement(entitlement);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
+    }
+  }, [token]);
+
+  const loadPlan = useCallback(async () => {
+    if (!token) return;
+    setPlanLoadState('loading');
+    setPlanLoadError(null);
+    setPlanCatalog(null);
+    setPlanEntitlement(null);
+    try {
+      const [catalog, entitlement] = await Promise.all([
+        fetchFounderPlanCatalog(),
+        fetchFounderPlanEntitlement(token),
+      ]);
+      setPlanCatalog(catalog);
+      setPlanEntitlement(entitlement);
+      setPlanLoadState('ready');
+    } catch (err: unknown) {
+      setPlanLoadError(err instanceof Error ? err.message : 'Founder plan could not be loaded.');
+      setPlanLoadState('error');
     }
   }, [token]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    void loadPlan();
+  }, [loadPlan]);
 
   useEffect(() => {
     setTab(initialTab);
@@ -370,7 +394,13 @@ export function AccountHub({
               token={token}
               catalog={planCatalog}
               entitlement={planEntitlement}
+              loadState={planLoadState}
+              loadError={planLoadError}
+              onRetry={() => void loadPlan()}
             />
+            {planLoadState === 'ready' && planEntitlement?.plan === 'team' ? (
+              <FounderTeamMembers token={token} entitlement={planEntitlement} />
+            ) : null}
             <FounderFreeQuotaCard status={promoStatus} />
             <TopUpPanel accessToken={token} />
           </section>

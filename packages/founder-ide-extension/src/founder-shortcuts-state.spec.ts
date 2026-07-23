@@ -40,6 +40,6 @@ describe('Founder shortcut rail', () => {
     const dailyReview = shortcutEntries('ship', connectedState).find(
       (entry) => entry.id === 'daily-quality-review',
     );
-    assert.equal(dailyReview?.command, 'founderOs.openDebugSquasher');
+    assert.equal(dailyReview?.command, 'founderOs.runDailyQualityReview');
   });
 });

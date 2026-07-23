@@ -28,11 +28,12 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /embedded Founder extension/);
   });
 
-  it('rejects a stale compiled Founder action toolbar', () => {
-    assert.match(source, /expectedFounderToolbar/);
-    assert.match(source, /void-flex-wrap void-gap-1 void-pb-0\.5/);
-    assert.match(source, /staleFounderToolbar/);
-    assert.match(source, /void-overflow-x-auto void-pb-0\.5/);
+  it('rejects a stale compiled Founder composer', () => {
+    assert.match(source, /expectedFounderComposer/);
+    assert.match(source, /Founder Second brain/);
+    assert.match(source, /founder\.personalAi\.transcribe/);
+    assert.match(source, /staleFounderComposer/);
+    assert.match(source, /Founder actions/);
     assert.match(source, /remove out-vscode before packaging/);
   });
 
@@ -62,6 +63,14 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /node_modules\\@vscode\\ripgrep\\bin\\rg\.exe/);
     assert.match(source, /Founder IDE ripgrep runtime is missing from both payload and source/);
     assert.match(source, /Founder IDE ripgrep runtime is unexpectedly small/);
+  });
+
+  it('restores the matching node-pty ConPTY runtime before packaging', () => {
+    assert.match(source, /node-pty\\third_party\\conpty/);
+    assert.match(source, /win10-x64/);
+    assert.match(source, /conpty\.dll/);
+    assert.match(source, /OpenConsole\.exe/);
+    assert.match(source, /Founder IDE ConPTY runtime is unexpectedly small/);
   });
 
   it('persists a deployment mode during silent installation', () => {

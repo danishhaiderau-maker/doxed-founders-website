@@ -45,6 +45,9 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /effectiveModelName/);
     assert.match(source, /Personal AI/);
     assert.match(source, /outside managed quota/);
+    assert.match(source, /Personal AI connected to Founder IDE/);
+    assert.match(source, /Do not merely announce that you will inspect/);
+    assert.match(source, /FOUNDER_SECOND_BRAIN_V1/);
   });
 
   it('advertises the current DeepSeek V4 context contract for every managed route', () => {
@@ -82,6 +85,7 @@ describe('Founder IDE upstream overlay', () => {
       'founder.personalAi.select',
       'founder.personalAi.enable',
       'founder.personalAi.delete',
+      'founder.personalAi.transcribe',
       'founder.managedAi.select',
     ]) {
       assert.ok(bridge.includes(command));
@@ -115,10 +119,37 @@ describe('Founder IDE upstream overlay', () => {
     );
     assert.match(source, /Add or manage personal AI/);
     assert.match(source, /Start voice input/);
-    assert.match(source, /founderSpeechRecognitionConstructor/);
+    assert.match(source, /navigator\.mediaDevices\.getUserMedia/);
+    assert.match(source, /founderVoiceWav/);
+    assert.match(source, /founder\.personalAi\.transcribe/);
     assert.match(source, /founderOs\.openSettings/);
     assert.match(source, /founderOs\.companionState/);
     assert.match(source, /Voice text is ready/);
+    const bridge = read(
+      'src/vs/workbench/contrib/void/browser/founderPersonalAiActions.ts',
+    );
+    assert.match(bridge, /glm-asr-2512/);
+    assert.match(bridge, /MAX_TRANSCRIPTION_BASE64_CHARS/);
+    assert.match(bridge, /open\.bigmodel\.cn/);
+  });
+
+  it('uses one independent Second brain workflow instead of prompt chips', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
+    );
+    const reviewer = read(
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/founderSecondBrain.ts',
+    );
+    assert.match(source, /Second brain/);
+    assert.match(source, /Ask AI/);
+    assert.match(source, /founder\.personalAi\.select/);
+    assert.doesNotMatch(source, /label: 'Challenge'/);
+    assert.doesNotMatch(source, /label: 'Optimize'/);
+    assert.match(reviewer, /QA this result/);
+    assert.match(reviewer, /Audit the approach/);
+    assert.match(reviewer, /Check competitive advantage/);
+    assert.match(reviewer, /Do not edit files/);
+    assert.match(reviewer, /Verified findings first/);
   });
 
   it('coordinates the native chat with other active Founder tasks', () => {
@@ -206,15 +237,16 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(applyScript, /Founder Node owns the signed manifest/);
   });
 
-  it('adds the seven focused Founder actions above the native composer', () => {
+  it('keeps the composer focused on one bounded Second brain control', () => {
     const source = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
     );
     for (const action of ['Verify', 'Challenge', 'Research', 'Panel', 'Test', 'Explain', 'Optimize']) {
-      assert.match(source, new RegExp(`label: '${action}'`));
+      assert.doesNotMatch(source, new RegExp(`label: '${action}'`));
     }
-    assert.match(source, /aria-label='Founder actions'/);
-    assert.match(source, /flex min-w-0 flex-wrap gap-1/);
-    assert.doesNotMatch(source, /gap-1 overflow-x-auto pb-0\.5' role='toolbar'/);
+    assert.match(source, /aria-label='Founder Second brain'/);
+    assert.match(source, /Second brain model/);
+    assert.match(source, /Second brain review/);
+    assert.match(source, /Run an independent read-only review/);
   });
 });

@@ -137,4 +137,24 @@ describe('Founder IDE extension manifest', () => {
       assert.ok(commands.has(command), `${command} must be contributed`);
     }
   });
+
+  it('keeps Remote and Connect visible while legacy editor chrome is progressive', () => {
+    const hubSource = readFileSync(join(__dirname, 'founder-hub.ts'), 'utf8');
+    const extensionSource = readFileSync(join(__dirname, 'extension.ts'), 'utf8');
+
+    for (const label of [
+      '<strong>New chat</strong>',
+      '<strong>Projects</strong>',
+      '<strong>Chats</strong>',
+      '<strong>Agents</strong>',
+      '<strong>Graph</strong>',
+      '<strong>Remote</strong>',
+      '<strong>Connect</strong>',
+    ]) {
+      assert.ok(hubSource.includes(label), `${label} must be visible in Founder navigation`);
+    }
+    assert.match(extensionSource, /activityBar\.location[\s\S]*?'hidden'/);
+    assert.match(extensionSource, /menuBarVisibility', 'toggle'/);
+    assert.match(hubSource, /Show'\} IDE rail/);
+  });
 });

@@ -3904,6 +3904,41 @@ export type FounderPlanEntitlement = {
   requiresXVerification: boolean;
 };
 
+export type FounderTeamRole = 'OWNER' | 'ADMIN' | 'MEMBER';
+
+export type FounderTeamMember = {
+  id: string;
+  teamId: string;
+  userId: string;
+  role: FounderTeamRole;
+  createdAt: string;
+  updatedAt: string;
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+    platformHandle: string | null;
+    avatarUrl: string | null;
+  };
+};
+
+export type FounderTeamOverview = {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  weeklyWeightedUnitCap: number;
+  createdAt: string;
+  updatedAt: string;
+  subscription: {
+    id: string;
+    status: 'ACTIVE' | 'PAST_DUE' | 'CANCELED';
+    currentPeriodStart: string;
+    currentPeriodEnd: string;
+    cancelAtPeriodEnd: boolean;
+  } | null;
+  members: FounderTeamMember[];
+};
+
 export function fetchFounderPlanCatalog() {
   return apiFetch<FounderPlanCatalog>('/founder-plans');
 }
@@ -3924,6 +3959,41 @@ export function createFounderBillingPortal(token: string) {
   return apiFetch<{ url: string }>(
     '/founder-plans/portal',
     { method: 'POST' },
+    token,
+  );
+}
+
+export function fetchFounderTeam(token: string) {
+  return apiFetch<FounderTeamOverview>('/founder-plans/team', undefined, token);
+}
+
+export function addFounderTeamMember(
+  token: string,
+  body: { email: string; role?: Exclude<FounderTeamRole, 'OWNER'> },
+) {
+  return apiFetch<FounderTeamMember>(
+    '/founder-plans/team/members',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function changeFounderTeamMemberRole(
+  token: string,
+  memberId: string,
+  role: Exclude<FounderTeamRole, 'OWNER'>,
+) {
+  return apiFetch<Omit<FounderTeamMember, 'user'>>(
+    `/founder-plans/team/members/${encodeURIComponent(memberId)}`,
+    { method: 'PATCH', body: JSON.stringify({ role }) },
+    token,
+  );
+}
+
+export function removeFounderTeamMember(token: string, memberId: string) {
+  return apiFetch<{ removed: true; memberId: string }>(
+    `/founder-plans/team/members/${encodeURIComponent(memberId)}`,
+    { method: 'DELETE' },
     token,
   );
 }

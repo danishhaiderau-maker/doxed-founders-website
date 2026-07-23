@@ -296,6 +296,14 @@
       {
         "command": "founderOs.openProjectBrief",
         "title": "Founder: Open project brief"
+      },
+      {
+        "command": "founderOs.runDailyQualityReview",
+        "title": "Founder: Run daily quality review"
+      },
+      {
+        "command": "founderOs.configureDailyQualityReview",
+        "title": "Founder: Configure daily quality review"
       }
     ],
     "menus": {
@@ -364,6 +372,27 @@
           "default": false,
           "description": "Show the legacy IDE icon rail and detailed Founder shortcut sections."
         },
+        "founderOs.dailySelfQa.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run an ownership-aware quality review at most once every 24 hours. The review never edits or rolls back workspace files."
+        },
+        "founderOs.dailySelfQa.taskLabels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional exact workspace task names to run during daily review. When empty, up to four workspace Build or Test group tasks are used."
+        },
+        "founderOs.dailySelfQa.probeUrls": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional HTTPS health endpoints to probe during daily review. HTTP is accepted only for localhost."
+        },
         "founderOs.apiBaseUrl": {
           "type": "string",
           "default": "",
@@ -389,7 +418,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/project-activity.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/project-activity.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

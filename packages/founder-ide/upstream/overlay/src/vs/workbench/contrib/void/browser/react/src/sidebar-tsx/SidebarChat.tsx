@@ -21,7 +21,7 @@ import { ChatMode, displayInfoOfProviderName, FeatureName, isFeatureNameDisabled
 import { ICommandService } from '../../../../../../../platform/commands/common/commands.js';
 import { WarningBox } from '../void-settings-tsx/WarningBox.js';
 import { getModelCapabilities, getIsReasoningEnabledState } from '../../../../common/modelCapabilities.js';
-import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text, Mic, MicOff, Settings2 } from 'lucide-react';
+import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text, Mic, MicOff, Settings2, Brain } from 'lucide-react';
 import { ChatMessage, CheckpointEntry, StagingSelectionItem, ToolMessage } from '../../../../common/chatThreadServiceTypes.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, BuiltinToolName, ToolName, LintErrorItem, ToolApprovalType, toolApprovalTypes } from '../../../../common/toolsServiceTypes.js';
 import { CopyButton, EditToolAcceptRejectButtonsHTML, IconShell1, JumpToFileButton, JumpToTerminalButton, StatusIndicator, StatusIndicatorForApplyButton, useApplyStreamState, useEditToolStreamState } from '../markdown/ApplyBlockHoverButtons.js';
@@ -34,6 +34,8 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
+import { readFounderProviderProfiles } from '../../../../common/founderProviderProfiles.js';
+import { buildFounderSecondBrainPrompt, founderSecondBrainIntents, FounderSecondBrainIntent } from './founderSecondBrain.js';
 
 
 
@@ -440,49 +442,69 @@ export const ButtonSubmit = ({ className, disabled, ...props }: ButtonProps & Re
 	</button>
 }
 
-type FounderSpeechRecognitionResult = {
-	isFinal: boolean;
-	[index: number]: { transcript?: string };
+type FounderVoiceRecorder = {
+	stream: MediaStream;
+	context: AudioContext;
+	source: MediaStreamAudioSourceNode;
+	processor: ScriptProcessorNode;
+	chunks: Float32Array[];
+	timer: number;
 };
 
-type FounderSpeechRecognitionEvent = {
-	resultIndex: number;
-	results: ArrayLike<FounderSpeechRecognitionResult>;
-};
+const founderVoiceSupported = (): boolean =>
+	Boolean(navigator.mediaDevices?.getUserMedia && window.AudioContext);
 
-type FounderSpeechRecognitionError = {
-	error?: string;
-};
-
-type FounderSpeechRecognition = {
-	continuous: boolean;
-	interimResults: boolean;
-	lang: string;
-	onstart: (() => void) | null;
-	onresult: ((event: FounderSpeechRecognitionEvent) => void) | null;
-	onerror: ((event: FounderSpeechRecognitionError) => void) | null;
-	onend: (() => void) | null;
-	start(): void;
-	stop(): void;
-	abort(): void;
-};
-
-type FounderSpeechRecognitionConstructor = new () => FounderSpeechRecognition;
-
-const founderSpeechRecognitionConstructor = (): FounderSpeechRecognitionConstructor | null => {
-	const speechWindow = window as typeof window & {
-		SpeechRecognition?: FounderSpeechRecognitionConstructor;
-		webkitSpeechRecognition?: FounderSpeechRecognitionConstructor;
+const founderVoiceWav = (chunks: Float32Array[], sampleRate: number): ArrayBuffer => {
+	const sampleCount = chunks.reduce((total, chunk) => total + chunk.length, 0);
+	const output = new ArrayBuffer(44 + sampleCount * 2);
+	const view = new DataView(output);
+	const write = (offset: number, value: string) => {
+		for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
 	};
-	return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+	write(0, 'RIFF');
+	view.setUint32(4, 36 + sampleCount * 2, true);
+	write(8, 'WAVE');
+	write(12, 'fmt ');
+	view.setUint32(16, 16, true);
+	view.setUint16(20, 1, true);
+	view.setUint16(22, 1, true);
+	view.setUint32(24, sampleRate, true);
+	view.setUint32(28, sampleRate * 2, true);
+	view.setUint16(32, 2, true);
+	view.setUint16(34, 16, true);
+	write(36, 'data');
+	view.setUint32(40, sampleCount * 2, true);
+	let offset = 44;
+	for (const chunk of chunks) {
+		for (const rawSample of chunk) {
+			const sample = Math.max(-1, Math.min(1, rawSample));
+			view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+			offset += 2;
+		}
+	}
+	return output;
 };
 
-const founderSpeechErrorMessage = (code?: string): string => {
-	if (code === 'not-allowed' || code === 'service-not-allowed') return 'Microphone access is blocked. Allow it in Founder Settings, then try again.';
-	if (code === 'audio-capture') return 'No microphone was found. Check the Windows input device and try again.';
-	if (code === 'no-speech') return 'No speech was detected. Tap the microphone and speak again.';
-	if (code === 'network') return 'Voice transcription could not reach its speech service. Your typed text is unchanged.';
-	return 'Voice input stopped before transcription completed. Your typed text is unchanged.';
+const founderVoiceBase64 = (buffer: ArrayBuffer): string => {
+	const bytes = new Uint8Array(buffer);
+	let binary = '';
+	const stride = 0x8000;
+	for (let offset = 0; offset < bytes.length; offset += stride) {
+		binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + stride, bytes.length)));
+	}
+	return btoa(binary);
+};
+
+const founderVoiceErrorMessage = (error: unknown): string => {
+	if (error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
+		return 'Microphone access is blocked. Allow it for Founder IDE, then try again.';
+	}
+	if (error instanceof DOMException && error.name === 'NotFoundError') {
+		return 'No microphone was found. Check the Windows input device and try again.';
+	}
+	return error instanceof Error && error.message
+		? error.message
+		: 'Voice input failed. Your typed text is unchanged.';
 };
 
 export const ButtonStop = ({ className, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) => {
@@ -2932,9 +2954,8 @@ const EditToolSoFar = ({ toolCallSoFar, }: { toolCallSoFar: RawToolCallObj }) =>
 export const SidebarChat = () => {
 	const textAreaRef = useRef<HTMLTextAreaElement | null>(null)
 	const textAreaFnsRef = useRef<TextAreaFns | null>(null)
-	const speechRecognitionRef = useRef<FounderSpeechRecognition | null>(null)
+	const voiceRecorderRef = useRef<FounderVoiceRecorder | null>(null)
 	const speechBaseTextRef = useRef('')
-	const voiceFailedRef = useRef(false)
 	const [voicePhase, setVoicePhase] = useState<'idle' | 'starting' | 'listening' | 'processing'>('idle')
 	const [voiceError, setVoiceError] = useState<string | null>(null)
 
@@ -2943,15 +2964,18 @@ export const SidebarChat = () => {
 	const chatThreadsService = accessor.get('IChatThreadService')
 
 	const settingsState = useSettingsState()
-	const founderActions = [
-		{ label: 'Verify', detail: 'Independently verify the current work. Inspect the changed files, run the smallest relevant tests, check the visible result, and report evidence plus any remaining risk.' },
-		{ label: 'Challenge', detail: 'Challenge the current approach. Find the strongest failure case, security risk, hidden assumption, or simpler design, then recommend a concrete correction.' },
-		{ label: 'Research', detail: 'Research this decision using primary sources and the current codebase. Separate verified facts from inference, compare credible options, and recommend the next action.' },
-		{ label: 'Panel', detail: 'Run a compact expert panel on this decision: implementation, product, security, and cost. Reconcile disagreements into one recommendation and name the evidence used.' },
-		{ label: 'Test', detail: 'Test the current work end to end. Run focused automated checks first, then inspect the user-visible path and return a pass/fail receipt with exact blockers.' },
-		{ label: 'Explain', detail: 'Explain the current code or decision in plain language for a founder. Cover what it does, why it matters, the tradeoffs, and the next practical step.' },
-		{ label: 'Optimize', detail: 'Optimize this work for correctness, speed, token efficiency, and maintainability. Measure before changing it, keep behavior stable, and report the measured improvement.' },
-	] as const
+	const reviewerProfiles = useMemo(
+		() => readFounderProviderProfiles(
+			settingsState.settingsOfProvider.openAICompatible.headersJSON,
+		).filter(profile => profile.enabled !== false),
+		[settingsState.settingsOfProvider.openAICompatible.headersJSON],
+	)
+	const [reviewerId, setReviewerId] = useState('')
+	const [reviewIntent, setReviewIntent] = useState<FounderSecondBrainIntent>('qa')
+	useEffect(() => {
+		if (reviewerProfiles.some(profile => profile.id === reviewerId)) return
+		setReviewerId(reviewerProfiles[0]?.id ?? '')
+	}, [reviewerId, reviewerProfiles])
 	// ----- HIGHER STATE -----
 
 	// threads state
@@ -2979,37 +3003,90 @@ export const SidebarChat = () => {
 	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
 
 	const isDisabled = instructionsAreEmpty || !!isFeatureNameDisabled('Chat', settingsState)
-	const voiceSupported = useMemo(() => Boolean(founderSpeechRecognitionConstructor()), [])
+	const voiceSupported = useMemo(() => founderVoiceSupported(), [])
+	const voiceProfile = useMemo(() => reviewerProfiles.find(profile => {
+		const identity = `${profile.label} ${profile.model} ${profile.baseUrl}`.toLowerCase()
+		return identity.includes('glm') || identity.includes('zhipu') || identity.includes('bigmodel.cn') || identity.includes('z.ai')
+	}), [reviewerProfiles])
 
-	const stopVoiceInput = useCallback(() => {
-		if (!speechRecognitionRef.current) return
+	const stopVoiceInput = useCallback(async (transcribe = true) => {
+		const recorder = voiceRecorderRef.current
+		if (!recorder) return
+		voiceRecorderRef.current = null
+		window.clearTimeout(recorder.timer)
+		recorder.processor.disconnect()
+		recorder.source.disconnect()
+		recorder.stream.getTracks().forEach(track => track.stop())
+		await recorder.context.close()
+		if (!transcribe) {
+			setVoicePhase('idle')
+			return
+		}
+		if (recorder.chunks.length === 0 || !voiceProfile) {
+			setVoicePhase('idle')
+			setVoiceError('No speech was captured. Your typed text is unchanged.')
+			return
+		}
 		setVoicePhase('processing')
-		speechRecognitionRef.current.stop()
-	}, [])
+		try {
+			const result = await commandService.executeCommand<{ text?: string }>(
+				'founder.personalAi.transcribe',
+				{ profileId: voiceProfile.id, audioBase64: founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate)) },
+			)
+			const transcript = result?.text?.trim() ?? ''
+			if (!transcript) throw new Error('No speech was detected in the recording.')
+			const base = speechBaseTextRef.current
+			const separator = base && transcript ? ' ' : ''
+			textAreaFnsRef.current?.setValue(`${base}${separator}${transcript}`.trimStart())
+			setVoiceError(null)
+			void commandService.executeCommand(
+				'founderOs.companionState',
+				'success',
+				'Voice text is ready',
+				'Review the transcription in Founder Chat, then send when ready.',
+			)
+		} catch (error) {
+			const message = founderVoiceErrorMessage(error)
+			setVoiceError(message)
+			void commandService.executeCommand('founderOs.companionState', 'error', 'Voice input failed', message)
+		} finally {
+			setVoicePhase('idle')
+			textAreaRef.current?.focus()
+		}
+	}, [commandService, voiceProfile])
 
-	const toggleVoiceInput = useCallback(() => {
+	const toggleVoiceInput = useCallback(async () => {
 		if (voicePhase === 'listening' || voicePhase === 'starting') {
-			stopVoiceInput()
+			await stopVoiceInput()
 			return
 		}
 		if (isRunning) return
 
-		const SpeechRecognition = founderSpeechRecognitionConstructor()
-		if (!SpeechRecognition) {
-			setVoiceError('Voice input is not available in this Founder IDE build. Update Founder IDE or use a connected speech service.')
+		if (!voiceSupported) {
+			setVoiceError('Voice input is not available in this Founder IDE build.')
+			return
+		}
+		if (!voiceProfile) {
+			setVoiceError('Connect and enable a GLM Personal AI profile before using voice input.')
+			await commandService.executeCommand('founderOs.openSettings', 'ai')
 			return
 		}
 
-		const recognition = new SpeechRecognition()
-		recognition.continuous = true
-		recognition.interimResults = true
-		recognition.lang = navigator.language || 'en-US'
 		speechBaseTextRef.current = textAreaRef.current?.value.trimEnd() ?? ''
-		voiceFailedRef.current = false
 		setVoiceError(null)
 		setVoicePhase('starting')
 
-		recognition.onstart = () => {
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+			const context = new AudioContext()
+			const source = context.createMediaStreamSource(stream)
+			const processor = context.createScriptProcessor(4096, 1, 1)
+			const chunks: Float32Array[] = []
+			processor.onaudioprocess = event => chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)))
+			source.connect(processor)
+			processor.connect(context.destination)
+			const timer = window.setTimeout(() => { void stopVoiceInput() }, 30_000)
+			voiceRecorderRef.current = { stream, context, source, processor, chunks, timer }
 			setVoicePhase('listening')
 			void commandService.executeCommand(
 				'founderOs.companionState',
@@ -3017,51 +3094,17 @@ export const SidebarChat = () => {
 				'Listening',
 				'Speak naturally. Your words stay in the composer until you send them.',
 			)
-		}
-		recognition.onresult = (event) => {
-			let transcript = ''
-			for (let index = 0; index < event.results.length; index += 1) {
-				transcript += event.results[index]?.[0]?.transcript ?? ''
-			}
-			const base = speechBaseTextRef.current
-			const separator = base && transcript ? ' ' : ''
-			textAreaFnsRef.current?.setValue(`${base}${separator}${transcript}`.trimStart())
-		}
-		recognition.onerror = (event) => {
-			const message = founderSpeechErrorMessage(event.error)
-			voiceFailedRef.current = true
+		} catch (error) {
+			const message = founderVoiceErrorMessage(error)
 			setVoiceError(message)
 			setVoicePhase('idle')
 			void commandService.executeCommand('founderOs.companionState', 'error', 'Voice input was blocked', message)
 		}
-		recognition.onend = () => {
-			speechRecognitionRef.current = null
-			setVoicePhase('idle')
-			textAreaRef.current?.focus()
-			if (!voiceFailedRef.current) {
-				void commandService.executeCommand(
-					'founderOs.companionState',
-					'success',
-					'Voice text is ready',
-					'Review the transcription in Founder Chat, then send when ready.',
-				)
-			}
-		}
-
-		speechRecognitionRef.current = recognition
-		try {
-			recognition.start()
-		} catch {
-			speechRecognitionRef.current = null
-			setVoicePhase('idle')
-			setVoiceError('Founder could not start the microphone. Wait a moment and try again.')
-		}
-	}, [commandService, isRunning, stopVoiceInput, voicePhase])
+	}, [commandService, isRunning, stopVoiceInput, voicePhase, voiceProfile, voiceSupported])
 
 	useEffect(() => () => {
-		speechRecognitionRef.current?.abort()
-		speechRecognitionRef.current = null
-	}, [])
+		void stopVoiceInput(false)
+	}, [stopVoiceInput])
 
 	const sidebarRef = useRef<HTMLDivElement>(null)
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
@@ -3074,7 +3117,7 @@ export const SidebarChat = () => {
 
 		// send message to LLM
 		const userMessage = _forceSubmit || textAreaRef.current?.value || ''
-		speechRecognitionRef.current?.stop()
+		if (voicePhase !== 'idle') return
 
 		try {
 			await chatThreadsService.addUserMessageAndStreamResponse({ userMessage, threadId })
@@ -3086,12 +3129,42 @@ export const SidebarChat = () => {
 		textAreaFnsRef.current?.setValue('')
 		textAreaRef.current?.focus() // focus input after submit
 
-	}, [chatThreadsService, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState])
+	}, [chatThreadsService, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState, voicePhase])
 
 	const onAbort = async () => {
 		const threadId = currentThread.id
 		await chatThreadsService.abortRunning(threadId)
 	}
+
+	const runSecondBrainReview = useCallback(async () => {
+		if (isRunning) return
+		const reviewer = reviewerProfiles.find(profile => profile.id === reviewerId)
+		if (!reviewer) {
+			await commandService.executeCommand('founderOs.openSettings', 'ai')
+			return
+		}
+		const priorModel = settingsState.modelSelectionOfFeature.Chat?.modelName
+		const priorProfile = reviewerProfiles.find(profile => profile.label === priorModel)
+		try {
+			await commandService.executeCommand('founder.personalAi.select', reviewer.id)
+			await onSubmit(buildFounderSecondBrainPrompt(previousMessages, reviewIntent, reviewer.label))
+		} finally {
+			if (typeof priorModel === 'string' && priorModel.startsWith('founder-os-')) {
+				await commandService.executeCommand('founder.managedAi.select', priorModel)
+			} else if (priorProfile) {
+				await commandService.executeCommand('founder.personalAi.select', priorProfile.id)
+			}
+		}
+	}, [
+		commandService,
+		isRunning,
+		onSubmit,
+		previousMessages,
+		reviewIntent,
+		reviewerId,
+		reviewerProfiles,
+		settingsState.modelSelectionOfFeature.Chat?.modelName,
+	])
 
 	const keybindingString = accessor.get('IKeybindingService').lookupKeybinding(VOID_CTRL_L_ACTION_ID)?.getLabel()
 
@@ -3213,17 +3286,46 @@ export const SidebarChat = () => {
 	}, [onSubmit, onAbort, isRunning])
 
 	const inputChatArea = <div className='flex min-w-0 flex-col gap-1.5'>
-		<div className='flex min-w-0 flex-wrap gap-1 pb-0.5' role='toolbar' aria-label='Founder actions'>
-			{founderActions.map((action) => <button
-				key={action.label}
+		<div className='flex min-w-0 items-center gap-1 pb-0.5' role='toolbar' aria-label='Founder Second brain'>
+			<div className='flex min-w-0 flex-1 items-center overflow-hidden rounded border border-void-border-2 bg-void-bg-1'>
+				<span className='flex h-7 shrink-0 items-center gap-1 border-r border-void-border-2 px-2 text-[11px] font-medium text-void-fg-2'>
+					<Brain size={14} strokeWidth={1.8} />
+					Second brain
+				</span>
+				{reviewerProfiles.length > 0 ? <>
+					<select
+						className='h-7 min-w-0 flex-1 bg-transparent px-1.5 text-[11px] text-void-fg-2 outline-none'
+						aria-label='Second brain model'
+						value={reviewerId}
+						onChange={event => setReviewerId(event.target.value)}
+						disabled={!!isRunning}
+					>
+						{reviewerProfiles.map(profile => <option key={profile.id} value={profile.id}>
+							{profile.label}
+						</option>)}
+					</select>
+					<select
+						className='h-7 min-w-0 flex-[1.25] border-l border-void-border-2 bg-transparent px-1.5 text-[11px] text-void-fg-2 outline-none'
+						aria-label='Second brain review'
+						value={reviewIntent}
+						onChange={event => setReviewIntent(event.target.value as FounderSecondBrainIntent)}
+						disabled={!!isRunning}
+					>
+						{founderSecondBrainIntents.map(intent => <option key={intent.id} value={intent.id}>
+							{intent.label}
+						</option>)}
+					</select>
+				</> : <span className='min-w-0 flex-1 truncate px-2 text-[11px] text-void-fg-3'>Connect a Personal AI reviewer</span>}
+			</div>
+			<button
 				type='button'
-				className='h-6 shrink-0 rounded border border-void-border-2 bg-void-bg-1 px-2 text-[11px] text-void-fg-3 hover:border-void-border-1 hover:bg-void-bg-2 hover:text-void-fg-1'
-				title={`${action.label}: draft this focused instruction`}
-				onClick={() => {
-					textAreaFnsRef.current?.setValue(action.detail)
-					textAreaRef.current?.focus()
-				}}
-			>{action.label}</button>)}
+				className='h-7 shrink-0 rounded border border-void-border-2 bg-void-bg-1 px-2.5 text-[11px] font-medium text-void-fg-2 hover:border-void-border-1 hover:bg-void-bg-2 hover:text-void-fg-1 disabled:cursor-not-allowed disabled:opacity-50'
+				title={reviewerProfiles.length > 0 ? 'Run an independent read-only review' : 'Connect a Personal AI reviewer'}
+				disabled={!!isRunning}
+				onClick={() => void runSecondBrainReview()}
+			>
+				{reviewerProfiles.length > 0 ? 'Ask AI' : 'Connect'}
+			</button>
 		</div>
 		<VoidChatArea
 		featureName='Chat'

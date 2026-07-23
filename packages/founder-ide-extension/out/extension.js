@@ -78,6 +78,7 @@ const safe_result_cache_1 = require("./safe-result-cache");
 const verified_solution_memory_1 = require("./verified-solution-memory");
 const project_activity_1 = require("./project-activity");
 const personal_ai_profiles_1 = require("./personal-ai-profiles");
+const daily_quality_review_1 = require("./daily-quality-review");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -97,6 +98,7 @@ let founderSafeResultCache;
 let founderVerifiedSolutionMemory;
 let founderProjectActivity;
 let personalAiProfiles;
+let dailyQualityReviewDisposable;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -137,6 +139,16 @@ function activate(context) {
     }));
     founderVerifiedSolutionMemory = new verified_solution_memory_1.FounderVerifiedSolutionMemory(path.join(context.globalStorageUri.fsPath, 'verified-solutions'));
     founderProjectActivity = new project_activity_1.FounderProjectActivityStore(path.join(context.globalStorageUri.fsPath, 'project-activity.json'));
+    dailyQualityReviewDisposable = (0, daily_quality_review_1.createDailyQualityReview)(context, {
+        activity: founderProjectActivity,
+        workspaceId: () => founderWorkspaceContext?.workspaceIdValue() ?? null,
+        awareness: () => founderAgentAwareness?.summary() ?? {
+            activeCount: 0,
+            conflictCount: 0,
+            tasks: [],
+        },
+    });
+    context.subscriptions.push(dailyQualityReviewDisposable);
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
         onDidSignIn: async () => {
             await (0, credentials_1.syncVaultIntoSettings)();
@@ -393,6 +405,7 @@ function deactivate() {
     founderHub?.dispose();
     founderSettings?.dispose();
     founderShortcuts?.dispose();
+    dailyQualityReviewDisposable?.dispose();
     // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
     (0, server_1.stopIpcServer)();
 }

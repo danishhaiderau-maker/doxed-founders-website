@@ -99,7 +99,7 @@ export function shortcutEntries(
           label: 'Daily quality review',
           description: 'Health, links, integrations, and release evidence',
           icon: 'verified-filled',
-          command: 'founderOs.openDebugSquasher',
+          command: 'founderOs.runDailyQualityReview',
         },
         {
           id: 'deployments',

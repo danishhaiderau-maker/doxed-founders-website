@@ -27,6 +27,14 @@ type FounderPersonalAiInput = {
 	updatedAt?: string;
 };
 
+type FounderPersonalAiTranscriptionInput = {
+	profileId?: string;
+	audioBase64?: string;
+};
+
+const GLM_TRANSCRIPTION_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/audio/transcriptions';
+const MAX_TRANSCRIPTION_BASE64_CHARS = 34_000_000;
+
 const BLOCKED_HEADERS = new Set([
 	'authorization',
 	'connection',
@@ -141,6 +149,23 @@ const profilesAndProvider = (service: IVoidSettingsService) => {
 	return { provider, profiles: readFounderProviderProfiles(provider.headersJSON) };
 };
 
+const bytesFromBase64 = (value: string): Uint8Array => {
+	const binary = atob(value);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) {
+		bytes[index] = binary.charCodeAt(index);
+	}
+	return bytes;
+};
+
+const isGlmSpeechProfile = (profile: FounderProviderProfile): boolean => {
+	const identity = `${profile.label} ${profile.model} ${profile.baseUrl}`.toLowerCase();
+	return identity.includes('glm')
+		|| identity.includes('zhipu')
+		|| identity.includes('bigmodel.cn')
+		|| identity.includes('z.ai');
+};
+
 const writeProfiles = async (
 	service: IVoidSettingsService,
 	profiles: FounderProviderProfile[],
@@ -179,6 +204,55 @@ registerAction2(class extends Action2 {
 		const { profiles } = profilesAndProvider(service);
 		const active = service.state.modelSelectionOfFeature.Chat?.modelName;
 		return profiles.map(profile => summary(profile, profile.label === active));
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() { super({ id: 'founder.personalAi.transcribe', title: { value: 'Founder: Transcribe Voice', original: 'Founder: Transcribe Voice' } }); }
+	async run(accessor: ServicesAccessor, input: FounderPersonalAiTranscriptionInput) {
+		const service = accessor.get(IVoidSettingsService);
+		await service.waitForInitState;
+		const profileId = input?.profileId?.trim();
+		const audioBase64 = input?.audioBase64?.trim();
+		if (!profileId || !audioBase64) throw new Error('Choose an enabled GLM Personal AI profile before using voice input.');
+		if (audioBase64.length > MAX_TRANSCRIPTION_BASE64_CHARS) throw new Error('Voice recording exceeds the 25 MB transcription limit.');
+
+		const { profiles } = profilesAndProvider(service);
+		const profile = profiles.find(candidate => candidate.id === profileId && candidate.enabled !== false);
+		if (!profile || !profile.apiKey || !isGlmSpeechProfile(profile)) {
+			throw new Error('Voice input requires an enabled GLM Personal AI profile with an API key.');
+		}
+
+		const bytes = bytesFromBase64(audioBase64);
+		if (bytes.byteLength < 44) throw new Error('The voice recording is empty.');
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 45_000);
+		try {
+			const form = new FormData();
+			form.append('model', 'glm-asr-2512');
+			form.append('stream', 'false');
+			form.append('file', new Blob([bytes], { type: 'audio/wav' }), 'founder-voice.wav');
+			const response = await fetch(GLM_TRANSCRIPTION_ENDPOINT, {
+				method: 'POST',
+				headers: { Authorization: `Bearer ${profile.apiKey}` },
+				body: form,
+				signal: controller.signal,
+			});
+			if (!response.ok) {
+				throw new Error(`GLM voice transcription returned ${response.status}.`);
+			}
+			const payload = await response.json() as { text?: unknown };
+			const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+			if (!text) throw new Error('No speech was detected in the recording.');
+			return { text, profile: profile.label, model: 'glm-asr-2512' };
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				throw new Error('Voice transcription timed out. Your typed text is unchanged.');
+			}
+			throw error;
+		} finally {
+			clearTimeout(timeout);
+		}
 	}
 });
 

@@ -24,11 +24,13 @@ export function FounderFreeQuotaCard({ status }: Props) {
     ? Math.min(100, Math.max(0, Math.round((status.tokensUsed / status.tokenCap) * 100)))
     : 0;
   const state = quotaState(status);
-  const planLabel = status?.plan === 'builder'
-    ? 'Builder'
-    : status?.plan === 'team'
-      ? status.teamName ?? 'Team'
-      : 'Free';
+  const planLabel = !status
+    ? 'managed'
+    : status.plan === 'builder'
+      ? 'Builder'
+      : status.plan === 'team'
+        ? status.teamName ?? 'Team'
+        : 'Free';
 
   return (
     <section className="border-b border-zinc-800 pb-6">
@@ -86,7 +88,7 @@ export function FounderFreeQuotaCard({ status }: Props) {
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
-        {!status?.founderRegistered && (
+        {status && !status.founderRegistered && (
           <Link href="/founder-den?tab=build" className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">
             Finish setup
           </Link>

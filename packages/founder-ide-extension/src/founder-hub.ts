@@ -665,6 +665,16 @@ export class FounderHubProvider
         <span class="nav-copy"><strong>Graph</strong><span>Changes, commits, and history</span></span>
         <span class="nav-arrow" aria-hidden="true">&gt;</span>
       </button>
+      <button class="nav-item" type="button" data-action="openRemote">
+        <span class="nav-icon" aria-hidden="true">R</span>
+        <span class="nav-copy"><strong>Remote</strong><span>${connected ? 'This computer is connected' : 'Pair this computer'}</span></span>
+        <span class="nav-arrow" aria-hidden="true">&gt;</span>
+      </button>
+      <button class="nav-item" type="button" data-action="openConnections">
+        <span class="nav-icon" aria-hidden="true">C</span>
+        <span class="nav-copy"><strong>Connect</strong><span>Services and infrastructure</span></span>
+        <span class="nav-arrow" aria-hidden="true">&gt;</span>
+      </button>
     </nav>
 
     <section class="agent-mode" aria-label="Agent mode">
@@ -692,17 +702,6 @@ export class FounderHubProvider
           <button class="tool-item" type="button" data-action="openProjectBrief"><strong>Project brief</strong><span>Last 24 hours and next work</span></button>
           <button class="tool-item" type="button" data-action="openExtensions"><strong>Extensions</strong><span>Advanced</span></button>
           <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>${advancedToolsVisible ? 'Hide' : 'Show'} IDE rail</strong><span>Advanced tools</span></button>
-        </div>
-      </details>
-    </section>
-
-    <section class="section">
-      <details>
-        <summary>Connect <span class="summary-value">${escapeHtml(connectionLabel)}</span></summary>
-        <div class="tool-list">
-          <button class="tool-item" type="button" data-action="manageConnection"><strong>Founder Node</strong><span>${escapeHtml(nodeLabel)}</span></button>
-          <button class="tool-item" type="button" data-action="openConnections"><strong>Services</strong><span>GitHub, Vercel, Railway, Neon</span></button>
-          <button class="tool-item" type="button" data-action="openRemote"><strong>Remote control</strong><span>This computer</span></button>
         </div>
       </details>
     </section>
