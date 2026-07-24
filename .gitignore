@@ -13,6 +13,16 @@ build/
 apps/founder-node/release/
 apps/founder-node/release-*/
 apps/founder-node/app.asar
+
+# Founder IDE installer output (multi-hundred-MB .exe artifacts from local/CI builds).
+# The top-level `dist/` rule above does NOT match nested paths in git's pattern language,
+# so installer/dist/ needs an explicit rule to prevent accidental commits.
+packages/founder-ide/installer/dist/
+packages/founder-ide/installer/final/
+packages/founder-ide/installer/staging/
+packages/founder-ide/dist/
+packages/founder-ide/staging/*.exe
+packages/founder-ide/staging/*.sha256
 .tools/
 apps/mobile-android/android/.gradle/
 apps/mobile-android/android/app/build/
@@ -62,7 +72,8 @@ prisma/*.db-journal
 # and have zero value in any cloud environment. Keep them on the laptop only.
 .edge-analysis/
 
-# Local logs / agent artifacts (never publish)
+# Local logs / agent artifacts (never publish outside the curated release receipt)
+/artifacts/*
 *.log
 agent-restart-report*.txt
 restart-report.txt
@@ -293,7 +304,13 @@ services/btc-conservative-agent/research/downloads/
 services/btc-conservative-agent/research/backups/
 services/btc-conservative-agent/research_retention/
 services/btc-conservative-agent/past_analysis/
-/artifacts/
+/artifacts/*
+!/artifacts/releases/
+/artifacts/releases/*
+!/artifacts/releases/0.9.4/
+/artifacts/releases/0.9.4/*
+!/artifacts/releases/0.9.4/*.json
+!/artifacts/releases/0.9.4/*.png
 /exports/
 /execution_funnel.jsonl*
 /lane_opportunity_capture.jsonl*
@@ -341,6 +358,7 @@ services/btc-conservative-agent/.runtime-locks/
 /PROJECT_CHECKLIST.md
 
 /founder-ide-window-*.png
+/staging/
 *.pkl
 /services/*.pkl
 .home-analyzer-user-stopped
