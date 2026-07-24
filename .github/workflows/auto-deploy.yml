@@ -15,6 +15,15 @@ on:
       # founder-os agent memory-sync noise (1-line tasks.json changes)
       - '.github/founder-os/**'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Run the normal deployment or a read-only live flat-boundary proof
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - flat-check-only
 
 permissions:
   contents: read
@@ -24,7 +33,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  flat-boundary:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'flat-check-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma@6.8.2 generate --schema prisma/schema.prisma
+
+      - name: Prove simultaneous raw flat boundary
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SHOWCASE_OWNER_URL: https://bot.doxxedcrypto.digital
+        run: node scripts/check-relay-flat.mjs
+
   deploy:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
