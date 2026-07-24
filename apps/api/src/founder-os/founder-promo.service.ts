@@ -421,6 +421,16 @@ export class FounderPromoService {
     return map.glm ?? null;
   }
 
+  /**
+   * Voice transcription is a separate capability from managed chat routing.
+   * The GLM credential remains server-side and is used only by the authenticated
+   * Founder speech proxy; it is never returned to Founder IDE.
+   */
+  async getDecryptedPlatformGlmSpeechKey(): Promise<string | null> {
+    const map = await this.loadDecryptedCredentials();
+    return map.glm ?? null;
+  }
+
   /** Decrypted platform DeepSeek promo key (distinct from platform brain fallback). */
   async getDecryptedPlatformPromoDeepseekKey(): Promise<string | null> {
     const map = await this.loadDecryptedCredentials();
