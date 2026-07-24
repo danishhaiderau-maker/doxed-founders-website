@@ -1,12 +1,8 @@
-import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
+import { proxyAwareNativeRequest } from './proxy-aware-request';
 
 const MAX_TRANSCRIPTION_BASE64_CHARS = 34_000_000;
 const MANAGED_VOICE_TIMEOUT_MS = 50_000;
 const MAX_CURL_OUTPUT_BYTES = 2_000_000;
-const CURL_STATUS_MARKER = '__FOUNDER_STATUS__:';
 
 export type ManagedVoiceInput = {
   audioBase64?: string;
@@ -34,100 +30,22 @@ export type ManagedVoiceRequestDeps = {
   platform?: NodeJS.Platform;
 };
 
-function curlConfigValue(value: string): string {
-  return value
-    .replaceAll('\\', '\\\\')
-    .replaceAll('"', '\\"')
-    .replaceAll('\r', '')
-    .replaceAll('\n', '');
-}
-
 async function proxyAwareNativeFetch(
   url: string,
   audio: Buffer,
   authorization: string,
 ): Promise<Response> {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'founder-voice-'));
-  const audioPath = path.join(tempDir, 'voice.wav');
-  const executable = process.platform === 'win32' ? 'curl.exe' : 'curl';
-
-  try {
-    await writeFile(audioPath, audio);
-    const config = [
-      `url = "${curlConfigValue(url)}"`,
-      'request = "POST"',
-      `header = "Authorization: ${curlConfigValue(authorization)}"`,
-      'header = "Content-Type: audio/wav"',
-      `data-binary = "@${curlConfigValue(audioPath)}"`,
-      'silent',
-      'show-error',
-      `max-time = ${Math.ceil(MANAGED_VOICE_TIMEOUT_MS / 1_000)}`,
-      'connect-timeout = 15',
-      `write-out = "${curlConfigValue(`${CURL_STATUS_MARKER}%{http_code}`)}"`,
-    ].join('\n');
-
-    const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(executable, ['--config', '-'], {
-        windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      const stdout: Buffer[] = [];
-      let outputBytes = 0;
-      let settled = false;
-      const finish = (callback: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        callback();
-      };
-      const timer = setTimeout(() => {
-        child.kill();
-        finish(() => reject(new Error('Founder native voice transport timed out.')));
-      }, MANAGED_VOICE_TIMEOUT_MS + 5_000);
-
-      child.stdout.on('data', (chunk: Buffer) => {
-        outputBytes += chunk.byteLength;
-        if (outputBytes > MAX_CURL_OUTPUT_BYTES) {
-          child.kill();
-          finish(() => reject(new Error('Founder native voice response was too large.')));
-          return;
-        }
-        stdout.push(chunk);
-      });
-      child.stderr.resume();
-      child.on('error', () => {
-        finish(() => reject(new Error('Founder native voice transport is unavailable.')));
-      });
-      child.on('close', (code) => {
-        finish(() => {
-          if (code !== 0) {
-            reject(new Error('Founder native voice transport could not reach its speech service.'));
-            return;
-          }
-          resolve(Buffer.concat(stdout).toString('utf8'));
-        });
-      });
-      child.stdin.end(config);
-    });
-
-    const marker = output.lastIndexOf(CURL_STATUS_MARKER);
-    if (marker < 0) {
-      throw new Error('Founder native voice transport returned an invalid response.');
-    }
-    const status = Number.parseInt(
-      output.slice(marker + CURL_STATUS_MARKER.length).trim(),
-      10,
-    );
-    if (!Number.isInteger(status) || status < 100 || status > 599) {
-      throw new Error('Founder native voice transport returned an invalid status.');
-    }
-    return new Response(output.slice(0, marker), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } finally {
-    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-  }
+  return proxyAwareNativeRequest({
+    url,
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'audio/wav',
+    },
+    body: audio,
+    timeoutMs: MANAGED_VOICE_TIMEOUT_MS,
+    maxResponseBytes: MAX_CURL_OUTPUT_BYTES,
+  });
 }
 
 export async function transcribeManagedVoiceRequest(
