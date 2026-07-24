@@ -89,6 +89,11 @@ assert.doesNotMatch(
 assert.match(startBot, /Test-ProcessIdAliveFast \$monitorPid/);
 assert.match(startBot, /\.home-bot-starter\.pid/);
 assert.match(read("start-home-analyzer.ps1"), /\.home-analyzer-starter\.pid/);
+assert.match(
+  startEverything,
+  /start-home-analyzer\.ps1"\)\s+@\(\s*"-Port",\s*"\$AnalyzerPort",\s*"-NoWait"/,
+  "full-stack recovery must start the analyzer in detached monitored mode",
+);
 assert.doesNotMatch(
   executableLines(providerFreeRecovery),
   /\bGet-(?:Process|CimInstance)\b|\bWin32_Process\b/,
