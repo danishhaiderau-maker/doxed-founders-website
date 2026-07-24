@@ -122,6 +122,20 @@ export function isStrictRawFlatReconcileSnapshot(rec, nowMs = Date.now()) {
   );
 }
 
+export function isStrictExchangeOrderAuditFlat(audit, nowMs = Date.now()) {
+  if (audit == null || typeof audit !== 'object') return false;
+  const checkedAgeMs = nowMs - Date.parse(String(audit.checkedAt ?? ''));
+  return (
+    audit.known === true
+    && audit.activeOrderCount === 0
+    && audit.managedActiveOrderCount === 0
+    && audit.foreignActiveOrderCount === 0
+    && Number.isFinite(checkedAgeMs)
+    && checkedAgeMs >= 0
+    && checkedAgeMs <= 60_000
+  );
+}
+
 async function main() {
   const { bot, baseUrl: botUrl } = await fetchOwnerState();
   const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
@@ -171,6 +185,7 @@ async function main() {
       relayExecutionMode: dashboard.relayExecutionMode ?? null,
       relayArmedAt: dashboard.relayArmedAt ?? null,
       realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
+      exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
       orphanOrderIds: dashboard.orphanOrderIds ?? [],
       orphanPositionIds: dashboard.orphanPositionIds ?? [],
     });
@@ -208,6 +223,7 @@ async function main() {
     && cheetahRows.every((row) => {
       return (
         isStrictRawFlatReconcileSnapshot(row.reconcile)
+        && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
         && row.orphanOrderIds.length === 0
         && row.orphanPositionIds.length === 0
       );

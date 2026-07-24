@@ -3191,6 +3191,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     try {
       orders = await this.activeTrading.listActiveOrders(creds);
     } catch (err) {
+      await this.persistExchangeOrderAudit(instance.id, {
+        known: false,
+        activeOrderCount: null,
+        managedActiveOrderCount: null,
+        foreignActiveOrderCount: null,
+        checkedAt: new Date().toISOString(),
+      }).catch(() => {
+        /* the relay pause below remains the authoritative failure signal */
+      });
       const message =
         `BITFINEX_ACTIVE_ORDER_READ_FAILED: unmanaged-order state is unknown; relay paused. ` +
         `${err instanceof Error ? err.message : String(err)}`;
@@ -3201,6 +3210,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       throw err;
     }
     const foreign = orders.filter((o) => !managedOrderIds.has(o.id));
+    await this.persistExchangeOrderAudit(instance.id, {
+      known: true,
+      activeOrderCount: orders.length,
+      managedActiveOrderCount: orders.length - foreign.length,
+      foreignActiveOrderCount: foreign.length,
+      checkedAt: new Date().toISOString(),
+    }).catch(() => {
+      /* a missing/stale audit makes the deployment flat gate fail closed */
+    });
     if (foreign.length > 0) {
       await this.persistOrphanOrderIds(instance.id, foreign).catch(() => {
         /* dashboard surfacing is best-effort */
@@ -3211,6 +3229,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
     return foreign;
+  }
+
+  private async persistExchangeOrderAudit(
+    instanceId: string,
+    exchangeOrderAudit: {
+      known: boolean;
+      activeOrderCount: number | null;
+      managedActiveOrderCount: number | null;
+      foreignActiveOrderCount: number | null;
+      checkedAt: string;
+    },
+  ) {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          exchangeOrderAudit,
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
   }
 
   /**

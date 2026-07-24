@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hasFullOwnerOrderState,
+  isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
 } from './check-relay-flat.mjs';
 
@@ -73,5 +74,37 @@ test('authenticated source proof rejects a sanitized state without an order book
   assert.equal(
     hasFullOwnerOrderState({ dashboard_owner: true, orders: [] }),
     true,
+  );
+});
+
+test('strict exchange order proof requires a fresh known zero-order snapshot', () => {
+  const flatAudit = {
+    known: true,
+    activeOrderCount: 0,
+    managedActiveOrderCount: 0,
+    foreignActiveOrderCount: 0,
+    checkedAt: '2026-07-24T05:44:50.000Z',
+  };
+  assert.equal(isStrictExchangeOrderAuditFlat(flatAudit, now), true);
+  assert.equal(
+    isStrictExchangeOrderAuditFlat(
+      { ...flatAudit, activeOrderCount: 1 },
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    isStrictExchangeOrderAuditFlat(
+      { ...flatAudit, known: false },
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    isStrictExchangeOrderAuditFlat(
+      { ...flatAudit, checkedAt: '2026-07-24T05:43:59.999Z' },
+      now,
+    ),
+    false,
   );
 });

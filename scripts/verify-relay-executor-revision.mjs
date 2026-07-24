@@ -12,6 +12,7 @@ if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
 
 const prisma = new PrismaClient();
 const deadline = Date.now() + timeoutMs;
+let lastObserved = [];
 
 try {
   while (Date.now() < deadline) {
@@ -38,6 +39,15 @@ try {
         .map((health) => String(health?.ownerId ?? '').trim())
         .filter(Boolean),
     );
+    lastObserved = currentWorkers.map((health) => ({
+      sourceRevision: health?.sourceRevision ?? null,
+      healthy: health?.healthy === true,
+      status: health?.status ?? null,
+      executionEnabled: health?.executionEnabled === true,
+      timeoutCount: health?.timeoutCount ?? null,
+      observedAt: health?.observedAt ?? null,
+      ownerPresent: String(health?.ownerId ?? '').trim() !== '',
+    }));
     const matched =
       currentWorkers.length > 0 &&
       ownerIds.size === 1 &&
@@ -60,7 +70,10 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
   if (process.exitCode == null) {
-    throw new Error(`Relay executor did not report exact healthy revision ${expected}`);
+    throw new Error(
+      `Relay executor did not report exact healthy revision ${expected}; ` +
+      `observed=${JSON.stringify(lastObserved)}`,
+    );
   }
 } finally {
   await prisma.$disconnect();
