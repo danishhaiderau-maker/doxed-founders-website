@@ -1,7 +1,6 @@
 'use client';
 
 import {
-  COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
   type CopyRelayLimitChainSnapshot,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
@@ -32,8 +31,12 @@ export function buildRelaySyncAlerts(input: {
   const alerts: Alert[] = [];
   const reconcile = input.copyRelayReconcile ?? input.copyRelaySim?.reconcile ?? null;
   const delta = reconcile?.deltaBtc ?? 0;
+  const rawExchangeQty =
+    reconcile?.rawExchangePositionQty ?? reconcile?.exchangePositionQty ?? 0;
   const deltaBad =
-    reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
+    Boolean(reconcile?.alert) ||
+    Math.round(Math.abs(delta) * 1e8) > 0 ||
+    Math.round(Math.abs(reconcile?.dustPositionQty ?? 0) * 1e8) > 0;
 
   // F3 writes one of these substrings to instance.lastError when an outage
   // crosses ~60s (see bot-bridge.service.ts circuit-breaker). The display cache
@@ -59,7 +62,7 @@ export function buildRelaySyncAlerts(input: {
     alerts.push({
       level: 'error',
       title: 'Ledger desync',
-      detail: `Exchange qty ${reconcile?.exchangePositionQty.toFixed(5)} BTC vs ledger ${reconcile?.ledgerOpenQty.toFixed(5)} BTC (Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(5)}). Virtual-lot reconcile is healing — do not go live until delta is near zero.`,
+      detail: `Raw exchange qty ${rawExchangeQty.toFixed(8)} BTC vs ledger ${reconcile?.ledgerOpenQty.toFixed(8)} BTC (Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(8)}). New entries remain blocked until the exact raw delta is zero.`,
     });
   }
 

@@ -3,10 +3,37 @@
 export const COPY_RELAY_SIM_DEFAULT_BALANCE_USD = 500;
 export const COPY_RELAY_SIM_RECONCILE_ALERT_BTC = 0.001;
 
-/** Exchange qty below Bitfinex min lot is treated as flat for reconcile/alerts. */
+/** Minimum size for a new BTC-PERP order. It is not an accounting-zero tolerance. */
 export const COPY_RELAY_MIN_QTY_BTC = 0.00004;
+export const BTC_SATOSHIS_PER_BTC = 100_000_000;
+
+/** Convert an exchange amount to its exact signed 8-decimal accounting unit. */
+export function btcToSats(qty: number): number {
+  if (!Number.isFinite(qty)) return 0;
+  return Math.round(qty * BTC_SATOSHIS_PER_BTC);
+}
+
+export function satsToBtc(sats: number): number {
+  if (!Number.isFinite(sats)) return 0;
+  return Number((Math.trunc(sats) / BTC_SATOSHIS_PER_BTC).toFixed(8));
+}
+
+/** Signed exchange-minus-ledger delta in the exchange's 8-decimal unit. */
+export function relayPositionDeltaSats(
+  exchangePositionAmount: number,
+  ledgerOpenAmount: number,
+): number {
+  return btcToSats(exchangePositionAmount) - btcToSats(ledgerOpenAmount);
+}
+
+/** Preserve the exchange's actual 8-decimal absolute position amount. */
+export function rawExchangeQtyBtc(qty: number): number {
+  return satsToBtc(Math.abs(btcToSats(qty)));
+}
+
+/** Strategy sizing helper only. Never use this to prove exchange flatness. */
 export function effectiveExchangeQtyBtc(qty: number): number {
-  const a = Math.abs(qty);
+  const a = rawExchangeQtyBtc(qty);
   return a < COPY_RELAY_MIN_QTY_BTC ? 0 : a;
 }
 
@@ -38,8 +65,17 @@ export type CopyRelaySimLedger = {
 };
 
 export type CopyRelayReconcileSnapshot = {
+  /** Exact raw exchange quantity. One satoshi is real exposure, not flat. */
   exchangePositionQty: number;
+  /** Explicit alias retained for clients upgraded from the old masked field. */
+  rawExchangePositionQty?: number;
+  /** Signed exchange amount; preserves LONG/SHORT reconciliation truth. */
+  signedExchangePositionQty?: number;
+  /** Non-zero only when Bitfinex still holds a sub-minimum residual position. */
+  dustPositionQty?: number;
   ledgerOpenQty: number;
+  /** Signed expected ledger amount; preserves LONG/SHORT reconciliation truth. */
+  signedLedgerOpenQty?: number;
   deltaBtc: number;
   alert: boolean;
   openLots: number;

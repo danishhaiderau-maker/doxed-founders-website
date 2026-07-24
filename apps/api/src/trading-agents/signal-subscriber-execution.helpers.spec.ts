@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SignalCycleStatus } from '@prisma/client';
 import {
+  btcToSats,
+  effectiveExchangeQtyBtc,
+  rawExchangeQtyBtc,
+  relayPositionDeltaSats,
+} from '@dcf/utils';
+import {
+  BITFINEX_POSITION_CLOSE_FLAG,
+  BITFINEX_REDUCE_ONLY_FLAG,
+  BITFINEX_SAFE_CLOSE_FLAGS,
+} from '../exchanges/bitfinex-api.client';
+import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
@@ -11,11 +22,13 @@ import {
   isBenignShowcaseEntryWait,
   isRecoveredShowcaseOutageError,
   isCycleFreshForRelayArm,
+  exchangeOrderFilledQtySats,
   marketCloseReductionConfirmed,
   mergedDirectionCompatible,
   pendingEntryMayOwnExchangePosition,
   pendingCopyShowcaseDisposition,
   relayEntryOrderIsCompletelyUnfilled,
+  relayLotExitTarget,
   relayWatchdogShouldRestart,
   resolveMissedShowcaseFill,
   untrackedActiveOrderIds,
@@ -86,6 +99,16 @@ test('market close is recorded only after the exchange position is reduced', () 
     }),
     false,
   );
+  assert.equal(
+    marketCloseReductionConfirmed({
+      direction: 'SHORT',
+      beforeQty: 0.00004,
+      closeQty: 0.00004,
+      afterAmount: -0.00003999,
+    }),
+    false,
+    'a one-satoshi reduction is not a confirmed full close',
+  );
 });
 
 test('watchdog cleanup cancels only exchange orders with zero reported fill', () => {
@@ -101,6 +124,103 @@ test('watchdog cleanup cancels only exchange orders with zero reported fill', ()
     relayEntryOrderIsCompletelyUnfilled({ amountOrig: 0.031, amount: 0 }),
     false,
   );
+  assert.equal(
+    relayEntryOrderIsCompletelyUnfilled({ amountOrig: -0.00004, amount: -0.00003999 }),
+    false,
+  );
+  assert.equal(
+    exchangeOrderFilledQtySats({ amountOrig: 0.00004, amount: 0 }),
+    4_000,
+  );
+  assert.equal(
+    exchangeOrderFilledQtySats({ amountOrig: -0.00004, amount: -0.00003999 }),
+    1,
+  );
+});
+
+test('relay lot exits target the remaining merged ledger exactly', () => {
+  assert.deepEqual(
+    relayLotExitTarget({
+      currentAmount: -0.06066,
+      remainingLedgerAmount: -0.03033,
+      exitingLedgerQty: 0.03033,
+      direction: 'SHORT',
+    }),
+    {
+      ok: true,
+      currentAmount: -0.06066,
+      targetAmount: -0.03033,
+      closeQty: 0.03033,
+      finalAccountFlatten: false,
+    },
+  );
+  assert.deepEqual(
+    relayLotExitTarget({
+      currentAmount: -0.00003999,
+      remainingLedgerAmount: 0,
+      exitingLedgerQty: 0.00004,
+      direction: 'SHORT',
+    }),
+    {
+      ok: true,
+      currentAmount: -0.00003999,
+      targetAmount: 0,
+      closeQty: 0.00003999,
+      finalAccountFlatten: true,
+    },
+  );
+  assert.equal(
+    relayLotExitTarget({
+      currentAmount: -0.03033,
+      remainingLedgerAmount: 0.03033,
+      exitingLedgerQty: 0.03033,
+      direction: 'SHORT',
+    }).ok,
+    false,
+  );
+  assert.equal(
+    relayLotExitTarget({
+      currentAmount: -0.06067,
+      remainingLedgerAmount: -0.03033,
+      exitingLedgerQty: 0.03033,
+      direction: 'SHORT',
+    }).reason,
+    'UNATTRIBUTED_EXCHANGE_EXPOSURE',
+    'same-direction manual exposure is never consumed by an automatic relay exit',
+  );
+  assert.deepEqual(
+    relayLotExitTarget({
+      currentAmount: -0.045,
+      remainingLedgerAmount: -0.03,
+      exitingLedgerQty: 0.03,
+      direction: 'SHORT',
+    }),
+    {
+      ok: true,
+      currentAmount: -0.045,
+      targetAmount: -0.03,
+      closeQty: 0.015,
+      finalAccountFlatten: false,
+    },
+    'post-submit recovery protects only the verified exiting-lot remainder',
+  );
+});
+
+test('satoshi accounting preserves residual exposure below the entry minimum', () => {
+  assert.equal(btcToSats(0.00003999), 3_999);
+  assert.equal(rawExchangeQtyBtc(-0.00003999), 0.00003999);
+  assert.equal(effectiveExchangeQtyBtc(-0.00003999), 0);
+});
+
+test('signed reconciliation rejects equal-size opposite exposure', () => {
+  assert.equal(relayPositionDeltaSats(-0.03, 0.03), -6_000_000);
+  assert.equal(relayPositionDeltaSats(0.03, 0.03), 0);
+});
+
+test('Bitfinex close flags keep partial exits reduce-only', () => {
+  assert.equal(BITFINEX_POSITION_CLOSE_FLAG, 512);
+  assert.equal(BITFINEX_REDUCE_ONLY_FLAG, 1024);
+  assert.equal(BITFINEX_SAFE_CLOSE_FLAGS, 1536);
 });
 
 test('historical orphan recovery ignores orders attributed to current live lots', () => {
@@ -530,6 +650,16 @@ test('does not append duplicate repair events for complete metadata', () => {
     shouldPersistLotMetaRepair(
       { qty: 0.02, direction: 'LONG' },
       { qty: 0.02, direction: 'LONG' },
+    ),
+    false,
+  );
+});
+
+test('treats an exact minimum-size lot as complete metadata', () => {
+  assert.equal(
+    shouldPersistLotMetaRepair(
+      { qty: 0.00004, direction: 'SHORT' },
+      { qty: 0.02, direction: 'SHORT' },
     ),
     false,
   );

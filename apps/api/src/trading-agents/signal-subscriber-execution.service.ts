@@ -19,8 +19,9 @@ import {
   resolveMirrorDisasterStopMarginPct,
   isCopyRelaySimActive,
   readCopyRelaySimState,
-  COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
-  effectiveExchangeQtyBtc,
+  btcToSats,
+  satsToBtc,
+  relayPositionDeltaSats,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
   SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS,
@@ -160,8 +161,18 @@ export function relayEntryOrderIsCompletelyUnfilled(order: {
   amountOrig: number;
   amount: number;
 }): boolean {
-  const filledQty = Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount));
-  return filledQty <= MIN_QTY_BTC;
+  return exchangeOrderFilledQtySats(order) === 0;
+}
+
+/** Bitfinex amounts are signed; fill accounting is exact at 8 decimals. */
+export function exchangeOrderFilledQtySats(order: {
+  amountOrig: number;
+  amount: number;
+}): number {
+  return Math.max(
+    0,
+    Math.abs(btcToSats(order.amountOrig)) - Math.abs(btcToSats(order.amount)),
+  );
 }
 
 /**
@@ -204,11 +215,99 @@ export function marketCloseReductionConfirmed(input: {
   closeQty: number;
   afterAmount: number;
 }): boolean {
-  if (input.beforeQty < MIN_QTY_BTC || input.closeQty < MIN_QTY_BTC) return false;
-  if (input.direction === 'LONG' && input.afterAmount < -MIN_QTY_BTC) return false;
-  if (input.direction === 'SHORT' && input.afterAmount > MIN_QTY_BTC) return false;
-  const expectedMaxQty = Math.max(0, input.beforeQty - input.closeQty) + MIN_QTY_BTC;
-  return Math.abs(input.afterAmount) <= expectedMaxQty;
+  const beforeSats = Math.abs(btcToSats(input.beforeQty));
+  const closeSats = Math.abs(btcToSats(input.closeQty));
+  if (beforeSats === 0 || closeSats === 0) return false;
+  const remainingSats = Math.max(0, beforeSats - closeSats);
+  const expectedAfterSats =
+    input.direction === 'LONG' ? remainingSats : -remainingSats;
+  return btcToSats(input.afterAmount) === expectedAfterSats;
+}
+
+export type RelayLotExitTarget = {
+  ok: boolean;
+  currentAmount: number;
+  targetAmount: number;
+  closeQty: number;
+  finalAccountFlatten: boolean;
+  reason?: string;
+};
+
+/**
+ * Decide the exact reduction for one virtual lot inside Bitfinex's merged
+ * BTC-PERP position. Quantities are compared as integer satoshis.
+ */
+export function relayLotExitTarget(input: {
+  currentAmount: number;
+  remainingLedgerAmount: number;
+  exitingLedgerQty: number;
+  direction: 'LONG' | 'SHORT';
+}): RelayLotExitTarget {
+  const currentSats = btcToSats(input.currentAmount);
+  const targetSats = btcToSats(input.remainingLedgerAmount);
+  const exitingSats = Math.abs(btcToSats(input.exitingLedgerQty));
+  const expectedSign = input.direction === 'LONG' ? 1 : -1;
+  const maximumOwnedSats = Math.abs(targetSats) + exitingSats;
+  if (targetSats !== 0 && Math.sign(targetSats) !== expectedSign) {
+    return {
+      ok: false,
+      currentAmount: satsToBtc(currentSats),
+      targetAmount: satsToBtc(targetSats),
+      closeQty: 0,
+      finalAccountFlatten: false,
+      reason: 'REMAINING_LEDGER_DIRECTION_MISMATCH',
+    };
+  }
+  if (currentSats === targetSats) {
+    return {
+      ok: true,
+      currentAmount: satsToBtc(currentSats),
+      targetAmount: satsToBtc(targetSats),
+      closeQty: 0,
+      finalAccountFlatten: targetSats === 0,
+    };
+  }
+  if (currentSats === 0 || Math.sign(currentSats) !== expectedSign) {
+    return {
+      ok: false,
+      currentAmount: satsToBtc(currentSats),
+      targetAmount: satsToBtc(targetSats),
+      closeQty: 0,
+      finalAccountFlatten: false,
+      reason: 'EXCHANGE_POSITION_DIRECTION_MISMATCH',
+    };
+  }
+  if (Math.abs(currentSats) > maximumOwnedSats) {
+    return {
+      ok: false,
+      currentAmount: satsToBtc(currentSats),
+      targetAmount: satsToBtc(targetSats),
+      closeQty: 0,
+      finalAccountFlatten: false,
+      reason: 'UNATTRIBUTED_EXCHANGE_EXPOSURE',
+    };
+  }
+  const reductionSats = currentSats - targetSats;
+  if (
+    Math.sign(reductionSats) !== expectedSign ||
+    Math.abs(targetSats) > Math.abs(currentSats)
+  ) {
+    return {
+      ok: false,
+      currentAmount: satsToBtc(currentSats),
+      targetAmount: satsToBtc(targetSats),
+      closeQty: 0,
+      finalAccountFlatten: false,
+      reason: 'EXIT_WOULD_INCREASE_OR_REVERSE_EXPOSURE',
+    };
+  }
+  return {
+    ok: true,
+    currentAmount: satsToBtc(currentSats),
+    targetAmount: satsToBtc(targetSats),
+    closeQty: satsToBtc(Math.abs(reductionSats)),
+    finalAccountFlatten: targetSats === 0,
+  };
 }
 
 /**
@@ -312,10 +411,10 @@ export function shouldPersistLotMetaRepair(
   stored: RepairableLotMeta,
   resolved: RepairableLotMeta,
 ): boolean {
-  const qtyMissing = !stored.qty || stored.qty <= MIN_QTY_BTC;
+  const qtyMissing = !stored.qty || btcToSats(stored.qty) === 0;
   const directionMissing = !stored.direction;
   return (
-    (!!resolved.qty && resolved.qty > MIN_QTY_BTC && qtyMissing) ||
+    (!!resolved.qty && btcToSats(resolved.qty) > 0 && qtyMissing) ||
     (!!resolved.direction && directionMissing)
   );
 }
@@ -1107,6 +1206,8 @@ type VirtualLotSummary = {
   pending: number;
   direction: 'LONG' | 'SHORT' | null;
   openQty: number;
+  signedOpenQty: number;
+  directionConflict: boolean;
 };
 
 type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
@@ -1118,14 +1219,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private activeTrading: ExecutionTradingClient;
   private readonly positionRuntime = new Map<string, PositionRuntime>();
   private readonly exitingLots = new Set<string>();
-  /**
-   * Dust sweep in-flight dedupe — keyed by `${userId}:${cycleId}`. Prevents
-   * stacking duplicate market-close orders for the same dust lot within a
-   * single tick window (matches the cancelStillLive L2104 defer pattern: a
-   * failed sweep is logged and retried on the next tick, never re-thrown).
-   * Cleared after each sweep attempt (success or failure).
-   */
-  private readonly dustSweepInFlight = new Set<string>();
   private running = false;
   private wakeQueued = false;
   private tickStartedAtMs = 0;
@@ -1814,7 +1907,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     instance: TradingAgentInstance,
     simActive = false,
   ) {
-    const exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED && !simActive;
+    let exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED && !simActive;
     const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
     const simState = simActive ? readCopyRelaySimState(instance.dashboardState) : null;
     const participantSince =
@@ -1848,6 +1941,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.warn(`Bitfinex prep ${instance.userId}: ${msg}`);
+        await this.pauseRelayForPositionMismatch(
+          instance,
+          `BITFINEX_PREP_FAILED: exchange orders or margin state is unknown; relay paused. ${msg}`,
+        );
+        return;
       }
     }
 
@@ -1869,7 +1967,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
 
     this.currentStage = 'RECONCILE_EXCHANGE_FLAT';
-    await this.reconcileImmediateExchangeFlat(agentId, instance.userId, creds, participantSince);
+    const exchangePositionReadable = await this.reconcileImmediateExchangeFlat(
+      agentId,
+      instance,
+      creds,
+      participantSince,
+      simActive,
+    );
+    if (!exchangePositionReadable) return;
 
     // Phase 2 — Layer B (NestJS Live Copy) reconcile-adopt pass. Re-arms
     // protective stops for OPEN participants whose meta.stopOrderId died
@@ -1918,6 +2023,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[RECONCILE-ADOPT] orphan adoption loop error ${instance.userId}: ${msg}`);
     });
+
+    if (!simActive) {
+      const currentStatus = await this.prisma.tradingAgentInstance.findUnique({
+        where: { id: instance.id },
+        select: { status: true },
+      });
+      if (!currentStatus) return;
+      exitOnly = currentStatus.status !== TradingAgentInstanceStatus.ACTIVE;
+    }
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -2131,7 +2245,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     this.currentStage = 'RECONCILE_LOT_LEDGER';
-    await this.reconcileLotLedger(
+    const ledgerReconciled = await this.reconcileLotLedger(
       agentId,
       instance,
       openParticipantAfter,
@@ -2139,6 +2253,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       managedOrderIds,
       simActive,
     );
+    if (!ledgerReconciled) return;
 
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
@@ -2245,6 +2360,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? Number.parseInt(botMaxRaw, 10)
           : null;
 
+    // A fail-closed path can pause/disarm the relay during this tick. Never
+    // reuse the status captured at tick start when deciding whether entries
+    // may run.
+    const currentInstanceState = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { status: true },
+    });
+    if (!currentInstanceState) return;
+    const exitOnlyNow =
+      !simActive && currentInstanceState.status !== TradingAgentInstanceStatus.ACTIVE;
+
     // Phase 0 — shadow-diff observability. Compares the showcase book (from
     // the state already fetched above) against the copy's ledger. Pure
     // observability: no exchange calls, no behavior change, never throws.
@@ -2255,14 +2381,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       canonicalSignedBook,
       openParticipantAfter,
       execMetaById,
-      !exitOnly,
+      !exitOnlyNow,
     ).catch((err) => {
       this.logger.warn(
         `[MIRROR-DIFF] snapshot failed ${instance.userId}: ${err instanceof Error ? err.message : err}`,
       );
     });
 
-    if (exitOnly) {
+    if (exitOnlyNow) {
       this.currentStage = 'PERSIST_PAUSED_CAPACITY';
       await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
       if (managedOpenTrade) {
@@ -2290,7 +2416,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       managedOrderIds,
       marginCap,
       maxConcurrent,
-      exitOnly,
+      exitOnlyNow,
       simActive,
     ).catch((err) => {
       this.logger.warn(
@@ -2950,13 +3076,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<VirtualLotSummary> {
     let open = 0;
     let pending = 0;
-    let openQty = 0;
+    let openQtySats = 0;
+    let signedOpenQtySats = 0;
     let direction: 'LONG' | 'SHORT' | null = null;
+    let directionConflict = false;
 
     for (const p of participants) {
       const meta = await this.loadExecutionMeta(p.id);
       let qty = meta.qty ?? 0;
-      if (qty <= MIN_QTY_BTC && meta.margin_usd && meta.limitPrice) {
+      if (btcToSats(qty) === 0 && meta.margin_usd && meta.limitPrice) {
         qty = computeQty(
           meta.margin_usd,
           resolveSubscriberLeverage(),
@@ -2965,17 +3093,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
       }
       if (!meta.direction) continue;
-      if (direction != null && meta.direction !== direction) continue;
-      direction = meta.direction;
+      if (direction != null && meta.direction !== direction) {
+        directionConflict = true;
+      } else if (direction == null) {
+        direction = meta.direction;
+      }
       if (p.status === SignalCycleStatus.OPEN) {
         open += 1;
-        openQty += qty;
+        const qtySats = Math.abs(btcToSats(qty));
+        openQtySats += qtySats;
+        signedOpenQtySats += meta.direction === 'LONG' ? qtySats : -qtySats;
       } else if (p.status === SignalCycleStatus.PENDING_ENTRY) {
         pending += 1;
       }
     }
 
-    return { open, pending, direction, openQty };
+    return {
+      open,
+      pending,
+      direction,
+      openQty: satsToBtc(openQtySats),
+      signedOpenQty: satsToBtc(signedOpenQtySats),
+      directionConflict,
+    };
   }
 
   private async persistCapacityState(
@@ -3047,12 +3187,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     managedOrderIds: Set<number>,
   ): Promise<Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string; cid?: number; createdAtMs?: number }>> {
     if (instance.exchangeProvider !== 'bitfinex') return [];
-    const orders = await this.activeTrading.listActiveOrders(creds).catch((err) => {
+    let orders: Awaited<ReturnType<ExecutionTradingClient['listActiveOrders']>>;
+    try {
+      orders = await this.activeTrading.listActiveOrders(creds);
+    } catch (err) {
+      const message =
+        `BITFINEX_ACTIVE_ORDER_READ_FAILED: unmanaged-order state is unknown; relay paused. ` +
+        `${err instanceof Error ? err.message : String(err)}`;
       this.logger.warn(
-        `Orphan surfacer ${instance.userId}: listActiveOrders failed: ${err instanceof Error ? err.message : err}`,
+        `Orphan surfacer ${instance.userId}: ${message}`,
       );
-      return [] as Awaited<ReturnType<typeof this.activeTrading.listActiveOrders>>;
-    });
+      await this.pauseRelayForPositionMismatch(instance, message);
+      throw err;
+    }
     const foreign = orders.filter((o) => !managedOrderIds.has(o.id));
     if (foreign.length > 0) {
       await this.persistOrphanOrderIds(instance.id, foreign).catch(() => {
@@ -3130,20 +3277,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     instance: TradingAgentInstance,
     participants: Array<{ id: string; status: SignalCycleStatus }>,
     creds: ExchangeCredentials,
-    managedOrderIds: Set<number>,
+    _managedOrderIds: Set<number>,
     simActive: boolean,
-  ) {
-    const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
+  ): Promise<boolean> {
     const summary = await this.buildVirtualLotSummary(participants);
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-    const exchangeQty = position ? effectiveExchangeQtyBtc(position.amount) : 0;
+    let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch (err) {
+      const message =
+        `EXCHANGE_POSITION_READ_FAILED: Bitfinex position is unknown; relay paused. ` +
+        `${err instanceof Error ? err.message : String(err)}`;
+      await this.pauseRelayForPositionMismatch(instance, message);
+      return false;
+    }
+
+    const signedExchangeAmount = satsToBtc(btcToSats(position?.amount ?? 0));
+    const rawExchangeQty = satsToBtc(Math.abs(btcToSats(signedExchangeAmount)));
     const ledgerOpenQty = summary.openQty;
-    const delta = exchangeQty - ledgerOpenQty;
+    const signedLedgerOpenAmount = summary.signedOpenQty;
+    const delta = satsToBtc(
+      relayPositionDeltaSats(signedExchangeAmount, signedLedgerOpenAmount),
+    );
     const mark = await this.activeTrading.getMarkPrice().catch(() => null);
 
     const reconcile = this.relaySim.buildReconcileSnapshot({
-      exchangePositionQty: exchangeQty,
+      exchangePositionQty: rawExchangeQty,
+      exchangePositionAmount: signedExchangeAmount,
       ledgerOpenQty,
+      ledgerOpenAmount: signedLedgerOpenAmount,
       openLots: summary.open,
       pendingLots: summary.pending,
       markPrice: mark,
@@ -3153,7 +3315,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       where: { id: instance.id },
       select: { dashboardState: true },
     });
-    if (!fresh) return;
+    if (!fresh) return false;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     const simActiveNow = isCopyRelaySimActive(dash);
     await this.prisma.tradingAgentInstance.update({
@@ -3173,102 +3335,61 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       },
     });
 
-    // Dust sweep — aggregate position check. If the merged exchange position is
-    // below MIN_QTY_BTC but non-zero, sweep it via market close so the user
-    // doesn't have to manually flatten a sub-threshold sliver. This catches
-    // dust that the per-participant reconcileManualClose path missed (e.g. all
-    // lots already CLOSED on the ledger but the exchange still shows residual
-    // qty from rounding / partial fills). Per-participant dust is handled in
-    // reconcileManualClose; this is the aggregate backstop. Wrapped in
-    // try/catch — never throws out of the reconcile loop.
-    if (exchangeQty > 0 && exchangeQty < MIN_QTY_BTC) {
-      try {
-        await this.sweepAggregateDust(
-          agentId,
-          instance,
-          participants,
-          creds,
-          position,
-          exchangeQty,
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Aggregate dust sweep ${instance.userId}: unexpected error — ${err instanceof Error ? err.message : err}`,
-        );
-      }
+    if (summary.directionConflict) {
+      const message =
+        'LEDGER_DIRECTION_CONFLICT: simultaneous LONG and SHORT virtual lots cannot be ' +
+        'represented by one merged BTC-PERP position; relay paused.';
+      await this.pauseRelayForPositionMismatch(instance, message);
+      return false;
     }
 
-    if (Math.abs(delta) <= MIN_QTY_BTC) return;
+    if (btcToSats(delta) === 0) return true;
 
     this.logger.warn(
-      `Virtual lot drift ${instance.userId}: exchange ${exchangeQty.toFixed(5)} BTC vs ledger ${ledgerOpenQty.toFixed(5)} BTC (Δ ${delta.toFixed(5)}, ${summary.open} open)`,
+      `Virtual lot drift ${instance.userId}: exchange ${signedExchangeAmount.toFixed(8)} BTC vs ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}, ${summary.open} open)`,
     );
-
-    if (delta > MIN_QTY_BTC) {
-      const pendingCount = summary.pending;
-      if (pendingCount === 0 && summary.open === 0) {
-        if (simActive && position) {
-          try {
-            await this.activeTrading.submitMarketClose(creds, {
-              symbol: position.symbol,
-              positionDirection: position.direction,
-              qty: exchangeQty,
-            });
-            this.logger.warn(
-              `Sim orphan exchange heal ${instance.userId}: flattened ${exchangeQty.toFixed(5)} BTC paper position (ledger empty)`,
-            );
-            await this.persistSimTickState(agentId, instance);
-            await this.prisma.tradingAgentInstance.update({
-              where: { id: instance.id },
-              data: { lastError: null },
-            });
-            return;
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.logger.error(`Sim orphan flatten failed ${instance.userId}: ${msg}`);
-          }
-        }
-        await this.prisma.tradingAgentInstance.update({
-          where: { id: instance.id },
-          data: {
-            lastError: `UNATTRIBUTED_EXCHANGE_EXPOSURE: exchange ${exchangeQty.toFixed(5)} BTC with no ledger lots — manual add detected; relay will not synthesize lots.`,
-          },
-        });
-      } else {
-        await this.reconcileUnattributedExchangeFills(
-          agentId,
-          instance.userId,
-          creds,
-          managedOrderIds,
-        );
-      }
-    }
-
-    if (delta < -MIN_QTY_BTC) {
-      await this.closeOrphanLedgerLots(
-        agentId,
-        instance.userId,
-        Math.abs(delta),
-        participants,
-        creds,
-        venue,
-      );
-    }
 
     if (reconcile.alert) {
       this.cycleAudit.stage('RECONCILE', {
         userId: instance.userId,
         agentId,
-        detail: `exchange ${exchangeQty.toFixed(5)} ledger ${ledgerOpenQty.toFixed(5)} Δ ${delta.toFixed(5)}`,
+        detail: `exchange ${signedExchangeAmount.toFixed(8)} ledger ${signedLedgerOpenAmount.toFixed(8)} Δ ${delta.toFixed(8)}`,
         meta: { reconcile },
       });
-      await this.prisma.tradingAgentInstance.update({
-        where: { id: instance.id },
-        data: {
-          lastError: `RECONCILE ALERT: exchange ${exchangeQty.toFixed(4)} BTC ≠ ledger ${ledgerOpenQty.toFixed(4)} BTC (Δ ${delta.toFixed(4)})`,
-        },
-      });
     }
+
+    if (
+      simActive &&
+      position &&
+      summary.open === 0 &&
+      summary.pending === 0
+    ) {
+      try {
+        await this.activeTrading.submitMarketClose(creds, {
+          symbol: position.symbol,
+          positionDirection: position.direction,
+          qty: rawExchangeQty,
+        });
+        this.logger.warn(
+          `Sim orphan exchange heal ${instance.userId}: flattened ${rawExchangeQty.toFixed(8)} BTC paper position (ledger empty)`,
+        );
+        await this.persistSimTickState(agentId, instance);
+      } catch (err) {
+        this.logger.error(
+          `Sim orphan flatten failed ${instance.userId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      return false;
+    }
+
+    const message =
+      `RECONCILE ALERT: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
+      `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
+      'Relay paused; no blind close or ledger rewrite was attempted.';
+    await this.pauseRelayForPositionMismatch(instance, message);
+    return false;
   }
 
   private async closeOrphanLedgerLots(
@@ -3279,6 +3400,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     venue = 'bitfinex',
   ) {
+    await Promise.reject(
+      new Error(
+        'PARTIAL_LEDGER_EXIT_RECONCILIATION_DISABLED: a partial exchange deficit cannot be safely attributed to a whole virtual lot.',
+      ),
+    );
+
     let remaining = excessBtc;
     const openRows = participants.filter((p) => p.status === SignalCycleStatus.OPEN);
     for (const row of openRows) {
@@ -3343,9 +3470,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           );
           continue;
         }
-        const filledQty =
-          (orderResting.amountOrig ?? 0) - (orderResting.amount ?? 0);
-        if (filledQty > MIN_QTY_BTC) {
+        const filledQty = satsToBtc(exchangeOrderFilledQtySats(orderResting));
+        if (btcToSats(filledQty) > 0) {
           // Partial/full fill — let reconcileFilledParticipants heal as a fill.
           this.logger.warn(
             `[RECONCILE-ADOPT] orphan oid=${oid} has filled qty=${filledQty.toFixed(5)} — NOT cancelling (defer to fill reconcile) ${userId} participant=${row.id}`,
@@ -4175,8 +4301,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       ? await this.activeTrading.findOrder(creds, orderId)
       : await this.activeTrading.findOrder(creds, orderId).catch(() => null);
     if (order) {
-      const filled = Math.abs(order.amountOrig) - Math.abs(order.amount);
-      if (filled > MIN_QTY_BTC) {
+      const filled = satsToBtc(exchangeOrderFilledQtySats(order));
+      if (btcToSats(filled) > 0) {
         return {
           filledQty: filled,
           fillPrice: order.price > 0 ? order.price : (meta.limitPrice ?? 0),
@@ -4425,6 +4551,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       .catch(() => {
         /* best-effort — must not abort the tick */
       });
+  }
+
+  /** Fail closed on any raw exchange-versus-ledger position mismatch. */
+  private async pauseRelayForPositionMismatch(
+    instance: TradingAgentInstance,
+    message: string,
+  ): Promise<void> {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    const dash = (fresh?.dashboardState ?? instance.dashboardState ?? {}) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        status: TradingAgentInstanceStatus.PAUSED,
+        lastError: message.slice(0, 500),
+        dashboardState: applyDashboardPatch(dash, {
+          relayExecutionMode: 'PAUSED',
+          relayArmedAt: null,
+          realTradingConfirmedAt: null,
+          positionMismatchDetectedAt: new Date().toISOString(),
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
   }
 
   private async monitorEntry(
@@ -5057,7 +5208,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         row.cycle.intentEnvelope,
         marginCap,
       );
-      if (meta.qty && meta.qty > MIN_QTY_BTC && meta.direction) continue;
+      if (meta.qty && btcToSats(meta.qty) > 0 && meta.direction) continue;
 
       const ageMs = Date.now() - row.updatedAt.getTime();
       if (ageMs < 120_000) continue;
@@ -5707,11 +5858,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
      * responsible for guaranteeing it is never WIDER than the standard SL
      * (e.g. a profit-lock rung price for an in-profit orphan). Omit to keep
      * the legacy behaviour used by every other call site.
-     */
+    */
     stopPriceOverride?: number,
+    qtyOverride?: number,
   ) {
     if (!meta.direction) return;
-    const qty = meta.qty ?? MIN_QTY_BTC;
+    const qty = qtyOverride ?? meta.qty ?? MIN_QTY_BTC;
     const entry = fillPrice ?? meta.limitPrice;
     if (!entry || entry <= 0) return;
 
@@ -5912,8 +6064,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
         return;
       }
-      const filledQty = Math.abs(resting.amountOrig) - Math.abs(resting.amount);
-      if (filledQty > MIN_QTY_BTC) {
+      const filledQty = satsToBtc(exchangeOrderFilledQtySats(resting));
+      if (btcToSats(filledQty) > 0) {
         await this.recordCancelRaceFill(
           agentId,
           userId,
@@ -6281,6 +6433,174 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
   }
 
+  private async expectedRemainingLedgerAmount(
+    agentId: string,
+    userId: string,
+    exitingParticipantId: string,
+  ): Promise<number | null> {
+    const rows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        id: { not: exitingParticipantId },
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId },
+      },
+      select: { id: true },
+    });
+    let signedSats = 0;
+    for (const row of rows) {
+      if (await this.hasParticipantExited(row.id)) continue;
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.direction || !meta.qty || btcToSats(meta.qty) === 0) return null;
+      const qtySats = Math.abs(btcToSats(meta.qty));
+      signedSats += meta.direction === 'LONG' ? qtySats : -qtySats;
+    }
+    return satsToBtc(signedSats);
+  }
+
+  private async pauseUserRelayForPositionMismatch(
+    userId: string,
+    agentId: string,
+    message: string,
+  ): Promise<void> {
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: { userId, agentId, exchangeProvider: 'bitfinex' },
+    });
+    for (const instance of instances) {
+      await this.pauseRelayForPositionMismatch(instance, message);
+    }
+  }
+
+  /**
+   * A close acknowledgement can time out after Bitfinex has partially reduced
+   * the position. Re-arm only the exchange-verified remainder owned by the
+   * exiting lot; never restore the lot's original full-size stop.
+   */
+  private async ensureProtectiveStopForVerifiedExitResidual(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope,
+    fillPrice: number | undefined,
+    stopOrderIds: Iterable<number>,
+  ): Promise<void> {
+    if (!meta.direction) return;
+
+    for (const stopOrderId of new Set(stopOrderIds)) {
+      const liveStop = await this.activeTrading.findOrder(creds, stopOrderId);
+      if (liveStop) return;
+    }
+
+    const remainingLedgerAmount = await this.expectedRemainingLedgerAmount(
+      agentId,
+      userId,
+      participantId,
+    );
+    if (remainingLedgerAmount == null) return;
+    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const target = relayLotExitTarget({
+      currentAmount: position?.amount ?? 0,
+      remainingLedgerAmount,
+      exitingLedgerQty: meta.qty ?? 0,
+      direction: meta.direction,
+    });
+    if (!target.ok || btcToSats(target.closeQty) === 0) return;
+
+    await this.ensureProtectiveStop(
+      agentId,
+      userId,
+      cycleId,
+      participantId,
+      { ...meta, stopOrderId: undefined },
+      creds,
+      intent,
+      fillPrice,
+      undefined,
+      target.closeQty,
+    );
+  }
+
+  private async closeParticipantPositionToLedgerTarget(
+    agentId: string,
+    userId: string,
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    leverage: number,
+    stopOrderIds: Iterable<number>,
+  ): Promise<RelayLotExitTarget> {
+    if (!meta.direction) {
+      throw new Error('EXIT_TARGET_MISSING_DIRECTION');
+    }
+    const remainingLedgerAmount = await this.expectedRemainingLedgerAmount(
+      agentId,
+      userId,
+      participantId,
+    );
+    if (remainingLedgerAmount == null) {
+      throw new Error('EXIT_TARGET_OTHER_LOT_METADATA_INCOMPLETE');
+    }
+    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const target = relayLotExitTarget({
+      currentAmount: position?.amount ?? 0,
+      remainingLedgerAmount,
+      exitingLedgerQty: meta.qty ?? 0,
+      direction: meta.direction,
+    });
+    if (!target.ok) {
+      const message =
+        `${target.reason}: exchange ${target.currentAmount.toFixed(8)} BTC, ` +
+        `post-exit ledger target ${target.targetAmount.toFixed(8)} BTC.`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
+      throw new Error(message);
+    }
+    for (const stopOrderId of new Set(stopOrderIds)) {
+      await this.cancelManagedOrderGone(
+        creds,
+        stopOrderId,
+        `EXIT-TARGET cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
+      ).then((result) => {
+        if (!result.gone) {
+          throw new Error(
+            `EXIT_TARGET_STOP_CANCEL_FAILED oid=${stopOrderId} reason=${result.reason ?? 'unknown'}`,
+          );
+        }
+      });
+    }
+    if (btcToSats(target.closeQty) === 0) return target;
+
+    if (target.finalAccountFlatten) {
+      await this.activeTrading.submitPositionFlatten(creds, {
+        positionDirection: meta.direction,
+        qty: target.closeQty,
+        leverage,
+      });
+    } else {
+      await this.activeTrading.submitMarketClose(creds, {
+        positionDirection: meta.direction,
+        qty: target.closeQty,
+        leverage,
+      });
+    }
+    const confirmed = await this.waitForMarketCloseConfirmation(
+      creds,
+      meta.direction,
+      Math.abs(target.currentAmount),
+      target.closeQty,
+    );
+    if (!confirmed) {
+      const message =
+        `MARKET_CLOSE_NOT_CONFIRMED_BY_EXCHANGE_POSITION: expected ` +
+        `${target.targetAmount.toFixed(8)} BTC after closing ${target.closeQty.toFixed(8)} BTC.`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
+      throw new Error(message);
+    }
+    return target;
+  }
+
   private async waitForMarketCloseConfirmation(
     creds: ExchangeCredentials,
     direction: 'LONG' | 'SHORT',
@@ -6345,9 +6665,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         participant.fillPrice != null
           ? Number(participant.fillPrice)
           : meta.limitPrice ?? meta.fillPrice ?? 0;
+      if (!meta.qty || !meta.direction) return false;
+      const leverage =
+        resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
 
       const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-      if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
+      if (!position || btcToSats(position.amount) === 0) {
+        try {
+          await this.closeParticipantPositionToLedgerTarget(
+            agentId,
+            userId,
+            participant.id,
+            meta,
+            creds,
+            leverage,
+            meta.stopOrderId ? [meta.stopOrderId] : [],
+          );
+        } catch (err) {
+          await this.pauseUserRelayForPositionMismatch(
+            userId,
+            agentId,
+            `ALREADY_FLAT_RECONCILIATION_FAILED cycle=${cycle.id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ).catch(() => {});
+          this.logger.warn(
+            `Already-flat target verification ${userId} cycle=${cycle.id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          return false;
+        }
         const exitPrice =
           opts?.showcaseExitPrice ??
           (await this.activeTrading.getMarkPrice().catch(() => fillPrice || 0));
@@ -6400,42 +6748,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return true;
       }
 
-      if (!meta.qty || !meta.direction) return false;
-
       let exitPrice = fillPrice ?? 0;
-      const leverage =
-        resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
-      const beforeQty = Math.abs(position.amount);
-      const closeQty = Math.min(meta.qty, beforeQty);
+      let closeTarget: RelayLotExitTarget;
       try {
-        if (meta.stopOrderId) {
-          try {
-            await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
-          } catch {
-            /* may have fired */
-          }
-        }
         exitPrice = await this.activeTrading.getMarkPrice();
-        if (closeQty >= MIN_QTY_BTC) {
-          await this.activeTrading.submitMarketClose(creds, {
-            positionDirection: meta.direction,
-            qty: closeQty,
-            leverage,
-          });
-          const confirmed = await this.waitForMarketCloseConfirmation(
-            creds,
-            meta.direction,
-            beforeQty,
-            closeQty,
-          );
-          if (!confirmed) {
-            throw new Error('MARKET_CLOSE_NOT_CONFIRMED_BY_EXCHANGE_POSITION');
-          }
-        }
+        closeTarget = await this.closeParticipantPositionToLedgerTarget(
+          agentId,
+          userId,
+          participant.id,
+          meta,
+          creds,
+          leverage,
+          meta.stopOrderId ? [meta.stopOrderId] : [],
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${msg}`);
-        await this.ensureProtectiveStop(
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `EXIT_RECONCILIATION_FAILED cycle=${cycle.id}: ${msg}`,
+        ).catch(() => {});
+        await this.ensureProtectiveStopForVerifiedExitResidual(
           agentId,
           userId,
           cycle.id,
@@ -6444,9 +6778,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           creds,
           cycle.intentEnvelope as SignalIntentEnvelope,
           fillPrice || undefined,
+          meta.stopOrderId ? [meta.stopOrderId] : [],
         ).catch(() => {});
         return false;
       }
+      const closeQty = closeTarget.closeQty;
 
       const direction = meta.direction;
       const pnlUsd =
@@ -7911,9 +8247,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     this.exitingLots.add(participantId);
     try {
-    const positionAmount = (await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0;
-    const beforeQty = Math.abs(positionAmount);
-    const closeQty = Math.min(meta.qty, beforeQty);
+    let closeQty = 0;
+    const stopIdsToCancel = new Set<number>();
+    if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
 
     try {
       // Option A — cancel BOTH the persisted meta.stopOrderId AND any tracked
@@ -7923,42 +8259,34 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // stop fire mid-close and realize the wrong rung.
       const runtimeTrack = this.positionRuntime.get(participantId);
       const trackedStopId = runtimeTrack?.currentStopOrderId;
-      const stopIdsToCancel = new Set<number>();
-      if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
       if (trackedStopId) stopIdsToCancel.add(trackedStopId);
-      for (const stopId of stopIdsToCancel) {
-        try {
-          await this.activeTrading.cancelOrder(creds, stopId);
-        } catch {
-          /* may have fired */
-        }
-      }
-      if (closeQty >= MIN_QTY_BTC) {
-        await this.activeTrading.submitMarketClose(creds, {
-          positionDirection: meta.direction,
-          qty: closeQty,
-          leverage: opts.leverage,
-        });
-        const confirmed = await this.waitForMarketCloseConfirmation(
-          creds,
-          meta.direction,
-          beforeQty,
-          closeQty,
-        );
-        if (!confirmed) {
-          throw new Error('MARKET_CLOSE_NOT_CONFIRMED_BY_EXCHANGE_POSITION');
-        }
-      }
+      const closeTarget = await this.closeParticipantPositionToLedgerTarget(
+        agentId,
+        userId,
+        participantId,
+        meta,
+        creds,
+        opts.leverage,
+        stopIdsToCancel,
+      );
+      closeQty = closeTarget.closeQty;
     } catch (err) {
       this.logger.warn(
         `Lot close ${userId} cycle=${cycleId} ${opts.reason}: ${err instanceof Error ? err.message : err}`,
       );
+      await this.pauseUserRelayForPositionMismatch(
+        userId,
+        agentId,
+        `EXIT_RECONCILIATION_FAILED cycle=${cycleId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      ).catch(() => {});
       const cycleRecord = await this.prisma.signalCycle.findUnique({
         where: { id: cycleId },
         select: { intentEnvelope: true },
       }).catch(() => null);
       if (cycleRecord) {
-        await this.ensureProtectiveStop(
+        await this.ensureProtectiveStopForVerifiedExitResidual(
           agentId,
           userId,
           cycleId,
@@ -7967,6 +8295,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           creds,
           cycleRecord.intentEnvelope as SignalIntentEnvelope,
           opts.fillPrice,
+          stopIdsToCancel,
         ).catch(() => {});
       }
       return false;
@@ -7981,7 +8310,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // (what the exchange would have realized on this lot's share of the merged position).
     let pnlUsd: number;
     let pnlSource: 'open_position' | 'exchange_realised' | 'reconstructed';
-    if (closeQty < MIN_QTY_BTC) {
+    if (btcToSats(closeQty) === 0) {
       const flat = await this.resolveAlreadyFlatPnl(
         agentId,
         userId,
@@ -8121,13 +8450,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    */
   private async reconcileImmediateExchangeFlat(
     agentId: string,
-    userId: string,
+    instance: TradingAgentInstance,
     creds: ExchangeCredentials,
     participantScope: { createdAt?: { gte: Date } } = {},
-  ) {
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
-    const exchangeQty = position ? Math.abs(position.amount) : 0;
-    if (exchangeQty >= MIN_QTY_BTC) return;
+    simActive = false,
+  ): Promise<boolean> {
+    const userId = instance.userId;
+    let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch (err) {
+      const message =
+        `EXCHANGE_POSITION_READ_FAILED (${simActive ? 'simulation' : 'live'}): ` +
+        `cannot prove Bitfinex flat; relay paused. ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      await this.pauseRelayForPositionMismatch(instance, message);
+      return false;
+    }
+    if (position && btcToSats(position.amount) !== 0) return true;
 
     const openRows = await this.prisma.signalCycleParticipant.findMany({
       where: {
@@ -8138,8 +8479,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       },
       include: { cycle: true },
     });
-    if (!openRows.length) return;
+    if (!openRows.length) return true;
 
+    let safeToContinue = true;
     for (const row of openRows) {
       if (await this.hasParticipantExited(row.id)) continue;
       const meta = await this.loadExecutionMeta(row.id);
@@ -8178,6 +8520,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // executed any quantity, leave it alone so reconcileFilledParticipants
       // heals it as a fill. Use the retry helper, not a bare cancelOrder.
       const cancelledOids: number[] = [];
+      let cancelStillLive = false;
       for (const oid of [meta.bitfinexOrderId, meta.stopOrderId]) {
         if (oid == null) continue;
         let orderResting: { amount: number; amountOrig: number } | null = null;
@@ -8193,9 +8536,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           );
           continue;
         }
-        const filledQty =
-          (orderResting.amountOrig ?? 0) - (orderResting.amount ?? 0);
-        if (filledQty > MIN_QTY_BTC) {
+        const filledQty = satsToBtc(exchangeOrderFilledQtySats(orderResting));
+        if (btcToSats(filledQty) > 0) {
           // Partial/full fill — let reconcileFilledParticipants heal as a fill.
           this.logger.warn(
             `[IMMEDIATE-FLAT] oid=${oid} has filled qty=${filledQty.toFixed(5)} — NOT cancelling (defer to fill reconcile) ${userId} participant=${row.id}`,
@@ -8213,10 +8555,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (result.gone) {
           cancelledOids.push(oid);
         } else {
+          cancelStillLive = true;
           this.logger.warn(
             `[IMMEDIATE-FLAT] cancel oid=${oid} FAILED and order still live (reason=${result.reason ?? 'unknown'} attempts=${result.attempts}) — deferring to next tick ${userId} participant=${row.id}`,
           );
         }
+      }
+      if (cancelStillLive) {
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `IMMEDIATE_FLAT_CANCEL_FAILED cycle=${row.cycleId}; managed order remains live.`,
+        ).catch(() => {});
+        safeToContinue = false;
+        continue;
       }
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
@@ -8234,6 +8586,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         `Immediate flat reconcile ${userId} cycle=${row.cycleId} — exchange 0, ledger OPEN closed (cancelled_oids=[${cancelledOids.join(',')}])`,
       );
     }
+    return safeToContinue;
   }
 
   /** Scenario 5 — cancel resting entry limits linked to a showcase cycle before exit. */
@@ -8283,15 +8636,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           `Lot qty drift ${userId} cycle=${cycle.id}: ledger lot ${meta.qty.toFixed(5)} > exchange ${exchangeQty.toFixed(5)} — partial external close?`,
         );
       }
-      // Dust sweep — residual exchange qty below MIN_QTY_BTC. Hands-free flatten
-      // so the user doesn't have to manually close sub-threshold slivers left
-      // by partial fills / stop scraps. Returns true only if it placed a
-      // market order; either way we return false here so the reconcile loop
-      // continues and the next tick confirms the flatten (matches the
-      // cancelStillLive L2104 defer-to-next-tick pattern).
-      if (exchangeQty > 0 && exchangeQty < MIN_QTY_BTC) {
-        await this.sweepDustPosition(agentId, userId, cycle, participant, meta, creds);
-      }
+      // This may be a legitimate minimum-size filled lot or a residual on top
+      // of another merged lot. Exit reconciliation owns cleanup; never sweep
+      // a live position merely because its size is below the new-entry minimum.
       return false;
     }
 
@@ -8342,248 +8689,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `Hire reconcile manual close ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`,
     );
     return true;
-  }
-
-  /**
-   * Dust sweep — hands-free flatten of residual exchange qty below MIN_QTY_BTC.
-   *
-   * Called from reconcileManualClose (per-participant, when the exchange
-   * position matches direction but is below threshold) and reconcileLotLedger
-   * (aggregate, when the merged exchange position is dust). Emits a DUST_SWEEP
-   * audit event every time; places a flatten market order only when the
-   * RELAY_AUTO_DUST_SWEEP kill switch is enabled (default on).
-   *
-   * Safety guards mirror the existing money-path patterns:
-   *  - participant must be OPEN or CLOSED (never PENDING_ENTRY)
-   *  - abs amount strictly between 0 and MIN_QTY_BTC
-   *  - cancel any resting stop on the lot first (L6284-6290 pattern)
-   *  - in-flight dedupe via dustSweepInFlight prevents stacking duplicate
-   *    market orders within the same tick window
-   *  - every step wrapped in try/catch; never throws out of the reconcile path
-   *
-   * Returns true only when a sweep market order was placed this call.
-   */
-  private async sweepDustPosition(
-    agentId: string,
-    userId: string,
-    cycle: { id: string },
-    participant: {
-      id: string;
-      status: SignalCycleStatus;
-      fillPrice?: { toNumber?: () => number } | null;
-    },
-    meta: ExecutionPayload,
-    creds: ExchangeCredentials,
-  ): Promise<boolean> {
-    const key = `${userId}:${cycle.id}`;
-    if (this.dustSweepInFlight.has(key)) return false;
-
-    const sweepEnabled =
-      (this.config.get<string>('RELAY_AUTO_DUST_SWEEP') ?? '1').trim() !== '0';
-
-    let position: { amount: number; direction?: 'LONG' | 'SHORT' } | null = null;
-    try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
-    } catch (err) {
-      this.logger.warn(
-        `Dust sweep ${userId} cycle=${cycle.id}: position fetch failed — ${err instanceof Error ? err.message : err}`,
-      );
-      await this.recordDustSweepEvent(agentId, userId, cycle.id, {
-        dustQty: 0,
-        marketOrderId: undefined,
-        sweepEnabled,
-        reason: 'position_fetch_failed',
-      });
-      return false;
-    }
-
-    const dustQty = position ? Math.abs(position.amount) : 0;
-    if (dustQty <= 0 || dustQty >= MIN_QTY_BTC) {
-      return false;
-    }
-
-    // PENDING_ENTRY participants have no real exposure to sweep yet.
-    if (
-      participant.status !== SignalCycleStatus.OPEN &&
-      participant.status !== SignalCycleStatus.CLOSED
-    ) {
-      return false;
-    }
-
-    this.dustSweepInFlight.add(key);
-    try {
-      // Cancel any resting stop on the lot first (reconcileManualClose L6284-6290
-      // pattern). Never let a stale protective stop fire mid-sweep and realize
-      // the wrong residual qty.
-      if (meta.stopOrderId) {
-        try {
-          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
-        } catch {
-          /* stop may have filled — safe to proceed, market close is authoritative */
-        }
-      }
-
-      if (!sweepEnabled) {
-        this.logger.warn(
-          `Dust detected ${userId} cycle=${cycle.id}: ${dustQty.toFixed(5)} BTC below MIN_QTY_BTC — sweep disabled (RELAY_AUTO_DUST_SWEEP=0), surfacing audit only`,
-        );
-        await this.recordDustSweepEvent(agentId, userId, cycle.id, {
-          dustQty,
-          marketOrderId: undefined,
-          sweepEnabled: false,
-          reason: 'auto_flatten_below_min_qty',
-        });
-        return false;
-      }
-
-      // Flatten via market close — negate the residual position amount. Reuses
-      // the same submitMarketClose path as closeVirtualLot (L5959) and the sim
-      // orphan heal (L1927). Direction is inferred from the live position sign
-      // so we close the correct way even if meta.direction is stale.
-      const positionDirection: 'LONG' | 'SHORT' =
-        position && position.amount < 0 ? 'SHORT' : (meta.direction ?? 'LONG');
-      let marketOrderId: number | undefined;
-      try {
-        marketOrderId = await this.activeTrading.submitMarketClose(creds, {
-          positionDirection,
-          qty: dustQty,
-        });
-      } catch (err) {
-        // Idempotency: never retry aggressively — log and defer to next tick
-        // (cancelStillLive L2104 pattern). The reconcile loop will re-detect
-        // dust on the next pass and retry.
-        this.logger.warn(
-          `Dust sweep market order failed ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err} — deferring to next tick`,
-        );
-        await this.recordDustSweepEvent(agentId, userId, cycle.id, {
-          dustQty,
-          marketOrderId: undefined,
-          sweepEnabled: true,
-          reason: 'market_order_failed',
-        });
-        return false;
-      }
-
-      this.logger.warn(
-        `Dust sweep ${userId} cycle=${cycle.id}: flattened ${dustQty.toFixed(5)} BTC via market order ${marketOrderId}`,
-      );
-      await this.recordDustSweepEvent(agentId, userId, cycle.id, {
-        dustQty,
-        marketOrderId,
-        sweepEnabled: true,
-        reason: 'auto_flatten_below_min_qty',
-      });
-      return true;
-    } finally {
-      this.dustSweepInFlight.delete(key);
-    }
-  }
-
-  /** Best-effort DUST_SWEEP audit event — never throws. */
-  private async recordDustSweepEvent(
-    agentId: string,
-    userId: string,
-    cycleId: string,
-    payload: {
-      dustQty: number;
-      marketOrderId?: number;
-      sweepEnabled: boolean;
-      reason: string;
-    },
-  ): Promise<void> {
-    try {
-      await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'DUST_SWEEP', {
-        venue: 'bitfinex',
-        source: 'hire',
-        event: 'DUST_SWEEP',
-        dust_qty: Math.round(payload.dustQty * 1e8) / 1e8,
-        market_order_id: payload.marketOrderId,
-        reason: payload.reason,
-        sweep_enabled: payload.sweepEnabled,
-      });
-    } catch (err) {
-      this.logger.warn(
-        `DUST_SWEEP audit failed ${userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
-      );
-    }
-  }
-
-  /**
-   * Aggregate dust backstop — called from reconcileLotLedger when the merged
-   * exchange position is dust. If exactly one OPEN participant owns the lot,
-   * delegate to sweepDustPosition (which cancels stops + places market close).
-   * If no OPEN participant claims it (all CLOSED/EXPIRED on ledger), emit a
-   * detection-only DUST_SWEEP event so the operator can decide — synthesizing
-   * a lot from nothing is the reconcileUnattributedExchangeFills path's job.
-   */
-  private async sweepAggregateDust(
-    agentId: string,
-    instance: TradingAgentInstance,
-    participants: Array<{ id: string; status: SignalCycleStatus }>,
-    creds: ExchangeCredentials,
-    position: { amount: number; direction?: 'LONG' | 'SHORT'; symbol?: string } | null,
-    exchangeQty: number,
-  ): Promise<void> {
-    // Only sweep when the instance is ACTIVE — PAUSED is exit-only and a dust
-    // flatten is a new market order, which we don't place on pause.
-    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return;
-
-    const openParticipants = participants.filter(
-      (p) => p.status === SignalCycleStatus.OPEN,
-    );
-
-    if (openParticipants.length === 1) {
-      const p = openParticipants[0];
-      const meta = await this.loadExecutionMeta(p.id).catch(() => ({} as ExecutionPayload));
-      const participantRow = await this.prisma.signalCycleParticipant.findUnique({
-        where: { id: p.id },
-        select: { id: true, status: true, fillPrice: true, cycleId: true },
-      });
-      if (!participantRow) return;
-      await this.sweepDustPosition(
-        agentId,
-        instance.userId,
-        { id: participantRow.cycleId },
-        { id: p.id, status: p.status, fillPrice: participantRow.fillPrice },
-        meta,
-        creds,
-      );
-      return;
-    }
-
-    // No single OPEN owner — surface detection only (no synthesized lot).
-    const sweepEnabled =
-      (this.config.get<string>('RELAY_AUTO_DUST_SWEEP') ?? '1').trim() !== '0';
-    this.logger.warn(
-      `Dust detected ${instance.userId}: ${exchangeQty.toFixed(5)} BTC on exchange with ${openParticipants.length} OPEN lots — no single owner, surfacing audit only`,
-    );
-    // Use the first OPEN participant's cycle if available, else the instance's
-    // most recent cycle — DUST_SWEEP is audit-only here so the cycleId is for
-    // operator triage, not status transition.
-    let cycleIdForAudit: string | undefined;
-    if (openParticipants.length > 0) {
-      const row = await this.prisma.signalCycleParticipant.findUnique({
-        where: { id: openParticipants[0].id },
-        select: { cycleId: true },
-      });
-      cycleIdForAudit = row?.cycleId;
-    }
-    if (!cycleIdForAudit) {
-      const latest = await this.prisma.signalCycle.findFirst({
-        where: { agentId },
-        orderBy: { createdAt: 'desc' },
-        select: { id: true },
-      });
-      cycleIdForAudit = latest?.id;
-    }
-    if (cycleIdForAudit) {
-      await this.recordDustSweepEvent(agentId, instance.userId, cycleIdForAudit, {
-        dustQty: exchangeQty,
-        marketOrderId: undefined,
-        sweepEnabled,
-        reason: openParticipants.length === 0 ? 'no_open_owner' : 'multiple_open_owners',
-      });
-    }
   }
 
   private async monitorExit(
@@ -8983,7 +9088,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
   ): Promise<ExecutionPayload> {
     const meta = await this.loadExecutionMeta(participantId);
-    if (meta.qty && meta.qty > MIN_QTY_BTC && meta.direction) return meta;
+    if (meta.qty && btcToSats(meta.qty) > 0 && meta.direction) return meta;
 
     const intent = intentEnvelope as SignalIntentEnvelope;
     const direction = meta.direction ?? intent?.direction;
@@ -9003,11 +9108,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         : marginCap);
 
     let qty = meta.qty;
-    if ((!qty || qty <= MIN_QTY_BTC) && limitPrice && limitPrice > 0 && marginUsd > 0) {
+    if ((!qty || btcToSats(qty) === 0) && limitPrice && limitPrice > 0 && marginUsd > 0) {
       qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
     }
 
-    if (qty && qty > MIN_QTY_BTC && direction) {
+    if (qty && btcToSats(qty) > 0 && direction) {
       if (shouldPersistLotMetaRepair(meta, { qty, direction })) {
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
           venue: 'bitfinex',

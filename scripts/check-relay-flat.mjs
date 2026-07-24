@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Read-only flat-boundary check for the showcase-to-Bitfinex relay.
- * Does not call Bitfinex directly and does not print credentials.
+ * Uses the executor's fresh raw Bitfinex reconciliation and does not print credentials.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -113,6 +113,9 @@ async function main() {
       lastError: instance.lastError,
       activeParticipants,
       reconcile,
+      relayExecutionMode: dashboard.relayExecutionMode ?? null,
+      relayArmedAt: dashboard.relayArmedAt ?? null,
+      realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
       orphanOrderIds: dashboard.orphanOrderIds ?? [],
       orphanPositionIds: dashboard.orphanPositionIds ?? [],
     });
@@ -136,21 +139,41 @@ async function main() {
     output.showcase.positions === 0
     && output.showcase.pendingOrders === 0;
   const trackedFlat = rows.every((row) => row.activeParticipants === 0);
-  const reconciledFlat = rows
-    .filter((row) => String(row.user).toLowerCase().includes('cheetah'))
-    .every((row) => {
+  const cheetahRows = rows
+    .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
+  const relayPausedAndDisarmed = cheetahRows.length > 0
+    && cheetahRows.every(
+      (row) =>
+        row.status === 'PAUSED'
+        && row.relayExecutionMode === 'PAUSED'
+        && row.relayArmedAt == null
+        && row.realTradingConfirmedAt == null,
+    );
+  const reconciledFlat = cheetahRows.length > 0
+    && cheetahRows.every((row) => {
       const rec = row.reconcile;
+      const rawExchangeQty = Number(
+        rec?.rawExchangePositionQty ?? rec?.exchangePositionQty ?? Number.NaN,
+      );
+      const reconcileAgeMs = Date.now() - Date.parse(String(rec?.updatedAt ?? ''));
       return (
-        Number(rec?.exchangePositionQty ?? 0) === 0
+        rec != null
+        && Number.isFinite(rawExchangeQty)
+        && rawExchangeQty === 0
+        && Number(rec?.dustPositionQty ?? 0) === 0
         && Number(rec?.ledgerOpenQty ?? 0) === 0
         && Number(rec?.deltaBtc ?? 0) === 0
         && Number(rec?.openLots ?? 0) === 0
         && Number(rec?.pendingLots ?? 0) === 0
+        && Number.isFinite(reconcileAgeMs)
+        && reconcileAgeMs >= 0
+        && reconcileAgeMs <= 60_000
         && row.orphanOrderIds.length === 0
         && row.orphanPositionIds.length === 0
       );
     });
-  process.exitCode = showcaseFlat && trackedFlat && reconciledFlat ? 0 : 2;
+  process.exitCode =
+    showcaseFlat && trackedFlat && relayPausedAndDisarmed && reconciledFlat ? 0 : 2;
 }
 
 main()

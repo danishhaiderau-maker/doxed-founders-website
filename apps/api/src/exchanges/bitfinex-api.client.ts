@@ -1,11 +1,16 @@
 import { createHmac } from 'node:crypto';
+import { btcToSats } from '@dcf/utils';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
 
 export const BITFINEX_BTC_PERP_SYMBOL = 'tBTCF0:USTF0';
 /** Bitfinex defaults to 10x when lev is omitted — showcase bot uses 100x. */
 export const BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE = 100;
-const MIN_POSITION_BTC = 0.000004;
+/** Bitfinex v2 order flags. Partial lot exits must use REDUCE_ONLY only. */
+export const BITFINEX_POSITION_CLOSE_FLAG = 512;
+export const BITFINEX_REDUCE_ONLY_FLAG = 1024;
+export const BITFINEX_SAFE_CLOSE_FLAGS =
+  BITFINEX_POSITION_CLOSE_FLAG | BITFINEX_REDUCE_ONLY_FLAG;
 const STABLE_CURRENCIES = new Set(['USD', 'USDT', 'UST', 'USTF0']);
 
 export type BitfinexWalletRow = {
@@ -513,9 +518,11 @@ export class BitfinexTradingClient {
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', {
       type: 'STOP',
       symbol,
-      amount: amount.toFixed(5),
+      amount: amount.toFixed(8),
       price: input.stopPrice.toFixed(2),
       lev,
+      // A stale protective stop must never open the opposite position.
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
@@ -541,12 +548,53 @@ export class BitfinexTradingClient {
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', {
       type: 'MARKET',
       symbol,
-      amount: amount.toFixed(5),
+      amount: amount.toFixed(8),
       lev,
+      // Partial virtual-lot exits share one merged BTC-PERP position.
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
     if (!id) throw new Error('Bitfinex market close submitted but no order id returned');
+    return id;
+  }
+
+  /**
+   * Final-account flatten only. The caller must first prove that the remaining
+   * relay-ledger target is exactly zero. CLOSE + REDUCE_ONLY prevents a rounded
+   * exact residual cleanup from reversing the account.
+   */
+  async submitPositionFlatten(
+    creds: ExchangeCredentials,
+    input: {
+      symbol?: string;
+      positionDirection: 'LONG' | 'SHORT';
+      qty: number;
+      leverage?: number;
+    },
+  ): Promise<number> {
+    if (btcToSats(input.qty) === 0) {
+      throw new Error('Bitfinex final flatten requires a non-zero raw position');
+    }
+    const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const lev = Math.min(
+      100,
+      Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)),
+    );
+    const amount =
+      input.positionDirection === 'LONG'
+        ? -Math.abs(input.qty)
+        : Math.abs(input.qty);
+    const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', {
+      type: 'MARKET',
+      symbol,
+      amount: amount.toFixed(8),
+      lev,
+      flags: BITFINEX_SAFE_CLOSE_FLAGS,
+      meta: { aff_code: 'doxxedcrypto' },
+    });
+    const id = parseBitfinexOrderId(res);
+    if (!id) throw new Error('Bitfinex final flatten submitted but no order id returned');
     return id;
   }
 
@@ -648,7 +696,7 @@ export class BitfinexTradingClient {
       if (!Array.isArray(row) || row.length < 8) continue;
       if (String(row[0]) !== symbol) continue;
       const amount = Number(row[2] ?? 0);
-      if (Math.abs(amount) < MIN_POSITION_BTC) continue;
+      if (btcToSats(amount) === 0) continue;
       const pnlUsd = Number(row[6] ?? 0);
       const pnlPct = Number(row[7] ?? 0);
       return {

@@ -7,9 +7,8 @@ import {
   type EnsureDerivativesResult,
 } from './bitfinex-api.client';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
-import type { CopyRelaySimLedger, CopyRelaySimOrder } from '@dcf/utils';
+import { btcToSats, satsToBtc, type CopyRelaySimLedger, type CopyRelaySimOrder } from '@dcf/utils';
 
-const MIN_POSITION_BTC = 0.00004;
 const SIM_FEE_BPS = 4;
 
 function orderAmount(direction: 'LONG' | 'SHORT', qty: number): number {
@@ -27,15 +26,15 @@ function weightedAvgEntry(
   fillPrice: number,
 ): number {
   const newAmt = currentAmt + deltaAmt;
-  if (Math.abs(newAmt) < MIN_POSITION_BTC) return fillPrice;
-  if (Math.abs(currentAmt) < MIN_POSITION_BTC) return fillPrice;
+  if (btcToSats(newAmt) === 0) return fillPrice;
+  if (btcToSats(currentAmt) === 0) return fillPrice;
   const currentNotional = Math.abs(currentAmt) * currentBase;
   const deltaNotional = Math.abs(deltaAmt) * fillPrice;
   return (currentNotional + deltaNotional) / (Math.abs(currentAmt) + Math.abs(deltaAmt));
 }
 
 function unrealizedPnlUsd(position: CopyRelaySimLedger['position'], mark: number): number {
-  if (!position || Math.abs(position.amount) < MIN_POSITION_BTC) return 0;
+  if (!position || btcToSats(position.amount) === 0) return 0;
   const qty = Math.abs(position.amount);
   return position.amount > 0
     ? (mark - position.basePrice) * qty
@@ -133,7 +132,7 @@ export class BitfinexSimTradingClient {
     symbol = BITFINEX_BTC_PERP_SYMBOL,
   ): Promise<BitfinexPositionDetail | null> {
     const p = this.ledger.position;
-    if (!p || Math.abs(p.amount) < MIN_POSITION_BTC || p.symbol !== symbol) return null;
+    if (!p || btcToSats(p.amount) === 0 || p.symbol !== symbol) return null;
     const mark = await this.getMarkPrice(symbol).catch(() => p.basePrice);
     const pnlUsd = unrealizedPnlUsd(p, mark);
     const notional = Math.abs(p.amount) * p.basePrice;
@@ -235,9 +234,21 @@ export class BitfinexSimTradingClient {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
     const mark = await this.getMarkPrice(symbol);
     const closeQty = Math.min(input.qty, Math.abs(this.ledger.position?.amount ?? input.qty));
-    if (closeQty < MIN_POSITION_BTC) return this.ledger.nextOrderId++;
+    if (btcToSats(closeQty) === 0) return this.ledger.nextOrderId++;
     this.applyClose(input.positionDirection, closeQty, mark);
     return this.ledger.nextOrderId++;
+  }
+
+  async submitPositionFlatten(
+    creds: ExchangeCredentials,
+    input: {
+      symbol?: string;
+      positionDirection: 'LONG' | 'SHORT';
+      qty: number;
+      leverage?: number;
+    },
+  ): Promise<number> {
+    return this.submitMarketClose(creds, input);
   }
 
   async submitMarketEntry(
@@ -315,7 +326,7 @@ export class BitfinexSimTradingClient {
     this.ledger.derivativesUsd -= fee;
 
     const p = this.ledger.position;
-    if (!p || Math.abs(p.amount) < MIN_POSITION_BTC) {
+    if (!p || btcToSats(p.amount) === 0) {
       this.ledger.position = {
         symbol: BITFINEX_BTC_PERP_SYMBOL,
         amount: deltaAmt,
@@ -324,8 +335,8 @@ export class BitfinexSimTradingClient {
       return;
     }
 
-    const newAmt = p.amount + deltaAmt;
-    if (Math.abs(newAmt) < MIN_POSITION_BTC) {
+    const newAmt = satsToBtc(btcToSats(p.amount) + btcToSats(deltaAmt));
+    if (btcToSats(newAmt) === 0) {
       const pnl =
         p.amount > 0
           ? (fillPrice - p.basePrice) * Math.abs(deltaAmt)
@@ -345,7 +356,7 @@ export class BitfinexSimTradingClient {
 
   private applyClose(positionDirection: 'LONG' | 'SHORT', qty: number, mark: number) {
     const p = this.ledger.position;
-    if (!p || Math.abs(p.amount) < MIN_POSITION_BTC) return;
+    if (!p || btcToSats(p.amount) === 0) return;
 
     const closeQty = Math.min(qty, Math.abs(p.amount));
     const fee = (closeQty * mark * SIM_FEE_BPS) / 10_000;
@@ -360,8 +371,8 @@ export class BitfinexSimTradingClient {
     this.ledger.derivativesUsd += pnl;
 
     const signedClose = positionDirection === 'LONG' ? -closeQty : closeQty;
-    const newAmt = p.amount + signedClose;
-    if (Math.abs(newAmt) < MIN_POSITION_BTC) {
+    const newAmt = satsToBtc(btcToSats(p.amount) + btcToSats(signedClose));
+    if (btcToSats(newAmt) === 0) {
       this.ledger.position = null;
     } else {
       this.ledger.position = { ...p, amount: newAmt };

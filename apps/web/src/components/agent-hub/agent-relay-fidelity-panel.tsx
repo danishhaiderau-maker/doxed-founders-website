@@ -99,7 +99,12 @@ export function AgentRelayFidelityPanel({
   if (!fidelity && !reconcile) return null;
 
   const delta = reconcile?.deltaBtc ?? 0;
-  const deltaAlert = reconcile?.alert ?? Math.abs(delta) > 0.001;
+  const rawExchangeQty =
+    reconcile?.rawExchangePositionQty ?? reconcile?.exchangePositionQty ?? 0;
+  const deltaAlert =
+    Boolean(reconcile?.alert) ||
+    Math.round(Math.abs(delta) * 1e8) > 0 ||
+    Math.round(Math.abs(reconcile?.dustPositionQty ?? 0) * 1e8) > 0;
   const latestRows = fidelity?.rows?.slice(0, 3) ?? [];
 
   return (
@@ -137,13 +142,13 @@ export function AgentRelayFidelityPanel({
           <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2">
             <p className="text-[10px] uppercase text-zinc-500">Exchange qty</p>
             <p className="text-sm font-semibold text-white">
-              {reconcile.exchangePositionQty.toFixed(5)} BTC
+              {rawExchangeQty.toFixed(8)} BTC
             </p>
           </div>
           <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2">
             <p className="text-[10px] uppercase text-zinc-500">Ledger qty</p>
             <p className="text-sm font-semibold text-white">
-              {reconcile.ledgerOpenQty.toFixed(5)} BTC
+              {reconcile.ledgerOpenQty.toFixed(8)} BTC
             </p>
           </div>
           <div

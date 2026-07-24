@@ -1,6 +1,6 @@
 /**
  * CI-friendly Railway redeploy — uses RAILWAY_TOKEN from env (GitHub Secrets).
- * No vault dependency. Triggers a production redeploy of the doxed-founders-website service.
+ * No vault dependency. Triggers both production API and isolated relay worker.
  *
  * Usage: RAILWAY_TOKEN=... node scripts/ci-railway-redeploy.mjs
  */
@@ -20,6 +20,7 @@ async function railwayGql(token, query, variables = {}) {
 async function main() {
   const token = process.env.RAILWAY_TOKEN?.trim();
   if (!token) {
+    if (process.env.CI) throw new Error('RAILWAY_TOKEN not set in CI');
     console.warn('RAILWAY_TOKEN not set — skipping Railway redeploy');
     return;
   }
@@ -38,33 +39,27 @@ async function main() {
   );
 
   const projects = data.projects?.edges?.map((e) => e.node) ?? [];
-  const target = projects.find((p) =>
-    p.services?.edges?.some((s) => s.node.name === 'doxed-founders-website'),
-  );
-  if (!target) {
-    console.warn('doxed-founders-website Railway service not found — skipping');
-    return;
+  for (const serviceName of ['doxed-founders-website', 'relay-executor']) {
+    const target = projects.find((project) =>
+      project.services?.edges?.some((edge) => edge.node.name === serviceName),
+    );
+    const env =
+      target?.environments?.edges?.find((edge) => edge.node.name === 'production')?.node ??
+      target?.environments?.edges?.[0]?.node;
+    const service =
+      target?.services?.edges?.find((edge) => edge.node.name === serviceName)?.node;
+    if (!target || !env || !service) {
+      throw new Error(`Required Railway service ${serviceName} or production environment not found`);
+    }
+    await railwayGql(
+      token,
+      `mutation($serviceId: String!, $environmentId: String!) {
+        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+      }`,
+      { serviceId: service.id, environmentId: env.id },
+    );
+    console.log(`Railway redeploy triggered on ${target.name} / ${service.name}`);
   }
-
-  const env =
-    target.environments?.edges?.find((e) => e.node.name === 'production')?.node ??
-    target.environments?.edges?.[0]?.node;
-  const service =
-    target.services?.edges?.find((e) => e.node.name === 'doxed-founders-website')?.node;
-  if (!env || !service) {
-    console.warn('Missing Railway env/service — skipping');
-    return;
-  }
-
-  await railwayGql(
-    token,
-    `mutation($serviceId: String!, $environmentId: String!) {
-      serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-    }`,
-    { serviceId: service.id, environmentId: env.id },
-  );
-
-  console.log(`Railway redeploy triggered on ${target.name} / ${service.name}`);
 }
 
 main().catch((err) => {

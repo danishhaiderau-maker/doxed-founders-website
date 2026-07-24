@@ -1,8 +1,11 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   COPY_RELAY_SIM_DEFAULT_BALANCE_USD,
-  COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
+  btcToSats,
   effectiveExchangeQtyBtc,
+  rawExchangeQtyBtc,
+  relayPositionDeltaSats,
+  satsToBtc,
   emptyCopyRelaySimState,
   formatMelbourneDateTime,
   readCopyRelaySimState,
@@ -374,18 +377,38 @@ export class CopyRelaySimService {
 
   buildReconcileSnapshot(input: {
     exchangePositionQty: number;
+    exchangePositionAmount?: number;
     ledgerOpenQty: number;
+    ledgerOpenAmount?: number;
     openLots: number;
     pendingLots: number;
     markPrice: number | null;
   }): CopyRelayReconcileSnapshot {
-    const exchangePositionQty = effectiveExchangeQtyBtc(input.exchangePositionQty);
-    const deltaBtc = exchangePositionQty - input.ledgerOpenQty;
+    const rawExchangePositionQty = rawExchangeQtyBtc(input.exchangePositionQty);
+    const strategyEffectiveExchangeQty = effectiveExchangeQtyBtc(input.exchangePositionQty);
+    const signedExchangePositionQty = satsToBtc(
+      btcToSats(input.exchangePositionAmount ?? input.exchangePositionQty),
+    );
+    const signedLedgerOpenQty = satsToBtc(
+      btcToSats(input.ledgerOpenAmount ?? input.ledgerOpenQty),
+    );
+    const deltaBtc = satsToBtc(
+      relayPositionDeltaSats(signedExchangePositionQty, signedLedgerOpenQty),
+    );
     return {
-      exchangePositionQty,
+      exchangePositionQty: rawExchangePositionQty,
+      rawExchangePositionQty,
+      signedExchangePositionQty,
+      dustPositionQty:
+        rawExchangePositionQty > 0 && strategyEffectiveExchangeQty === 0
+          ? rawExchangePositionQty
+          : 0,
       ledgerOpenQty: input.ledgerOpenQty,
+      signedLedgerOpenQty,
       deltaBtc,
-      alert: Math.abs(deltaBtc) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
+      // Any satoshi mismatch is real. The legacy 0.001 BTC threshold remains
+      // available for presentation severity, never for flatness proof.
+      alert: btcToSats(deltaBtc) !== 0,
       openLots: input.openLots,
       pendingLots: input.pendingLots,
       markPrice: input.markPrice,

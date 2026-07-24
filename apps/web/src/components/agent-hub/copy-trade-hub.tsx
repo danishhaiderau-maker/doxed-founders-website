@@ -43,7 +43,12 @@ export function CopyTradeDetailsStrip({
 }) {
   const reconcile = copyRelayReconcile ?? null;
   const delta = reconcile?.deltaBtc ?? 0;
-  const deltaBad = reconcile?.alert ?? Math.abs(delta) > 0.001;
+  const rawExchangeQty =
+    reconcile?.rawExchangePositionQty ?? reconcile?.exchangePositionQty ?? 0;
+  const deltaBad =
+    Boolean(reconcile?.alert) ||
+    Math.round(Math.abs(delta) * 1e8) > 0 ||
+    Math.round(Math.abs(reconcile?.dustPositionQty ?? 0) * 1e8) > 0;
   const limitChain = copyRelayLimitChain;
   const limitBad = limitChain != null && !limitChain.aligned;
   const lifecycle = tradeLifecycleIntegrity;
@@ -54,7 +59,7 @@ export function CopyTradeDetailsStrip({
     liveBook?.positions.some(
       (position) =>
         position.leg === 'Exchange net (actual)' || position.leg === 'Bitfinex net',
-    ) || Math.abs(reconcile?.exchangePositionQty ?? 0) > 1e-8
+    ) || Math.round(Math.abs(rawExchangeQty) * 1e8) > 0
       ? 1
       : 0;
   const exchangePendingCount = liveBook?.pendingOrders.length ?? 0;
@@ -125,15 +130,15 @@ export function CopyTradeDetailsStrip({
               ) : null}
               <p className={deltaBad ? 'mt-1' : ''}>
                 <strong>Exchange authority:</strong> exchange qty{' '}
-                <span className="font-mono">{reconcile.exchangePositionQty.toFixed(5)}</span>{' '}
+                <span className="font-mono">{rawExchangeQty.toFixed(8)}</span>{' '}
                 BTC · ledger qty{' '}
-                <span className="font-mono">{reconcile.ledgerOpenQty.toFixed(5)}</span> BTC · Δ{' '}
+                <span className="font-mono">{reconcile.ledgerOpenQty.toFixed(8)}</span> BTC · Δ{' '}
                 <span className="font-mono">
                   {delta >= 0 ? '+' : ''}
-                  {delta.toFixed(5)}
+                  {delta.toFixed(8)}
                 </span>{' '}
                 BTC · {reconcile.openLots} open / {reconcile.pendingLots} pending lots
-                {deltaBad ? ' — reconcile healing active' : ' — in sync'}
+                {deltaBad ? ' — new entries blocked pending exact reconciliation' : ' — in sync'}
               </p>
             </div>
           ) : null}

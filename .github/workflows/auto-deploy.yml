@@ -26,7 +26,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -80,7 +80,6 @@ jobs:
           PUBLIC_SITE_URL: https://doxxedcrypto.digital
 
       - name: Trigger Railway redeploy
-        continue-on-error: true
         id: railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -90,8 +89,15 @@ jobs:
         run: |
           echo "Waiting 120s for Vercel auto-deploy + Railway rebuild to start..."
           echo "Railway step outcome: ${{ steps.railway.outcome }}"
-          echo "(Railway also auto-deploys from GitHub push — a failed/missing token here does not block production.)"
+          echo "Both the public API and isolated relay executor are required."
           sleep 120
+
+      - name: Verify isolated relay executor revision
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EXPECTED_SOURCE_REVISION: ${{ github.sha }}
+          RELAY_REVISION_TIMEOUT_MS: 120000
+        run: node scripts/verify-relay-executor-revision.mjs
 
       - name: Smoke test production
         env:
@@ -108,4 +114,4 @@ jobs:
           echo "- **API:** https://doxed-founders-website-production.up.railway.app/api/health" >> $GITHUB_STEP_SUMMARY
           echo "- **Schema push:** ${{ steps.schema.outputs.changed == 'true' && 'applied' || 'skipped (no changes)' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Vercel:** auto-deployed from GitHub (check Vercel dashboard)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Railway redeploy:** ${{ steps.railway.outcome }} (non-fatal — Railway auto-deploys from GitHub push)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Railway redeploy:** ${{ steps.railway.outcome }} (API + isolated relay executor required)" >> $GITHUB_STEP_SUMMARY
