@@ -72,6 +72,7 @@ jobs:
         run: |
           npm test --workspace=@dcf/utils
           npm test --workspace=@dcf/api
+          node --test scripts/check-relay-flat.spec.mjs
 
       - name: Build web (catch Vercel build errors before Vercel does)
         run: npm run build --workspace=@dcf/web

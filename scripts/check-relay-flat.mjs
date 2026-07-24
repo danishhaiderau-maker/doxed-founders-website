@@ -5,6 +5,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
@@ -65,6 +66,38 @@ async function fetchOwnerState() {
     }
   }
   throw lastError ?? new Error('showcase owner unavailable');
+}
+
+export function isStrictRawFlatReconcileSnapshot(rec, nowMs = Date.now()) {
+  if (rec == null || typeof rec !== 'object') return false;
+  for (const key of [
+    'rawExchangePositionQty',
+    'dustPositionQty',
+    'signedExchangePositionQty',
+    'ledgerOpenQty',
+    'signedLedgerOpenQty',
+    'deltaBtc',
+    'openLots',
+    'pendingLots',
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(rec, key)) return false;
+    if (typeof rec[key] !== 'number' || !Number.isFinite(rec[key])) return false;
+  }
+
+  const reconcileAgeMs = nowMs - Date.parse(String(rec.updatedAt ?? ''));
+  return (
+    rec.rawExchangePositionQty === 0
+    && rec.dustPositionQty === 0
+    && rec.signedExchangePositionQty === 0
+    && rec.ledgerOpenQty === 0
+    && rec.signedLedgerOpenQty === 0
+    && rec.deltaBtc === 0
+    && rec.openLots === 0
+    && rec.pendingLots === 0
+    && Number.isFinite(reconcileAgeMs)
+    && reconcileAgeMs >= 0
+    && reconcileAgeMs <= 60_000
+  );
 }
 
 async function main() {
@@ -151,23 +184,8 @@ async function main() {
     );
   const reconciledFlat = cheetahRows.length > 0
     && cheetahRows.every((row) => {
-      const rec = row.reconcile;
-      const rawExchangeQty = Number(
-        rec?.rawExchangePositionQty ?? rec?.exchangePositionQty ?? Number.NaN,
-      );
-      const reconcileAgeMs = Date.now() - Date.parse(String(rec?.updatedAt ?? ''));
       return (
-        rec != null
-        && Number.isFinite(rawExchangeQty)
-        && rawExchangeQty === 0
-        && Number(rec?.dustPositionQty ?? 0) === 0
-        && Number(rec?.ledgerOpenQty ?? 0) === 0
-        && Number(rec?.deltaBtc ?? 0) === 0
-        && Number(rec?.openLots ?? 0) === 0
-        && Number(rec?.pendingLots ?? 0) === 0
-        && Number.isFinite(reconcileAgeMs)
-        && reconcileAgeMs >= 0
-        && reconcileAgeMs <= 60_000
+        isStrictRawFlatReconcileSnapshot(row.reconcile)
         && row.orphanOrderIds.length === 0
         && row.orphanPositionIds.length === 0
       );
@@ -176,11 +194,17 @@ async function main() {
     showcaseFlat && trackedFlat && relayPausedAndDisarmed && reconciledFlat ? 0 : 2;
 }
 
-main()
-  .catch((error) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+const isDirectRun =
+  process.argv[1] != null
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectRun) {
+  main()
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

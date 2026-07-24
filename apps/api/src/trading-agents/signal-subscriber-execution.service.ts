@@ -4245,12 +4245,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /**
    * Money-path cancel helper. Retries the cancel with backoff via
    * {@link cancelOrderWithRetry}, then — only if the cancel API reported a
-   * non-"gone" failure — verifies with {@link confirmOrderGone} whether the
-   * order is actually still on the active book. Returns `gone: true` when the
-   * cancel succeeded OR a follow-up `findOrder` confirms the order is no
-   * longer active; ONLY in that case may the caller record an EXPIRED ledger
-   * event. Returns `gone: false` when the cancel failed AND the order is
-   * confirmed still live — caller must leave the participant PENDING_ENTRY,
+   * response, always verifies with {@link confirmOrderGone} whether the order
+   * is actually still on the active book. Returns `gone: true` only when a
+   * follow-up `findOrder` confirms the order is no longer active; ONLY in that
+   * case may the caller record an EXPIRED ledger event. Returns `gone: false`
+   * when the order is still live or the verification read fails — caller must
+   * leave the participant PENDING_ENTRY,
    * set `instance.lastError = 'CANCEL_FAILED_ORDER_STILL_LIVE'`, audit
    * `RECONCILE_CANCEL_FAILED`, and let the next tick retry.
    */
@@ -4264,11 +4264,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       logger: this.logger,
       label,
     });
-    if (result.ok) {
-      return { gone: true, reason: result.reason, attempts: result.attempts };
-    }
+    // Bitfinex can acknowledge the HTTP request while the v2 notification is
+    // stale or reports an application-level error. Treat the cancel response
+    // as intent only; every outcome must be followed by an active-book read.
     const gone = await confirmOrderGone(client, creds, orderId);
-    return { gone, reason: result.reason, attempts: result.attempts };
+    return {
+      gone,
+      reason:
+        result.reason
+        ?? (result.ok && !gone ? 'CANCEL_ACK_NOT_CONFIRMED' : undefined),
+      attempts: result.attempts,
+    };
   }
 
   /**
@@ -6659,7 +6665,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     this.exitingLots.add(participant.id);
     try {
-      await this.cancelLinkedPendingLimits(creds, meta, new Set());
+      try {
+        await this.cancelLinkedPendingLimits(creds, meta);
+      } catch (err) {
+        const message =
+          `LINKED_ENTRY_REMAINDER_UNCERTAIN cycle=${cycle.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${message}`);
+        return false;
+      }
 
       const fillPrice =
         participant.fillPrice != null
@@ -6669,7 +6685,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const leverage =
         resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
 
-      const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+      let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+      try {
+        position = await this.activeTrading.getOpenPositionDetail(creds);
+      } catch (err) {
+        const message =
+          `EXIT_POSITION_READ_FAILED cycle=${cycle.id}: Bitfinex position is unknown; ` +
+          `${err instanceof Error ? err.message : String(err)}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${message}`);
+        return false;
+      }
       if (!position || btcToSats(position.amount) === 0) {
         try {
           await this.closeParticipantPositionToLedgerTarget(
@@ -8521,13 +8547,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // heals it as a fill. Use the retry helper, not a bare cancelOrder.
       const cancelledOids: number[] = [];
       let cancelStillLive = false;
+      let orderLookupFailed = false;
       for (const oid of [meta.bitfinexOrderId, meta.stopOrderId]) {
         if (oid == null) continue;
         let orderResting: { amount: number; amountOrig: number } | null = null;
         try {
-          orderResting = await this.activeTrading.findOrder(creds, oid).catch(() => null);
-        } catch {
-          orderResting = null;
+          orderResting = await this.activeTrading.findOrder(creds, oid);
+        } catch (err) {
+          orderLookupFailed = true;
+          safeToContinue = false;
+          const message =
+            `IMMEDIATE_FLAT_ORDER_READ_FAILED cycle=${row.cycleId} oid=${oid}: ` +
+            `cannot prove the managed order is gone; ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+          this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
+          break;
         }
         if (!orderResting) {
           // Already gone (filled, cancelled, or expired) — nothing to cancel.
@@ -8538,11 +8574,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
         const filledQty = satsToBtc(exchangeOrderFilledQtySats(orderResting));
         if (btcToSats(filledQty) > 0) {
-          // Partial/full fill — let reconcileFilledParticipants heal as a fill.
+          // The account is already exchange-flat. Cancel the still-resting
+          // managed remainder even when this order previously filled in part;
+          // leaving it active could reopen exposure after we record EXIT.
           this.logger.warn(
-            `[IMMEDIATE-FLAT] oid=${oid} has filled qty=${filledQty.toFixed(5)} — NOT cancelling (defer to fill reconcile) ${userId} participant=${row.id}`,
+            `[IMMEDIATE-FLAT] oid=${oid} has filled qty=${filledQty.toFixed(8)}; cancelling the active remainder before EXIT ${userId} participant=${row.id}`,
           );
-          continue;
         }
         this.logger.log(
           `[IMMEDIATE-FLAT] cancelling oid=${oid} reason=IMMEDIATE_EXCHANGE_FLAT ${userId} participant=${row.id}`,
@@ -8561,12 +8598,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           );
         }
       }
+      if (orderLookupFailed) continue;
       if (cancelStillLive) {
         await this.pauseUserRelayForPositionMismatch(
           userId,
           agentId,
           `IMMEDIATE_FLAT_CANCEL_FAILED cycle=${row.cycleId}; managed order remains live.`,
         ).catch(() => {});
+        safeToContinue = false;
+        continue;
+      }
+
+      let postCancelPosition: Awaited<
+        ReturnType<ExecutionTradingClient['getOpenPositionDetail']>
+      >;
+      try {
+        postCancelPosition = await this.activeTrading.getOpenPositionDetail(creds);
+      } catch (err) {
+        const message =
+          `IMMEDIATE_FLAT_POST_CANCEL_POSITION_READ_FAILED cycle=${row.cycleId}: ` +
+          `cannot reconfirm Bitfinex flat; ${err instanceof Error ? err.message : String(err)}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
+        safeToContinue = false;
+        continue;
+      }
+      if (postCancelPosition && btcToSats(postCancelPosition.amount) !== 0) {
+        const message =
+          `IMMEDIATE_FLAT_CANCEL_RACE_FILL cycle=${row.cycleId}: Bitfinex position changed to ` +
+          `${postCancelPosition.amount.toFixed(8)} BTC; EXIT deferred for fill reconciliation.`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
         safeToContinue = false;
         continue;
       }
@@ -8593,14 +8655,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async cancelLinkedPendingLimits(
     creds: ExchangeCredentials,
     meta: ExecutionPayload,
-    activeOrderIdSet: Set<number>,
   ) {
-    if (meta.bitfinexOrderId && activeOrderIdSet.has(meta.bitfinexOrderId)) {
-      try {
-        await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
-      } catch {
-        /* already filled or gone */
-      }
+    const orderId = meta.bitfinexOrderId;
+    if (!orderId) return;
+
+    // `findOrder` reads the active book. A read failure is uncertainty, not
+    // proof that the entry remainder is gone. Cancel any live managed
+    // remainder before reducing the position so it cannot refill after EXIT.
+    const resting = await this.activeTrading.findOrder(creds, orderId);
+    if (!resting) return;
+
+    const cancel = await this.cancelManagedOrderGone(
+      creds,
+      orderId,
+      `SHOWCASE-CLOSE cancel linked entry oid=${orderId}`,
+    );
+    if (!cancel.gone) {
+      throw new Error(
+        `LINKED_ENTRY_CANCEL_FAILED oid=${orderId} reason=${cancel.reason ?? 'unknown'}`,
+      );
     }
   }
 

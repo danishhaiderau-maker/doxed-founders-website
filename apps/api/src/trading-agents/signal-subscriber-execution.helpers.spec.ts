@@ -13,6 +13,7 @@ import {
   BITFINEX_SAFE_CLOSE_FLAGS,
 } from '../exchanges/bitfinex-api.client';
 import {
+  SignalSubscriberExecutionService,
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
@@ -39,6 +40,192 @@ import {
   shouldPersistLotMetaRepair,
   shouldClearShowcaseStatusError,
 } from './signal-subscriber-execution.service';
+
+test('showcase close fails closed when linked entry remainder state is unreadable', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let cancelCalled = false;
+  service.activeTrading = {
+    findOrder: async () => {
+      throw new Error('Bitfinex order read unavailable');
+    },
+  };
+  service.cancelManagedOrderGone = async () => {
+    cancelCalled = true;
+    return { gone: true, attempts: 1 };
+  };
+
+  await assert.rejects(
+    service.cancelLinkedPendingLimits({}, { bitfinexOrderId: 123 }),
+    /Bitfinex order read unavailable/,
+  );
+  assert.equal(cancelCalled, false);
+});
+
+test('showcase close cancels and confirms a live managed entry remainder', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let cancelledOrderId: number | null = null;
+  service.activeTrading = {
+    findOrder: async () => ({
+      id: 456,
+      amount: -0.00002,
+      amountOrig: -0.00004,
+      price: 65_000,
+    }),
+  };
+  service.cancelManagedOrderGone = async (
+    _creds: unknown,
+    orderId: number,
+  ) => {
+    cancelledOrderId = orderId;
+    return { gone: true, attempts: 1 };
+  };
+
+  await service.cancelLinkedPendingLimits({}, { bitfinexOrderId: 456 });
+  assert.equal(cancelledOrderId, 456);
+});
+
+test('showcase close refuses EXIT when linked entry cancellation is unconfirmed', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeTrading = {
+    findOrder: async () => ({
+      id: 789,
+      amount: 0.00004,
+      amountOrig: 0.00004,
+      price: 65_000,
+    }),
+  };
+  service.cancelManagedOrderGone = async () => ({
+    gone: false,
+    attempts: 3,
+    reason: 'exchange unavailable',
+  });
+
+  await assert.rejects(
+    service.cancelLinkedPendingLimits({}, { bitfinexOrderId: 789 }),
+    /LINKED_ENTRY_CANCEL_FAILED/,
+  );
+});
+
+test('managed cancel requires an active-book read even after cancel acknowledgement', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.logger = { error: () => {}, warn: () => {} };
+  service.activeTrading = {
+    cancelOrder: async () => {},
+    findOrder: async () => ({ id: 901 }),
+  };
+
+  assert.deepEqual(
+    await service.cancelManagedOrderGone({}, 901, 'test cancel'),
+    {
+      gone: false,
+      reason: 'CANCEL_ACK_NOT_CONFIRMED',
+      attempts: 1,
+    },
+  );
+
+  service.activeTrading.findOrder = async () => null;
+  assert.deepEqual(
+    await service.cancelManagedOrderGone({}, 901, 'test cancel'),
+    {
+      gone: true,
+      reason: undefined,
+      attempts: 1,
+    },
+  );
+});
+
+function buildImmediateFlatHarness(
+  opts: {
+    findOrder: () => Promise<any>;
+    postCancelPosition: { amount: number } | null;
+  },
+) {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let positionReadCount = 0;
+  let exitRecorded = false;
+  let paused = false;
+  service.activeTrading = {
+    getOpenPositionDetail: async () => {
+      positionReadCount += 1;
+      return positionReadCount === 1 ? null : opts.postCancelPosition;
+    },
+    getMarkPrice: async () => 65_000,
+    findOrder: opts.findOrder,
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      findMany: async () => [{
+        id: 'participant-1',
+        cycleId: 'cycle-1',
+        fillPrice: 65_000,
+        cycle: {},
+      }],
+    },
+  };
+  service.hasParticipantExited = async () => false;
+  service.loadExecutionMeta = async () => ({
+    bitfinexOrderId: 321,
+    direction: 'LONG',
+    qty: 0.00004,
+    limitPrice: 65_000,
+  });
+  service.resolveAlreadyFlatPnl = async () => ({
+    pnlUsd: 0,
+    pnlSource: 'reconstructed',
+  });
+  service.cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  service.pauseUserRelayForPositionMismatch = async () => {
+    paused = true;
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async () => {
+      exitRecorded = true;
+    },
+  };
+  service.logger = { log: () => {}, warn: () => {} };
+
+  return {
+    service,
+    state: () => ({ exitRecorded, paused }),
+  };
+}
+
+test('immediate-flat reconciliation does not record EXIT when order lookup fails', async () => {
+  const { service, state } = buildImmediateFlatHarness({
+    findOrder: async () => {
+      throw new Error('active book unavailable');
+    },
+    postCancelPosition: null,
+  });
+
+  const safe = await service.reconcileImmediateExchangeFlat(
+    'agent-1',
+    { userId: 'user-1' },
+    {},
+  );
+  assert.equal(safe, false);
+  assert.deepEqual(state(), { exitRecorded: false, paused: true });
+});
+
+test('immediate-flat reconciliation detects a cancel-race fill before EXIT', async () => {
+  const { service, state } = buildImmediateFlatHarness({
+    findOrder: async () => ({
+      id: 321,
+      amount: 0.00004,
+      amountOrig: 0.00004,
+      price: 65_000,
+    }),
+    postCancelPosition: { amount: 0.00004 },
+  });
+
+  const safe = await service.reconcileImmediateExchangeFlat(
+    'agent-1',
+    { userId: 'user-1' },
+    {},
+  );
+  assert.equal(safe, false);
+  assert.deepEqual(state(), { exitRecorded: false, paused: true });
+});
 
 test('orphan adoption defers to a same-direction pending entry that may own the fill', () => {
   assert.equal(
