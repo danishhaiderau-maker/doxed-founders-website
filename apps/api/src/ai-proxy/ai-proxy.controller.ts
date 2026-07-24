@@ -10,6 +10,7 @@ import {
   HttpStatus,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import {
@@ -27,6 +28,9 @@ import {
 } from './dto/ai-proxy.dto';
 import type { Response, Request } from 'express';
 import { pipeAiProxySseResponse } from './ai-proxy-response-stream';
+import { AiProxySpeechService } from './ai-proxy-speech.service';
+
+const MAX_FOUNDER_SPEECH_BYTES = 25 * 1024 * 1024;
 
 type AuthedRequest = Request & {
   user?: { id?: string; sub?: string; userId?: string };
@@ -49,6 +53,7 @@ export class AiProxyController {
   constructor(
     private readonly runtimeService: AiProxyRuntimeService,
     private readonly usageService: AiProxyUsageService,
+    private readonly speechService: AiProxySpeechService,
   ) {}
 
   /** OpenAI-compatible /v1/models — expands our aliases to a model list. */
@@ -111,6 +116,58 @@ export class AiProxyController {
       nodeId: req.founderNode.nodeId,
     };
     return this.streamChat(res, auth, body);
+  }
+
+  /**
+   * Authenticated speech-to-text for Founder IDE. The desktop sends WAV bytes
+   * through its Founder Node identity; the platform speech credential never
+   * leaves the API process. The resulting text stays in the composer and is
+   * submitted through the user's selected route (Founder Auto by default).
+   */
+  @UseGuards(FounderNodeGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('audio/transcriptions')
+  async transcribeVoice(
+    @Req() req: Request & { founderNode: FounderNodeRequestUser },
+    @Res() res: Response,
+  ): Promise<void> {
+    const contentType = String(req.headers['content-type'] ?? '')
+      .split(';', 1)[0]
+      .trim()
+      .toLowerCase();
+    if (contentType !== 'audio/wav' && contentType !== 'audio/x-wav') {
+      throw new HttpException(
+        { error: { message: 'Founder voice accepts WAV audio only.' } },
+        HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+      );
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const raw of req as unknown as AsyncIterable<
+      Uint8Array | string
+    >) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      total += chunk.byteLength;
+      if (total > MAX_FOUNDER_SPEECH_BYTES) {
+        throw new HttpException(
+          { error: { message: 'Founder voice recording exceeds 25 MB.' } },
+          HttpStatus.PAYLOAD_TOO_LARGE,
+        );
+      }
+      chunks.push(chunk);
+    }
+    if (total < 44) {
+      throw new HttpException(
+        { error: { message: 'Founder voice recording is empty.' } },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const result = await this.speechService.transcribeWav(
+      Buffer.concat(chunks, total),
+    );
+    res.status(HttpStatus.OK).json(result);
   }
 
   /**
