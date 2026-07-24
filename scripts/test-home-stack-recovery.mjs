@@ -18,6 +18,7 @@ const ensureBridge = read("ensure-home-bridge.ps1");
 const startEverything = read("home-stack-start-everything.ps1");
 const autoWire = read("auto-wire-after-tunnel.ps1");
 const startBot = read("start-home-bot.ps1");
+const botAutoRestart = read("bot-auto-restart.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
 const health = read("home-stack-health.ps1");
@@ -87,6 +88,13 @@ assert.doesNotMatch(
   "bot startup must not block on process/TCP-table providers",
 );
 assert.match(startBot, /Test-ProcessIdAliveFast \$monitorPid/);
+assert.match(
+  botAutoRestart,
+  /\$p\s*=\s*Get-Process -Id \$currentPid -ErrorAction SilentlyContinue/,
+  "bot monitor must acquire the process handle used by StartTime and WaitForExit",
+);
+assert.match(botAutoRestart, /\$p\.StartTime/);
+assert.match(botAutoRestart, /\$p\.WaitForExit\(2000\)/);
 assert.match(startBot, /\.home-bot-starter\.pid/);
 assert.match(read("start-home-analyzer.ps1"), /\.home-analyzer-starter\.pid/);
 assert.match(
@@ -168,7 +176,7 @@ assert.match(startEverything, /Replacing stale bot revision from verified flat s
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 84,
+    checks: 87,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -191,6 +199,7 @@ console.log(
       "hidden HTTP.sys bridge owners are cleared by exact repo script path",
       "revision upgrades fail closed when source state is active or unknown",
       "automatic revision replacement proceeds only from a verified source-flat boundary",
+      "bot auto-restart monitor acquires a live process handle before liveness timing",
       "an unkillable elevated watchdog cannot block recovery while the stop sentinel is active",
       "healthy services keep their legitimate startup-lock owners",
       "analyzer health validates the actual canonical report output root",
