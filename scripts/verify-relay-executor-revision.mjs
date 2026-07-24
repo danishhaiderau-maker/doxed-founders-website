@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
+import { classifyRelaySourceRevision } from './relay-revision-policy.mjs';
 
 const expected = String(process.env.EXPECTED_SOURCE_REVISION ?? '').trim();
 const timeoutMs = Number(process.env.RELAY_REVISION_TIMEOUT_MS ?? 120_000);
@@ -13,6 +15,54 @@ if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
 const prisma = new PrismaClient();
 const deadline = Date.now() + timeoutMs;
 let lastObserved = [];
+const revisionProofCache = new Map();
+
+async function inspectDescendant(expectedRevision, observedRevision) {
+  execFileSync(
+    'git',
+    ['fetch', '--no-tags', '--depth=64', 'origin', observedRevision],
+    { stdio: 'ignore' },
+  );
+  let isDescendant = true;
+  try {
+    execFileSync(
+      'git',
+      ['merge-base', '--is-ancestor', expectedRevision, observedRevision],
+      { stdio: 'ignore' },
+    );
+  } catch {
+    isDescendant = false;
+  }
+  const changedFiles = isDescendant
+    ? execFileSync(
+        'git',
+        ['diff', '--name-only', `${expectedRevision}..${observedRevision}`],
+        { encoding: 'utf8' },
+      )
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : [];
+  return { isDescendant, changedFiles };
+}
+
+async function classifyObservedRevision(observedRevision) {
+  if (!revisionProofCache.has(observedRevision)) {
+    revisionProofCache.set(
+      observedRevision,
+      classifyRelaySourceRevision({
+        expected,
+        observed: observedRevision,
+        inspectDescendant,
+      }).catch(() => ({
+        accepted: false,
+        mode: 'inspection-failed',
+        changedFiles: [],
+      })),
+    );
+  }
+  return revisionProofCache.get(observedRevision);
+}
 
 try {
   while (Date.now() < deadline) {
@@ -48,12 +98,22 @@ try {
       observedAt: health?.observedAt ?? null,
       ownerPresent: String(health?.ownerId ?? '').trim() !== '',
     }));
+    const revisionClassifications = new Map();
+    for (const health of currentWorkers) {
+      const observedRevision = String(health?.sourceRevision ?? '').trim();
+      revisionClassifications.set(
+        observedRevision,
+        await classifyObservedRevision(observedRevision),
+      );
+    }
     const matched =
       currentWorkers.length > 0 &&
       ownerIds.size === 1 &&
       currentWorkers.every(
         (health) =>
-          health?.sourceRevision === expected &&
+          revisionClassifications.get(
+            String(health?.sourceRevision ?? '').trim(),
+          )?.accepted === true &&
           health?.healthy === true &&
           health?.status === 'RUNNING' &&
           health?.executionEnabled === true &&
@@ -61,8 +121,13 @@ try {
           String(health?.ownerId ?? '').trim() !== '',
       );
     if (matched) {
+      const observedRevision = String(
+        currentWorkers[0]?.sourceRevision ?? '',
+      ).trim();
+      const revisionProof = revisionClassifications.get(observedRevision);
       console.log(
-        `Relay executor owner ${[...ownerIds][0]} is fresh, enabled, RUNNING, and healthy on exact revision ${expected}`,
+        `Relay executor owner ${[...ownerIds][0]} is fresh, enabled, RUNNING, and healthy ` +
+        `on ${revisionProof.mode} revision ${observedRevision} (required safety ancestor ${expected})`,
       );
       process.exitCode = 0;
       break;
