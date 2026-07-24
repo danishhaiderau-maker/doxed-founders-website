@@ -12,7 +12,7 @@ Product & platform (19 recent commits)
 
 ## Last Commit
 
-fix(analyzer): launch monitored recovery owner
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
