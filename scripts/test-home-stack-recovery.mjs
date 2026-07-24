@@ -108,6 +108,8 @@ assert.match(providerFreeRecovery, /Set-HomeStackUserStopped/);
 assert.match(providerFreeRecovery, /Stopped exact watchdog owner pid=\$watchdogPid/);
 assert.match(providerFreeRecovery, /Get-ProcessCommandLineFast \$watchdogPid/);
 assert.match(providerFreeRecovery, /user-stopped sentinel keeps it in stand-down/);
+assert.match(providerFreeRecovery, /\$botNeedsStart = -not \(Test-PortOpen \$BotPort\)/);
+assert.match(providerFreeRecovery, /if \(\$botNeedsStart\) \{ \$requiredLocks \+= "\.home-bot-start\.lock" \}/);
 assert.doesNotMatch(
   providerFreeRecovery,
   /Remove-Item.+\.home-stack-user-stopped/,
@@ -160,7 +162,7 @@ assert.match(startEverything, /Replacing stale bot revision from verified flat s
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 81,
+    checks: 83,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -184,6 +186,7 @@ console.log(
       "revision upgrades fail closed when source state is active or unknown",
       "automatic revision replacement proceeds only from a verified source-flat boundary",
       "an unkillable elevated watchdog cannot block recovery while the stop sentinel is active",
+      "healthy services keep their legitimate startup-lock owners",
     ],
   }),
 );

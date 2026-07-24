@@ -122,13 +122,15 @@ foreach ($executable in @("powershell.exe", "pwsh.exe")) {
 # New startup owners record their PID before any potentially slow work. When a
 # service is offline, stop only that recorded PowerShell owner with executable
 # and creation-time verification; never enumerate or terminate unrelated shells.
-if (-not (Test-PortOpen $BotPort)) {
+$botNeedsStart = -not (Test-PortOpen $BotPort)
+$analyzerNeedsStart = -not (Test-PortOpen $AnalyzerPort)
+if ($botNeedsStart) {
   Stop-RecordedProcess `
     (Join-Path $repoRoot ".home-bot-starter.pid") `
     @("powershell", "pwsh") `
     10 | Out-Null
 }
-if (-not (Test-PortOpen $AnalyzerPort)) {
+if ($analyzerNeedsStart) {
   Stop-RecordedProcess `
     (Join-Path $repoRoot ".home-analyzer-starter.pid") `
     @("powershell", "pwsh") `
@@ -164,16 +166,16 @@ foreach ($lockName in @(
   Remove-Item -LiteralPath (Join-Path $repoRoot $lockName) -Force -ErrorAction SilentlyContinue
 }
 
-foreach ($requiredLock in @(
-  ".home-bot-start.lock",
-  ".home-analyzer-start.lock"
-)) {
+$requiredLocks = @()
+if ($botNeedsStart) { $requiredLocks += ".home-bot-start.lock" }
+if ($analyzerNeedsStart) { $requiredLocks += ".home-analyzer-start.lock" }
+foreach ($requiredLock in $requiredLocks) {
   $requiredPath = Join-Path $repoRoot $requiredLock
   if (-not (Test-LockAvailable $requiredPath)) {
     throw "$requiredLock is still owned by an unverified legacy starter; refusing an unsafe duplicate launch."
   }
 }
-Log "Bot and analyzer startup locks are available"
+Log "Required offline-service startup locks are available"
 
 function Test-BridgeHealthOnce {
   try {
