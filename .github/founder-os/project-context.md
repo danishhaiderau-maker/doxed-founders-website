@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(relay): prove zero active exchange orders at flat gate
 
 ## Last Activity
 
