@@ -295,7 +295,9 @@ bot._resolve_config_file_for_load = original_resolve_config_file
 print("\n[7] Direct local bridge control is safe during secret rotation")
 reset_state()
 original_admin_token = bot._BOT_ADMIN_TOKEN
+original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
 bot._BOT_ADMIN_TOKEN = "required-test-token"
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
 with bot.app.test_client() as client:
     direct_pause = client.post("/api/pause", environ_base={"REMOTE_ADDR": "127.0.0.1"})
     check("direct loopback pause is accepted without a token", direct_pause.status_code == 200)
@@ -311,6 +313,7 @@ with bot.app.test_client() as client:
     check("direct loopback resume is accepted without a token", direct_resume.status_code == 200)
     check("direct loopback resume changes state", bot.state.get("execution_paused") is False)
 bot._BOT_ADMIN_TOKEN = original_admin_token
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = original_bootstrap_complete
 
 
 print("\n[8] Paused shadow replay is visible without entering global books")
