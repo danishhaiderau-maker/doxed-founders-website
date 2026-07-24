@@ -7,7 +7,8 @@
     "build": "npx prisma generate --schema ../../prisma/schema.prisma && next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx --test src/components/agent-hub/agent-live-execution-view.spec.ts src/components/agent-hub/agent-public-profile.live.spec.tsx"
+    "qa:founder-shell:visual": "node scripts/founder-shell-visual-qa.mjs",
+    "test:founder-shell-visual-qa": "node --test scripts/founder-shell-visual-qa.spec.mjs"
   },
   "dependencies": {
     "@dcf/config": "*",
