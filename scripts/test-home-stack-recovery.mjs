@@ -150,6 +150,7 @@ assert.match(commandWorker, /recover-home-stack-provider-free\.ps1/);
 assert.match(health, /function Get-BotRuntimeStatus/);
 assert.match(health, /\/api\/state/);
 assert.match(health, /StateKnown\s+=\s+\$true/);
+assert.match(health, /GetFullPath\(\$agentDir\)/);
 assert.match(
   health,
   /Flat\s+=\s+\(\$status\.Orders -eq 0 -and \$status\.Positions -eq 0\)/,
@@ -162,7 +163,7 @@ assert.match(startEverything, /Replacing stale bot revision from verified flat s
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 83,
+    checks: 84,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -187,6 +188,7 @@ console.log(
       "automatic revision replacement proceeds only from a verified source-flat boundary",
       "an unkillable elevated watchdog cannot block recovery while the stop sentinel is active",
       "healthy services keep their legitimate startup-lock owners",
+      "analyzer health validates the actual canonical report output root",
     ],
   }),
 );

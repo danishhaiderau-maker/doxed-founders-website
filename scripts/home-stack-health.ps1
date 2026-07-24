@@ -125,11 +125,13 @@ function Test-AnalyzerHealthy {
   try {
     $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
     if (-not $s.ok) { return $false }
-    # Serve one canonical report tree from the analyzer's research directory.
+    # Serve one canonical report tree from the agent data root. The analyzer
+    # source lives in research\, but BTC_AGENT_REPORT_DIR intentionally points
+    # at $agentDir where the current report manifest and exports are written.
     # A matching version label from any copied checkout must not pass.
     $reportRoot = [string]$s.report_root
     if (-not $reportRoot) { $reportRoot = [string]$s.cwd }
-    $expectedReportRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "services\btc-conservative-agent\research")).TrimEnd('\', '/')
+    $expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir).TrimEnd('\', '/')
     try { $actualReportRoot = [System.IO.Path]::GetFullPath($reportRoot).TrimEnd('\', '/') } catch { return $false }
     if (-not $actualReportRoot.Equals($expectedReportRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($s.runtime_sync_match -ne $true) { return $false }
