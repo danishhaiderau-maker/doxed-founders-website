@@ -2025,7 +2025,7 @@ export function markAllNotificationsRead(token: string) {
   return apiFetch('/notifications/read-all', { method: 'PATCH' }, token);
 }
 
-// ─── Founder Den / Public Founder Presence ───────────────────────────────────
+// ─── Build workspace / Public Founder Presence ───────────────────────────────
 
 export interface FounderVideo {
   id: string;
@@ -3079,7 +3079,7 @@ export interface FounderOnboardingStatus {
 }
 
 export function fetchPublicFounderPromo() {
-  return apiFetch<{ enabled: boolean; message: string | null; windowDays?: number }>(
+  return apiFetch<{ enabled: boolean; message: string | null; windowDays: number; tokenCap: number }>(
     '/founder-os/promo/public',
   );
 }
@@ -3852,6 +3852,16 @@ export type FounderPromoPlatformSettings = {
 };
 
 export type FounderPromoUserStatus = {
+  plan: 'free' | 'builder' | 'team';
+  priceCentsMonthly: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  teamRole: 'owner' | 'admin' | 'member' | null;
+  coordination: boolean;
+  remoteControl: boolean;
+  rolesAndAudit: boolean;
+  unit: 'weighted_tokens';
+  weightsVersion: 'founder-wtu-v1';
   enabled: boolean;
   eligible: boolean;
   founderRegistered: boolean;
@@ -3860,11 +3870,133 @@ export type FounderPromoUserStatus = {
   daysRemaining: number | null;
   tokenCap: number;
   tokensUsed: number;
+  reservedWeightedUnits: number;
   tokensRemaining: number;
   exhausted: boolean;
   message: string | null;
   providers: string[];
 };
+
+export type FounderPlanCatalog = {
+  currency: 'usd';
+  plans: Array<{
+    id: 'free' | 'builder' | 'team';
+    priceCentsMonthly: number | null;
+    weeklyWeightedUnits: number | null;
+    checkoutAvailable: boolean;
+    message?: string;
+  }>;
+};
+
+export type FounderPlanEntitlement = {
+  plan: 'free' | 'builder' | 'team';
+  quotaOwnerKey: string;
+  weeklyWeightedUnitCap: number;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  priceCentsMonthly: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  teamRole: 'owner' | 'admin' | 'member' | null;
+  coordination: boolean;
+  remoteControl: boolean;
+  rolesAndAudit: boolean;
+  requiresXVerification: boolean;
+};
+
+export type FounderTeamRole = 'OWNER' | 'ADMIN' | 'MEMBER';
+
+export type FounderTeamMember = {
+  id: string;
+  teamId: string;
+  userId: string;
+  role: FounderTeamRole;
+  createdAt: string;
+  updatedAt: string;
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+    platformHandle: string | null;
+    avatarUrl: string | null;
+  };
+};
+
+export type FounderTeamOverview = {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  weeklyWeightedUnitCap: number;
+  createdAt: string;
+  updatedAt: string;
+  subscription: {
+    id: string;
+    status: 'ACTIVE' | 'PAST_DUE' | 'CANCELED';
+    currentPeriodStart: string;
+    currentPeriodEnd: string;
+    cancelAtPeriodEnd: boolean;
+  } | null;
+  members: FounderTeamMember[];
+};
+
+export function fetchFounderPlanCatalog() {
+  return apiFetch<FounderPlanCatalog>('/founder-plans');
+}
+
+export function fetchFounderPlanEntitlement(token: string) {
+  return apiFetch<FounderPlanEntitlement>('/founder-plans/me', undefined, token);
+}
+
+export function createFounderBuilderCheckout(token: string) {
+  return apiFetch<{ url: string; sessionId: string }>(
+    '/founder-plans/builder/checkout',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function createFounderBillingPortal(token: string) {
+  return apiFetch<{ url: string }>(
+    '/founder-plans/portal',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function fetchFounderTeam(token: string) {
+  return apiFetch<FounderTeamOverview>('/founder-plans/team', undefined, token);
+}
+
+export function addFounderTeamMember(
+  token: string,
+  body: { email: string; role?: Exclude<FounderTeamRole, 'OWNER'> },
+) {
+  return apiFetch<FounderTeamMember>(
+    '/founder-plans/team/members',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function changeFounderTeamMemberRole(
+  token: string,
+  memberId: string,
+  role: Exclude<FounderTeamRole, 'OWNER'>,
+) {
+  return apiFetch<Omit<FounderTeamMember, 'user'>>(
+    `/founder-plans/team/members/${encodeURIComponent(memberId)}`,
+    { method: 'PATCH', body: JSON.stringify({ role }) },
+    token,
+  );
+}
+
+export function removeFounderTeamMember(token: string, memberId: string) {
+  return apiFetch<{ removed: true; memberId: string }>(
+    `/founder-plans/team/members/${encodeURIComponent(memberId)}`,
+    { method: 'DELETE' },
+    token,
+  );
+}
 
 export function fetchFounderPromoStatus(token: string) {
   return apiFetch<FounderPromoUserStatus>('/account/founder-promo', undefined, token);
@@ -5949,6 +6081,25 @@ export function fetchFounderNodeVaultRelays(token: string) {
 
 export function fetchFounderNodeStatus(token: string) {
   return apiFetch<{ nodes: FounderNodeStatusRow[] }>('/founder-node/status', undefined, token);
+}
+
+export function authorizeFounderNodeDevice(
+  token: string,
+  input: { userCode: string; label?: string; platform?: string },
+) {
+  return apiFetch<{ authorized: true; founderId: string; nodeId: string }>(
+    '/founder-node/device-code/authorize',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function denyFounderNodeDevice(token: string, userCode: string) {
+  return apiFetch<{ denied: true }>(
+    '/founder-node/device-code/deny',
+    { method: 'POST', body: JSON.stringify({ userCode }) },
+    token,
+  );
 }
 
 export function revokeFounderNode(nodeId: string, token: string) {
