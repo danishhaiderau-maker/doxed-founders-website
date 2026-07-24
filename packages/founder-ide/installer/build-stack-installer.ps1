@@ -219,6 +219,24 @@ $requiredNativeBindings = @(
     "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node",
     "resources\app\node_modules\windows-foreground-love\build\Release\*.node"
 )
+
+# A warm payload can contain a policy-watcher binary from an older Electron
+# target even though the filename and size still look valid. Always refresh
+# this binding from the pinned source checkout before exercising it below.
+$policyWatcherRelativePath = "node_modules\@vscode\policy-watcher\build\Release\vscode-policy-watcher.node"
+$policyWatcherSource = Join-Path $vscodeSource $policyWatcherRelativePath
+$policyWatcherDest = Join-Path $ideAppRoot $policyWatcherRelativePath
+if (-not (Test-Path $policyWatcherSource)) {
+    throw "Founder IDE policy watcher is missing from the pinned source: $policyWatcherRelativePath"
+}
+New-Item -ItemType Directory -Path (Split-Path $policyWatcherDest -Parent) -Force | Out-Null
+if (-not (Test-Path $policyWatcherDest) -or
+    (Get-FileHash -LiteralPath $policyWatcherDest -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $policyWatcherSource -Algorithm SHA256).Hash) {
+    Copy-Item $policyWatcherSource $policyWatcherDest -Force
+    Write-Host "[stack]   refreshed Electron-targeted policy watcher"
+}
+
 foreach ($bindingPattern in $requiredNativeBindings) {
     $binding = Get-ChildItem -Path (Join-Path $ideRoot $bindingPattern) -ErrorAction SilentlyContinue |
                Select-Object -First 1
@@ -227,6 +245,27 @@ foreach ($bindingPattern in $requiredNativeBindings) {
     }
 }
 Write-Host "[stack]   all supported Windows startup bindings verified"
+
+# Presence is not enough for native addons: a stale ABI can load but receive a
+# corrupted N-API argument list. Execute the real three-argument watcher
+# contract with the packaged Electron runtime and fail before installer work.
+$ideExecutable = Join-Path $ideRoot "Founder IDE.exe"
+$policyPackageForNode = (Join-Path $ideAppRoot "node_modules\@vscode\policy-watcher").Replace("\", "/")
+$policyProbe = "const p=require('$policyPackageForNode'); const w=p.createWatcher('FounderIDE',{},()=>{}); if(!w||typeof w.dispose!=='function') process.exit(3); w.dispose(); process.exit(0);"
+$previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
+try {
+    $env:ELECTRON_RUN_AS_NODE = "1"
+    # Piping to Out-String makes Windows PowerShell wait for this GUI-subsystem
+    # executable and populate LASTEXITCODE before the packaging script moves on.
+    $policyProbeOutput = (& $ideExecutable -e $policyProbe 2>&1 | Out-String)
+    $policyProbeExit = $LASTEXITCODE
+} finally {
+    $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
+}
+if ($policyProbeExit -ne 0) {
+    throw "Founder IDE policy watcher runtime contract failed (exit $policyProbeExit): $policyProbeOutput"
+}
+Write-Host "[stack]   policy watcher runtime contract verified"
 
 # node-pty's postinstall step copies its matching ConPTY runtime beside the
 # native bindings. Warm VS Code payloads can retain the .node files while

@@ -66,6 +66,14 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(source, /Founder IDE native binding is missing/);
   });
 
+  it('executes the packaged policy watcher contract with the pinned Electron runtime', () => {
+    assert.match(source, /refreshed Electron-targeted policy watcher/);
+    assert.match(source, /ELECTRON_RUN_AS_NODE/);
+    assert.match(source, /createWatcher\('FounderIDE',\{\},\(\)=>\{\}\)/);
+    assert.match(source, /policy watcher runtime contract failed/);
+    assert.match(source, /policy watcher runtime contract verified/);
+  });
+
   it('restores and validates the pinned ripgrep runtime', () => {
     assert.match(source, /node_modules\\@vscode\\ripgrep\\bin\\rg\.exe/);
     assert.match(source, /Founder IDE ripgrep runtime is missing from both payload and source/);
