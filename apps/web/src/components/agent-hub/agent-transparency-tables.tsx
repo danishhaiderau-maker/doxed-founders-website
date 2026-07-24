@@ -1,6 +1,7 @@
 'use client';
 
 import { displayMelbourneTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
+import { selectLiveExecutionBook } from '@/components/agent-hub/agent-live-execution-view';
 
 function MiniTable({
   title,
@@ -85,7 +86,8 @@ export function AgentTransparencyTables({
   /** Public showcase — positions, orders, trades only (no signals / AI columns). */
   executionOnly?: boolean;
 }) {
-  const book = liveBook ?? EMPTY_LIVE_BOOK;
+  const sourceBook = liveBook ?? EMPTY_LIVE_BOOK;
+  const book = executionOnly ? selectLiveExecutionBook(sourceBook) : sourceBook;
   const cap = Math.max(1, Math.min(maxRows, 20));
 
   const signalRows = book.activeSignals.slice(0, cap).map((s) => [
@@ -103,13 +105,7 @@ export function AgentTransparencyTables({
     s.exitReason ?? '—',
   ]);
 
-  const actualExchangePositions = book.positions.filter(
-    (position) =>
-      position.leg === 'Exchange net (actual)' ||
-      position.leg === 'Bitfinex net',
-  );
-  const visiblePositions = executionOnly ? actualExchangePositions : book.positions;
-  const positionRows = visiblePositions.slice(0, cap).map((p) => [
+  const positionRows = book.positions.slice(0, cap).map((p) => [
     p.leg,
     p.side,
     p.qty.toFixed(4),

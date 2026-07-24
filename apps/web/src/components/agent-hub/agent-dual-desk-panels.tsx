@@ -242,8 +242,8 @@ export function AgentDeskView({
       ) : null}
       {!exchangeLiveBook ? (
         <p className="rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
-          Waiting for exchange sync — start the relay and ensure Derivatives has USDT. Tables update
-          within seconds once your first mirrored signal fires.
+          Bitfinex state is temporarily unavailable. This is not proof that the account is flat;
+          the desk will retry automatically.
         </p>
       ) : null}
       <AgentTransparencyTables liveBook={liveBook} maxRows={5} executionOnly />

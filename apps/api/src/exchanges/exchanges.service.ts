@@ -10,6 +10,22 @@ import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { ExchangeAdapterRegistry } from './exchange-adapter.registry';
 import { BitfinexTradingClient } from './bitfinex-api.client';
 
+export async function readBitfinexExchangeSnapshot(
+  client: Pick<BitfinexTradingClient, 'listActiveOrders' | 'getOpenPositionDetail'>,
+  creds: ExchangeCredentials,
+) {
+  try {
+    const [orders, position] = await Promise.all([
+      client.listActiveOrders(creds),
+      client.getOpenPositionDetail(creds),
+    ]);
+    return { orders, position };
+  } catch {
+    // A partial or failed account read is unknown, never proof of a flat book.
+    return null;
+  }
+}
+
 @Injectable()
 export class ExchangesService {
   private readonly registry = new ExchangeAdapterRegistry();
@@ -145,19 +161,7 @@ export class ExchangesService {
   async getUserBitfinexExchangeSnapshot(userId: string) {
     const creds = await this.getUserCredentials(userId, 'bitfinex');
     if (!creds) return null;
-    let orders: Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>> = [];
-    let position: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>> = null;
-    try {
-      orders = await this.bitfinex.listActiveOrders(creds);
-    } catch {
-      orders = [];
-    }
-    try {
-      position = await this.bitfinex.getOpenPositionDetail(creds);
-    } catch {
-      position = null;
-    }
-    return { orders, position };
+    return readBitfinexExchangeSnapshot(this.bitfinex, creds);
   }
 
   /** Exchange-truth position closes for live-copy Trades table backfill when Neon ledger lags. */

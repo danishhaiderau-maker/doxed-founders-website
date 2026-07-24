@@ -149,7 +149,7 @@ export function AgentDeskMetricsBar({
   // baseline (it would produce phantom drift with zero input from the copy).
   const liveArmed = isLiveSession && instanceStatus === 'ACTIVE';
   const liveAnchorKey = liveArmed ? (userAgent.userSessionStartedAt ?? null) : null;
-  const showcaseDeltaSinceLiveStart = useShowcaseDeltaSinceLiveStart(
+  useShowcaseDeltaSinceLiveStart(
     liveAnchorKey,
     showcaseAgent.sessionPnlUsd ?? 0,
   );
@@ -235,22 +235,12 @@ export function AgentDeskMetricsBar({
     const unrealized = userAgent.unrealizedPnlUsd ?? 0;
     const {
       sessionPnlUsd: sessionPnl,
-      equityPnlUsd: liveEquityPnl,
       usedBookFallback,
     } = computeLiveCopyEquityPnl({
       backendSessionPnlUsd: userAgent.sessionPnlUsd ?? 0,
       bookRealizedPnlUsd: realizedFromBook,
       unrealizedPnlUsd: unrealized,
     });
-    // Drift = showcase session P&L (since the user's explicit live-copy arm)
-    // − live copy P&L, on the SAME equity basis. The showcase side
-    // (`showcaseDeltaSinceLiveStart`) is the bot's equity-based session P&L
-    // delta. `computeLiveCopyEquityPnl` keeps the live side on that same basis:
-    // the backend session value already includes open unrealized P&L, while
-    // the closed-trade fallback adds unrealized exactly once. `null` when no
-    // arm is active (PAUSED or no baseline yet) → the cell renders "—".
-    const showcaseDelta = showcaseDeltaSinceLiveStart;
-    const drift = showcaseDelta == null ? null : showcaseDelta - liveEquityPnl;
     const sessionHint = paused
       ? 'Paused — open positions remain'
       : userAgent.openPositionSide
@@ -271,28 +261,10 @@ export function AgentDeskMetricsBar({
         hint: `${sessionHint} · ${formatPercent(userAgent.netReturnPct ?? 0)}`,
       },
       {
-        // drift = showcase PnL − live PnL. Sign flips the wording; abs value
-        // drives the displayed amount so it's always positive in the message.
-        // > 0.10 → showcase ahead (live is behind); < −0.10 → live ahead;
-        // within ±$0.10 → tracking. See comments above for the equity basis.
-        label:
-          drift == null
-            ? 'Drift vs showcase'
-            : drift > 0.1
-              ? 'Behind showcase'
-              : drift < -0.1
-                ? 'Ahead of showcase'
-                : 'Tracking showcase',
-        value: drift == null ? '—' : formatUsd(Math.abs(drift), 2),
-        accent:
-          drift == null
-            ? 'text-zinc-300'
-            : drift > 0.1
-              ? 'text-amber-400'
-              : drift < -0.1
-                ? 'text-emerald-400'
-                : 'text-zinc-300',
-        hint: drift == null ? 'Start Live Copy to track' : 'vs showcase baseline',
+        label: 'Completed trades',
+        value: String(liveBook?.trades.length ?? 0),
+        accent: 'text-zinc-100',
+        hint: 'Bitfinex ledger closes this session',
       },
     ];
   } else {

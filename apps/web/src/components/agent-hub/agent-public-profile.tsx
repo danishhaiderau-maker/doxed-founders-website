@@ -4,13 +4,13 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import {
   formatPercent,
-  formatUsd,
   buildTradingAgentActionShareText,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
   type CopyRelayLimitChainSnapshot,
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
+  type AgentShowcaseFlash,
   type TradingAgentDashboardState,
   type TradingAgentSessionStats,
 } from '@dcf/utils';
@@ -22,6 +22,7 @@ import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentAnalyzerPanel } from '@/components/agent-hub/agent-analyzer-panel';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
+import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
@@ -29,6 +30,7 @@ import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import { ShareOnXButton } from '@/components/share-on-x-button';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
+import { resolveInitialAgentDesk } from '@/components/agent-hub/agent-live-execution-view';
 
 const deskStorageKey = (slug: string) => `agent-hub-desk-${slug}`;
 
@@ -174,62 +176,6 @@ function PublicReasoningPanel({
       </div>
       {dashboard.transparency?.reason && (
         <p className="mt-3 text-xs text-zinc-500">{dashboard.transparency.reason}</p>
-      )}
-    </section>
-  );
-}
-
-function LiveRelayReasoningPanel({
-  agent,
-  exchangeLabel,
-  liveBook,
-}: {
-  agent: TradingAgentSummary;
-  exchangeLabel?: string | null;
-  liveBook?: TradingAgentDashboardState['liveBook'] | null;
-}) {
-  const openPos = liveBook?.positions?.[0];
-  const pending = liveBook?.pendingOrders?.length ?? 0;
-  const lastSignal = liveBook?.activeSignals?.[0];
-  const exchange = exchangeLabel ?? 'Bitfinex';
-
-  return (
-    <section className="rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-950/20 to-zinc-950/50 p-6">
-      <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-300">
-        Your {exchange} relay status
-      </h2>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <div className="rounded-xl border border-zinc-800 bg-black/20 px-3 py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-zinc-500">Open position</p>
-          <p className="mt-1 text-sm font-semibold text-white">
-            {openPos ? `${openPos.side} · ${openPos.qty.toFixed(4)} BTC` : agent.openPositionSide ?? 'None'}
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-800 bg-black/20 px-3 py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-zinc-500">Pending limits</p>
-          <p className="mt-1 text-sm font-semibold text-white">{pending}</p>
-        </div>
-        <div className="rounded-xl border border-zinc-800 bg-black/20 px-3 py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-zinc-500">Session P&amp;L</p>
-          <p className={`mt-1 text-sm font-semibold ${(agent.sessionPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {formatUsd(agent.sessionPnlUsd ?? 0, 2)}
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-800 bg-black/20 px-3 py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-zinc-500">Exchange balance</p>
-          <p className="mt-1 text-sm font-semibold text-white">
-            {formatUsd(agent.exchangeBalanceUsd ?? agent.balanceUsd ?? 0, 2)}
-          </p>
-        </div>
-      </div>
-      {lastSignal && (
-        <p className="mt-4 text-sm text-zinc-300">
-          Last relay signal: <strong>{lastSignal.direction}</strong> · {lastSignal.confidence}% conf ·{' '}
-          {lastSignal.outcome}
-        </p>
-      )}
-      {agent.walletStatusHint && (
-        <p className="mt-2 text-xs text-amber-200/80">{agent.walletStatusHint}</p>
       )}
     </section>
   );
@@ -547,6 +493,7 @@ export function AgentPublicProfile({
   exchangeConnected,
   viewScope = 'showcase',
   showcaseNote,
+  showcaseFlash,
   showcaseAgent,
   showcaseLiveBook,
   exchangeLiveBook,
@@ -600,6 +547,7 @@ export function AgentPublicProfile({
   exchangeConnected?: boolean;
   viewScope?: 'showcase' | 'user';
   showcaseNote?: string | null;
+  showcaseFlash?: AgentShowcaseFlash | null;
   showcaseAgent?: TradingAgentSummary;
   showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
   exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
@@ -635,7 +583,13 @@ export function AgentPublicProfile({
   const isLiveSession = hired && instanceMode === 'live';
   const relaySimActive = Boolean(copyRelaySim?.active);
   const relaySimDeskAvailable = isLiveSession && exchangeProvider === 'bitfinex';
-  const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() => readStoredDesk(slug) ?? 'showcase');
+  const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() =>
+    resolveInitialAgentDesk({
+      storedDesk: readStoredDesk(slug),
+      isLiveSession,
+      relaySimActive,
+    }),
+  );
 
   // Full-session stats (Total P&L, P&L %, Win Rate, Trades) — same source the
   // Analyzer panel renders. Reused for the hero "Share to X" text so the tweet
@@ -825,13 +779,17 @@ export function AgentPublicProfile({
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
-      {showcaseNote && !(slug === 'conservative-btc' && resolvedDesk === 'showcase') && (
+      {showcaseNote && resolvedDesk === 'showcase' && (
         <p className="mb-4 rounded-xl border border-violet-500/25 bg-violet-950/20 px-4 py-3 text-sm text-violet-100/90">
           {showcaseNote}
         </p>
       )}
 
-      <StateIntegrityHeader dashboard={dashboard} />
+      {slug === 'conservative-btc' && resolvedDesk === 'showcase' ? (
+        <AgentShowcaseFlashBanner flash={showcaseFlash ?? null} className="mb-4" />
+      ) : null}
+
+      {resolvedDesk === 'showcase' ? <StateIntegrityHeader dashboard={dashboard} /> : null}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_300px]">
         <div className="min-w-0 space-y-6">
@@ -918,12 +876,14 @@ export function AgentPublicProfile({
                   Connect {exchangeLabel ?? 'Bitfinex'} &amp; copy
                 </Link>
               ) : null}
-              <button
-                type="button"
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:border-violet-500/50"
-              >
-                Observe showcase
-              </button>
+              {resolvedDesk === 'showcase' ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:border-violet-500/50"
+                >
+                  Observe showcase
+                </button>
+              ) : null}
               {isLiveSession && rentalExpiresAt && resolvedDesk === 'live' && (
                 <LiveCopyRentalBadge expiresAt={rentalExpiresAt} />
               )}
@@ -940,7 +900,7 @@ export function AgentPublicProfile({
             </div>
           </section>
 
-          {slug === 'conservative-btc' && (
+          {slug === 'conservative-btc' && resolvedDesk === 'showcase' && (
             <div className="mt-6">
               <AgentAnalyzerPanel slug={slug} summary={sessionSummary} />
             </div>
@@ -981,13 +941,7 @@ export function AgentPublicProfile({
                 liveBook={exchangeLiveBook}
               />
             ) : null}
-            {resolvedDesk === 'relay-sim' ? null : resolvedDesk === 'live' && isLiveSession ? (
-              <LiveRelayReasoningPanel
-                agent={agent}
-                exchangeLabel={exchangeLabel}
-                liveBook={exchangeLiveBook}
-              />
-            ) : resolvedDesk === 'showcase' ? (
+            {resolvedDesk === 'relay-sim' || (resolvedDesk === 'live' && isLiveSession) ? null : resolvedDesk === 'showcase' ? (
               isAdmin ? (
                 <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
               ) : null

@@ -1048,6 +1048,9 @@ export class TradingAgentsService implements OnModuleInit {
       instance.exchangeProvider === 'bitfinex'
         ? await this.exchanges.getUserBitfinexExchangeSnapshot(userId)
         : null;
+    if (instance.exchangeProvider === 'bitfinex' && !snapshot) {
+      return null;
+    }
     const metrics =
       instance.exchangeProvider === 'bitfinex'
         ? await this.exchanges.getUserBitfinexLiveMetrics(userId, {

@@ -14,7 +14,6 @@ import {
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
-import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import { SignalApiPanel } from '@/components/agent-hub/signal-api-panel';
 import { AgentHubShell } from '@/components/agent-hub/agent-hub-shell';
 import { useShareOrigin } from '@/components/share-on-x-button';
@@ -411,9 +410,6 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   return (
     <AgentHubShell>
-      {slug === 'conservative-btc' && (
-        <AgentShowcaseFlashBanner flash={showcaseFlash} />
-      )}
       {error && (
         <p className="mx-4 mt-4 rounded-lg border border-amber-500/30 bg-amber-950/30 px-4 py-2 text-sm text-amber-200 sm:mx-6">
           {error}
@@ -467,6 +463,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           exchangeConnected={exchangeConnected || Boolean(agent.exchangeConnected)}
           viewScope={viewScope}
           showcaseNote={showcaseNote}
+          showcaseFlash={showcaseFlash}
           showcaseAgent={showcaseAgent ?? agent}
           showcaseLiveBook={showcaseLiveBook}
           exchangeLiveBook={exchangeLiveBook}

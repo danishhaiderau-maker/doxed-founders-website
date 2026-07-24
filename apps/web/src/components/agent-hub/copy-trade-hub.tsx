@@ -18,6 +18,7 @@ import {
 } from '@/components/agent-hub/agent-relay-sync-alerts';
 import type { TradingAgentSummary } from '@/lib/api';
 import type { TradingAgentDashboardState } from '@dcf/utils';
+import { shouldShowShowcaseReference } from '@/components/agent-hub/agent-live-execution-view';
 
 export function CopyTradeDetailsStrip({
   agent,
@@ -345,7 +346,7 @@ export function CopyTradeHub({
         showcaseAvailable={Boolean(botConnected)}
       />
 
-      {(activeDesk === 'live' || activeDesk === 'relay-sim') && (
+      {shouldShowShowcaseReference(activeDesk) && (
         <ShowcaseReferenceBar
           showcaseAgent={showcaseAgent}
           botConnected={botConnected}

@@ -31,6 +31,7 @@ test('does not render a protective stop as a pending entry order', () => {
   });
 
   assert.equal(book.pendingOrders.length, 1);
+  assert.equal(book.pendingOrders[0]?.tradeId, 'bfx-2');
   assert.equal(book.pendingOrders[0]?.side, 'SHORT');
   assert.equal(book.pendingOrders[0]?.limitPrice, 64_424);
 });
@@ -130,6 +131,7 @@ test('keeps genuinely separate pending orders visible', () => {
   });
 
   assert.equal(book.pendingOrders.length, 2);
+  assert.equal(book.pendingOrders[0]?.tradeId, 'bfx-1');
   assert.equal(book.pendingOrders[1]?.tradeId, 'cont-separate');
 });
 
@@ -241,6 +243,56 @@ test('does not invent trade direction from a Bitfinex ledger win or loss', () =>
   assert.equal(book.trades.length, 1);
   assert.equal(book.trades[0]?.direction, '—');
   assert.equal(book.trades[0]?.netUsd, 2.25);
+});
+
+test('renders only exchange-ledger closes and keeps distinct close ids inside two minutes', () => {
+  const closedAt = new Date('2026-07-23T10:55:53.717Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.CLOSED,
+        fillPrice: 65_000,
+        exitPrice: 64_900,
+        pnlUsd: 3,
+        pnlMarginPct: 1,
+        limitPrice: 65_000,
+        qty: 0.03,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: null,
+        createdAt: new Date(closedAt.getTime() - 60_000),
+        updatedAt: closedAt,
+        cycle: {
+          tradeId: 'virtual-close-must-not-render',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: new Date(closedAt.getTime() - 60_000),
+        },
+      },
+    ],
+    ledgerCloses: [
+      {
+        ledgerId: '2001',
+        closedAt,
+        pnlUsd: 2.25,
+        description: 'Position closed',
+      },
+      {
+        ledgerId: '2002',
+        closedAt: new Date(closedAt.getTime() + 30_000),
+        pnlUsd: -0.75,
+        description: 'Position closed',
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    book.trades.map((trade) => trade.tradeId).sort(),
+    ['bfx-2001', 'bfx-2002'],
+  );
 });
 
 test('expired copy rows expose creation, cancellation, and terminal reason separately', () => {

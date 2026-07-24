@@ -147,6 +147,7 @@ export function mapSubscriberExchangeLiveBook(input: {
     })
     .slice(0, 10)
     .map((o) => ({
+      tradeId: `bfx-${o.id}`,
       ageMin: 0,
       side: orderSide(o.amount),
       status: String(o.status ?? 'ACTIVE').toUpperCase(),
@@ -273,52 +274,12 @@ export function mapSubscriberExchangeLiveBook(input: {
       continue;
     }
 
-    if (row.status === 'CLOSED') {
-      // F7b (2026-07-07 incident) — suppress never-filled cancelled orders.
-      // A CLOSED participant with no fillPrice, no exitPrice, and zero PnL is
-      // an order that was placed then cancelled/expired without ever trading
-      // (RECONCILE_CANCEL_BY_EXCHANGE, DUPLICATE_LIMIT_SKIPPED, SIGNAL_TTL_EXPIRED,
-      // etc.). Rendering these as "$entry → $entry +0.00% Win" tiles in the
-      // trade journey misled the user into thinking fake trades were being
-      // generated. They belong in an "expired/abandoned" view, not the journey.
-      const isUnfilledNoPnl =
-        row.fillPrice == null &&
-        row.exitPrice == null &&
-        Math.abs(Number(row.pnlUsd ?? 0)) < 0.01;
-      if (isUnfilledNoPnl) continue;
-
-      const entry = Number(row.fillPrice ?? limitPrice);
-      const exit = Number(row.exitPrice ?? entry);
-      const pnlPct = Number(row.pnlMarginPct ?? 0);
-      const netUsd = Number(row.pnlUsd ?? 0);
-      const durMin = Math.max(
-        1,
-        Math.round((row.updatedAt.getTime() - row.createdAt.getTime()) / 60_000),
-      );
-      trades.push({
-        time: fmtTime(row.updatedAt),
-        tradeId: row.cycle.tradeId,
-        direction,
-        entry,
-        exit,
-        durationMin: durMin,
-        pnlPct,
-        netUsd,
-        grossUsd: netUsd,
-        tradeFeesUsd: 0,
-        fundingUsd: 0,
-        aiBand: 'LIVE',
-      });
-    }
+    // CLOSED participant rows are virtual relay accounting, not a distinct
+    // Bitfinex close. Completed live results come exclusively from the
+    // exchange ledger below so one real close appears exactly once.
   }
 
-  const participantCloseMs = trades.map((t) => Date.parse(String(t.time).replace(' AEST', '+10:00'))).filter(Number.isFinite);
   for (const row of input.ledgerCloses ?? []) {
-    const closedMs = row.closedAt.getTime();
-    const alreadyCovered = participantCloseMs.some(
-      (ms) => Number.isFinite(ms) && Math.abs(ms - closedMs) <= 120_000,
-    );
-    if (alreadyCovered) continue;
     trades.push({
       time: fmtTime(row.closedAt),
       tradeId: `bfx-${row.ledgerId}`,
