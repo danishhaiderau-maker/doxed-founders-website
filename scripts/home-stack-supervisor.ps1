@@ -308,26 +308,39 @@ while ($true) {
   # minutes under process-table contention.
   Set-Content -Path $heartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
   $tunnelUrl = Get-TunnelPublicUrl
-  $botOk = Test-BotHealthy
+  $botRuntime = Get-BotRuntimeStatus
+  $botOk = ($botRuntime.Responding -and $botRuntime.RevisionMatches)
+  $botRevisionDeferred = (
+    $botRuntime.Responding -and
+    -not $botRuntime.RevisionMatches -and
+    (-not $botRuntime.StateKnown -or -not $botRuntime.Flat)
+  )
+  $botRevisionRestartSafe = (
+    $botRuntime.Responding -and
+    -not $botRuntime.RevisionMatches -and
+    $botRuntime.StateKnown -and
+    $botRuntime.Flat
+  )
+  $botServing = $botRuntime.Responding
   $analyzerOk = Test-AnalyzerHealthy
   $bridgeOk = Test-BridgeHealthy
   # Do not enumerate Windows processes in the progress loop.  The public
   # tunnel probe below is the authoritative health signal; this label records
   # that a tunnel URL is configured, not an unbounded process-table lookup.
   $cfState = "unprobed"
-  $tunnelOk = if ($botOk -and $tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
+  $tunnelOk = if ($botServing -and $tunnelUrl) { Test-TunnelPublicHealthy $tunnelUrl } else { $false }
 
   $botStartupAgeSec = Get-BotStartupAgeSeconds
-  $botStarting = (-not $botOk -and $botStartupAgeSec -lt $BotStartupGraceSec)
+  $botStarting = (-not $botServing -and $botStartupAgeSec -lt $BotStartupGraceSec)
 
-  if ($botOk -or $botStarting) { $fail.bot = 0 } else { $fail.bot++ }
+  if ($botOk -or $botRevisionDeferred -or $botStarting) { $fail.bot = 0 } else { $fail.bot++ }
   if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
 
   # Diagnostic only: a bounded accepting socket with a failed HTTP probe is
   # sufficient evidence of a hung server. Never enumerate the TCP table here.
-  $botHung = (-not $botOk -and (Test-PortOpen $BotPort))
+  $botHung = (-not $botServing -and (Test-PortOpen $BotPort))
   # F4c-429 — surface the rate-limit-backoff state on the tick line so we can
   # see in the log when 429s are being absorbed (instead of causing flaps).
   $backoff = Get-TunnelBackoffState
@@ -338,7 +351,16 @@ while ($true) {
     $backoffTag = "rl-ok"
   }
   $startupTag = if ($botStarting) { "starting=$([int]$botStartupAgeSec)s/$($BotStartupGraceSec)s" } else { "starting=no" }
-  Log ("tick bot=$botOk analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $startupTag $backoffTag url=$tunnelUrl")
+  $revisionTag = if ($botOk) {
+    "revision=current"
+  } elseif ($botRevisionDeferred) {
+    "revision=stale-deferred stateKnown=$($botRuntime.StateKnown) orders=$($botRuntime.Orders) positions=$($botRuntime.Positions)"
+  } elseif ($botRevisionRestartSafe) {
+    "revision=stale-flat-restart-safe"
+  } else {
+    "revision=unproven"
+  }
+  Log ("tick bot=$botOk serving=$botServing analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $revisionTag $startupTag $backoffTag url=$tunnelUrl")
 
   if ($fail.bridge -ge $FailThreshold) {
     $lastRecover.bridge = Invoke-Recovery "bridge" { Restart-BridgeComponent } $lastRecover.bridge $BridgeCooldownSec
@@ -400,7 +422,7 @@ while ($true) {
   }
 
   # Zombie cloudflared: process up but public URL dead for multiple checks.
-  if ($botOk -and $tunnelUrl -and -not $tunnelOk -and $fail.tunnel -ge $FailThreshold) {
+  if ($botServing -and $tunnelUrl -and -not $tunnelOk -and $fail.tunnel -ge $FailThreshold) {
     if (Test-HomeStackUserStopped) {
       Log "RECOVER tunnel skipped - user stopped stack"
       $fail.tunnel = 0
@@ -419,7 +441,7 @@ while ($true) {
   # has stopped the stack (no point watching a bot the user wants down) and
   # when the bot itself is down (Restart-BotComponent above re-launches the
   # monitor via start-home-bot.ps1 -NoWait, so we'd just race it).
-  if ($botOk -and -not (Test-HomeStackUserStopped) -and -not (Test-AutoRestartMonitorAlive)) {
+  if ($botServing -and -not (Test-HomeStackUserStopped) -and -not (Test-AutoRestartMonitorAlive)) {
     Restart-AutoRestartMonitor -WatchPid 0
   }
 

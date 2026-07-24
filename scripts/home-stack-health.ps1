@@ -61,26 +61,50 @@ function Test-BotRevisionMatches([object]$Ping) {
   return $expected.StartsWith($actual, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-BotHealthy {
-  if (-not (Test-PortOpen $BotPort)) { return $false }
-  try {
-    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/ping" -TimeoutSec 12
-    if ($ping.ok -and $ping.dashboard_owner -eq $true -and (Test-BotRevisionMatches $ping)) {
-      return $true
-    }
-  } catch { }
-  # One retry — slow laptops often miss the first probe under load.
-  Start-Sleep -Milliseconds 800
-  try {
-    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/ping" -TimeoutSec 15
-    return (
-      $ping.ok -and
-      $ping.dashboard_owner -eq $true -and
-      (Test-BotRevisionMatches $ping)
-    )
-  } catch {
-    return $false
+function Get-BotRuntimeStatus {
+  $status = [pscustomobject]@{
+    Responding      = $false
+    RevisionMatches = $false
+    StateKnown      = $false
+    Flat            = $false
+    Orders          = -1
+    Positions       = -1
+    SourceGitRev    = ""
   }
+  if (-not (Test-PortOpen $BotPort)) { return $status }
+
+  foreach ($timeoutSec in @(12, 15)) {
+    try {
+      $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/ping" -TimeoutSec $timeoutSec
+      if ($ping.ok -and $ping.dashboard_owner -eq $true) {
+        $status.Responding = $true
+        $status.RevisionMatches = Test-BotRevisionMatches $ping
+        $status.SourceGitRev = [string]$ping.source_git_rev
+        break
+      }
+    } catch { }
+    Start-Sleep -Milliseconds 800
+  }
+
+  # A revision mismatch is an upgrade request, not a liveness failure. Prove
+  # the source paper book is flat before allowing an automatic replacement.
+  # Unknown state fails closed and leaves the currently responding bot alone.
+  if ($status.Responding -and -not $status.RevisionMatches) {
+    try {
+      $state = Invoke-RestMethod -Uri "http://127.0.0.1:$BotPort/api/state" -TimeoutSec 12
+      $status.Orders = @($state.orders).Count
+      $status.Positions = @($state.positions).Count
+      $status.StateKnown = $true
+      $status.Flat = ($status.Orders -eq 0 -and $status.Positions -eq 0)
+    } catch { }
+  }
+
+  return $status
+}
+
+function Test-BotHealthy {
+  $status = Get-BotRuntimeStatus
+  return ($status.Responding -and $status.RevisionMatches)
 }
 
 function Test-AnalyzerHealthyQuick {

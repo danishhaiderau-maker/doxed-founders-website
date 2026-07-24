@@ -95,8 +95,28 @@ if (-not $SkipBridgeRestart) {
 }
 
 # Step 1 — bot (kill duplicates before start)
-if (-not (Test-BotHealthy)) {
-  if (Test-BotHung) {
+$botRuntime = Get-BotRuntimeStatus
+$botHealthy = ($botRuntime.Responding -and $botRuntime.RevisionMatches)
+$botUpgradeDeferred = (
+  $botRuntime.Responding -and
+  -not $botRuntime.RevisionMatches -and
+  (-not $botRuntime.StateKnown -or -not $botRuntime.Flat)
+)
+if ($botUpgradeDeferred) {
+  Write-Step "[1/4] Bot update deferred - source book is active or unavailable (orders=$($botRuntime.Orders), positions=$($botRuntime.Positions))"
+  $messages.Add("[1/4] Bot update deferred until source flat - keep relay paused")
+} elseif (-not $botHealthy) {
+  if (
+    $botRuntime.Responding -and
+    -not $botRuntime.RevisionMatches -and
+    $botRuntime.StateKnown -and
+    $botRuntime.Flat
+  ) {
+    Write-Step "[1/4] Replacing stale bot revision from verified flat source boundary..."
+    Stop-BotPidFile | Out-Null
+    Stop-ListenPortFast $BotPort | Out-Null
+    Start-Sleep -Seconds 2
+  } elseif (Test-BotHung) {
     Write-Step "[1/4] Clearing hung bot on :$BotPort..."
     Stop-BotPidFile | Out-Null
     Stop-ListenPortFast $BotPort | Out-Null

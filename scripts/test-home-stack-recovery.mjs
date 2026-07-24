@@ -20,6 +20,8 @@ const autoWire = read("auto-wire-after-tunnel.ps1");
 const startBot = read("start-home-bot.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
+const health = read("home-stack-health.ps1");
+const supervisor = read("home-stack-supervisor.ps1");
 const hiddenPs1 = common.slice(
   common.indexOf("function Start-HiddenPs1"),
   common.indexOf("function Start-VisibleConsole"),
@@ -142,11 +144,22 @@ assert.match(
   /refusing an unsafe duplicate launch/,
 );
 assert.match(commandWorker, /recover-home-stack-provider-free\.ps1/);
+assert.match(health, /function Get-BotRuntimeStatus/);
+assert.match(health, /\/api\/state/);
+assert.match(health, /StateKnown\s+=\s+\$true/);
+assert.match(
+  health,
+  /Flat\s+=\s+\(\$status\.Orders -eq 0 -and \$status\.Positions -eq 0\)/,
+);
+assert.match(supervisor, /\$botRevisionDeferred/);
+assert.match(supervisor, /revision=stale-deferred/);
+assert.match(startEverything, /Bot update deferred - source book is active or unavailable/);
+assert.match(startEverything, /Replacing stale bot revision from verified flat source boundary/);
 
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 72,
+    checks: 80,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -167,6 +180,8 @@ console.log(
       "recovery suppresses watchdog respawn until the successful start path clears it",
       "wedged scheduled watchdog owners are cleared by exact native command line",
       "hidden HTTP.sys bridge owners are cleared by exact repo script path",
+      "revision upgrades fail closed when source state is active or unknown",
+      "automatic revision replacement proceeds only from a verified source-flat boundary",
     ],
   }),
 );
