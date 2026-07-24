@@ -108,7 +108,12 @@ foreach ($executable in @("powershell.exe", "pwsh.exe")) {
       Start-Sleep -Milliseconds 200
     }
     if (Test-ProcessIdAliveFast $watchdogPid) {
-      throw "Unable to stop exact watchdog owner pid=$watchdogPid."
+      # The sentinel is already present and bridge-watchdog rechecks it on
+      # every relaunch path. A higher-integrity scheduled owner may refuse
+      # termination, but it cannot recover components while the marker is
+      # present; log it and continue restoring the updated supervisor.
+      Log "Exact watchdog owner pid=$watchdogPid remained alive; user-stopped sentinel keeps it in stand-down"
+      continue
     }
     Log "Stopped exact watchdog owner pid=$watchdogPid"
   }
