@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge pull request #43 from danishhaiderau-maker/release/founder-ide-v1-clean
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
