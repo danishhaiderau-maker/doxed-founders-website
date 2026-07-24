@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (29 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fail closed on malformed Bitfinex account reads
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
