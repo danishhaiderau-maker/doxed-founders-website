@@ -298,7 +298,28 @@ export type BitfinexActiveOrder = {
 
 /** Bitfinex order array indices (REST). */
 export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
-  if (!Array.isArray(row) || row.length < 14) return null;
+  if (!Array.isArray(row) || row.length < 17) return null;
+  const id = Number(row[0]);
+  const symbol = typeof row[3] === 'string' ? row[3] : '';
+  const amount = Number(row[6]);
+  const amountOrig = Number(row[7]);
+  const orderType = String(row[8] ?? '');
+  const price = Number(row[16] ?? row[14] ?? 0);
+  const status = String(row[13] ?? '');
+  if (
+    !Number.isFinite(id)
+    || id <= 0
+    || !symbol
+    || !Number.isFinite(amount)
+    || !Number.isFinite(amountOrig)
+    || amountOrig === 0
+    || !orderType
+    || !Number.isFinite(price)
+    || price < 0
+    || !status
+  ) {
+    return null;
+  }
   const cidRaw = row[2];
   const createdAtRaw = row[4];
   const cid =
@@ -310,16 +331,91 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
       ? Number(createdAtRaw)
       : undefined;
   return {
-    id: Number(row[0]),
-    symbol: String(row[3]),
-    amount: Number(row[6]),
-    amountOrig: Number(row[7]),
-    orderType: String(row[8] ?? ''),
-    price: Number(row[16] ?? row[14] ?? 0),
-    status: String(row[13] ?? 'UNKNOWN'),
+    id,
+    symbol,
+    amount,
+    amountOrig,
+    orderType,
+    price,
+    status,
     ...(cid != null ? { cid } : {}),
     ...(createdAtMs != null ? { createdAtMs } : {}),
   };
+}
+
+export function parseActiveOrdersPayload(
+  payload: unknown,
+  symbol = BITFINEX_BTC_PERP_SYMBOL,
+): BitfinexActiveOrder[] {
+  if (!Array.isArray(payload)) {
+    throw new Error('Bitfinex active-orders response is not an array');
+  }
+  const parsed: BitfinexActiveOrder[] = [];
+  for (const [index, row] of payload.entries()) {
+    const order = parseActiveOrder(row as unknown[]);
+    if (!order) {
+      throw new Error(`Bitfinex active-orders row ${index} is malformed`);
+    }
+    if (order.symbol === symbol) parsed.push(order);
+  }
+  return parsed;
+}
+
+export function parseOpenPositionPayload(
+  payload: unknown,
+  symbol = BITFINEX_BTC_PERP_SYMBOL,
+): BitfinexPositionDetail | null {
+  if (!Array.isArray(payload)) {
+    throw new Error('Bitfinex positions response is not an array');
+  }
+  let matched: BitfinexPositionDetail | null = null;
+  for (const [index, row] of payload.entries()) {
+    if (!Array.isArray(row)) {
+      throw new Error(`Bitfinex positions row ${index} is malformed`);
+    }
+    if (typeof row[0] !== 'string' || !row[0]) {
+      throw new Error(`Bitfinex positions row ${index} has no symbol`);
+    }
+    if (row[0] !== symbol) continue;
+    if (matched) {
+      throw new Error(`Bitfinex returned duplicate ${symbol} position rows`);
+    }
+    if (row.length < 8) {
+      throw new Error(`Bitfinex ${symbol} position row is incomplete`);
+    }
+    const amount = Number(row[2]);
+    const basePrice = Number(row[3]);
+    const pnlUsd = Number(row[6]);
+    const pnlPct = Number(row[7]);
+    if (
+      !Number.isFinite(amount)
+      || !Number.isFinite(basePrice)
+      || !Number.isFinite(pnlUsd)
+      || !Number.isFinite(pnlPct)
+    ) {
+      throw new Error(`Bitfinex ${symbol} position row has invalid numeric fields`);
+    }
+    if (amount === 0) {
+      throw new Error(`Bitfinex ${symbol} returned a zero-amount position row`);
+    }
+    const amountSats = btcToSats(amount);
+    if (
+      amountSats === 0
+      || Math.abs(amount - amountSats / 100_000_000) > 1e-12
+      || basePrice <= 0
+    ) {
+      throw new Error(`Bitfinex ${symbol} position amount or base price is invalid`);
+    }
+    matched = {
+      symbol,
+      amount,
+      basePrice,
+      pnlUsd,
+      pnlPct,
+      direction: amount > 0 ? 'LONG' : 'SHORT',
+    };
+  }
+  return matched;
 }
 
 export class BitfinexTradingClient {
@@ -662,10 +758,7 @@ export class BitfinexTradingClient {
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/orders', {
       sym: symbol,
     });
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .map((row) => parseActiveOrder(row as unknown[]))
-      .filter((o): o is BitfinexActiveOrder => o != null);
+    return parseActiveOrdersPayload(rows, symbol);
   }
 
   async findOrder(
@@ -691,24 +784,7 @@ export class BitfinexTradingClient {
     symbol = BITFINEX_BTC_PERP_SYMBOL,
   ): Promise<BitfinexPositionDetail | null> {
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/positions');
-    if (!Array.isArray(rows)) return null;
-    for (const row of rows) {
-      if (!Array.isArray(row) || row.length < 8) continue;
-      if (String(row[0]) !== symbol) continue;
-      const amount = Number(row[2] ?? 0);
-      if (btcToSats(amount) === 0) continue;
-      const pnlUsd = Number(row[6] ?? 0);
-      const pnlPct = Number(row[7] ?? 0);
-      return {
-        symbol,
-        amount,
-        basePrice: Number(row[3] ?? 0),
-        pnlUsd,
-        pnlPct,
-        direction: amount > 0 ? 'LONG' : 'SHORT',
-      };
-    }
-    return null;
+    return parseOpenPositionPayload(rows, symbol);
   }
 
   /** Sum fees and exchange-realized position P&L from one margin-ledger request. */
