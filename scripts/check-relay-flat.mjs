@@ -44,7 +44,21 @@ const botUrls = [
   resolveHomeBotPublicUrl(),
 ].filter(Boolean);
 
+export function hasFullOwnerOrderState(bot) {
+  return (
+    bot != null
+    && typeof bot === 'object'
+    && (
+      Array.isArray(bot.orders)
+      || Array.isArray(bot.pending_orders)
+    )
+  );
+}
+
 async function fetchOwnerState() {
+  if (process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES' && !adminToken) {
+    throw new Error('BOT_ADMIN_TOKEN is required for an authenticated owner-state flat proof');
+  }
   let lastError = null;
   for (const baseUrl of [...new Set(botUrls)]) {
     try {
@@ -58,6 +72,14 @@ async function fetchOwnerState() {
         return response.json();
       });
       if (bot?.dashboard_owner === true) {
+        if (
+          process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES'
+          && !hasFullOwnerOrderState(bot)
+        ) {
+          throw new Error(
+            `${baseUrl} did not return the authenticated owner order state`,
+          );
+        }
         return { bot, baseUrl };
       }
       lastError = new Error(`${baseUrl} is not the dashboard owner`);

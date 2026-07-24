@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isStrictRawFlatReconcileSnapshot } from './check-relay-flat.mjs';
+import {
+  hasFullOwnerOrderState,
+  isStrictRawFlatReconcileSnapshot,
+} from './check-relay-flat.mjs';
 
 const now = Date.parse('2026-07-24T05:45:00.000Z');
 
@@ -55,5 +58,20 @@ test('strict flat proof rejects one satoshi, dust, and stale observations', () =
   assert.equal(
     isStrictRawFlatReconcileSnapshot(rawFlat({ rawExchangePositionQty: null }), now),
     false,
+  );
+});
+
+test('authenticated source proof rejects a sanitized state without an order book', () => {
+  assert.equal(
+    hasFullOwnerOrderState({ dashboard_owner: true, positions: [] }),
+    false,
+  );
+  assert.equal(
+    hasFullOwnerOrderState({ dashboard_owner: true, pending_orders: [] }),
+    true,
+  );
+  assert.equal(
+    hasFullOwnerOrderState({ dashboard_owner: true, orders: [] }),
+    true,
   );
 });
