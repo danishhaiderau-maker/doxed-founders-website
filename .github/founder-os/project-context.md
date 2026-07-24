@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (30 recent commits)
+Product & platform (29 recent commits)
 
 ## Progress
 
