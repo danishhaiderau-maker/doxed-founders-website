@@ -5,21 +5,22 @@ import { Suspense } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AccountHub, type AccountTab } from '@/components/account/account-hub';
 
-const VALID_TABS = new Set<AccountTab>([
-  'overview',
-  'messages',
-  'topup',
-  'security',
-  'notifications',
-  'connected',
-  'points',
-  'reputation',
-  'activity',
-]);
+const LEGACY_TAB_MAP: Record<string, AccountTab> = {
+  overview: 'profile',
+  messages: 'inbox',
+  topup: 'plan',
+  security: 'security',
+  notifications: 'inbox',
+  connected: 'security',
+  reputation: 'profile',
+  activity: 'inbox',
+};
+
+const VALID_TABS = new Set<AccountTab>(['profile', 'security', 'plan', 'inbox']);
 
 function AccountPageInner() {
   const searchParams = useSearchParams();
-  const tabParam = searchParams.get('tab') ?? 'overview';
+  const tabParam = searchParams.get('tab') ?? 'profile';
 
   if (tabParam === 'points') {
     redirect('/ddollar');
@@ -27,7 +28,7 @@ function AccountPageInner() {
 
   const initialTab = VALID_TABS.has(tabParam as AccountTab)
     ? (tabParam as AccountTab)
-    : 'overview';
+    : (LEGACY_TAB_MAP[tabParam] ?? 'profile');
   const messageWith = searchParams.get('with');
 
   return (
@@ -38,7 +39,7 @@ function AccountPageInner() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Account</h1>
             <p className="text-sm text-zinc-500">
-              Overview · Security · Notifications · Reputation
+              Profile | Security | Plan | Inbox
             </p>
           </div>
           <SiteNav />

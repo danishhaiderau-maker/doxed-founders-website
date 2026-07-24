@@ -3,7 +3,7 @@
  *
  * On activation:
  *   1. Resolve credentials (settings → `~/FounderVault/node-config.json`).
- *   2. Register the `LanguageModelChatProvider` + agentic tools + chat participant.
+ *   2. Register the native chat participant and its agentic tools.
  *   3. Wire the execution-profile selector (status bar + QuickPick).
  *   4. Wire the DDollar cost tracker (status bar + breakdown).
  *   5. If creds missing, show a "not paired" notification + status bar.
@@ -21,39 +21,223 @@ import {
   syncVaultIntoSettings,
   vaultFileExists,
 } from './credentials';
-import { FounderOsChatProvider } from './chat-provider';
-import { FOUNDER_OS_MODELS, FOUNDER_OS_VENDOR } from './models';
+import { FOUNDER_OS_MODELS } from './models';
 import { editFileTool } from './tools/edit-file';
 import { runCommandTool } from './tools/run-command';
 import { readWorkspaceTool } from './tools/read-workspace';
 import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
+import { GatewayMetadataUi } from './gateway-metadata-ui';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
+// Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
+import {
+  ensureInstallIdentity,
+} from './device-code-sign-in';
+import { PairingStatusBar } from './pairing-status-bar';
+import { startIpcServer, stopIpcServer } from './ipc/server';
+import { FOUNDER_TOOL_IDS } from './tool-names';
+import {
+  embeddedRelayExecutable,
+  launchEmbeddedRelay,
+} from './embedded-relay';
+import {
+  FOUNDER_AUTH_PROVIDER_ID,
+  FounderAuthenticationProvider,
+} from './founder-authentication';
+import { FounderHubProvider } from './founder-hub';
+import { FounderSettingsPanel } from './founder-settings';
+import { FounderShortcutRegistry } from './founder-shortcuts';
+import { FounderCompanionViewProvider } from './founder-companion';
+import { FounderAgentAwareness } from './agent-awareness';
+import { FounderWorkspaceContextIndex } from './workspace-context-index';
+import { FounderSafeResultCache } from './safe-result-cache';
+import { FounderVerifiedSolutionMemory } from './verified-solution-memory';
+import { FounderProjectActivityStore } from './project-activity';
+import { PersonalAiProfileStore } from './personal-ai-profiles';
+import { createDailyQualityReview } from './daily-quality-review';
+import {
+  normalizeFounderWorkMode,
+  readFounderWorkMode,
+  writeFounderWorkMode,
+} from './founder-agent-mode';
+import {
+  transcribeManagedVoice,
+  type ManagedVoiceInput,
+} from './managed-voice';
+import {
+  describeManagedVisuals,
+  type ManagedVisualInput,
+} from './managed-visual';
 
-let connectionStatusBar: vscode.StatusBarItem | undefined;
-let registeredProvider: vscode.Disposable | undefined;
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
 let costTracker: CostTracker | undefined;
+let gatewayMetadataUi: GatewayMetadataUi | undefined;
 let debugSquasherDisposable: vscode.Disposable | undefined;
 let currentCreds: FounderOsCredentials | null = null;
+/** Phase 2 — pairing-state status bar (refreshes every 15s + on config change). */
+let pairingStatusBar: PairingStatusBar | undefined;
+let founderAuthenticationProvider: FounderAuthenticationProvider | undefined;
+let founderHub: FounderHubProvider | undefined;
+let founderSettings: FounderSettingsPanel | undefined;
+let founderShortcuts: FounderShortcutRegistry | undefined;
+let founderCompanion: FounderCompanionViewProvider | undefined;
+let founderAgentAwareness: FounderAgentAwareness | undefined;
+let founderWorkspaceContext: FounderWorkspaceContextIndex | undefined;
+let founderSafeResultCache: FounderSafeResultCache | undefined;
+let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
+let founderProjectActivity: FounderProjectActivityStore | undefined;
+let personalAiProfiles: PersonalAiProfileStore | undefined;
+let dailyQualityReviewDisposable: vscode.Disposable | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  // Status bar (connection state) ----------------------------------------------------
-  connectionStatusBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Right,
-    100,
+  startEmbeddedRelay();
+
+  // One canonical status control for pairing, requests and route health.
+  pairingStatusBar = new PairingStatusBar();
+  context.subscriptions.push(pairingStatusBar);
+  pairingStatusBar.start();
+
+  // Founder identity and control surface.
+  founderHub = new FounderHubProvider(context);
+  context.subscriptions.push(
+    founderHub,
+    vscode.window.registerWebviewViewProvider(FounderHubProvider.viewId, founderHub, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
   );
-  connectionStatusBar.command = 'founderOs.manage';
-  context.subscriptions.push(connectionStatusBar);
+  founderShortcuts = new FounderShortcutRegistry();
+  context.subscriptions.push(founderShortcuts);
+  founderCompanion = new FounderCompanionViewProvider(context);
+  context.subscriptions.push(
+    founderCompanion,
+    vscode.tasks.onDidStartTask((event) => {
+      founderCompanion?.setVerifying(`Checking ${event.execution.task.name}`, 'Running a local workspace task');
+    }),
+    vscode.tasks.onDidEndTaskProcess((event) => {
+      if (event.exitCode === 0) {
+        founderCompanion?.setSuccess(event.execution.task.name, 'Task completed with exit code 0');
+      } else {
+        founderCompanion?.setError(
+          event.execution.task.name,
+          event.exitCode == null ? 'Task ended without a result' : `Task exited with code ${event.exitCode}`,
+        );
+      }
+    }),
+  );
+  founderAgentAwareness = new FounderAgentAwareness();
+  founderHub.setAgentAwareness(founderAgentAwareness.summary());
+  context.subscriptions.push(
+    founderAgentAwareness,
+    founderAgentAwareness.onDidChange((summary) => {
+      founderHub?.setAgentAwareness(summary);
+      if (summary.conflictCount > 0) {
+        founderCompanion?.setCoordinating(
+          'Agents are coordinating',
+          `${summary.conflictCount} overlapping task${summary.conflictCount === 1 ? '' : 's'} detected`,
+        );
+      }
+    }),
+  );
+  founderWorkspaceContext = new FounderWorkspaceContextIndex(context);
+  context.subscriptions.push(founderWorkspaceContext);
+  founderSafeResultCache = new FounderSafeResultCache(
+    path.join(context.globalStorageUri.fsPath, 'safe-result-cache'),
+  );
+  context.subscriptions.push(
+    founderWorkspaceContext.onDidInvalidate(({ workspaceId }) => {
+      founderSafeResultCache?.invalidateWorkspace(workspaceId);
+    }),
+  );
+  founderVerifiedSolutionMemory = new FounderVerifiedSolutionMemory(
+    path.join(context.globalStorageUri.fsPath, 'verified-solutions'),
+  );
+  founderProjectActivity = new FounderProjectActivityStore(
+    path.join(context.globalStorageUri.fsPath, 'project-activity.json'),
+  );
+  dailyQualityReviewDisposable = createDailyQualityReview(context, {
+    activity: founderProjectActivity,
+    workspaceId: () => founderWorkspaceContext?.workspaceIdValue() ?? null,
+    awareness: () => founderAgentAwareness?.summary() ?? {
+      activeCount: 0,
+      conflictCount: 0,
+      tasks: [],
+    },
+  });
+  context.subscriptions.push(dailyQualityReviewDisposable);
+
+  founderAuthenticationProvider = new FounderAuthenticationProvider({
+    onDidSignIn: async () => {
+      await syncVaultIntoSettings();
+      await startIpcServer();
+      registerOrNotify(context);
+      pairingStatusBar?.setGatewayResult('ok');
+      founderHub?.refresh();
+      founderSettings?.refresh();
+      founderShortcuts?.refresh();
+      founderCompanion?.setSuccess('Founder connected', 'Identity, Node, and remote control are ready');
+    },
+    onDidSignOut: () => {
+      registerOrNotify(context);
+      pairingStatusBar?.refresh();
+      founderHub?.refresh();
+      founderSettings?.refresh();
+      founderShortcuts?.refresh();
+      founderCompanion?.setOffline('Sign in required', 'Connect Founder to use managed AI and remote control');
+    },
+  });
+  context.subscriptions.push(
+    founderAuthenticationProvider,
+    vscode.authentication.registerAuthenticationProvider(
+      FOUNDER_AUTH_PROVIDER_ID,
+      'Founder',
+      founderAuthenticationProvider,
+      { supportsMultipleAccounts: false },
+    ),
+  );
 
   // Execution-profile selector + DDollar cost tracker (independent of creds) ---------
-  profileManager = new ProfileManager(context);
+  profileManager = new ProfileManager(context, { showStatusBar: false });
+  personalAiProfiles = new PersonalAiProfileStore(context, {
+    save: async (profile) => {
+      await vscode.commands.executeCommand('founder.personalAi.save', profile);
+    },
+    select: async (id) => {
+      await vscode.commands.executeCommand('founder.personalAi.select', id);
+    },
+    setEnabled: async (id, enabled) => {
+      await vscode.commands.executeCommand('founder.personalAi.enable', { id, enabled });
+    },
+    delete: async (id) => {
+      await vscode.commands.executeCommand('founder.personalAi.delete', id);
+    },
+  });
   costTracker = new CostTracker();
-  context.subscriptions.push(profileManager, costTracker);
+  gatewayMetadataUi = new GatewayMetadataUi();
+  context.subscriptions.push(profileManager, personalAiProfiles, costTracker, gatewayMetadataUi);
   profileManager.show();
-  costTracker.show();
+  founderSettings = new FounderSettingsPanel({
+    getProfile: () => profileManager!.profile,
+    setProfile: (id) => profileManager!.setProfile(id),
+    getManagedAlias: () => profileManager!.alias,
+    setManagedAlias: async (id) => {
+      await profileManager!.setAlias(id);
+      await vscode.commands.executeCommand('founder.managedAi.select', id);
+    },
+    personalAiProfiles,
+  });
+  context.subscriptions.push(founderSettings);
+  context.subscriptions.push(
+    personalAiProfiles.onDidChange(() => {
+      founderSettings?.refresh();
+      founderHub?.refresh();
+    }),
+  );
+  void personalAiProfiles.ready().then(() => {
+    founderSettings?.refresh();
+    registerOrNotify(context);
+  });
 
   // Agentic tools (registered once; available to any chat participant / model).
   // `vscode.lm.registerTool` only exists on VS Code 1.96+ (proposed `lmTools`
@@ -63,9 +247,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // point isn't processed (proposed-gated on 1.93.1), so we swallow that case.
   if (typeof vscode.lm.registerTool === 'function') {
     const tools: ReadonlyArray<readonly [string, vscode.LanguageModelTool<unknown>]> = [
-      ['founder.editFile', editFileTool as vscode.LanguageModelTool<unknown>],
-      ['founder.runCommand', runCommandTool as vscode.LanguageModelTool<unknown>],
-      ['founder.readWorkspace', readWorkspaceTool as vscode.LanguageModelTool<unknown>],
+      [FOUNDER_TOOL_IDS.editFile, editFileTool as vscode.LanguageModelTool<unknown>],
+      [FOUNDER_TOOL_IDS.runCommand, runCommandTool as vscode.LanguageModelTool<unknown>],
+      [
+        FOUNDER_TOOL_IDS.readWorkspace,
+        readWorkspaceTool as vscode.LanguageModelTool<unknown>,
+      ],
     ];
     for (const [name, tool] of tools) {
       try {
@@ -80,8 +267,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)),
     vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)),
+    vscode.commands.registerCommand('founderOs.signIn', () => signInWithFounderId(context)),
+    vscode.commands.registerCommand('founderOs.signOut', async () => {
+      const signedOut = await founderAuthenticationProvider?.signOut();
+      if (!signedOut) {
+        void vscode.window.showInformationMessage('Founder: no account is signed in.');
+      }
+    }),
     vscode.commands.registerCommand('founderOs.connectFounderOs', () =>
-      connectFounderOsAccount(context),
+      signInWithFounderId(context),
     ),
     vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig),
     vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias),
@@ -95,15 +289,173 @@ export function activate(context: vscode.ExtensionContext): void {
       costTracker?.reset();
       void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
     }),
+    vscode.commands.registerCommand('founderOs.showGatewayMetadata', () =>
+      gatewayMetadataUi?.revealChannel(),
+    ),
+    vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () =>
+      gatewayMetadataUi?.showRecent(),
+    ),
+    vscode.commands.registerCommand('founderOs.openHub', () =>
+      vscode.commands.executeCommand('workbench.view.extension.founderOs'),
+    ),
+    vscode.commands.registerCommand('founderOs.openCompanion', async () => {
+      await vscode.workspace.getConfiguration('founderOs').update(
+        'companion.enabled',
+        true,
+        vscode.ConfigurationTarget.Global,
+      );
+      founderCompanion?.syncEnabled();
+    }),
+    vscode.commands.registerCommand(
+      'founderOs.companionState',
+      (state: unknown, title: unknown, detail: unknown) => {
+        const safeTitle = typeof title === 'string' ? title.slice(0, 96) : 'Founder Dragon';
+        const safeDetail = typeof detail === 'string' ? detail.slice(0, 220) : '';
+        switch (state) {
+          case 'listening':
+            founderCompanion?.setListening(safeTitle, safeDetail);
+            break;
+          case 'planning':
+            founderCompanion?.setPlanning(safeTitle, safeDetail);
+            break;
+          case 'working':
+            founderCompanion?.setWorking(safeTitle, safeDetail);
+            break;
+          case 'coordinating':
+            founderCompanion?.setCoordinating(safeTitle, safeDetail);
+            break;
+          case 'verifying':
+            founderCompanion?.setVerifying(safeTitle, safeDetail);
+            break;
+          case 'success':
+            founderCompanion?.setSuccess(safeTitle, safeDetail);
+            break;
+          case 'attention':
+            founderCompanion?.setAttention(safeTitle, safeDetail);
+            break;
+          case 'error':
+            founderCompanion?.setError(safeTitle, safeDetail);
+            break;
+          case 'offline':
+            founderCompanion?.setOffline(safeTitle, safeDetail);
+            break;
+          case 'update':
+            founderCompanion?.setUpdate(safeTitle, safeDetail);
+            break;
+          default:
+            founderCompanion?.setIdle();
+        }
+      },
+    ),
+    vscode.commands.registerCommand('founderOs.openAgents', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+      await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
+    }),
+    vscode.commands.registerCommand('founderOs.openShip', () =>
+      revealFounderView('founderOs', 'founderOs.ship'),
+    ),
+    vscode.commands.registerCommand('founderOs.openNodeView', () =>
+      revealFounderView('founderOs', 'founderOs.node'),
+    ),
+    vscode.commands.registerCommand('founderOs.openConnectionsView', () =>
+      revealFounderView('founderOs', 'founderOs.connections'),
+    ),
+    vscode.commands.registerCommand('founderOs.openRemoteView', () =>
+      revealFounderView('founderOs', 'founderOs.remote'),
+    ),
+    vscode.commands.registerCommand('founderOs.openRemoteControl', () =>
+      vscode.env.openExternal(
+        vscode.Uri.parse('https://doxxedcrypto.digital/founder-den?onboard=sovereign'),
+      ),
+    ),
+    vscode.commands.registerCommand('founderOs.openChat', async () => {
+      try {
+        await vscode.commands.executeCommand('void.sidebar.open');
+      } catch {
+        await vscode.commands.executeCommand('workbench.action.chat.open');
+      }
+    }),
+    vscode.commands.registerCommand('founderOs.openConnections', () =>
+      vscode.env.openExternal(
+        vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
+      ),
+    ),
+    vscode.commands.registerCommand('founderOs.openSettings', (tab?: unknown) =>
+      founderSettings?.show(tab === 'ai' ? 'ai' : 'account'),
+    ),
+    vscode.commands.registerCommand('founderOs.refreshHub', () =>
+      founderHub?.refresh(),
+    ),
+    vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
+      founderShortcuts?.refresh(),
+    ),
+    vscode.commands.registerCommand('founderOs.getWorkMode', () =>
+      readFounderWorkMode(),
+    ),
+    vscode.commands.registerCommand('founderOs.setWorkMode', async (value: unknown) => {
+      const workMode = normalizeFounderWorkMode(value);
+      writeFounderWorkMode(workMode);
+      await vscode.workspace
+        .getConfiguration('founderOs')
+        .update(
+          'agentMode',
+          workMode === 'team' ? 'team' : 'focus',
+          vscode.ConfigurationTarget.Global,
+        );
+      founderHub?.refresh();
+      return workMode;
+    }),
+    vscode.commands.registerCommand(
+      'founderOs.transcribeVoice',
+      (input: ManagedVoiceInput) => transcribeManagedVoice(input),
+    ),
+    vscode.commands.registerCommand(
+      'founderOs.describeVisualAttachments',
+      (input: ManagedVisualInput) => describeManagedVisuals(input),
+    ),
+    vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+      await founderWorkspaceContext?.refresh(true);
+      const summary = founderWorkspaceContext?.summary();
+      void vscode.window.showInformationMessage(
+        summary
+          ? `Founder project map refreshed: ${summary.files} files, ${summary.symbols} symbols.`
+          : 'Open a folder to build the Founder project map.',
+      );
+    }),
+    vscode.commands.registerCommand('founderOs.openProjectBrief', openProjectBrief),
   );
+
+  void applyFounderNavigationDefaults(context);
 
   // First-pass registration (synchronous so the model picker populates fast).
   registerOrNotify(context);
 
+  // Phase 3 — start the named-pipe IPC server so the embedded relay can
+  // connect to this IDE instance. The server only starts if we have a config
+  // with an installId (otherwise it's a no-op until the user signs in).
+  // Best-effort: failure to start (e.g. another IDE instance already bound)
+  // logs a warning but does not crash activation.
+  if (vaultFileExists()) {
+    // Legacy paired vaults predate install.json. Mint the local pipe identity
+    // before starting the server so either the IDE or relay may launch
+    // first and both converge on the same authenticated endpoint.
+    ensureInstallIdentity();
+  }
+  startIpcServer().catch((err) => {
+    console.warn('Founder OS IPC server failed to start:', err);
+  });
+
   // Auto-load ~/FounderVault/node-config.json into founderOs.* settings so
   // pairing isn't manual every session. Fire-and-forget; re-registers after.
   void syncVaultIntoSettings().then((synced) => {
-    if (synced) registerOrNotify(context);
+    if (synced) {
+      void startIpcServer();
+      registerOrNotify(context);
+    }
+    founderAuthenticationProvider?.refresh();
+    founderHub?.refresh();
+    founderSettings?.refresh();
+    founderShortcuts?.refresh();
   });
 
   // Re-resolve when relevant settings change.
@@ -111,6 +463,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('founderOs')) {
         registerOrNotify(context);
+        founderCompanion?.syncEnabled();
+        founderHub?.refresh();
+        founderSettings?.refresh();
+        founderShortcuts?.refresh();
       }
     }),
   );
@@ -118,162 +474,248 @@ export function activate(context: vscode.ExtensionContext): void {
   // Re-resolve when the vault file appears / changes (pairing completed while
   // the editor is open). We watch the FounderVault directory if it exists.
   watchVaultFile(context, () => {
-    void syncVaultIntoSettings().then(() => registerOrNotify(context));
+    void syncVaultIntoSettings().then((synced) => {
+      if (synced) {
+        void startIpcServer();
+        registerOrNotify(context);
+      }
+      founderAuthenticationProvider?.refresh();
+      founderHub?.refresh();
+      founderSettings?.refresh();
+      founderShortcuts?.refresh();
+    });
   });
 }
 
-export function deactivate(): void {
-  registeredProvider?.dispose();
-  registeredParticipant?.dispose();
-  connectionStatusBar?.dispose();
-  profileManager?.dispose();
-  costTracker?.dispose();
-  debugSquasherDisposable?.dispose();
+async function applyFounderNavigationDefaults(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  // V5 makes the installed default Founder-first without removing the
+  // inspectable editor tools. Alt reveals the native menu, while Build and
+  // ship can restore the advanced IDE rail at any time.
+  const migrationKey = 'founderOs.navigationV5Applied';
+  if (context.globalState.get<boolean>(migrationKey, false)) return;
+
+  const workbench = vscode.workspace.getConfiguration('workbench');
+  await workbench.update(
+    'activityBar.location',
+    'hidden',
+    vscode.ConfigurationTarget.Global,
+  );
+  await vscode.workspace
+    .getConfiguration('window')
+    .update('menuBarVisibility', 'toggle', vscode.ConfigurationTarget.Global);
+  await vscode.workspace
+    .getConfiguration('founderOs')
+    .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
+  await context.globalState.update(migrationKey, true);
+  await vscode.commands.executeCommand('workbench.view.extension.founderOs');
 }
 
-/** Register the chat provider + participant if we have creds; otherwise show "not paired". */
+async function revealFounderView(containerId: string, viewId: string): Promise<void> {
+  await vscode.commands.executeCommand(`workbench.view.extension.${containerId}`);
+  await vscode.commands.executeCommand(`${viewId}.focus`);
+}
+
+function startEmbeddedRelay(): void {
+  // Stock VS Code/Cursor installs of this extension simply skip this step.
+  const relayRuntime = { runtimeExecutable: process.execPath };
+  const embeddedRelay = embeddedRelayExecutable(
+    vscode.env.appRoot,
+    process.platform,
+    relayRuntime.runtimeExecutable,
+  );
+  const relayExists = Boolean(embeddedRelay && fs.existsSync(embeddedRelay));
+  logRelayStartup(
+    `candidate=${embeddedRelay ?? 'unsupported'} exists=${relayExists} appRoot=${vscode.env.appRoot} execPath=${process.execPath}`,
+  );
+  if (!relayExists) return;
+
+  try {
+    ensureInstallIdentity();
+    const relay = launchEmbeddedRelay(
+      vscode.env.appRoot,
+      process.platform,
+      relayRuntime,
+    );
+    logRelayStartup(`state=${relay.state} pid=${relay.pid ?? 'none'}`);
+    console.log(`Founder IDE relay: ${relay.state}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    logRelayStartup(`error=${message}`);
+    console.warn('Founder IDE relay failed to start:', error);
+  }
+}
+
+export function deactivate(): void {
+  registeredParticipant?.dispose();
+  profileManager?.dispose();
+  costTracker?.dispose();
+  gatewayMetadataUi?.dispose();
+  debugSquasherDisposable?.dispose();
+  pairingStatusBar?.dispose();
+  founderAuthenticationProvider?.dispose();
+  founderHub?.dispose();
+  founderSettings?.dispose();
+  founderShortcuts?.dispose();
+  dailyQualityReviewDisposable?.dispose();
+  // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
+  stopIpcServer();
+}
+
+/** Register the chat participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context: vscode.ExtensionContext): void {
   const creds = resolveCredentials();
-  if (!creds) {
-    registeredProvider?.dispose();
-    registeredProvider = undefined;
-    registeredParticipant?.dispose();
-    registeredParticipant = undefined;
-    debugSquasherDisposable?.dispose();
-    debugSquasherDisposable = undefined;
-    currentCreds = null;
-    setStatusNotPaired();
-    void showPairPrompt(context);
-    return;
-  }
-
   if (
-    currentCreds &&
-    currentCreds.apiBaseUrl === creds.apiBaseUrl &&
-    currentCreds.nodeId === creds.nodeId &&
-    currentCreds.nodeToken === creds.nodeToken &&
-    registeredProvider
+    registeredParticipant
+    && (
+      (!currentCreds && !creds)
+      || (currentCreds && creds
+        && currentCreds.apiBaseUrl === creds.apiBaseUrl
+        && currentCreds.nodeId === creds.nodeId
+        && currentCreds.nodeToken === creds.nodeToken)
+    )
   ) {
-    // Already registered with identical creds — just refresh the label.
-    setStatusConnected(currentCreds);
+    pairingStatusBar?.refresh();
+    founderShortcuts?.refresh();
     return;
   }
 
   // Credentials changed — re-register.
-  registeredProvider?.dispose();
   registeredParticipant?.dispose();
   debugSquasherDisposable?.dispose();
 
-  const provider = new FounderOsChatProvider(creds, {
+  registeredParticipant = registerFounderOsChatParticipant(context, {
+    creds: creds ?? undefined,
+    profileManager: profileManager!,
+    personalAiProfiles,
+    costTracker: costTracker!,
+    coordination: founderAgentAwareness,
+    projectContext: founderWorkspaceContext,
+    resultCache: founderSafeResultCache,
+    solutionMemory: founderVerifiedSolutionMemory,
+    projectActivity: founderProjectActivity,
     onRequestStart: (modelId) => {
-      connectionStatusBar!.text = `$(sync~spin) Founder OS: ${modelId}`;
-      connectionStatusBar!.tooltip = 'Streaming response from Founder OS gateway…';
+      pairingStatusBar?.setRequestInFlight(modelId);
+      founderCompanion?.setPlanning('Planning the route', modelId);
     },
     onMetadata: (meta) => {
       const tier = meta.tier ?? '?';
-      const cost = typeof meta.ddollarCost === 'number' ? `${meta.ddollarCost} D$` : '';
       const provider2 = meta.provider ?? '';
       const model = meta.model ?? '';
-      connectionStatusBar!.text = `$(sparkle) Founder OS: ${tier}${cost ? ` · ${cost}` : ''}`;
-      connectionStatusBar!.tooltip = `Last route — tier: ${tier}, provider: ${provider2}, model: ${model}, cost: ${cost || 'n/a'}`;
+      pairingStatusBar?.setRouteDetails({
+        tier,
+        provider: provider2,
+        model,
+        cost: meta.ddollarCost,
+      });
       costTracker?.record(meta);
+      gatewayMetadataUi?.record(meta);
+      founderCompanion?.setWorking(
+        `Reaching ${provider2 || 'the selected provider'}`,
+        model || tier,
+      );
+    },
+    onCacheHit: (estimatedTokensAvoided) => {
+      founderCompanion?.setSuccess(
+        'Verified context reused',
+        `Provider skipped; about ${estimatedTokensAvoided.toLocaleString()} tokens avoided`,
+      );
     },
     onRequestEnd: (_modelId, ok, errorMessage) => {
+      pairingStatusBar?.setRequestResult(ok, errorMessage);
       if (ok) {
-        connectionStatusBar!.text = '$(check) Founder OS: Connected';
-        connectionStatusBar!.tooltip = `Founder OS gateway connected. Creds source: ${creds.source}.`;
-      } else if (errorMessage) {
-        connectionStatusBar!.text = '$(error) Founder OS: Error';
-        connectionStatusBar!.tooltip = `Last request failed: ${errorMessage}`;
+        founderCompanion?.setSuccess('Response delivered', 'Founder AI reached the workspace');
+      } else {
+        founderCompanion?.setError('Founder AI was blocked', errorMessage || 'Open evidence for details');
       }
     },
   });
 
-  // `vscode.lm.registerLanguageModelChatProvider` only exists on VS Code 1.96+
-  // (the `LanguageModelChatProvider` API). On 1.93.1 this function is absent, so
-  // we skip provider registration and rely on the chat participant (stable API)
-  // which streams directly from the gateway. Guarding here keeps activation alive.
-  if (typeof vscode.lm.registerLanguageModelChatProvider === 'function') {
-    registeredProvider = vscode.lm.registerLanguageModelChatProvider(
-      FOUNDER_OS_VENDOR,
-      provider,
+  // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
+  if (creds) {
+    debugSquasherDisposable = createDebugSquasherStatus(
+      context,
+      () => resolveCredentials(),
+      { showStatusBar: false },
     );
-    context.subscriptions.push(registeredProvider);
+    context.subscriptions.push(debugSquasherDisposable);
   } else {
-    registeredProvider = undefined;
+    debugSquasherDisposable = undefined;
+    void showPairPrompt(context);
   }
 
-  // Enhanced chat participant — drives a real vscode.lm round-trip with
-  // Memory Engine injection + tool use. Falls back to onboarding only if the
-  // participant id is already claimed by another extension.
-  registeredParticipant = registerFounderOsChatParticipant(context, {
-    creds,
-    profileManager: profileManager!,
-    costTracker: costTracker!,
-  });
-
-  // Debug Squasher status bar — polls /api/debug-squasher/latest every 2 min.
-  debugSquasherDisposable = createDebugSquasherStatus(context, () =>
-    resolveCredentials(),
-  );
-  context.subscriptions.push(debugSquasherDisposable);
-
   currentCreds = creds;
-  setStatusConnected(creds);
-}
-
-function setStatusConnected(creds: FounderOsCredentials): void {
-  if (!connectionStatusBar) return;
-  connectionStatusBar.text = '$(check) Founder OS: Connected';
-  connectionStatusBar.tooltip = `Connected to ${creds.apiBaseUrl} (creds: ${creds.source}). Click to manage.`;
-  connectionStatusBar.show();
-}
-
-function setStatusNotPaired(): void {
-  if (!connectionStatusBar) return;
-  connectionStatusBar.text = '$(warning) Founder OS: Not Paired';
-  connectionStatusBar.tooltip =
-    'Founder Node credentials not found. Pair Founder Node, or set founderOs.apiBaseUrl / nodeId / nodeToken.';
-  connectionStatusBar.show();
+  pairingStatusBar?.refresh();
+  founderHub?.refresh();
+  founderSettings?.refresh();
+  founderShortcuts?.refresh();
 }
 
 let pairPromptShownThisSession = false;
 async function showPairPrompt(context: vscode.ExtensionContext): Promise<void> {
   if (pairPromptShownThisSession) return;
   pairPromptShownThisSession = true;
-  const choice = await vscode.window.showWarningMessage(
-    'Founder OS chat: Founder Node not paired. Pair it to enable Founder OS models in Chat.',
-    'Pair Founder Node',
-    'Open settings',
-    'Dismiss',
+  const hasOpenedHub = context.globalState.get<boolean>(
+    'founderOs.hubOpened',
+    false,
   );
-  if (choice === 'Pair Founder Node') {
-    await pairWithFounderNode(context);
-  } else if (choice === 'Open settings') {
-    void vscode.commands.executeCommand(
-      'workbench.action.openSettings',
-      'founderOs',
+  if (!hasOpenedHub) {
+    await context.globalState.update('founderOs.hubOpened', true);
+    await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+  }
+}
+
+/**
+ * Phase 2 — device-code sign-in. Drives the RFC 8628 flow interactively,
+ * writes the resulting credentials to ~/FounderVault/node-config.json, then
+ * refreshes the chat provider + status bar.
+ */
+async function signInWithFounderId(context: vscode.ExtensionContext): Promise<void> {
+  if (!pairingStatusBar) return;
+  pairingStatusBar.setPairingInProgress(true);
+  try {
+    const session = await vscode.authentication.getSession(
+      FOUNDER_AUTH_PROVIDER_ID,
+      ['founder'],
+      { createIfNone: true },
     );
+    if (!session) return;
+    // Reload from the vault file so the chat provider picks up the new creds.
+    await syncVaultIntoSettings();
+    await startIpcServer();
+    registerOrNotify(context);
+    pairingStatusBar.setGatewayResult('ok');
+    founderHub?.refresh();
+    void vscode.window.showInformationMessage(
+      `Founder: signed in as ${session.account.label}.`,
+    );
+  } catch (error) {
+    if (!(error instanceof vscode.CancellationError)) {
+      const message = error instanceof Error ? error.message : String(error);
+      void vscode.window.showErrorMessage(`Founder sign-in failed: ${message}`);
+    }
+  } finally {
+    pairingStatusBar.setPairingInProgress(false);
   }
 }
 
 async function manageConnection(context: vscode.ExtensionContext): Promise<void> {
   const items: (vscode.QuickPickItem & { action: () => unknown })[] = [
     {
-      label: 'Connect Founder OS (Twitter)…',
-      description: 'open doxxedcrypto.digital login — identity syncs via Founder Node',
-      action: () => connectFounderOsAccount(context),
+      label: 'Sign in with X to Founder OS…',
+      description: 'connect this Founder IDE and its background relay',
+      action: () => signInWithFounderId(context),
     },
     {
-      label: 'Load Founder Node from vault…',
+      label: 'Load existing connection from vault…',
       description: vaultFileExists() ? 'vault file present — no pairing code needed' : 'vault file missing',
       action: () => pairWithFounderNode(context),
     },
     {
       label: 'Open settings (founderOs.*)',
-      description: 'override apiBaseUrl / nodeId / nodeToken',
-      action: () =>
-        vscode.commands.executeCommand('workbench.action.openSettings', 'founderOs'),
+      description: 'workspace mode and advanced connection settings',
+      action: () => vscode.commands.executeCommand('founderOs.openSettings'),
     },
     {
       label: 'Open node-config.json',
@@ -304,51 +746,16 @@ async function manageConnection(context: vscode.ExtensionContext): Promise<void>
   if (picked) await picked.action();
 }
 
-/**
- * Twitter / Founder OS identity lives on doxxedcrypto.digital.
- * Once the account is linked to Founder Node (heartbeat), the IDE reads
- * ~/FounderVault/node-config.json — no GitHub/Google/Apple cloud OAuth and no
- * manual pairing-code paste in the IDE.
- */
-async function connectFounderOsAccount(context: vscode.ExtensionContext): Promise<void> {
-  const hasVault = vaultFileExists();
-  const choice = await vscode.window.showInformationMessage(
-    hasVault
-      ? 'Founder Node vault is already on this machine. Sign in with Twitter on Founder OS only if you need to manage your cloud account. AI in this IDE uses the Node token — not third-party cloud login.'
-      : 'Sign in to Founder OS with Twitter, then open Founder Node on this PC so it can write ~/FounderVault/node-config.json. After that, Founder IDE loads credentials automatically (no pairing code in the IDE).',
-    'Open Twitter login',
-    'Open Builder settings',
-    hasVault ? 'Reload vault now' : 'Cancel',
-  );
-  if (choice === 'Open Twitter login') {
-    void vscode.env.openExternal(
-      vscode.Uri.parse('https://doxxedcrypto.digital/login?callbackUrl=/settings/builder'),
-    );
-  } else if (choice === 'Open Builder settings') {
-    void vscode.env.openExternal(
-      vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'),
-    );
-  } else if (choice === 'Reload vault now') {
-    const synced = await syncVaultIntoSettings();
-    registerOrNotify(context);
-    void vscode.window.showInformationMessage(
-      synced
-        ? `Vault loaded — node ${synced.nodeId} @ ${synced.apiBaseUrl}`
-        : 'Vault file missing or invalid.',
-    );
-  }
-}
-
 async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<void> {
   const file = nodeConfigPath();
 
-  // Prefer vault auto-load — Founder Node writes this on pair / Connect IDE.
+  // Prefer vault auto-load — the embedded relay shares this connection file.
   if (vaultFileExists()) {
     const synced = await syncVaultIntoSettings();
     if (synced) {
       registerOrNotify(context);
       const open = await vscode.window.showInformationMessage(
-        `Loaded Founder Node credentials from:\n${file}\n\napiBaseUrl=${synced.apiBaseUrl}\nnodeId=${synced.nodeId}`,
+        `Loaded Founder IDE connection from:\n${file}\n\napiBaseUrl=${synced.apiBaseUrl}\nnodeId=${synced.nodeId}`,
         'Reload window',
         'Open file',
         'OK',
@@ -360,47 +767,30 @@ async function pairWithFounderNode(context: vscode.ExtensionContext): Promise<vo
     }
   }
 
-  // Optional: paste a Twitter-auth session JWT + API base for cloud-only pairing
-  // when Founder Node isn't installed yet (thin slice — nodeId/token still preferred).
   const choice = await vscode.window.showInformationMessage(
-    'Founder OS chat needs a paired Founder Node.\n\nOpen Founder Node on this machine and click "Connect IDE / Pair". This writes ~/FounderVault/node-config.json, which the extension loads automatically.',
-    'Open Founder OS settings',
-    'Paste API + node credentials',
-    'Open docs',
+    'Founder IDE is not connected yet. Sign in with X to connect this computer securely.',
+    'Sign in with X',
+    'Founder Settings',
     'Cancel',
   );
-  if (choice === 'Open Founder OS settings') {
-    void vscode.commands.executeCommand(
-      'workbench.action.openSettings',
-      'founderOs',
+  if (choice === 'Sign in with X') {
+    await signInWithFounderId(context);
+  } else if (choice === 'Founder Settings') {
+    void vscode.commands.executeCommand('founderOs.openSettings');
+  }
+}
+
+function logRelayStartup(message: string): void {
+  try {
+    const logDir = path.join(os.homedir(), 'FounderVault', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(
+      path.join(logDir, 'founder-ide-extension.log'),
+      `[${new Date().toISOString()}] ${message}\n`,
+      'utf8',
     );
-  } else if (choice === 'Paste API + node credentials') {
-    const apiBaseUrl = await vscode.window.showInputBox({
-      prompt: 'Founder OS API base URL',
-      value: 'https://doxxedcrypto.digital',
-      placeHolder: 'https://doxxedcrypto.digital',
-    });
-    if (!apiBaseUrl) return;
-    const nodeId = await vscode.window.showInputBox({
-      prompt: 'Founder Node ID (from Settings → Founder Stack after pairing)',
-      placeHolder: 'fn_…',
-    });
-    if (!nodeId) return;
-    const nodeToken = await vscode.window.showInputBox({
-      prompt: 'Founder Node token (shown once at pair time, or from node-config.json)',
-      password: true,
-    });
-    if (!nodeToken) return;
-    const cfg = vscode.workspace.getConfiguration('founderOs');
-    await cfg.update('apiBaseUrl', apiBaseUrl.replace(/\/$/, ''), vscode.ConfigurationTarget.Global);
-    await cfg.update('nodeId', nodeId.trim(), vscode.ConfigurationTarget.Global);
-    await cfg.update('nodeToken', nodeToken.trim(), vscode.ConfigurationTarget.Global);
-    registerOrNotify(context);
-    void vscode.window.showInformationMessage('Founder OS credentials saved to User settings.');
-  } else if (choice === 'Open docs') {
-    void vscode.env.openExternal(
-      vscode.Uri.parse('https://doxxedcrypto.digital/downloads#founder-node'),
-    );
+  } catch {
+    // Startup tracing is best-effort and never blocks the editor.
   }
 }
 
@@ -408,12 +798,12 @@ async function openVaultConfig(): Promise<void> {
   const file = nodeConfigPath();
   if (!fs.existsSync(file)) {
     const choice = await vscode.window.showWarningMessage(
-      `No node-config.json at ${file}. Pair Founder Node first.`,
-      'Pair Founder Node',
+      `No Founder IDE connection exists at ${file}.`,
+      'Sign in with X',
       'Cancel',
     );
-    if (choice === 'Pair Founder Node') {
-      void vscode.commands.executeCommand('founderOs.pair');
+    if (choice === 'Sign in with X') {
+      void vscode.commands.executeCommand('founderOs.signIn');
     }
     return;
   }
@@ -421,22 +811,59 @@ async function openVaultConfig(): Promise<void> {
   await vscode.window.showTextDocument(doc);
 }
 
+async function openProjectBrief(): Promise<void> {
+  const workspaceId = founderWorkspaceContext?.workspaceIdValue();
+  const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'Founder project';
+  if (!workspaceId || !founderProjectActivity) {
+    void vscode.window.showInformationMessage('Open a project to view its Founder brief.');
+    return;
+  }
+  const document = await vscode.workspace.openTextDocument({
+    language: 'markdown',
+    content: founderProjectActivity.dailyBrief(workspaceId, workspaceName),
+  });
+  await vscode.window.showTextDocument(document, { preview: true });
+}
+
 async function selectModelAlias(): Promise<void> {
-  const items = FOUNDER_OS_MODELS.map((m) => ({
-    label: m.name,
-    description: m.id,
-    detail: m.detail,
-    picked: m.isDefault,
-  }));
+  await personalAiProfiles?.ready();
+  const activePersonalId = personalAiProfiles?.activeId();
+  const items: Array<vscode.QuickPickItem & {
+    routeKind: 'managed' | 'personal';
+    id: string;
+  }> = [
+    ...FOUNDER_OS_MODELS.map((model) => ({
+      label: `$(sparkle) ${model.name}`,
+      description: model.id,
+      detail: model.detail,
+      picked: !activePersonalId && profileManager?.alias.id === model.id,
+      routeKind: 'managed' as const,
+      id: model.id,
+    })),
+    ...(personalAiProfiles?.list().filter((profile) => profile.enabled).map((profile) => ({
+      label: `${profile.kind === 'ollama' ? '$(device-desktop)' : '$(key)'} ${profile.name}`,
+      description: profile.kind === 'ollama' ? 'Local | outside managed quota' : 'Personal AI | outside managed quota',
+      detail: `${profile.model} | ${profile.baseUrl}`,
+      picked: activePersonalId === profile.id,
+      routeKind: 'personal' as const,
+      id: profile.id,
+    })) ?? []),
+  ];
   const picked = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select a Founder OS model alias (changes the chat model dropdown selection)',
+    title: 'Choose AI for Founder Chat',
+    placeHolder: 'Founder managed, Personal AI, or local Ollama',
   });
   if (!picked) return;
-  // Open the chat model picker so the user can apply the selection. The
-  // underlying provider is already registered; this is a UX hint.
-  void vscode.window.showInformationMessage(
-    `Selected ${picked.label}. Pick it from the model dropdown in Chat to apply.`,
-  );
+  if (picked.routeKind === 'managed') {
+    await personalAiProfiles?.select(null);
+    const aliasId = picked.id as (typeof FOUNDER_OS_MODELS)[number]['id'];
+    await profileManager?.setAlias(aliasId);
+    await vscode.commands.executeCommand('founder.managedAi.select', aliasId);
+  } else {
+    await personalAiProfiles?.select(picked.id);
+    void vscode.window.showInformationMessage(`${picked.label.replace(/^\$\([^)]+\)\s*/, '')} is now active.`);
+  }
+  founderSettings?.refresh();
 }
 
 /**

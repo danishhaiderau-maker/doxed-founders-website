@@ -268,7 +268,7 @@ try {
 }
 
 // 2b. founderOs metadata pre-line is routed to onMetadata, not onToken.
-const metaChunk = JSON.stringify({ founderOs: { requestId: 'req_1', tier: 'auto', provider: 'glm', model: 'glm-4.6', ddollarCost: 0.012 } });
+const metaChunk = JSON.stringify({ founderOs: { requestId: 'req_1', tier: 'auto', provider: 'deepseek', model: 'deepseek-v4-flash', ddollarCost: 0.012 } });
 const serverMeta = await startMockGateway({ chunks: [metaChunk, happyChunks[0], '[DONE]'], delayMs: 5 });
 const portMeta = serverMeta.address().port;
 const tokensMeta = [];
@@ -281,7 +281,7 @@ await gatewayClient.callGateway(
 ).catch(() => {});
 await close(serverMeta);
 check('metadata line: routed to onMetadata', metaMeta.length === 1, `meta=${JSON.stringify(metaMeta)}`);
-check('metadata line: parsed requestId/tier/provider', metaMeta[0]?.tier === 'auto' && metaMeta[0]?.provider === 'glm');
+check('metadata line: parsed requestId/tier/provider', metaMeta[0]?.tier === 'auto' && metaMeta[0]?.provider === 'deepseek');
 check('metadata line: NOT emitted as a token', tokensMeta.length === 1 && tokensMeta[0] === 'Hello',
   `tokens=${JSON.stringify(tokensMeta)}`);
 

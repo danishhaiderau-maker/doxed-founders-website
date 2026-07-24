@@ -119,7 +119,12 @@ foreach ($entry in $manifest.files) {
         }
         "add" {
             if ($destExists) {
-                throw "mode=add but upstream already has $destAbs (already customized upstream? switch mode to replace)"
+                $marker = [string]$entry.marker
+                $existingContent = Get-Content $destAbs -Raw
+                if (-not $marker -or $existingContent -notmatch [regex]::Escape($marker)) {
+                    throw "mode=add but upstream already has $destAbs without the Founder overlay marker (upstream conflict; review before overwriting)"
+                }
+                Write-Host "[apply-founder]   reapply  $destRel" -ForegroundColor DarkCyan
             }
         }
         default { throw "Unknown mode '$mode' for $srcRel (expected 'replace' or 'add')" }
@@ -134,6 +139,202 @@ foreach ($entry in $manifest.files) {
     Write-Host ("[apply-founder]   {0,-7}  {1}" -f $mode, $destRel) -ForegroundColor Cyan
 }
 Write-Host "[apply-founder] applied $copied overlay file(s)" -ForegroundColor Green
+
+# The native chat already carries a stable thread id. Add the active workspace
+# root to its logging metadata so the Electron-side Founder coordination bridge
+# can scope awareness to the correct project without replacing the large
+# upstream chatThreadService.ts file in our overlay.
+$chatThreadService = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\browser\chatThreadService.ts"
+if (-not (Test-Path $chatThreadService)) { throw "chatThreadService.ts missing at $chatThreadService" }
+$chatThreadContent = Get-Content $chatThreadService -Raw
+$coordinationOld = 'logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },'
+$coordinationNew = 'logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode, workspacePath: this._workspaceContextService.getWorkspace().folders[0]?.uri.fsPath ?? '''' } },'
+if ($chatThreadContent.Contains($coordinationOld)) {
+    $chatThreadContent = $chatThreadContent.Replace($coordinationOld, $coordinationNew)
+    [System.IO.File]::WriteAllText($chatThreadService, $chatThreadContent, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "[apply-founder]   patch    native chat workspace coordination" -ForegroundColor Cyan
+} elseif (-not $chatThreadContent.Contains($coordinationNew)) {
+    throw "Native chat logging signature changed upstream; workspace coordination was not applied"
+} else {
+    Write-Host "[apply-founder]   reapply  native chat workspace coordination" -ForegroundColor DarkCyan
+}
+
+# Keep user-visible upstream strings behind a small, fail-closed branding
+# boundary. Copying the very large upstream modules into the overlay would make
+# upgrades needlessly brittle; exact literal replacements instead fail loudly
+# when upstream moves while preserving internal service/API identifiers.
+function Set-FounderSourceLiteral {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Old,
+        [Parameter(Mandatory = $true)][string]$New
+    )
+
+    $target = Join-Path $VscodiumCheckout $RelativePath
+    if (-not (Test-Path $target)) { throw "Founder branding target missing: $target" }
+    $content = Get-Content $target -Raw
+    if ($content.Contains($Old)) {
+        $content = $content.Replace($Old, $New)
+        [System.IO.File]::WriteAllText($target, $content, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "[apply-founder]   brand    $RelativePath" -ForegroundColor Cyan
+        return
+    }
+    if (-not $content.Contains($New)) {
+        throw "Founder branding signature changed upstream in ${RelativePath}: '$Old'"
+    }
+    Write-Host "[apply-founder]   reapply  $RelativePath" -ForegroundColor DarkCyan
+}
+
+$telemetryService = "src\vs\platform\telemetry\common\telemetryService.ts"
+Set-FounderSourceLiteral $telemetryService `
+    "Void separately records basic usage like the number of messages people are sending. If you'd like to disable Void metrics, you may do so in Void's Settings." `
+    "Founder IDE can record basic product usage such as message counts. You can disable Founder metrics in Founder Settings."
+
+$sendMessageService = "src\vs\workbench\contrib\void\common\sendLLMMessageService.ts"
+Set-FounderSourceLiteral $sendMessageService "Please add a provider in Void's Settings." "Choose Founder Managed AI, Personal AI, or Local AI in Founder Settings."
+
+$settingsTypes = "src\vs\workbench\contrib\void\common\voidSettingsTypes.ts"
+Set-FounderSourceLiteral $settingsTypes "authenticate before using Vertex with Void." "authenticate before using Vertex with Founder IDE."
+
+$scmService = "src\vs\workbench\contrib\void\browser\voidSCMService.ts"
+Set-FounderSourceLiteral $scmService "VoidSCM - Commit Message" "Founder IDE - Commit Message"
+Set-FounderSourceLiteral $scmService "Void: Generate Commit Message" "Founder IDE: Generate Commit Message"
+Set-FounderSourceLiteral $scmService "Void: Cancel Commit Message Generation" "Founder IDE: Cancel Commit Message Generation"
+
+$commandBarService = "src\vs\workbench\contrib\void\browser\voidCommandBarService.ts"
+Set-FounderSourceLiteral $commandBarService "Void: " "Founder IDE: "
+
+$toolsService = "src\vs\workbench\contrib\void\browser\toolsService.ts"
+Set-FounderSourceLiteral $toolsService "automatically killed by Void after" "automatically stopped by Founder IDE after"
+
+$terminalService = "src\vs\workbench\contrib\void\browser\terminalToolService.ts"
+Set-FounderSourceLiteral $terminalService "Void Agent" "Founder Agent"
+
+$sidebarPane = "src\vs\workbench\contrib\void\browser\sidebarPane.ts"
+Set-FounderSourceLiteral $sidebarPane "Open Void Sidebar" "Open Founder Chat"
+
+$editCodeService = "src\vs\workbench\contrib\void\browser\editCodeService.ts"
+Set-FounderSourceLiteral $editCodeService "Void Agent" "Founder Agent"
+Set-FounderSourceLiteral $editCodeService "Void:" "Founder IDE:"
+
+$fileService = "src\vs\workbench\contrib\void\browser\fileService.ts"
+Set-FounderSourceLiteral $fileService "Void: Copy Prompt" "Founder IDE: Copy Prompt"
+
+$metricsService = "src\vs\workbench\contrib\void\common\metricsService.ts"
+Set-FounderSourceLiteral $metricsService "Void: Log Debug Info" "Founder IDE: Log Debug Info"
+
+$quickEditActions = "src\vs\workbench\contrib\void\browser\quickEditActions.ts"
+Set-FounderSourceLiteral $quickEditActions "Void: Quick Edit" "Founder IDE: Quick Edit"
+
+$legacyOnboarding = "src\vs\workbench\contrib\void\browser\react\src\void-onboarding\VoidOnboarding.tsx"
+Set-FounderSourceLiteral $legacyOnboarding `
+    "[Email us](mailto:founders@voideditor.com)" `
+    "[Founder support](https://doxxedcrypto.digital)"
+
+$providerRuntime = "src\vs\workbench\contrib\void\electron-main\llmMessage\sendLLMMessage.impl.ts"
+Set-FounderSourceLiteral $providerRuntime "'HTTP-Referer': 'https://voideditor.com'" "'HTTP-Referer': 'https://doxxedcrypto.digital'"
+Set-FounderSourceLiteral $providerRuntime "'X-Title': 'Void'" "'X-Title': 'Founder IDE'"
+Set-FounderSourceLiteral $providerRuntime "Void providerName was invalid" "Founder IDE provider name was invalid"
+Set-FounderSourceLiteral $providerRuntime "Void: Response from model was empty." "Founder AI response was empty."
+
+# Founder Node owns the signed manifest, verification, rollback, and Dragon
+# update states. Disable Void's legacy action and periodic checker so the one
+# installed application never exposes or runs a second update path.
+$legacyUpdater = "src\vs\workbench\contrib\void\browser\voidUpdateActions.ts"
+Set-FounderSourceLiteral $legacyUpdater "registerAction2(class extends Action2" "false && registerAction2(class extends Action2"
+Set-FounderSourceLiteral $legacyUpdater "registerWorkbenchContribution2(VoidUpdateWorkbenchContribution.ID" "false && registerWorkbenchContribution2(VoidUpdateWorkbenchContribution.ID"
+Set-FounderSourceLiteral $legacyUpdater "This is a very old version of Void" "This Founder IDE build is out of date"
+Set-FounderSourceLiteral $legacyUpdater "[Void Editor](https://voideditor.com/download-beta)" "[Founder IDE](https://doxxedcrypto.digital)"
+Set-FounderSourceLiteral $legacyUpdater "https://voideditor.com/download-beta" "https://doxxedcrypto.digital"
+Set-FounderSourceLiteral $legacyUpdater "Void Site" "Founder site"
+Set-FounderSourceLiteral $legacyUpdater "https://voideditor.com/" "https://doxxedcrypto.digital/"
+Set-FounderSourceLiteral $legacyUpdater "Void Error:" "Founder IDE update error:"
+Set-FounderSourceLiteral $legacyUpdater "reinstall Void" "reinstall Founder IDE"
+Set-FounderSourceLiteral $legacyUpdater "Void Update" "Founder IDE Update"
+Set-FounderSourceLiteral $legacyUpdater "Void: Check for Updates" "Founder IDE: Check for Updates"
+
+$legacyUpdateMain = "src\vs\workbench\contrib\void\electron-main\voidUpdateMainService.ts"
+Set-FounderSourceLiteral $legacyUpdateMain "Restart Void to update!" "Restart Founder IDE to update!"
+Set-FounderSourceLiteral $legacyUpdateMain "A new version of Void is available!" "A new version of Founder IDE is available!"
+Set-FounderSourceLiteral $legacyUpdateMain "Void is up-to-date!" "Founder IDE is up-to-date!"
+
+# Void renamed VS Code's auxiliary bar throughout the shell. Founder uses a
+# plain product term so layout menus describe the destination instead of the
+# upstream fork. Keep this exact list explicit so new surfaces require review.
+$assistantPanelSources = @(
+    "src\vs\workbench\contrib\quickaccess\browser\viewQuickAccess.ts",
+    "src\vs\workbench\browser\workbench.contribution.ts",
+    "src\vs\workbench\browser\actions\layoutActions.ts",
+    "src\vs\workbench\browser\parts\panel\panelActions.ts",
+    "src\vs\workbench\browser\parts\paneCompositeBar.ts",
+    "src\vs\workbench\browser\parts\auxiliarybar\auxiliaryBarPart.ts",
+    "src\vs\workbench\browser\parts\auxiliarybar\auxiliaryBarActions.ts"
+)
+foreach ($assistantPanelSource in $assistantPanelSources) {
+    Set-FounderSourceLiteral $assistantPanelSource "Void Side Bar" "Assistant Panel"
+}
+Set-FounderSourceLiteral `
+    "src\vs\workbench\browser\workbench.contribution.ts" `
+    "The Void side bar will show on the opposite side of the workbench." `
+    "The Assistant Panel will show on the opposite side of the workbench."
+
+$fileActions = "src\vs\workbench\contrib\files\browser\fileActions.contribution.ts"
+Set-FounderSourceLiteral $fileActions "&&Open Void Settings" "&&Open Founder Settings"
+
+$dialogHandler = "src\vs\workbench\electron-sandbox\parts\dialogs\dialogHandler.ts"
+Set-FounderSourceLiteral $dialogHandler "VSCode Version: {0}" "Editor Core Version: {0}"
+Set-FounderSourceLiteral $dialogHandler "Void Version: {1}" "Founder IDE Version: {1}"
+
+# Electron's generated Process declaration narrows `off` to its own `loaded`
+# event, hiding Node's generic EventEmitter overload during the pinned VS Code
+# compile. The runtime is still Node's Process EventEmitter, so keep behavior
+# unchanged and make only the two cleanup calls explicit.
+$parcelWatcher = "src\vs\platform\files\node\watcher\parcel\parcelWatcher.ts"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "(process as NodeJS.Process).off('uncaughtException', onUncaughtException);" `
+    "(process as NodeJS.EventEmitter).off('uncaughtException', onUncaughtException);"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
+    "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
+
+# Keep every Electron version boundary aligned with the pinned upstream
+# manifest. A stale local package mutation can otherwise assemble an
+# incompatible executable while the TypeScript build still succeeds.
+$npmrc = Join-Path $VscodiumCheckout ".npmrc"
+$packageJson = Join-Path $VscodiumCheckout "package.json"
+$packageLock = Join-Path $VscodiumCheckout "package-lock.json"
+$electronChecksums = Join-Path $VscodiumCheckout "build\checksums\electron.txt"
+$electronVersion = [string]$manifest.upstream.electron_version
+$electronPin = "target=`"$electronVersion`""
+$electronChecksumName = "electron-v$electronVersion-win32-x64.zip"
+if (-not (Test-Path $npmrc) -or -not (Test-Path $packageJson) -or
+    -not (Test-Path $packageLock) -or -not (Test-Path $electronChecksums)) {
+    throw "Pinned Electron metadata is missing from the upstream checkout"
+}
+$npmrcContent = Get-Content $npmrc -Raw
+if (-not $npmrcContent.Contains($electronPin) -or
+    -not $npmrcContent.Contains('build_from_source="true"')) {
+    throw "Electron npm pin changed; restore the manifest version and source-build policy before packaging"
+}
+$package = Get-Content $packageJson -Raw | ConvertFrom-Json
+$lockElectronVersions = @(
+    & node -e "const lock=require(process.argv[1]); console.log(lock.packages?.['']?.devDependencies?.electron ?? ''); console.log(lock.packages?.['node_modules/electron']?.version ?? '');" $packageLock
+)
+if ($LASTEXITCODE -ne 0 -or $lockElectronVersions.Count -ne 2) {
+    throw "Could not parse Electron versions from package-lock.json"
+}
+if ([string]$package.devDependencies.electron -ne $electronVersion -or
+    [string]$lockElectronVersions[0] -ne $electronVersion -or
+    [string]$lockElectronVersions[1] -ne $electronVersion) {
+    throw "Electron package metadata does not match manifest version $electronVersion"
+}
+$electronChecksumContent = Get-Content $electronChecksums -Raw
+if ($electronChecksumContent -notmatch "(?m)^[a-f0-9]{64} \*$([regex]::Escape($electronChecksumName))$") {
+    throw "Official Electron checksum is missing for $electronChecksumName"
+}
+Write-Host "[apply-founder]   Electron $electronVersion package and checksum pins verified" -ForegroundColor Green
 
 # --- Verify product.json -----------------------------------------------------
 $productF = Join-Path $VscodiumCheckout "product.json"
@@ -164,17 +365,54 @@ Write-Host "[apply-founder] product.json OK: nameLong='$($product.nameLong)' app
 # --- Verify the Gateway rewire landed ----------------------------------------
 $sendLlm = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendLLMMessage.ts"
 $sendFos = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\sendFounderOs.ts"
+$nativeCoordination = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\electron-main\llmMessage\founderNativeCoordination.ts"
+$personalAiBridge = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\browser\founderPersonalAiActions.ts"
 if (-not (Test-Path $sendLlm)) { throw "sendLLMMessage.ts missing at $sendLlm" }
 if (-not (Test-Path $sendFos)) { throw "sendFounderOs.ts missing at $sendFos" }
+if (-not (Test-Path $nativeCoordination)) { throw "founderNativeCoordination.ts missing at $nativeCoordination" }
+if (-not (Test-Path $personalAiBridge)) { throw "founderPersonalAiActions.ts missing at $personalAiBridge" }
 $sendLlmContent = Get-Content $sendLlm -Raw
 if ($sendLlmContent -notmatch "FOUNDER_OS_GATEWAY_REWIRE") {
     throw "sendLLMMessage.ts is missing the FOUNDER_OS_GATEWAY_REWIRE marker - overlay did not apply"
+}
+if ((Get-Content $chatThreadService -Raw) -notmatch 'workspacePath: this\._workspaceContextService') {
+    throw "Native chat is missing workspace-scoped coordination metadata"
+}
+$personalAiBridgeContent = Get-Content $personalAiBridge -Raw
+foreach ($commandId in @("founder.personalAi.save", "founder.personalAi.select", "founder.managedAi.select")) {
+    if ($personalAiBridgeContent -notmatch [regex]::Escape($commandId)) {
+        throw "Founder Personal AI bridge is missing command '$commandId'"
+    }
+}
+if ($personalAiBridgeContent -notmatch "Remote Personal AI providers must use HTTPS") {
+    throw "Founder Personal AI bridge is missing remote URL hardening"
 }
 $sendFosLen = (Get-Item $sendFos).Length
 if ($sendFosLen -lt 5000) {
     throw "sendFounderOs.ts is suspiciously small ($sendFosLen bytes) - overlay may be truncated"
 }
 Write-Host "[apply-founder] Gateway rewire OK: sendLLMMessage.ts patched, sendFounderOs.ts present ($sendFosLen bytes)" -ForegroundColor Green
+
+# --- Verify clean-profile Founder AI defaults -------------------------------
+$modelCapabilities = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\modelCapabilities.ts"
+$settingsService = Join-Path $VscodiumCheckout "src\vs\workbench\contrib\void\common\voidSettingsService.ts"
+if (-not (Test-Path $modelCapabilities) -or -not (Test-Path $settingsService)) {
+    throw "Founder AI default-model sources are missing after overlay application"
+}
+$modelCapabilitiesContent = Get-Content $modelCapabilities -Raw
+$settingsServiceContent = Get-Content $settingsService -Raw
+foreach ($modelAlias in @("founder-os-auto", "founder-os-fast", "founder-os-reasoning", "founder-os-code")) {
+    if ($modelCapabilitiesContent -notmatch [regex]::Escape($modelAlias)) {
+        throw "modelCapabilities.ts is missing managed model alias '$modelAlias'"
+    }
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-auto'") {
+    throw "voidSettingsService.ts does not select founder-os-auto for a clean profile"
+}
+if ($settingsServiceContent -notmatch "modelName: 'founder-os-code'") {
+    throw "voidSettingsService.ts does not select founder-os-code for clean-profile autocomplete"
+}
+Write-Host "[apply-founder] clean-profile Founder AI defaults OK: Auto chat + Code autocomplete" -ForegroundColor Green
 
 # --- Verify code.iss ---------------------------------------------------------
 $codeIss = Join-Path $VscodiumCheckout "build\win32\code.iss"
@@ -186,7 +424,14 @@ if ($codeIssContent -notmatch "OutputBaseFilename=FounderIDESetup") {
 if ($codeIssContent -notmatch "AppPublisher=Doxxed Crypto") {
     throw "build/win32/code.iss missing 'AppPublisher=Doxxed Crypto' - overlay did not apply"
 }
-Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto" -ForegroundColor Green
+# The tools\* Source line must be wrapped in #ifexist "tools\*" so the inner
+# installer compiles even when the open-source gulp targets omit tools/
+# (the remote-tunnel CLI is only produced by VS Code's official Azure pipeline).
+# Regression check for the 0.9.2 CI fix.
+if ($codeIssContent -notmatch '#ifexist "tools\\\*"') {
+    throw "build/win32/code.iss missing #ifexist `"tools\*`" guard on the tools Source line - overlay did not apply (regression of 0.9.2 CI fix)"
+}
+Write-Host "[apply-founder] code.iss OK: OutputBaseFilename=FounderIDESetup, AppPublisher=Doxxed Crypto, #ifexist tools guard present" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64-min-ci." -ForegroundColor Green
+Write-Host "[apply-founder] DONE - Founder IDE customizations applied. Next: npm ci, then gulp vscode-win32-x64." -ForegroundColor Green

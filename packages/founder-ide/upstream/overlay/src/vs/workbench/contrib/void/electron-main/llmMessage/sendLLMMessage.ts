@@ -7,8 +7,10 @@ import { SendLLMMessageParams, OnText, OnFinalMessage, OnError } from '../../com
 import { IMetricsService } from '../../common/metricsService.js';
 import { displayInfoOfProviderName } from '../../common/voidSettingsTypes.js';
 import { sendLLMMessageToProviderImplementation } from './sendLLMMessage.impl.js';
-// FOUNDER_OS_GATEWAY_REWIRE - Phase 5 step 5. Redirect all AI through our Gateway.
+// FOUNDER_OS_GATEWAY_REWIRE - Founder-managed aliases use our Gateway. Personal
+// and local provider selections stay on Void's encrypted direct-provider path.
 import { sendFounderOsChat, sendFounderOsFIM, founderOsEnabled } from './sendFounderOs.js';
+import { headersWithoutFounderProviderProfiles, resolveFounderProviderProfile } from '../../common/founderProviderProfiles.js';
 
 
 export const sendLLMMessage = async ({
@@ -80,7 +82,7 @@ export const sendLLMMessage = async ({
 
 		// handle failed to fetch errors, which give 0 information by design
 		if (errorMessage === 'TypeError: fetch failed')
-			errorMessage = `Failed to fetch from ${displayInfoOfProviderName(providerName).title}. This likely means you specified the wrong endpoint in Void's Settings, or your local model provider like Ollama is powered off.`
+			errorMessage = `Failed to fetch from ${displayInfoOfProviderName(providerName).title}. Check the endpoint in Founder Settings, or confirm that your local model provider is running.`
 
 		captureLLMEvent(`${loggingName} - Error`, { error: errorMessage })
 		onError_({ message: errorMessage, fullError })
@@ -102,13 +104,19 @@ export const sendLLMMessage = async ({
 		captureLLMEvent(`${loggingName} - Sending FIM`, { prefixLen: messages_?.prefix?.length, suffixLen: messages_?.suffix?.length })
 
 
-	// FOUNDER_OS_GATEWAY_REWIRE - Phase 5 step 5. Redirect all AI through our Gateway.
-	// Import is at module top (see line 10). If the Founder Node vault is paired,
-	// route every request to our Gateway and skip Void's per-provider dispatch.
-	// If the vault is absent, fall through to Void's normal dispatch.
-	if (founderOsEnabled()) {
+	// A paired Founder IDE can use Founder Managed and remembered personal/local
+	// providers side by side. Only explicit founder-os-* aliases are Gateway
+	// routes; every other selection must honor the provider chosen in the chat.
+	const isFounderManagedSelection = modelName.startsWith('founder-os-')
+	if (founderOsEnabled() && isFounderManagedSelection) {
 		if (messagesType === 'chatMessages') {
-			await sendFounderOsChat({ messages: messages_, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode });
+			const threadId = typeof loggingExtras?.threadId === 'string' ? loggingExtras.threadId : '';
+			const workspacePath = typeof loggingExtras?.workspacePath === 'string' ? loggingExtras.workspacePath : '';
+			await sendFounderOsChat({
+				messages: messages_, onText, onFinalMessage, onError, _setAborter,
+				loggingName, modelSelection, settingsOfProvider, separateSystemMessage, chatMode, mcpTools,
+				coordination: threadId && workspacePath ? { threadId, workspacePath } : undefined,
+			});
 			return
 		}
 		if (messagesType === 'FIMMessage') {
@@ -116,6 +124,36 @@ export const sendLLMMessage = async ({
 			return
 		}
 	}
+
+	const personalProfile = providerName === 'openAICompatible'
+		? resolveFounderProviderProfile(settingsOfProvider.openAICompatible.headersJSON, modelName)
+		: null;
+	const effectiveModelName = personalProfile?.model ?? modelName;
+	const effectiveSettingsOfProvider = providerName === 'openAICompatible'
+		? {
+			...settingsOfProvider,
+			openAICompatible: {
+				...settingsOfProvider.openAICompatible,
+				...(personalProfile ? {
+					endpoint: personalProfile.baseUrl,
+					apiKey: personalProfile.apiKey,
+					headersJSON: JSON.stringify(personalProfile.headers),
+				} : {
+					headersJSON: headersWithoutFounderProviderProfiles(
+						settingsOfProvider.openAICompatible.headersJSON,
+					),
+				}),
+			},
+		}
+		: settingsOfProvider;
+	const personalOnFinalMessage: OnFinalMessage = personalProfile
+		? (params) => {
+			const routeKind = personalProfile.kind === 'ollama' ? 'Local' : 'Personal AI';
+			const latencyMs = Date.now() - submit_time.getTime();
+			const receipt = `\n\n---\n**Founder route** | ${routeKind} | ${personalProfile.label} | ${personalProfile.model} | outside managed quota | ${latencyMs.toLocaleString()} ms`;
+			onFinalMessage({ ...params, fullText: `${params.fullText}${receipt}` });
+		}
+		: onFinalMessage;
 
 try {
 		const implementation = sendLLMMessageToProviderImplementation[providerName]
@@ -125,12 +163,21 @@ try {
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
-			await sendChat({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, overridesOfModel, modelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
+			const directMessages = personalProfile ? [{
+				role: 'system' as const,
+				content: [
+					`You are ${personalProfile.label}, a Personal AI connected to Founder IDE.`,
+					'Use the available workspace and engineering tools in the current turn when evidence is needed. Do not merely announce that you will inspect the codebase and stop.',
+					'Never claim to be Founder AI or a Founder-managed model. Your configured profile and model appear in the route receipt.',
+					'When the latest request begins [FOUNDER_SECOND_BRAIN_V1], act as an independent read-only reviewer: inspect evidence, do not edit files or deploy, distinguish verified defects from opinion, and return the requested verdict and concrete correction.',
+				].join(' '),
+			}, ...messages_] : messages_;
+			await sendChat({ messages: directMessages, onText, onFinalMessage: personalOnFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
 			return
 		}
 		if (messagesType === 'FIMMessage') {
 			if (sendFIM) {
-				await sendFIM({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, overridesOfModel, modelName, _setAborter, providerName, separateSystemMessage })
+				await sendFIM({ messages: messages_, onText, onFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage })
 				return
 			}
 			onError({ message: `Error running Autocomplete with ${providerName} - ${modelName}.`, fullError: null })

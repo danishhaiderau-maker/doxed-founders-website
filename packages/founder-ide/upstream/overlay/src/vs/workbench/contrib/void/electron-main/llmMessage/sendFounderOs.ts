@@ -35,10 +35,28 @@ import type {
 	OnFinalMessage,
 	OnError,
 	RawToolCallObj,
+	RawToolParamsObj,
 	AnthropicReasoning,
 } from '../../common/sendLLMMessageTypes.js';
 import type { ModelSelection, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import type { ChatMode } from '../../common/voidSettingsTypes.js';
+import { availableTools, type InternalToolInfo } from '../../common/prompt/prompts.js';
+import { beginNativeCoordination } from './founderNativeCoordination.js';
+import {
+	formatNativeTeamAdvice,
+	latestFounderRequest,
+	nativeTeamAdvisers,
+	readNativeAgentMode,
+	readNativeWorkMode,
+	shouldAssembleNativeTeam,
+	nativeWorkModeSystem,
+	type FounderTeamAdviser,
+} from './founderNativeTeam.js';
+import {
+	nativeAutoEscalationReason,
+	stripUntrustedFounderRouteReceipts,
+	type FounderNativeEscalationReason,
+} from './founderNativeRouting.js';
 
 // ---------------------------------------------------------------------------
 // Credential discovery - mirrors credentials.ts. Reads the vault file that
@@ -98,6 +116,27 @@ function bearerFromVault(cfg: NodeConfigFile): string {
 	return `fos_${cfg.nodeId}:${cfg.nodeToken}`;
 }
 
+function gatewayErrorMessage(status: number, responseBody: string): string {
+	const normalized = responseBody.toLowerCase();
+	const providerCredentialFailed =
+		normalized.includes('api key') &&
+		(normalized.includes('invalid') || normalized.includes('authentication'));
+
+	if (providerCredentialFailed) {
+		return 'The selected AI provider is unavailable. Open Founder Connections to repair it or choose another model.';
+	}
+	if (status === 401 || status === 403) {
+		return 'Your Founder session needs to be renewed. Open the Founder panel and sign in again.';
+	}
+	if (status === 429) {
+		return 'Your Founder AI allowance is temporarily unavailable. Check Founder Connections for usage and provider options.';
+	}
+	if (status >= 500) {
+		return 'Founder AI is temporarily unavailable. Your workspace and local files are unaffected.';
+	}
+	return 'Founder could not send this request. Check the active model in Founder Connections.';
+}
+
 // ---------------------------------------------------------------------------
 // Feature -> model alias mapping (design report section 4.3).
 // loggingName values come from the callers:
@@ -136,6 +175,7 @@ interface FounderOsMetadata {
 	provider?: string;
 	model?: string;
 	ddollarCost?: number;
+	routePolicy?: 'free_flash_only' | 'managed_auto';
 	[k: string]: unknown;
 }
 
@@ -149,7 +189,14 @@ function findEventBoundary(buf: string): number {
 
 interface StreamHandlers {
 	onDelta: (delta: string) => void;
+	onReasoningDelta?: (delta: string) => void;
+	onToolDelta?: (tool: {
+		index: number;
+		id?: string;
+		function?: { name?: string; arguments?: string };
+	}) => void;
 	onMetadata?: (meta: FounderOsMetadata) => void;
+	onDone?: () => void;
 }
 
 function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
@@ -161,7 +208,11 @@ function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
 	}
 	if (dataLines.length === 0) return;
 	const payload = dataLines.join('\n').trim();
-	if (payload === '[DONE]' || payload.length === 0) return;
+	if (payload === '[DONE]') {
+		handlers.onDone?.();
+		return;
+	}
+	if (payload.length === 0) return;
 
 	try {
 		const evt = JSON.parse(payload) as Record<string, unknown>;
@@ -170,11 +221,27 @@ function handleSseEvent(rawEvent: string, handlers: StreamHandlers): void {
 			handlers.onMetadata?.(evt.founderOs as FounderOsMetadata);
 			return;
 		}
-		const choices = evt.choices as Array<{ delta?: { content?: string } }> | undefined;
-		const delta = choices?.[0]?.delta?.content;
+		const choices = evt.choices as Array<{
+			delta?: {
+				content?: string;
+				reasoning_content?: string;
+				tool_calls?: Array<{
+					index: number;
+					id?: string;
+					function?: { name?: string; arguments?: string };
+				}>;
+			};
+		}> | undefined;
+		const choiceDelta = choices?.[0]?.delta;
+		const delta = choiceDelta?.content;
 		if (typeof delta === 'string' && delta.length > 0) {
 			handlers.onDelta(delta);
 		}
+		const reasoningDelta = choiceDelta?.reasoning_content;
+		if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+			handlers.onReasoningDelta?.(reasoningDelta);
+		}
+		for (const tool of choiceDelta?.tool_calls ?? []) handlers.onToolDelta?.(tool);
 	} catch {
 		/* ignore malformed/keepalive chunk */
 	}
@@ -184,7 +251,7 @@ async function pumpSseStream(
 	body: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
 	handlers: StreamHandlers,
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
 	// The Gateway returns a web ReadableStream via fetch; handle both web and
 	// node stream shapes defensively.
 	const reader: { read(): Promise<{ done: boolean; value?: Uint8Array | Buffer }> } =
@@ -207,10 +274,18 @@ async function pumpSseStream(
 
 	const decoder = new TextDecoder();
 	let buffer = '';
+	let sawDone = false;
+	const trackedHandlers: StreamHandlers = {
+		...handlers,
+		onDone: () => {
+			sawDone = true;
+			handlers.onDone?.();
+		},
+	};
 
 	try {
 		for (;;) {
-			if (signal.aborted) return;
+			if (signal.aborted) return false;
 			const { done, value } = await reader.read();
 			if (done) break;
 			if (!value) continue;
@@ -220,10 +295,10 @@ async function pumpSseStream(
 			while ((sepIndex = findEventBoundary(buffer)) !== -1) {
 				const rawEvent = buffer.slice(0, sepIndex);
 				buffer = buffer.slice(sepIndex).replace(/^(\r?\n){2}/, '');
-				handleSseEvent(rawEvent, handlers);
+				handleSseEvent(rawEvent, trackedHandlers);
 			}
 		}
-		if (buffer.trim().length > 0) handleSseEvent(buffer, handlers);
+		if (buffer.trim().length > 0) handleSseEvent(buffer, trackedHandlers);
 	} finally {
 		try {
 			// @ts-ignore - releaseLock exists on web readers only
@@ -232,6 +307,7 @@ async function pumpSseStream(
 			/* noop */
 		}
 	}
+	return sawDone;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +318,11 @@ interface OpenAiMsg {
 	role: 'system' | 'user' | 'assistant' | 'tool';
 	content: string;
 	tool_call_id?: string;
+	tool_calls?: Array<{
+		id: string;
+		type: 'function';
+		function: { name: string; arguments: string };
+	}>;
 }
 
 function toOpenAiMessages(
@@ -265,6 +346,7 @@ function toOpenAiMessages(
 			const msg: OpenAiMsg = { role: role as OpenAiMsg['role'], content };
 			// @ts-ignore - tool_call_id lives on the tool role variant
 			if (role === 'tool' && raw.tool_call_id) msg.tool_call_id = raw.tool_call_id;
+			if (role === 'assistant' && Array.isArray(raw.tool_calls)) msg.tool_calls = raw.tool_calls;
 			out.push(msg);
 		} else if (role === 'model') {
 			// Gemini shape -> assistant
@@ -289,6 +371,7 @@ interface FounderOsCommonParams {
 async function gatewayFetch(
 	body: Record<string, unknown>,
 	onError: OnError,
+	onController?: (controller: AbortController) => void,
 ): Promise<{ res: Response; controller: AbortController } | null> {
 	const cfg = readVaultConfig();
 	if (!cfg) {
@@ -296,6 +379,7 @@ async function gatewayFetch(
 		return null;
 	}
 	const controller = new AbortController();
+	onController?.(controller);
 	const url = `${proxyBaseUrl(cfg.apiBaseUrl)}/chat/completions`;
 	try {
 		const res = await fetch(url, {
@@ -310,13 +394,119 @@ async function gatewayFetch(
 		});
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
-			onError({ message: `Founder OS gateway returned ${res.status}: ${text.slice(0, 500)}`, fullError: null });
+			onError({
+				message: gatewayErrorMessage(res.status, text),
+				fullError: null,
+			});
 			return null;
 		}
 		return { res, controller };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		onError({ message: `Founder OS gateway network error: ${message}`, fullError: err instanceof Error ? err : null });
+		onError({
+			message: 'Founder could not reach the AI gateway. Check your connection from the Founder panel.',
+			fullError: err instanceof Error ? err : null,
+		});
+		return null;
+	}
+}
+
+function inlineReceiptValue(value: unknown, fallback = '?'): string {
+	if (typeof value !== 'string' || !value.trim()) return fallback;
+	return value.trim().replace(/[\r\n`|]/g, ' ').slice(0, 120);
+}
+
+function founderRouteReceipt(
+	meta: FounderOsMetadata | undefined,
+	latencyMs: number,
+	escalationReason: FounderNativeEscalationReason | null,
+): string {
+	if (!meta) return '';
+	const provider = inlineReceiptValue(meta.provider);
+	const model = inlineReceiptValue(meta.model);
+	const tier = inlineReceiptValue(meta.tier);
+	const cost = typeof meta.ddollarCost === 'number' && Number.isFinite(meta.ddollarCost)
+		? ` · ${meta.ddollarCost} D$`
+		: '';
+	const policy = meta.routePolicy === 'free_flash_only' ? ' | Free: Flash' : '';
+	const escalation = escalationReason
+		? ` | Auto requested Pro: ${escalationReason.replace('_', ' ')}`
+		: '';
+	return `\n\n---\n**Founder route** · ${tier} · ${provider}/${model} · ${latencyMs} ms${cost}${policy}${escalation}`;
+}
+
+async function requestNativeTeamAdvice(
+	adviser: FounderTeamAdviser,
+	request: string,
+	controllers: Set<AbortController>,
+): Promise<{ adviser: FounderTeamAdviser; text: string }> {
+	let registeredController: AbortController | undefined;
+	const got = await gatewayFetch(
+		{
+			model: 'founder-os-fast',
+			messages: [
+				{ role: 'system', content: adviser.system },
+				{ role: 'user', content: request },
+			],
+			stream: true,
+			max_tokens: 450,
+			founder_os_metadata: true,
+			metadata: { founder_agent_role: adviser.id, founder_agent_mode: 'team' },
+		},
+		() => undefined,
+		(controller) => {
+			registeredController = controller;
+			controllers.add(controller);
+		},
+	);
+	if (!got) {
+		if (registeredController) controllers.delete(registeredController);
+		return { adviser, text: '' };
+	}
+	let text = '';
+	try {
+		const done = await pumpSseStream(
+			got.res.body as ReadableStream<Uint8Array>,
+			{ onDelta: (delta) => { text += delta; } },
+			got.controller.signal,
+		);
+		return { adviser, text: done ? text : '' };
+	} catch {
+		return { adviser, text: '' };
+	} finally {
+		controllers.delete(got.controller);
+	}
+}
+
+function gatewayTools(chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined): Array<Record<string, unknown>> {
+	return (availableTools(chatMode, mcpTools) ?? []).map((tool) => ({
+		type: 'function',
+		function: {
+			name: tool.name,
+			description: tool.description,
+			parameters: {
+				type: 'object',
+				properties: Object.fromEntries(
+					Object.entries(tool.params).map(([name, info]) => [name, { type: 'string', ...info }]),
+				),
+			},
+		},
+	}));
+}
+
+function completedToolCall(name: string, argumentsJson: string, id: string): RawToolCallObj | null {
+	if (!name) return null;
+	try {
+		const parsed = JSON.parse(argumentsJson) as unknown;
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+		const rawParams = parsed as RawToolParamsObj;
+		return {
+			id,
+			name,
+			rawParams,
+			doneParams: Object.keys(rawParams),
+			isDone: true,
+		};
+	} catch {
 		return null;
 	}
 }
@@ -330,55 +520,183 @@ export interface FounderOsChatParams extends FounderOsCommonParams {
 	settingsOfProvider: SettingsOfProvider;
 	separateSystemMessage: string | undefined;
 	chatMode: ChatMode | null;
+	mcpTools: InternalToolInfo[] | undefined;
+	coordination?: {
+		threadId: string;
+		workspacePath: string;
+	};
 }
 
 export async function sendFounderOsChat(params: FounderOsChatParams): Promise<void> {
-	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, separateSystemMessage, chatMode } = params;
+	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode, mcpTools } = params;
 
-	const model = aliasForFeature(loggingName, 'chatMessages', chatMode);
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
+	const requestedModel = modelSelection?.modelName;
+	const escalationReason = requestedModel === 'founder-os-auto'
+		? nativeAutoEscalationReason(openAiMessages)
+		: null;
+	const model = escalationReason
+		? 'founder-os-reasoning'
+		: typeof requestedModel === 'string' && requestedModel.startsWith('founder-os-')
+			? requestedModel
+			: aliasForFeature(loggingName, 'chatMessages', chatMode);
+	openAiMessages.unshift({
+		role: 'system',
+		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the application shows the exact provider and model after the answer. Never write, imitate, quote, or predict a Founder route receipt; that trusted evidence is appended by the application. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
+	});
+	openAiMessages.splice(1, 0, {
+		role: 'system',
+		content: nativeWorkModeSystem(readNativeWorkMode()),
+	});
+	const coordination = params.coordination
+		? beginNativeCoordination({
+			threadId: params.coordination.threadId,
+			workspacePath: params.coordination.workspacePath,
+			provider: model,
+			messages: openAiMessages,
+		})
+		: undefined;
+	if (coordination?.context) {
+		openAiMessages.splice(1, 0, { role: 'system', content: coordination.context });
+	}
+	const coordinationHeartbeat = coordination
+		? setInterval(() => coordination.refresh(), 60_000)
+		: undefined;
+	coordinationHeartbeat?.unref?.();
+	const activeControllers = new Set<AbortController>();
+	let requestAborted = false;
+	_setAborter(() => {
+		requestAborted = true;
+		for (const controller of activeControllers) controller.abort();
+	});
+
+	const founderRequest = latestFounderRequest(openAiMessages);
+	if (shouldAssembleNativeTeam(readNativeAgentMode(), chatMode, founderRequest)) {
+		const adviserResults = await Promise.all(
+			nativeTeamAdvisers().map((adviser) =>
+				requestNativeTeamAdvice(adviser, founderRequest, activeControllers),
+			),
+		);
+		const handoff = formatNativeTeamAdvice(adviserResults);
+		if (handoff) {
+			const insertAt = coordination?.context ? 2 : 1;
+			openAiMessages.splice(insertAt, 0, { role: 'system', content: handoff });
+		}
+	}
+	if (requestAborted) {
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+		coordination?.settle();
+		return;
+	}
 
 	const body: Record<string, unknown> = {
 		model,
 		messages: openAiMessages,
 		stream: true,
 		founder_os_metadata: true,
+		...(escalationReason ? { metadata: { founder_auto_escalation: escalationReason } } : {}),
 	};
+	const tools = gatewayTools(chatMode, mcpTools);
+	if (tools.length > 0) {
+		body.tools = tools;
+		body.tool_choice = 'auto';
+	}
 
-	const got = await gatewayFetch(body, onError);
-	if (!got) return;
+	const got = await gatewayFetch(body, onError, (controller) => activeControllers.add(controller));
+	if (!got) {
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+		coordination?.fail();
+		return;
+	}
 	const { res, controller } = got;
-	_setAborter(() => controller.abort());
 
+	const startedAt = Date.now();
 	let fullText = '';
 	let fullReasoning = '';
+	let routeMetadata: FounderOsMetadata | undefined;
+	let toolName = '';
+	let toolId = '';
+	let toolArguments = '';
+	let sawDone = false;
 
-	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
-		onDelta: (delta) => {
-			fullText += delta;
-			onText({ fullText, fullReasoning, toolCall: undefined });
-		},
-		onMetadata: (meta) => {
-			// Route transparency. A future UI hook can surface this in the
-			// chat thread status slot; for now log it so it's observable.
-			console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
-		},
-	}, controller.signal);
+	try {
+		sawDone = await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
+			onDelta: (delta) => {
+				fullText += delta;
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
+			},
+			onReasoningDelta: (delta) => {
+				fullReasoning += delta;
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
+			},
+			onToolDelta: (tool) => {
+				if (tool.index !== 0) return;
+				toolName += tool.function?.name ?? '';
+				toolArguments += tool.function?.arguments ?? '';
+				toolId += tool.id ?? '';
+				onText({
+					fullText,
+					fullReasoning,
+					toolCall: toolName
+						? { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId }
+						: undefined,
+				});
+			},
+			onMetadata: (meta) => {
+				routeMetadata = meta;
+				console.log(`[Founder OS] ${meta.tier ?? '?'}/${meta.provider ?? '?'}/${meta.model ?? '?'} cost=${meta.ddollarCost ?? '?'} D$ req=${meta.requestId ?? '?'}`);
+			},
+		}, controller.signal);
+	} catch (error) {
+		coordination?.fail();
+		throw error;
+	} finally {
+		activeControllers.delete(controller);
+		if (coordinationHeartbeat) clearInterval(coordinationHeartbeat);
+	}
 
-	if (!fullText && !fullReasoning) {
+	if (!sawDone) {
+		coordination?.fail();
+		onError({ message: 'Founder OS: Stream ended before the completion marker.', fullError: null });
+		return;
+	}
+
+	if (!fullText && !fullReasoning && !toolName) {
+		coordination?.fail();
 		onError({ message: 'Founder OS: Response from gateway was empty.', fullError: null });
 		return;
 	}
 
+	const toolCall = completedToolCall(toolName, toolArguments, toolId);
+	if (toolName && !toolCall) {
+		coordination?.fail();
+		onError({ message: 'Founder OS: The model returned an incomplete tool request.', fullError: null });
+		return;
+	}
+	const finalText = toolCall
+		? fullText
+		: `${stripUntrustedFounderRouteReceipts(fullText)}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
-		fullText,
+		fullText: finalText,
 		fullReasoning,
-		anthropicReasoning: null,
+	anthropicReasoning: null,
+		...(toolCall ? { toolCall } : {}),
 	};
 	onFinalMessage(finalParams);
+	coordination?.settle();
 
-	// satisfy RawToolCallObj import (unused but keeps the type graph intact)
-	void (null as unknown as RawToolCallObj);
 	void (null as unknown as AnthropicReasoning);
 }
 
@@ -416,10 +734,14 @@ export async function sendFounderOsFIM(params: FounderOsFIMParams): Promise<void
 	// FIM doesn't stream incremental text in Void's design (onText is unused
 	// for FIMMessage - see autocompleteService.ts); collect then onFinalMessage.
 	let fullText = '';
-	await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
+	const sawDone = await pumpSseStream(res.body as ReadableStream<Uint8Array>, {
 		onDelta: (delta) => { fullText += delta; },
 	}, controller.signal);
 
+	if (!sawDone) {
+		onError({ message: 'Founder OS: Autocomplete stream ended before the completion marker.', fullError: null });
+		return;
+	}
 	if (!fullText) {
 		onError({ message: 'Founder OS: Autocomplete response from gateway was empty.', fullError: null });
 		return;

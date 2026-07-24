@@ -1,5 +1,5 @@
 /**
- * `founder.readWorkspace` — LanguageModelTool.
+ * `founder-read-workspace` — LanguageModelTool.
  *
  * Walks the current workspace file tree and returns a compact summary the model
  * can reason about: the tree (respecting common ignore patterns) plus optional
@@ -75,10 +75,11 @@ function walk(root: string, maxEntries: number): { entries: string[]; truncated:
       const full = path.join(dir, name);
       let stat: fs.Stats;
       try {
-        stat = fs.statSync(full);
+        stat = fs.lstatSync(full);
       } catch {
         continue;
       }
+      if (stat.isSymbolicLink()) continue;
       const isDir = stat.isDirectory();
       const rel = path.relative(root, full).replace(/\\/g, '/');
       entries.push(isDir ? `${rel}/` : rel);
@@ -93,15 +94,36 @@ function walk(root: string, maxEntries: number): { entries: string[]; truncated:
 function resolveSubdir(subdir: string | undefined): string | null {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) return null;
-  if (!subdir) return root;
-  if (path.isAbsolute(subdir)) return subdir;
-  return path.join(root, subdir);
+  const candidate = !subdir
+    ? path.resolve(root)
+    : path.isAbsolute(subdir)
+      ? path.resolve(subdir)
+      : path.resolve(root, subdir);
+  const relative = path.relative(path.resolve(root), candidate);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  try {
+    const realRoot = fs.realpathSync(root);
+    const realCandidate = fs.realpathSync(candidate);
+    const realRelative = path.relative(realRoot, realCandidate);
+    return realRelative.startsWith('..') || path.isAbsolute(realRelative)
+      ? null
+      : realCandidate;
+  } catch {
+    return null;
+  }
 }
 
 function readWorkspaceFile(root: string, rel: string): string | null {
-  const full = path.isAbsolute(rel) ? rel : path.join(root, rel);
+  const full = path.isAbsolute(rel) ? path.resolve(rel) : path.resolve(root, rel);
+  const relative = path.relative(path.resolve(root), full);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
   try {
-    const buf = fs.readFileSync(full, 'utf8');
+    if (fs.lstatSync(full).isSymbolicLink()) return null;
+    const realRoot = fs.realpathSync(root);
+    const realFile = fs.realpathSync(full);
+    const realRelative = path.relative(realRoot, realFile);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) return null;
+    const buf = fs.readFileSync(realFile, 'utf8');
     if (buf.length > 16_000) {
       return buf.slice(0, 16_000) + `\n…[truncated, ${buf.length - 16_000} more chars]`;
     }

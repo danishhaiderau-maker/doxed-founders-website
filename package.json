@@ -145,7 +145,7 @@
     "test:founder-ide:manifest": "node --test packages/founder-ide/updates/validate-update-manifest.spec.mjs",
     "test:founder-ide:release-evidence": "node --test packages/founder-ide/scripts/verify-release-evidence.spec.mjs",
     "test:founder-ide:overlay": "node --test packages/founder-ide/upstream/overlay/overlay.spec.mjs packages/founder-ide/installer/build-stack-installer.spec.mjs",
-    "test:founder-ide:provider-profiles": "tsx --test packages/founder-ide/scripts/founder-provider-profiles.spec.ts",
+    "test:founder-ide:provider-profiles": "tsx --test packages/founder-ide/scripts/founder-provider-profiles.spec.ts packages/founder-ide/scripts/founder-route-receipt.spec.ts",
     "test:founder-node:ide-updater": "tsx --test apps/founder-node/test/ide-update-manager.spec.ts",
     "test:founder-ide": "npm run verify:founder-ide:update-manifest && npm run test:founder-ide:manifest && npm run test:founder-ide:release-evidence && npm run test:founder-ide:overlay && npm run test:founder-ide:provider-profiles && npm run test:founder-ide:smoke",
     "db:verify": "tsx scripts/verify-seed.mjs",

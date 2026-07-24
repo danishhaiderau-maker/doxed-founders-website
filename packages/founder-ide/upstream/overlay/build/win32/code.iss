@@ -76,9 +76,13 @@ Type: filesandordirs; Name: "{app}\resources\app\node_modules"; Check: IsNotBack
 Type: filesandordirs; Name: "{app}\resources\app\node_modules.asar.unpacked"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\resources\app\node_modules.asar"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\resources\app\Credits_45.0.2454.85.html"; Check: IsNotBackgroundUpdate
+; Founder IDE upgrades replace the embedded relay as one immutable payload.
+; Without this, removed files from an earlier relay can survive the upgrade.
+Type: filesandordirs; Name: "{app}\resources\founder-relay"; Check: IsNotBackgroundUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_"
+Type: filesandordirs; Name: "{app}\resources\founder-relay"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -94,7 +98,15 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
 Source: "*"; Excludes: "\CodeSignSummary*.md,\tools,\tools\*,\appx,\appx\*,\resources\app\product.json"; DestDir: "{code:GetDestDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
+; Founder IDE: the tools\ directory (Microsoft remote-tunnel CLI `code tunnel`) is only
+; emitted by VS Code official Azure pipeline, NOT by the open-source gulp targets
+; vscode-win32-x64 / vscode-win32-x64-min. Guard with ISPP #ifexist so the compiler
+; skips the line when tools\ is absent instead of aborting with
+; "No files found matching ...tools\*". Mirrors the #ifdef AppxPackageFullname
+; guard on the appx\* line below. See packages/founder-ide/RELEASES.md (0.9.2).
+#ifexist "tools\*"
+  Source: "tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
+#endif
 Source: "{#ProductJsonPath}"; DestDir: "{code:GetDestDir}\resources\app"; Flags: ignoreversion
 #ifdef AppxPackageFullname
 Source: "appx\*"; DestDir: "{app}\appx"; BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater and QualityIsInsiders
@@ -1587,6 +1599,7 @@ begin
   if not CurUninstallStep = usUninstall then begin
     exit;
   end;
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Founder IDE');
   if not RegQueryStringValue({#EnvironmentRootKey}, '{#EnvironmentKey}', 'Path', Path)
   then begin
     exit;

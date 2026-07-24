@@ -1,16 +1,17 @@
 # build-stack-installer.ps1
 #
-# Orchestrates the full Founder Stack build:
+# Orchestrates the complete Founder IDE build:
 #   1. Build the Founder OS chat extension .vsix (packages/founder-ide-extension)
-#   2. Build Founder IDE (build/build-founder-ide.sh -> VSCodium dev/build.sh)
-#   3. Compose it into Founder-Stack-Setup-<v>.exe via Inno Setup (iscc)
+#   2. Build the Founder IDE application payload
+#   3. Build and embed the Founder relay, then create the IDE installer
+#   4. Compose the mode-aware Founder-IDE-Setup-<v>.exe bootstrapper
 #
-# As of 0.9.1 the bundle is IDE-only. Founder Node is no longer built or
-# bundled — the IDE talks to the Gateway API directly and does not need a
-# paired local node.
+# Founder Node is an internal runtime of Founder IDE. Its unpacked Electron
+# payload is copied under resources/founder-relay before the IDE installer is
+# created. Users install, launch, update, and uninstall one application.
 #
 # This script is the entry point for producing a downloadable installer. It
-# does NOT clone VSCodium (one-time setup on the build machine — see
+# does NOT clone VSCodium (one-time setup on the build machine - see
 # RELEASES.md). It expects to be run from a VSCodium downstream checkout that
 # has the monorepo's packages/founder-ide/ layered in.
 #
@@ -21,18 +22,20 @@
 # Env / params:
 #   -MonorepoRoot        - path to the Founder OS monorepo (default: detected up from this script)
 #   -VscodiumCheckout    - path to the VSCodium downstream checkout (default: current dir)
-#   -Version             - Founder Stack version (default: 0.1.0)
+#   -Version             - Founder IDE version (default: 0.1.0)
 #   -SkipExtensionBuild  - skip step 1 (you already built the .vsix)
 #   -SkipIdeBuild        - skip step 2 (you already built Founder IDE)
+#   -SkipFounderNodeBuild - reuse apps/founder-node/release/win-unpacked
 #   -IsccPath            - path to iscc.exe (default: auto-detect)
 
 [CmdletBinding()]
 param(
     [string]$MonorepoRoot     = "",
     [string]$VscodiumCheckout = (Get-Location).Path,
-    [string]$Version          = "0.1.0",
+    [string]$Version          = "0.9.4",
     [switch]$SkipExtensionBuild,
     [switch]$SkipIdeBuild,
+    [switch]$SkipFounderNodeBuild,
     [string]$IsccPath         = ""
 )
 
@@ -51,6 +54,20 @@ if (-not $MonorepoRoot) {
 Write-Host "[stack] monorepo root: $MonorepoRoot"
 Write-Host "[stack] vscodium checkout: $VscodiumCheckout"
 Write-Host "[stack] version: $Version"
+
+# The current Void build cache is the VS Code source tree itself, while older
+# downstream checkouts keep that source under a VSCode/ child. Detect both so
+# a warm local build and the clean CI build package the same application.
+$vscodeSource = $VscodiumCheckout
+if (-not (Test-Path (Join-Path $vscodeSource "gulpfile.js"))) {
+    $nestedVscodeSource = Join-Path $VscodiumCheckout "VSCode"
+    if (Test-Path (Join-Path $nestedVscodeSource "gulpfile.js")) {
+        $vscodeSource = $nestedVscodeSource
+    } else {
+        throw "VS Code source tree not found at $VscodiumCheckout or $nestedVscodeSource"
+    }
+}
+Write-Host "[stack] vscode source: $vscodeSource"
 
 # --- Locate iscc (Inno Setup compiler) ---------------------------------------
 if (-not $IsccPath) {
@@ -75,7 +92,7 @@ Write-Host "[stack] staging: $staging"
 
 # --- Step 1: build the chat extension .vsix ---------------------------------
 if (-not $SkipExtensionBuild) {
-    Write-Host "`n[stack] STEP 1/3 — building Founder OS chat extension .vsix" -ForegroundColor Cyan
+    Write-Host "`n[stack] STEP 1/4 - building Founder OS chat extension .vsix" -ForegroundColor Cyan
     $extDir = Join-Path $MonorepoRoot "packages\founder-ide-extension"
     if (-not (Test-Path (Join-Path $extDir "package.json"))) {
         throw "Extension not found at $extDir"
@@ -97,15 +114,31 @@ if (-not $SkipExtensionBuild) {
         Write-Host "[stack]   -> $vsixDest"
     } finally { Pop-Location }
 } else {
-    Write-Host "`n[stack] STEP 1/3 — SKIPPED (SkipExtensionBuild)" -ForegroundColor DarkGray
+    Write-Host "`n[stack] STEP 1/4 - SKIPPED (SkipExtensionBuild)" -ForegroundColor DarkGray
     $vsixDest = Join-Path $staging "founder-ide-extension.vsix"
     if (-not (Test-Path $vsixDest)) { throw "SkipExtensionBuild set but $vsixDest not staged." }
 }
 
-# --- Step 2: build Founder IDE -----------------------------------------------
+$founderHubPatchSource = Join-Path $MonorepoRoot "packages\founder-ide-extension\out\founder-hub.js"
+$founderHubPatch = Join-Path $staging "founder-hub.js"
+if (-not (Test-Path $founderHubPatchSource)) {
+    throw "Compiled Founder hub not found: $founderHubPatchSource"
+}
+Copy-Item $founderHubPatchSource $founderHubPatch -Force
+if ((Get-Item $founderHubPatch).Length -lt 10000) {
+    throw "Compiled Founder hub is unexpectedly small: $founderHubPatch"
+}
+Write-Host "[stack]   staged Founder hub correction -> $founderHubPatch"
+
+# --- Step 2: build Founder IDE application payload ---------------------------
 $ideSetup = Join-Path $staging "Founder-IDE-Setup-x64.exe"
+# VS Code's gulp package tasks always emit beside the source directory. That
+# is `$VscodiumCheckout\VSCode-win32-x64` for the historical nested layout and
+# the checkout parent for a direct `...\void-builder\vscode` source tree.
+$ideRoot = Join-Path (Split-Path -Parent $vscodeSource) "VSCode-win32-x64"
+Write-Host "[stack] IDE payload: $ideRoot"
 if (-not $SkipIdeBuild) {
-    Write-Host "`n[stack] STEP 2/3 — building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
+    Write-Host "`n[stack] STEP 2/4 - building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
     $buildPs1 = Join-Path $VscodiumCheckout "build\build-founder-ide.ps1"
     if (-not (Test-Path $buildPs1)) {
         throw "build-founder-ide.ps1 not found at $buildPs1 (is VscodiumCheckout correct?)"
@@ -113,19 +146,321 @@ if (-not $SkipIdeBuild) {
     & $buildPs1 -ExtensionVsix $vsixDest
     if ($LASTEXITCODE -ne 0) { throw "build-founder-ide.ps1 failed (exit $LASTEXITCODE)" }
 
-    # Find the produced installer and copy it to staging with a stable name.
-    $candidate = Get-ChildItem -Path (Join-Path $VscodiumCheckout "VSCode") -Recurse -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $candidate) { throw "Founder IDE setup .exe not found in VSCode\... after build." }
-    Copy-Item $candidate.FullName $ideSetup -Force
-    Write-Host "[stack]   -> $ideSetup"
 } else {
-    Write-Host "`n[stack] STEP 2/3 — SKIPPED (SkipIdeBuild)" -ForegroundColor DarkGray
-    if (-not (Test-Path $ideSetup)) { throw "SkipIdeBuild set but $ideSetup not staged." }
+    Write-Host "`n[stack] STEP 2/4 - SKIPPED (SkipIdeBuild)" -ForegroundColor DarkGray
+}
+if (-not (Test-Path (Join-Path $ideRoot "Founder IDE.exe"))) {
+    throw "Founder IDE application payload not found at $ideRoot"
+}
+$ideAppRoot = Join-Path $ideRoot "resources\app"
+
+# A warm VS Code checkout can retain out-vscode from an earlier React build
+# because the upstream gulp dependency graph does not track the nested tsup
+# bundle. Refuse to ship a payload whose Founder composer is stale.
+$workbenchBundle = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.desktop.main.js"
+if (-not (Test-Path $workbenchBundle)) {
+    throw "Founder IDE workbench bundle not found at $workbenchBundle"
+}
+$electronMainBundle = Join-Path $ideRoot "resources\app\out\main.js"
+if (-not (Test-Path $electronMainBundle)) {
+    throw "Founder IDE Electron main bundle not found at $electronMainBundle"
+}
+$workbenchText = [System.IO.File]::ReadAllText($workbenchBundle)
+$founderPayloadText = $workbenchText + [System.IO.File]::ReadAllText($electronMainBundle)
+$expectedFounderComposer = @(
+    "Founder Second brain",
+    "Run an independent read-only review",
+    "founderOs.transcribeVoice",
+    "founder.personalAi.transcribe",
+    "Founder work mode: Ask",
+    "Founder work mode: Plan",
+    "Founder work mode: Build",
+    "Founder work mode: Debug",
+    "Founder work mode: Team"
+)
+$staleFounderComposer = @(
+    "label:`"Verify`"",
+    "label:`"Challenge`"",
+    "Founder actions",
+    "Connect and enable a GLM Personal AI profile before using voice input."
+)
+if ($expectedFounderComposer.Where({ -not $founderPayloadText.Contains($_) }).Count -gt 0 -or
+    $staleFounderComposer.Where({ $workbenchText.Contains($_) }).Count -gt 0) {
+    throw "Founder IDE payload is stale or incomplete. Rebuild the React and Electron bundles before packaging."
+}
+Write-Host "[stack]   Founder work modes, Second brain, and voice composer payload verified"
+
+# Search and the context index use VS Code's pinned ripgrep executable. A
+# cached dependency install can retain the package while omitting its
+# postinstall download, which only becomes visible as an ENOENT after launch.
+$ripgrepRelativePath = "node_modules\@vscode\ripgrep\bin\rg.exe"
+$ripgrepDest = Join-Path $ideAppRoot $ripgrepRelativePath
+$ripgrepSha256 = "5075519D24E22733AACDDDD218C7023FC94C49150397E1EDA5C4F6B866C3174E"
+if (-not (Test-Path $ripgrepDest)) {
+    $ripgrepSource = Join-Path $vscodeSource $ripgrepRelativePath
+    if (-not (Test-Path $ripgrepSource)) {
+        throw "Founder IDE ripgrep runtime is missing from both payload and source: $ripgrepRelativePath"
+    }
+    New-Item -ItemType Directory -Path (Split-Path $ripgrepDest -Parent) -Force | Out-Null
+    Copy-Item $ripgrepSource $ripgrepDest -Force
+    Write-Host "[stack]   restored ripgrep runtime -> $ripgrepDest"
+}
+if ((Get-Item $ripgrepDest).Length -lt 1000000) {
+    throw "Founder IDE ripgrep runtime is unexpectedly small: $ripgrepDest"
+}
+$actualRipgrepSha256 = (Get-FileHash -LiteralPath $ripgrepDest -Algorithm SHA256).Hash
+if ($actualRipgrepSha256 -ne $ripgrepSha256) {
+    throw "Founder IDE ripgrep runtime checksum mismatch: expected $ripgrepSha256, got $actualRipgrepSha256"
+}
+Write-Host "[stack]   ripgrep runtime checksum verified"
+
+# Verify the bindings used during a supported Windows 10/11 startup before
+# spending time building the inner and outer installers. Parcel intentionally
+# ships its watcher through a platform package, and node-pty uses ConPTY on
+# every Windows build supported by this release.
+$requiredNativeBindings = @(
+    "resources\app\node_modules\@parcel\watcher-win32-x64\watcher.node",
+    "resources\app\node_modules\@vscode\deviceid\build\Release\*.node",
+    "resources\app\node_modules\@vscode\spdlog\build\Release\*.node",
+    "resources\app\node_modules\@vscode\sqlite3\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-ca-certs\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-mutex\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-process-tree\build\Release\*.node",
+    "resources\app\node_modules\@vscode\windows-registry\build\Release\*.node",
+    "resources\app\node_modules\@*\policy-watcher\build\Release\*.node",
+    "resources\app\node_modules\kerberos\build\Release\*.node",
+    "resources\app\node_modules\native-is-elevated\build\Release\*.node",
+    "resources\app\node_modules\native-keymap\build\Release\*.node",
+    "resources\app\node_modules\native-watchdog\build\Release\*.node",
+    "resources\app\node_modules\node-pty\build\Release\conpty.node",
+    "resources\app\node_modules\node-pty\build\Release\conpty_console_list.node",
+    "resources\app\node_modules\windows-foreground-love\build\Release\*.node"
+)
+
+# A warm payload can contain a policy-watcher binary from an older Electron
+# target even though the filename and size still look valid. Always refresh
+# this binding from the pinned source checkout before exercising it below.
+$policyWatcherRelativePath = "node_modules\@vscode\policy-watcher\build\Release\vscode-policy-watcher.node"
+$policyWatcherSource = Join-Path $vscodeSource $policyWatcherRelativePath
+$policyWatcherDest = Join-Path $ideAppRoot $policyWatcherRelativePath
+if (-not (Test-Path $policyWatcherSource)) {
+    throw "Founder IDE policy watcher is missing from the pinned source: $policyWatcherRelativePath"
+}
+New-Item -ItemType Directory -Path (Split-Path $policyWatcherDest -Parent) -Force | Out-Null
+if (-not (Test-Path $policyWatcherDest) -or
+    (Get-FileHash -LiteralPath $policyWatcherDest -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $policyWatcherSource -Algorithm SHA256).Hash) {
+    Copy-Item $policyWatcherSource $policyWatcherDest -Force
+    Write-Host "[stack]   refreshed Electron-targeted policy watcher"
 }
 
-# --- Step 3: compose the Founder Stack installer via Inno Setup ---------------
-Write-Host "`n[stack] STEP 3/3 — composing Founder Stack installer via Inno Setup" -ForegroundColor Cyan
+foreach ($bindingPattern in $requiredNativeBindings) {
+    $binding = Get-ChildItem -Path (Join-Path $ideRoot $bindingPattern) -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+    if (-not $binding) {
+        throw "Founder IDE native binding is missing: $bindingPattern"
+    }
+}
+Write-Host "[stack]   all supported Windows startup bindings verified"
+
+# Presence is not enough for native addons: a stale ABI can load but receive a
+# corrupted N-API argument list. Execute the real three-argument watcher
+# contract with the packaged Electron runtime and fail before installer work.
+$ideExecutable = Join-Path $ideRoot "Founder IDE.exe"
+$policyPackageForNode = (Join-Path $ideAppRoot "node_modules\@vscode\policy-watcher").Replace("\", "/")
+$policyProbe = "const p=require('$policyPackageForNode'); const w=p.createWatcher('FounderIDE',{},()=>{}); if(!w||typeof w.dispose!=='function') process.exit(3); w.dispose(); process.exit(0);"
+$previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
+try {
+    $env:ELECTRON_RUN_AS_NODE = "1"
+    # Piping to Out-String makes Windows PowerShell wait for this GUI-subsystem
+    # executable and populate LASTEXITCODE before the packaging script moves on.
+    $policyProbeOutput = (& $ideExecutable -e $policyProbe 2>&1 | Out-String)
+    $policyProbeExit = $LASTEXITCODE
+} finally {
+    $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
+}
+if ($policyProbeExit -ne 0) {
+    throw "Founder IDE policy watcher runtime contract failed (exit $policyProbeExit): $policyProbeOutput"
+}
+Write-Host "[stack]   policy watcher runtime contract verified"
+
+# node-pty's postinstall step copies its matching ConPTY runtime beside the
+# native bindings. Warm VS Code payloads can retain the .node files while
+# omitting this directory, which only becomes visible after install as a
+# terminal launch failure. Restore the runtime from the pinned node-pty source
+# used by this checkout and verify both files before packaging.
+$nodePtyRelease = Join-Path $ideAppRoot "node_modules\node-pty\build\Release"
+$conptyRuntime = Join-Path $nodePtyRelease "conpty"
+$conptyDll = Join-Path $conptyRuntime "conpty.dll"
+$openConsole = Join-Path $conptyRuntime "OpenConsole.exe"
+if (-not (Test-Path $conptyDll) -or -not (Test-Path $openConsole)) {
+    $conptyVersions = Join-Path $vscodeSource "node_modules\node-pty\third_party\conpty"
+    $conptyVersion = Get-ChildItem -Path $conptyVersions -Directory -ErrorAction SilentlyContinue |
+                     Sort-Object Name -Descending |
+                     Select-Object -First 1
+    if (-not $conptyVersion) {
+        throw "Founder IDE ConPTY runtime source is missing below $conptyVersions"
+    }
+    $conptySource = Join-Path $conptyVersion.FullName "win10-x64"
+    foreach ($runtimeFile in @("conpty.dll", "OpenConsole.exe")) {
+        $sourceFile = Join-Path $conptySource $runtimeFile
+        if (-not (Test-Path $sourceFile)) {
+            throw "Founder IDE ConPTY runtime source is missing: $sourceFile"
+        }
+    }
+    New-Item -ItemType Directory -Path $conptyRuntime -Force | Out-Null
+    Copy-Item (Join-Path $conptySource "conpty.dll") $conptyDll -Force
+    Copy-Item (Join-Path $conptySource "OpenConsole.exe") $openConsole -Force
+    Write-Host "[stack]   restored node-pty ConPTY runtime -> $conptyRuntime"
+}
+if ((Get-Item $conptyDll).Length -lt 50000 -or (Get-Item $openConsole).Length -lt 500000) {
+    throw "Founder IDE ConPTY runtime is unexpectedly small below $conptyRuntime"
+}
+
+# Embed the Founder extension into the application payload even when the
+# expensive IDE compilation is skipped. A staged VSIX alone is not installed
+# on a clean machine by the inner setup executable.
+$builtinExtension = Join-Path $ideRoot "resources\app\extensions\founder-ide-extension"
+$extensionUnpack = Join-Path $staging "founder-ide-extension-unpacked"
+if (Test-Path $extensionUnpack) { Remove-Item $extensionUnpack -Recurse -Force }
+New-Item -ItemType Directory -Path $extensionUnpack -Force | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory($vsixDest, $extensionUnpack)
+$unpackedExtension = Join-Path $extensionUnpack "extension"
+if (-not (Test-Path (Join-Path $unpackedExtension "package.json"))) {
+    throw "Staged Founder extension VSIX is malformed: $vsixDest"
+}
+if (Test-Path $builtinExtension) { Remove-Item $builtinExtension -Recurse -Force }
+Copy-Item $unpackedExtension $builtinExtension -Recurse -Force
+Remove-Item $extensionUnpack -Recurse -Force
+Write-Host "[stack]   embedded Founder extension -> $builtinExtension"
+
+# Patch the compiled shell after the downstream build and before installer
+# packaging. Both scripts fail closed if an upstream minified signature moves.
+
+# VS Code requires its Electron-targeted SQLite binding during main-process
+# startup. Cached payload builds can otherwise look healthy while omitting the
+# native file and then emit an uncaught exception on every launch.
+$sqliteRelativePath = "node_modules\@vscode\sqlite3\build\Release\vscode-sqlite3.node"
+$sqliteNativeDest = Join-Path $ideAppRoot $sqliteRelativePath
+if (-not (Test-Path $sqliteNativeDest)) {
+    $sqliteNativeSource = Join-Path $vscodeSource $sqliteRelativePath
+    if (-not (Test-Path $sqliteNativeSource)) {
+        throw "Founder IDE SQLite native binding is missing from both payload and source: $sqliteRelativePath"
+    }
+    New-Item -ItemType Directory -Path (Split-Path $sqliteNativeDest -Parent) -Force | Out-Null
+    Copy-Item $sqliteNativeSource $sqliteNativeDest -Force
+    Write-Host "[stack]   restored SQLite native binding -> $sqliteNativeDest"
+}
+if ((Get-Item $sqliteNativeDest).Length -lt 100000) {
+    throw "Founder IDE SQLite native binding is unexpectedly small: $sqliteNativeDest"
+}
+
+foreach ($patchName in @(
+    "patch-founder-settings-entry.py",
+    "patch-founder-native-ai.py",
+    "patch-founder-voice-endpoint.py"
+)) {
+    $patchScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\$patchName"
+    if (-not (Test-Path $patchScript)) { throw "Founder IDE shell patch not found: $patchScript" }
+    Write-Host "[stack]   applying $patchName"
+    python $patchScript --app $ideAppRoot
+    if ($LASTEXITCODE -ne 0) { throw "$patchName failed (exit $LASTEXITCODE)" }
+}
+
+$workbenchPatch = Join-Path $staging "founder-workbench.desktop.main.js"
+Copy-Item $workbenchBundle $workbenchPatch -Force
+if (-not (Test-Path $workbenchPatch) -or (Get-Item $workbenchPatch).Length -lt 1000000) {
+    throw "Founder IDE workbench correction was not staged: $workbenchPatch"
+}
+Write-Host "[stack]   staged Founder workbench correction -> $workbenchPatch"
+
+$productJson = Join-Path $ideAppRoot "product.json"
+$productJsonPatch = Join-Path $staging "founder-product.json"
+$integrityScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\sync-founder-integrity.py"
+if (-not (Test-Path $integrityScript)) {
+    throw "Founder IDE integrity synchronizer not found: $integrityScript"
+}
+python $integrityScript `
+    --workbench $workbenchBundle `
+    --product $productJson `
+    --output $productJson
+if ($LASTEXITCODE -ne 0) {
+    throw "Founder IDE integrity synchronization failed (exit $LASTEXITCODE)"
+}
+Copy-Item $productJson $productJsonPatch -Force
+if (-not (Test-Path $productJsonPatch) -or (Get-Item $productJsonPatch).Length -lt 1000) {
+    throw "Founder IDE product manifest correction was not staged: $productJsonPatch"
+}
+Write-Host "[stack]   staged Founder integrity manifest -> $productJsonPatch"
+
+# --- Step 3: build and embed the Founder relay -------------------------------
+$nodeDir = Join-Path $MonorepoRoot "apps\founder-node"
+$relayRoot = Join-Path $nodeDir "release\win-unpacked"
+if (-not $SkipFounderNodeBuild) {
+    Write-Host "`n[stack] STEP 3/4 - building and embedding Founder relay" -ForegroundColor Cyan
+    if (-not (Test-Path (Join-Path $nodeDir "package.json"))) {
+        throw "Founder Node not found at $nodeDir"
+    }
+    Push-Location $nodeDir
+    try {
+        if (-not (Test-Path "node_modules")) {
+            Write-Host "[stack]   npm ci (founder-node)"
+            npm ci --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "npm ci (founder-node) failed" }
+        }
+        Write-Host "[stack]   npm run build"
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "Founder Node build failed" }
+        # Disable electron-builder's auto-discovery so it doesn't try to sign
+        # with a cert that isn't present in CI. Signing is done by a later
+        # dedicated step (Azure Trusted Signing) on the outer bundle.
+        $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+        # electron-builder --dir can retain files from a previous unpacked
+        # payload. Start clean so renamed or retired assets cannot survive in
+        # the one-app installer after their source references are removed.
+        if (Test-Path $relayRoot) {
+            Write-Host "[stack]   removing stale Founder relay payload"
+            Remove-Item $relayRoot -Recurse -Force
+        }
+        Write-Host "[stack]   electron-builder --win --dir"
+        npx electron-builder --win --x64 --dir --publish never
+        if ($LASTEXITCODE -ne 0) { throw "electron-builder --win failed (exit $LASTEXITCODE)" }
+    } finally { Pop-Location }
+} else {
+    Write-Host "`n[stack] STEP 3/4 - SKIPPED (SkipFounderNodeBuild)" -ForegroundColor DarkGray
+}
+
+if (-not (Test-Path (Join-Path $relayRoot "Founder Node.exe"))) {
+    throw "Founder relay payload not found at $relayRoot"
+}
+$embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-founder-relay.ps1"
+& $embedScript -IdeRoot $ideRoot -RelayRoot $relayRoot
+
+# The relay must be embedded before gulp packages the inner installer.
+Push-Location $vscodeSource
+try {
+    # Inno prints one line per compressed file (thousands of lines for the
+    # Electron payload). Capture that noise so CI and agent shells do not
+    # terminate an otherwise healthy compiler when their output buffer fills.
+    $packagingLog = Join-Path $staging "founder-ide-inner-installer.log"
+    & cmd.exe /d /c "npx.cmd gulp vscode-win32-x64-user-setup > `"$packagingLog`" 2>&1"
+    $packagingExit = $LASTEXITCODE
+    Get-Content $packagingLog -Tail 30
+    if ($packagingExit -ne 0) {
+        throw "Founder IDE installer packaging failed (exit $packagingExit; log: $packagingLog)"
+    }
+} finally { Pop-Location }
+
+$innerDir = Join-Path $vscodeSource ".build\win32-x64\user-setup"
+$candidate = Get-ChildItem -Path $innerDir -Filter "FounderIDESetup.exe" -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $candidate) { throw "Founder IDE setup .exe not found in $innerDir after packaging." }
+Copy-Item $candidate.FullName $ideSetup -Force
+Write-Host "[stack]   one-app installer payload -> $ideSetup"
+
+# --- Step 4: compose the mode-aware Founder IDE bootstrapper ------------------
+Write-Host "`n[stack] STEP 4/4 - composing Founder IDE installer via Inno Setup" -ForegroundColor Cyan
 $iss = Join-Path $VscodiumCheckout "installer\founder-stack.iss"
 if (-not (Test-Path $iss)) {
     # Fall back to the monorepo copy if the checkout doesn't have it.
@@ -134,25 +469,45 @@ if (-not (Test-Path $iss)) {
 if (-not (Test-Path $iss)) { throw "founder-stack.iss not found." }
 
 # Run iscc with our staging paths + version. iscc resolves #define paths
-# relative to the .iss file, so pass absolute paths.
-$ideSetupAbs = (Resolve-Path $ideSetup).Path
+# relative to the .iss file, so pass absolute paths. Use FORWARD SLASHES in
+# the ISCC defines: ISCC's #define substitution treats `\` as an escape inside
+# string literals (e.g. `\D:` is read as a "filename prefix"), so Windows-style
+# backslash paths produce "Unknown filename prefix" compile errors.
+$ideSetupAbs = ((Resolve-Path $ideSetup).Path) -replace '\\','/'
+$workbenchPatchAbs = ((Resolve-Path $workbenchPatch).Path) -replace '\\','/'
+$productJsonPatchAbs = ((Resolve-Path $productJsonPatch).Path) -replace '\\','/'
+$founderHubPatchAbs = ((Resolve-Path $founderHubPatch).Path) -replace '\\','/'
 
 & $IsccPath `
     "/DFOUNDER_STACK_VERSION=$Version" `
     "/DFOUNDER_IDE_SETUP=`"$ideSetupAbs`"" `
+    "/DFOUNDER_WORKBENCH_PATCH=`"$workbenchPatchAbs`"" `
+    "/DFOUNDER_PRODUCT_PATCH=`"$productJsonPatchAbs`"" `
+    "/DFOUNDER_HUB_PATCH=`"$founderHubPatchAbs`"" `
     $iss
 if ($LASTEXITCODE -ne 0) { throw "iscc failed (exit $LASTEXITCODE)" }
 
-# Locate the produced bundle.
-$bundleDir = Join-Path $VscodiumCheckout "dist"
-if (-not (Test-Path $bundleDir)) { $bundleDir = (Split-Path -Parent $iss) }
-$bundle = Get-ChildItem -Path $bundleDir -Filter "Founder-Stack-Setup-*.exe" -ErrorAction SilentlyContinue |
-          Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $bundle) { throw "Founder Stack installer not found in $bundleDir after iscc." }
+# Locate the produced bundle. OutputDir in founder-stack.iss is relative to
+# the script location, while downstream builds may carry their own dist dir.
+$bundleDirs = @(
+    (Join-Path $VscodiumCheckout "dist"),
+    (Join-Path (Split-Path -Parent $iss) "dist"),
+    (Split-Path -Parent $iss)
+) | Select-Object -Unique
+$bundle = $bundleDirs |
+          Where-Object { Test-Path $_ } |
+          ForEach-Object {
+              Get-ChildItem -Path $_ -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue
+          } |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+if (-not $bundle) {
+    throw "Founder IDE installer not found after iscc. Searched: $($bundleDirs -join ', ')"
+}
 
-Write-Host "`n[stack] DONE — Founder Stack installer:" -ForegroundColor Green
+Write-Host "`n[stack] DONE - one Founder IDE installer:" -ForegroundColor Green
 Write-Host "        $($bundle.FullName)" -ForegroundColor Green
 Write-Host "        size: $([math]::Round($bundle.Length / 1MB, 1)) MB"
 Write-Host ""
 Write-Host "[stack] Next: smoke-test on a clean Windows VM, then publish:" -ForegroundColor Cyan
-Write-Host "        gh release create v$Version `"$($bundle.FullName)`" --repo danishhaiderau-maker/doxed-founders-website --title `"Founder Stack $Version`""
+Write-Host "        gh release create founder-stack-v$Version `"$($bundle.FullName)`" --repo danishhaiderau-maker/doxed-founders-website --title `"Founder IDE $Version`""

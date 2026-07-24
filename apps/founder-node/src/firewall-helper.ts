@@ -130,7 +130,12 @@ export async function promptFirewallBlocked(options: {
   consecutiveFailures?: number;
   lastError?: string | null;
   onRetrySync?: () => void;
+  embeddedMode?: boolean;
 }): Promise<void> {
+  // Founder IDE owns connection health in the bundled one-app experience.
+  // The standalone firewall dialog is disruptive there and can also mislabel
+  // a temporary API outage as a local Windows Firewall problem.
+  if (options.embeddedMode) return;
   const failures = options.consecutiveFailures ?? 2;
   if (!shouldOfferFirewallHelp(failures, options.lastError) || !canShowFirewallPrompt()) return;
 

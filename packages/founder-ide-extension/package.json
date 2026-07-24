@@ -1,8 +1,8 @@
 {
   "name": "founder-ide-extension",
-  "displayName": "Founder OS Chat",
-  "description": "Registers the Founder OS AI Gateway as a first-class VS Code chat model provider. Streams tokens from your own routing layer into the built-in Chat view. Works in Cursor, VSCodium, stock VS Code, and Windsurf.",
-  "version": "0.1.0",
+  "displayName": "Founder",
+  "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
+  "version": "0.5.0",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -11,15 +11,75 @@
     "directory": "packages/founder-ide-extension"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.99.0"
   },
   "categories": ["Chat", "AI", "Machine Learning", "Other"],
   "keywords": ["ai", "chat", "founder-os", "openai-compatible", "llm"],
   "main": "./out/extension.js",
+  "exports": {
+    "./ipc": {
+      "types": "./src/ipc/protocol.ts",
+      "default": "./out/ipc/protocol.js"
+    }
+  },
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "contributes": {
+    "authentication": [
+      {
+        "id": "founderOs",
+        "label": "Founder"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "founderOs",
+          "title": "Founder",
+          "icon": "resources/founder.svg"
+        }
+      ]
+    },
+    "views": {
+      "founderOs": [
+        {
+          "id": "founderOs.hub",
+          "name": "Founder",
+          "type": "webview"
+        },
+        {
+          "id": "founderOs.agents",
+          "name": "Agents",
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
+        },
+        {
+          "id": "founderOs.ship",
+          "name": "Ship",
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
+        },
+        {
+          "id": "founderOs.node",
+          "name": "Founder Node",
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
+        },
+        {
+          "id": "founderOs.connections",
+          "name": "Connections",
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
+        },
+        {
+          "id": "founderOs.remote",
+          "name": "Remote Sessions",
+          "visibility": "collapsed",
+          "when": "config.founderOs.advancedIdeTools"
+        }
+      ]
+    },
     "chatParticipants": [
       {
         "id": "founder-os.chat",
@@ -35,7 +95,7 @@
     ],
     "languageModelTools": [
       {
-        "name": "founder.editFile",
+        "name": "founder-edit-file",
         "displayName": "Edit File",
         "modelDescription": "Edit a file in the workspace by replacing oldText with newText. Use absolute paths. Set createIfMissing=true to create the file if it does not exist. The change is applied via vscode.workspace.applyEdit and is reviewable in the editor.",
         "userDescription": "Edit or create a workspace file (Founder OS)",
@@ -68,7 +128,7 @@
         }
       },
       {
-        "name": "founder.runCommand",
+        "name": "founder-run-command",
         "displayName": "Run Command",
         "modelDescription": "Run a shell command in a VS Code terminal and return its combined stdout+stderr output. The command runs in the workspace root by default. Use for build, test, lint, and inspection commands. Confirm with the user before destructive commands.",
         "userDescription": "Run a terminal command and capture output (Founder OS)",
@@ -97,7 +157,7 @@
         }
       },
       {
-        "name": "founder.readWorkspace",
+        "name": "founder-read-workspace",
         "displayName": "Read Workspace",
         "modelDescription": "Walk the current workspace file tree and return a compact summary (respecting common ignore patterns like node_modules and .git). Optionally include the full contents of a small set of files via readFiles. Use this to ground yourself in the repo structure before editing.",
         "userDescription": "Read the workspace file tree (Founder OS)",
@@ -132,12 +192,20 @@
         "title": "Founder OS: Manage connection"
       },
       {
+        "command": "founderOs.signIn",
+        "title": "Founder: Sign in with X"
+      },
+      {
+        "command": "founderOs.signOut",
+        "title": "Founder: Sign out"
+      },
+      {
         "command": "founderOs.pair",
-        "title": "Founder OS: Pair with Founder Node"
+        "title": "Founder OS: Connect this Founder IDE"
       },
       {
         "command": "founderOs.connectFounderOs",
-        "title": "Founder OS: Connect Founder OS (Twitter)"
+        "title": "Founder OS: Reconnect Founder OS"
       },
       {
         "command": "founderOs.selectModel",
@@ -158,11 +226,181 @@
       {
         "command": "founderOs.openVaultConfig",
         "title": "Founder OS: Open node-config.json"
+      },
+      {
+        "command": "founderOs.showGatewayMetadata",
+        "title": "Founder OS: Show gateway metadata output channel"
+      },
+      {
+        "command": "founderOs.recentGatewayMetadata",
+        "title": "Founder OS: Recent gateway requests"
+      },
+      {
+        "command": "founderOs.openHub",
+        "title": "Founder: Open control center"
+      },
+      {
+        "command": "founderOs.openAgents",
+        "title": "Founder: Open Agents"
+      },
+      {
+        "command": "founderOs.openCompanion",
+        "title": "Founder: Open Dragon"
+      },
+      {
+        "command": "founderOs.openShip",
+        "title": "Founder: Open Ship"
+      },
+      {
+        "command": "founderOs.openNodeView",
+        "title": "Founder: Open Founder Node"
+      },
+      {
+        "command": "founderOs.openConnectionsView",
+        "title": "Founder: Open Connections"
+      },
+      {
+        "command": "founderOs.openRemoteView",
+        "title": "Founder: Open Remote Sessions"
+      },
+      {
+        "command": "founderOs.openRemoteControl",
+        "title": "Founder: Open web remote control"
+      },
+      {
+        "command": "founderOs.openChat",
+        "title": "Founder: Open chat"
+      },
+      {
+        "command": "founderOs.transcribeVoice",
+        "title": "Founder: Transcribe voice"
+      },
+      {
+        "command": "founderOs.describeVisualAttachments",
+        "title": "Founder: Read attached screenshots"
+      },
+      {
+        "command": "founderOs.openConnections",
+        "title": "Founder: Manage connections"
+      },
+      {
+        "command": "founderOs.openSettings",
+        "title": "Founder: Open settings"
+      },
+      {
+        "command": "founderOs.refreshHub",
+        "title": "Refresh Founder",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "founderOs.refreshShortcuts",
+        "title": "Refresh Founder shortcuts",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "founderOs.refreshProjectContext",
+        "title": "Founder: Refresh local project map"
+      },
+      {
+        "command": "founderOs.openProjectBrief",
+        "title": "Founder: Open project brief"
+      },
+      {
+        "command": "founderOs.runDailyQualityReview",
+        "title": "Founder: Run daily quality review"
+      },
+      {
+        "command": "founderOs.configureDailyQualityReview",
+        "title": "Founder: Configure daily quality review"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "founderOs.refreshHub",
+          "when": "view == founderOs.hub",
+          "group": "navigation"
+        },
+        {
+          "command": "founderOs.refreshShortcuts",
+          "when": "view == founderOs.agents || view == founderOs.ship || view == founderOs.node || view == founderOs.connections || view == founderOs.remote",
+          "group": "navigation"
+        }
+      ],
+      "menubar/preferences": [
+        {
+          "command": "founderOs.openSettings",
+          "group": "1_founder@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "Founder OS",
       "properties": {
+        "founderOs.workspaceMode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hybrid",
+            "cloud"
+          ],
+          "enumItemLabels": [
+            "Local",
+            "Hybrid",
+            "Founder Cloud"
+          ],
+          "default": "hybrid",
+          "description": "Where this workspace runs and which connected services it may use."
+        },
+        "founderOs.agentMode": {
+          "type": "string",
+          "enum": [
+            "focus",
+            "team"
+          ],
+          "enumItemLabels": [
+            "Focus",
+            "Team"
+          ],
+          "default": "focus",
+          "description": "Focus uses one editing owner. Team adds bounded read-only advisers while one agent retains edit ownership."
+        },
+        "founderOs.companion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the draggable Founder Dragon on the desktop and its status controls in Founder IDE."
+        },
+        "founderOs.companion.reducedMotion": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep the Founder Dragon visible without continuous motion."
+        },
+        "founderOs.advancedIdeTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the legacy IDE icon rail and detailed Founder shortcut sections."
+        },
+        "founderOs.dailySelfQa.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run an ownership-aware quality review at most once every 24 hours. The review never edits or rolls back workspace files."
+        },
+        "founderOs.dailySelfQa.taskLabels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional exact workspace task names to run during daily review. When empty, up to four workspace Build or Test group tasks are used."
+        },
+        "founderOs.dailySelfQa.probeUrls": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional HTTPS health endpoints to probe during daily review. HTTP is accepted only for localhost."
+        },
         "founderOs.apiBaseUrl": {
           "type": "string",
           "default": "",
@@ -171,12 +409,7 @@
         "founderOs.nodeId": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Optional override for the Founder Node ID. If empty, the extension reads `nodeId` from `~/FounderVault/node-config.json`."
-        },
-        "founderOs.nodeToken": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Optional override for the Founder Node token. If empty, the extension reads `nodeToken` from `~/FounderVault/node-config.json`."
+          "markdownDescription": "Optional override for the local relay ID. If empty, Founder IDE reads `nodeId` from `~/FounderVault/node-config.json`."
         },
         "founderOs.requestTimeoutMs": {
           "type": "number",
@@ -192,11 +425,12 @@
     "watch": "tsc -watch -p ./",
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/managed-visual-request.spec.ts src/managed-voice-request.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/project-activity.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "@types/vscode": "^1.104.0",
+    "@types/vscode": "1.99.1",
     "@vscode/vsce": "^3.2.0",
     "typescript": "^5.8.3"
   }

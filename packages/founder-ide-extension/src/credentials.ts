@@ -1,9 +1,9 @@
 /**
  * Credential discovery for the Founder OS chat provider.
  *
- * Resolution order (first non-empty wins per field):
- *   1. `founderOs.apiBaseUrl` / `founderOs.nodeId` / `founderOs.nodeToken` settings
- *   2. `~/FounderVault/node-config.json`  (written by Founder Node on pair)
+ * The vault is authoritative for identity and credentials. Non-secret settings
+ * may override the API URL; legacy node settings are accepted only when no
+ * vault exists so older development installs can still migrate.
  *
  * The bearer token format is `fos_{nodeId}:{nodeToken}` (OpenAI-compat) or
  * `FounderNode {nodeId}:{nodeToken}` (preferred for gateway calls). See
@@ -29,6 +29,11 @@ export interface NodeConfigFile {
   nodeToken: string;
   label?: string;
   pairedAt?: string;
+  founderId?: string;
+  installId?: string;
+  ipcSecret?: string;
+  tokenExpiresAt?: string;
+  tokenRotatedAt?: string;
 }
 
 /** Path to the Founder Node vault config — `~/FounderVault/node-config.json`. */
@@ -60,7 +65,7 @@ function nonEmpty(s: string | undefined): s is string {
 }
 
 /**
- * Resolve credentials from settings first, then the vault file.
+ * Resolve credentials from the vault, with a legacy settings fallback.
  * Returns `null` if we don't have enough to authenticate a request.
  */
 export function resolveCredentials(): FounderOsCredentials | null {
@@ -73,13 +78,16 @@ export function resolveCredentials(): FounderOsCredentials | null {
 
   const rawUrl = nonEmpty(settingsUrl) ? settingsUrl! : vault?.apiBaseUrl ?? '';
   const apiBaseUrl = rawUrl ? normalizeApiBaseUrl(rawUrl) : '';
-  const nodeId = nonEmpty(settingsNodeId) ? settingsNodeId! : vault?.nodeId ?? '';
-  const nodeToken = nonEmpty(settingsNodeToken) ? settingsNodeToken! : vault?.nodeToken ?? '';
+  const nodeId = vault?.nodeId
+    ?? (nonEmpty(settingsNodeId) ? settingsNodeId : '');
+  const nodeToken = vault?.nodeToken
+    ?? (nonEmpty(settingsNodeToken) ? settingsNodeToken : '');
 
   if (!apiBaseUrl || !nodeId || !nodeToken) return null;
 
-  const usedSettings = nonEmpty(settingsUrl) || nonEmpty(settingsNodeId) || nonEmpty(settingsNodeToken);
-  const usedVault = vault !== null;
+  const usedSettings = nonEmpty(settingsUrl)
+    || (!vault && (nonEmpty(settingsNodeId) || nonEmpty(settingsNodeToken)));
+  const usedVault = Boolean(vault);
   const source: FounderOsCredentials['source'] = usedSettings && usedVault ? 'mixed' : usedSettings ? 'settings' : 'vault';
 
   return { apiBaseUrl, nodeId, nodeToken, source };
@@ -111,42 +119,46 @@ export function normalizeApiBaseUrl(url: string): string {
 }
 
 /**
- * Copy vault credentials into `founderOs.*` (+ OpenAI-compat) User settings so
- * pairing survives vault moves and OpenAI-compatible providers can reuse the same
- * Node bearer without a pairing-code prompt. Best-effort.
+ * Synchronize non-secret connection metadata and remove credentials written by
+ * older builds. The vault remains the single local source of the node token.
  */
 export async function syncVaultIntoSettings(): Promise<FounderOsCredentials | null> {
   const vault = readVaultConfig();
   if (!vault) return null;
 
   const apiBaseUrl = normalizeApiBaseUrl(vault.apiBaseUrl);
-  const bearer = `fos_${vault.nodeId}:${vault.nodeToken}`;
-  // Nest global prefix is `/api`, controller is `v1` → `/api/v1`.
-  const openaiBase = proxyBaseUrl(apiBaseUrl);
 
   const cfg = vscode.workspace.getConfiguration('founderOs');
   try {
     await cfg.update('apiBaseUrl', apiBaseUrl, vscode.ConfigurationTarget.Global);
     await cfg.update('nodeId', vault.nodeId, vscode.ConfigurationTarget.Global);
-    await cfg.update('nodeToken', vault.nodeToken, vscode.ConfigurationTarget.Global);
+    const legacyToken = cfg.get<string>('nodeToken');
+    if (legacyToken === vault.nodeToken || legacyToken?.startsWith('fn_')) {
+      await cfg.update('nodeToken', undefined, vscode.ConfigurationTarget.Global);
+    }
   } catch {
-    // Settings write can fail in restricted / remote hosts — vault still works.
+    // Settings writes can fail in restricted hosts. The vault remains authoritative.
   }
 
-  // Best-effort OpenAI-compat keys for the Founder OS gateway in Founder IDE.
+  // Older installers copied the Founder bearer into provider settings. The
+  // native Founder route now reads the vault directly, so remove those copies.
   try {
     const root = vscode.workspace.getConfiguration();
-    await root.update('openAICompatible.apiUrl', openaiBase, vscode.ConfigurationTarget.Global);
-    await root.update('openAICompatible.apiKey', bearer, vscode.ConfigurationTarget.Global);
+    for (const key of ['openAICompatible.apiKey', 'openai.apiKey']) {
+      const value = root.get<string>(key);
+      if (value?.startsWith('fos_')) {
+        await root.update(key, undefined, vscode.ConfigurationTarget.Global);
+      }
+    }
   } catch {
-    // optional
+    // Best-effort migration. No new secret is written to settings.
   }
 
   return {
     apiBaseUrl,
     nodeId: vault.nodeId,
     nodeToken: vault.nodeToken,
-    source: 'settings',
+    source: 'vault',
   };
 }
 
@@ -173,5 +185,66 @@ export function vaultFileExists(): boolean {
     return fs.existsSync(nodeConfigPath());
   } catch {
     return false;
+  }
+}
+
+/**
+ * Remove the local Founder session while preserving unrelated local runtime
+ * preferences that may share node-config.json.
+ */
+export async function clearFounderSession(): Promise<void> {
+  const file = nodeConfigPath();
+  try {
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const credentialKeys = [
+        'apiBaseUrl',
+        'nodeId',
+        'nodeToken',
+        'founderId',
+        'installId',
+        'ipcSecret',
+        'pairedAt',
+        'tokenExpiresAt',
+        'tokenRotatedAt',
+      ];
+      for (const key of credentialKeys) delete parsed[key];
+
+      const meaningfulKeys = Object.keys(parsed).filter(
+        (key) => key !== 'version' && key !== 'label',
+      );
+      if (meaningfulKeys.length === 0) {
+        fs.unlinkSync(file);
+      } else {
+        fs.writeFileSync(file, JSON.stringify(parsed, null, 2), 'utf8');
+      }
+    }
+  } catch {
+    // Local sign-out continues even if the optional vault cleanup fails.
+  }
+
+  const cfg = vscode.workspace.getConfiguration('founderOs');
+  for (const key of ['apiBaseUrl', 'nodeId', 'nodeToken']) {
+    try {
+      await cfg.update(key, undefined, vscode.ConfigurationTarget.Global);
+    } catch {
+      // Restricted hosts can reject settings writes. The vault is authoritative.
+    }
+  }
+
+  try {
+    const root = vscode.workspace.getConfiguration();
+    for (const [key, url] of [
+      ['openAICompatible.apiKey', 'openAICompatible.apiUrl'],
+      ['openai.apiKey', 'openai.apiBase'],
+    ] as const) {
+      const currentKey = root.get<string>(key);
+      if (currentKey?.startsWith('fos_')) {
+        await root.update(key, undefined, vscode.ConfigurationTarget.Global);
+        await root.update(url, undefined, vscode.ConfigurationTarget.Global);
+      }
+    }
+  } catch {
+    // Best-effort cleanup for the compatibility provider.
   }
 }

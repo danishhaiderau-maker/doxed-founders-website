@@ -1,5 +1,235 @@
 # Founder IDE — releases
 
+## 0.9.4 (Void-derived foundation) - INTERNAL TEST CANDIDATE
+
+> **Status: locally installed and verified; unsigned and not approved for
+> public distribution.** Founder IDE is one user-facing Windows application.
+> Founder Node is an embedded background relay owned by that application.
+
+### What changed
+
+- **Founder-native workflow.** A labelled Founder home surface provides New
+  chat, Projects, Chats, Agents, Graph, Connect, Settings, and progressively
+  disclosed build-and-ship tools while preserving the editor, terminal,
+  debugger, extensions, and source-control graph.
+- **One coherent settings surface.** Account, plan and weekly usage, managed
+  DeepSeek routes, unlimited named Personal AI profiles, Ollama, connections,
+  infrastructure, privacy, remote control, and advanced editor settings are
+  reachable from Founder Settings. No credential is returned to a webview.
+- **DeepSeek-only managed AI.** Free uses a 200,000 weighted-token weekly
+  allowance. Builder uses a 5,000,000 weighted-token weekly allowance. Local
+  Ollama and personal keys remain outside managed quota. The legacy hidden
+  daily classification gate was removed so one server-authoritative plan
+  ledger governs customer allowance.
+- **Coordinated work.** Active chats publish bounded awareness, scope, file
+  leases, dependencies, blockers, verification, and merge state. Focus and
+  Team modes use bounded workers rather than an arbitrary agent count.
+- **Living Founder Dragon.** The transparent companion is draggable across
+  displays, remembers its position, follows real task and coordination states,
+  shows compact receipts, honors reduced motion, and belongs to the IDE rather
+  than creating a second installed product identity.
+- **Embedded relay and remote actions.** The hidden relay is packaged under
+  `resources/founder-relay`; authenticated IPC covers read, proposed edit,
+  command, cancel, status, approval, and result receipts.
+- **Updater release identity.** The installed application writes
+  `founder-release.json`, so the embedded relay compares update manifests
+  against Founder IDE 0.9.4 instead of its own internal package version.
+- **Website product truth.** Founder account and plan screens use live plan and
+  usage endpoints, Builder checkout and billing-portal actions, current weekly
+  quota language, DeepSeek V4 route names, and one-app pairing instructions.
+
+### Verification completed locally
+
+- 450 scoped automated checks pass across the extension, embedded relay,
+  vault, updater manifest, overlay, installer, IPC, coordination, quota, API,
+  and website layers. The separate trading strategy suite was intentionally
+  excluded from this IDE release boundary.
+- API and website typechecks pass. The production-style website build completed
+  route generation after the final quota-policy and admin-language repair.
+- A clean local uninstall/install preserved `FounderVault` and Founder IDE
+  profile data, removed obsolete Founder Node/Stack/Void shortcuts, and left
+  one Founder IDE application, uninstall entry, desktop shortcut, Start item,
+  and taskbar identity.
+- Installed UI screenshots pass at 1440x900, 1280x720, 1187x739, and 768x900
+  without critical page errors or visible Void branding in the tested routes.
+- The final installed settings pass keeps Account, AI, Local & Cloud,
+  Connections, and Advanced readable in the narrow layout instead of
+  truncating the tab labels.
+- Installed managed chat completed on the final artifact with nonce
+  `V1-CORRECTED-20260723-1848`, a visible final response, route
+  `reasoning / deepseek-v4-pro`, 1,908 ms provider latency, 7.84 s total
+  latency, and no critical native errors. This also confirms the remaining
+  Auto-to-Flash production policy gate listed below.
+- The source and installed Founder Settings bundles have the same SHA-256
+  (`370CC211A2E4F0DBFF0C9C7AC03B48F254B5AC3F2E64ACBEBABBC0E978F94730`),
+  and the installed embedded relay matches the reviewed payload SHA-256
+  (`37B97EDC6B6E081914E33FF2E40CA31CC497060432AF989C11B0F8FCF3101C63`).
+- Draft PR `#42` carries the release branch and its Vercel preview checks pass.
+
+### Expected artifact
+
+- `Founder-IDE-Setup-0.9.4.exe` - one-app Windows installer, 214,115,394 bytes,
+  SHA-256
+  `F3E829D43B144DDD98FB5B5FF29AD9AF36AD9238C4F5273C2983F28CEE372A30`;
+  unsigned internal testing only until the signing and clean-machine gates
+  pass.
+
+The stable public update manifest intentionally remains on the last published
+release. It must not advertise this unsigned internal candidate.
+
+### Open release gates
+
+- Activate and verify the trusted Windows signing identity.
+- Run install, update, rollback, and uninstall on a clean Windows VM.
+- Complete the installed-application soak period.
+- Deploy API PR `#41` only at the coordinated trading full-flat boundary, then
+  prove one complete installed Agent tool loop.
+- Deploy the fail-closed Founder Auto/Free to DeepSeek V4 Flash policy and
+  repeat the installed Auto, Fast, Reasoning, and Code route matrix.
+- Prove production website remote control with a real installed device and
+  finish live GitHub, Vercel, Railway, Neon, email, and Telegram connection
+  flows.
+
+---
+
+## 0.9.3 (Void fork) — ONE-APP TEST CANDIDATE
+
+> **Status: locally verified, pending CI/signing/production deployment.**
+> Founder IDE is now the only user-facing application. The existing Founder
+> Node runtime is embedded under `resources/founder-relay` and runs hidden as
+> the IDE's website and local-infrastructure connector.
+
+### What changed
+
+- **One installed app.** The Windows pipeline packages the unpacked relay into
+  Founder IDE before creating the IDE installer. There is no second Node
+  sub-installer, Apps entry, Start Menu item, tray, or updater.
+- **Automatic background relay.** The IDE extension starts the embedded
+  runtime before its chat UI initializes, strips the extension host's
+  `ELECTRON_RUN_AS_NODE` flag, and records a secret-free startup trace.
+- **Shared Founder ID connection.** X/device-code authorization writes the
+  shared `FounderVault` identity used by chat, website sync, IPC, and the
+  background relay.
+- **Upgrade cleanup.** The bootstrapper uninstalls legacy standalone Founder
+  Node builds, removes obsolete Founder Stack files/shortcuts/startup entries,
+  and preserves `FounderVault` and IDE settings.
+- **One update/uninstall owner.** Founder IDE owns relay updates and removes
+  both the embedded payload and its login entry on uninstall.
+- **Installer truthfulness retained.** Public/Hybrid/Private selection still
+  fails closed when optional Private-mode binaries are not bundled.
+
+### Verification
+
+- Extension: 71 tests passing.
+- Embedded relay: 33 tests passing.
+- API/dispatch/auth: 169 tests passing.
+- Authenticated live named-pipe read returned 25 entries from the open
+  workspace.
+- Local status endpoint and embedded IDE handshake verified.
+- Inno Setup one-app bootstrapper syntax compile verified.
+
+### Expected artifacts
+
+- `Founder-IDE-Setup-0.9.3.exe`
+- `Founder-IDE-Setup-0.9.3.exe.sha256`
+- `founder-ide-0.9.3-sbom.spdx.json`
+
+### External gates
+
+- Azure Trusted Signing credentials/account validation.
+- Green clean-runner Windows installer build and clean-VM install.
+- Production API/Railway rollout for the X/device-code routes.
+- Production website-to-laptop staging smoke and soak test.
+
+---
+
+## 0.9.2 (Void fork) — RC — PENDING CI GREEN + SIGNING
+
+> **Status: Release Candidate.** Re-bundles Founder Node (which 0.9.1
+> incorrectly removed), wires Azure Trusted Signing in CI, adds an SBOM and
+> a sigstore build-provenance attestation, and makes the installer's
+> deployment-mode wizard truthful about what's actually bundled. NOT YET
+> SHIPPED — pending a green `build-founder-ide.yml` run that exercises the
+> `code.iss` `#ifexist` fix (commit `020b67b5`) end-to-end plus a signed
+> outer `.exe` once the Azure Trusted Signing account is provisioned.
+
+### What changed
+
+- **FIX: `code.iss` `#ifexist` guard (commit `020b67b5`).** The inner
+  installer step (`gulp vscode-win32-x64-user-setup`) had been aborting with
+  `No files found matching ...VSCode-win32-x64\tools\*` because the
+  open-source gulp targets don't emit the `tools\` directory (Microsoft's
+  remote-tunnel CLI is only produced by VS Code's official Azure pipeline).
+  The overlay's `build/win32/code.iss` now wraps the
+  `Source: "tools\*"` line in an ISPP `#ifexist "tools\*"` guard, mirroring
+  the existing `#ifdef AppxPackageFullname` guard on the `appx\*` line.
+  `scripts/apply-founder-customizations.ps1` asserts the guard is present as
+  a regression check.
+- **FOUNDER NODE RE-BUNDLED (commit `daecf5d5`).** 0.9.1 removed Founder
+  Node from the bundle on the assumption that the IDE talks to the Gateway
+  API directly. That assumption is wrong: the IDE Gateway client requires
+  `~/FounderVault/node-config.json`, which only Founder Node creates on
+  first pairing. Without Founder Node in the bundle, the IDE's AI features
+  are dead-on-arrival for new users. Founder Node is now installed in every
+  deployment mode (it is required, not optional). The outer `founder-stack.iss`
+  stages `Founder-Node-win-x64.exe` as a sub-installer and invokes it
+  silently after the IDE install.
+- **TRUTHFUL DEPLOYMENT MODES (commit `daecf5d5`).** If the Forgejo +
+  cloudflared binaries are not staged in the build, the Private option in
+  the wizard is annotated `[UNAVAILABLE]` and a one-time info dialog
+  explains why. `NextButtonClick` hard-refuses to proceed if the user
+  somehow selects Private anyway. We never silently skip a component the
+  user selected.
+- **AZURE TRUSTED SIGNING IN CI (commit `a9b5bc34`).** Both the inner
+  `FounderIDESetup.exe` (signed in place before iscc bundles it) and the
+  outer `Founder-Stack-Setup-<v>.exe` are signed via
+  `azure/artifact-signing-action@v2` on release builds. A `signtool verify`
+  step hard-fails the build if the outer exe is unsigned on a release
+  build. Requires 6 `AZURE_*` repo secrets — see
+  `docs/CODE-SIGNING-GUIDE.md` §0. **External blocker:** Azure Trusted
+  Signing account provisioning takes hours-days of Microsoft identity
+  review.
+- **SBOM + BUILD PROVENANCE (commit `a9b5bc34`).** An SPDX SBOM is
+  generated by `anchore/sbom-action@v0` and uploaded as a release asset.
+  A sigstore attestation is created by `actions/attest-build-provenance@v1`,
+  verifiable downstream with
+  `gh attestation verify <file> --repo <org>/<repo>`.
+
+### Build artifacts (pending green CI)
+
+- `Founder-Stack-Setup-0.9.2.exe` — signed outer bundle (IDE + Founder Node
+  + optional Forgejo/cloudflared). SHA-256 and size will be filled in by
+  the CI run.
+- `Founder-Stack-Setup-0.9.2.exe.sha256` — sidecar hash.
+- `founder-stack-0.9.2-sbom.spdx.json` — SPDX SBOM.
+- sigstore attestation — verifiable via `gh attestation verify`.
+
+### Known limitations (0.9.2)
+
+- **Signing is external-gated.** Until the Azure Trusted Signing account
+  completes Microsoft identity validation, the signing step is a no-op and
+  the build produces an unsigned exe (the `signtool verify` step is
+  advisory-only on dev builds). See `docs/CODE-SIGNING-GUIDE.md` §0.
+- **Private-mode binaries still not bundled.** The `private_core` component
+  (Forgejo + cloudflared) is gated by `#ifexist` + `Check:` functions and
+  the wizard's Private option is annotated `[UNAVAILABLE]`. Users who want
+  Private mode must add the binaries later via Founder IDE. This is a
+  known gap, not a regression.
+
+### Build commands
+
+```powershell
+# Trigger a CI run (artifact-only, no release):
+gh workflow run build-founder-ide.yml `
+  --ref codex/founder-ide-installer-ci `
+  -f version=0.9.2 -f skip_release=true
+
+# Or via the orchestrator locally (takes hours):
+.\packages\founder-ide\installer\build-stack-installer.ps1 -Version 0.9.2
+```
+
+---
+
 ## 0.9.1 (Void fork) — FIX — BUILT
 
 > **Status: BUILT (unsigned).** Fixes the launcher-exe regression in 0.9.0
