@@ -55,8 +55,16 @@ import traceback
 import re
 import csv
 import io
+import itertools
 import zipfile
 from pathlib import Path
+
+ADX_RESEARCH_LOW_MAX = 18.0
+ADX_RESEARCH_MID_MAX = 30.0
+TYPE_B_DISCOVERY_MIN_TRADES = 120
+TYPE_B_GATE_MIN_TRADES = 220
+TYPE_B_RULE_MIN_TRAIN_N = 8
+TYPE_B_RULE_MIN_HOLDOUT_N = 5
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -14135,7 +14143,12 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
-        combo_label = f"{str(adx_b).upper()}+GAP_{spread_b}+{entry_b}+{str(lane).upper()}"
+        adx_label = {
+            "adx_low": "ADX_LT_18",
+            "adx_mid": "ADX_18_TO_30",
+            "adx_high": "ADX_30_PLUS",
+        }.get(str(adx_b).lower(), str(adx_b).upper())
+        combo_label = f"{adx_label}+GAP_{spread_b}+{entry_b}+{str(lane).upper()}"
         combos.append({
             "combo": combo_label,
             "adx_bucket": adx_b,
@@ -14719,10 +14732,10 @@ def _type_b_bucket(val, kind: str) -> str:
     except (TypeError, ValueError):
         return "unknown"
     if kind == "adx":
-        if v < 20:
-            return "adx<20"
-        if v < 30:
-            return "adx20-30"
+        if v < ADX_RESEARCH_LOW_MAX:
+            return "adx<18"
+        if v < ADX_RESEARCH_MID_MAX:
+            return "adx18-30"
         return "adx30+"
     if kind == "spread":
         if v <= 2:
@@ -14796,6 +14809,239 @@ def _type_b_probability_table(work: pd.DataFrame) -> list:
     return rows[:40]
 
 
+def _type_b_entry_feature_frame(work: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Build a leak-free entry feature frame for Type-B outcome discovery."""
+    if work is None or work.empty:
+        return pd.DataFrame(), {}
+    frame = pd.DataFrame(index=work.index)
+    mfe_raw = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
+        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
+    )
+    mfe = pd.to_numeric(mfe_raw, errors="coerce")
+    frame["is_type_b"] = mfe.ge(15)
+
+    timestamp = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
+    for name in ("close_ts", "ts", "timestamp", "ts_melbourne"):
+        if name not in work.columns:
+            continue
+        missing = timestamp.isna()
+        if not missing.any():
+            break
+        parsed = pd.to_datetime(work.loc[missing, name], errors="coerce", utc=True)
+        timestamp.loc[missing] = parsed
+    frame["_time"] = timestamp
+    frame["_order"] = np.arange(len(frame))
+
+    adx_raw = work["adx_at_entry"] if "adx_at_entry" in work else pd.Series(np.nan, index=work.index)
+    adx = pd.to_numeric(adx_raw, errors="coerce")
+    frame["adx"] = adx.map(lambda v: _type_b_bucket(v, "adx"))
+
+    if "directional_spread" in work.columns:
+        spread_raw = work["directional_spread"]
+    else:
+        spread_raw = work["conviction_spread"] if "conviction_spread" in work else pd.Series(np.nan, index=work.index)
+    spread = pd.to_numeric(spread_raw, errors="coerce")
+    frame["spread"] = spread.map(lambda v: _type_b_bucket(v, "spread"))
+
+    volume_raw = work["features_volume_ratio"] if "features_volume_ratio" in work else (
+        work["feature_volume_ratio"] if "feature_volume_ratio" in work else pd.Series(np.nan, index=work.index)
+    )
+    volume = pd.to_numeric(volume_raw, errors="coerce")
+    frame["volume_ratio"] = pd.cut(
+        volume,
+        [-np.inf, 0.5, 0.75, np.inf],
+        right=False,
+        labels=["volume<0.50", "volume0.50-0.75", "volume0.75+"],
+    ).astype(str)
+
+    ema_raw = work["context_ema_slope"] if "context_ema_slope" in work else pd.Series(np.nan, index=work.index)
+    ema = pd.to_numeric(ema_raw, errors="coerce")
+    frame["ema_slope"] = ema.map(
+        lambda v: "ema_unknown" if pd.isna(v) else ("ema_up" if v > 0 else ("ema_down" if v < 0 else "ema_flat"))
+    )
+
+    structure_raw = work["structure_score_at_entry"] if "structure_score_at_entry" in work else (
+        work["structure"] if "structure" in work else pd.Series(np.nan, index=work.index)
+    )
+    structure = pd.to_numeric(structure_raw, errors="coerce")
+    frame["structure"] = pd.cut(
+        structure,
+        [-np.inf, -4, -1, np.inf],
+        right=False,
+        labels=["structure<-4", "structure-4--1", "structure>=-1"],
+    ).astype(str)
+
+    entry_raw = work["entry_mode_bucket"] if "entry_mode_bucket" in work else pd.Series("unknown", index=work.index)
+    frame["entry_mode"] = entry_raw.fillna("unknown").astype(str).str.upper()
+    direction_raw = work["final_direction"] if "final_direction" in work else (
+        work["dir"] if "dir" in work else pd.Series("unknown", index=work.index)
+    )
+    frame["direction"] = direction_raw.fillna("unknown").astype(str).str.upper()
+
+    raw_by_feature = {
+        "adx": adx,
+        "spread": spread,
+        "volume_ratio": volume,
+        "ema_slope": ema,
+        "structure": structure,
+        "entry_mode": entry_raw.replace("", np.nan),
+        "direction": direction_raw.replace("", np.nan),
+    }
+    coverage = {}
+    total = len(frame)
+    for feature, raw in raw_by_feature.items():
+        available = int(pd.Series(raw, index=frame.index).notna().sum())
+        coverage[feature] = {
+            "available": available,
+            "total": total,
+            "pct": round(100.0 * available / total, 1) if total else 0.0,
+        }
+    frame = frame[mfe.notna()].copy()
+    frame = frame.sort_values(["_time", "_order"], na_position="last")
+    return frame, coverage
+
+
+def _type_b_rule_part(feature: str, bucket: str) -> str:
+    labels = {
+        ("adx", "adx<18"): "ADX <18",
+        ("adx", "adx18-30"): "ADX 18–<30",
+        ("adx", "adx30+"): "ADX ≥30",
+        ("spread", "spread0-2"): "score gap 0–2",
+        ("spread", "spread3-4"): "score gap 3–4",
+        ("spread", "spread5+"): "score gap ≥5",
+        ("volume_ratio", "volume<0.50"): "volume ratio <0.50",
+        ("volume_ratio", "volume0.50-0.75"): "volume ratio 0.50–<0.75",
+        ("volume_ratio", "volume0.75+"): "volume ratio ≥0.75",
+        ("ema_slope", "ema_up"): "EMA slope up",
+        ("ema_slope", "ema_down"): "EMA slope down",
+        ("ema_slope", "ema_flat"): "EMA slope flat",
+        ("structure", "structure<-4"): "structure score <-4",
+        ("structure", "structure-4--1"): "structure score -4–<-1",
+        ("structure", "structure>=-1"): "structure score ≥-1",
+    }
+    if (feature, bucket) in labels:
+        return labels[(feature, bucket)]
+    if feature == "entry_mode":
+        return f"entry {bucket.replace('_', ' ')}"
+    if feature == "direction":
+        return f"direction {bucket}"
+    return f"{feature}={bucket}"
+
+
+def _type_b_entry_rule_analysis(work: pd.DataFrame) -> dict:
+    """Train on older outcomes and evaluate candidate entry rules on the newest 30%."""
+    frame, coverage = _type_b_entry_feature_frame(work)
+    total = len(frame)
+    if total < 20:
+        return {
+            "predictor_rules": [],
+            "feature_coverage": coverage,
+            "predictor_readiness": {
+                "status": "EARLY_COLLECTION",
+                "total_trades": total,
+                "type_b_trades": int(frame["is_type_b"].sum()) if total else 0,
+                "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1) if total else None,
+                "validated_rules": 0,
+                "note": f"Only {total} outcome-labelled trades; at least {TYPE_B_DISCOVERY_MIN_TRADES} are required for holdout discovery.",
+            },
+        }
+
+    holdout_n = max(20, int(round(total * 0.30)))
+    holdout_n = min(holdout_n, max(1, total - 12))
+    train = frame.iloc[:-holdout_n].copy()
+    holdout = frame.iloc[-holdout_n:].copy()
+    train_base = float(train["is_type_b"].mean()) if len(train) else 0.0
+    holdout_base = float(holdout["is_type_b"].mean()) if len(holdout) else 0.0
+    dimensions = ("adx", "spread", "volume_ratio", "ema_slope", "structure", "entry_mode", "direction")
+    rules = []
+    for width in (1, 2):
+        for dims in itertools.combinations(dimensions, width):
+            for raw_keys, sub in train.groupby(list(dims), observed=True, dropna=False):
+                keys = raw_keys if isinstance(raw_keys, tuple) else (raw_keys,)
+                if len(sub) < TYPE_B_RULE_MIN_TRAIN_N:
+                    continue
+                if any(str(value).lower() in ("unknown", "nan", "ema_unknown", "") for value in keys):
+                    continue
+                train_rate = float(sub["is_type_b"].mean())
+                train_lift = train_rate / train_base if train_base > 0 else 0.0
+                if train_lift < 1.05:
+                    continue
+                mask = pd.Series(True, index=holdout.index)
+                for dim, value in zip(dims, keys):
+                    mask &= holdout[dim].eq(value)
+                check = holdout[mask]
+                check_rate = float(check["is_type_b"].mean()) if len(check) else 0.0
+                check_lift = check_rate / holdout_base if holdout_base > 0 else 0.0
+                if len(check) < TYPE_B_RULE_MIN_HOLDOUT_N:
+                    status = "INSUFFICIENT_HOLDOUT"
+                elif train_lift >= 1.20 and check_lift >= 1.15 and int(check["is_type_b"].sum()) >= 3:
+                    status = "HOLDOUT_POSITIVE"
+                elif check_lift < 0.90:
+                    status = "FAILED_HOLDOUT"
+                else:
+                    status = "COLLECTING"
+                rules.append({
+                    "rule": " AND ".join(_type_b_rule_part(dim, str(value)) for dim, value in zip(dims, keys)),
+                    "features": list(dims),
+                    "train_n": int(len(sub)),
+                    "train_type_b_pct": round(100.0 * train_rate, 1),
+                    "train_lift": round(train_lift, 2),
+                    "holdout_n": int(len(check)),
+                    "holdout_type_b_pct": round(100.0 * check_rate, 1) if len(check) else None,
+                    "holdout_lift": round(check_lift, 2) if len(check) else None,
+                    "status": status,
+                    "out_of_sample": True,
+                })
+
+    # Candidate ordering uses training evidence only. Holdout outcomes are an
+    # independent falsification check; include every positive holdout result in
+    # the displayed set so a valid check is not hidden below sparse train-only
+    # combinations.
+    rules.sort(key=lambda row: (-row["train_lift"], -row["train_n"], row["rule"]))
+    holdout_positive = sum(1 for row in rules if row["status"] == "HOLDOUT_POSITIVE")
+    shown = list(rules[:8])
+    for row in rules:
+        if row["status"] == "HOLDOUT_POSITIVE" and row not in shown:
+            shown.append(row)
+    for row in rules:
+        if len(shown) >= 12:
+            break
+        if row not in shown:
+            shown.append(row)
+    shown = shown[:12]
+    if total < TYPE_B_DISCOVERY_MIN_TRADES:
+        status = "EARLY_COLLECTION"
+    elif total < TYPE_B_GATE_MIN_TRADES:
+        status = "COLLECTING"
+    elif not holdout_positive:
+        status = "NO_STABLE_RULE"
+    else:
+        status = "RESEARCH_CANDIDATE_READY"
+    note = (
+        f"{total} outcome-labelled trades: {len(train)} older trades select candidates and "
+        f"{len(holdout)} newest trades are untouched holdout evidence. "
+        f"{holdout_positive} rule(s) are holdout-positive. No live entry gate before "
+        f"≥{TYPE_B_GATE_MIN_TRADES} total outcomes and repeated rolling-window confirmation."
+    )
+    return {
+        "predictor_rules": shown,
+        "feature_coverage": coverage,
+        "predictor_readiness": {
+            "status": status,
+            "total_trades": total,
+            "type_b_trades": int(frame["is_type_b"].sum()),
+            "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1),
+            "train_trades": int(len(train)),
+            "train_baseline_type_b_pct": round(100.0 * train_base, 1),
+            "holdout_trades": int(len(holdout)),
+            "holdout_baseline_type_b_pct": round(100.0 * holdout_base, 1),
+            "validated_rules": holdout_positive,
+            "minimum_total_for_gate": TYPE_B_GATE_MIN_TRADES,
+            "note": note,
+        },
+    }
+
+
 def type_b_predictor_report(trades=None, session=None):
     """Pre-entry feature separators — TYPE_A vs TYPE_B averages and ranked deltas."""
     if session is None:
@@ -14822,11 +15068,43 @@ def type_b_predictor_report(trades=None, session=None):
             json.dump(payload, f, indent=2)
         return payload
 
+    mfe_source = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
+        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
+    )
+    valid_mfe = pd.to_numeric(mfe_source, errors="coerce")
+    work = work[valid_mfe.notna()].copy()
+    if work.empty:
+        payload = {
+            "schema": "type_b_predictor_v3",
+            "session_scope": scope,
+            "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
+            "cohorts": {},
+            "separators_ranked": [],
+            "top_separators": [],
+            "probability_table": [],
+            "predictor_rules": [],
+            "predictor_readiness": {
+                "status": "EARLY_COLLECTION",
+                "total_trades": 0,
+                "type_b_trades": 0,
+                "validated_rules": 0,
+                "note": "No trades have a valid MFE outcome yet.",
+            },
+        }
+        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
+
     work["trade_mfe_type"] = _trade_mfe_type_series(work)
     cohort_stats = {}
     for ttype in ("TYPE_A", "TYPE_B", "MIXED"):
         sub = work[work["trade_mfe_type"] == ttype]
         stats = _combo_stats_from_df(sub)
+        sub_mfe_source = sub["mfe_margin_pct"] if "mfe_margin_pct" in sub else (
+            sub["max_profit"] if "max_profit" in sub else pd.Series(np.nan, index=sub.index)
+        )
+        sub_mfe = pd.to_numeric(sub_mfe_source, errors="coerce")
+        stats["avg_mfe_pct"] = round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None
         avgs = {}
         for col, label in feature_cols:
             if col not in sub.columns:
@@ -14856,8 +15134,10 @@ def type_b_predictor_report(trades=None, session=None):
         separators.sort(key=lambda x: x["delta_abs"], reverse=True)
 
     prob_table = _type_b_probability_table(work)
+    entry_analysis = _type_b_entry_rule_analysis(work)
+    predictor_rules = entry_analysis.get("predictor_rules") or []
     payload = {
-        "schema": "type_b_predictor_v2",
+        "schema": "type_b_predictor_v3",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -14867,7 +15147,18 @@ def type_b_predictor_report(trades=None, session=None):
         "separators_ranked": separators,
         "top_separators": separators[:10],
         "probability_table": prob_table,
-        "hypothesis": "Moderate AI (60-65) + spread 4 + high participation → Type B sweet spot",
+        "predictor_rules": predictor_rules,
+        "predictor_readiness": entry_analysis.get("predictor_readiness") or {},
+        "feature_coverage": entry_analysis.get("feature_coverage") or {},
+        "method": (
+            "Only entry-time fields are eligible. Candidates are selected on the older 70% "
+            "of outcome-labelled trades and evaluated on the newest 30% chronological holdout."
+        ),
+        "hypothesis": (
+            predictor_rules[0]["rule"]
+            if predictor_rules
+            else "No entry-time fingerprint has enough holdout evidence yet."
+        ),
     }
     if separators:
         print(f"  Top separator: {separators[0]['feature']} Δ={separators[0]['delta_abs']} {PIPELINE_ENFORCEMENT_TAG}")
@@ -15177,9 +15468,9 @@ def _adx_bucket_val(v) -> str:
         x = float(v)
     except (TypeError, ValueError):
         return "unknown"
-    if x < 18:
+    if x < ADX_RESEARCH_LOW_MAX:
         return "adx_low"
-    if x < 30:
+    if x < ADX_RESEARCH_MID_MAX:
         return "adx_mid"
     return "adx_high"
 
