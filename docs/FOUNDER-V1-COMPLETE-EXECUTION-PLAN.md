@@ -209,18 +209,19 @@ admin and user usage screenshots.
   chips with one compact Second brain control. It must select an enabled BYOK
   or local reviewer and provide QA, architecture audit, competition check, and
   custom-review intents without crowding the composer.
-- [ ] Build a deterministic reviewer context pack containing the original
+- [x] Build a deterministic reviewer context pack containing the original
   founder goal, project/decision graph, current answer or patch, changed files,
   test and visual evidence, route receipts, and known risks. Bound and redact
   the pack before sending it to the founder-selected reviewer.
-- [ ] Require a structured reviewer result with verdict, verified defects,
+- [x] Require a structured reviewer result with verdict, verified defects,
   evidence references, opinion, proposed correction, confidence, competitive
   analysis, and unanswered questions. Generic acknowledgements such as
   "I will inspect the repository" are an incomplete result, not success.
-- [ ] Reconcile the independent review through Founder AI: distinguish verified
+- [x] Reconcile the independent review through Founder AI: distinguish verified
   defects from opinion, propose the smallest correction, preserve dissent in
   the receipt, and never apply reviewer output without the normal approval and
-  ownership gates.
+  ownership gates. The source path is read-only and fail-closed; refreshed
+  installed-app proof remains part of the Stage 11 acceptance run.
 - [x] Add a simple work-mode menu modelled on the useful parts of modern AI
   workspaces: Ask (read only), Plan (no edits), Build (one editing owner),
   Debug (focused diagnosis), and Team (bounded coordinated specialists).

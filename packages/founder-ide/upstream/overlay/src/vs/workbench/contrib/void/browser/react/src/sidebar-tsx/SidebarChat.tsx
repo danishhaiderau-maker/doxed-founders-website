@@ -35,7 +35,7 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
 import { readFounderProviderProfiles } from '../../../../common/founderProviderProfiles.js';
-import { buildFounderSecondBrainPrompt, founderSecondBrainIntents, FounderSecondBrainIntent } from './founderSecondBrain.js';
+import { buildFounderSecondBrainPrompt, buildFounderSecondBrainReconciliationPrompt, founderSecondBrainIntents, FounderSecondBrainIntent } from './founderSecondBrain.js';
 
 
 
@@ -3256,7 +3256,7 @@ export const SidebarChat = () => {
 
 	const sidebarRef = useRef<HTMLDivElement>(null)
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
-	const onSubmit = useCallback(async (_forceSubmit?: string) => {
+	const onSubmit = useCallback(async (_forceSubmit?: string, _skipVisualAttachments = false) => {
 
 		if (isDisabled && !_forceSubmit) return
 		if (isRunning) return
@@ -3268,7 +3268,7 @@ export const SidebarChat = () => {
 		if (voicePhase !== 'idle' || visualPhase !== 'idle') return
 
 		try {
-			if (visualAttachments.length > 0) {
+			if (!_skipVisualAttachments && visualAttachments.length > 0) {
 				setVisualPhase('processing')
 				const result = await commandService.executeCommand<{ descriptions?: FounderVisualDescription[] }>(
 					'founderOs.describeVisualAttachments',
@@ -3316,9 +3316,29 @@ export const SidebarChat = () => {
 		}
 		const priorModel = settingsState.modelSelectionOfFeature.Chat?.modelName
 		const priorProfile = reviewerProfiles.find(profile => profile.label === priorModel)
+		const threadId = currentThread.id
+		const messageCountBeforeReview = previousMessages.length
 		try {
 			await commandService.executeCommand('founder.personalAi.select', reviewer.id)
 			await onSubmit(buildFounderSecondBrainPrompt(previousMessages, reviewIntent, reviewer.label))
+			const completedThread = chatThreadsService.getCurrentThread()
+			if (completedThread?.id !== threadId) return
+			const reviewMessages = completedThread.messages.slice(messageCountBeforeReview)
+			const reviewerResult = [...reviewMessages]
+				.reverse()
+				.find(message => message.role === 'assistant')
+				?.displayContent
+			if (!reviewerResult?.trim()) return
+			await commandService.executeCommand('founder.managedAi.select', 'founder-os-auto')
+			await onSubmit(
+				buildFounderSecondBrainReconciliationPrompt(
+					previousMessages,
+					reviewerResult,
+					reviewIntent,
+					reviewer.label,
+				),
+				true,
+			)
 		} finally {
 			if (typeof priorModel === 'string' && priorModel.startsWith('founder-os-')) {
 				await commandService.executeCommand('founder.managedAi.select', priorModel)
@@ -3328,6 +3348,8 @@ export const SidebarChat = () => {
 		}
 	}, [
 		commandService,
+		currentThread.id,
+		chatThreadsService,
 		isRunning,
 		onSubmit,
 		previousMessages,

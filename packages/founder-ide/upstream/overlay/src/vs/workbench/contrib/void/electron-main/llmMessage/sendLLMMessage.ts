@@ -11,6 +11,14 @@ import { sendLLMMessageToProviderImplementation } from './sendLLMMessage.impl.js
 // and local provider selections stay on Void's encrypted direct-provider path.
 import { sendFounderOsChat, sendFounderOsFIM, founderOsEnabled } from './sendFounderOs.js';
 import { headersWithoutFounderProviderProfiles, resolveFounderProviderProfile } from '../../common/founderProviderProfiles.js';
+import {
+	buildFounderReviewEvidencePack,
+	founderReviewEvidenceMessage,
+	founderReviewChatMode,
+	founderReviewTools,
+	isFounderIndependentReview,
+	renderFounderIndependentReview,
+} from './founderIndependentReview.js';
 
 
 export const sendLLMMessage = async ({
@@ -128,6 +136,18 @@ export const sendLLMMessage = async ({
 	const personalProfile = providerName === 'openAICompatible'
 		? resolveFounderProviderProfile(settingsOfProvider.openAICompatible.headersJSON, modelName)
 		: null;
+	const isSecondBrainReview = messagesType === 'chatMessages'
+		&& isFounderIndependentReview(messages_);
+	const reviewWorkspacePath = typeof loggingExtras?.workspacePath === 'string'
+		? loggingExtras.workspacePath
+		: '';
+	const reviewEvidence = isSecondBrainReview
+		? founderReviewEvidenceMessage(
+			reviewWorkspacePath
+				? buildFounderReviewEvidencePack(reviewWorkspacePath)
+				: null,
+		)
+		: '';
 	const effectiveModelName = personalProfile?.model ?? modelName;
 	const effectiveSettingsOfProvider = providerName === 'openAICompatible'
 		? {
@@ -150,8 +170,17 @@ export const sendLLMMessage = async ({
 		? (params) => {
 			const routeKind = personalProfile.kind === 'ollama' ? 'Local' : 'Personal AI';
 			const latencyMs = Date.now() - submit_time.getTime();
-			const receipt = `\n\n---\n**Founder route** | ${routeKind} | ${personalProfile.label} | ${personalProfile.model} | outside managed quota | ${latencyMs.toLocaleString()} ms`;
-			onFinalMessage({ ...params, fullText: `${params.fullText}${receipt}` });
+			const review = isSecondBrainReview
+				? renderFounderIndependentReview(params.fullText)
+				: null;
+			const receiptKind = review
+				? `read-only review${review.valid ? '' : ' · unstructured'}`
+				: 'direct';
+			const receipt = `\n\n---\n**Founder route** | ${routeKind} | ${personalProfile.label} | ${personalProfile.model} | ${receiptKind} | outside managed quota | ${latencyMs.toLocaleString()} ms`;
+			onFinalMessage({
+				...params,
+				fullText: `${review?.text ?? params.fullText}${receipt}`,
+			});
 		}
 		: onFinalMessage;
 
@@ -163,16 +192,37 @@ try {
 		}
 		const { sendFIM, sendChat } = implementation
 		if (messagesType === 'chatMessages') {
-			const directMessages = personalProfile ? [{
-				role: 'system' as const,
-				content: [
-					`You are ${personalProfile.label}, a Personal AI connected to Founder IDE.`,
-					'Use the available workspace and engineering tools in the current turn when evidence is needed. Do not merely announce that you will inspect the codebase and stop.',
-					'Never claim to be Founder AI or a Founder-managed model. Your configured profile and model appear in the route receipt.',
-					'When the latest request begins [FOUNDER_SECOND_BRAIN_V1], act as an independent read-only reviewer: inspect evidence, do not edit files or deploy, distinguish verified defects from opinion, and return the requested verdict and concrete correction.',
-				].join(' '),
-			}, ...messages_] : messages_;
-			await sendChat({ messages: directMessages, onText, onFinalMessage: personalOnFinalMessage, onError, settingsOfProvider: effectiveSettingsOfProvider, modelSelectionOptions, overridesOfModel, modelName: effectiveModelName, _setAborter, providerName, separateSystemMessage, chatMode, mcpTools })
+			const directMessages = personalProfile ? [
+				{
+					role: 'system' as const,
+					content: [
+						`You are ${personalProfile.label}, a Personal AI connected to Founder IDE.`,
+						'Use the available workspace and engineering tools in the current turn when evidence is needed. Do not merely announce that you will inspect the codebase and stop.',
+						'Never claim to be Founder AI or a Founder-managed model. Your configured profile and model appear in the route receipt.',
+						'When the latest request begins [FOUNDER_SECOND_BRAIN_V1], act as an independent read-only reviewer: inspect evidence, do not edit files or deploy, distinguish verified defects from opinion, and return the requested verdict and concrete correction.',
+					].join(' '),
+				},
+				...(reviewEvidence ? [{
+					role: 'system' as const,
+					content: reviewEvidence,
+				}] : []),
+				...messages_,
+			] : messages_;
+			await sendChat({
+				messages: directMessages,
+				onText,
+				onFinalMessage: personalOnFinalMessage,
+				onError,
+				settingsOfProvider: effectiveSettingsOfProvider,
+				modelSelectionOptions,
+				overridesOfModel,
+				modelName: effectiveModelName,
+				_setAborter,
+				providerName,
+				separateSystemMessage,
+				chatMode: founderReviewChatMode(isSecondBrainReview, chatMode),
+				mcpTools: founderReviewTools(isSecondBrainReview, mcpTools),
+			})
 			return
 		}
 		if (messagesType === 'FIMMessage') {

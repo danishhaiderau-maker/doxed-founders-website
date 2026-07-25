@@ -31,6 +31,7 @@
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCoordination.ts",       "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCoordination.ts",       "mode": "add", "marker": "Founder IDE native chat coordination presence" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts",               "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts",               "mode": "add", "marker": "Founder IDE bounded native Team mode" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeRouting.ts",            "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeRouting.ts",            "mode": "add", "marker": "Founder IDE native managed-routing evidence" },
+    { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderIndependentReview.ts",        "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/founderIndependentReview.ts",        "mode": "add", "marker": "Founder IDE independent read-only review boundary" },
     { "src": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "dest": "src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts",                   "mode": "add", "marker": "sendFounderOs.ts - Founder OS Gateway rewire" }
   ]
 }

@@ -41,6 +41,10 @@ import type {
 import type { ModelSelection, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import type { ChatMode } from '../../common/voidSettingsTypes.js';
 import { availableTools, type InternalToolInfo } from '../../common/prompt/prompts.js';
+import {
+	founderReviewTools,
+	isFounderReviewReconciliation,
+} from './founderIndependentReview.js';
 import { beginNativeCoordination } from './founderNativeCoordination.js';
 import {
 	formatNativeTeamAdvice,
@@ -481,10 +485,13 @@ function gatewayTools(
 	chatMode: ChatMode | null,
 	mcpTools: InternalToolInfo[] | undefined,
 	workMode: ReturnType<typeof readNativeWorkMode>,
+	strictReadOnly = false,
 ): Array<Record<string, unknown>> {
 	if (workMode === 'ask') return [];
 	const tools = availableTools(chatMode, mcpTools) ?? [];
-	const allowedTools = workMode === 'plan'
+	const allowedTools = strictReadOnly
+		? founderReviewTools(true, tools) ?? []
+		: workMode === 'plan'
 		? tools.filter((tool) =>
 			!/(?:apply|command|create|delete|edit|execute|insert|mkdir|move|patch|remove|rename|replace|run|shell|terminal|write)/i.test(tool.name),
 		)
@@ -542,7 +549,8 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode, mcpTools } = params;
 
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
-	const workMode = readNativeWorkMode();
+	const isReviewReconciliation = isFounderReviewReconciliation(openAiMessages);
+	const workMode = isReviewReconciliation ? 'plan' : readNativeWorkMode();
 	const requestedModel = modelSelection?.modelName;
 	const escalationReason = requestedModel === 'founder-os-auto'
 		? nativeAutoEscalationReason(openAiMessages)
@@ -560,6 +568,12 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		role: 'system',
 		content: nativeWorkModeSystem(workMode),
 	});
+	if (isReviewReconciliation) {
+		openAiMessages.splice(2, 0, {
+			role: 'system',
+			content: 'Founder Second brain reconciliation is read-only. Verify evidence, preserve disagreement, propose the smallest correction, and require normal approval before any later editing turn.',
+		});
+	}
 	const coordination = params.coordination
 		? beginNativeCoordination({
 			threadId: params.coordination.threadId,
@@ -606,9 +620,14 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		messages: openAiMessages,
 		stream: true,
 		founder_os_metadata: true,
-		...(escalationReason ? { metadata: { founder_auto_escalation: escalationReason } } : {}),
+		...(escalationReason || isReviewReconciliation ? {
+			metadata: {
+				...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
+				...(isReviewReconciliation ? { founder_second_brain_reconciliation: true } : {}),
+			},
+		} : {}),
 	};
-	const tools = gatewayTools(chatMode, mcpTools, workMode);
+	const tools = gatewayTools(chatMode, mcpTools, workMode, isReviewReconciliation);
 	if (tools.length > 0) {
 		body.tools = tools;
 		body.tool_choice = 'auto';
@@ -699,7 +718,9 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	}
 	const finalText = toolCall
 		? fullText
-		: `${stripUntrustedFounderRouteReceipts(fullText)}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
+		: `${stripUntrustedFounderRouteReceipts(fullText)}${isReviewReconciliation
+			? '\n\n**Second brain reconciliation** | read-only | dissent preserved | approval required'
+			: ''}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
 		fullText: finalText,
 		fullReasoning,

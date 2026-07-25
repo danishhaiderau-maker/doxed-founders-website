@@ -154,16 +154,44 @@ describe('Founder IDE upstream overlay', () => {
     const reviewer = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/founderSecondBrain.ts',
     );
+    const boundary = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderIndependentReview.ts',
+    );
+    const sender = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendLLMMessage.ts',
+    );
     assert.match(source, /Second brain/);
     assert.match(source, /Ask AI/);
     assert.match(source, /founder\.personalAi\.select/);
+    assert.match(source, /founder\.managedAi\.select', 'founder-os-auto'/);
+    assert.match(source, /buildFounderSecondBrainReconciliationPrompt/);
     assert.doesNotMatch(source, /label: 'Challenge'/);
     assert.doesNotMatch(source, /label: 'Optimize'/);
     assert.match(reviewer, /QA this result/);
     assert.match(reviewer, /Audit the approach/);
     assert.match(reviewer, /Check competitive advantage/);
-    assert.match(reviewer, /Do not edit files/);
-    assert.match(reviewer, /Verified findings first/);
+    assert.match(reviewer, /You cannot edit files/);
+    assert.match(reviewer, /verified_defects/);
+    assert.match(reviewer, /insufficient_evidence/);
+    assert.match(boundary, /MUTATING_TOOL/);
+    assert.match(boundary, /READ_ONLY_TOOL/);
+    assert.match(boundary, /Founder IDE did not accept a pass verdict/);
+    assert.match(boundary, /FOUNDER_SECOND_BRAIN_RECONCILE_V1/);
+    assert.match(boundary, /project-context\.md/);
+    assert.match(boundary, /decisions\.md/);
+    assert.match(boundary, /tasks\.json/);
+    assert.match(boundary, /execFileSync/);
+    assert.match(sender, /founderReviewChatMode/);
+    assert.match(sender, /founderReviewTools/);
+    assert.match(sender, /renderFounderIndependentReview/);
+    assert.match(sender, /buildFounderReviewEvidencePack/);
+    const managed = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    assert.match(managed, /isFounderReviewReconciliation/);
+    assert.match(managed, /dissent preserved/);
+    assert.match(managed, /approval required/);
+    assert.match(managed, /strictReadOnly/);
   });
 
   it('coordinates the native chat with other active Founder tasks', () => {
@@ -233,7 +261,7 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /if \(workMode === 'ask'\) return \[\]/);
     assert.match(source, /workMode === 'plan'/);
     assert.match(source, /nativeWorkModeSystem\(workMode\)/);
-    assert.match(source, /gatewayTools\(chatMode, mcpTools, workMode\)/);
+    assert.match(source, /gatewayTools\(chatMode, mcpTools, workMode/);
   });
 
   it('patches native chat metadata with the active workspace root', () => {
