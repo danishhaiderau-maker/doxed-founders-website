@@ -289,6 +289,16 @@ def run():
         "api_relay_state" not in inspect.getsource(bot._api_state_cache_refresher_loop)
         and "_build_api_state_snapshot" not in inspect.getsource(bot._relay_state_cache_refresher_loop),
     )
+    dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
+    check(
+        "dashboard snapshot excludes the raw order book before deepcopy",
+        'if key != "order_book"' in dashboard_snapshot_source
+        and 'snapshot.pop("order_book"' not in dashboard_snapshot_source,
+    )
+    check(
+        "dashboard presentation refresh is not an aggressive hot loop",
+        bot._API_STATE_REFRESH_INTERVAL_SEC >= 5.0,
+    )
     execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
     check(
         "execution relay snapshot excludes presentation ledgers",

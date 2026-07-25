@@ -183,8 +183,10 @@ try {
     try {
       $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/ping")
       $req.Method = "GET"
-      $req.Timeout = 2000
-      $req.ReadWriteTimeout = 2000
+      # Keep dead-listener detection prompt without killing a healthy engine
+      # during a short CPU-heavy market-analysis burst.
+      $req.Timeout = 5000
+      $req.ReadWriteTimeout = 5000
       $req.KeepAlive = $false
       $resp = $req.GetResponse()
       $ok = ([int]$resp.StatusCode -eq 200)
@@ -253,7 +255,7 @@ try {
           } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 45) {
             $consecutiveLivenessFailures++
             Write-RestartLog "liveness_failed	pid=$currentPid	count=$consecutiveLivenessFailures"
-            if ($consecutiveLivenessFailures -ge 3) {
+            if ($consecutiveLivenessFailures -ge 6) {
               $code = -2
               Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process alive but /api/ping unavailable"
               Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue
