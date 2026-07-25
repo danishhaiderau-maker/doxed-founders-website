@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type {
   CommandResult,
   EditOutcome,
@@ -7,69 +7,66 @@ import type {
   RunCommandOpts,
   WorkspaceNode,
 } from '../execution-manager.types';
-import { FilesystemAdapter } from './filesystem.adapter';
-import { LocalShellAdapter } from './local-shell.adapter';
 
 /**
- * FounderIdeAdapter — the `vscode` execution target (Founder IDE is a
- * VS Code fork). Same local-shell / filesystem path as CursorAdapter until
- * Founder Node IPC can dispatch into a live IDE session.
+ * Process-global registration for the Founder IDE execution target.
  *
- * Registered so `/api/execution-manager/health` lists Founder IDE / VS Code
- * as a first-class connected target alongside terminal + filesystem.
+ * A remote IDE action must be scoped to an authenticated founder and the
+ * exact paired computer that advertised the selected session. That context
+ * is available only through IdeBridgeService's durable queue, not through
+ * this global adapter contract. The adapter therefore remains visibly
+ * disconnected and fails closed instead of executing on the API host.
  */
 @Injectable()
 export class FounderIdeAdapter implements ExecutionAdapter {
   readonly target = 'vscode' as const;
   private readonly logger = new Logger(FounderIdeAdapter.name);
-  private connected = false;
-
-  constructor(
-    @Optional() private readonly shell?: LocalShellAdapter,
-    @Optional() private readonly filesystem?: FilesystemAdapter,
-  ) {}
 
   async connect(): Promise<void> {
-    this.connected = Boolean(this.shell || this.filesystem);
-    if (this.connected) {
-      this.logger.log(
-        'FounderIdeAdapter using local shell/filesystem path (IDE IPC pending).',
-      );
-    }
+    this.logger.log(
+      'Founder IDE remote execution uses the authenticated user-scoped IDE bridge.',
+    );
   }
 
   async disconnect(): Promise<void> {
-    this.connected = false;
+    // Stateless. The user-scoped relay owns its own lifecycle.
   }
 
   isConnected(): boolean {
-    return this.connected;
+    return false;
   }
 
-  async readWorkspace(path?: string): Promise<WorkspaceNode[]> {
-    if (this.filesystem) return this.filesystem.readWorkspace(path);
-    if (this.shell) return this.shell.readWorkspace(path);
+  async readWorkspace(_path?: string): Promise<WorkspaceNode[]> {
+    this.refuseProcessGlobalDispatch();
     return [];
   }
 
   async applyEdits(edits: FileEdit[]): Promise<EditOutcome[]> {
-    if (this.filesystem) return this.filesystem.applyEdits(edits);
-    if (this.shell) return this.shell.applyEdits(edits);
-    return edits.map((e) => ({
-      path: e.path,
+    this.refuseProcessGlobalDispatch();
+    return edits.map((edit) => ({
+      path: edit.path,
       ok: false,
-      error: 'FounderIdeAdapter has no filesystem delegate',
+      error: 'user_scoped_ide_bridge_required',
     }));
   }
 
-  async runCommand(command: string, opts?: RunCommandOpts): Promise<CommandResult> {
-    if (this.shell) return this.shell.runCommand(command, opts);
+  async runCommand(
+    command: string,
+    _opts?: RunCommandOpts,
+  ): Promise<CommandResult> {
+    this.refuseProcessGlobalDispatch();
     return {
       command,
       exitCode: 126,
       stdout: '',
-      stderr: 'FounderIdeAdapter has no shell delegate',
+      stderr: 'user_scoped_ide_bridge_required',
       durationMs: 0,
     };
+  }
+
+  private refuseProcessGlobalDispatch(): void {
+    this.logger.warn(
+      'Refused process-global Founder IDE action; use the authenticated user-scoped IDE bridge.',
+    );
   }
 }

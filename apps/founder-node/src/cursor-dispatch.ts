@@ -17,6 +17,7 @@ import { throwIfFounderNodeAuthResponse } from './sync-client';
 import type { IdeIpcClient } from './ide-ipc-client';
 import {
   buildFounderIdeMessage,
+  isDispatchForNode,
   isFounderIdeProvider,
   type PendingDispatch,
 } from './founder-ide-dispatch-protocol';
@@ -968,6 +969,12 @@ export async function processPendingDispatches(
     let processed = 0;
     for (const candidate of dispatches) {
       if (processed >= MAX_DISPATCHES_PER_CYCLE) break;
+      if (!isDispatchForNode(candidate, config.nodeId)) {
+        console.warn(
+          `Refusing dispatch ${candidate.id} without an exact Founder Node match.`,
+        );
+        continue;
+      }
       if (
         isFounderIdeProvider(candidate.ideProvider) &&
         !founderIdeClient?.isHandshakeActive()

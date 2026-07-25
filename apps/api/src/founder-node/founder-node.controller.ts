@@ -468,15 +468,16 @@ export class FounderNodeController {
   }
 
   /**
-   * Founder Node polls this on each sync cycle to pick up prompts the user
-   * typed into the Founder OS sidebar while a Cursor chat session was
-   * selected. Each returned dispatch should be opened in the local Cursor
-   * IDE and then reported via /dispatch/:id/complete.
+   * Founder Node polls this on each sync cycle. Results are restricted to
+   * the exact authenticated node that advertised the selected IDE session.
    */
   @UseGuards(FounderNodeGuard)
   @Get('pending-dispatches')
   pendingDispatches(@Req() req: { founderNode: FounderNodeRequestUser }) {
-    return this.ideBridge.getPendingDispatches(req.founderNode.userId);
+    return this.ideBridge.getPendingDispatches(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
   }
 
   /** Claim one pending dispatch before executing — prevents double paste races. */
@@ -486,13 +487,17 @@ export class FounderNodeController {
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('id') id: string,
   ) {
-    return this.ideBridge.claimDispatch(req.founderNode.userId, id);
+    return this.ideBridge.claimDispatch(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+      id,
+    );
   }
 
   /**
-   * Founder Node calls this after it has typed the prompt into Cursor (or
-   * given up). Atomically flips the dispatch row PENDING → DISPATCHED and
-   * records a short result string.
+   * Founder Node calls this after the local IDE returns a result (or the
+   * explicit Cursor compatibility path finishes). Completion is accepted
+   * only from the node that atomically claimed the dispatch.
    */
   @UseGuards(FounderNodeGuard)
   @Post('dispatch/:id/complete')
@@ -501,7 +506,18 @@ export class FounderNodeController {
     @Param('id') id: string,
     @Body() body: { result?: string; error?: string },
   ) {
-    const result = body.error ? `error: ${body.error}` : body.result;
-    return this.ideBridge.markDispatched(id, result);
+    const error =
+      typeof body?.error === 'string' ? body.error.trim() : '';
+    const result =
+      typeof body?.result === 'string' ? body.result : undefined;
+    if (!error && !result) {
+      throw new BadRequestException('Dispatch result or error required');
+    }
+    return this.ideBridge.markDispatched(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+      id,
+      error ? `error: ${error}` : result,
+    );
   }
 }

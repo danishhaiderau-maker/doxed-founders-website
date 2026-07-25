@@ -327,6 +327,70 @@ export class DesktopBridgeService {
     )[0];
   }
 
+  /**
+   * Resolve the paired computer that most recently reported a session.
+   *
+   * Dispatch ownership must be derived from the authenticated heartbeat
+   * snapshot, never from a node id supplied by the browser. A founder can
+   * pair several computers, and account-level scoping alone would let the
+   * first polling node claim work intended for another device.
+   */
+  async findSessionOwnerNodeId(
+    userId: string,
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const normalized = decodeURIComponent(sessionId).trim();
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const graph = settings?.memoryGraph;
+    if (!graph || typeof graph !== 'object' || Array.isArray(graph)) {
+      return undefined;
+    }
+    const byNode = (graph as Record<string, unknown>)[SESSIONS_KEY];
+    if (!byNode || typeof byNode !== 'object' || Array.isArray(byNode)) {
+      return undefined;
+    }
+
+    let best:
+      | {
+          nodeId: string;
+          messageCount: number;
+          lastActiveAt: number;
+        }
+      | undefined;
+    for (const [nodeId, nodeSessions] of Object.entries(
+      byNode as Record<string, BridgeSession[]>,
+    )) {
+      if (!nodeId || !Array.isArray(nodeSessions)) continue;
+      for (const session of nodeSessions) {
+        if (
+          session.id !== normalized &&
+          session.composerId !== normalized &&
+          session.id !== sessionId &&
+          session.composerId !== sessionId
+        ) {
+          continue;
+        }
+        const candidate = {
+          nodeId,
+          messageCount: session.messages?.length ?? 0,
+          lastActiveAt: Date.parse(session.lastActiveAt) || 0,
+        };
+        if (
+          !best ||
+          candidate.lastActiveAt > best.lastActiveAt ||
+          (candidate.lastActiveAt === best.lastActiveAt &&
+            candidate.messageCount > best.messageCount)
+        ) {
+          best = candidate;
+        }
+      }
+    }
+    return best?.nodeId;
+  }
+
   private sanitizeSessions(input: unknown): BridgeSession[] {
     if (!Array.isArray(input)) return [];
     const out: BridgeSession[] = [];

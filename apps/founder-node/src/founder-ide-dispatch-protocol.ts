@@ -5,6 +5,7 @@ import {
 
 export type PendingDispatch = {
   id: string;
+  nodeId?: string | null;
   sessionId: string;
   prompt: string;
   ideProvider: string;
@@ -12,6 +13,13 @@ export type PendingDispatch = {
 
 export function isFounderIdeProvider(provider: string): boolean {
   return ['founder-ide', 'founder_ide', 'void', 'vscode'].includes(provider.toLowerCase());
+}
+
+export function isDispatchForNode(
+  dispatch: PendingDispatch,
+  nodeId: string,
+): boolean {
+  return dispatch.nodeId === nodeId;
 }
 
 function ipcEnvelope() {

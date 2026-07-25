@@ -33,8 +33,9 @@ class Bootstrapper {
  * Execution Manager module — kernel service #4.
  *
  * Wires the service + the read-only controller, then on init registers
- * the adapters Phase 3 ships with (terminal, filesystem, cursor + Founder IDE
- * with local-shell fallback). Later phases add more adapters here without
+ * the adapters Phase 3 ships with (terminal, filesystem, cursor + Founder IDE).
+ * Founder IDE remote work is handled by the user-scoped IDE bridge; the
+ * process-global adapter stays fail-closed. Later phases add more adapters here without
  * touching the service — the registry is the seam.
  *
  * No Prisma / no application-code imports: this module is stateless.
@@ -47,8 +48,8 @@ class Bootstrapper {
     ExecutionManagerService,
     // Adapters are injectable so Nest manages their lifecycle. The
     // bootstrapper below pulls them out of the DI container to register.
-    // LocalShell + Filesystem must be constructed before Cursor / FounderIde
-    // so those adapters can inject them as local delegates.
+    // LocalShell + Filesystem are API-host tools. They are never injected into
+    // the Founder IDE adapter, which must not impersonate a paired computer.
     LocalShellAdapter,
     FilesystemAdapter,
     CursorAdapter,

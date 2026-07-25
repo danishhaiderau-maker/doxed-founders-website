@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildFounderIdeMessage,
+  isDispatchForNode,
   isFounderIdeProvider,
   type PendingDispatch,
 } from '../src/founder-ide-dispatch-protocol';
@@ -9,6 +10,7 @@ import {
 function dispatch(prompt: string): PendingDispatch {
   return {
     id: 'dispatch-123',
+    nodeId: 'node-abc',
     sessionId: 'founder-ide:node-abc',
     prompt,
     ideProvider: 'founder-ide',
@@ -59,5 +61,15 @@ describe('Founder IDE relay protocol', () => {
     assert.equal(isFounderIdeProvider('founder-ide'), true);
     assert.equal(isFounderIdeProvider('vscode'), true);
     assert.equal(isFounderIdeProvider('cursor'), false);
+  });
+
+  it('refuses unbound and cross-computer dispatches', () => {
+    const exact = dispatch('hello');
+    assert.equal(isDispatchForNode(exact, 'node-abc'), true);
+    assert.equal(isDispatchForNode(exact, 'node-other'), false);
+    assert.equal(
+      isDispatchForNode({ ...exact, nodeId: null }, 'node-abc'),
+      false,
+    );
   });
 });

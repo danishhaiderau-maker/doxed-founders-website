@@ -19,18 +19,30 @@ import { ConnectedWorkspaceService } from '../connected-workspace/connected-work
 
 export type PendingIdeDispatchRow = {
   id: string;
+  nodeId: string | null;
   sessionId: string;
   prompt: string;
   ideProvider: string;
 };
 
 const DISPATCH_DEDUPE_MS = 60_000;
+const MAX_DISPATCH_RESULT_CHARS = 32_000;
 const DISPATCH_ATTACH_RE =
   /<!--founder-attach:image:[\s\S]*?-->/g;
+const FOUNDER_IDE_PROVIDERS = new Set([
+  'founder-ide',
+  'founder_ide',
+  'void',
+  'vscode',
+]);
 
 /** Strip attachment blocks for duplicate detection — user-visible text only. */
 function normalizeDispatchPromptForDedupe(prompt: string): string {
   return prompt.replace(DISPATCH_ATTACH_RE, '').replace(/\s+/g, ' ').trim();
+}
+
+function isFounderIdeProvider(provider: string): boolean {
+  return FOUNDER_IDE_PROVIDERS.has(provider.trim().toLowerCase());
 }
 
 export type RecentAgentMessage = {
@@ -418,13 +430,29 @@ export class IdeBridgeService {
   ) {
     const trimmed = prompt?.trim();
     if (!trimmed) throw new Error('Prompt required');
-    const attributed = withFounderOsDispatchAttribution(trimmed);
+    const targetNodeId = await this.desktopBridge.findSessionOwnerNodeId(
+      userId,
+      sessionId,
+    );
+    if (!targetNodeId) {
+      throw new NotFoundException(
+        'IDE session is not available on a paired Founder Node',
+      );
+    }
+    const normalizedProvider = ideProvider?.trim() || 'cursor';
+    // Founder IDE consumes structured JSON actions. Cursor needs the visible
+    // attribution prefix, but applying it to JSON turns edits/commands into
+    // plain chat prompts at the local IPC boundary.
+    const attributed = isFounderIdeProvider(normalizedProvider)
+      ? trimmed
+      : withFounderOsDispatchAttribution(trimmed);
     const dedupeKey = normalizeDispatchPromptForDedupe(attributed);
 
     // One row per user action — ignore duplicate POSTs within 60s (normalized text).
     const recent = (await this.dispatchModel.findMany({
       where: {
         userId,
+        nodeId: targetNodeId,
         sessionId,
         OR: [
           {
@@ -451,40 +479,62 @@ export class IdeBridgeService {
     return this.dispatchModel.create({
       data: {
         userId,
+        nodeId: targetNodeId,
         sessionId,
         prompt: attributed,
-        ideProvider: ideProvider || 'cursor',
+        ideProvider: normalizedProvider,
         status: 'PENDING',
       },
     });
   }
 
   /**
-   * Return up to `take` PENDING dispatches for a user, oldest first.
-   * Called by Founder Node on each sync cycle.
+   * Return up to `take` PENDING dispatches for one authenticated node,
+   * oldest first. Called by Founder Node on each sync cycle.
    */
-  async getPendingDispatches(userId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
+  async getPendingDispatches(
+    userId: string,
+    nodeId: string,
+    take = 10,
+  ): Promise<PendingIdeDispatchRow[]> {
     return this.dispatchModel.findMany({
-      where: { userId, status: 'PENDING' },
+      where: { userId, nodeId, status: 'PENDING' },
       orderBy: { createdAt: 'asc' },
       take,
-      select: { id: true, sessionId: true, prompt: true, ideProvider: true },
+      select: {
+        id: true,
+        nodeId: true,
+        sessionId: true,
+        prompt: true,
+        ideProvider: true,
+      },
     });
   }
 
   /**
    * Atomically claim a dispatch for execution. Flips PENDING → DISPATCHING
-   * only when the row is still pending for this user (compare-and-swap).
+   * only when the row is still pending for this user and node
+   * (compare-and-swap).
    */
-  async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
+  async claimDispatch(
+    userId: string,
+    nodeId: string,
+    dispatchId: string,
+  ): Promise<PendingIdeDispatchRow | null> {
     const existing = await this.dispatchModel.findFirst({
-      where: { id: dispatchId, userId, status: 'PENDING' },
-      select: { id: true, sessionId: true, prompt: true, ideProvider: true },
+      where: { id: dispatchId, userId, nodeId, status: 'PENDING' },
+      select: {
+        id: true,
+        nodeId: true,
+        sessionId: true,
+        prompt: true,
+        ideProvider: true,
+      },
     });
     if (!existing) return null;
     const claimed = await this.dispatchModel.updateMany({
-      where: { id: dispatchId, userId, status: 'PENDING' },
-      data: { status: 'DISPATCHING' },
+      where: { id: dispatchId, userId, nodeId, status: 'PENDING' },
+      data: { status: 'DISPATCHING', claimedByNodeId: nodeId },
     });
     if (claimed.count === 0) return null;
 
@@ -493,6 +543,7 @@ export class IdeBridgeService {
     const siblings = (await this.dispatchModel.findMany({
       where: {
         userId,
+        nodeId,
         sessionId: existing.sessionId,
         status: 'PENDING',
       },
@@ -507,7 +558,12 @@ export class IdeBridgeService {
       .map((row) => row.id);
     if (supersededIds.length > 0) {
       await this.dispatchModel.updateMany({
-        where: { id: { in: supersededIds }, userId, status: 'PENDING' },
+        where: {
+          id: { in: supersededIds },
+          userId,
+          nodeId,
+          status: 'PENDING',
+        },
         data: {
           status: 'DISPATCHED',
           dispatchedAt: new Date(),
@@ -519,15 +575,33 @@ export class IdeBridgeService {
     return existing;
   }
 
-  async markDispatched(id: string, result?: string): Promise<void> {
-    await this.dispatchModel.updateMany({
-      where: { id, status: { in: ['PENDING', 'DISPATCHING'] } },
+  async markDispatched(
+    userId: string,
+    nodeId: string,
+    id: string,
+    result?: string,
+  ): Promise<void> {
+    const completed = await this.dispatchModel.updateMany({
+      where: {
+        id,
+        userId,
+        nodeId,
+        claimedByNodeId: nodeId,
+        status: 'DISPATCHING',
+      },
       data: {
         status: 'DISPATCHED',
         dispatchedAt: new Date(),
-        ...(result ? { result: result.slice(0, 4000) } : {}),
+        ...(result
+          ? { result: result.slice(0, MAX_DISPATCH_RESULT_CHARS) }
+          : {}),
       },
     });
+    if (completed.count === 0) {
+      throw new NotFoundException(
+        'Dispatch is not claimed by this Founder Node',
+      );
+    }
   }
 
   /** Poll delivery outcome for a dispatch the web UI just created. */
@@ -552,11 +626,28 @@ export class IdeBridgeService {
     } | null;
     if (!row) throw new NotFoundException('Dispatch not found');
     const resultText = row.result ?? '';
-    const delivered = row.status === 'DISPATCHED' && /^dispatched\s*\(/i.test(resultText);
+    let structuredResult: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(resultText) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        structuredResult = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Cursor dispatches intentionally use a short human-readable result.
+    }
+    const structuredFailure =
+      Boolean(structuredResult?.error) ||
+      (structuredResult?.kind === 'chat' &&
+        structuredResult.delivered === false);
+    const delivered =
+      row.status === 'DISPATCHED' &&
+      (/^dispatched\s*\(/i.test(resultText) ||
+        (Boolean(structuredResult) && !structuredFailure));
     const failed =
       row.status === 'DISPATCHED' &&
       !delivered &&
-      (/^error:/i.test(resultText) ||
+      (structuredFailure ||
+        /^error:/i.test(resultText) ||
         /Command failed|SendKeys.*failed|paste failed|refusing SendKeys|Could not focus/i.test(
           resultText,
         ));
