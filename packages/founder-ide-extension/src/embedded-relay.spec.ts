@@ -28,14 +28,14 @@ describe('embedded Founder relay', () => {
     );
   });
 
-  it('does not launch when the current IDE build has no bundled relay', () => {
-    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+  it('does not launch when the current IDE build has no bundled relay', async () => {
+    const result = await launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
       existsSync: () => false,
     });
     assert.equal(result.state, 'not-bundled');
   });
 
-  it('starts the bundled relay hidden in embedded mode', () => {
+  it('starts the bundled relay hidden in embedded mode', async () => {
     let captured:
       | {
           executable: string;
@@ -48,7 +48,7 @@ describe('embedded Founder relay', () => {
       unref() {},
     } as ChildProcess;
 
-    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+    const result = await launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
       environment: { ELECTRON_RUN_AS_NODE: '1' },
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
@@ -68,14 +68,14 @@ describe('embedded Founder relay', () => {
     assert.equal(captured?.options?.env?.ELECTRON_RUN_AS_NODE, undefined);
   });
 
-  it('replaces a legacy standalone lock instead of treating it as embedded', () => {
+  it('replaces a legacy standalone lock instead of treating it as embedded', async () => {
     let spawned = false;
     const fakeChild = {
       pid: 4243,
       unref() {},
     } as ChildProcess;
 
-    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+    const result = await launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
       isProcessAlive: () => true,
@@ -96,12 +96,12 @@ describe('embedded Founder relay', () => {
     assert.equal(spawned, true);
   });
 
-  it('replaces an embedded lock when Windows reused the pid for another process', () => {
+  it('replaces an embedded lock when Windows reused the pid for another process', async () => {
     let spawned = false;
     const executable = 'C:\\Founder IDE\\resources\\founder-relay\\Founder Node.exe';
     const fakeChild = { pid: 4244, unref() {} } as ChildProcess;
 
-    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+    const result = await launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
       isProcessAlive: () => true,
@@ -117,9 +117,9 @@ describe('embedded Founder relay', () => {
     assert.equal(spawned, true);
   });
 
-  it('keeps the running embedded relay when pid and executable both match', () => {
+  it('keeps the running embedded relay when pid and executable both match', async () => {
     const executable = 'C:\\Founder IDE\\resources\\founder-relay\\Founder Node.exe';
-    const result = launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
+    const result = await launchEmbeddedRelay('C:\\Founder IDE\\resources\\app', 'win32', {
       existsSync: () => true,
       homedir: () => 'C:\\Users\\founder',
       isProcessAlive: () => true,

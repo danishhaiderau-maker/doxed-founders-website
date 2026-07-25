@@ -551,18 +551,24 @@ function startEmbeddedRelay(): void {
 
   try {
     ensureInstallIdentity();
-    const relay = launchEmbeddedRelay(
-      vscode.env.appRoot,
-      process.platform,
-      relayRuntime,
-    );
-    logRelayStartup(`state=${relay.state} pid=${relay.pid ?? 'none'}`);
-    console.log(`Founder IDE relay: ${relay.state}`);
   } catch (error) {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     logRelayStartup(`error=${message}`);
-    console.warn('Founder IDE relay failed to start:', error);
+    console.warn('Founder IDE relay identity check failed:', error);
+    return;
   }
+  void launchEmbeddedRelay(
+    vscode.env.appRoot,
+    process.platform,
+    relayRuntime,
+  ).then((relay) => {
+    logRelayStartup(`state=${relay.state} pid=${relay.pid ?? 'none'}`);
+    console.log(`Founder IDE relay: ${relay.state}`);
+  }).catch((error) => {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    logRelayStartup(`error=${message}`);
+    console.warn('Founder IDE relay failed to start:', error);
+  });
 }
 
 export function deactivate(): void {

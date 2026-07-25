@@ -23,7 +23,8 @@
     }
   },
   "activationEvents": [
-    "*"
+    "onView:founderOs.hub",
+    "onStartupFinished"
   ],
   "contributes": {
     "configurationDefaults": {

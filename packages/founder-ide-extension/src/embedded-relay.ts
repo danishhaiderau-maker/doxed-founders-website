@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,7 +24,7 @@ interface EmbeddedRelayDeps {
   processExecutablePath?: (
     pid: number,
     platform: NodeJS.Platform,
-  ) => string | null;
+  ) => Promise<string | null> | string | null;
   readLockFile?: (file: string) => string;
   runtimeExecutable?: string;
   spawnProcess?: (
@@ -77,21 +77,24 @@ function defaultIsProcessAlive(pid: number): boolean {
   }
 }
 
-function defaultProcessExecutablePath(
+async function defaultProcessExecutablePath(
   pid: number,
   platform: NodeJS.Platform,
-): string | null {
+): Promise<string | null> {
   try {
     if (platform === 'win32') {
       const command = `(Get-Process -Id ${pid} -ErrorAction Stop).Path`;
-      return execFileSync(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', command],
-        { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
-      ).trim() || null;
+      return await new Promise<string | null>((resolve) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', command],
+          { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
+          (error, stdout) => resolve(error ? null : stdout.trim() || null),
+        );
+      });
     }
     if (platform === 'linux') {
-      return fs.readlinkSync(`/proc/${pid}/exe`);
+      return await fs.promises.readlink(`/proc/${pid}/exe`);
     }
   } catch {
     return null;
@@ -99,14 +102,17 @@ function defaultProcessExecutablePath(
   return null;
 }
 
-function activeRelayPid(
+async function activeRelayPid(
   vaultRoot: string,
   executable: string,
   platform: NodeJS.Platform,
   isProcessAlive: (pid: number) => boolean,
-  processExecutablePath: (pid: number, platform: NodeJS.Platform) => string | null,
+  processExecutablePath: (
+    pid: number,
+    platform: NodeJS.Platform,
+  ) => Promise<string | null> | string | null,
   readLockFile: (file: string) => string,
-): number | null {
+): Promise<number | null> {
   try {
     const lock = JSON.parse(
       readLockFile(path.join(vaultRoot, '.founder-node.lock')),
@@ -118,7 +124,7 @@ function activeRelayPid(
     };
     if (normalize(lock.exePath) !== normalize(executable)) return null;
     if (!isProcessAlive(lock.pid)) return null;
-    const liveExecutable = processExecutablePath(lock.pid, platform);
+    const liveExecutable = await processExecutablePath(lock.pid, platform);
     if (!liveExecutable || normalize(liveExecutable) !== normalize(executable)) {
       return null;
     }
@@ -128,11 +134,11 @@ function activeRelayPid(
   }
 }
 
-export function launchEmbeddedRelay(
+export async function launchEmbeddedRelay(
   appRoot: string,
   platform: NodeJS.Platform = process.platform,
   deps: EmbeddedRelayDeps = {},
-): EmbeddedRelayLaunchResult {
+): Promise<EmbeddedRelayLaunchResult> {
   const executable = embeddedRelayExecutable(
     appRoot,
     platform,
@@ -148,7 +154,7 @@ export function launchEmbeddedRelay(
   }
 
   const vaultRoot = path.join((deps.homedir ?? os.homedir)(), 'FounderVault');
-  const runningPid = activeRelayPid(
+  const runningPid = await activeRelayPid(
     vaultRoot,
     executable,
     platform,

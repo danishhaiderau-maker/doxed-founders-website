@@ -66,8 +66,8 @@ describe('Founder IDE extension manifest', () => {
     }
     assert.deepEqual(
       manifest.activationEvents,
-      ['*'],
-      'Founder Node and Founder Home must start with the IDE',
+      ['onView:founderOs.hub', 'onStartupFinished'],
+      'Founder Home activates on demand and Founder Node starts after workbench startup',
     );
     assert.deepEqual(manifest.contributes?.authentication, [
       { id: 'founderOs', label: 'Founder' },
