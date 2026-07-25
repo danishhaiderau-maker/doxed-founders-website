@@ -23551,7 +23551,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Positions</h2>
 <table>
-    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th><th>Action</th></tr></thead>
     <tbody id="positionsTable"></tbody>
 </table>
 
@@ -23830,6 +23830,12 @@ DASHBOARD_JS = """(function () {
         alert('Save failed: ' + (e && e.message ? e.message : 'network error'));
         return null;
       }
+    }
+    async function closeShowcasePosition(tradeId) {
+      if (!tradeId) return;
+      if (!confirm('Close showcase paper position ' + tradeId + ' now? This does not close a Bitfinex position.')) return;
+      const res = await post('/api/positions/close', {trade_id: tradeId});
+      if (res && res.ok) await refresh();
     }
     async function updateThreshold(value) {
       await post('/api/set_threshold', {value: parseFloat(value)});
@@ -25087,6 +25093,7 @@ DASHBOARD_JS = """(function () {
             <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
             <td>${l.tp || '-'}</td>
             <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
+            <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
           </tr>
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
@@ -27461,6 +27468,46 @@ def api_resume():
     set_execution_paused("")
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})
+
+
+@app.route('/api/positions/close', methods=['POST'])
+def api_close_showcase_position():
+    """Close one exact showcase paper position through normal accounting."""
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    with state_lock:
+        matches = [
+            pos for pos in open_positions
+            if str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+        ]
+    if not matches:
+        return jsonify({"error": "open showcase position not found", "trade_id": trade_id}), 404
+    if len(matches) != 1:
+        logger.error(
+            "[ADMIN] Refusing ambiguous paper close trade_id=%s matches=%s",
+            trade_id,
+            len(matches),
+        )
+        return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
+    close_position(matches[0], "ADMIN_MANUAL_CLOSE")
+    with state_lock:
+        still_open = any(
+            str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+            for pos in open_positions
+        )
+    if still_open:
+        return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
+    return jsonify({
+        "status": "closed",
+        "trade_id": trade_id,
+        "scope": "showcase_paper_only",
+    })
+
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
