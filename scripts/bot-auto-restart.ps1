@@ -244,15 +244,18 @@ try {
 
         # Process existence alone is not health. A Python startup once remained
         # alive for minutes without binding :7002, so the old monitor watched a
-        # dead dashboard forever. After a 45s boot grace, three consecutive
-        # failed 10s liveness checks force a supervised restart.
+        # dead dashboard forever. Importing the full research engine can also
+        # legitimately take several minutes on the home PC (especially after a
+        # reboot or Defender scan) while the early boot server is intermittently
+        # unable to acquire the Python GIL. Give that bounded startup phase 15
+        # minutes, then require six consecutive failed probes before recycling.
         $livenessNow = Get-Date
         $forcedLivenessRestart = $false
         if (($livenessNow - $lastLivenessCheck).TotalSeconds -ge 10) {
           $lastLivenessCheck = $livenessNow
           if (Test-BotPingQuick) {
             $consecutiveLivenessFailures = 0
-          } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 45) {
+          } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 900) {
             $consecutiveLivenessFailures++
             Write-RestartLog "liveness_failed	pid=$currentPid	count=$consecutiveLivenessFailures"
             if ($consecutiveLivenessFailures -ge 6) {
