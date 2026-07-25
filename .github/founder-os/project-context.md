@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): separate showcase and personal session status (#45)
+Merge pull request #46 from danishhaiderau-maker/codex/bitfinex-e2e-stability
 
 ## Last Activity
 
