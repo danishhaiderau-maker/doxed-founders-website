@@ -11,9 +11,10 @@ import {
 
 test('Founder OS aliases force their advertised routing intent', () => {
   assert.equal(forcedIntentForAlias('founder-os-fast'), 'simple_qa');
+  assert.equal(forcedIntentForAlias('founder-os-auto'), 'simple_qa');
   assert.equal(forcedIntentForAlias('founder-os-reasoning'), 'reasoning');
   assert.equal(forcedIntentForAlias('founder-os-code'), 'code');
-  assert.equal(forcedIntentForAlias('founder-os-auto'), null);
+  assert.equal(forcedIntentForAlias('deepseek-v4-flash'), null);
 });
 
 test('unsupported cached providers fail over to a supported DeepSeek model', () => {
@@ -30,6 +31,19 @@ test('unsupported cached providers fail over to a supported DeepSeek model', () 
 });
 
 test('Founder aliases enforce the proven DeepSeek adapter', () => {
+  assert.deepEqual(
+    normalizeFounderAliasRoute(
+      'founder-os-auto',
+      'deepseek',
+      DEEPSEEK_V4_PRO_MODEL,
+      'fast',
+    ),
+    {
+      providerKey: 'deepseek',
+      model: DEEPSEEK_V4_FLASH_MODEL,
+      wasUnsupported: false,
+    },
+  );
   assert.deepEqual(
     normalizeFounderAliasRoute('founder-os-code', 'glm', 'glm-5.2', 'code'),
     {

@@ -95,15 +95,28 @@ test('reasoning and code aliases route with forced intent and v4 pro', async () 
   }
 });
 
-test('founder-os-auto preserves inferred intent while normalizing stale model', async () => {
+test('founder-os-auto defaults routine requests to fast/flash', async () => {
   const { runtime, calls } = runtimeWithDecision('deepseek-reasoner');
   const route = await runtime.decideRoute(auth, {
     model: 'founder-os-auto',
     messages,
   });
-  assert.equal(calls[0]?.intent, 'reasoning');
-  assert.equal(route.intent, 'reasoning');
-  assert.equal(route.model, 'deepseek-v4-pro');
+  assert.equal(calls[0]?.intent, 'simple_qa');
+  assert.equal(route.intent, 'simple_qa');
+  assert.equal(route.tier, 'fast');
+  assert.equal(route.model, 'deepseek-v4-flash');
+});
+
+test('founder-os-auto stays fast/flash when v2 falls back to the legacy router', async () => {
+  const runtime = runtimeWithV2Failure();
+  const route = await runtime.decideRoute(auth, {
+    model: 'founder-os-auto',
+    messages,
+  });
+  assert.equal(route.intent, 'simple_qa');
+  assert.equal(route.tier, 'fast');
+  assert.equal(route.providerKey, 'deepseek');
+  assert.equal(route.model, 'deepseek-v4-flash');
 });
 
 test('founder-os-fast stays fast/flash when v2 falls back to the legacy router', async () => {

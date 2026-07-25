@@ -16,7 +16,9 @@ export type SupportedProxyProvider = 'glm' | 'deepseek';
 export function forcedIntentForAlias(alias: string): ForcedAliasIntent | null {
   if (alias === 'founder-os-code') return 'code';
   if (alias === 'founder-os-reasoning') return 'reasoning';
-  if (alias === 'founder-os-fast') return 'simple_qa';
+  if (alias === 'founder-os-fast' || alias === 'founder-os-auto') {
+    return 'simple_qa';
+  }
   return null;
 }
 

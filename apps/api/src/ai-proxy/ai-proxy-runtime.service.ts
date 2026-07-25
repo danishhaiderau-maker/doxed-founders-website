@@ -117,8 +117,10 @@ export class AiProxyRuntimeService {
   ): Promise<ResolvedRoute> {
     const requestedAlias = body.model ?? FOUNDER_OS_AUTO_MODEL;
 
-    // Map alias → intent hint. The router does the real classification, but
-    // the alias lets the founder force a tier from the IDE.
+    // The public aliases are a predictable cost contract. Auto/Fast stay on
+    // Flash; only explicit Reasoning/Code requests may use Pro. We still run
+    // classification for observability and non-Founder aliases, but it cannot
+    // silently upgrade a routine Founder Auto request.
     const forcedIntent = forcedIntentForAlias(requestedAlias);
 
     const lastUserMessage = [...(body.messages ?? [])]
