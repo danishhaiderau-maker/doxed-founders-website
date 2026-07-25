@@ -188,7 +188,9 @@ $expectedFounderComposer = @(
     "Founder work mode: Plan",
     "Founder work mode: Build",
     "Founder work mode: Debug",
-    "Founder work mode: Team"
+    "Founder work mode: Team",
+    "founder.coordinated-build",
+    "Founder skill"
 )
 $staleFounderComposer = @(
     "label:`"Verify`"",
@@ -200,7 +202,7 @@ if ($expectedFounderComposer.Where({ -not $founderPayloadText.Contains($_) }).Co
     $staleFounderComposer.Where({ $workbenchText.Contains($_) }).Count -gt 0) {
     throw "Founder IDE payload is stale or incomplete. Rebuild the React and Electron bundles before packaging."
 }
-Write-Host "[stack]   Founder work modes, Second brain, and voice composer payload verified"
+Write-Host "[stack]   Founder work modes, workflow Skills, Second brain, and voice composer payload verified"
 
 # Search and the context index use VS Code's pinned ripgrep executable. A
 # cached dependency install can retain the package while omitting its
