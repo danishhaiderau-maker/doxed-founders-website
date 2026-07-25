@@ -127,6 +127,17 @@ installer hashes, soak log.
   symbols, and invalidation conditions; never reuse an unverified answer.
 - [x] Add a founder-controlled daily project brief covering completed work,
   blockers, decisions, usage, savings, and suggested next actions.
+- [ ] Expose a local Code Intelligence service from Founder Node for Founder
+  IDE and other explicitly connected clients. V1 must incrementally hash files,
+  index symbols, imports, and reverse dependencies, produce a compact
+  active-file-seeded repository map, and return bounded
+  `(file, startLine, endLine, score, reason)` evidence rather than whole files.
+  A vector store is optional until a benchmark proves it improves this
+  deterministic graph-first path.
+- [ ] Prove changed-file invalidation, branch/worktree isolation, ignored and
+  secret-file exclusion, bounded MCP output, cold-start recovery, and useful
+  retrieval on representative repositories before advertising token savings
+  from Code Intelligence.
 
 Evidence: graph tests, cold-start benchmark, provenance examples, secret-scan
 result.
@@ -242,6 +253,23 @@ admin and user usage screenshots.
 - [x] Bridge Founder Settings into the native chat picker and direct-provider
   runtime so the settings gear has one Founder-owned destination and changing
   a route is not a cosmetic selection.
+- [ ] Complete the existing screenshot attachment path end to end. Paste,
+  browse, and drag/drop must work in Ask, Plan, Build, Debug, and Team; each
+  image receives one bounded vision/OCR pass and the text-only working model
+  receives a structured, explicitly untrusted description of layout, visible
+  text, annotations, and likely intent rather than raw image bytes.
+- [ ] Implement the authenticated `/api/v1/images/descriptions` boundary used
+  by the installed composer, enforce the existing type/count/byte limits, cap
+  each structured description at 2,000 tokens, preserve attachments and typed
+  text on failure, and show a clear fail-closed message when no permitted
+  vision route is available.
+- [ ] Support a founder-selected Personal AI vision profile and a compatible
+  local Ollama multimodal profile for the privacy path. Managed vision, if
+  enabled, uses its own probed model, entitlement, reservation, and truthful
+  receipt; it never silently changes the Founder Auto text route.
+- [ ] Prove annotation-aware evidence with screenshots containing circles,
+  arrows, and labels. The vision result must identify the marked region and
+  OCR text without treating model inference as verified source truth.
 - [x] Permit HTTP only for localhost and private-network endpoints; remote
   Personal AI requires HTTPS, protected headers cannot be overridden, and
   keys are redacted from logs and visible route receipts.
@@ -303,6 +331,18 @@ screenshots, quota tests, native final-response screenshots.
   than displaying an arbitrary agent count; default Focus remains one agent.
 - [x] Show overlap, waiting, blocked, verification, and merge decisions in a
   founder-readable activity timeline and graph.
+- [ ] Upgrade the shared AgentBus contract from prompt handoffs to a durable
+  dependency graph with typed `dependsOn`, `supersedes`, `replyTo`, owned
+  `scope` globs, artifact references, token/time budgets, attempt and stall
+  counters, capability routing, and versioned evidence. Large handoffs live in
+  bounded disk/database artifacts rather than chat messages.
+- [ ] Make AgentBus v2 event-sourced and idempotent, reject cycles and stale
+  completions, route overlapping scopes through the existing lease/fencing
+  boundary, and feed CI/review/test failures back to the owning task without
+  creating another editing owner.
+- [ ] Prove replay, dependency release, supersession, overlap, stale fencing,
+  bounded retry/stall escalation, independent-scope concurrency, and verified
+  merge behavior across multiple chats.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
 merge receipt, multi-agent task graph screenshots.
@@ -508,6 +548,19 @@ gates.
 - [ ] Enforce verify-then-show: tests, typecheck, build, visual check, and
   evidence receipt before an agent declares completion.
 - [ ] Add a cheap independent self-critique pass against the original goal.
+- [ ] Treat visual verify-then-show as a first-class gate for user-facing UI
+  work. Capture the changed state, combine a redacted screenshot with the
+  original goal, affected UI contract, diff summary, and deterministic
+  DOM/console/network evidence, then ask a read-only independent vision
+  reviewer for a structured verdict, defects, risks, and evidence references.
+- [ ] Run deterministic visual checks for every UI change and use local vision
+  first when configured. A founder-selected Personal AI vision model may be
+  used with consent; if no permitted vision route exists, never label the
+  result visually verified and require an explicit human visual sign-off.
+- [ ] Bound and redact visual review inputs and outputs, exclude secrets and
+  unrelated windows, honor reduced motion, and record the reviewer route,
+  latency, budget domain, verdict, and unresolved dissent without allowing the
+  reviewer to edit files.
 - [ ] Auto-repair failed QA; use scoped rollback only when the agent owns the
   entire change and can prove it will not remove founder work.
 - [x] Run API, web, Founder Node, extension, overlay, installer, updater, IPC,
@@ -522,6 +575,10 @@ gates.
   later owned Stage 11 changes require one final refresh.
 - [ ] Rebuild the installer after the final owned changes, then regenerate and
   validate the canonical release receipt against that exact artifact.
+- [ ] Add an explicit fast-compression installer-QA profile so install,
+  shortcut, upgrade, and uninstall checks do not pay release-compression cost.
+  Keep `lzma2/ultra64` and deterministic release settings unchanged for the
+  final signed artifact, and label every fast-compression package internal QA.
 - [x] Reject a warm-build payload when its compiled Founder action toolbar is
   older than the reviewed React source; the installer and CI now fail instead
   of silently shipping stale UI.
@@ -556,30 +613,38 @@ gates.
    one Dragon, one labelled navigation hierarchy, and one evidence standard.
    Reject duplicate settings, launch identities, generic prompt-chip clutter,
    and public claims unsupported by measured receipts.
-2. **Finish the core AI loop.** Prove managed Auto/Fast on Flash and explicit
-   Code/Reasoning on Pro; keep any premium expert lane feature-flagged until its
-   probe and benchmark pass; finish installed voice; restore the packaged
-   terminal; keep model, quota, latency, cache, and error receipts truthful.
-3. **Finish reliable work orchestration.** Prove Ask, Plan, Build, Debug, and
-   Team; require the project and decision graph, stable prefix, scoped
-   retrieval, ownership leases, verified memory, and 10-15 minute cross-chat
-   awareness. Team uses useful specialists, never an arbitrary swarm count.
-4. **Finish independent review.** Complete the bounded reviewer context pack,
+2. **Finish the core AI and input loop.** Prove managed Auto/Fast on Flash and
+   explicit Code/Reasoning on Pro; keep any premium expert lane feature-flagged
+   until its probe and benchmark pass; finish installed voice, the bounded
+   screenshot-to-text bridge in all five modes, and the packaged terminal; keep
+   model, quota, latency, cache, vision, and error receipts truthful.
+3. **Finish local context efficiency.** Measure current provider egress through
+   typed, CI-enforced call-site IDs rather than stale static percentages. Ship
+   the minimal graph-first Code Intelligence service in Founder Node with
+   incremental hashes, symbols, imports, reverse dependencies, a compact repo
+   map, bounded evidence tuples, and representative retrieval benchmarks.
+4. **Finish reliable work orchestration.** Prove Ask, Plan, Build, Debug, and
+   Team; upgrade AgentBus to durable dependency, supersession, reply, scope,
+   artifact, budget, and stall contracts; require ownership leases, verified
+   memory, one editing owner, and 10-15 minute cross-chat awareness. Team uses
+   useful specialists, never an arbitrary swarm count.
+5. **Finish independent review.** Complete the bounded reviewer context pack,
    structured Second brain result, evidence-linked reconciliation, dissent
-   receipt, and approval gate. A reviewer can inspect everything relevant but
-   remains read-only.
-5. **Finish the Founder experience.** Ship the installed Apple-inspired shell,
+   receipt, and approval gate. Add visual verify-then-show for user-facing
+   changes, using deterministic checks plus an allowed local or Personal AI
+   vision reviewer; without one, require explicit human visual sign-off.
+6. **Finish the Founder experience.** Ship the installed Apple-inspired shell,
    labelled New chat/Projects/Chats/Agents/Graph/Remote/Connect/Settings
    navigation, progressive disclosure for expert coding tools, persistent
    projects/chats, Graph as a first-class view, and the accepted living
    desktop Dragon.
-6. **Finish secure Remote and website parity.** Prove short-lived pairing,
+7. **Finish secure Remote and website parity.** Prove short-lived pairing,
    account/install binding, 256-bit device secret protection, explicit device
    approval, rate limits, expiry, single consumption, revoke, rename,
    reconnect, pending approvals, and a real web-to-installed-IDE action. Apply
    the same plans, usage, AI, projects, chats, agents, graph, services,
    receipts, settings, and visual language to the website.
-7. **Freeze, package, install, and prove.** Rebuild the exact payload and
+8. **Freeze, package, install, and prove.** Rebuild the exact payload and
    one-app installer, preserve Founder data, remove stale app identities,
    install, and execute the full functional, visual, failure-state, security,
    accessibility, update/rollback/uninstall, and clean-machine matrix. Public
