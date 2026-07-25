@@ -146,14 +146,23 @@ export function buildRelayExecutorHealth(input: {
 }
 
 /**
- * Restart the API only when a stuck executor may have an active live relay.
- * With zero ACTIVE Bitfinex instances, health stays fail-closed and future
- * starts are blocked, but the public API/dashboard must remain available.
+ * Restart a dedicated executor worker whenever its tick is stuck. A timed-out
+ * Promise cannot be cancelled safely, and leaving an isolated worker alive
+ * with zero ACTIVE instances makes it permanently unable to pass the next
+ * guarded start. The shared public API still restarts only when a stuck
+ * executor may have an active live relay so its dashboard remains available.
  * A null count means persistence/query failed, so exposure is unknown and a
  * clean restart remains the safer choice.
  */
-export function relayWatchdogShouldRestart(activeLiveInstanceCount: number | null): boolean {
-  return activeLiveInstanceCount == null || activeLiveInstanceCount > 0;
+export function relayWatchdogShouldRestart(
+  activeLiveInstanceCount: number | null,
+  dedicatedExecutorWorker = false,
+): boolean {
+  return (
+    dedicatedExecutorWorker
+    || activeLiveInstanceCount == null
+    || activeLiveInstanceCount > 0
+  );
 }
 
 /** Watchdog cleanup may cancel an entry only when the exchange reports zero fill. */
@@ -1396,7 +1405,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // A timed-out async operation cannot be cancelled safely in-process. Exit only
       // after durable fail-closed state is attempted so Railway restarts a clean executor
       // without allowing the abandoned Promise to submit a duplicate later.
-      const restartRequired = relayWatchdogShouldRestart(activeLiveInstanceCount);
+      const restartRequired = relayWatchdogShouldRestart(
+        activeLiveInstanceCount,
+        process.env.RELAY_EXECUTOR_WORKER === 'true',
+      );
       if (
         restartRequired &&
         process.env.NODE_ENV !== 'test' &&

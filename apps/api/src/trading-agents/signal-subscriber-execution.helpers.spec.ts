@@ -505,6 +505,12 @@ test('watchdog keeps the API online when no live Bitfinex relay is active', () =
   assert.equal(relayWatchdogShouldRestart(null), true);
 });
 
+test('dedicated relay worker always restarts after a stuck tick', () => {
+  assert.equal(relayWatchdogShouldRestart(0, true), true);
+  assert.equal(relayWatchdogShouldRestart(1, true), true);
+  assert.equal(relayWatchdogShouldRestart(null, true), true);
+});
+
 test('live relay accepts only cycles created after the latest explicit Start', () => {
   const dashboardState = { relayArmedAt: '2026-07-20T01:02:03.000Z' };
   assert.equal(relayArmTimestampMs(dashboardState), Date.parse(dashboardState.relayArmedAt));
