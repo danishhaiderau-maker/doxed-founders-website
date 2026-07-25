@@ -627,8 +627,14 @@ export function AgentPublicProfile({
     }
   }, [slug, relaySimActive, relaySimDeskAvailable]);
 
-  const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
-  const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
+  const resolvedDesk: AgentDeskId =
+    activeDesk === 'relay-sim' && !relaySimDeskAvailable
+      ? 'live'
+      : activeDesk === 'relay-sim' && relaySimDeskAvailable
+        ? 'relay-sim'
+        : activeDesk;
+  const isUserSession = resolvedDesk !== 'showcase' && (viewScope === 'user' || isCopySession || isLiveSession);
+  const isLive = resolvedDesk === 'showcase' && botConnected && !executionPaused && publicStatus === 'online';
   const heroBadge = isLiveSession
     ? instanceStatus === 'PAUSED'
       ? { label: 'Relay off', className: 'bg-red-500/20 text-red-200 ring-1 ring-red-500/40' }
@@ -642,7 +648,15 @@ export function AgentPublicProfile({
       : publicStatus === 'updating'
         ? { label: 'Updating', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
         : { label: 'Offline', className: 'bg-zinc-800 text-zinc-400' };
-  const statusLabel = isLiveSession
+  const statusLabel = resolvedDesk === 'showcase'
+    ? isLive
+      ? 'Admin showcase (observe only)'
+      : publicStatus === 'offline' && !botConnected
+        ? 'Showcase stopped'
+        : executionPaused
+          ? 'Showcase paused'
+          : 'Showcase offline'
+    : isLiveSession
     ? instanceStatus === 'PAUSED'
       ? `Relay stopped · ${exchangeLabel ?? 'Exchange'} protected`
       : relaySimActive
@@ -650,13 +664,7 @@ export function AgentPublicProfile({
         : `Live copy on ${exchangeLabel ?? 'your exchange'}`
     : isCopySession
       ? 'Legacy DDollar paper — connect Bitfinex for real copy'
-    : isLive
-      ? 'Admin showcase (observe only)'
-      : publicStatus === 'offline' && !botConnected
-        ? 'Showcase stopped'
-        : executionPaused
-          ? 'Showcase paused'
-          : 'Showcase offline';
+      : 'Personal session unavailable';
   const statusColor = isUserSession
     ? 'text-violet-300'
     : isLive
@@ -717,13 +725,6 @@ export function AgentPublicProfile({
       );
   const deskActivity =
     activeDesk === 'relay-sim' ? simAct : activeDesk === 'live' ? userAct : showcaseAct;
-
-  const resolvedDesk: AgentDeskId =
-    activeDesk === 'relay-sim' && !relaySimDeskAvailable
-      ? 'live'
-      : activeDesk === 'relay-sim' && relaySimDeskAvailable
-        ? 'relay-sim'
-        : activeDesk;
 
   const deskHeroBadge =
     resolvedDesk === 'showcase'
