@@ -23,6 +23,7 @@
 #   -MonorepoRoot        - path to the Founder OS monorepo (default: detected up from this script)
 #   -VscodiumCheckout    - path to the VSCodium downstream checkout (default: current dir)
 #   -IdePayloadRoot      - optional prebuilt Founder IDE payload for fast local packaging
+#   -FounderNodePayloadRoot - optional prebuilt Founder Node payload for non-destructive QA packaging
 #   -Version             - Founder IDE version (default: 0.1.0)
 #   -SkipExtensionBuild  - skip step 1 (you already built the .vsix)
 #   -SkipIdeBuild        - skip step 2 (you already built Founder IDE)
@@ -36,6 +37,7 @@ param(
     [string]$MonorepoRoot     = "",
     [string]$VscodiumCheckout = (Get-Location).Path,
     [string]$IdePayloadRoot   = "",
+    [string]$FounderNodePayloadRoot = "",
     [string]$Version          = "0.9.4",
     [switch]$SkipExtensionBuild,
     [switch]$SkipIdeBuild,
@@ -442,8 +444,17 @@ Write-Host "[stack]   staged Founder integrity manifest -> $productJsonPatch"
 
 # --- Step 3: build and embed the Founder relay -------------------------------
 $nodeDir = Join-Path $MonorepoRoot "apps\founder-node"
-$relayRoot = Join-Path $nodeDir "release\win-unpacked"
-if (-not $SkipFounderNodeBuild) {
+$relayRoot = if ($FounderNodePayloadRoot) {
+    if (-not (Test-Path $FounderNodePayloadRoot)) {
+        throw "Prebuilt Founder Node payload not found at $FounderNodePayloadRoot"
+    }
+    (Resolve-Path $FounderNodePayloadRoot).Path
+} else {
+    Join-Path $nodeDir "release\win-unpacked"
+}
+if ($FounderNodePayloadRoot) {
+    Write-Host "`n[stack] STEP 3/4 - using verified prebuilt Founder relay payload" -ForegroundColor Cyan
+} elseif (-not $SkipFounderNodeBuild) {
     Write-Host "`n[stack] STEP 3/4 - building and embedding Founder relay" -ForegroundColor Cyan
     if (-not (Test-Path (Join-Path $nodeDir "package.json"))) {
         throw "Founder Node not found at $nodeDir"
@@ -458,6 +469,17 @@ if (-not $SkipFounderNodeBuild) {
         Write-Host "[stack]   npm run build"
         npm run build
         if ($LASTEXITCODE -ne 0) { throw "Founder Node build failed" }
+        Write-Host "[stack]   generating Founder Node application icons"
+        node (Join-Path $MonorepoRoot "scripts\generate-founder-node-icon.mjs")
+        if ($LASTEXITCODE -ne 0) { throw "Founder Node icon generation failed" }
+        $nodeIconPng = Join-Path $nodeDir "build\icon.png"
+        $nodeIconIco = Join-Path $nodeDir "build\icon.ico"
+        if (-not (Test-Path $nodeIconPng) -or (Get-Item $nodeIconPng).Length -lt 4096) {
+            throw "Founder Node PNG icon is missing or unexpectedly small: $nodeIconPng"
+        }
+        if (-not (Test-Path $nodeIconIco) -or (Get-Item $nodeIconIco).Length -lt 1000) {
+            throw "Founder Node ICO icon is missing or unexpectedly small: $nodeIconIco"
+        }
         # Disable electron-builder's auto-discovery so it doesn't try to sign
         # with a cert that isn't present in CI. Signing is done by a later
         # dedicated step (Azure Trusted Signing) on the outer bundle.
@@ -479,6 +501,14 @@ if (-not $SkipFounderNodeBuild) {
 
 if (-not (Test-Path (Join-Path $relayRoot "Founder Node.exe"))) {
     throw "Founder relay payload not found at $relayRoot"
+}
+$relayAsar = Join-Path $relayRoot "resources\app.asar"
+$relayIcon = Join-Path $relayRoot "resources\icon.png"
+if (-not (Test-Path $relayAsar) -or (Get-Item $relayAsar).Length -lt 1000000) {
+    throw "Founder relay application archive is missing or unexpectedly small: $relayAsar"
+}
+if (-not (Test-Path $relayIcon) -or (Get-Item $relayIcon).Length -lt 4096) {
+    throw "Founder relay packaged icon is missing or unexpectedly small: $relayIcon"
 }
 $embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-founder-relay.ps1"
 & $embedScript -IdeRoot $ideRoot -RelayRoot $relayRoot

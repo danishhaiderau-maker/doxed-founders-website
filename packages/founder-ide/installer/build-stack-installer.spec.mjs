@@ -22,6 +22,27 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.ok(packageInner > embed);
   });
 
+  it('generates and verifies Founder Node icons before Electron packaging', () => {
+    const generateIcon = source.indexOf('generate-founder-node-icon.mjs');
+    const packageRelay = source.indexOf('npx electron-builder --win --x64 --dir');
+    assert.ok(generateIcon >= 0);
+    assert.ok(packageRelay > generateIcon);
+    assert.match(source, /build\\icon\.png/);
+    assert.match(source, /build\\icon\.ico/);
+    assert.match(source, /Founder Node PNG icon is missing or unexpectedly small/);
+    assert.match(source, /Founder Node ICO icon is missing or unexpectedly small/);
+  });
+
+  it('accepts a verified prebuilt Founder Node payload without replacing older output', () => {
+    assert.match(source, /\[string\]\$FounderNodePayloadRoot = ""/);
+    assert.match(source, /Prebuilt Founder Node payload not found/);
+    assert.match(source, /using verified prebuilt Founder relay payload/);
+    assert.match(source, /\$relayAsar = Join-Path \$relayRoot "resources\\app\.asar"/);
+    assert.match(source, /\$relayIcon = Join-Path \$relayRoot "resources\\icon\.png"/);
+    assert.match(source, /Founder relay application archive is missing or unexpectedly small/);
+    assert.match(source, /Founder relay packaged icon is missing or unexpectedly small/);
+  });
+
   it('keeps release compression as the default and labels fast QA installers', () => {
     const innerInstallerSource = fs.readFileSync(
       path.join(root, '..', 'upstream', 'overlay', 'build', 'win32', 'code.iss'),
