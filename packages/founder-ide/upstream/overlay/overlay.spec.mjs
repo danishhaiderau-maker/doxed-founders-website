@@ -279,6 +279,9 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(applyScript, /parcelWatcher\.ts/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('uncaughtException'/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('unhandledRejection'/);
+    assert.match(applyScript, /menubar\.ts/);
+    assert.match(applyScript, /BaseWindow, BrowserWindow/);
+    assert.match(applyScript, /win instanceof BrowserWindow \? win : activeWindow/);
     assert.match(applyScript, /manifest\.upstream\.electron_version/);
     assert.match(applyScript, /build_from_source="true"/);
     assert.match(applyScript, /lock\.packages\?\.\['node_modules\/electron'\]\?\.version/);

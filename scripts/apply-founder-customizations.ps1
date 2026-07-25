@@ -299,6 +299,31 @@ Set-FounderSourceLiteral `
     "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
     "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
 
+# Electron 34 widened MenuItem click callbacks from BrowserWindow to
+# BaseWindow. Keep the upstream menu implementation strongly typed while
+# narrowing back to BrowserWindow only for browser-specific callbacks.
+$menubar = "src\vs\platform\menubar\electron-main\menubar.ts"
+Set-FounderSourceLiteral `
+    $menubar `
+    "import { app, BrowserWindow, KeyboardEvent, Menu, MenuItem, MenuItemConstructorOptions, WebContents } from 'electron';" `
+    "import { app, BaseWindow, BrowserWindow, KeyboardEvent, Menu, MenuItem, MenuItemConstructorOptions, WebContents } from 'electron';"
+Set-FounderSourceLiteral `
+    $menubar `
+    "private readonly fallbackMenuHandlers: { [id: string]: (menuItem: MenuItem, browserWindow: BrowserWindow | undefined, event: KeyboardEvent) => void } = Object.create(null);" `
+    "private readonly fallbackMenuHandlers: { [id: string]: (menuItem: MenuItem, browserWindow: BaseWindow | undefined, event: KeyboardEvent) => void } = Object.create(null);"
+Set-FounderSourceLiteral `
+    $menubar `
+    "private makeContextAwareClickHandler(click: (menuItem: MenuItem, win: BrowserWindow, event: KeyboardEvent) => void, contextSpecificHandlers: IMenuItemClickHandler): (menuItem: MenuItem, win: BrowserWindow | undefined, event: KeyboardEvent) => void {" `
+    "private makeContextAwareClickHandler(click: (menuItem: MenuItem, win: BrowserWindow, event: KeyboardEvent) => void, contextSpecificHandlers: IMenuItemClickHandler): (menuItem: MenuItem, win: BaseWindow | undefined, event: KeyboardEvent) => void {"
+Set-FounderSourceLiteral `
+    $menubar `
+    "return (menuItem: MenuItem, win: BrowserWindow | undefined, event: KeyboardEvent) => {" `
+    "return (menuItem: MenuItem, win: BaseWindow | undefined, event: KeyboardEvent) => {"
+Set-FounderSourceLiteral `
+    $menubar `
+    "click(menuItem, win || activeWindow, event);" `
+    "click(menuItem, win instanceof BrowserWindow ? win : activeWindow, event);"
+
 # Keep every Electron version boundary aligned with the pinned upstream
 # manifest. A stale local package mutation can otherwise assemble an
 # incompatible executable while the TypeScript build still succeeds.
