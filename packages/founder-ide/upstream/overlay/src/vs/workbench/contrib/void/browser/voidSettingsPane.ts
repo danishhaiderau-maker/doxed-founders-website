@@ -118,13 +118,13 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 );
 
 
-// register the gear on the top right
+// Register the one Founder settings entry point on the top right.
 export const VOID_TOGGLE_SETTINGS_ACTION_ID = 'workbench.action.toggleVoidSettings'
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
 			id: VOID_TOGGLE_SETTINGS_ACTION_ID,
-			title: nls.localize2('voidSettings', 'Founder: Toggle Personal AI Settings'),
+			title: nls.localize2('voidSettings', 'Founder: Open Settings'),
 			icon: Codicon.settingsGear,
 			menu: [
 				{
@@ -141,7 +141,7 @@ registerAction2(class extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'ai');
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'account');
 	}
 })
 
@@ -152,13 +152,13 @@ registerAction2(class extends Action2 {
 	constructor() {
 		super({
 			id: VOID_OPEN_SETTINGS_ACTION_ID,
-			title: nls.localize2('voidSettingsAction2', 'Founder: Open Personal AI Settings'),
+			title: nls.localize2('voidSettingsAction2', 'Founder: Open Settings'),
 			f1: true,
 			icon: Codicon.settingsGear,
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'ai');
+		await accessor.get(ICommandService).executeCommand('founderOs.openSettings', 'account');
 	}
 })
 

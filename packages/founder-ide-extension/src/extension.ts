@@ -46,7 +46,10 @@ import {
   FounderAuthenticationProvider,
 } from './founder-authentication';
 import { FounderHubProvider } from './founder-hub';
-import { FounderSettingsPanel } from './founder-settings';
+import {
+  FounderSettingsPanel,
+  normalizeFounderSettingsTab,
+} from './founder-settings';
 import { FounderShortcutRegistry } from './founder-shortcuts';
 import { FounderCompanionViewProvider } from './founder-companion';
 import { FounderAgentAwareness } from './agent-awareness';
@@ -61,6 +64,10 @@ import {
   readFounderWorkMode,
   writeFounderWorkMode,
 } from './founder-agent-mode';
+import {
+  founderInterfaceModeDefinition,
+  normalizeFounderInterfaceMode,
+} from './founder-interface-mode';
 import {
   transcribeManagedVoice,
   type ManagedVoiceInput,
@@ -381,7 +388,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
     ),
     vscode.commands.registerCommand('founderOs.openSettings', (tab?: unknown) =>
-      founderSettings?.show(tab === 'ai' ? 'ai' : 'account'),
+      founderSettings?.show(normalizeFounderSettingsTab(tab)),
     ),
     vscode.commands.registerCommand('founderOs.refreshHub', () =>
       founderHub?.refresh(),
@@ -425,8 +432,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.openProjectBrief', openProjectBrief),
   );
 
+  void applyFounderInterfaceMode(true);
   const navigationTimer = setTimeout(
-    () => void applyFounderNavigationDefaults(context),
+    () => void applyFounderInterfaceMode(true),
     15_000,
   );
   context.subscriptions.push({
@@ -468,6 +476,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('founderOs')) {
+        if (e.affectsConfiguration('founderOs.interfaceMode')) {
+          void applyFounderInterfaceMode(false);
+        }
         registerOrNotify(context);
         founderCompanion?.syncEnabled();
         founderHub?.refresh();
@@ -493,41 +504,38 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 }
 
-async function applyFounderNavigationDefaults(
-  context: vscode.ExtensionContext,
-): Promise<void> {
-  // V5 makes the installed default Founder-first without removing the
-  // inspectable editor tools. Alt reveals the native menu, while Build and
-  // ship can restore the advanced IDE rail at any time.
-  const migrationKey = 'founderOs.navigationV5Applied';
-  if (context.globalState.get<boolean>(migrationKey, false)) return;
-
+async function applyFounderInterfaceMode(revealFounderHome: boolean): Promise<void> {
+  // Apply the selected profile for every window. This avoids stale window
+  // layout state silently reopening the old IDE rail in a new workspace.
+  const founder = vscode.workspace.getConfiguration('founderOs');
+  const mode = normalizeFounderInterfaceMode(founder.get<string>('interfaceMode'));
+  const definition = founderInterfaceModeDefinition(mode);
   const workbench = vscode.workspace.getConfiguration('workbench');
-  if (workbench.get<string>('activityBar.location') !== 'hidden') {
+  if (workbench.get<string>('activityBar.location') !== definition.activityBarLocation) {
     await workbench.update(
       'activityBar.location',
-      'hidden',
+      definition.activityBarLocation,
       vscode.ConfigurationTarget.Global,
     );
   }
   const windowConfig = vscode.workspace.getConfiguration('window');
-  if (windowConfig.get<string>('menuBarVisibility') !== 'toggle') {
+  if (windowConfig.get<string>('menuBarVisibility') !== definition.menuBarVisibility) {
     await windowConfig.update(
       'menuBarVisibility',
-      'toggle',
+      definition.menuBarVisibility,
       vscode.ConfigurationTarget.Global,
     );
   }
-  const founderConfig = vscode.workspace.getConfiguration('founderOs');
-  if (founderConfig.get<boolean>('advancedIdeTools') !== false) {
-    await founderConfig.update(
+  if (founder.get<boolean>('advancedIdeTools') !== definition.advancedIdeTools) {
+    await founder.update(
       'advancedIdeTools',
-      false,
+      definition.advancedIdeTools,
       vscode.ConfigurationTarget.Global,
     );
   }
-  await context.globalState.update(migrationKey, true);
-  await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+  if (mode === 'founder' && revealFounderHome) {
+    await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+  }
 }
 
 async function revealFounderView(containerId: string, viewId: string): Promise<void> {

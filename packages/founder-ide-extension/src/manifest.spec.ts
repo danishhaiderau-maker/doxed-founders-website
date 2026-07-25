@@ -154,22 +154,22 @@ describe('Founder IDE extension manifest', () => {
     ]) {
       assert.ok(hubSource.includes(label), `${label} must be visible in Founder navigation`);
     }
-    assert.match(extensionSource, /activityBar\.location[\s\S]*?'hidden'/);
-    assert.match(extensionSource, /menuBarVisibility[\s\S]*?'toggle'/);
-    assert.match(hubSource, /Show'\} IDE rail/);
+    assert.match(extensionSource, /applyFounderInterfaceMode\(true\)/);
+    assert.match(extensionSource, /definition\.activityBarLocation/);
+    assert.match(extensionSource, /definition\.menuBarVisibility/);
+    assert.match(hubSource, /Developer mode/);
+    assert.match(hubSource, /Founder mode/);
     assert.match(hubSource, /body\s*\{[\s\S]*?padding:\s*0;/);
     assert.match(hubSource, /overflow-x:\s*hidden;/);
     assert.match(hubSource, /@media\s*\(max-width:\s*180px\)/);
     assert.match(hubSource, /\.nav-copy span,[\s\S]*?\.tool-item span,[\s\S]*?\.summary-value[\s\S]*?display:\s*none;/);
-    assert.match(hubSource, /case 'openConnections':[\s\S]*?founderOs\.openConnectionsView/);
-    assert.match(hubSource, /case 'openRemote':[\s\S]*?founderOs\.openRemoteView/);
     assert.match(
       hubSource,
-      /case 'openConnections':[\s\S]*?advancedIdeTools[\s\S]*?true[\s\S]*?openConnectionsView/,
+      /case 'openConnections':[\s\S]*?founderOs\.openSettings', 'connections'/,
     );
     assert.match(
       hubSource,
-      /case 'openRemote':[\s\S]*?advancedIdeTools[\s\S]*?true[\s\S]*?openRemoteView/,
+      /case 'openRemote':[\s\S]*?founderOs\.openRemoteControl/,
     );
   });
 
@@ -183,6 +183,7 @@ describe('Founder IDE extension manifest', () => {
     };
     assert.deepEqual(manifest.contributes?.configurationDefaults, {
       'workbench.activityBar.location': 'hidden',
+      'founderOs.interfaceMode': 'founder',
       'founderOs.advancedIdeTools': false,
     });
   });

@@ -33,6 +33,7 @@
   "contributes": {
     "configurationDefaults": {
       "workbench.activityBar.location": "hidden",
+      "founderOs.interfaceMode": "founder",
       "founderOs.advancedIdeTools": false
     },
     "authentication": [
@@ -374,6 +375,19 @@
           "default": "focus",
           "description": "Focus uses one editing owner. Team adds bounded read-only advisers while one agent retains edit ownership."
         },
+        "founderOs.interfaceMode": {
+          "type": "string",
+          "enum": [
+            "founder",
+            "developer"
+          ],
+          "enumItemLabels": [
+            "Founder mode",
+            "Developer mode"
+          ],
+          "default": "founder",
+          "description": "Founder mode keeps chat, preview, changes, deploy, and agent status in focus. Developer mode restores the complete IDE toolset."
+        },
         "founderOs.companion.enabled": {
           "type": "boolean",
           "default": true,
@@ -435,7 +449,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-shortcuts-state.spec.ts src/managed-visual-request.spec.ts src/managed-voice-request.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/project-activity.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-hub-state.spec.ts src/founder-interface-mode.spec.ts src/founder-shortcuts-state.spec.ts src/managed-visual-request.spec.ts src/managed-voice-request.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/project-activity.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

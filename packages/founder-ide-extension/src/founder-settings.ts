@@ -94,7 +94,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
   constructor(private readonly dependencies: FounderSettingsDependencies) {}
 
   show(tab: FounderSettingsTab = 'account'): void {
-    this.activeTab = tab;
+    this.activeTab = normalizeFounderSettingsTab(tab);
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Active);
       this.refresh();
@@ -827,6 +827,10 @@ function isFounderSettingsTab(value: unknown): value is FounderSettingsTab {
     || value === 'infrastructure'
     || value === 'connections'
     || value === 'advanced';
+}
+
+export function normalizeFounderSettingsTab(value: unknown): FounderSettingsTab {
+  return isFounderSettingsTab(value) ? value : 'account';
 }
 
 function personalDraftFromMessage(

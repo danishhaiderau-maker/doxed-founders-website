@@ -15,6 +15,10 @@ import {
   writeFounderAgentMode,
   type FounderAgentMode,
 } from './founder-agent-mode';
+import {
+  founderInterfaceModeDefinition,
+  normalizeFounderInterfaceMode,
+} from './founder-interface-mode';
 
 type FounderHubAction =
   | 'signIn'
@@ -163,16 +167,10 @@ export class FounderHubProvider
         await vscode.commands.executeCommand('founderOs.openChat');
         break;
       case 'openConnections':
-        await vscode.workspace
-          .getConfiguration('founderOs')
-          .update('advancedIdeTools', true, vscode.ConfigurationTarget.Global);
-        await vscode.commands.executeCommand('founderOs.openConnectionsView');
+        await vscode.commands.executeCommand('founderOs.openSettings', 'connections');
         break;
       case 'openRemote':
-        await vscode.workspace
-          .getConfiguration('founderOs')
-          .update('advancedIdeTools', true, vscode.ConfigurationTarget.Global);
-        await vscode.commands.executeCommand('founderOs.openRemoteView');
+        await vscode.commands.executeCommand('founderOs.openRemoteControl');
         break;
       case 'openSettings':
         await vscode.commands.executeCommand('founderOs.openSettings', 'account');
@@ -187,17 +185,13 @@ export class FounderHubProvider
         await vscode.commands.executeCommand('founderOs.openProjectBrief');
         break;
       case 'toggleAdvancedTools': {
-        const workbench = vscode.workspace.getConfiguration('workbench');
-        const location = workbench.get<string>('activityBar.location', 'default');
-        const show = location === 'hidden';
-        await workbench.update(
-          'activityBar.location',
-          show ? 'default' : 'hidden',
+        const founder = vscode.workspace.getConfiguration('founderOs');
+        const current = normalizeFounderInterfaceMode(founder.get<string>('interfaceMode'));
+        await founder.update(
+          'interfaceMode',
+          current === 'founder' ? 'developer' : 'founder',
           vscode.ConfigurationTarget.Global,
         );
-        await vscode.workspace
-          .getConfiguration('founderOs')
-          .update('advancedIdeTools', show, vscode.ConfigurationTarget.Global);
         break;
       }
       case 'toggleCompanion': {
@@ -222,10 +216,8 @@ export class FounderHubProvider
     const agentMode = normalizeFounderAgentMode(config.get<string>('agentMode'));
     const agentModeDefinition = founderAgentModeDefinition(agentMode);
     const companionEnabled = config.get<boolean>('companion.enabled', true);
-    const advancedToolsVisible =
-      vscode.workspace
-        .getConfiguration('workbench')
-        .get<string>('activityBar.location', 'default') !== 'hidden';
+    const interfaceMode = normalizeFounderInterfaceMode(config.get<string>('interfaceMode'));
+    const interfaceDefinition = founderInterfaceModeDefinition(interfaceMode);
     const workspaceLabel =
       vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'Open a project';
     const credentials = resolveCredentials();
@@ -725,7 +717,7 @@ export class FounderHubProvider
           <button class="tool-item" type="button" data-action="runTask"><strong>Run task</strong><span>Build or test</span></button>
           <button class="tool-item" type="button" data-action="openProjectBrief"><strong>Project brief</strong><span>Last 24 hours and next work</span></button>
           <button class="tool-item" type="button" data-action="openExtensions"><strong>Extensions</strong><span>Advanced</span></button>
-          <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>${advancedToolsVisible ? 'Hide' : 'Show'} IDE rail</strong><span>Advanced tools</span></button>
+          <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>${interfaceMode === 'founder' ? 'Developer mode' : 'Founder mode'}</strong><span>${interfaceMode === 'founder' ? 'Show the complete IDE toolset' : 'Return to the focused Founder workspace'}</span></button>
         </div>
       </details>
     </section>
@@ -737,6 +729,16 @@ export class FounderHubProvider
         <div class="mode-summary">
           <strong>${escapeHtml(modeDefinition.summary)}</strong>
           <span>${escapeHtml(modeDefinition.services)}</span>
+        </div>
+      </details>
+    </section>
+
+    <section class="section">
+      <details>
+        <summary>Interface <span class="summary-value">${escapeHtml(interfaceDefinition.label)}</span></summary>
+        <div class="mode-summary">
+          <strong>${escapeHtml(interfaceDefinition.label)}</strong>
+          <span>${interfaceMode === 'founder' ? 'Chat, preview, changes, deploy, and agent status stay in focus.' : 'Files, terminal, source control, debugging, and extensions stay visible.'}</span>
         </div>
       </details>
     </section>
