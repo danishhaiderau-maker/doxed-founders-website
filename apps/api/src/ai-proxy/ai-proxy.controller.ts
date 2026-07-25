@@ -25,10 +25,12 @@ import { AiProxyUsageService } from './ai-proxy-usage.service';
 import {
   ChatCompletionRequestDto,
   FimCompletionRequestDto,
+  VisualDescriptionRequestDto,
 } from './dto/ai-proxy.dto';
 import type { Response, Request } from 'express';
 import { pipeAiProxySseResponse } from './ai-proxy-response-stream';
 import { AiProxySpeechService } from './ai-proxy-speech.service';
+import { AiProxyVisualService } from './ai-proxy-visual.service';
 
 const MAX_FOUNDER_SPEECH_BYTES = 25 * 1024 * 1024;
 
@@ -54,6 +56,7 @@ export class AiProxyController {
     private readonly runtimeService: AiProxyRuntimeService,
     private readonly usageService: AiProxyUsageService,
     private readonly speechService: AiProxySpeechService,
+    private readonly visualService: AiProxyVisualService,
   ) {}
 
   /** OpenAI-compatible /v1/models — expands our aliases to a model list. */
@@ -168,6 +171,24 @@ export class AiProxyController {
       Buffer.concat(chunks, total),
     );
     res.status(HttpStatus.OK).json(result);
+  }
+
+  /**
+   * Reads annotated screenshots for Founder IDE without exposing the managed
+   * provider key to the desktop. The service treats image text as untrusted
+   * evidence and returns bounded descriptions under the original file names.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('images/descriptions')
+  async describeImages(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: VisualDescriptionRequestDto,
+  ) {
+    return this.visualService.describe(
+      req.founderNode.userId,
+      body.attachments,
+    );
   }
 
   /**

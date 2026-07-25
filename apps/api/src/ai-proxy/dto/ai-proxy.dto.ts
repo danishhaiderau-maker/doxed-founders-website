@@ -1,4 +1,6 @@
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -7,6 +9,7 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -59,6 +62,28 @@ export class FimCompletionRequestDto {
   @IsOptional()
   @IsString()
   model?: string;
+}
+
+export class VisualAttachmentDto {
+  @IsString()
+  @MaxLength(180)
+  name!: string;
+
+  @IsIn(['image/png', 'image/jpeg', 'image/webp'])
+  mimeType!: 'image/png' | 'image/jpeg' | 'image/webp';
+
+  @IsString()
+  @MaxLength(5_600_000)
+  dataBase64!: string;
+}
+
+export class VisualDescriptionRequestDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(4)
+  @ValidateNested({ each: true })
+  @Type(() => VisualAttachmentDto)
+  attachments!: VisualAttachmentDto[];
 }
 
 export class ChatCompletionRequestDto {

@@ -2,7 +2,7 @@ import { proxyAwareNativeRequest } from './proxy-aware-request';
 
 const MAX_VISUAL_ATTACHMENTS = 4;
 const MAX_VISUAL_BASE64_CHARS = 5_600_000;
-const MAX_VISUAL_REQUEST_BASE64_CHARS = 9_300_000;
+const MAX_VISUAL_REQUEST_BASE64_CHARS = 9_800_000;
 const VISUAL_TIMEOUT_MS = 60_000;
 const MAX_VISUAL_RESPONSE_BYTES = 2_000_000;
 const VISUAL_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);

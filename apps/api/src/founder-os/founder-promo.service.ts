@@ -431,6 +431,15 @@ export class FounderPromoService {
     return map.glm ?? null;
   }
 
+  /**
+   * Image understanding is isolated from chat routing so the desktop can send
+   * screenshots without ever receiving the platform credential.
+   */
+  async getDecryptedPlatformGlmVisionKey(): Promise<string | null> {
+    const map = await this.loadDecryptedCredentials();
+    return map.glm ?? null;
+  }
+
   /** Decrypted platform DeepSeek promo key (distinct from platform brain fallback). */
   async getDecryptedPlatformPromoDeepseekKey(): Promise<string | null> {
     const map = await this.loadDecryptedCredentials();

@@ -15,6 +15,7 @@ import { LearningEngineModule } from '../learning-engine/learning-engine.module'
 import { RoutingEngineModule } from '../routing-engine/routing-engine.module';
 import { FounderOsModule } from '../founder-os/founder-os.module';
 import { AiProxySpeechService } from './ai-proxy-speech.service';
+import { AiProxyVisualService } from './ai-proxy-visual.service';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { AiProxySpeechService } from './ai-proxy-speech.service';
     AiProxyRuntimeService,
     AiProxyUsageService,
     AiProxySpeechService,
+    AiProxyVisualService,
     IntentClassifierService,
     FounderNodeGuard,
   ],
