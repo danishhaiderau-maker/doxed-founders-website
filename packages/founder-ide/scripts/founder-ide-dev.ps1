@@ -68,6 +68,14 @@ function Resolve-NodeExecutable {
     return $command.Source
 }
 
+function Format-NamedArgument {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    return "$Name=`"$Value`""
+}
+
 function Assert-PinnedCheckout {
     param(
         [Parameter(Mandatory = $true)][string]$Checkout,
@@ -166,8 +174,11 @@ $extensionRoot = Join-Path $repoRoot "packages\founder-ide-extension"
 $applyScript = Join-Path $repoRoot "scripts\apply-founder-customizations.ps1"
 $fastGulpfile = Join-Path $repoRoot "packages\founder-ide\build\founder-fast-gulpfile.js"
 
+if (-not $CacheRoot -and $env:FOUNDER_IDE_DEV_CACHE) {
+    $CacheRoot = $env:FOUNDER_IDE_DEV_CACHE
+}
 if (-not $CacheRoot) {
-    $CacheRoot = Join-Path $repoRoot "artifacts\founder-ide-dev-cache"
+    $CacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) "FounderIDE\dev-cache"
 }
 $CacheRoot = [System.IO.Path]::GetFullPath($CacheRoot)
 
@@ -242,9 +253,9 @@ if ($Mode -eq "Extension") {
         $extensionsDir = Join-Path $CacheRoot "profiles\extensions"
         New-Item -ItemType Directory -Force -Path $profileRoot, $extensionsDir | Out-Null
         Start-Process -FilePath $InstalledExe -ArgumentList @(
-            "--user-data-dir=$profileRoot",
-            "--extensions-dir=$extensionsDir",
-            "--extensionDevelopmentPath=$stageRoot"
+            (Format-NamedArgument "--user-data-dir" $profileRoot),
+            (Format-NamedArgument "--extensions-dir" $extensionsDir),
+            (Format-NamedArgument "--extensionDevelopmentPath" $stageRoot)
         )
         $status.launched = $InstalledExe
         $status.profile = $profileRoot
@@ -335,9 +346,9 @@ if (-not $NoLaunch) {
     $extensionsDir = Join-Path $CacheRoot "profiles\extensions"
     New-Item -ItemType Directory -Force -Path $profileRoot, $extensionsDir | Out-Null
     Start-Process -FilePath $codeBat -ArgumentList @(
-        "--user-data-dir=$profileRoot",
-        "--extensions-dir=$extensionsDir",
-        "--extensionDevelopmentPath=$stageRoot"
+        (Format-NamedArgument "--user-data-dir" $profileRoot),
+        (Format-NamedArgument "--extensions-dir" $extensionsDir),
+        (Format-NamedArgument "--extensionDevelopmentPath" $stageRoot)
     ) -WorkingDirectory $CheckoutPath
     $status.launched = $codeBat
     $status.profile = $profileRoot

@@ -24,6 +24,10 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /staged or deleted tracked files/);
   assert.match(script, /requires an existing compiled output/);
   assert.match(script, /extensionDevelopmentPath/);
+  assert.match(script, /Format-NamedArgument/);
+  assert.match(script, /FOUNDER_IDE_DEV_CACHE/);
+  assert.match(script, /GetTempPath/);
+  assert.doesNotMatch(script, /artifacts\\founder-ide-dev-cache/);
 });
 
 test(
