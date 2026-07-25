@@ -82,11 +82,12 @@ export function newIpcSecret(): string {
 export async function requestDeviceCode(
   apiBaseUrl: string,
   installId: string,
+  ipcSecret: string,
 ): Promise<{ grant: DeviceCodeGrant; installId: string }> {
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/device-code'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ installId }),
+    body: JSON.stringify({ installId, ipcSecret }),
   });
   const body = (await res.json().catch(() => null)) as (DeviceCodeGrant & {
     message?: string | string[];
@@ -225,15 +226,18 @@ export async function postLogout(
 export async function postRevoke(
   apiBaseUrl: string,
   nodeId: string,
+  nodeToken: string,
 ): Promise<void> {
-  try {
-    await fetch(apiBase(apiBaseUrl, '/api/founder-node/revoke'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeId }),
-    });
-  } catch {
-    /* best-effort */
+  const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/revoke-self'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `FounderNode ${nodeId}:${nodeToken}`,
+    },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(`Node revocation failed (${res.status})`);
   }
 }
 

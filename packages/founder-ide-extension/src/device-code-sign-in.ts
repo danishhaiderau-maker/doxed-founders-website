@@ -113,11 +113,12 @@ function apiBase(apiBaseUrl: string, p: string): string {
 export async function requestDeviceCode(
   apiBaseUrl: string,
   installId: string,
+  ipcSecret: string,
 ): Promise<DeviceCodeGrant> {
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/device-code'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ installId }),
+    body: JSON.stringify({ installId, ipcSecret }),
   });
   const body = (await res.json().catch(() => null)) as (DeviceCodeGrant & {
     message?: string | string[];
@@ -276,7 +277,11 @@ export async function runDeviceCodeSignIn(
   let grant: DeviceCodeGrant;
   try {
     options.onProgress?.('Requesting device code…');
-    grant = await requestDeviceCode(apiBaseUrl, install.installId);
+    grant = await requestDeviceCode(
+      apiBaseUrl,
+      install.installId,
+      install.ipcSecret,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     void vscode.window.showErrorMessage(`Founder OS sign-in failed: ${msg}`);

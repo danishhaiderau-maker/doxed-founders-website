@@ -557,6 +557,7 @@ model User {
   connectedWorkspaces      ConnectedWorkspace[]
   founderNodes             FounderNode[]
   founderNodePairings      FounderNodePairingCode[]
+  founderNodeDeviceCodes   FounderNodeDeviceCode[]
   founderNodeVaultRelays   FounderNodeVaultRelay[]
   founderNodeVaultSyncAcks FounderNodeVaultSyncAck[]
   founderNodeInferenceJobs FounderNodeInferenceJob[]
@@ -2033,7 +2034,47 @@ model FounderNode {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // ─── Phase 2 — Founder ID + token lifecycle ───────────────────────────────
+  /**
+   * The Founder ID that owns this node. Equal to userId in the current
+   * implementation (one founder per user) but stored separately so we can
+   * later decouple "user" (login identity) from "founder" (the revocable
+   * device-authorization identity). Nullable for backwards compatibility
+   * with nodes paired before Phase 2 — they are upgraded to a founderId on
+   * next pair/rotate.
+   */
+  founderId      String?
+  /**
+   * ISO timestamp when the nodeToken expires server-side. Founder Node
+   * auto-rotates when within 7 days of this time. Null means "no expiry"
+   * (some self-hosted deployments).
+   */
+  tokenExpiresAt DateTime?
+  tokenRotatedAt DateTime?
+
+  // ─── Phase 3 — per-install IPC identity ────────────────────────────────────
+  /**
+   * Per-install ID that names the Windows named pipe used for IDE IPC:
+   * \\.\pipe\founder-ide-{installId}. Generated client-side at first launch
+   * and recorded on pair so the FounderIdeAdapter can look up the pipe path
+   * by nodeId. Nullable for legacy paired nodes (no IPC).
+   */
+  installId     String?
+  /**
+   * bcrypt hash of the per-install IPC secret. The IDE extension presents
+   * the plaintext secret during the IPC handshake; the node verifies by
+   * bcrypt.compare. Stored as a hash so a DB leak doesn't expose the live
+   * pipe credential. Nullable for legacy paired nodes.
+   */
+  ipcSecretHash String? @db.Text
+
   @@index([userId])
+  // Index founderId for the "list all nodes for this founder" query (today
+  // equivalent to the userId index, but prepares for the founder/user split).
+  @@index([founderId])
+  // Index installId so the FounderIdeAdapter can look up the IPC pipe path by
+  // installId (the IDE extension sends its installId during the handshake).
+  @@index([installId])
 }
 
 /**
@@ -2126,6 +2167,76 @@ model FounderNodePairingCode {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+/**
+ * Phase 2 — RFC 8628 device-authorization grant. The web app creates one of
+ * these when a founder starts the device-code flow; the Founder Node tray
+ * polls POST /founder-node/device-code/poll with `deviceCode` until the
+ * founder authorizes (or denies) in the browser. The 8-char `userCode` is
+ * what the user types; the long `deviceCode` is the bearer for polling.
+ */
+model FounderNodeDeviceCode {
+  id              String    @id @default(cuid())
+  /**
+   * Bound at authorize time (when the founder logs in via the browser).
+   * Nullable per RFC 8628 §3.1: the device-authorization request itself is
+   * anonymous — the tray calls POST /device-code with no user creds, and the
+   * grant is created with userId=null. The founder's userId is stamped onto
+   * the row when they click "Authorize" in the browser. Earlier schema had
+   * this as NOT NULL with a FK, which forced the controller to pass a bogus
+   * placeholder string ('pending-web-authorize') that would fail the FK on
+   * INSERT. Nullable + nullable FK is the correct shape.
+   */
+  userId          String?
+  /**
+   * Long opaque token the device polls with.
+   */
+  deviceCode      String    @unique
+  /**
+   * Short human-readable code like ABCD-1234.
+   */
+  userCode        String    @unique
+  /**
+   * Browser URL the user visits to authorize.
+   */
+  verificationUri String
+  expiresAt       DateTime
+  /**
+   * Recommended polling interval in seconds.
+   */
+  interval        Int       @default(5)
+  /**
+   * pending | authorized | denied | expired. The poll endpoint reads this
+   * and returns the matching RFC 8628 status. We do NOT delete on authorize
+   * — the row is kept until expiry so the poll can return the tokens safely
+   * (the device may poll once more after authorization before tearing down).
+   */
+  status          String    @default("pending")
+  /**
+   * Set when status flips to authorized — single-use, cleared after first read.
+   */
+  nodeToken       String?   @db.Text
+  nodeId          String?
+  founderId       String?
+  installId       String?
+  ipcSecretHash   String?   @db.Text
+  tokenExpiresAt  DateTime?
+  /**
+   * Server-side timestamp of the last /device-code/poll request for this
+   * grant. Used to detect slow_down (RFC 8628 §3.5) — if the client polls
+   * again within `interval` seconds, we return slow_down and the controller
+   * adds 5s to Retry-After. Null until first poll.
+   */
+  lastPolledAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([status])
 }
 
 /**

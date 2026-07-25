@@ -1069,16 +1069,27 @@ function buildTrayMenu(vaultRoot: string) {
             cancelId: 1,
           });
           if (choice.response !== 0) return;
-          await postRevoke(config.apiBaseUrl, config.nodeId);
-          disconnectIdeIpcClient(vaultRoot);
-          clearNodeConfig(vaultRoot);
-          authRecoveryHandled = false;
-          pairingInProgress = false;
-          activeDeviceCode = null;
-          stopBackgroundLoops(loops);
-          refreshTrayMenu(vaultRoot);
-          notifyDesktop('Node revoked', 'Server-side identity removed. Re-pair to continue.');
-          openPairWindow();
+          try {
+            await postRevoke(
+              config.apiBaseUrl,
+              config.nodeId,
+              config.nodeToken,
+            );
+            disconnectIdeIpcClient(vaultRoot);
+            clearNodeConfig(vaultRoot);
+            authRecoveryHandled = false;
+            pairingInProgress = false;
+            activeDeviceCode = null;
+            stopBackgroundLoops(loops);
+            refreshTrayMenu(vaultRoot);
+            notifyDesktop('Node revoked', 'Server-side identity removed. Re-pair to continue.');
+            openPairWindow();
+          } catch (err) {
+            notifyDesktop(
+              'Node revocation failed',
+              err instanceof Error ? err.message : String(err),
+            );
+          }
         })();
       },
     });
@@ -1530,7 +1541,11 @@ app.whenReady().then(() => {
   ipcMain.handle('start-device-code', async (): Promise<DeviceCodeRendererGrant> => {
     const install = ensureInstallIdentity(vaultRoot);
     const apiBaseUrl = (readNodeConfig(vaultRoot)?.apiBaseUrl ?? DEFAULT_API).replace(/\/$/, '');
-    const { grant } = await requestDeviceCode(apiBaseUrl, install.installId);
+    const { grant } = await requestDeviceCode(
+      apiBaseUrl,
+      install.installId,
+      install.ipcSecret,
+    );
     activeDeviceCode = {
       deviceCode: grant.deviceCode,
       rendererGrant: {
