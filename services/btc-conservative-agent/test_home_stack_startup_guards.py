@@ -81,7 +81,8 @@ def main() -> None:
     check(
         "auto-restart supervises liveness instead of process existence only",
         "function Test-BotPingQuick" in MONITOR
-        and "consecutiveLivenessFailures -ge 3" in MONITOR
+        and "consecutiveLivenessFailures -ge 6" in MONITOR
+        and "$req.Timeout = 5000" in MONITOR
         and "bot process alive but /api/ping unavailable" in MONITOR,
     )
     check(

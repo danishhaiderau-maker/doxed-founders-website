@@ -20825,6 +20825,10 @@ state_lock = threading.RLock()
 trade_lock = threading.RLock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
+_API_STATE_REFRESH_INTERVAL_SEC = max(
+    5.0,
+    float(os.getenv("API_STATE_REFRESH_INTERVAL_SEC", "10.0")),
+)
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
 _api_state_cache_lock = threading.Lock()
@@ -26926,8 +26930,12 @@ def _build_api_state_snapshot():
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
         with state_lock:
-            snapshot = copy.deepcopy(state)
-            snapshot.pop("order_book", None)
+            # The raw order book is large and fast-moving. Deep-copying it only
+            # to discard it afterwards held state_lock for up to 38 seconds,
+            # starving the dashboard, webhook reads, and /api/ping.
+            snapshot = copy.deepcopy(
+                {key: value for key, value in state.items() if key != "order_book"}
+            )
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
@@ -27212,7 +27220,7 @@ def _start_api_state_cache_refresher():
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         logger.info(
-            "[API STATE] independent dashboard (1.5s) and relay "
+            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s) and relay "
             f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
         )
 
@@ -27226,7 +27234,7 @@ def _api_state_cache_refresher_loop():
                 _api_state_cache["built_at"] = time.time()
         except Exception as e:
             logger.error(f"/api/state background refresher error: {e}")
-        shutdown_event.wait(1.5)
+        shutdown_event.wait(_API_STATE_REFRESH_INTERVAL_SEC)
 
 
 def _relay_state_cache_refresher_loop():
