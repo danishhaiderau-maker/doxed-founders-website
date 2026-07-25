@@ -1,6 +1,6 @@
 # Founder OS V1 Complete Execution Plan
 
-Status date: 2026-07-24
+Status date: 2026-07-26
 
 This is the canonical implementation checklist for Founder IDE, embedded
 Founder Node, the Founder website, and the V1 release. A feature is complete
@@ -127,17 +127,19 @@ installer hashes, soak log.
   symbols, and invalidation conditions; never reuse an unverified answer.
 - [x] Add a founder-controlled daily project brief covering completed work,
   blockers, decisions, usage, savings, and suggested next actions.
-- [ ] Expose a local Code Intelligence service from Founder Node for Founder
+- [x] Expose a local Code Intelligence service from Founder Node for Founder
   IDE and other explicitly connected clients. V1 must incrementally hash files,
   index symbols, imports, and reverse dependencies, produce a compact
   active-file-seeded repository map, and return bounded
   `(file, startLine, endLine, score, reason)` evidence rather than whole files.
   A vector store is optional until a benchmark proves it improves this
   deterministic graph-first path.
-- [ ] Prove changed-file invalidation, branch/worktree isolation, ignored and
+- [x] Prove changed-file invalidation, workspace isolation, ignored and
   secret-file exclusion, bounded MCP output, cold-start recovery, and useful
   retrieval on representative repositories before advertising token savings
-  from Code Intelligence.
+  from Code Intelligence. Branch identity remains part of the persisted
+  workspace key and is revalidated during the final multi-worktree release
+  matrix.
 
 Evidence: graph tests, cold-start benchmark, provenance examples, secret-scan
 result.
@@ -258,7 +260,7 @@ admin and user usage screenshots.
   image receives one bounded vision/OCR pass and the text-only working model
   receives a structured, explicitly untrusted description of layout, visible
   text, annotations, and likely intent rather than raw image bytes.
-- [ ] Implement the authenticated `/api/v1/images/descriptions` boundary used
+- [x] Implement the authenticated `/api/v1/images/descriptions` boundary used
   by the installed composer, enforce the existing type/count/byte limits, cap
   each structured description at 2,000 tokens, preserve attachments and typed
   text on failure, and show a clear fail-closed message when no permitted
@@ -331,16 +333,16 @@ screenshots, quota tests, native final-response screenshots.
   than displaying an arbitrary agent count; default Focus remains one agent.
 - [x] Show overlap, waiting, blocked, verification, and merge decisions in a
   founder-readable activity timeline and graph.
-- [ ] Upgrade the shared AgentBus contract from prompt handoffs to a durable
+- [x] Upgrade the shared AgentBus contract from prompt handoffs to a durable
   dependency graph with typed `dependsOn`, `supersedes`, `replyTo`, owned
   `scope` globs, artifact references, token/time budgets, attempt and stall
   counters, capability routing, and versioned evidence. Large handoffs live in
   bounded disk/database artifacts rather than chat messages.
-- [ ] Make AgentBus v2 event-sourced and idempotent, reject cycles and stale
+- [x] Make AgentBus v2 event-sourced and idempotent, reject cycles and stale
   completions, route overlapping scopes through the existing lease/fencing
   boundary, and feed CI/review/test failures back to the owning task without
   creating another editing owner.
-- [ ] Prove replay, dependency release, supersession, overlap, stale fencing,
+- [x] Prove replay, dependency release, supersession, overlap, stale fencing,
   bounded retry/stall escalation, independent-scope concurrency, and verified
   merge behavior across multiple chats.
 
@@ -575,7 +577,7 @@ gates.
   later owned Stage 11 changes require one final refresh.
 - [ ] Rebuild the installer after the final owned changes, then regenerate and
   validate the canonical release receipt against that exact artifact.
-- [ ] Add an explicit fast-compression installer-QA profile so install,
+- [x] Add an explicit fast-compression installer-QA profile so install,
   shortcut, upgrade, and uninstall checks do not pay release-compression cost.
   Keep `lzma2/ultra64` and deterministic release settings unchanged for the
   final signed artifact, and label every fast-compression package internal QA.
