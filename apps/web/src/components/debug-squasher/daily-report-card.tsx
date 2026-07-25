@@ -34,10 +34,9 @@ type RunSummary = {
  * Daily Report card for the Founder OS shell.
  *
  * Polls GET /api/debug-squasher/latest every 60s and shows:
- *   - Overall platform verdict (✓ healthy / ⚠ N bugs found)
+ *   - Overall platform verdict (healthy / N issues found)
  *   - Per-pillar pass/fail counts
- *   - For each failed pillar: AI diagnosis + a "Copy fix" button per
- *     suggested fix
+ *   - For each failed pillar: diagnosis and a copyable suggested fix
  *
  * Designed to sit next to the existing observability widgets in the shell.
  */
@@ -76,7 +75,7 @@ export function DailyReportCard() {
   if (loading) {
     return (
       <Card>
-        <p className="text-sm text-zinc-400">Loading latest platform health check…</p>
+        <p className="text-sm text-zinc-400">Loading the latest quality review...</p>
       </Card>
     );
   }
@@ -84,12 +83,12 @@ export function DailyReportCard() {
   if (!run) {
     return (
       <Card>
-        <p className="text-sm text-zinc-400">No debug-squasher runs yet.</p>
+        <p className="text-sm text-zinc-400">No daily quality review is available yet.</p>
         <Link
           href="/admin/debug-squasher"
           className="mt-2 inline-block text-xs text-emerald-400 hover:underline"
         >
-          Trigger a run from the admin panel →
+          Run a review from the admin panel
         </Link>
       </Card>
     );
@@ -101,7 +100,7 @@ export function DailyReportCard() {
     <Card>
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-          Debug Squasher · Daily Report
+          Daily quality review
         </h3>
         <span
           className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
@@ -112,7 +111,7 @@ export function DailyReportCard() {
                 : 'bg-red-950/60 text-red-300'
           }`}
         >
-          {overallOk ? '✓ Healthy' : `⚠ ${run.totals.checksFailed} bugs found`}
+          {overallOk ? 'Healthy' : `${run.totals.checksFailed} issues found`}
         </span>
       </div>
 
@@ -147,7 +146,7 @@ export function DailyReportCard() {
       <div className="mt-4 flex items-center justify-between text-xs">
         <span className="text-zinc-500">Triggered by {run.triggeredBy}</span>
         <Link href="/admin/debug-squasher" className="text-emerald-400 hover:underline">
-          View history →
+          View history
         </Link>
       </div>
     </Card>
@@ -237,7 +236,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function Card({ children }: { children: React.ReactNode }) {
   return (
-    <section className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+    <section className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
       {children}
     </section>
   );

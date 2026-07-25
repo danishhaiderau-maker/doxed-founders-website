@@ -2,7 +2,31 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import {
+  CheckCircle2,
+  Cloud,
+  Gauge,
+  KeyRound,
+  Lightbulb,
+  MonitorSmartphone,
+  Plug,
+  Rocket,
+  ShieldCheck,
+  Wrench,
+  type LucideIcon,
+} from 'lucide-react';
 import { apiUrl } from '@/lib/api-base';
+import {
+  fetchFounderPlanCatalog,
+  fetchFounderPlanEntitlement,
+  fetchFounderPromoStatus,
+  type FounderPlanCatalog,
+  type FounderPlanEntitlement,
+  type FounderPromoUserStatus,
+} from '@/lib/api';
+import { FounderPlanSummary } from '@/components/account/founder-plan-summary';
+import { FounderFreeQuotaCard } from '@/components/account/founder-free-quota-card';
+import type { FounderPlanLoadState } from '@/components/account/founder-plan-account-state';
 import { IdeaValidatorPanel } from '@/components/idea-validator/idea-validator-panel';
 import { IdeaPopUp } from '@/components/idea-validator/idea-pop-up';
 import { LamTaskSubmitter } from '@/components/lam/lam-task-submitter';
@@ -21,165 +45,401 @@ type DashboardData = {
     reputationPoints?: number;
     contributorLevel?: string;
   };
-  connectedApps?: Array<{ provider: string; label: string; connectedAt?: string | null }>;
+  connectedApps?: Array<{
+    provider: string;
+    label: string;
+    connectedAt?: string | null;
+  }>;
 };
 
+type ToolView = 'review' | 'idea' | 'action';
 type Props = { accessToken: string };
+
+const WORKSPACE_ACTIONS: Array<{
+  href: string;
+  label: string;
+  detail: string;
+  icon: LucideIcon;
+  tone: string;
+}> = [
+  {
+    href: '/founder-den?tab=build',
+    label: 'Continue building',
+    detail: 'Projects, tasks, decisions, and proofs',
+    icon: Rocket,
+    tone: 'text-emerald-300 bg-emerald-500/10',
+  },
+  {
+    href: '/phone',
+    label: 'Control desktop',
+    detail: 'Reach your paired Founder IDE securely',
+    icon: MonitorSmartphone,
+    tone: 'text-sky-300 bg-sky-500/10',
+  },
+  {
+    href: '/settings/integrations',
+    label: 'Connect services',
+    detail: 'GitHub, Vercel, Railway, Neon, and more',
+    icon: Plug,
+    tone: 'text-amber-300 bg-amber-500/10',
+  },
+  {
+    href: '/settings/builder?tab=ai',
+    label: 'Manage AI',
+    detail: 'Founder AI, personal keys, and local Ollama',
+    icon: KeyRound,
+    tone: 'text-cyan-300 bg-cyan-500/10',
+  },
+];
+
+const TOOL_VIEWS: Array<{
+  id: ToolView;
+  label: string;
+  detail: string;
+  icon: LucideIcon;
+}> = [
+  {
+    id: 'review',
+    label: 'Daily review',
+    detail: 'Health, links, and release evidence',
+    icon: ShieldCheck,
+  },
+  {
+    id: 'idea',
+    label: 'Validate idea',
+    detail: 'Research before committing resources',
+    icon: Lightbulb,
+  },
+  {
+    id: 'action',
+    label: 'Run action',
+    detail: 'Execute an approved browser task',
+    icon: Wrench,
+  },
+];
+
+function planName(plan: FounderPlanEntitlement['plan'] | undefined): string {
+  if (plan === 'builder') return 'Founder Builder';
+  if (plan === 'team') return 'Founder Team';
+  return 'Founder Free';
+}
 
 export function FounderOsShell({ accessToken }: Props) {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
-  const [tier, setTier] = useState<'VISITOR' | 'DOXXED' | 'UNKNOWN'>('UNKNOWN');
-  const [ddollar, setDdollar] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [toolView, setToolView] = useState<ToolView>('review');
+  const [planCatalog, setPlanCatalog] = useState<FounderPlanCatalog | null>(null);
+  const [planEntitlement, setPlanEntitlement] = useState<FounderPlanEntitlement | null>(null);
+  const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
+  const [planLoadState, setPlanLoadState] = useState<FounderPlanLoadState>('loading');
+  const [planLoadError, setPlanLoadError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadDashboard = useCallback(async () => {
+    setDashboardError(null);
     try {
-      const res = await fetch(apiUrl('/api/founder-os/dashboard'), {
+      const response = await fetch(apiUrl('/api/founder-os/dashboard'), {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      if (res.ok) {
-        const data = (await res.json()) as DashboardData;
-        setDashboard(data);
-        const points =
-          data.founder?.reputationPoints ?? data.user?.reputationPoints ?? 0;
-        setDdollar(points);
-        const level =
-          data.founder?.tier ?? data.user?.contributorLevel ?? 'PARASITE';
-        const normalized = String(level).toUpperCase();
-        setTier(
-          normalized === 'VERIFIED_BUILDER' || normalized === 'DOXXED'
-            ? 'DOXXED'
-            : 'VISITOR',
-        );
+      if (!response.ok) {
+        throw new Error(`Workspace status could not be loaded (${response.status}).`);
       }
-    } catch {
-      // surfaced by empty state below
-    } finally {
-      setLoading(false);
+      setDashboard((await response.json()) as DashboardData);
+    } catch (reason) {
+      setDashboardError(
+        reason instanceof Error ? reason.message : 'Workspace status could not be loaded.',
+      );
+    }
+  }, [accessToken]);
+
+  const loadPlan = useCallback(async () => {
+    setPlanLoadState('loading');
+    setPlanLoadError(null);
+    setPlanCatalog(null);
+    setPlanEntitlement(null);
+    try {
+      const [catalog, entitlement, promo] = await Promise.all([
+        fetchFounderPlanCatalog(),
+        fetchFounderPlanEntitlement(accessToken),
+        fetchFounderPromoStatus(accessToken).catch(() => null),
+      ]);
+      setPlanCatalog(catalog);
+      setPlanEntitlement(entitlement);
+      setPromoStatus(promo);
+      setPlanLoadState('ready');
+    } catch (reason) {
+      setPlanLoadError(
+        reason instanceof Error ? reason.message : 'Founder plan could not be loaded.',
+      );
+      setPlanLoadState('error');
     }
   }, [accessToken]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadDashboard();
+    void loadPlan();
+  }, [loadDashboard, loadPlan]);
+
+  const points =
+    dashboard?.founder?.reputationPoints
+    ?? dashboard?.user?.reputationPoints
+    ?? null;
+  const contributor =
+    dashboard?.founder?.tier
+    ?? dashboard?.user?.contributorLevel
+    ?? null;
+  const isDoxxed = contributor
+    ? ['VERIFIED_BUILDER', 'DOXXED'].includes(String(contributor).toUpperCase())
+    : false;
 
   return (
     <div className="space-y-8">
-      <StatusBar tier={tier} ddollar={ddollar} loading={loading} />
+      <WorkspaceStatus
+        plan={planEntitlement}
+        points={points}
+        connectedServices={dashboard?.connectedApps?.length ?? 0}
+        error={dashboardError}
+      />
 
-      <CtaCards tier={tier} accessToken={accessToken} />
-
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Debug Squasher · Phase 6.5
-          </h2>
-          <span className="rounded bg-emerald-950/40 px-2 py-0.5 text-[10px] uppercase text-emerald-300">
-            Health Check
-          </span>
+      <section aria-labelledby="workspace-actions">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium text-zinc-500">Workspace</p>
+            <h2 id="workspace-actions" className="mt-1 text-xl font-semibold text-white">
+              Build, connect, and ship
+            </h2>
+          </div>
+          <Link
+            href="/account?tab=plan"
+            className="inline-flex items-center gap-2 text-sm text-zinc-400 transition hover:text-white"
+          >
+            <Gauge className="h-4 w-4" aria-hidden />
+            Plan and usage
+          </Link>
         </div>
-        <DailyReportCard />
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {WORKSPACE_ACTIONS.map((action) => (
+            <Link
+              key={action.href}
+              href={action.href}
+              className="group flex min-h-24 items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-950/50 p-4 transition hover:border-zinc-600 hover:bg-zinc-900/70"
+            >
+              <span
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${action.tone}`}
+              >
+                <action.icon className="h-4 w-4" strokeWidth={1.8} aria-hidden />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-zinc-100">
+                  {action.label}
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-500">
+                  {action.detail}
+                </span>
+              </span>
+            </Link>
+          ))}
+        </div>
       </section>
 
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Idea Validator · Phase 6
+      <section className="border-t border-zinc-800 pt-8" aria-labelledby="plan-and-usage">
+        <div className="mb-6">
+          <p className="text-xs font-medium text-zinc-500">Founder AI</p>
+          <h2 id="plan-and-usage" className="mt-1 text-xl font-semibold text-white">
+            Plan and usage
           </h2>
-          <span className="rounded bg-violet-950/40 px-2 py-0.5 text-[10px] uppercase text-violet-300">
-            Browser Use LAM
-          </span>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">
+            Live entitlement data is the source of truth. Founder-managed DeepSeek, personal AI
+            profiles, and local Ollama stay clearly separated.
+          </p>
         </div>
-        <IdeaValidatorPanel accessToken={accessToken} />
+        <div className="space-y-6">
+          <FounderPlanSummary
+            token={accessToken}
+            catalog={planCatalog}
+            entitlement={planEntitlement}
+            loadState={planLoadState}
+            loadError={planLoadError}
+            onRetry={() => void loadPlan()}
+          />
+          <FounderFreeQuotaCard status={promoStatus} />
+        </div>
       </section>
 
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Actions · Phase 9
-          </h2>
-          <span className="rounded bg-violet-950/40 px-2 py-0.5 text-[10px] uppercase text-violet-300">
-            Large Action Model
-          </span>
-        </div>
-        <LamTaskSubmitter accessToken={accessToken} />
-      </section>
+      <WorkspaceTools
+        accessToken={accessToken}
+        selected={toolView}
+        onSelect={setToolView}
+      />
 
-      <QuickLinksGrid />
+      <ConnectedServices services={dashboard?.connectedApps ?? []} />
 
-      <RecentActivityStrip dashboard={dashboard} />
+      {!isDoxxed ? <FounderIdentity accessToken={accessToken} /> : null}
 
       <IdeaPopUp accessToken={accessToken} />
-
       <ConsentPopup />
     </div>
   );
 }
 
-function StatusBar({
-  tier,
-  ddollar,
-  loading,
+function WorkspaceStatus({
+  plan,
+  points,
+  connectedServices,
+  error,
 }: {
-  tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN';
-  ddollar: number | null;
-  loading: boolean;
+  plan: FounderPlanEntitlement | null;
+  points: number | null;
+  connectedServices: number;
+  error: string | null;
 }) {
-  const tierLabel =
-    tier === 'DOXXED' ? 'Doxxed Builder' : tier === 'VISITOR' ? 'Visitor' : '—';
-  const tierAccent =
-    tier === 'DOXXED' ? 'text-emerald-300' : 'text-amber-300';
   return (
-    <div className="flex flex-wrap items-center gap-4 rounded-xl border border-zinc-800 bg-zinc-950/40 px-5 py-4">
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-          Status
-        </p>
-        <p className={`mt-1 text-lg font-bold ${tierAccent}`}>
-          {loading ? '…' : tierLabel}
-        </p>
+    <section className="border-b border-zinc-800 pb-6" aria-label="Founder workspace status">
+      <div className="flex flex-wrap items-start justify-between gap-5">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium text-emerald-300">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden />
+            Founder workspace
+          </div>
+          <h2 className="mt-2 text-2xl font-semibold text-white">
+            Everything important, one place
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">
+            Continue a build, reach your desktop, review usage, or connect the service your project
+            needs next.
+          </p>
+        </div>
+        <div className="grid min-w-64 grid-cols-3 gap-4 text-right">
+          <StatusValue label="Plan" value={plan ? planName(plan.plan) : 'Checking'} />
+          <StatusValue
+            label="DDollar"
+            value={points == null ? 'Checking' : points.toLocaleString()}
+          />
+          <StatusValue label="Connected" value={String(connectedServices)} />
+        </div>
       </div>
-      <div className="h-10 w-px bg-zinc-800" />
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-          DDollar balance
+      {error ? (
+        <p className="mt-4 text-sm text-amber-200" role="status">
+          {error}
         </p>
-        <p className="mt-1 text-lg font-bold text-white">
-          {loading || ddollar == null
-            ? '…'
-            : `${ddollar.toLocaleString()} DD`}
-        </p>
-      </div>
-      <div className="h-10 w-px bg-zinc-800" />
-      <div className="flex-1 text-xs text-zinc-500">
-        DoxxedCrypto = trust layer. Verify once → unlock unlimited AI + launch
-        rights.
-      </div>
+      ) : null}
+    </section>
+  );
+}
+
+function StatusValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs text-zinc-500">{label}</p>
+      <p className="mt-1 truncate text-sm font-semibold text-zinc-100">{value}</p>
     </div>
   );
 }
 
-function CtaCards({
-  tier,
+function WorkspaceTools({
   accessToken,
+  selected,
+  onSelect,
 }: {
-  tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN';
   accessToken: string;
+  selected: ToolView;
+  onSelect: (view: ToolView) => void;
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {tier !== 'DOXXED' ? (
-        <GetDoxxedCard accessToken={accessToken} />
-      ) : (
-        <AlreadyDoxxedCard />
-      )}
-      <LaunchTokenCard tier={tier} />
-    </div>
+    <section className="border-t border-zinc-800 pt-8" aria-labelledby="workspace-tools">
+      <p className="text-xs font-medium text-zinc-500">Focused tools</p>
+      <h2 id="workspace-tools" className="mt-1 text-xl font-semibold text-white">
+        Choose the job, then see only what it needs
+      </h2>
+      <div
+        className="mt-4 grid gap-1 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1 sm:grid-cols-3"
+        role="tablist"
+        aria-label="Founder workspace tools"
+      >
+        {TOOL_VIEWS.map((view) => (
+          <button
+            key={view.id}
+            type="button"
+            role="tab"
+            aria-selected={selected === view.id}
+            onClick={() => onSelect(view.id)}
+            className={`flex min-h-14 items-center gap-3 rounded-md px-3 py-2 text-left transition ${
+              selected === view.id
+                ? 'bg-zinc-800 text-white'
+                : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'
+            }`}
+          >
+            <view.icon className="h-4 w-4 shrink-0" strokeWidth={1.8} aria-hidden />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold">{view.label}</span>
+              <span className="block truncate text-xs text-zinc-500">{view.detail}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="mt-5" role="tabpanel">
+        {selected === 'review' ? <DailyReportCard /> : null}
+        {selected === 'idea' ? <IdeaValidatorPanel accessToken={accessToken} /> : null}
+        {selected === 'action' ? <LamTaskSubmitter accessToken={accessToken} /> : null}
+      </div>
+    </section>
   );
 }
 
-function GetDoxxedCard({ accessToken }: { accessToken: string }) {
+function ConnectedServices({
+  services,
+}: {
+  services: NonNullable<DashboardData['connectedApps']>;
+}) {
+  return (
+    <section className="border-t border-zinc-800 pt-8" aria-labelledby="connected-services">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium text-zinc-500">Infrastructure</p>
+          <h2 id="connected-services" className="mt-1 text-xl font-semibold text-white">
+            Connected services
+          </h2>
+        </div>
+        <Link
+          href="/settings/integrations"
+          className="inline-flex items-center gap-2 text-sm text-zinc-400 transition hover:text-white"
+        >
+          <Cloud className="h-4 w-4" aria-hidden />
+          Manage connections
+        </Link>
+      </div>
+      {services.length === 0 ? (
+        <div className="mt-4 flex items-start gap-3 rounded-lg border border-dashed border-zinc-700 p-4">
+          <Plug className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+          <div>
+            <p className="text-sm font-medium text-zinc-200">No service is connected yet</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">
+              Add only what the current project needs. Founder OS will keep credentials and
+              deployment access in one place.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <ul className="mt-4 divide-y divide-zinc-800 border-y border-zinc-800">
+          {services.map((service) => (
+            <li
+              key={`${service.provider}:${service.label}`}
+              className="flex min-h-12 items-center justify-between gap-4 py-3"
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" aria-hidden />
+                <span className="truncate text-sm font-medium text-zinc-200">{service.label}</span>
+              </span>
+              <span className="text-xs text-zinc-500">{service.provider}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function FounderIdentity({ accessToken }: { accessToken: string }) {
+  const [expanded, setExpanded] = useState(false);
   const [form, setForm] = useState({
     githubUrl: '',
     twitterHandle: '',
@@ -203,7 +463,7 @@ function GetDoxxedCard({ accessToken }: { accessToken: string }) {
     setSubmitting(true);
     setResult(null);
     try {
-      const res = await fetch(apiUrl('/api/founder-applications'), {
+      const response = await fetch(apiUrl('/api/founder-applications'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -214,25 +474,18 @@ function GetDoxxedCard({ accessToken }: { accessToken: string }) {
           lifecycleStage: 'IDEA',
         }),
       });
-      if (res.ok) {
-        setResult({
-          ok: true,
-          message:
-            'Application submitted. The team will personally review your video and respond within 48h.',
-        });
-      } else {
-        const body = (await res.json().catch(() => ({}))) as {
-          message?: string;
-        };
-        setResult({
-          ok: false,
-          error: body.message ?? `Submission failed (${res.status})`,
-        });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { message?: string };
+        throw new Error(body.message ?? `Submission failed (${response.status}).`);
       }
-    } catch (err) {
+      setResult({
+        ok: true,
+        message: 'Application submitted. The team will review it and respond in your account.',
+      });
+    } catch (reason) {
       setResult({
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: reason instanceof Error ? reason.message : 'Submission failed.',
       });
     } finally {
       setSubmitting(false);
@@ -240,202 +493,85 @@ function GetDoxxedCard({ accessToken }: { accessToken: string }) {
   }
 
   return (
-    <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-5">
-      <h3 className="text-base font-bold text-emerald-200">Get Doxxed</h3>
-      <p className="mt-1 text-xs text-zinc-400">
-        Verify once → unlock unlimited AI, DDollar earning, and project launch
-        rights. No KYC. Just a 60-second video.
-      </p>
-
-      <div className="mt-4 space-y-3">
-        <Field
-          label="GitHub URL"
-          value={form.githubUrl}
-          onChange={(v) => setForm({ ...form, githubUrl: v })}
-          placeholder="https://github.com/your-handle"
-        />
-        <Field
-          label="Project / company name"
-          value={form.projectName}
-          onChange={(v) => setForm({ ...form, projectName: v })}
-          placeholder="What are you building?"
-        />
-        <Field
-          label="Twitter handle"
-          value={form.twitterHandle}
-          onChange={(v) => setForm({ ...form, twitterHandle: v })}
-          placeholder="@your-handle"
-        />
-        <Field
-          label="Founder video URL (60-90 sec)"
-          value={form.videoUrl}
-          onChange={(v) => setForm({ ...form, videoUrl: v })}
-          placeholder="https://… (YouTube / Loom / mp4)"
-        />
-        <TextArea
-          label="What are you building?"
-          value={form.ideaDescription}
-          onChange={(v) => setForm({ ...form, ideaDescription: v })}
-          placeholder="One paragraph — the problem, the product, why you."
-        />
-      </div>
-
-      <button
-        type="button"
-        disabled={submitting}
-        onClick={submit}
-        className="mt-4 w-full rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
-      >
-        {submitting ? 'Submitting…' : 'Submit for review'}
-      </button>
-
-      {result?.ok && (
-        <p className="mt-3 rounded-lg border border-emerald-700 bg-emerald-900/30 p-3 text-xs text-emerald-200">
-          {result.message}
-        </p>
-      )}
-      {result && !result.ok && (
-        <p className="mt-3 rounded-lg border border-rose-700 bg-rose-900/30 p-3 text-xs text-rose-200">
-          {result.error}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function AlreadyDoxxedCard() {
-  return (
-    <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-5">
-      <h3 className="text-base font-bold text-emerald-200">
-        ✅ Doxxed Builder
-      </h3>
-      <p className="mt-1 text-xs text-zinc-400">
-        You have unlimited AI, full DDollar earning, and launch rights. Keep
-        building in public.
-      </p>
-      <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-        <Link
-          href="/founder-den"
-          className="rounded-lg border border-zinc-700 px-3 py-2 text-center text-zinc-200 hover:border-zinc-500 hover:text-white"
-        >
-          Founder Den →
-        </Link>
-        <Link
-          href="/settings/ai-usage"
-          className="rounded-lg border border-zinc-700 px-3 py-2 text-center text-zinc-200 hover:border-zinc-500 hover:text-white"
-        >
-          AI Usage →
-        </Link>
-      </div>
-    </div>
-  );
-}
-
-function LaunchTokenCard({ tier }: { tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN' }) {
-  const [waitlistEmail, setWaitlistEmail] = useState('');
-  const [joined, setJoined] = useState(false);
-
-  const canLaunch = tier === 'DOXXED';
-
-  return (
-    <div className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5">
-      <h3 className="text-base font-bold text-violet-200">
-        I&apos;m Ready — Launch My Token
-      </h3>
-      <p className="mt-1 text-xs text-zinc-400">
-        Spin up a token on Solana, open a 15-day Raise Room commitment window,
-        and trade on the integrated DEX. Revenue share for DDollar pledgers.
-      </p>
-
-      {!canLaunch && (
-        <p className="mt-3 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-200">
-          {tier === 'VISITOR'
-            ? '🔒 Get Doxxed first to unlock launch rights.'
-            : 'Token launch unlocks at Phase 7. Join the waitlist for early access.'}
-        </p>
-      )}
-
-      {canLaunch ? (
+    <section className="border-t border-zinc-800 pt-8" aria-labelledby="founder-identity">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex max-w-2xl items-start gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-300">
+            <ShieldCheck className="h-4 w-4" aria-hidden />
+          </span>
+          <div>
+            <h2 id="founder-identity" className="text-lg font-semibold text-white">
+              Verify your founder identity
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-zinc-400">
+              Connect your public work and a short founder video. Verification unlocks the
+              builder workflow; your live plan still controls managed AI usage.
+            </p>
+          </div>
+        </div>
         <button
           type="button"
-          disabled
-          className="mt-4 w-full cursor-not-allowed rounded-lg border border-violet-700/50 bg-violet-900/30 px-4 py-2 text-sm font-semibold text-violet-300"
-          title="Phase 7+ — not yet enabled"
+          onClick={() => setExpanded((current) => !current)}
+          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-zinc-500 hover:text-white"
+          aria-expanded={expanded}
         >
-          Launching soon (Phase 7)
+          {expanded ? 'Close application' : 'Start verification'}
         </button>
-      ) : (
-        <div className="mt-4">
-          {!joined ? (
-            <div className="flex gap-2">
-              <input
-                type="email"
-                value={waitlistEmail}
-                onChange={(e) => setWaitlistEmail(e.target.value)}
-                placeholder="founder@your-startup.com"
-                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-xs text-zinc-200"
-              />
-              <button
-                type="button"
-                onClick={() => setJoined(true)}
-                disabled={!waitlistEmail.includes('@')}
-                className="rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
-              >
-                Join waitlist
-              </button>
-            </div>
-          ) : (
-            <p className="rounded-lg border border-violet-700 bg-violet-900/30 p-3 text-xs text-violet-200">
-              You&apos;re on the list. We&apos;ll email you when Phase 7 opens.
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QuickLinksGrid() {
-  const links = [
-    { href: '/phone', label: 'Phone Remote', desc: 'Control your IDE from your phone', accent: 'text-emerald-300' },
-    { href: '/raise-room', label: 'Raise Room', desc: 'Discover founders · pledge DDollar', accent: 'text-amber-300' },
-    { href: '/founder-den', label: 'Founder Den', desc: 'Personal build dashboard', accent: 'text-violet-300' },
-    { href: '/settings/ai-usage', label: 'AI Usage', desc: 'Proxy stats · connect Cursor', accent: 'text-amber-300' },
-    { href: '/founder-os/decisions', label: 'Decision Log', desc: 'Routing decisions · cache hits', accent: 'text-sky-300' },
-  ];
-  return (
-    <div>
-      <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-        Quick links
-      </h3>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {links.map((l) => (
-          <Link
-            key={l.href}
-            href={l.href}
-            className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4 hover:border-zinc-600"
-          >
-            <p className={`text-sm font-bold ${l.accent}`}>{l.label}</p>
-            <p className="mt-1 text-[11px] text-zinc-500">{l.desc}</p>
-          </Link>
-        ))}
       </div>
-    </div>
-  );
-}
 
-function RecentActivityStrip({ dashboard }: { dashboard: DashboardData | null }) {
-  void dashboard;
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-5">
-      <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-        Recent activity
-      </h3>
-      <p className="mt-3 text-xs text-zinc-500">
-        No recent activity yet. Once the Learning Engine (Phase 4) is live,
-        routing improvements and project events will stream here.
-      </p>
-    </div>
+      {expanded ? (
+        <div className="mt-5 grid gap-4 border-t border-zinc-800 pt-5 md:grid-cols-2">
+          <Field
+            label="GitHub URL"
+            value={form.githubUrl}
+            onChange={(value) => setForm({ ...form, githubUrl: value })}
+            placeholder="https://github.com/your-handle"
+          />
+          <Field
+            label="Project or company"
+            value={form.projectName}
+            onChange={(value) => setForm({ ...form, projectName: value })}
+            placeholder="What are you building?"
+          />
+          <Field
+            label="X handle"
+            value={form.twitterHandle}
+            onChange={(value) => setForm({ ...form, twitterHandle: value })}
+            placeholder="@your-handle"
+          />
+          <Field
+            label="Founder video URL"
+            value={form.videoUrl}
+            onChange={(value) => setForm({ ...form, videoUrl: value })}
+            placeholder="YouTube, Loom, or a direct video link"
+          />
+          <div className="md:col-span-2">
+            <TextArea
+              label="What are you building?"
+              value={form.ideaDescription}
+              onChange={(value) => setForm({ ...form, ideaDescription: value })}
+              placeholder="The problem, the product, and why you are building it."
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-3 md:col-span-2">
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => void submit()}
+              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-black transition hover:bg-emerald-400 disabled:opacity-50"
+            >
+              {submitting ? 'Submitting...' : 'Submit for review'}
+            </button>
+            {result?.ok ? (
+              <p className="text-sm text-emerald-200" role="status">{result.message}</p>
+            ) : null}
+            {result && !result.ok ? (
+              <p className="text-sm text-red-300" role="alert">{result.error}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -447,17 +583,17 @@ function Field({
 }: {
   label: string;
   value: string;
-  onChange: (v: string) => void;
+  onChange: (value: string) => void;
   placeholder?: string;
 }) {
   return (
-    <label className="block text-xs">
+    <label className="block text-sm">
       <span className="text-zinc-400">{label}</span>
       <input
         value={value}
-        onChange={(e) => onChange(e.currentTarget.value)}
+        onChange={(event) => onChange(event.currentTarget.value)}
         placeholder={placeholder}
-        className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-xs text-zinc-200"
+        className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none transition focus:border-blue-400"
       />
     </label>
   );
@@ -471,18 +607,18 @@ function TextArea({
 }: {
   label: string;
   value: string;
-  onChange: (v: string) => void;
+  onChange: (value: string) => void;
   placeholder?: string;
 }) {
   return (
-    <label className="block text-xs">
+    <label className="block text-sm">
       <span className="text-zinc-400">{label}</span>
       <textarea
         value={value}
-        onChange={(e) => onChange(e.currentTarget.value)}
+        onChange={(event) => onChange(event.currentTarget.value)}
         placeholder={placeholder}
-        rows={3}
-        className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-xs text-zinc-200"
+        rows={4}
+        className="mt-1.5 w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none transition focus:border-blue-400"
       />
     </label>
   );

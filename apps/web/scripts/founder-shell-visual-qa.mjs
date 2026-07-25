@@ -20,6 +20,7 @@ const routes = [
   { name: 'downloads', path: '/downloads' },
   { name: 'trade', path: '/paper-trading' },
   { name: 'account', path: '/account' },
+  { name: 'founder-os', path: '/founder-os' },
 ];
 
 fs.mkdirSync(outputDir, { recursive: true });

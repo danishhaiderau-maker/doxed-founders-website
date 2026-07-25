@@ -258,6 +258,8 @@ function NavDropdown({
       </button>
       {isOpen && (
         <div
+          role="menu"
+          aria-label={`${row.label} menu`}
           className={cn(
             'absolute left-0 top-full z-50 mt-1.5 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/95 shadow-2xl backdrop-blur-md',
             accent.panel,
@@ -277,6 +279,7 @@ function NavDropdown({
                 <Link
                   key={`${item.label}-${item.href}`}
                   href={href}
+                  role="menuitem"
                   onClick={() => setOpenId(null)}
                   className={cn(
                     'flex items-start gap-2.5 rounded-lg border border-transparent px-3 py-2.5 transition',

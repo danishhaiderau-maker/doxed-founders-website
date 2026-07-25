@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { keccak256, toUtf8Bytes } from 'ethers';
 
 /** Agent-to-agent contracts. V2 keeps the original fields API-compatible. */
 
@@ -465,7 +465,7 @@ export function agentBusHandoffFingerprint(h: AgentBusHandoff): string {
     priorAttempts: boundedInteger(h.priorAttempts, 0, 100) ?? 0,
     stallThreshold: boundedInteger(h.stallThreshold, 1, 10) ?? 2,
   });
-  return createHash('sha256').update(stable).digest('hex');
+  return stableAgentBusDigest(stable);
 }
 
 function deterministicHandoffId(
@@ -474,8 +474,8 @@ function deterministicHandoffId(
   target: AgentBusTarget,
   title: string,
 ): string {
-  const digest = createHash('sha256')
-    .update(JSON.stringify({
+  const digest = stableAgentBusDigest(
+    JSON.stringify({
       founderId: input.founderId,
       projectId: input.projectId ?? null,
       kind: input.kind,
@@ -494,10 +494,16 @@ function deterministicHandoffId(
       budgetMs: boundedInteger(input.budgetMs, 1_000, 86_400_000),
       capabilityTags: normalizeTags(input.capabilityTags),
       priorAttempts: boundedInteger(input.priorAttempts, 0, 100) ?? 0,
-    }))
-    .digest('hex')
-    .slice(0, 24);
+    }),
+  ).slice(0, 24);
   return `bus-${digest}`;
+}
+
+function stableAgentBusDigest(value: string): string {
+  // AgentBus is exported to both Node services and browser clients. Ethers'
+  // isomorphic keccak keeps stable IDs collision-resistant without bundling
+  // node:crypto into the Founder website.
+  return keccak256(toUtf8Bytes(value)).slice(2);
 }
 
 function nextLedgerState(
