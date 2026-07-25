@@ -316,17 +316,19 @@ bot._BOT_ADMIN_TOKEN = original_admin_token
 print("\n[8] Paused shadow replay is visible without entering global books")
 reset_state()
 baseline_paused_open = bot.paused_shadow_dashboard_stats().get("open", 0)
+paused_shadow_start = bot.time.time()
+paused_shadow_call_ts = bot.utc_iso()
 with bot.replay_lock:
     bot.replay_buffers["pause-shadow-visible-1"] = {
         "closed": False,
-        "start_ts": 1_721_000_000.0,
+        "start_ts": paused_shadow_start,
         "research_lane": bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
         "direction": "SHORT",
         "paused_shadow": True,
         "collection_mode": "ADMIN_PAUSED_SHADOW",
         "source_trade_id": "scan-pause-shadow-1",
         "shared_ai_call_id": "scan-pause-shadow-1",
-        "shared_ai_call_ts": "2026-07-21T00:16:38+00:00",
+        "shared_ai_call_ts": paused_shadow_call_ts,
         "adx_at_signal": 27.0,
         "prompt_id": bot.SHARED_DIRECTION_PROMPT_ID,
     }
@@ -341,7 +343,11 @@ visible_row = next(
     if row.get("trade_id") == "pause-shadow-visible-1"
 )
 check("paused shadow preserves one shared paid-call ID", visible_row.get("shared_ai_call_id") == "scan-pause-shadow-1")
-check("paused shadow separates AI-call time from lane time", visible_row.get("shared_ai_call_ts") == "2026-07-21T00:16:38+00:00" and visible_row.get("lane_recorded_ts"))
+check(
+    "paused shadow separates AI-call time from lane time",
+    visible_row.get("shared_ai_call_ts") == paused_shadow_call_ts
+    and visible_row.get("lane_recorded_ts"),
+)
 check("paused shadow remains outside pending orders", not bot.pending_orders)
 check("paused shadow remains outside positions", not bot.open_positions)
 with open(bot.__file__, "r", encoding="utf-8") as dashboard_file:

@@ -295,14 +295,19 @@ def run():
         "build_paper_order_book" not in execution_source
         and "build_state_integrity" not in execution_source,
     )
-    with bot.app.test_client() as client:
-        execution_response = client.get("/api/relay-execution-state")
-        check("execution relay endpoint returns canonical JSON", execution_response.status_code == 200)
-        check(
-            "execution relay endpoint proves direct bounded source",
-            execution_response.headers.get("X-Relay-State-Cache") == "EXECUTION_DIRECT"
-            and execution_response.get_json().get("relay_cache", {}).get("mode") == "EXECUTION_DIRECT",
-        )
+    old_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+    try:
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+        with bot.app.test_client() as client:
+            execution_response = client.get("/api/relay-execution-state")
+            check("execution relay endpoint returns canonical JSON", execution_response.status_code == 200)
+            check(
+                "execution relay endpoint proves direct bounded source",
+                execution_response.headers.get("X-Relay-State-Cache") == "EXECUTION_DIRECT"
+                and execution_response.get_json().get("relay_cache", {}).get("mode") == "EXECUTION_DIRECT",
+            )
+    finally:
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = old_bootstrap_complete
     check(
         "cache reads never wait on the expensive relay rebuild lock",
         "with _RELAY_STATE_CACHE_LOCK" in inspect.getsource(bot._cached_relay_state_response)
