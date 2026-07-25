@@ -48,13 +48,13 @@ socket.addEventListener('message', ({ data }) => {
   }
 });
 
-function send(method, params = {}) {
+function send(method, params = {}, timeoutMs = 20_000) {
   const id = ++sequence;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`${method} timed out`));
-    }, 20_000);
+    }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     socket.send(JSON.stringify({ id, method, params }));
   });
@@ -70,7 +70,109 @@ async function evaluate(expression, awaitPromise = false) {
   return response.result?.value;
 }
 
+async function readWebviewText(candidate) {
+  const webview = new WebSocket(candidate.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    webview.addEventListener('open', resolve, { once: true });
+    webview.addEventListener('error', reject, { once: true });
+  });
+  const text = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Webview text probe timed out')), 10_000);
+    webview.addEventListener('message', ({ data }) => {
+      const message = JSON.parse(data.toString());
+      if (message.id !== 1) return;
+      clearTimeout(timer);
+      if (message.error) reject(new Error(message.error.message));
+      else resolve(message.result?.result?.value || '');
+    });
+    webview.send(JSON.stringify({
+      id: 1,
+      method: 'Runtime.evaluate',
+      params: {
+        expression: `(document.querySelector('iframe')?.contentDocument || document).body?.innerText || ''`,
+        returnByValue: true,
+      },
+    }));
+  });
+  webview.close();
+  return text;
+}
+
+async function readVisibleProductText() {
+  const mainText = await evaluate(`document.body?.innerText || ''`);
+  const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
+  const webviewTexts = await Promise.all(
+    targets
+      .filter((candidate) => candidate.type === 'iframe' && candidate.webSocketDebuggerUrl)
+      .map((candidate) => readWebviewText(candidate).catch(() => '')),
+  );
+  return `${mainText}\n${webviewTexts.join('\n')}`;
+}
+
+async function resetTargetScroll(candidate) {
+  const targetSocket = new WebSocket(candidate.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    targetSocket.addEventListener('open', resolve, { once: true });
+    targetSocket.addEventListener('error', reject, { once: true });
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Scroll reset timed out')), 10_000);
+    targetSocket.addEventListener('message', ({ data }) => {
+      const message = JSON.parse(data.toString());
+      if (message.id !== 1) return;
+      clearTimeout(timer);
+      if (message.error) reject(new Error(message.error.message));
+      else resolve();
+    });
+    targetSocket.send(JSON.stringify({
+      id: 1,
+      method: 'Runtime.evaluate',
+      params: {
+        expression: `(() => {
+          const root = document.querySelector('iframe')?.contentDocument || document;
+          root.defaultView?.scrollTo(0, 0);
+          for (const element of root.querySelectorAll('*')) {
+            if (element.scrollTop > 0) element.scrollTop = 0;
+            if (element.scrollLeft > 0) element.scrollLeft = 0;
+          }
+          return true;
+        })()`,
+        returnByValue: true,
+      },
+    }));
+  });
+  targetSocket.close();
+}
+
+async function resetVisibleScroll() {
+  await evaluate(`(() => {
+    window.scrollTo(0, 0);
+    for (const element of document.querySelectorAll('*')) {
+      if (element.scrollTop > 0) element.scrollTop = 0;
+      if (element.scrollLeft > 0) element.scrollLeft = 0;
+    }
+    return true;
+  })()`);
+  const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
+  await Promise.all(
+    targets
+      .filter((candidate) => candidate.type === 'iframe' && candidate.webSocketDebuggerUrl)
+      .map((candidate) => resetTargetScroll(candidate).catch(() => undefined)),
+  );
+}
+
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForCondition(label, predicate, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue;
+  while (Date.now() < deadline) {
+    lastValue = await predicate();
+    if (lastValue) return lastValue;
+    await wait(500);
+  }
+  throw new Error(`${label} did not become ready within ${timeoutMs} ms.`);
+}
 
 async function runCommandPalette(command) {
   await send('Input.dispatchKeyEvent', {
@@ -86,7 +188,6 @@ async function runCommandPalette(command) {
     windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
   });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
-  await wait(4_000);
 }
 
 await send('Runtime.enable');
@@ -102,6 +203,13 @@ if (hasRequestedViewport) {
   });
 }
 await send('Page.bringToFront');
+await waitForCondition(
+  'Founder IDE extension activation',
+  () => evaluate(`(() => {
+    const body = document.body?.innerText || '';
+    return document.readyState === 'complete' && !/Activating Extensions/i.test(body);
+  })()`),
+);
 if (process.env.FOUNDER_IDE_QA_TRUST === '1') {
   const trusted = await evaluate(`(() => {
     const button = [...document.querySelectorAll('button, a, [role="button"]')]
@@ -134,12 +242,25 @@ await send('Input.dispatchKeyEvent', {
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW', modifiers: 2 });
 await wait(500);
 await runCommandPalette('Founder: Open control center');
+await waitForCondition(
+  'Founder control center',
+  async () => {
+    const text = await readVisibleProductText();
+    return /New chat/i.test(text)
+      && /Projects/i.test(text)
+      && /Chats/i.test(text)
+      && /Agents/i.test(text)
+      && /Graph/i.test(text);
+  },
+);
+await resetVisibleScroll();
+await wait(250);
 
 const screenshot = await send('Page.captureScreenshot', {
   format: 'png',
   fromSurface: true,
   captureBeyondViewport: false,
-});
+}, 60_000);
 fs.writeFileSync(
   path.join(outputDir, `installed-workbench${viewportSuffix}.png`),
   Buffer.from(screenshot.data, 'base64'),
@@ -176,34 +297,6 @@ const ui = await evaluate(`(() => {
     },
   };
 })()`);
-
-async function readWebviewText(candidate) {
-  const webview = new WebSocket(candidate.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    webview.addEventListener('open', resolve, { once: true });
-    webview.addEventListener('error', reject, { once: true });
-  });
-  const text = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Webview text probe timed out')), 10_000);
-    webview.addEventListener('message', ({ data }) => {
-      const message = JSON.parse(data.toString());
-      if (message.id !== 1) return;
-      clearTimeout(timer);
-      if (message.error) reject(new Error(message.error.message));
-      else resolve(message.result?.result?.value || '');
-    });
-    webview.send(JSON.stringify({
-      id: 1,
-      method: 'Runtime.evaluate',
-      params: {
-        expression: `(document.querySelector('iframe')?.contentDocument || document).body?.innerText || ''`,
-        returnByValue: true,
-      },
-    }));
-  });
-  webview.close();
-  return text;
-}
 
 const currentTargets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
 const webviewTexts = await Promise.all(
