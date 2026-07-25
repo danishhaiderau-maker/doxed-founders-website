@@ -8,12 +8,17 @@ import {
 import {
   BuildQueueItemKind,
   BuildQueueStatus,
+  FounderEventStatus,
   FounderEventType,
   NotificationType,
+  Prisma,
   ScoutMarketStatus,
   SuggestedUpdateStatus,
 } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+import { randomUUID } from 'node:crypto';
 import {
+  agentBusRetryDecision,
   countActionableQueueItems,
   enrichFounderQueueItems,
   founderQueueToActionableAttention,
@@ -25,8 +30,13 @@ import {
   type AttentionItem,
   type FounderQueueItem,
   planAgentBusHandoffs,
+  replayAgentBusEvents,
+  resolveAgentBusGraph,
   agentBusHandoffFingerprint,
   type AgentBusHandoff,
+  type AgentBusLedgerEvent,
+  type AgentBusLedgerEventType,
+  type AgentBusLedgerState,
   type WorkforceAgentOutput,
 } from '@dcf/utils';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
@@ -284,6 +294,16 @@ export class FounderCommandCenterService {
       buildStatus?: string;
       prUrl?: string | null;
       result?: string | null;
+      dependsOn?: string[];
+      supersedes?: string;
+      replyTo?: string;
+      artifactPath?: string;
+      scope?: string[];
+      budgetTokens?: number;
+      budgetMs?: number;
+      capabilityTags?: string[];
+      priorAttempts?: number;
+      stallThreshold?: number;
     },
   ): Promise<AgentBusRunResult | null> {
     const founder = await this.prisma.founder.findUnique({
@@ -300,6 +320,16 @@ export class FounderCommandCenterService {
       detail: input.detail,
       sourceTask: input.sourceTask,
       researchSummary: input.kind === 'RESEARCH_COMPLETED' ? input.detail : undefined,
+      dependsOn: input.dependsOn,
+      supersedes: input.supersedes,
+      replyTo: input.replyTo,
+      artifactPath: input.artifactPath,
+      scope: input.scope,
+      budgetTokens: input.budgetTokens,
+      budgetMs: input.budgetMs,
+      capabilityTags: input.capabilityTags,
+      priorAttempts: input.priorAttempts,
+      stallThreshold: input.stallThreshold,
       buildOutput:
         input.kind !== 'RESEARCH_COMPLETED'
           ? { status: input.buildStatus ?? 'UNKNOWN', prUrl: input.prUrl, result: input.result }
@@ -360,6 +390,16 @@ export class FounderCommandCenterService {
       buildStatus?: string;
       prUrl?: string | null;
       result?: string | null;
+      dependsOn?: string[];
+      supersedes?: string;
+      replyTo?: string;
+      artifactPath?: string;
+      scope?: string[];
+      budgetTokens?: number;
+      budgetMs?: number;
+      capabilityTags?: string[];
+      priorAttempts?: number;
+      stallThreshold?: number;
     },
   ) {
     const founder = await this.prisma.founder.findUnique({ where: { userId } });
@@ -372,6 +412,16 @@ export class FounderCommandCenterService {
       detail: input.detail,
       sourceTask: input.sourceTask,
       researchSummary: input.kind === 'RESEARCH_COMPLETED' ? input.detail : undefined,
+      dependsOn: input.dependsOn,
+      supersedes: input.supersedes,
+      replyTo: input.replyTo,
+      artifactPath: input.artifactPath,
+      scope: input.scope,
+      budgetTokens: input.budgetTokens,
+      budgetMs: input.budgetMs,
+      capabilityTags: input.capabilityTags,
+      priorAttempts: input.priorAttempts,
+      stallThreshold: input.stallThreshold,
       buildOutput:
         input.kind !== 'RESEARCH_COMPLETED'
           ? { status: input.buildStatus ?? 'UNKNOWN', prUrl: input.prUrl, result: input.result }
@@ -406,59 +456,289 @@ export class FounderCommandCenterService {
     const applied: string[] = [];
     const skipped: string[] = [];
     let contentDraftId: string | undefined;
+    const actor = `founder-command-center:${randomUUID()}`;
+    const ledger = await this.loadAgentBusLedger(founder.id);
+    const completedIds = new Set(
+      [...ledger.stateByHandoff.entries()]
+        .filter(([, state]) => state === 'complete')
+        .map(([handoffId]) => handoffId),
+    );
+    const graph = resolveAgentBusGraph(handoffs, completedIds);
+    const executableIds = new Set(graph.ready.map((handoff) => handoff.id));
+    const byId = new Map(handoffs.map((handoff) => [handoff.id, handoff]));
 
-    for (const h of handoffs) {
+    for (const handoffId of graph.supersededIds) {
+      const handoff = byId.get(handoffId);
+      if (!handoff) continue;
+      let state = ledger.stateByHandoff.get(handoff.id);
+      if (!state) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff,
+          type: 'CREATED',
+          actor,
+        });
+        state = 'planned';
+      }
+      if (!isTerminalAgentBusState(state)) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff,
+          type: 'SUPERSEDED',
+          actor,
+        });
+      }
+      skipped.push(handoff.id);
+    }
+
+    for (const { handoff, waitingFor } of graph.blocked) {
+      let state = ledger.stateByHandoff.get(handoff.id);
+      if (!state) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff,
+          type: 'CREATED',
+          actor,
+        });
+        state = 'planned';
+      }
+      if (state === 'planned') {
+        const claimed = await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff,
+          type: 'CLAIMED',
+          actor,
+        });
+        if (claimed) state = 'claimed';
+      }
+      if (state === 'claimed' || state === 'running') {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff,
+          type: 'BLOCKED',
+          actor,
+          reason: `Waiting for ${waitingFor.join(', ')}`.slice(0, 500),
+        });
+      }
+      skipped.push(handoff.id);
+    }
+
+    for (const h of graph.ordered) {
+      if (!executableIds.has(h.id)) continue;
+      let state = ledger.stateByHandoff.get(h.id);
+      if (state === 'complete' || state === 'failed' || state === 'superseded') {
+        skipped.push(h.id);
+        continue;
+      }
+      if (!state) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'CREATED',
+          actor,
+        });
+        state = 'planned';
+      }
+      if (agentBusRetryDecision(h) === 'escalate') {
+        if (state === 'planned') {
+          const claimed = await this.persistAgentBusTransition({
+            founderId: founder.id,
+            projectId: project,
+            userId,
+            handoff: h,
+            type: 'CLAIMED',
+            actor,
+          });
+          if (claimed) state = 'claimed';
+        }
+        if (state === 'claimed') {
+          await this.persistAgentBusTransition({
+            founderId: founder.id,
+            projectId: project,
+            userId,
+            handoff: h,
+            type: 'FAILED',
+            actor,
+            reason: 'Stall threshold reached; founder review required.',
+          });
+          await this.notifications.notifyUser(userId, {
+            type: NotificationType.AGENT_RESULT,
+            title: 'Founder review needed',
+            body: h.title.slice(0, 180),
+            link: '/founder-den?tab=activity',
+          });
+        }
+        skipped.push(h.id);
+        continue;
+      }
+      if (state === 'verifying') {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'COMPLETED',
+          actor,
+          reason: 'Recovered after the verified side effect.',
+        });
+        skipped.push(h.id);
+        continue;
+      }
+      if (state === 'blocked') {
+        const resumed = await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'RESUMED',
+          actor,
+        });
+        if (!resumed) {
+          skipped.push(h.id);
+          continue;
+        }
+        state = 'running';
+      }
+      if (state === 'planned') {
+        const claimed = await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'CLAIMED',
+          actor,
+        });
+        if (!claimed) {
+          skipped.push(h.id);
+          continue;
+        }
+        state = 'claimed';
+      }
+      if (state === 'claimed') {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'STARTED',
+          actor,
+        });
+        state = 'running';
+      }
+      if (state !== 'running') {
+        skipped.push(h.id);
+        continue;
+      }
       if (await this.shouldSkipBusHandoff(founder.id, h)) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'VERIFYING',
+          actor,
+          reason: 'Equivalent recent output already exists.',
+        });
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'COMPLETED',
+          actor,
+          reason: 'Idempotent reuse of verified output.',
+        });
         skipped.push(h.id);
         continue;
       }
 
-      if (h.to === 'builder' && h.payload.spec) {
-        await this.buildQueue.quickBuild(userId, {
-          prompt: h.payload.spec ?? `${h.title}. ${h.detail}`.slice(0, 1200),
-        });
-        applied.push(h.id);
-        await this.notifications.notifyUser(userId, {
-          type: NotificationType.BUILD_QUEUE,
-          title: 'Build queued from research',
-          body: h.title.slice(0, 120),
-          link: '/founder-den?tab=build',
-        });
-      }
+      try {
+        if (h.to === 'builder' && h.payload.spec) {
+          await this.buildQueue.quickBuild(userId, {
+            prompt: h.payload.spec ?? `${h.title}. ${h.detail}`.slice(0, 1200),
+          });
+          applied.push(h.id);
+          await this.notifications.notifyUser(userId, {
+            type: NotificationType.BUILD_QUEUE,
+            title: 'Build queued from research',
+            body: h.title.slice(0, 120),
+            link: '/founder-den?tab=build',
+          });
+        }
 
-      if (h.to === 'content') {
-        const headline = h.title.slice(0, 120);
-        const trader = (h.payload.prompt ?? h.detail).slice(0, 500);
-        const body = `${h.detail}\n\n${h.payload.prompt ?? ''}`.trim().slice(0, 4000);
-        const draft = await this.prisma.suggestedBuildUpdate.create({
-          data: {
-            founderId: founder.id,
-            projectId: project ?? undefined,
-            headline,
-            body: body || headline,
-            devSummary: h.detail.slice(0, 2000),
-            traderSummary: trader || headline,
-            source: 'agent_bus',
-          },
-        });
-        contentDraftId = draft.id;
-        applied.push(h.id);
-        await this.notifications.notifyUser(userId, {
-          type: NotificationType.BUILD_QUEUE,
-          title: 'Draft update ready',
-          body: headline,
-          link: '/founder-den?tab=social',
-        });
-      }
+        if (h.to === 'content') {
+          const headline = h.title.slice(0, 120);
+          const trader = (h.payload.prompt ?? h.detail).slice(0, 500);
+          const body = `${h.detail}\n\n${h.payload.prompt ?? ''}`.trim().slice(0, 4000);
+          const draft = await this.prisma.suggestedBuildUpdate.create({
+            data: {
+              founderId: founder.id,
+              projectId: project ?? undefined,
+              headline,
+              body: body || headline,
+              devSummary: h.detail.slice(0, 2000),
+              traderSummary: trader || headline,
+              source: 'agent_bus',
+            },
+          });
+          contentDraftId = draft.id;
+          applied.push(h.id);
+          await this.notifications.notifyUser(userId, {
+            type: NotificationType.BUILD_QUEUE,
+            title: 'Draft update ready',
+            body: headline,
+            link: '/founder-den?tab=social',
+          });
+        }
 
-      if (h.to === 'founder_queue') {
-        applied.push(h.id);
-        await this.notifications.notifyUser(userId, {
-          type: NotificationType.AGENT_RESULT,
-          title: h.title.slice(0, 80),
-          body: h.detail.slice(0, 180),
-          link: '/founder-den?tab=activity',
+        if (h.to === 'founder_queue') {
+          applied.push(h.id);
+          await this.notifications.notifyUser(userId, {
+            type: NotificationType.AGENT_RESULT,
+            title: h.title.slice(0, 80),
+            body: h.detail.slice(0, 180),
+            link: '/founder-den?tab=activity',
+          });
+        }
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'VERIFYING',
+          actor,
         });
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'COMPLETED',
+          actor,
+        });
+      } catch (error) {
+        await this.persistAgentBusTransition({
+          founderId: founder.id,
+          projectId: project,
+          userId,
+          handoff: h,
+          type: 'FAILED',
+          actor,
+          reason: error instanceof Error ? error.message.slice(0, 500) : 'Unknown handoff failure.',
+        });
+        throw error;
       }
     }
 
@@ -469,6 +749,66 @@ export class FounderCommandCenterService {
       skipped: skipped.length,
       contentDraftId,
     };
+  }
+
+  private async loadAgentBusLedger(founderId: string) {
+    const rows = await this.prisma.founderEvent.findMany({
+      where: { founderId, source: 'agent_bus_v2' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { payload: true },
+    });
+    const events = rows
+      .map((row) => readAgentBusLedgerEvent(row.payload))
+      .filter((event): event is Omit<AgentBusLedgerEvent, 'sequence'> => event != null)
+      .sort(compareAgentBusLedgerEvents)
+      .map((event, sequence) => ({ ...event, sequence }));
+    return replayAgentBusEvents(events);
+  }
+
+  private async persistAgentBusTransition(input: {
+    founderId: string;
+    projectId?: string | null;
+    userId: string;
+    handoff: AgentBusHandoff;
+    type: AgentBusLedgerEventType;
+    actor: string;
+    reason?: string;
+  }): Promise<boolean> {
+    const eventId = `${input.handoff.id}:${input.type.toLowerCase()}`;
+    const at = new Date().toISOString();
+    const ledgerPayload: Record<string, unknown> = {
+      eventId,
+      handoffId: input.handoff.id,
+      type: input.type,
+      at,
+      actor: input.actor,
+    };
+    if (input.reason) ledgerPayload.reason = input.reason;
+    if (input.type === 'CREATED') ledgerPayload.contract = input.handoff;
+    try {
+      await this.prisma.founderEvent.create({
+        data: {
+          founderId: input.founderId,
+          projectId: input.projectId ?? undefined,
+          userId: input.userId,
+          type: FounderEventType.QUICK_COMMAND,
+          source: 'agent_bus_v2',
+          title: `${input.type}: ${input.handoff.title}`.slice(0, 180),
+          payload: {
+            agentBusLedger: ledgerPayload,
+          } as Prisma.InputJsonValue,
+          status: FounderEventStatus.PROCESSED,
+          processedAt: new Date(at),
+          dedupeKey: `agent-bus-v2:${eventId}`,
+        },
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof PrismaClientKnownRequestError && error.code === 'P2002') {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private async shouldSkipBusHandoff(founderId: string, h: AgentBusHandoff): Promise<boolean> {
@@ -616,3 +956,71 @@ export class FounderCommandCenterService {
     throw new NotFoundException(`Unknown queue item: ${itemId}`);
   }
 }
+
+const AGENT_BUS_LEDGER_EVENT_TYPES = new Set<AgentBusLedgerEventType>([
+  'CREATED',
+  'CLAIMED',
+  'STARTED',
+  'BLOCKED',
+  'RESUMED',
+  'VERIFYING',
+  'COMPLETED',
+  'FAILED',
+  'SUPERSEDED',
+]);
+
+function readAgentBusLedgerEvent(
+  payload: Prisma.JsonValue,
+): Omit<AgentBusLedgerEvent, 'sequence'> | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const candidate = (payload as Record<string, Prisma.JsonValue>).agentBusLedger;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  const event = candidate as Record<string, Prisma.JsonValue>;
+  if (
+    typeof event.eventId !== 'string'
+    || typeof event.handoffId !== 'string'
+    || typeof event.type !== 'string'
+    || !AGENT_BUS_LEDGER_EVENT_TYPES.has(event.type as AgentBusLedgerEventType)
+    || typeof event.at !== 'string'
+    || !Number.isFinite(Date.parse(event.at))
+    || typeof event.actor !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    eventId: event.eventId,
+    handoffId: event.handoffId,
+    type: event.type as AgentBusLedgerEventType,
+    at: event.at,
+    actor: event.actor,
+    reason: typeof event.reason === 'string' ? event.reason : undefined,
+  };
+}
+
+function isTerminalAgentBusState(state: AgentBusLedgerState): boolean {
+  return state === 'complete' || state === 'failed' || state === 'superseded';
+}
+
+function compareAgentBusLedgerEvents(
+  left: Omit<AgentBusLedgerEvent, 'sequence'>,
+  right: Omit<AgentBusLedgerEvent, 'sequence'>,
+): number {
+  const byTime = Date.parse(left.at) - Date.parse(right.at);
+  if (byTime !== 0) return byTime;
+  if (left.handoffId !== right.handoffId) {
+    return left.handoffId.localeCompare(right.handoffId);
+  }
+  return AGENT_BUS_EVENT_ORDER[left.type] - AGENT_BUS_EVENT_ORDER[right.type];
+}
+
+const AGENT_BUS_EVENT_ORDER: Record<AgentBusLedgerEventType, number> = {
+  CREATED: 0,
+  CLAIMED: 1,
+  STARTED: 2,
+  BLOCKED: 3,
+  RESUMED: 4,
+  VERIFYING: 5,
+  COMPLETED: 6,
+  FAILED: 7,
+  SUPERSEDED: 8,
+};
