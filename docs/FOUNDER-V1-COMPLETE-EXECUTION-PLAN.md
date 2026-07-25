@@ -249,9 +249,11 @@ admin and user usage screenshots.
   latency, and outside-managed-quota status without exposing credentials.
 - [ ] Deploy the focused production Agent-tool gateway repair from PR `#41`
   (`2d293f85`). The patch admits validated `tools`/`tool_choice`, preserves
-  tool-call history, and forwards both to DeepSeek; API build and the complete
-  158-test API suite pass, but installed Agent execution remains blocked until
-  the coordinated production deployment boundary.
+  tool-call history, and forwards both to DeepSeek. The exact three-file
+  contract is integrated on the isolated Founder release branch and passes the
+  current no-write typecheck plus the complete 252-test API suite; installed
+  Agent execution remains blocked until the coordinated production deployment
+  boundary.
 - [ ] Prove one complete installed Agent loop after that deployment: model
   selects a tool, the IDE obtains local approval where required, the tool runs,
   the tool result returns to the same conversation, and the final answer plus
