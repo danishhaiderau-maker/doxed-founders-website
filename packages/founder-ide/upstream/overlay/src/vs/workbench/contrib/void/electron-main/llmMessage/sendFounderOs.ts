@@ -45,6 +45,12 @@ import {
 	founderReviewTools,
 	isFounderReviewReconciliation,
 } from './founderIndependentReview.js';
+import {
+	nativeSkillForWorkMode,
+	nativeSkillReceipt,
+	nativeSkillSystem,
+	nativeSkillToolTurnsUsed,
+} from './founderNativeSkills.js';
 import { beginNativeCoordination } from './founderNativeCoordination.js';
 import {
 	formatNativeTeamAdvice,
@@ -486,12 +492,14 @@ function gatewayTools(
 	mcpTools: InternalToolInfo[] | undefined,
 	workMode: ReturnType<typeof readNativeWorkMode>,
 	strictReadOnly = false,
+	toolBudgetRemaining = Number.POSITIVE_INFINITY,
 ): Array<Record<string, unknown>> {
-	if (workMode === 'ask') return [];
+	if (workMode === 'ask' || toolBudgetRemaining <= 0) return [];
 	const tools = availableTools(chatMode, mcpTools) ?? [];
+	const skill = nativeSkillForWorkMode(workMode);
 	const allowedTools = strictReadOnly
 		? founderReviewTools(true, tools) ?? []
-		: workMode === 'plan'
+		: skill.toolPolicy === 'read_only'
 		? tools.filter((tool) =>
 			!/(?:apply|command|create|delete|edit|execute|insert|mkdir|move|patch|remove|rename|replace|run|shell|terminal|write)/i.test(tool.name),
 		)
@@ -551,6 +559,9 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
 	const isReviewReconciliation = isFounderReviewReconciliation(openAiMessages);
 	const workMode = isReviewReconciliation ? 'plan' : readNativeWorkMode();
+	const skill = nativeSkillForWorkMode(workMode);
+	const skillToolTurnsUsed = nativeSkillToolTurnsUsed(openAiMessages);
+	const skillToolBudgetRemaining = Math.max(0, skill.maxToolTurns - skillToolTurnsUsed);
 	const requestedModel = modelSelection?.modelName;
 	const escalationReason = requestedModel === 'founder-os-auto'
 		? nativeAutoEscalationReason(openAiMessages)
@@ -568,8 +579,12 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		role: 'system',
 		content: nativeWorkModeSystem(workMode),
 	});
+	openAiMessages.splice(2, 0, {
+		role: 'system',
+		content: nativeSkillSystem(skill),
+	});
 	if (isReviewReconciliation) {
-		openAiMessages.splice(2, 0, {
+		openAiMessages.splice(3, 0, {
 			role: 'system',
 			content: 'Founder Second brain reconciliation is read-only. Verify evidence, preserve disagreement, propose the smallest correction, and require normal approval before any later editing turn.',
 		});
@@ -620,14 +635,19 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		messages: openAiMessages,
 		stream: true,
 		founder_os_metadata: true,
-		...(escalationReason || isReviewReconciliation ? {
-			metadata: {
-				...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
-				...(isReviewReconciliation ? { founder_second_brain_reconciliation: true } : {}),
-			},
-		} : {}),
+		metadata: {
+			founder_skill: `${skill.id}@${skill.version}`,
+			...(escalationReason ? { founder_auto_escalation: escalationReason } : {}),
+			...(isReviewReconciliation ? { founder_second_brain_reconciliation: true } : {}),
+		},
 	};
-	const tools = gatewayTools(chatMode, mcpTools, workMode, isReviewReconciliation);
+	const tools = gatewayTools(
+		chatMode,
+		mcpTools,
+		workMode,
+		isReviewReconciliation,
+		skillToolBudgetRemaining,
+	);
 	if (tools.length > 0) {
 		body.tools = tools;
 		body.tool_choice = 'auto';
@@ -720,7 +740,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		? fullText
 		: `${stripUntrustedFounderRouteReceipts(fullText)}${isReviewReconciliation
 			? '\n\n**Second brain reconciliation** | read-only | dissent preserved | approval required'
-			: ''}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
+			: ''}${nativeSkillReceipt(skill, skillToolTurnsUsed)}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
 		fullText: finalText,
 		fullReasoning,

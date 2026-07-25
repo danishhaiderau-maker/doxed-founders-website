@@ -258,10 +258,14 @@ describe('Founder IDE upstream overlay', () => {
     const source = read(
       'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
     );
-    assert.match(source, /if \(workMode === 'ask'\) return \[\]/);
-    assert.match(source, /workMode === 'plan'/);
+    const skills = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeSkills.ts',
+    );
+    assert.match(source, /workMode === 'ask' \|\| toolBudgetRemaining <= 0/);
+    assert.match(skills, /plan:[\s\S]*?toolPolicy: 'read_only'/);
+    assert.match(source, /skill\.toolPolicy === 'read_only'/);
     assert.match(source, /nativeWorkModeSystem\(workMode\)/);
-    assert.match(source, /gatewayTools\(chatMode, mcpTools, workMode/);
+    assert.match(source, /gatewayTools\([\s\S]*?skillToolBudgetRemaining/);
   });
 
   it('patches native chat metadata with the active workspace root', () => {
@@ -330,8 +334,23 @@ describe('Founder IDE upstream overlay', () => {
     const team = read(
       'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeTeam.ts',
     );
+    const skills = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeSkills.ts',
+    );
+    const gateway = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
     assert.match(team, /nativeWorkModeSystem/);
     assert.match(team, /Reproduce the failure/);
     assert.match(team, /sole editing owner/);
+    assert.match(skills, /founder\.concise-answer/);
+    assert.match(skills, /founder\.evidence-plan/);
+    assert.match(skills, /founder\.verified-build/);
+    assert.match(skills, /founder\.root-cause-debug/);
+    assert.match(skills, /founder\.coordinated-build/);
+    assert.match(skills, /maxToolTurns/);
+    assert.match(gateway, /nativeSkillSystem/);
+    assert.match(gateway, /nativeSkillReceipt/);
+    assert.match(gateway, /metadata:\s*\{\s*founder_skill:/);
   });
 });

@@ -228,10 +228,13 @@ admin and user usage screenshots.
 - [ ] Prove all five work modes in the refreshed installed application,
   including that Ask and Plan cannot edit, Build and Debug keep one editing
   owner, and Team exposes the bounded coordination receipt.
-- [ ] Treat skills as reusable, versioned workflows attached to these five
+- [x] Treat skills as reusable, versioned workflows attached to these five
   modes rather than adding another permanent icon for every capability.
   Skills declare tools, permissions, evidence requirements, budget, and output
-  contract; risky or destructive tools still require explicit approval.
+  contract; risky or destructive tools still require explicit approval. V1
+  attaches one stable built-in workflow to each visible mode and exposes the
+  selected skill in the response receipt without adding another navigation
+  surface.
 - [x] Implement the Founder Settings Personal AI manager with name, connection
   kind, base URL, key, model, optional headers, edit-with-secret-preservation,
   connectivity test, enable/disable, delete, and active selection. Secrets use
