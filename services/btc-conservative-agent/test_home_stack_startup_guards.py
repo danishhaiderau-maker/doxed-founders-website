@@ -228,7 +228,8 @@ def main() -> None:
         and "TerminateProcess" in COMMON
         and "Get-Process -Id" not in SUPERVISOR
         and "Get-Process cloudflared" not in SUPERVISOR
-        and "Get-Process -Id" not in MONITOR,
+        and MONITOR.count("Get-Process -Id $currentPid") == 1
+        and "Get-Process |" not in MONITOR,
     )
     check(
         "supervisor startup never eagerly compiles native process support",
