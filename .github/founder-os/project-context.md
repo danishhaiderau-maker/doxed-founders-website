@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(web): separate showcase and personal session status (#45)
 
 ## Last Activity
 
