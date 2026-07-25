@@ -20829,6 +20829,10 @@ _API_STATE_REFRESH_INTERVAL_SEC = max(
     5.0,
     float(os.getenv("API_STATE_REFRESH_INTERVAL_SEC", "10.0")),
 )
+_API_STATE_LOCK_TIMEOUT_SEC = max(
+    0.1,
+    float(os.getenv("API_STATE_LOCK_TIMEOUT_SEC", "2.0")),
+)
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
 _api_state_cache_lock = threading.Lock()
@@ -26929,7 +26933,10 @@ def _build_api_state_snapshot():
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
-        with state_lock:
+        state_acquired = state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        if not state_acquired:
+            raise TimeoutError("api-state snapshot timed out waiting for state_lock")
+        try:
             # The raw order book is large and fast-moving. Deep-copying it only
             # to discard it afterwards held state_lock for up to 38 seconds,
             # starving the dashboard, webhook reads, and /api/ping.
@@ -26939,7 +26946,12 @@ def _build_api_state_snapshot():
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
-        with trade_lock:
+        finally:
+            state_lock.release()
+        trade_acquired = trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        if not trade_acquired:
+            raise TimeoutError("api-state snapshot timed out waiting for trade_lock")
+        try:
             trades_copy = _snapshot_trades_for_api(session_start)
             expired_orders_total = len(expired_orders)
             expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
@@ -26972,6 +26984,8 @@ def _build_api_state_snapshot():
                 }
                 for ln in PATHWAY_LAB_LANES
             }
+        finally:
+            trade_lock.release()
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
@@ -27119,8 +27133,11 @@ def _build_api_state_snapshot():
         sync_cooldown_debug_state()
         branding = build_dashboard_display(snapshot)
         snapshot.update(branding)
-        with state_lock:
-            state.update(branding)
+        if state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
+            try:
+                state.update(branding)
+            finally:
+                state_lock.release()
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
             "count": get_active_signal_count(),
@@ -27174,9 +27191,13 @@ def _build_api_state_snapshot():
         snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
         snapshot["smart_submit_enabled"] = smart_submit_enabled()
         snapshot["research_config"] = research_config_for_dashboard()
-        with state_lock:
+        if not state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
+            raise TimeoutError("api-state snapshot timed out waiting for final state_lock")
+        try:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
+        finally:
+            state_lock.release()
         snapshot["display_timezone"] = "Australia/Melbourne"
         snapshot["server_ts_melbourne"] = _format_melbourne_hm(snapshot.get("server_ts") or utc_iso())
         snapshot["ai_input_time_melbourne"] = (
@@ -27371,48 +27392,24 @@ def api_state():
             if not admin_authed:
                 resp.headers["X-Api-State-Sanitized"] = "1"
             return resp
-    # Cold-start fallback: cache empty before the refresher has populated it.
-    # Build once synchronously so the first dashboard poll still works, and seed
-    # the cache so subsequent polls hit.
-    try:
-        snap = _build_api_state_snapshot()
-        with _api_state_cache_lock:
-            _api_state_cache["payload"] = snap
-            _api_state_cache["built_at"] = time.time()
-        payload = snap if admin_authed else _sanitize_public_state(snap)
-        resp = jsonify(payload)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["X-Api-State-Cache"] = "miss-fallback"
-        if not admin_authed:
-            resp.headers["X-Api-State-Sanitized"] = "1"
-        return resp
-    except Exception as e:
-        logger.error(f"/api/state error: {str(e)}")
-        err_payload = {
-            "api_state_error": str(e)[:500],
-            "bot_version": EXECUTION_FIX_VERSION,
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "bot_pid": os.getpid(),
-            "bot_cwd": os.getcwd(),
-            "dashboard_port": DASHBOARD_PORT,
-            "dashboard_url": dashboard_public_url(),
-            "deepseek_key_present": bool(_deepseek_api_key()),
-            "research_lane_enabled": research_lane_enabled_map(),
-            "continuous_ai_research_enabled": continuous_ai_research_enabled(),
-        }
-        # Error payload contains only operational metadata, no strategy internals.
-        if not admin_authed:
-            err_payload = {
-                "api_state_error": err_payload["api_state_error"],
-                "bot_version": err_payload["bot_version"],
-                "bot_pid": err_payload["bot_pid"],
-                "dashboard_port": err_payload["dashboard_port"],
-                "dashboard_url": err_payload["dashboard_url"],
-            }
-        resp = jsonify(err_payload)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        return resp, 500
+    # Cache warming must never consume a request worker. During the July 26
+    # incident, eight simultaneous dashboard polls all entered the synchronous
+    # fallback and waited behind trade/state locks for ~97 seconds. That
+    # exhausted the bounded server and made /api/ping look dead, so the external
+    # monitor killed a process that was still progressing. Only the dedicated
+    # refresher may build this presentation snapshot.
+    resp = jsonify({
+        "api_state_error": "dashboard snapshot is warming",
+        "bot_version": EXECUTION_FIX_VERSION,
+        "bot_pid": os.getpid(),
+        **_dashboard_owner_metadata(),
+        "retry_after_sec": 2,
+    })
+    resp.status_code = 503
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Retry-After"] = "2"
+    resp.headers["X-Api-State-Cache"] = "warming"
+    return resp
 
 
 @app.route('/health')

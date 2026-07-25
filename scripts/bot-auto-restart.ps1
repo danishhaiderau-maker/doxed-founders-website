@@ -248,7 +248,11 @@ try {
         # legitimately take several minutes on the home PC (especially after a
         # reboot or Defender scan) while the early boot server is intermittently
         # unable to acquire the Python GIL. Give that bounded startup phase 15
-        # minutes, then require six consecutive failed probes before recycling.
+        # minutes, then require eighteen consecutive failed probes before
+        # recycling. A Bitfinex TLS failure plus one presentation-snapshot lock
+        # wait has reached ~97s on this PC; six probes recycled a still-progressing
+        # process at precisely the worst moment. Eighteen keeps genuine hangs
+        # bounded while allowing transient exchange/network stalls to recover.
         $livenessNow = Get-Date
         $forcedLivenessRestart = $false
         if (($livenessNow - $lastLivenessCheck).TotalSeconds -ge 10) {
@@ -258,7 +262,7 @@ try {
           } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 900) {
             $consecutiveLivenessFailures++
             Write-RestartLog "liveness_failed	pid=$currentPid	count=$consecutiveLivenessFailures"
-            if ($consecutiveLivenessFailures -ge 6) {
+            if ($consecutiveLivenessFailures -ge 18) {
               $code = -2
               Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process alive but /api/ping unavailable"
               Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue
