@@ -25,6 +25,17 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /requires an existing compiled output/);
   assert.match(script, /extensionDevelopmentPath/);
   assert.match(script, /Format-NamedArgument/);
+  assert.match(script, /Format-PositionalArgument \$gulpCli/);
+  assert.match(script, /Copy-Item -LiteralPath \$fastGulpfile -Destination \$checkoutGulpfile -Force/);
+  assert.match(script, /Format-PositionalArgument \$checkoutGulpfile/);
+  assert.match(script, /Format-PositionalArgument \$reactBuild/);
+  assert.match(script, /Get-RecordedNodeProcess/);
+  assert.match(script, /workbenchWatchStartedAt/);
+  assert.match(script, /reactWatchStartedAt/);
+  assert.match(script, /\$PSCommandPath/);
+  assert.match(script, /SetLastWriteTimeUtc/);
+  assert.match(script, /if \(\$overlayApplied\)/);
+  assert.match(script, /announcedCompileInputs/);
   assert.match(script, /FOUNDER_IDE_DEV_CACHE/);
   assert.match(script, /GetTempPath/);
   assert.doesNotMatch(script, /artifacts\\founder-ide-dev-cache/);
@@ -57,7 +68,7 @@ test(
     const status = JSON.parse(stdout);
 
     assert.equal(status.mode, 'Status');
-    assert.equal(status.overlayFiles, 22);
+    assert.equal(status.overlayFiles, 23);
     assert.ok(status.extensionFiles > 30);
     assert.match(status.overlayHash, /^[a-f0-9]{64}$/);
     assert.match(status.extensionHash, /^[a-f0-9]{64}$/);

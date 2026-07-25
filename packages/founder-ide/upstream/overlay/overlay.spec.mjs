@@ -276,12 +276,19 @@ describe('Founder IDE upstream overlay', () => {
 
   it('keeps the pinned Electron and Node process typings build-compatible', () => {
     const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
+    assert.match(applyScript, /safe\.directory=\$VscodiumCheckout/);
     assert.match(applyScript, /parcelWatcher\.ts/);
+    assert.match(applyScript, /NodeJS\.Process\)\.on\('uncaughtException'/);
+    assert.match(applyScript, /NodeJS\.Process\)\.on\('unhandledRejection'/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('uncaughtException'/);
     assert.match(applyScript, /NodeJS\.EventEmitter\)\.off\('unhandledRejection'/);
     assert.match(applyScript, /menubar\.ts/);
     assert.match(applyScript, /BaseWindow, BrowserWindow/);
     assert.match(applyScript, /win instanceof BrowserWindow \? win : activeWindow/);
+    assert.match(applyScript, /build\\lib\\tsb\\builder\.ts/);
+    assert.match(applyScript, /build\\lib\\tsb\\builder\.js/);
+    assert.match(applyScript, /colors\.bgCyan/);
+    assert.match(applyScript, /ansi_colors_1\.default\.bgCyan/);
     assert.match(applyScript, /manifest\.upstream\.electron_version/);
     assert.match(applyScript, /build_from_source="true"/);
     assert.match(applyScript, /lock\.packages\?\.\['node_modules\/electron'\]\?\.version/);

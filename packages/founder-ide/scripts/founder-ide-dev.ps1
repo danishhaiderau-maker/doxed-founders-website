@@ -76,6 +76,42 @@ function Format-NamedArgument {
     return "$Name=`"$Value`""
 }
 
+function Format-PositionalArgument {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    return '"{0}"' -f $Value.Replace('"', '\"')
+}
+
+function Get-RecordedNodeProcess {
+    param(
+        [int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedNode,
+        [Parameter(Mandatory = $true)][DateTime]$NotBefore
+    )
+
+    if ($ProcessId -le 0) {
+        return $null
+    }
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process -or $process.HasExited) {
+        return $null
+    }
+    try {
+        $actualPath = [System.IO.Path]::GetFullPath($process.Path)
+        $expectedPath = [System.IO.Path]::GetFullPath($ExpectedNode)
+        if (-not $actualPath.Equals($expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        if ($process.StartTime.ToUniversalTime() -lt $NotBefore.ToUniversalTime().AddMinutes(-1)) {
+            return $null
+        }
+    } catch {
+        return $null
+    }
+    return $process
+}
+
 function Assert-PinnedCheckout {
     param(
         [Parameter(Mandatory = $true)][string]$Checkout,
@@ -182,7 +218,7 @@ if (-not $CacheRoot) {
 }
 $CacheRoot = [System.IO.Path]::GetFullPath($CacheRoot)
 
-$overlayFiles = @($manifestPath, $applyScript, $fastGulpfile)
+$overlayFiles = @($manifestPath, $applyScript, $fastGulpfile, $PSCommandPath)
 foreach ($entry in $manifest.files) {
     $overlayFiles += Join-Path $overlayRoot ([string]$entry.src)
 }
@@ -283,6 +319,7 @@ $previousState = $null
 if (Test-Path $workbenchStateFile) {
     $previousState = Get-Content -LiteralPath $workbenchStateFile -Raw | ConvertFrom-Json
 }
+$overlayApplied = $false
 if ($Force -or -not $previousState -or $previousState.overlayHash -ne $overlayHash) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $applyScript `
         -VscodiumCheckout $CheckoutPath `
@@ -290,6 +327,7 @@ if ($Force -or -not $previousState -or $previousState.overlayHash -ne $overlayHa
     if ($LASTEXITCODE -ne 0) {
         throw "Founder overlay application failed with exit code $LASTEXITCODE"
     }
+    $overlayApplied = $true
 }
 
 $logRoot = Join-Path $CacheRoot "logs"
@@ -298,40 +336,106 @@ $gulpCli = Join-Path $CheckoutPath "node_modules\gulp\bin\gulp.js"
 if (-not (Test-Path $gulpCli)) {
     throw "Warm checkout dependencies are missing: $gulpCli"
 }
+$checkoutGulpfile = Join-Path $CheckoutPath ".founder-fast-gulpfile.cjs"
+Copy-Item -LiteralPath $fastGulpfile -Destination $checkoutGulpfile -Force
 
 $env:FOUNDER_IDE_CHECKOUT = $CheckoutPath
 $watchOut = Join-Path $logRoot "workbench-watch.out.log"
 $watchErr = Join-Path $logRoot "workbench-watch.err.log"
-$watchProcess = Start-Process `
-    -FilePath $nodeExecutable `
-    -ArgumentList @("--max-old-space-size=8192", $gulpCli, "--gulpfile", $fastGulpfile, "founder-watch-client") `
-    -WorkingDirectory $CheckoutPath `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $watchOut `
-    -RedirectStandardError $watchErr `
-    -PassThru
+$canReusePrevious = $previousState `
+    -and $previousState.checkout -eq $CheckoutPath `
+    -and $previousState.upstreamCommit -eq [string]$manifest.upstream.commit `
+    -and $previousState.node -eq (& $nodeExecutable --version).Trim()
+$watchProcess = if ($canReusePrevious) {
+    $watchStartedAt = if ($previousState.workbenchWatchStartedAt) {
+        [DateTime]::Parse([string]$previousState.workbenchWatchStartedAt)
+    } else {
+        [DateTime]::Parse([string]$previousState.startedAt).AddHours(-1)
+    }
+    Get-RecordedNodeProcess `
+        -ProcessId ([int]$previousState.workbenchWatchPid) `
+        -ExpectedNode $nodeExecutable `
+        -NotBefore $watchStartedAt
+}
+if (-not $watchProcess) {
+    $watchProcess = Start-Process `
+        -FilePath $nodeExecutable `
+        -ArgumentList @(
+            "--max-old-space-size=8192",
+            (Format-PositionalArgument $gulpCli),
+            "--gulpfile",
+            (Format-PositionalArgument $checkoutGulpfile),
+            "founder-watch-client"
+        ) `
+        -WorkingDirectory $CheckoutPath `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $watchOut `
+        -RedirectStandardError $watchErr `
+        -PassThru
+}
 
 $reactBuild = Join-Path $CheckoutPath "src\vs\workbench\contrib\void\browser\react\build.js"
 $reactOut = Join-Path $logRoot "react-watch.out.log"
 $reactErr = Join-Path $logRoot "react-watch.err.log"
-$reactProcess = Start-Process `
-    -FilePath $nodeExecutable `
-    -ArgumentList @($reactBuild, "--watch") `
-    -WorkingDirectory (Split-Path -Parent $reactBuild) `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $reactOut `
-    -RedirectStandardError $reactErr `
-    -PassThru
+$reactProcess = if ($canReusePrevious) {
+    $reactStartedAt = if ($previousState.reactWatchStartedAt) {
+        [DateTime]::Parse([string]$previousState.reactWatchStartedAt)
+    } else {
+        [DateTime]::Parse([string]$previousState.startedAt).AddHours(-1)
+    }
+    Get-RecordedNodeProcess `
+        -ProcessId ([int]$previousState.reactWatchPid) `
+        -ExpectedNode $nodeExecutable `
+        -NotBefore $reactStartedAt
+}
+if (-not $reactProcess) {
+    $reactProcess = Start-Process `
+        -FilePath $nodeExecutable `
+        -ArgumentList @((Format-PositionalArgument $reactBuild), "--watch") `
+        -WorkingDirectory (Split-Path -Parent $reactBuild) `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $reactOut `
+        -RedirectStandardError $reactErr `
+        -PassThru
+}
 
+$compileInputs = @()
+if ($overlayApplied) {
+    $compileInputs = @(
+        & git -c "safe.directory=$CheckoutPath" -C $CheckoutPath diff --name-only -- `
+            "src/**/*.ts" `
+            "src/**/*.tsx"
+    )
+    $compileInputs += @(
+        & git -c "safe.directory=$CheckoutPath" -C $CheckoutPath ls-files --others --exclude-standard -- `
+            "src/**/*.ts" `
+            "src/**/*.tsx"
+    )
+    $compileInputs = @($compileInputs | Sort-Object -Unique)
+    if ($compileInputs.Count -gt 0) {
+        Start-Sleep -Seconds 2
+        foreach ($relativePath in $compileInputs) {
+            $inputPath = Join-Path $CheckoutPath $relativePath
+            if (Test-Path -LiteralPath $inputPath -PathType Leaf) {
+                [System.IO.File]::SetLastWriteTimeUtc($inputPath, [DateTime]::UtcNow)
+            }
+        }
+    }
+}
+
+$stateUpdatedAt = (Get-Date).ToUniversalTime()
 $state = [ordered]@{
     overlayHash = $overlayHash
     extensionHash = $extensionHash
     checkout = $CheckoutPath
     upstreamCommit = [string]$manifest.upstream.commit
     node = (& $nodeExecutable --version).Trim()
-    startedAt = (Get-Date).ToUniversalTime().ToString("o")
+    startedAt = $stateUpdatedAt.ToString("o")
     workbenchWatchPid = $watchProcess.Id
+    workbenchWatchStartedAt = $watchProcess.StartTime.ToUniversalTime().ToString("o")
     reactWatchPid = $reactProcess.Id
+    reactWatchStartedAt = $reactProcess.StartTime.ToUniversalTime().ToString("o")
+    announcedCompileInputs = $compileInputs.Count
     logs = $logRoot
 }
 $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $workbenchStateFile -Encoding UTF8

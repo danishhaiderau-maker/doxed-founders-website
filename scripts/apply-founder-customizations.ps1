@@ -84,7 +84,7 @@ if (-not (Test-Path $detectedProductJson) -and (Test-Path (Join-Path $VscodiumCh
 $actualCommit = $null
 if (Test-Path (Join-Path $VscodiumCheckout ".git")) {
     try {
-        $actualCommit = (git -C $VscodiumCheckout rev-parse HEAD 2>$null)
+        $actualCommit = (git -c "safe.directory=$VscodiumCheckout" -C $VscodiumCheckout rev-parse HEAD 2>$null)
     } catch { $actualCommit = $null }
 }
 if ($actualCommit) {
@@ -95,7 +95,7 @@ if ($actualCommit) {
         Write-Warning "[apply-founder] building anyway (pin may need a bump in MANIFEST.json)"
     }
 } else {
-    Write-Warning "[apply-founder] no .git in checkout - skipping commit verification (continuing)"
+    Write-Warning "[apply-founder] checkout commit could not be verified (continuing)"
 }
 
 # --- Apply each overlay file -------------------------------------------------
@@ -285,18 +285,27 @@ $dialogHandler = "src\vs\workbench\electron-sandbox\parts\dialogs\dialogHandler.
 Set-FounderSourceLiteral $dialogHandler "VSCode Version: {0}" "Editor Core Version: {0}"
 Set-FounderSourceLiteral $dialogHandler "Void Version: {1}" "Founder IDE Version: {1}"
 
-# Electron's generated Process declaration narrows `off` to its own `loaded`
-# event, hiding Node's generic EventEmitter overload during the pinned VS Code
-# compile. The runtime is still Node's Process EventEmitter, so keep behavior
-# unchanged and make only the two cleanup calls explicit.
+# Electron's generated Process declaration conflicts with Node's generic
+# EventEmitter overloads during the pinned VS Code compile. The runtime is
+# still Node's Process EventEmitter, so keep behavior unchanged and make the
+# four listener calls explicit. Start from the clean upstream spellings so a
+# fresh release worktree does not depend on an earlier manual patch.
 $parcelWatcher = "src\vs\platform\files\node\watcher\parcel\parcelWatcher.ts"
 Set-FounderSourceLiteral `
     $parcelWatcher `
-    "(process as NodeJS.Process).off('uncaughtException', onUncaughtException);" `
+    "process.on('uncaughtException', onUncaughtException);" `
+    "(process as NodeJS.Process).on('uncaughtException', onUncaughtException);"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "process.on('unhandledRejection', onUnhandledRejection);" `
+    "(process as NodeJS.Process).on('unhandledRejection', onUnhandledRejection);"
+Set-FounderSourceLiteral `
+    $parcelWatcher `
+    "process.off('uncaughtException', onUncaughtException);" `
     "(process as NodeJS.EventEmitter).off('uncaughtException', onUncaughtException);"
 Set-FounderSourceLiteral `
     $parcelWatcher `
-    "(process as NodeJS.Process).off('unhandledRejection', onUnhandledRejection);" `
+    "process.off('unhandledRejection', onUnhandledRejection);" `
     "(process as NodeJS.EventEmitter).off('unhandledRejection', onUnhandledRejection);"
 
 # Electron 34 widened MenuItem click callbacks from BrowserWindow to
@@ -305,7 +314,7 @@ Set-FounderSourceLiteral `
 $menubar = "src\vs\platform\menubar\electron-main\menubar.ts"
 Set-FounderSourceLiteral `
     $menubar `
-    "import { app, BrowserWindow, KeyboardEvent, Menu, MenuItem, MenuItemConstructorOptions, WebContents } from 'electron';" `
+    "import { app, BrowserWindow, BaseWindow, KeyboardEvent, Menu, MenuItem, MenuItemConstructorOptions, WebContents } from 'electron';" `
     "import { app, BaseWindow, BrowserWindow, KeyboardEvent, Menu, MenuItem, MenuItemConstructorOptions, WebContents } from 'electron';"
 Set-FounderSourceLiteral `
     $menubar `
@@ -313,7 +322,7 @@ Set-FounderSourceLiteral `
     "private readonly fallbackMenuHandlers: { [id: string]: (menuItem: MenuItem, browserWindow: BaseWindow | undefined, event: KeyboardEvent) => void } = Object.create(null);"
 Set-FounderSourceLiteral `
     $menubar `
-    "private makeContextAwareClickHandler(click: (menuItem: MenuItem, win: BrowserWindow, event: KeyboardEvent) => void, contextSpecificHandlers: IMenuItemClickHandler): (menuItem: MenuItem, win: BrowserWindow | undefined, event: KeyboardEvent) => void {" `
+    "private makeContextAwareClickHandler(click: (menuItem: MenuItem, win: BaseWindow, event: KeyboardEvent) => void, contextSpecificHandlers: IMenuItemClickHandler): (menuItem: MenuItem, win: BaseWindow | undefined, event: KeyboardEvent) => void {" `
     "private makeContextAwareClickHandler(click: (menuItem: MenuItem, win: BrowserWindow, event: KeyboardEvent) => void, contextSpecificHandlers: IMenuItemClickHandler): (menuItem: MenuItem, win: BaseWindow | undefined, event: KeyboardEvent) => void {"
 Set-FounderSourceLiteral `
     $menubar `
@@ -323,6 +332,15 @@ Set-FounderSourceLiteral `
     $menubar `
     "click(menuItem, win || activeWindow, event);" `
     "click(menuItem, win instanceof BrowserWindow ? win : activeWindow, event);"
+
+# The pinned build sources call a lowercase background-color helper that does
+# not exist in the locked ansi-colors runtime. Patch both the TypeScript source
+# and the checked-in JavaScript consumed by gulp so a clean compile can report
+# its result instead of throwing after it has written the output.
+$tsbBuilderSource = "build\lib\tsb\builder.ts"
+$tsbBuilderRuntime = "build\lib\tsb\builder.js"
+Set-FounderSourceLiteral $tsbBuilderSource "colors.bgcyan(" "colors.bgCyan("
+Set-FounderSourceLiteral $tsbBuilderRuntime "ansi_colors_1.default.bgcyan(" "ansi_colors_1.default.bgCyan("
 
 # Keep every Electron version boundary aligned with the pinned upstream
 # manifest. A stale local package mutation can otherwise assemble an
