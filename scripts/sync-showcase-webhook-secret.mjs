@@ -93,7 +93,7 @@ function railwayCommand(args) {
 }
 
 function railwayCliVariables() {
-  const command = railwayCommand(['variables', '--json']);
+  const command = railwayCommand(['variables', '--service', API_SERVICE, '--json']);
   const raw = execFileSync(command.file, command.args, {
     cwd: process.cwd(),
     env: railwayCliEnv(),
@@ -104,7 +104,13 @@ function railwayCliVariables() {
 }
 
 function railwayCliSet(key, value) {
-  const command = railwayCommand(['variables', '--set', `${key}=${value}`]);
+  const command = railwayCommand([
+    'variables',
+    '--service',
+    API_SERVICE,
+    '--set',
+    `${key}=${value}`,
+  ]);
   execFileSync(command.file, command.args, {
     cwd: process.cwd(),
     env: railwayCliEnv(),

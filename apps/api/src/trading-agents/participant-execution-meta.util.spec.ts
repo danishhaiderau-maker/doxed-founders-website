@@ -16,4 +16,16 @@ test('participant execution metadata keeps the latest terminal audit reason', ()
 
   assert.equal(meta.limitPrice, 65_892.83);
   assert.equal(meta.terminalReason, 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED');
+  assert.equal(meta.exchangeProven, true);
+});
+
+test('participant execution metadata does not mark virtual-only events as exchange proven', () => {
+  const meta = foldParticipantExecutionMeta([
+    {
+      eventType: 'EXIT',
+      payload: { reason: 'SHOWCASE_MIRROR', fill_price: 63_918 },
+    },
+  ]);
+
+  assert.equal(meta.exchangeProven, false);
 });

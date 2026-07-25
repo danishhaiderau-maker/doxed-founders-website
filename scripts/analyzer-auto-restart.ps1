@@ -203,6 +203,37 @@ try {
     return 0
   }
 
+  function Restart-AnalyzerDashboardHidden {
+    $dashboardPidFile = Join-Path $repoRoot ".home-analyzer-dashboard.pid"
+    if (Test-Path $dashboardPidFile) {
+      try {
+        $dashboardPid = [int](Get-Content $dashboardPidFile -Raw).Trim()
+        if ($dashboardPid -gt 0) {
+          Stop-Process -Id $dashboardPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+    }
+    try {
+      Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique |
+        ForEach-Object {
+          $procId = [int]$_
+          if ($procId -gt 0 -and $procId -ne 4) {
+            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+          }
+        }
+    } catch { }
+    Start-Sleep -Seconds 1
+    $dashboardProc = Start-Process -FilePath "python" `
+      -ArgumentList @("research_dashboard.py", "--standalone") `
+      -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+    if ($dashboardProc -and $dashboardProc.Id -gt 0) {
+      Set-Content -Path $dashboardPidFile -Value "$($dashboardProc.Id)" -NoNewline -Encoding UTF8
+      return $dashboardProc.Id
+    }
+    return 0
+  }
+
   # --- Main watch/restart loop -------------------------------------------------
   # Unlike bot-auto-restart (which blocks on WaitForExit), the analyzer loop POLLS:
   # the analyzer can hang with the port still bound (Flask thread deadlock under
@@ -211,6 +242,7 @@ try {
   $currentPid = $AnalyzerPid
   $restartTimes = [System.Collections.Generic.List[datetime]]::new()
   $consecutiveCrashes = 0
+  $consecutiveHealthFailures = 0
   $bootedAt = Get-Date
 
   while ($true) {
@@ -238,16 +270,29 @@ try {
         # Healthy: reset consecutive-crash counter so backoff does not pile up
         # across one transient blip.
         $consecutiveCrashes = 0
+        $consecutiveHealthFailures = 0
         continue
       }
-      # Process alive but health probe dead = hung. Kill it so we can relaunch
-      # cleanly (a hung Flask holds the port and blocks the replacement bind).
-      $code = -2
-      Write-CrashReport -CrashedPid $currentPid -Code $code -Message "analyzer health probe failed (hung listener) - killing and restarting"
-      try { Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue } catch { }
-      for ($waitAttempt = 0; $waitAttempt -lt 50 -and (Test-ProcessIdAliveFast $currentPid); $waitAttempt++) {
-        Start-Sleep -Milliseconds 100
+      # The research engine and read-only dashboard are separate processes.
+      # A long dashboard refresh can transiently miss one probe; killing the
+      # engine here discarded an otherwise healthy collection cycle. Require
+      # repeated failures, then replace only the dashboard listener.
+      $consecutiveHealthFailures++
+      Write-RestartLog "dashboard_health_failed`tengine_pid=$currentPid`tcount=$consecutiveHealthFailures"
+      if ($consecutiveHealthFailures -lt 3) {
+        continue
       }
+      $dashboardPid = Restart-AnalyzerDashboardHidden
+      Start-Sleep -Seconds 5
+      if ($dashboardPid -gt 0 -and (Test-AnalyzerHttpHealthy)) {
+        Write-RestartLog "dashboard_restarted`tengine_pid=$currentPid`tdashboard_pid=$dashboardPid"
+        $consecutiveHealthFailures = 0
+        continue
+      }
+      $code = -2
+      Write-CrashReport -CrashedPid $currentPid -Code $code -Message "analyzer dashboard recovery failed while research engine remained alive"
+      $consecutiveHealthFailures = 0
+      continue
     }
 
     # Exit code 0 = intentional shutdown (e.g. user stop-home-analyzer). Don't restart.

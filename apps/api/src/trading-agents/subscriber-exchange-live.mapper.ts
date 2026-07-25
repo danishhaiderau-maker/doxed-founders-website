@@ -29,6 +29,7 @@ export type SubscriberCycleRow = {
   stopLoss?: number | null;
   takeProfit?: number | null;
   terminalReason?: string | null;
+  exchangeProven?: boolean;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -162,6 +163,7 @@ export function mapSubscriberExchangeLiveBook(input: {
   const expiredOrders: TradingAgentDashboardState['liveBook']['expiredOrders'] = [];
   const activeSignals: TradingAgentDashboardState['liveBook']['activeSignals'] = [];
   const trades: TradingAgentDashboardState['liveBook']['trades'] = [];
+  const participantCloseFallbacks: TradingAgentDashboardState['liveBook']['trades'] = [];
 
   for (const row of input.participants) {
     const intent = parseIntent(row.cycle.intentEnvelope);
@@ -274,9 +276,41 @@ export function mapSubscriberExchangeLiveBook(input: {
       continue;
     }
 
-    // CLOSED participant rows are virtual relay accounting, not a distinct
-    // Bitfinex close. Completed live results come exclusively from the
-    // exchange ledger below so one real close appears exactly once.
+    // Prefer Bitfinex close-ledger rows below. Some derivative closes do not
+    // appear in that endpoint, though, so retain an exchange-proven fallback.
+    // It is emitted only when the exchange returned no close-ledger rows,
+    // preventing the participant and ledger representations from appearing
+    // as two completed trades.
+    if (
+      row.status === 'CLOSED' &&
+      row.exchangeProven === true &&
+      row.fillPrice != null &&
+      row.exitPrice != null &&
+      qty > 0 &&
+      row.pnlUsd != null &&
+      Number.isFinite(row.pnlUsd)
+    ) {
+      const entry = Number(row.fillPrice);
+      const exit = Number(row.exitPrice);
+      const durationMin = Math.max(
+        0,
+        Math.round(((row.updatedAt.getTime() - row.createdAt.getTime()) / 60_000) * 10) / 10,
+      );
+      participantCloseFallbacks.push({
+        time: fmtTime(row.updatedAt),
+        tradeId: row.cycle.tradeId,
+        direction,
+        entry,
+        exit,
+        durationMin,
+        pnlPct: Number(row.pnlMarginPct ?? 0),
+        netUsd: Number(row.pnlUsd),
+        grossUsd: Number(row.pnlUsd),
+        tradeFeesUsd: 0,
+        fundingUsd: 0,
+        aiBand: 'EXCHANGE_VERIFIED',
+      });
+    }
   }
 
   for (const row of input.ledgerCloses ?? []) {
@@ -296,6 +330,9 @@ export function mapSubscriberExchangeLiveBook(input: {
       fundingUsd: 0,
       aiBand: 'EXCHANGE',
     });
+  }
+  if ((input.ledgerCloses?.length ?? 0) === 0) {
+    trades.push(...participantCloseFallbacks);
   }
 
   trades.sort((a, b) => {

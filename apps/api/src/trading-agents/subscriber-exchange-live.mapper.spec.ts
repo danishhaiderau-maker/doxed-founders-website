@@ -295,6 +295,80 @@ test('renders only exchange-ledger closes and keeps distinct close ids inside tw
   );
 });
 
+test('renders one exchange-proven participant close when Bitfinex close ledger is empty', () => {
+  const createdAt = new Date('2026-07-25T09:07:47.530Z');
+  const closedAt = new Date('2026-07-25T09:36:18.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.CLOSED,
+        fillPrice: 63_918,
+        exitPrice: 63_969,
+        pnlUsd: -1.6,
+        pnlMarginPct: -7.98,
+        limitPrice: 63_917.9,
+        qty: 0.03129,
+        stopLoss: 64_173.672,
+        takeProfit: null,
+        terminalReason: 'SHOWCASE_MIRROR',
+        exchangeProven: true,
+        createdAt,
+        updatedAt: closedAt,
+        cycle: {
+          tradeId: 'tbhv1-49cb75b66c23',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: 'SHOWCASE_UNREACHABLE_OPEN_LOT',
+          createdAt,
+        },
+      },
+    ],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades.length, 1);
+  assert.equal(book.trades[0]?.tradeId, 'tbhv1-49cb75b66c23');
+  assert.equal(book.trades[0]?.direction, 'SHORT');
+  assert.equal(book.trades[0]?.entry, 63_918);
+  assert.equal(book.trades[0]?.exit, 63_969);
+  assert.equal(book.trades[0]?.netUsd, -1.6);
+});
+
+test('does not render a virtual-only participant close as a Bitfinex completed trade', () => {
+  const now = new Date('2026-07-25T09:36:18.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.CLOSED,
+        fillPrice: 63_918,
+        exitPrice: 63_969,
+        pnlUsd: -1.6,
+        pnlMarginPct: -7.98,
+        limitPrice: 63_917.9,
+        qty: 0.03129,
+        terminalReason: 'PAPER_EXIT',
+        exchangeProven: false,
+        createdAt: new Date(now.getTime() - 60_000),
+        updatedAt: now,
+        cycle: {
+          tradeId: 'paper-close',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: new Date(now.getTime() - 60_000),
+        },
+      },
+    ],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades.length, 0);
+});
+
 test('expired copy rows expose creation, cancellation, and terminal reason separately', () => {
   const createdAt = new Date('2026-07-22T12:36:19.000Z');
   const expiredAt = new Date('2026-07-22T12:38:42.000Z');
