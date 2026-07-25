@@ -1106,6 +1106,8 @@ def _typeb_payload():
         "cohorts": cohort_rows,
         "separators": (rep.get("top_separators") or rep.get("separators_ranked") or [])[:12],
         "rules": rep.get("predictor_rules") or rep.get("rules") or [],
+        "predictor_readiness": rep.get("predictor_readiness") or {},
+        "feature_coverage": rep.get("feature_coverage") or {},
         "probability_table": rep.get("probability_table") or [],
     }
 
@@ -1681,12 +1683,21 @@ def api_lane_retirement():
 
 
 def _genome_payload():
-    # ROOT already points at the research directory. Keep the canonical path
-    # relative to ROOT so embedded and standalone dashboards read one artifact.
-    rep = _read_json(str(Path("genome") / "genome_analysis_report.json"))
-    if not rep:
-        rep = _read_json("genome_analysis_report.json")
-    return rep or {}
+    # Standalone mode sets ROOT/DATA_ROOT to the agent root, while the Genome
+    # writer publishes under agent/research/genome. Embedded/legacy mode may
+    # instead set ROOT directly to agent/research. Support both layouts so a
+    # fresh Genome report cannot be hidden by the dashboard launch mode.
+    candidates = (
+        Path("research") / "genome" / "genome_analysis_report.json",
+        Path("genome") / "genome_analysis_report.json",
+        Path("research") / "genome_analysis_report.json",
+        Path("genome_analysis_report.json"),
+    )
+    for candidate in candidates:
+        rep = _read_json(str(candidate))
+        if rep and rep.get("schema"):
+            return rep
+    return {}
 
 
 @app.route("/api/genome")
@@ -2282,8 +2293,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Lane Laboratory</h2>
     <p class="note" id="lanes-filter-note">Default: AI lanes + CONTINUOUS benchmark. Historical non-AI lanes stay in CSV; use Show all lanes for legacy COMBO/EDGE/CHASE.</p>
     <label class="lane-toggle"><input type="checkbox" id="show-all-lanes"/> Show all lanes</label>
-    <p class="note" id="lanes-metrics-note">Sess Fills = live/paper closes only. V2 lanes show checker-pass sims and reject counterfactuals separately.</p>
-    <table><thead><tr><th>Lane</th><th>Appr</th><th>Paper Fills</th><th>Checker Pass</th><th>Shadow Sims</th><th>Rejects</th><th>Shadow</th><th>Sess PnL</th><th>Shadow PnL</th><th>EV/appr</th><th>All Fills</th><th>All PnL</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <p class="note" id="lanes-metrics-note">Executed session = closed paper/live lane fills in the current Fresh Collection. Shadow simulation = counterfactual fills that never reached the exchange and are never relay-eligible. These cohorts are separate and must not be added together.</p>
+    <table><thead><tr><th>Lane</th><th>Approvals</th><th title="Closed paper/live fills in the current Fresh Collection">Executed fills</th><th title="V2 checker-pass counterfactual simulations">Checker-pass sims</th><th title="V2 rejected counterfactual simulations">Reject CF sims</th><th title="Counterfactual blocked orders that later simulated a fill">Shadow filled sims</th><th title="P&amp;L from executed paper/live closes in this Fresh Collection">Executed-session P&amp;L</th><th title="Counterfactual P&amp;L from shadow simulations; never relay-eligible">Shadow-simulation P&amp;L</th><th>EV/approval</th><th title="Deduplicated executed fills across retained history">Historical fills</th><th>Historical P&amp;L</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
     <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
@@ -2292,11 +2303,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-typeb">
     <h2>MFE Type-B outcome cohort</h2>
-    <p class="note" id="typeb-note">Post-trade MFE≥15% classification. This is not the Type B Hunter tile, an entry signal, or a live gate.</p>
+    <p class="note" id="typeb-note">Post-trade MFE≥15% classification. Entry-time fingerprints below use a chronological holdout and remain advisory until repeated samples validate them.</p>
     <div class="kpis" id="typeb-kpis"></div>
     <table><thead><tr><th>Cohort</th><th>Trades</th><th>WR%</th><th>Avg MFE%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="typeb-cohort-body"></tbody></table>
     <h3>MFE-runner probability table (historical — not an entry gate)</h3>
     <table><thead><tr><th>Dimension</th><th>Bucket</th><th>N</th><th>TYPE_B</th><th>P(TYPE_B)%</th><th>WR%</th></tr></thead><tbody id="typeb-prob-body"></tbody></table>
+    <h3>Entry-time fingerprints (chronological holdout)</h3>
+    <p class="note" id="typeb-readiness-note">Collecting entry-time evidence.</p>
+    <table><thead><tr><th>Entry rule</th><th>Train N</th><th>Train P(B)</th><th>Train lift</th><th>Holdout N</th><th>Holdout P(B)</th><th>Holdout lift</th><th>Status</th></tr></thead><tbody id="typeb-rules-body"></tbody></table>
     <h3>Top separators (MFE outcome Type B vs Type A)</h3>
     <table><thead><tr><th>Feature</th><th>TYPE_A mean</th><th>TYPE_B mean</th><th>|Δ|</th></tr></thead><tbody id="typeb-sep-body"></tbody></table>
   </section>
@@ -2570,6 +2584,16 @@ if (showAllEl) {
   });
 }
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
+function fmtAdxBucket(v) {
+  const key = String(v || '').toLowerCase();
+  if (['adx_low', 'adx<18', 'adx_lt_18'].includes(key)) return 'ADX <18';
+  if (['adx_mid', 'adx18-30', 'adx_18_to_30'].includes(key)) return 'ADX 18–<30';
+  if (['adx_high', 'adx30+', 'adx_30_plus'].includes(key)) return 'ADX ≥30';
+  return v || 'ADX unknown';
+}
+function fmtResearchBucket(dimension, bucket) {
+  return String(dimension || '').toLowerCase() === 'adx' ? fmtAdxBucket(bucket) : (bucket || '');
+}
 function fmtMelb(iso) {
   if (!iso) return '—';
   try {
@@ -2696,7 +2720,7 @@ async function loadLanes() {
     const paper = isScan ? 0 : ((row.trades || 0) === 0 && ordN ? `0/${ordN}ord` : row.trades);
     const apprCell = isScan ? `${row.approves ?? 0} appr` : (row.approves ?? 0);
     const rejCell = isScan ? `R:${row.coordinator_rejects||0} S:${row.coordinator_skipped||0} T:${row.coordinator_timeouts||0}` : (rej || '\u2014');
-    return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
+    return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
   }).join('') || '<tr><td colspan="12">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
 
 }
@@ -2727,7 +2751,8 @@ async function loadCombos() {
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('combos-body').innerHTML = (d.top||[]).map(c => {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
-    return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.adx_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
+    const combo = `${fmtAdxBucket(c.adx_bucket)} + gap ${c.spread_bucket||''} + ${c.entry_mode||''} + ${c.lane||''}`;
+    return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
 }
 
@@ -3034,21 +3059,31 @@ async function loadFeatures() {
 async function loadTypeB() {
   const r = await fetch('/api/typeb');
   const d = await r.json();
+  const readiness = d.predictor_readiness || {};
   const note = document.getElementById('typeb-note');
-  if (note && d.classification) note.textContent = 'Post-trade MFE cohort only; not the Type B Hunter tile. ' + d.classification + ' — advisory research only.';
+  if (note && d.classification) note.textContent = 'Post-trade MFE cohort only; not the Type B Hunter tile. ' + d.classification + ' Entry-time rules are selected on earlier trades and checked on the newest holdout; advisory research only.';
   document.getElementById('typeb-kpis').innerHTML = [
     ['Cohorts', (d.cohorts||[]).length],
-    ['Separators', (d.separators||[]).length],
-    ['Rules', (d.rules||[]).length],
+    ['Entry rows', readiness.total_trades ?? 0],
+    ['Outcome Type B', readiness.type_b_trades ?? 0],
+    ['Baseline P(B)', readiness.baseline_type_b_pct != null ? readiness.baseline_type_b_pct + '%' : 'n/a'],
+    ['Validated rules', readiness.validated_rules ?? 0],
+    ['Readiness', readiness.status || 'COLLECTING'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('typeb-cohort-body').innerHTML = (d.cohorts||[]).map(c =>
-    `<tr><td>${c.cohort}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>${c.avg_mfe_pct ?? 'n/a'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`
+    `<tr><td>${c.cohort}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>${c.avg_mfe_pct != null ? c.avg_mfe_pct + '%' : 'n/a'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`
   ).join('') || '<tr><td colspan="6">Run analyzer — type_b_predictor_report.json</td></tr>';
   document.getElementById('typeb-prob-body').innerHTML = (d.probability_table||[]).map(p =>
-    `<tr><td>${p.dimension||''}</td><td>${p.bucket||''}</td><td>${p.trades||0}</td><td>${p.type_b_count||0}</td><td>${p.type_b_probability_pct??'n/a'}%</td><td>${p.wr_pct??'n/a'}%</td></tr>`
+    `<tr><td>${p.dimension||''}</td><td>${fmtResearchBucket(p.dimension, p.bucket)}</td><td>${p.trades||0}</td><td>${p.type_b_count||0}</td><td>${p.type_b_probability_pct??'n/a'}%</td><td>${p.wr_pct??'n/a'}%</td></tr>`
   ).join('') || '<tr><td colspan="6">Run analyzer for Type B discovery table.</td></tr>';
+  const readinessNote = document.getElementById('typeb-readiness-note');
+  if (readinessNote) readinessNote.textContent = readiness.note || 'Collecting entry-time evidence.';
+  document.getElementById('typeb-rules-body').innerHTML = (d.rules||[]).map(rule => {
+    const statusClass = rule.status === 'HOLDOUT_POSITIVE' ? 'green' : (rule.status === 'FAILED_HOLDOUT' ? 'red' : '');
+    return `<tr class="${statusClass}"><td>${rule.rule||''}</td><td>${rule.train_n||0}</td><td>${rule.train_type_b_pct??'n/a'}%</td><td>${rule.train_lift??'n/a'}x</td><td>${rule.holdout_n||0}</td><td>${rule.holdout_type_b_pct??'n/a'}%</td><td>${rule.holdout_lift??'n/a'}x</td><td>${rule.status||'COLLECTING'}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">No entry-time rule has enough chronological holdout evidence yet.</td></tr>';
   document.getElementById('typeb-sep-body').innerHTML = (d.separators||[]).map(s =>
-    `<tr><td>${s.feature||s.name||''}</td><td>${s.type_a_mean ?? 'n/a'}</td><td>${s.type_b_mean ?? 'n/a'}</td><td>${s.abs_delta ?? s.delta ?? 'n/a'}</td></tr>`
+    `<tr><td>${s.feature||s.name||''}</td><td>${s.type_a_mean ?? 'n/a'}</td><td>${s.type_b_mean ?? 'n/a'}</td><td>${s.delta_abs ?? s.abs_delta ?? s.delta ?? 'n/a'}</td></tr>`
   ).join('') || '<tr><td colspan="4">No separators yet.</td></tr>';
 }
 

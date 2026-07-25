@@ -20,6 +20,9 @@ SUPERVISOR_WATCHDOG = (
 REGISTER_SUPERVISOR_WATCHDOG = (
     ROOT / "scripts" / "register-supervisor-watchdog.ps1"
 ).read_text(encoding="utf-8")
+REGISTER_BRIDGE_WATCHDOG = (
+    ROOT / "scripts" / "register-bridge-watchdog.ps1"
+).read_text(encoding="utf-8")
 BOT = (
     ROOT / "services" / "btc-conservative-agent" / "bot.py"
 ).read_text(encoding="utf-8")
@@ -43,21 +46,23 @@ def check(name: str, condition: bool) -> None:
 
 def main() -> None:
     check(
-        "listener ownership uses non-blocking native netstat",
+        "listener ownership uses the bounded native TCP owner API",
         "function Get-ListenPortOwners" in COMMON
-        and "netstat.exe -ano -p TCP" in COMMON
+        and "GetTcpListenerOwners($ListenPort)" in COMMON
         and "Get-NetTCPConnection -LocalPort $ListenPort" not in COMMON,
     )
     check(
-        "listener cleanup has a taskkill fallback",
-        "taskkill.exe /PID $procId /T /F" in COMMON
+        "listener cleanup has native termination and Restart Manager fallbacks",
+        "function Stop-ProcessIdFast" in COMMON
+        and "TerminateProcess" in COMMON
+        and "Stop-ExactProcessViaRestartManagerFast $procId" in COMMON
         and "Unable to stop listener PID $procId" in COMMON
         and "$killed += $procId" in COMMON,
     )
     check(
         "start refuses an occupied port after cleanup",
         "refusing duplicate bot start" in START
-        and START.count("Test-PortBound $BotListenPort") >= 3,
+        and START.count("Test-PortOpen $BotListenPort") >= 3,
     )
     check(
         "all bot startup paths share one exclusive starter lock",
@@ -191,6 +196,12 @@ def main() -> None:
         and "$ageSeconds -ge 0 -and $ageSeconds -le 300" in SUPERVISOR_WATCHDOG,
     )
     check(
+        "bridge watchdog exits before its scheduled-task hard limit",
+        '-DurationMin 3 -Quiet' in REGISTER_BRIDGE_WATCHDOG
+        and 'ExecutionTimeLimit (New-TimeSpan -Minutes 4)'
+        in REGISTER_BRIDGE_WATCHDOG,
+    )
+    check(
         "supervisor watchdog has a durable recurring task installer",
         '"DoxedSupervisorWatchdog"' in REGISTER_SUPERVISOR_WATCHDOG
         and "New-ScheduledTaskTrigger" in REGISTER_SUPERVISOR_WATCHDOG
@@ -217,7 +228,8 @@ def main() -> None:
         and "TerminateProcess" in COMMON
         and "Get-Process -Id" not in SUPERVISOR
         and "Get-Process cloudflared" not in SUPERVISOR
-        and "Get-Process -Id" not in MONITOR,
+        and MONITOR.count("Get-Process -Id $currentPid") == 1
+        and "Get-Process |" not in MONITOR,
     )
     check(
         "supervisor startup never eagerly compiles native process support",

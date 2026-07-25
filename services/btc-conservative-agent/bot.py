@@ -6215,6 +6215,10 @@ def _load_local_dotenv():
 _load_local_dotenv()
 DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
+DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
@@ -6969,7 +6973,7 @@ def _report_showcase_inference_usage(
     completion_tokens: int,
     *,
     source: str = "showcase_bot",
-    model: str = "deepseek-chat",
+    model: str = None,
 ) -> None:
     """Enqueue DeepSeek token counts for batched push to the platform adoption chart."""
     url = SHOWCASE_INFERENCE_USAGE_URL
@@ -6979,7 +6983,7 @@ def _report_showcase_inference_usage(
         "promptTokens": int(prompt_tokens),
         "completionTokens": int(completion_tokens),
         "provider": "deepseek",
-        "model": model,
+        "model": model or _deepseek_model(),
         "source": source,
         "billingSource": "platform_showcase",
     }
@@ -11653,6 +11657,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
             int(ai_result.get("long_score", factors.get("long_score", 0)) or 0)
             - int(ai_result.get("short_score", factors.get("short_score", 0)) or 0)
         ),
+        "deepseek_model": ai_result.get("deepseek_model"),
+        "deepseek_thinking_mode": ai_result.get("deepseek_thinking_mode"),
         "research_lane": RESEARCH_LANE_AI_SCAN,
         "research_model": "Shared Direction Call",
         "lane_verdicts": copy.deepcopy(ai_result.get("lane_verdicts") or {}),
@@ -11871,6 +11877,35 @@ def _deepseek_api_key():
     _load_local_dotenv()
     return (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 
+
+def _deepseek_config_receipt() -> tuple:
+    """Return configured values without validation so failures remain journalable."""
+    _load_local_dotenv()
+    model = (os.getenv("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL).strip().lower()
+    mode = (
+        os.getenv("DEEPSEEK_THINKING_MODE") or DEEPSEEK_DEFAULT_THINKING_MODE
+    ).strip().lower()
+    return model, mode
+
+
+def _deepseek_model() -> str:
+    """Resolve an explicit supported model; never fall back from a bad value silently."""
+    model, _ = _deepseek_config_receipt()
+    if model not in DEEPSEEK_SUPPORTED_MODELS:
+        supported = ", ".join(sorted(DEEPSEEK_SUPPORTED_MODELS))
+        raise RuntimeError(f"INVALID_DEEPSEEK_MODEL:{model}:supported={supported}")
+    return model
+
+
+def _deepseek_thinking_mode() -> str:
+    """Resolve V4 thinking mode independently so it can be shadow-tested safely."""
+    _, mode = _deepseek_config_receipt()
+    if mode not in DEEPSEEK_SUPPORTED_THINKING_MODES:
+        supported = ", ".join(sorted(DEEPSEEK_SUPPORTED_THINKING_MODES))
+        raise RuntimeError(f"INVALID_DEEPSEEK_THINKING_MODE:{mode}:supported={supported}")
+    return mode
+
+
 def _csv_row_to_ai_history(row: dict) -> dict:
     try:
         wp = float(row.get("win_prob") or 0)
@@ -11886,10 +11921,26 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         m = re.search(r"Decision:\s*(APPROVE|REJECT)", comment, re.IGNORECASE)
         if m:
             dec = m.group(1).upper()
+    raw_time = row.get("shared_ai_call_ts") or row.get("ts") or row.get("time") or "-"
+    call_id = row.get("shared_ai_call_id") or row.get("trade_id")
+    long_score = row.get("long_score") or row.get("bull_score") or 0
+    short_score = row.get("short_score") or row.get("bear_score") or 0
+    try:
+        long_score = int(float(long_score))
+    except (TypeError, ValueError):
+        long_score = 0
+    try:
+        short_score = int(float(short_score))
+    except (TypeError, ValueError):
+        short_score = 0
     return {
-        "time": row.get("ts") or row.get("time") or "-",
+        "time": raw_time,
+        "melbourne_time": _format_melbourne_hm(raw_time),
+        "session_ts": bot_start_time,
         "trade_id": row.get("trade_id"),
+        "shared_ai_call_id": call_id,
         "ai_direction_raw": row.get("ai_direction_raw") or row.get("dir"),
+        "candidate_direction": row.get("candidate_direction") or row.get("ai_direction_raw") or row.get("dir"),
         "final_direction": row.get("final_direction") or row.get("dir"),
         "inverted": str(row.get("inverted", "")).lower() in ("true", "1", "yes"),
         "decision": dec or "UNKNOWN",
@@ -11897,8 +11948,19 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         "comment": comment[:2000],
         "source": row.get("source", "CSV"),
         "ai_error": str(row.get("ai_error", "")).lower() in ("true", "1", "yes") or dec == "AI_ERROR",
+        "error_type": row.get("error_type"),
+        "error_detail": (row.get("error_detail") or "")[:500],
+        "latency_ms": row.get("latency_ms"),
+        "http_status": row.get("http_status"),
+        "edge_score": row.get("edge_score"),
+        "long_score": long_score,
+        "short_score": short_score,
+        "score_gap": abs(long_score - short_score),
+        "deepseek_model": row.get("deepseek_model"),
+        "deepseek_thinking_mode": row.get("deepseek_thinking_mode"),
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model") or research_lane_label(row.get("research_lane")),
+        "lane_verdicts": {},
     }
 
 def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
@@ -11912,24 +11974,49 @@ def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
     seen_paths = set()
     rows = []
     for path in paths:
-        if path in seen_paths or not os.path.isfile(path):
+        canonical_path = os.path.normcase(os.path.abspath(path))
+        if canonical_path in seen_paths or not os.path.isfile(canonical_path):
             continue
-        seen_paths.add(path)
+        seen_paths.add(canonical_path)
         for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
             try:
-                with open(path, newline="", encoding=enc) as f:
+                with open(canonical_path, newline="", encoding=enc) as f:
                     rows.extend(list(csv.DictReader(f)))
                 break
             except UnicodeDecodeError:
                 continue
             except Exception as e:
-                logger.debug(f"[AI HISTORY CSV] read failed {path}: {e}")
+                logger.debug(f"[AI HISTORY CSV] read failed {canonical_path}: {e}")
                 break
     if not rows:
         return []
     rows.sort(key=lambda r: r.get("ts") or r.get("time") or "")
     out = [_csv_row_to_ai_history(r) for r in rows[-max(limit * 3, limit):]]
     return out[-limit:]
+
+
+def _restore_session_ai_history_from_csv(limit: int = 50) -> list:
+    """Restore current-session AI rows from the crash-safe CSV journal."""
+    csv_rows = _load_recent_ai_history_from_csv(max(limit * 4, limit))
+    session_rows = _session_ai_history(csv_rows, max(limit * 2, limit))
+    by_call = {}
+    for row in session_rows:
+        call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
+        if not call_id:
+            continue
+        previous = by_call.get(call_id)
+        if previous is None or (row.get("time") or "") >= (previous.get("time") or ""):
+            by_call[call_id] = row
+    restored = sorted(by_call.values(), key=lambda row: row.get("time") or "")[-limit:]
+    with state_lock:
+        state["ai_history"] = restored
+        state["ai_history_updated"] = time.time() if restored else 0.0
+    logger.info(
+        f"[AI HISTORY] restored={len(restored)} current-session rows from journal "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return restored
+
 
 def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
     if RESEARCH_AI_SOLE_AUTHORITY or is_research_data_collection():
@@ -11974,12 +12061,20 @@ def call_deepseek_api(messages, temperature=0.4):
     api_key = _deepseek_api_key()
     if not api_key:
         raise RuntimeError("MISSING_API_KEY")
+    model = _deepseek_model()
+    thinking_mode = _deepseek_thinking_mode()
+    request_payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "thinking": {"type": thinking_mode},
+    }
     t0 = time.time()
     try:
         res = requests.post(
             DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "deepseek-chat", "messages": messages, "temperature": temperature},
+            json=request_payload,
             timeout=AI_TIMEOUT_SEC,
         )
     except requests.RequestException as e:
@@ -12014,12 +12109,13 @@ def call_deepseek_api(messages, temperature=0.4):
         )
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
-    _report_showcase_inference_usage(prompt_tokens, completion_tokens)
+    _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
     return text, latency_ms
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
     err_type = type(exc).__name__
     detail = str(exc)[:1500]
+    configured_model, configured_thinking_mode = _deepseek_config_receipt()
     if getattr(exc, "http_status", None):
         http_status = exc.http_status
     if latency_ms is None and getattr(exc, "latency_ms", None):
@@ -12039,6 +12135,8 @@ def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None)
         "source": "ERROR",
         "approved": False,
         "trade_id": trade_id,
+        "deepseek_model": configured_model,
+        "deepseek_thinking_mode": configured_thinking_mode,
     }
 
 def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extra=None, force=False):
@@ -12109,6 +12207,7 @@ def log_ai_error_row(ai_result, ctx=None):
 
 def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     try:
+        configured_model, configured_thinking_mode = _deepseek_config_receipt()
         with csv_lock:
             row = {
                 "ts": utc_iso(),
@@ -12132,6 +12231,16 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 "factor_gate": ai_result.get("factor_gate"),
                 "bull_score": ai_result.get("bull_score", 0),
                 "bear_score": ai_result.get("bear_score", 0),
+                "shared_ai_call_id": _shared_ai_call_id(ai_result=ai_result),
+                "shared_ai_call_ts": ai_result.get("shared_ai_call_ts") or ai_result.get("ai_call_ts"),
+                "candidate_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+                "final_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+                "long_score": ai_result.get("long_score", 0),
+                "short_score": ai_result.get("short_score", 0),
+                "deepseek_model": ai_result.get("deepseek_model") or configured_model,
+                "deepseek_thinking_mode": (
+                    ai_result.get("deepseek_thinking_mode") or configured_thinking_mode
+                ),
                 **csv_research_meta(),
             }
             dynamic_csv_writer(CSV_AI_TRANCHE, row)
@@ -14926,7 +15035,7 @@ def evaluate_signal_with_ai(
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
             from demo_mode import cassette_lookup, cassette_record
-            cassette_resp = cassette_lookup("deepseek-chat", temperature, prompt[:256])
+            cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
             if cassette_resp:
                 response_data = cassette_resp.get("response", cassette_resp.get("body", {}))
                 text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -14981,6 +15090,8 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
+            "deepseek_model": _deepseek_model(),
+            "deepseek_thinking_mode": _deepseek_thinking_mode(),
         }
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
@@ -23440,7 +23551,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Positions</h2>
 <table>
-    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th><th>Action</th></tr></thead>
     <tbody id="positionsTable"></tbody>
 </table>
 
@@ -23719,6 +23830,12 @@ DASHBOARD_JS = """(function () {
         alert('Save failed: ' + (e && e.message ? e.message : 'network error'));
         return null;
       }
+    }
+    async function closeShowcasePosition(tradeId) {
+      if (!tradeId) return;
+      if (!confirm('Close showcase paper position ' + tradeId + ' now? This does not close a Bitfinex position.')) return;
+      const res = await post('/api/positions/close', {trade_id: tradeId});
+      if (res && res.ok) await refresh();
     }
     async function updateThreshold(value) {
       await post('/api/set_threshold', {value: parseFloat(value)});
@@ -24976,6 +25093,7 @@ DASHBOARD_JS = """(function () {
             <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
             <td>${l.tp || '-'}</td>
             <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
+            <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
           </tr>
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
@@ -27350,6 +27468,46 @@ def api_resume():
     set_execution_paused("")
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})
+
+
+@app.route('/api/positions/close', methods=['POST'])
+def api_close_showcase_position():
+    """Close one exact showcase paper position through normal accounting."""
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    with state_lock:
+        matches = [
+            pos for pos in open_positions
+            if str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+        ]
+    if not matches:
+        return jsonify({"error": "open showcase position not found", "trade_id": trade_id}), 404
+    if len(matches) != 1:
+        logger.error(
+            "[ADMIN] Refusing ambiguous paper close trade_id=%s matches=%s",
+            trade_id,
+            len(matches),
+        )
+        return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
+    close_position(matches[0], "ADMIN_MANUAL_CLOSE")
+    with state_lock:
+        still_open = any(
+            str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+            for pos in open_positions
+        )
+    if still_open:
+        return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
+    return jsonify({
+        "status": "closed",
+        "trade_id": trade_id,
+        "scope": "showcase_paper_only",
+    })
+
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -30653,6 +30811,7 @@ def main():
     with state_lock:
         state["ai_history"] = []
         state["bot_start_time"] = bot_start_time
+    _restore_session_ai_history_from_csv(50)
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0

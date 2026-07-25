@@ -229,6 +229,17 @@ try {
         $code = -1
         Write-CrashReport -CrashedPid $currentPid -Code $code -Message "bot process gone before monitor attached"
       } else {
+        # Acquire the process handle used by StartTime and WaitForExit below.
+        # The native liveness probe intentionally returns only a boolean; an
+        # earlier refactor removed this assignment and left `$p` null, causing
+        # the monitor to throw every five seconds instead of supervising the
+        # bot. A process can disappear between the native probe and this read;
+        # let the guarded loop retry and take the normal gone-process path.
+        $p = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
+        if (-not $p) {
+          throw "bot process $currentPid disappeared while monitor attached"
+        }
+
         # Process existence alone is not health. A Python startup once remained
         # alive for minutes without binding :7002, so the old monitor watched a
         # dead dashboard forever. After a 45s boot grace, three consecutive

@@ -82,7 +82,11 @@ try {
   $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
   $exe  = if ($pwsh) { $pwsh.Source } else { (Get-Command powershell.exe).Source }
   $arg  = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File'
-  $action = New-ScheduledTaskAction -Execute $exe -Argument "$arg `"$watchdog`" -DurationMin 5 -Quiet"
+  # Keep the watchdog's requested lifetime below the task's hard execution
+  # limit. A 5-minute loop under a 4-minute limit was force-terminated with
+  # Task Scheduler result 0x41306, creating an avoidable coverage gap before
+  # the next trigger could acquire the singleton lock.
+  $action = New-ScheduledTaskAction -Execute $exe -Argument "$arg `"$watchdog`" -DurationMin 3 -Quiet"
   # Every 1 min — the watchdog's inner loop covers the 10s polling; the task guarantees a
   # fresh watchdog is spawned if the previous one exited (so coverage survives logoff/reboot).
   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
@@ -91,10 +95,10 @@ try {
 
   $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   if ($existing) {
-    Set-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
+    Set-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -ErrorAction Stop | Out-Null
     Wd-Log "Updated scheduled task '$taskName' (every 1 min) -> $watchdog"
   } else {
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'DoxedCrypto bridge :7810 auto-respawn watchdog. Polls /health every ~10s and relaunches the bridge if it dies.' | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'DoxedCrypto bridge :7810 auto-respawn watchdog. Polls /health every ~10s and relaunches the bridge if it dies.' -ErrorAction Stop | Out-Null
     Wd-Log "Registered scheduled task '$taskName' (every 1 min) -> $watchdog"
   }
   $taskRegistered = $true

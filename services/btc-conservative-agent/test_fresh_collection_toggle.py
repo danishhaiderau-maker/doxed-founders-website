@@ -16,12 +16,15 @@ import bot
 class FreshCollectionToggleTests(unittest.TestCase):
     def setUp(self):
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
+        self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
         with bot.state_lock:
             bot.state["fresh_collection_mode"] = False
 
     def tearDown(self):
         with bot.state_lock:
             bot.state["fresh_collection_mode"] = self.original_mode
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = self.original_bootstrap_complete
 
     def test_duplicate_on_request_is_rejected_as_stale(self):
         fake_reset = {"ok": True, "summary": "test reset"}
