@@ -1,6 +1,7 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
 import inspect
+import time
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
@@ -298,6 +299,42 @@ def run():
     check(
         "dashboard presentation refresh is not an aggressive hot loop",
         bot._API_STATE_REFRESH_INTERVAL_SEC >= 5.0,
+    )
+    api_state_source = inspect.getsource(bot.api_state)
+    check(
+        "dashboard requests never build the heavy snapshot synchronously",
+        "_build_api_state_snapshot" not in api_state_source
+        and "dashboard snapshot is warming" in api_state_source,
+    )
+    original_payload = bot._api_state_cache["payload"]
+    original_built_at = bot._api_state_cache["built_at"]
+    original_building = bot._api_state_cache["building"]
+    original_builder = bot._build_api_state_snapshot
+    try:
+        with bot._api_state_cache_lock:
+            bot._api_state_cache["payload"] = None
+            bot._api_state_cache["built_at"] = 0.0
+            bot._api_state_cache["building"] = True
+
+        def _must_not_build_on_request():
+            raise AssertionError("/api/state invoked the heavy snapshot builder")
+
+        bot._build_api_state_snapshot = _must_not_build_on_request
+        started = time.monotonic()
+        response = bot.app.test_client().get("/api/state")
+        elapsed = time.monotonic() - started
+        check("cold /api/state fails fast", response.status_code == 503 and elapsed < 2.0)
+    finally:
+        bot._build_api_state_snapshot = original_builder
+        with bot._api_state_cache_lock:
+            bot._api_state_cache["payload"] = original_payload
+            bot._api_state_cache["built_at"] = original_built_at
+            bot._api_state_cache["building"] = original_building
+
+    check(
+        "dashboard snapshot lock waits are bounded",
+        "state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)" in dashboard_snapshot_source
+        and "trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)" in dashboard_snapshot_source,
     )
     execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
     check(
