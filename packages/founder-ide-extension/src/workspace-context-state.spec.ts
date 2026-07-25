@@ -3,11 +3,14 @@ import { describe, it } from 'node:test';
 import {
   buildWorkspaceContextIndex,
   dependencyImpact,
+  estimateWorkspaceContextTokens,
   extractImportSpecifiers,
   formatWorkspaceContextForPrompt,
+  isSensitiveWorkspacePath,
   parseDecisionLedger,
   parseWorkspaceContextIndex,
   rankWorkspaceContextFiles,
+  rankWorkspaceContextTuples,
   symbolCandidateScore,
   workspaceCacheContext,
   workspaceContextFileNeedsRefresh,
@@ -81,6 +84,30 @@ describe('Founder workspace context index', () => {
     assert.doesNotMatch(prompt, /secret source contents/);
   });
 
+  it('returns bounded line-range tuples from matching symbols', () => {
+    const index = buildWorkspaceContextIndex('workspace-1', [
+      {
+        ...file('src/auth/session.ts', ['rotateSessionToken']),
+        symbolLocations: [{
+          name: 'rotateSessionToken',
+          startLine: 41,
+          endLine: 58,
+          kind: 'Function',
+        }],
+      },
+    ]);
+    assert.deepEqual(
+      rankWorkspaceContextTuples(index, 'rotate session token')[0],
+      {
+        file: 'src/auth/session.ts',
+        startLine: 41,
+        endLine: 58,
+        score: rankWorkspaceContextTuples(index, 'rotate session token')[0]?.score,
+        reason: 'symbol match',
+      },
+    );
+  });
+
   it('prioritizes shallow source entry points over deep test files for symbol analysis', () => {
     assert.ok(
       symbolCandidateScore('apps/api/src/main.ts')
@@ -112,6 +139,41 @@ describe('Founder workspace context index', () => {
       'src/page.tsx',
     ]);
     assert.match(formatWorkspaceContextForPrompt(index, 'change api request'), /used by src\/api\.spec\.ts, src\/page\.tsx/);
+  });
+
+  it('rejects environment files, private keys, and credential containers', () => {
+    for (const sensitive of [
+      '.env',
+      '.env.production',
+      'config/service-account.prod.json',
+      'FounderVault/node-config.json',
+      'certs/release.pfx',
+      'keys/id_ed25519',
+    ]) {
+      assert.equal(isSensitiveWorkspacePath(sensitive), true, sensitive);
+    }
+    assert.equal(isSensitiveWorkspacePath('src/secrets-storage.ts'), false);
+    assert.equal(isSensitiveWorkspacePath('docs/environment.md'), false);
+  });
+
+  it('uses the active file as a personalized graph seed', () => {
+    const page = { ...file('src/page.tsx', ['Page']), imports: ['./api'] };
+    const api = { ...file('src/api.ts', ['request']), imports: ['./session'] };
+    const session = { ...file('src/session.ts', ['rotateSession']), imports: [] };
+    const unrelated = { ...file('src/unrelated.ts', ['renderChart']), imports: [] };
+    const index = buildWorkspaceContextIndex('workspace-1', [
+      page,
+      api,
+      session,
+      unrelated,
+    ]);
+    const ranked = rankWorkspaceContextFiles(index, 'change behavior', {
+      activeFile: 'src/page.tsx',
+      limit: 4,
+    }).map((entry) => entry.path);
+    assert.equal(ranked[0], 'src/page.tsx');
+    assert.ok(ranked.includes('src/api.ts'));
+    assert.ok(!ranked.includes('src/unrelated.ts'));
   });
 
   it('remembers rejected approaches with source provenance', () => {
@@ -151,5 +213,22 @@ describe('Founder workspace context index', () => {
       original?.contextHash,
       workspaceCacheContext(changedUnrelated, 'explain session token rotation')?.contextHash,
     );
+  });
+
+  it('keeps a 10,000-file repository map below the hard 4K token budget', () => {
+    const files = Array.from({ length: 10_000 }, (_, index) => ({
+      ...file(`packages/service-${index}/src/handler.ts`, [
+        `handleFounderServiceRequest${index}`,
+      ]),
+      imports: index > 0 ? [`../../service-${index - 1}/src/handler`] : [],
+    }));
+    const index = buildWorkspaceContextIndex('workspace-large', files);
+    const prompt = formatWorkspaceContextForPrompt(index, 'founder service handler', {
+      activeFile: 'packages/service-9999/src/handler.ts',
+      limit: 10_000,
+      maxEstimatedTokens: 4_000,
+    });
+    assert.ok(estimateWorkspaceContextTokens(prompt) <= 4_000);
+    assert.match(prompt, /service-9999/);
   });
 });

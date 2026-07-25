@@ -20,6 +20,10 @@
     "./ipc": {
       "types": "./src/ipc/protocol.ts",
       "default": "./out/ipc/protocol.js"
+    },
+    "./code-intelligence": {
+      "types": "./src/workspace-context-state.ts",
+      "default": "./out/workspace-context-state.js"
     }
   },
   "activationEvents": [

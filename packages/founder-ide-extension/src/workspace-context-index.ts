@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   buildWorkspaceContextIndex,
   extractImportSpecifiers,
   formatWorkspaceContextForPrompt,
+  isSensitiveWorkspacePath,
   parseDecisionLedger,
   parseWorkspaceContextIndex,
   symbolCandidateScore,
@@ -14,6 +16,7 @@ import {
   workspaceCacheContext,
   type WorkspaceContextFile,
   type WorkspaceContextIndexState,
+  type WorkspaceContextSymbol,
   type WorkspaceDecisionRecord,
   type WorkspaceCacheContext,
 } from './workspace-context-state';
@@ -21,11 +24,12 @@ import type { VerifiedSolutionFile } from './verified-solution-memory';
 
 const INDEXABLE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,md,mdx,py,go,rs,java,kt,swift,cs,cpp,c,h,hpp,css,scss,html,yml,yaml,toml,sql,prisma,sol,sh,ps1}';
 const EXCLUDE_GLOB = '**/{.git,node_modules,dist,out,build,.next,.turbo,coverage,.cache,.venv,venv,__pycache__,artifacts}/**';
-const MAX_FILES = 5_000;
+const MAX_FILES = 25_000;
 const MAX_FILE_BYTES = 512_000;
-const INITIAL_SYMBOL_BUDGET = 32;
-const SYMBOL_BATCH_SIZE = 4;
+const INITIAL_SYMBOL_BUDGET = 96;
+const SYMBOL_BATCH_SIZE = 8;
 const REFRESH_DEBOUNCE_MS = 1_500;
+const WORKSPACE_IDENTITY_CHECK_MS = 5_000;
 
 export interface FounderWorkspaceContextSummary {
   files: number;
@@ -41,6 +45,8 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
   private readonly watcher: vscode.FileSystemWatcher;
   private workspaceId: string | null;
   private indexFile: string | null;
+  private readonly dirtyPaths = new Set<string>();
+  private lastWorkspaceIdentityCheckAt = 0;
   private readonly invalidationEmitter = new vscode.EventEmitter<{ workspaceId: string; path?: string }>();
   readonly onDidInvalidate = this.invalidationEmitter.event;
 
@@ -63,11 +69,18 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
   }
 
   contextFor(prompt: string): string {
-    return formatWorkspaceContextForPrompt(this.state, prompt);
+    this.ensureWorkspaceIdentity();
+    return formatWorkspaceContextForPrompt(this.state, prompt, {
+      activeFile: activeWorkspaceFile(),
+      maxEstimatedTokens: 4_000,
+    });
   }
 
   cacheContextFor(prompt: string): WorkspaceCacheContext | null {
-    return workspaceCacheContext(this.state, prompt);
+    this.ensureWorkspaceIdentity();
+    return workspaceCacheContext(this.state, prompt, {
+      activeFile: activeWorkspaceFile(),
+    });
   }
 
   workspaceIdValue(): string | null {
@@ -129,14 +142,15 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
 
   private invalidateAndSchedule(uri?: vscode.Uri): void {
     const workspaceId = this.workspaceId;
-    this.state = null;
+    const invalidatedPath = uri ? relativeWorkspacePath(uri) : null;
+    if (invalidatedPath) this.dirtyPaths.add(invalidatedPath);
     if (workspaceId) {
       this.invalidationEmitter.fire({
         workspaceId,
-        ...(uri ? { path: relativeWorkspacePath(uri) ?? undefined } : {}),
+        ...(invalidatedPath ? { path: invalidatedPath } : {}),
       });
     }
-    this.scheduleRefresh(true);
+    this.scheduleRefresh(false);
   }
 
   private scheduleRefresh(force = false): void {
@@ -147,7 +161,11 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
 
   private indexFileFor(workspaceId: string | null): string | null {
     return workspaceId
-      ? path.join(this.context.globalStorageUri.fsPath, 'workspace-context', `${workspaceId}.json`)
+      ? path.join(
+          process.env.FOUNDER_CODE_INTELLIGENCE_DIR
+            ?? path.join(os.homedir(), '.founder-ide', 'code-intelligence'),
+          `${workspaceId}.json`,
+        )
       : null;
   }
 
@@ -174,6 +192,17 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     this.workspaceId = workspaceId;
     this.indexFile = this.indexFileFor(workspaceId);
     this.state = this.readPersisted(workspaceId, this.indexFile);
+    this.dirtyPaths.clear();
+  }
+
+  private ensureWorkspaceIdentity(): void {
+    if (Date.now() - this.lastWorkspaceIdentityCheckAt < WORKSPACE_IDENTITY_CHECK_MS) {
+      return;
+    }
+    this.lastWorkspaceIdentityCheckAt = Date.now();
+    const previous = this.workspaceId;
+    this.switchWorkspace();
+    if (this.workspaceId !== previous) this.scheduleRefresh(false);
   }
 
   private readPersisted(
@@ -196,10 +225,12 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     const workspaceId = currentWorkspaceId();
     const indexFile = this.indexFile;
     if (!workspaceId || !indexFile) return;
-    const uris = await vscode.workspace.findFiles(INDEXABLE_GLOB, EXCLUDE_GLOB, MAX_FILES);
+    const discovered = await vscode.workspace.findFiles(INDEXABLE_GLOB, EXCLUDE_GLOB, MAX_FILES);
+    const uris = filterIndexableUris(discovered);
     const previous = new Map(this.state?.files.map((file) => [file.path, file]) ?? []);
     const next: WorkspaceContextFile[] = [];
-    const decisions: WorkspaceDecisionRecord[] = [];
+    let decisions: WorkspaceDecisionRecord[] = this.state?.decisions ?? [];
+    let decisionLedgerSeen = false;
     const symbolQueue: Array<{ uri: vscode.Uri; file: WorkspaceContextFile }> = [];
 
     for (const uri of uris) {
@@ -214,7 +245,8 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       if (stat.size > MAX_FILE_BYTES) continue;
       const old = previous.get(relativePath);
       const isDecisionLedger = relativePath.toLowerCase() === '.github/founder-os/decisions.md';
-      if (!force && !isDecisionLedger && !workspaceContextFileNeedsRefresh(old, {
+      if (isDecisionLedger) decisionLedgerSeen = true;
+      if (!force && !this.dirtyPaths.has(relativePath) && !workspaceContextFileNeedsRefresh(old, {
         path: relativePath,
         size: stat.size,
         mtimeMs: stat.mtime,
@@ -237,11 +269,12 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
         mtimeMs: stat.mtime,
         sha256,
         symbols: [],
+        symbolLocations: [],
         imports: extractImportSpecifiers(source, languageIdForPath(relativePath)),
       };
       next.push(file);
       if (isDecisionLedger) {
-        decisions.push(...parseDecisionLedger(source, relativePath, sha256));
+        decisions = parseDecisionLedger(source, relativePath, sha256);
       }
       if (supportsSymbols(relativePath)) {
         symbolQueue.push({ uri, file });
@@ -256,12 +289,14 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
     for (let offset = 0; offset < selectedSymbolFiles.length; offset += SYMBOL_BATCH_SIZE) {
       const batch = selectedSymbolFiles.slice(offset, offset + SYMBOL_BATCH_SIZE);
       await Promise.all(batch.map(async ({ uri, file }) => {
-        file.symbols = await documentSymbols(uri);
+        file.symbolLocations = await documentSymbols(uri);
+        file.symbols = file.symbolLocations.map((symbol) => symbol.name);
       }));
     }
 
+    if (!decisionLedgerSeen) decisions = [];
     if (workspaceId !== currentWorkspaceId() || indexFile !== this.indexFile) {
-      this.scheduleRefresh(true);
+      this.scheduleRefresh(false);
       return;
     }
     this.state = buildWorkspaceContextIndex(
@@ -271,6 +306,7 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
       decisions,
     );
     this.writePersisted(this.state, indexFile);
+    this.dirtyPaths.clear();
   }
 
   private writePersisted(state: WorkspaceContextIndexState, indexFile: string): void {
@@ -287,10 +323,38 @@ export class FounderWorkspaceContextIndex implements vscode.Disposable {
 
 function currentWorkspaceId(): string | null {
   const roots = vscode.workspace.workspaceFolders
-    ?.map((folder) => path.resolve(folder.uri.fsPath).toLowerCase())
+    ?.map((folder) => workspaceIdentity(folder.uri.fsPath))
     .sort();
   if (!roots || roots.length === 0) return null;
   return createHash('sha256').update(roots.join('\n')).digest('hex').slice(0, 24);
+}
+
+function workspaceIdentity(root: string): string {
+  const resolved = path.resolve(root).toLowerCase();
+  try {
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 2_000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().toLowerCase();
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 2_000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().toLowerCase();
+    return `${resolved}\n${gitDir}\n${branch}`;
+  } catch {
+    return resolved;
+  }
+}
+
+function activeWorkspaceFile(): string | null {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  return uri ? relativeWorkspacePath(uri) : null;
 }
 
 function relativeWorkspacePath(uri: vscode.Uri): string | null {
@@ -318,29 +382,76 @@ function supportsSymbols(file: string): boolean {
   return /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cs|cpp|c|h|hpp|sol)$/i.test(file);
 }
 
-async function documentSymbols(uri: vscode.Uri): Promise<string[]> {
+async function documentSymbols(uri: vscode.Uri): Promise<WorkspaceContextSymbol[]> {
   try {
     const symbols = await vscode.commands.executeCommand<
       Array<vscode.DocumentSymbol | vscode.SymbolInformation>
     >('vscode.executeDocumentSymbolProvider', uri);
     if (!symbols) return [];
-    const names: string[] = [];
+    const locations: WorkspaceContextSymbol[] = [];
     const visit = (symbol: vscode.DocumentSymbol | vscode.SymbolInformation): void => {
-      if (names.length >= 40) return;
-      if (symbol.name && !names.includes(symbol.name)) names.push(symbol.name);
+      if (locations.length >= 40) return;
+      const range = 'location' in symbol ? symbol.location.range : symbol.range;
+      if (symbol.name && !locations.some((candidate) => candidate.name === symbol.name)) {
+        locations.push({
+          name: symbol.name,
+          startLine: range.start.line + 1,
+          endLine: Math.max(range.start.line + 1, range.end.line + 1),
+          kind: vscode.SymbolKind[symbol.kind],
+        });
+      }
       if ('children' in symbol) {
         for (const child of symbol.children.slice(0, 12)) visit(child);
       }
     };
     for (const symbol of symbols) visit(symbol);
-    return names;
+    return locations;
   } catch {
     return [];
   }
+}
+
+function filterIndexableUris(uris: vscode.Uri[]): vscode.Uri[] {
+  const safe = uris.filter((uri) => !isSensitiveWorkspacePath(uri.fsPath));
+  const ignored = new Set<string>();
+  const grouped = new Map<string, Array<{ uri: vscode.Uri; relative: string }>>();
+  for (const uri of safe) {
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder) continue;
+    const relative = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll('\\', '/');
+    const entries = grouped.get(folder.uri.fsPath) ?? [];
+    entries.push({ uri, relative });
+    grouped.set(folder.uri.fsPath, entries);
+  }
+  for (const [root, entries] of grouped) {
+    const result = spawnSync(
+      'git',
+      ['check-ignore', '--stdin', '-z'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        input: `${entries.map((entry) => entry.relative).join('\0')}\0`,
+        timeout: 5_000,
+        maxBuffer: 5 * 1024 * 1024,
+        windowsHide: true,
+      },
+    );
+    if (result.status !== 0 && result.status !== 1) continue;
+    for (const relative of String(result.stdout ?? '').split('\0').filter(Boolean)) {
+      ignored.add(`${root.toLowerCase()}\0${relative.replaceAll('\\', '/').toLowerCase()}`);
+    }
+  }
+  return safe.filter((uri) => {
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder) return false;
+    const relative = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll('\\', '/').toLowerCase();
+    return !ignored.has(`${folder.uri.fsPath.toLowerCase()}\0${relative}`);
+  });
 }
 
 export const __testHooks = {
   languageIdForPath,
   supportsSymbols,
   symbolCandidateScore,
+  isSensitiveWorkspacePath,
 };

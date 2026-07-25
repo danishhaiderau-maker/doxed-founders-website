@@ -14,8 +14,9 @@
     "pack:win": "electron-builder --win",
     "pack:mac": "electron-builder --mac",
     "pack:linux": "electron-builder --linux",
+    "mcp:code-intelligence": "node dist/code-intelligence-mcp.js",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/founder-ide-dispatch-protocol.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
+    "test": "tsx --test test/code-intelligence-index.spec.ts test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/founder-ide-dispatch-protocol.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
   },
   "dependencies": {
     "@dcf/founder-vault": "*",
@@ -41,6 +42,7 @@
       "package.json",
       "node_modules/@dcf/**/*",
       "node_modules/founder-ide-extension/out/ipc/protocol.js",
+      "node_modules/founder-ide-extension/out/workspace-context-state.js",
       "node_modules/founder-ide-extension/package.json"
     ],
     "extraResources": [
