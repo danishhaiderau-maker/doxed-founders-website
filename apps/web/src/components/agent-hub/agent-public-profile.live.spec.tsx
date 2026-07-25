@@ -196,4 +196,38 @@ test('signed-in live desk shows each Bitfinex entity once and no showcase panels
   assert.equal(count(html, 'Exchange net (actual)'), 1);
   assert.match(html, /Your Bitfinex live session/);
   assert.match(html, /Completed trades/);
+
+  const adminShowcaseHtml = renderToStaticMarkup(
+    React.createElement(AgentPublicProfile, {
+      slug: 'conservative-btc',
+      agent,
+      dashboard,
+      activity: [],
+      allAgents: [],
+      following: true,
+      hired: true,
+      signedIn: true,
+      isAdmin: true,
+      botConnected: true,
+      executionPaused: false,
+      publicStatus: 'online',
+      instanceStatus: 'ACTIVE',
+      instanceMode: 'copy',
+      exchangeProvider: null,
+      exchangeLabel: null,
+      exchangeConnected: false,
+      viewScope: 'showcase',
+      showcaseAgent: agent,
+      showcaseLiveBook: dashboard.liveBook,
+      exchangeLiveBook: null,
+      relaySimLiveBook: null,
+      copyRelaySim: null,
+      showcaseActivity: [],
+      userActivity: [],
+    } as never),
+  );
+
+  assert.match(adminShowcaseHtml, /Showcase live/);
+  assert.match(adminShowcaseHtml, /Admin showcase \(observe only\)/);
+  assert.equal(adminShowcaseHtml.includes('Legacy DDollar paper'), false);
 });
