@@ -158,6 +158,41 @@ function Restart-BridgeComponent {
   Start-VisibleConsole (Join-Path $scriptDir "home-stack-launcher.ps1") @() -Title "Doxed Home Bridge :$BridgePort"
 }
 
+function Test-AutoRestartMonitorFresh {
+  $heartbeatFile = Join-Path $repoRoot ".home-bot-auto-restart.heartbeat"
+  $pidFile = Join-Path $repoRoot ".home-bot-crash-monitor.pid"
+  if (-not (Test-Path $heartbeatFile) -or -not (Test-Path $pidFile)) {
+    return $false
+  }
+  try {
+    $heartbeat = [datetime]::Parse(
+      (Get-Content $heartbeatFile -Raw -ErrorAction Stop).Trim(),
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    )
+    $ageSec = ((Get-Date).ToUniversalTime() - $heartbeat).TotalSeconds
+    $monitorPid = [int](Get-Content $pidFile -Raw -ErrorAction Stop).Trim()
+    return (
+      $ageSec -ge 0 -and
+      $ageSec -le 180 -and
+      (Test-ProcessIdAliveFast $monitorPid)
+    )
+  } catch {
+    return $false
+  }
+}
+
+function Test-AnalyzerAutoRestartMonitorAlive {
+  $lockFile = Join-Path $repoRoot ".home-analyzer-auto-restart.lock"
+  if (-not (Test-Path $lockFile)) { return $false }
+  try {
+    $monitorPid = [int](Get-Content $lockFile -Raw -ErrorAction Stop).Trim()
+    return $monitorPid -gt 0 -and (Test-ProcessIdAliveFast $monitorPid)
+  } catch {
+    return $false
+  }
+}
+
 # Respawn the bot-auto-restart.ps1 monitor if its heartbeat is stale or missing.
 # This is the missing link from the 2026-07-08 audit: the auto-restart monitor
 # was dying silently (transient .NET exception escaped the watch loop before
@@ -385,6 +420,13 @@ while ($true) {
       # restart the supervisor manually after fixing the root cause.
       Log "RECOVER bot skipped - crash-loop breaker tripped ($MaxBotRestartsInWindow in $BotRestartWindowMin min). Manual intervention required."
       $fail.bot = 0
+    } elseif (Test-AutoRestartMonitorFresh) {
+      # The dedicated monitor owns bot replacement. In the 2026-07-25 outage
+      # it restarted the bot while this supervisor simultaneously entered
+      # Restart-BotComponent, creating competing starters. Let the monitor
+      # finish its bounded backoff; take over only after it becomes stale.
+      Log "RECOVER bot deferred - dedicated auto-restart monitor is fresh"
+      $fail.bot = 0
     } else {
       # Crash-loop circuit breaker: prune restarts older than the window, then
       # check the cap. If exceeded, HALT bot recovery and surface a Windows
@@ -412,6 +454,9 @@ while ($true) {
   if ($fail.analyzer -ge $FailThreshold) {
     if (Test-HomeStackUserStopped) {
       Log "RECOVER analyzer skipped - user stopped stack"
+      $fail.analyzer = 0
+    } elseif (Test-AnalyzerAutoRestartMonitorAlive) {
+      Log "RECOVER analyzer deferred - dedicated analyzer monitor is alive"
       $fail.analyzer = 0
     } else {
       $lastRecover.analyzer = Invoke-Recovery "analyzer" { Restart-AnalyzerComponent } $lastRecover.analyzer $AnalyzerCooldownSec

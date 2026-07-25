@@ -6,6 +6,7 @@ export type ParticipantExecutionMeta = {
   profitLockFloor: number | null;
   direction: 'LONG' | 'SHORT' | null;
   terminalReason: string | null;
+  exchangeProven: boolean;
 };
 
 type EventRow = { eventType: string; payload: unknown };
@@ -29,10 +30,25 @@ function impliedHardStopPrice(
 export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExecutionMeta {
   const merged: Record<string, unknown> = {};
   let terminalReason: string | null = null;
+  let exchangeProven = false;
   for (const e of events) {
     if (e.payload && typeof e.payload === 'object') {
       const payload = e.payload as Record<string, unknown>;
       Object.assign(merged, payload);
+      const exchangeId =
+        payload.exchangeOrderId ??
+        payload.exchange_order_id ??
+        payload.bitfinex_order_id ??
+        payload.orderId ??
+        payload.order_id;
+      const exchangeIds = payload.exchangeOrderIds ?? payload.exchange_order_ids;
+      if (
+        (typeof exchangeId === 'string' && exchangeId.trim()) ||
+        (typeof exchangeId === 'number' && Number.isFinite(exchangeId)) ||
+        (Array.isArray(exchangeIds) && exchangeIds.length > 0)
+      ) {
+        exchangeProven = true;
+      }
       if (e.eventType === 'EXPIRED' || e.eventType === 'EXIT') {
         const reason = payload.reason ?? payload.exit_reason ?? payload.event;
         if (typeof reason === 'string' && reason.trim()) terminalReason = reason.trim();
@@ -67,7 +83,15 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
     }
   }
 
-  return { limitPrice, qty, stopPrice, profitLockFloor, direction, terminalReason };
+  return {
+    limitPrice,
+    qty,
+    stopPrice,
+    profitLockFloor,
+    direction,
+    terminalReason,
+    exchangeProven,
+  };
 }
 
 /** @deprecated Use foldParticipantExecutionMeta */

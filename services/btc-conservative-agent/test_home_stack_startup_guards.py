@@ -8,6 +8,9 @@ COMMON = (ROOT / "scripts" / "home-stack-common.ps1").read_text(encoding="utf-8"
 START = (ROOT / "scripts" / "start-home-bot.ps1").read_text(encoding="utf-8")
 HEALTH = (ROOT / "scripts" / "home-stack-health.ps1").read_text(encoding="utf-8")
 MONITOR = (ROOT / "scripts" / "bot-auto-restart.ps1").read_text(encoding="utf-8")
+ANALYZER_MONITOR = (ROOT / "scripts" / "analyzer-auto-restart.ps1").read_text(
+    encoding="utf-8"
+)
 AUTOSTART = (ROOT / "scripts" / "register-bot-autostart.ps1").read_text(
     encoding="utf-8"
 )
@@ -80,6 +83,25 @@ def main() -> None:
         "function Test-BotPingQuick" in MONITOR
         and "consecutiveLivenessFailures -ge 3" in MONITOR
         and "bot process alive but /api/ping unavailable" in MONITOR,
+    )
+    check(
+        "supervisor defers to the fresh dedicated bot monitor",
+        "function Test-AutoRestartMonitorFresh" in SUPERVISOR
+        and "RECOVER bot deferred - dedicated auto-restart monitor is fresh"
+        in SUPERVISOR,
+    )
+    check(
+        "analyzer dashboard recovery preserves the research engine",
+        "function Restart-AnalyzerDashboardHidden" in ANALYZER_MONITOR
+        and "consecutiveHealthFailures -lt 3" in ANALYZER_MONITOR
+        and "dashboard recovery failed while research engine remained alive"
+        in ANALYZER_MONITOR,
+    )
+    check(
+        "supervisor defers to the dedicated analyzer monitor",
+        "function Test-AnalyzerAutoRestartMonitorAlive" in SUPERVISOR
+        and "RECOVER analyzer deferred - dedicated analyzer monitor is alive"
+        in SUPERVISOR,
     )
     check(
         "auto-restart never calls the blocking TCP provider",

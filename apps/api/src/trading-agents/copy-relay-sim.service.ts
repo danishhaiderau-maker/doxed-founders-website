@@ -367,6 +367,7 @@ export class CopyRelaySimService {
           qty: meta.qty,
           stopLoss: meta.stopPrice,
           takeProfit: meta.profitLockFloor,
+          exchangeProven: meta.exchangeProven,
           updatedAt: p.updatedAt,
           createdAt: p.createdAt,
           cycle: p.cycle,
