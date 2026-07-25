@@ -28,6 +28,8 @@
 #   -SkipIdeBuild        - skip step 2 (you already built Founder IDE)
 #   -SkipFounderNodeBuild - reuse apps/founder-node/release/win-unpacked
 #   -IsccPath            - path to iscc.exe (default: auto-detect)
+#   -InstallerProfile    - Release (maximum compression) or FastQa (internal,
+#                          prebuilt-payload installer for install-flow QA)
 
 [CmdletBinding()]
 param(
@@ -38,7 +40,9 @@ param(
     [switch]$SkipExtensionBuild,
     [switch]$SkipIdeBuild,
     [switch]$SkipFounderNodeBuild,
-    [string]$IsccPath         = ""
+    [string]$IsccPath         = "",
+    [ValidateSet("Release", "FastQa")]
+    [string]$InstallerProfile = "Release"
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +60,16 @@ if (-not $MonorepoRoot) {
 Write-Host "[stack] monorepo root: $MonorepoRoot"
 Write-Host "[stack] vscodium checkout: $VscodiumCheckout"
 Write-Host "[stack] version: $Version"
+Write-Host "[stack] installer profile: $InstallerProfile"
+
+if ($InstallerProfile -eq "FastQa" -and -not $IdePayloadRoot) {
+    throw "FastQa requires -IdePayloadRoot. Daily development uses the unpackaged Founder Dev lanes; FastQa is only for install-flow QA from a verified prebuilt payload."
+}
+
+$installerCompression = if ($InstallerProfile -eq "FastQa") { "zip" } else { "lzma2/ultra64" }
+$innerCompression = if ($InstallerProfile -eq "FastQa") { "zip" } else { "lzma" }
+$solidCompression = if ($InstallerProfile -eq "FastQa") { "no" } else { "yes" }
+$installerSuffix = if ($InstallerProfile -eq "FastQa") { "-internal-qa" } else { "" }
 
 # The current Void build cache is the VS Code source tree itself, while older
 # downstream checkouts keep that source under a VSCode/ child. Detect both so
@@ -515,6 +529,8 @@ if ($IdePayloadRoot) {
         InstallTarget                = "user"
         ProductJsonPath              = $targetProductJson
         Quality                      = $quality
+        FounderCompression           = $innerCompression
+        FounderSolidCompression      = $solidCompression
     }
     $innerIss = Join-Path $vscodeSource "build\win32\code.iss"
     if (-not (Test-Path $innerIss)) {
@@ -573,6 +589,9 @@ $founderHubPatchAbs = ((Resolve-Path $founderHubPatch).Path) -replace '\\','/'
 
 & $IsccPath `
     "/DFOUNDER_STACK_VERSION=$Version" `
+    "/DFOUNDER_COMPRESSION=$installerCompression" `
+    "/DFOUNDER_SOLID_COMPRESSION=$solidCompression" `
+    "/DFOUNDER_INSTALLER_SUFFIX=$installerSuffix" `
     "/DFOUNDER_IDE_SETUP=`"$ideSetupAbs`"" `
     "/DFOUNDER_WORKBENCH_PATCH=`"$workbenchPatchAbs`"" `
     "/DFOUNDER_PRODUCT_PATCH=`"$productJsonPatchAbs`"" `
@@ -587,15 +606,16 @@ $bundleDirs = @(
     (Join-Path (Split-Path -Parent $iss) "dist"),
     (Split-Path -Parent $iss)
 ) | Select-Object -Unique
+$expectedBundleName = "Founder-IDE-Setup-$Version$installerSuffix.exe"
 $bundle = $bundleDirs |
           Where-Object { Test-Path $_ } |
           ForEach-Object {
-              Get-ChildItem -Path $_ -Filter "Founder-IDE-Setup-*.exe" -ErrorAction SilentlyContinue
+              Get-ChildItem -Path $_ -Filter $expectedBundleName -ErrorAction SilentlyContinue
           } |
           Sort-Object LastWriteTime -Descending |
           Select-Object -First 1
 if (-not $bundle) {
-    throw "Founder IDE installer not found after iscc. Searched: $($bundleDirs -join ', ')"
+    throw "$expectedBundleName not found after iscc. Searched: $($bundleDirs -join ', ')"
 }
 
 Write-Host "`n[stack] DONE - one Founder IDE installer:" -ForegroundColor Green

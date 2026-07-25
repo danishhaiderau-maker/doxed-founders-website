@@ -22,6 +22,40 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.ok(packageInner > embed);
   });
 
+  it('keeps release compression as the default and labels fast QA installers', () => {
+    const innerInstallerSource = fs.readFileSync(
+      path.join(root, '..', 'upstream', 'overlay', 'build', 'win32', 'code.iss'),
+      'utf8',
+    );
+    assert.match(source, /\[ValidateSet\("Release", "FastQa"\)\]/);
+    assert.match(source, /\[string\]\$InstallerProfile = "Release"/);
+    assert.match(source, /FastQa requires -IdePayloadRoot/);
+    assert.match(
+      source,
+      /\$installerCompression = if \(\$InstallerProfile -eq "FastQa"\) \{ "zip" \} else \{ "lzma2\/ultra64" \}/,
+    );
+    assert.match(
+      source,
+      /\$innerCompression = if \(\$InstallerProfile -eq "FastQa"\) \{ "zip" \} else \{ "lzma" \}/,
+    );
+    assert.match(source, /\$installerSuffix = if .*"-internal-qa"/);
+    assert.match(source, /FounderCompression\s+= \$innerCompression/);
+    assert.match(source, /FounderSolidCompression\s+= \$solidCompression/);
+    assert.match(source, /\/DFOUNDER_COMPRESSION=\$installerCompression/);
+    assert.match(source, /\/DFOUNDER_INSTALLER_SUFFIX=\$installerSuffix/);
+    assert.match(installerSource, /#define FOUNDER_COMPRESSION "lzma2\/ultra64"/);
+    assert.match(installerSource, /#define FOUNDER_SOLID_COMPRESSION "yes"/);
+    assert.match(installerSource, /Compression=\{#FOUNDER_COMPRESSION\}/);
+    assert.match(installerSource, /SolidCompression=\{#FOUNDER_SOLID_COMPRESSION\}/);
+    assert.match(
+      installerSource,
+      /OutputBaseFilename=Founder-IDE-Setup-\{#FOUNDER_STACK_VERSION\}\{#FOUNDER_INSTALLER_SUFFIX\}/,
+    );
+    assert.match(innerInstallerSource, /#define FounderCompression "lzma"/);
+    assert.match(innerInstallerSource, /Compression=\{#FounderCompression\}/);
+    assert.match(innerInstallerSource, /SolidCompression=\{#FounderSolidCompression\}/);
+  });
+
   it('refreshes the bundled Founder extension during a warm package run', () => {
     assert.match(source, /founder-ide-extension-unpacked/);
     assert.match(source, /ZipFile\]::ExtractToDirectory\(\$vsixDest/);

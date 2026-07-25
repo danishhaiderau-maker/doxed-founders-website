@@ -67,6 +67,18 @@
   #define FOUNDER_HUB_PATCH "..\..\..\staging\founder-hub.js"
 #endif
 
+#ifndef FOUNDER_COMPRESSION
+  #define FOUNDER_COMPRESSION "lzma2/ultra64"
+#endif
+
+#ifndef FOUNDER_SOLID_COMPRESSION
+  #define FOUNDER_SOLID_COMPRESSION "yes"
+#endif
+
+#ifndef FOUNDER_INSTALLER_SUFFIX
+  #define FOUNDER_INSTALLER_SUFFIX ""
+#endif
+
 [Setup]
 AppId={{A01A0D39-2EE3-4C82-8A2B-24AFA46E22B9}
 AppName=Founder IDE
@@ -80,9 +92,9 @@ DefaultDirName={tmp}\FounderIDEBootstrap
 DefaultGroupName=Founder IDE
 DisableProgramGroupPage=yes
 OutputDir=dist
-OutputBaseFilename=Founder-IDE-Setup-{#FOUNDER_STACK_VERSION}
-Compression=lzma2/ultra64
-SolidCompression=yes
+OutputBaseFilename=Founder-IDE-Setup-{#FOUNDER_STACK_VERSION}{#FOUNDER_INSTALLER_SUFFIX}
+Compression={#FOUNDER_COMPRESSION}
+SolidCompression={#FOUNDER_SOLID_COMPRESSION}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest

@@ -4,6 +4,14 @@
       ? ('; LicenseFile: "' + RepoDir + '\licenses\LICENSE-' + Language + '.rtf"') \
       : '; LicenseFile: "' + RepoDir + '\' + RootLicenseFileName + '"'
 
+#ifndef FounderCompression
+  #define FounderCompression "lzma"
+#endif
+
+#ifndef FounderSolidCompression
+  #define FounderSolidCompression "yes"
+#endif
+
 [Setup]
 AppId={#AppId}
 AppName={#NameLong}
@@ -16,8 +24,8 @@ DefaultGroupName={#NameLong}
 AllowNoIcons=yes
 OutputDir={#OutputDir}
 OutputBaseFilename=FounderIDESetup
-Compression=lzma
-SolidCompression=yes
+Compression={#FounderCompression}
+SolidCompression={#FounderSolidCompression}
 AppMutex={code:GetAppMutex}
 SetupMutex={#AppMutex}setup
 ; this is a // Void icon comment. Old: WizardImageFile="{#RepoDir}\resources\win32\inno-big-100.bmp,{#RepoDir}\resources\win32\inno-big-125.bmp,{#RepoDir}\resources\win32\inno-big-150.bmp,{#RepoDir}\resources\win32\inno-big-175.bmp,{#RepoDir}\resources\win32\inno-big-200.bmp,{#RepoDir}\resources\win32\inno-big-225.bmp,{#RepoDir}\resources\win32\inno-big-250.bmp"
