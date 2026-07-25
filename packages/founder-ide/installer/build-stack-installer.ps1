@@ -22,6 +22,7 @@
 # Env / params:
 #   -MonorepoRoot        - path to the Founder OS monorepo (default: detected up from this script)
 #   -VscodiumCheckout    - path to the VSCodium downstream checkout (default: current dir)
+#   -IdePayloadRoot      - optional prebuilt Founder IDE payload for fast local packaging
 #   -Version             - Founder IDE version (default: 0.1.0)
 #   -SkipExtensionBuild  - skip step 1 (you already built the .vsix)
 #   -SkipIdeBuild        - skip step 2 (you already built Founder IDE)
@@ -32,6 +33,7 @@
 param(
     [string]$MonorepoRoot     = "",
     [string]$VscodiumCheckout = (Get-Location).Path,
+    [string]$IdePayloadRoot   = "",
     [string]$Version          = "0.9.4",
     [switch]$SkipExtensionBuild,
     [switch]$SkipIdeBuild,
@@ -132,12 +134,22 @@ Write-Host "[stack]   staged Founder hub correction -> $founderHubPatch"
 
 # --- Step 2: build Founder IDE application payload ---------------------------
 $ideSetup = Join-Path $staging "Founder-IDE-Setup-x64.exe"
-# VS Code's gulp package tasks always emit beside the source directory. That
-# is `$VscodiumCheckout\VSCode-win32-x64` for the historical nested layout and
-# the checkout parent for a direct `...\void-builder\vscode` source tree.
-$ideRoot = Join-Path (Split-Path -Parent $vscodeSource) "VSCode-win32-x64"
+# VS Code's gulp package tasks normally emit beside the source directory. For
+# local QA, a caller can instead provide a verified payload and skip the
+# expensive native shell build while still rebuilding every Founder-owned
+# extension, relay, patch, and installer layer.
+if ($IdePayloadRoot) {
+    if (-not (Test-Path $IdePayloadRoot)) {
+        throw "Prebuilt Founder IDE payload not found at $IdePayloadRoot"
+    }
+    $ideRoot = (Resolve-Path $IdePayloadRoot).Path
+} else {
+    $ideRoot = Join-Path (Split-Path -Parent $vscodeSource) "VSCode-win32-x64"
+}
 Write-Host "[stack] IDE payload: $ideRoot"
-if (-not $SkipIdeBuild) {
+if ($IdePayloadRoot) {
+    Write-Host "`n[stack] STEP 2/4 - using verified prebuilt Founder IDE payload" -ForegroundColor Cyan
+} elseif (-not $SkipIdeBuild) {
     Write-Host "`n[stack] STEP 2/4 - building Founder IDE (VSCodium downstream)" -ForegroundColor Cyan
     $buildPs1 = Join-Path $VscodiumCheckout "build\build-founder-ide.ps1"
     if (-not (Test-Path $buildPs1)) {
@@ -243,15 +255,18 @@ $requiredNativeBindings = @(
 $policyWatcherRelativePath = "node_modules\@vscode\policy-watcher\build\Release\vscode-policy-watcher.node"
 $policyWatcherSource = Join-Path $vscodeSource $policyWatcherRelativePath
 $policyWatcherDest = Join-Path $ideAppRoot $policyWatcherRelativePath
-if (-not (Test-Path $policyWatcherSource)) {
-    throw "Founder IDE policy watcher is missing from the pinned source: $policyWatcherRelativePath"
-}
-New-Item -ItemType Directory -Path (Split-Path $policyWatcherDest -Parent) -Force | Out-Null
-if (-not (Test-Path $policyWatcherDest) -or
-    (Get-FileHash -LiteralPath $policyWatcherDest -Algorithm SHA256).Hash -ne
-    (Get-FileHash -LiteralPath $policyWatcherSource -Algorithm SHA256).Hash) {
-    Copy-Item $policyWatcherSource $policyWatcherDest -Force
-    Write-Host "[stack]   refreshed Electron-targeted policy watcher"
+if (Test-Path $policyWatcherSource) {
+    New-Item -ItemType Directory -Path (Split-Path $policyWatcherDest -Parent) -Force | Out-Null
+    if (-not (Test-Path $policyWatcherDest) -or
+        (Get-FileHash -LiteralPath $policyWatcherDest -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $policyWatcherSource -Algorithm SHA256).Hash) {
+        Copy-Item $policyWatcherSource $policyWatcherDest -Force
+        Write-Host "[stack]   refreshed Electron-targeted policy watcher"
+    }
+} elseif (-not (Test-Path $policyWatcherDest)) {
+    throw "Founder IDE policy watcher is missing from both payload and pinned source: $policyWatcherRelativePath"
+} else {
+    Write-Host "[stack]   using Electron-targeted policy watcher from verified payload"
 }
 
 foreach ($bindingPattern in $requiredNativeBindings) {
@@ -268,16 +283,31 @@ Write-Host "[stack]   all supported Windows startup bindings verified"
 # contract with the packaged Electron runtime and fail before installer work.
 $ideExecutable = Join-Path $ideRoot "Founder IDE.exe"
 $policyPackageForNode = (Join-Path $ideAppRoot "node_modules\@vscode\policy-watcher").Replace("\", "/")
-$policyProbe = "const p=require('$policyPackageForNode'); const w=p.createWatcher('FounderIDE',{},()=>{}); if(!w||typeof w.dispose!=='function') process.exit(3); w.dispose(); process.exit(0);"
-$previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
+$policyProbe = "const p=require('$policyPackageForNode'); const w=p.createWatcher('FounderIDE',{},()=>{}); if(!w||typeof w.dispose!=='function') process.exit(3); setTimeout(()=>{try{w.dispose();setTimeout(()=>process.exit(0),250)}catch{process.exit(4)}},250);"
+$policyProbeStart = New-Object System.Diagnostics.ProcessStartInfo
+$policyProbeStart.FileName = $ideExecutable
+$policyProbeStart.Arguments = "-e `"$policyProbe`""
+$policyProbeStart.UseShellExecute = $false
+$policyProbeStart.CreateNoWindow = $true
+$policyProbeStart.RedirectStandardOutput = $true
+$policyProbeStart.RedirectStandardError = $true
+$policyProbeStart.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1"
+$policyProbeProcess = New-Object System.Diagnostics.Process
+$policyProbeProcess.StartInfo = $policyProbeStart
 try {
-    $env:ELECTRON_RUN_AS_NODE = "1"
-    # Piping to Out-String makes Windows PowerShell wait for this GUI-subsystem
-    # executable and populate LASTEXITCODE before the packaging script moves on.
-    $policyProbeOutput = (& $ideExecutable -e $policyProbe 2>&1 | Out-String)
-    $policyProbeExit = $LASTEXITCODE
-} finally {
-    $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
+    if (-not $policyProbeProcess.Start()) {
+        throw "Founder IDE policy watcher runtime contract could not start."
+    }
+    if (-not $policyProbeProcess.WaitForExit(30000)) {
+        $policyProbeProcess.Kill()
+        throw "Founder IDE policy watcher runtime contract timed out after 30 seconds."
+    }
+    $policyProbeOutput = $policyProbeProcess.StandardOutput.ReadToEnd()
+    $policyProbeError = $policyProbeProcess.StandardError.ReadToEnd()
+    $policyProbeExit = $policyProbeProcess.ExitCode
+} finally { $policyProbeProcess.Dispose() }
+if ($policyProbeError) {
+    $policyProbeOutput = "$policyProbeOutput`n$policyProbeError".Trim()
 }
 if ($policyProbeExit -ne 0) {
     throw "Founder IDE policy watcher runtime contract failed (exit $policyProbeExit): $policyProbeOutput"
@@ -437,22 +467,83 @@ if (-not (Test-Path (Join-Path $relayRoot "Founder Node.exe"))) {
 $embedScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\embed-founder-relay.ps1"
 & $embedScript -IdeRoot $ideRoot -RelayRoot $relayRoot
 
-# The relay must be embedded before gulp packages the inner installer.
-Push-Location $vscodeSource
-try {
-    # Inno prints one line per compressed file (thousands of lines for the
-    # Electron payload). Capture that noise so CI and agent shells do not
-    # terminate an otherwise healthy compiler when their output buffer fills.
-    $packagingLog = Join-Path $staging "founder-ide-inner-installer.log"
-    & cmd.exe /d /c "npx.cmd gulp vscode-win32-x64-user-setup > `"$packagingLog`" 2>&1"
-    $packagingExit = $LASTEXITCODE
-    Get-Content $packagingLog -Tail 30
-    if ($packagingExit -ne 0) {
-        throw "Founder IDE installer packaging failed (exit $packagingExit; log: $packagingLog)"
-    }
-} finally { Pop-Location }
+# The relay must be embedded before packaging the inner installer. A prebuilt
+# payload cannot use the upstream gulp task because that task derives the
+# payload path from the source checkout. Invoke the same Inno script with the
+# same definitions so local iteration stays fast and reproducible.
+if ($IdePayloadRoot) {
+    $packageJson = Get-Content (Join-Path $vscodeSource "package.json") -Raw | ConvertFrom-Json
+    $productJson = Get-Content (Join-Path $vscodeSource "product.json") -Raw | ConvertFrom-Json
+    $innerDir = Join-Path $staging "inner-setup-$Version-$PID"
+    New-Item -ItemType Directory -Force -Path $innerDir | Out-Null
+    $targetProductJson = Join-Path $innerDir "product.json"
+    $productForInstaller = Get-Content (Join-Path $ideAppRoot "product.json") -Raw | ConvertFrom-Json
+    $productForInstaller | Add-Member -NotePropertyName target -NotePropertyValue "user" -Force
+    [System.IO.File]::WriteAllText(
+        $targetProductJson,
+        ($productForInstaller | ConvertTo-Json -Depth 100),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
 
-$innerDir = Join-Path $vscodeSource ".build\win32-x64\user-setup"
+    $quality = if ($productJson.quality) { [string]$productJson.quality } else { "dev" }
+    $innerDefinitions = [ordered]@{
+        NameLong                     = [string]$productJson.nameLong
+        NameShort                    = [string]$productJson.nameShort
+        DirName                      = [string]$productJson.win32DirName
+        Version                      = [string]$packageJson.version
+        RawVersion                   = ([string]$packageJson.version) -replace '-\w+$',''
+        NameVersion                  = "$($productJson.win32NameVersion) (User)"
+        ExeBasename                  = [string]$productJson.nameShort
+        RegValueName                 = [string]$productJson.win32RegValueName
+        ShellNameShort               = [string]$productJson.win32ShellNameShort
+        AppMutex                     = [string]$productJson.win32MutexName
+        TunnelMutex                  = [string]$productJson.win32TunnelMutex
+        TunnelServiceMutex           = [string]$productJson.tunnelServiceMutex
+        TunnelApplicationName        = [string]$productJson.tunnelApplicationName
+        ApplicationName              = [string]$productJson.applicationName
+        Arch                         = "x64"
+        AppId                        = [string]$productJson.win32x64UserAppId
+        IncompatibleTargetAppId      = [string]$productJson.win32x64AppId
+        AppUserId                    = [string]$productJson.win32AppUserModelId
+        ArchitecturesAllowed         = "x64"
+        ArchitecturesInstallIn64BitMode = "x64"
+        SourceDir                    = $ideRoot
+        RepoDir                      = $vscodeSource
+        OutputDir                    = $innerDir
+        InstallTarget                = "user"
+        ProductJsonPath              = $targetProductJson
+        Quality                      = $quality
+    }
+    $innerIss = Join-Path $vscodeSource "build\win32\code.iss"
+    if (-not (Test-Path $innerIss)) {
+        throw "Founder IDE inner installer definition not found: $innerIss"
+    }
+    $innerArgs = @($innerIss)
+    foreach ($definition in $innerDefinitions.GetEnumerator()) {
+        $innerArgs += "/D$($definition.Key)=$($definition.Value)"
+    }
+    Write-Host "[stack]   composing inner installer from verified payload"
+    & $IsccPath @innerArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Founder IDE inner installer packaging failed (exit $LASTEXITCODE)"
+    }
+} else {
+    Push-Location $vscodeSource
+    try {
+        # Inno prints one line per compressed file (thousands of lines for the
+        # Electron payload). Capture that noise so CI and agent shells do not
+        # terminate an otherwise healthy compiler when their output buffer fills.
+        $packagingLog = Join-Path $staging "founder-ide-inner-installer.log"
+        & cmd.exe /d /c "npx.cmd gulp vscode-win32-x64-user-setup > `"$packagingLog`" 2>&1"
+        $packagingExit = $LASTEXITCODE
+        Get-Content $packagingLog -Tail 30
+        if ($packagingExit -ne 0) {
+            throw "Founder IDE installer packaging failed (exit $packagingExit; log: $packagingLog)"
+        }
+    } finally { Pop-Location }
+    $innerDir = Join-Path $vscodeSource ".build\win32-x64\user-setup"
+}
+
 $candidate = Get-ChildItem -Path $innerDir -Filter "FounderIDESetup.exe" -ErrorAction SilentlyContinue |
              Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $candidate) { throw "Founder IDE setup .exe not found in $innerDir after packaging." }

@@ -26,6 +26,10 @@
     "*"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "workbench.activityBar.location": "hidden",
+      "founderOs.advancedIdeTools": false
+    },
     "authentication": [
       {
         "id": "founderOs",

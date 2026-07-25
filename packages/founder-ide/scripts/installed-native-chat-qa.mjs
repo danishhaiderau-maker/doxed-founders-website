@@ -6,6 +6,8 @@ const outputDir = path.resolve(process.env.FOUNDER_IDE_QA_DIR || 'artifacts/inst
 const nonce = process.env.FOUNDER_IDE_QA_NONCE || `QA-${Date.now()}`;
 const requestedMode = process.env.FOUNDER_IDE_QA_MODE?.trim().toLowerCase() || '';
 const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() || '';
+const trustWorkspace = process.env.FOUNDER_IDE_QA_TRUST_WORKSPACE === '1';
+const expectedModel = process.env.FOUNDER_IDE_QA_EXPECT_MODEL?.trim().toLowerCase() || '';
 const evidenceId = nonce.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 96);
 fs.mkdirSync(outputDir, { recursive: true });
 
@@ -65,6 +67,69 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 
 await send('Runtime.enable');
 await send('Page.enable');
+if (trustWorkspace) {
+  let trusted = await evaluate(`(() => {
+    const candidates = [...document.querySelectorAll('*')]
+      .filter((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return /Trust the authors of all files|Yes, I trust the authors/i.test(
+          candidate.textContent || '',
+        )
+          && rect.width > 0
+          && rect.height > 0
+          && style.visibility !== 'hidden'
+          && style.display !== 'none';
+      })
+      .map((candidate) => {
+        const describedControl = candidate
+          .closest('.monaco-description-button')
+          ?.querySelector('button, [role="button"], a');
+        return describedControl
+          || candidate.closest('button, [role="button"], a')
+          || candidate;
+      });
+    const control = [...new Set(candidates)]
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return (leftRect.width * leftRect.height) - (rightRect.width * rightRect.height);
+      })[0];
+    control?.click();
+    return Boolean(control);
+  })()`);
+  if (trusted) await wait(1_500);
+  let trustDialogVisible = await evaluate(`(() => {
+    return [...document.querySelectorAll('[role="dialog"], .monaco-dialog-box')]
+      .some((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return /Do you trust the authors of the files in this folder/i.test(
+          candidate.textContent || '',
+        ) && rect.width > 0 && rect.height > 0;
+      });
+  })()`);
+  if (trustDialogVisible) {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab' });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab' });
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
+    await wait(1_500);
+    trusted = true;
+    trustDialogVisible = await evaluate(`(() => {
+      return [...document.querySelectorAll('[role="dialog"], .monaco-dialog-box')]
+        .some((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return /Do you trust the authors of the files in this folder/i.test(
+            candidate.textContent || '',
+          ) && rect.width > 0 && rect.height > 0;
+        });
+    })()`);
+  }
+  if (trustDialogVisible) {
+    throw new Error('Founder IDE workspace-trust dialog could not be approved.');
+  }
+  if (trusted) await wait(6_000);
+}
 let composer = await evaluate(`(() => {
   const element = [...document.querySelectorAll('textarea')]
     .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
@@ -88,11 +153,18 @@ if (!composer) {
 if (!composer) throw new Error('Founder Chat composer was not found.');
 
 if (requestedMode) {
-  const modeNames = { normal: 'Chat', gather: 'Gather', agent: 'Agent' };
-  const modeDetails = {
-    normal: 'Normal chat',
-    gather: "Reads files, but can't edit",
-    agent: 'Edits files and uses tools',
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
+  await wait(150);
+  const modeNames = {
+    ask: 'Ask',
+    plan: 'Plan',
+    build: 'Build',
+    debug: 'Debug',
+    team: 'Team',
+    normal: 'Chat',
+    gather: 'Gather',
+    agent: 'Agent',
   };
   if (!modeNames[requestedMode]) throw new Error(`Unknown Founder chat mode: ${requestedMode}`);
   const currentMode = await evaluate(`(() => {
@@ -100,8 +172,9 @@ if (requestedMode) {
       .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
     if (!composer) return null;
     const composerRect = composer.getBoundingClientRect();
+    const labels = ${JSON.stringify(Object.values(modeNames))};
     const button = [...document.querySelectorAll('button')]
-      .filter((candidate) => ['Chat', 'Gather', 'Agent'].includes(candidate.textContent?.trim() || ''))
+      .filter((candidate) => labels.includes(candidate.textContent?.trim() || ''))
       .filter((candidate) => {
         const rect = candidate.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0
@@ -109,21 +182,51 @@ if (requestedMode) {
           && rect.top >= composerRect.bottom - 90
           && rect.top <= composerRect.bottom + 40;
       })[0];
-    button?.click();
     return button?.textContent?.trim() || null;
   })()`);
   if (!currentMode) throw new Error('Founder Chat mode control was not found.');
   if (currentMode !== modeNames[requestedMode]) {
+    await evaluate(`(() => {
+      const composer = [...document.querySelectorAll('textarea')]
+        .find((candidate) => /Enter instructions/i.test(candidate.placeholder || ''));
+      if (!composer) return false;
+      const composerRect = composer.getBoundingClientRect();
+      const labels = ${JSON.stringify(Object.values(modeNames))};
+      const button = [...document.querySelectorAll('button')]
+        .filter((candidate) => labels.includes(candidate.textContent?.trim() || ''))
+        .filter((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0
+            && rect.left >= composerRect.left
+            && rect.top >= composerRect.bottom - 90
+            && rect.top <= composerRect.bottom + 40;
+        })[0];
+      button?.click();
+      return Boolean(button);
+    })()`);
     await wait(300);
     const selected = await evaluate(`(() => {
-      const wanted = ${JSON.stringify(modeNames[requestedMode] + modeDetails[requestedMode])};
-      const option = [...document.querySelectorAll('div')]
-        .filter((candidate) => candidate.textContent?.replace(/\\s+/g, '').trim() === wanted.replace(/\\s+/g, ''))
-        .find((candidate) => {
+      const wanted = ${JSON.stringify(modeNames[requestedMode])};
+      const candidates = [...document.querySelectorAll('*')]
+        .filter((candidate) => {
           const rect = candidate.getBoundingClientRect();
           const style = getComputedStyle(candidate);
-          return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-        });
+          const text = candidate.textContent?.replace(/\\s+/g, ' ').trim() || '';
+          return (text === wanted || text.startsWith(wanted + ' '))
+            && rect.width > 0
+            && rect.height > 0
+            && style.visibility !== 'hidden'
+            && style.display !== 'none';
+        })
+        .map((candidate) =>
+          candidate.closest('[role="option"], button, [role="menuitem"]') || candidate
+        );
+      const option = [...new Set(candidates)]
+        .sort((left, right) => {
+          const leftRect = left.getBoundingClientRect();
+          const rightRect = right.getBoundingClientRect();
+          return (leftRect.width * leftRect.height) - (rightRect.width * rightRect.height);
+        })[0];
       option?.click();
       return Boolean(option);
     })()`);
@@ -137,6 +240,7 @@ await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', mo
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' });
 const prompt = `Reply exactly: Founder AI is online. ${nonce}`;
+const expectedResponse = `Founder AI is online. ${nonce}`;
 await send('Input.insertText', { text: prompt });
 await wait(250);
 
@@ -166,11 +270,13 @@ if (!submitted) throw new Error('Founder Chat send control was not found.');
 const startedAt = Date.now();
 let chatText = '';
 let responseCount = 0;
+let routeReceiptVisible = false;
 while (Date.now() - startedAt < 90_000) {
   await wait(700);
   chatText = await evaluate(`document.body.innerText.slice(-24000)`);
-  responseCount = chatText.split(`Founder AI is online. ${nonce}`).length - 1;
-  if (responseCount >= 2 && /Founder route/i.test(chatText)) break;
+  responseCount = chatText.split(expectedResponse).length - 1;
+  routeReceiptVisible = /Founder route\s*(?:Â·|·|\|)\s*(?:fast|reasoning|code|auto|chat)\s*(?:Â·|·|\|)\s*deepseek\/deepseek-v4-(?:pro|flash)/i.test(chatText);
+  if (responseCount >= 2 && routeReceiptVisible) break;
 }
 const latencyMs = Date.now() - startedAt;
 const screenshot = await send('Page.captureScreenshot', {
@@ -181,7 +287,9 @@ const screenshot = await send('Page.captureScreenshot', {
 const screenshotPath = path.join(outputDir, `installed-founder-chat-native-${evidenceId}.png`);
 fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
-const route = chatText.match(/Founder route\s*[·.]\s*([^\r\n]+(?:\r?\n[^\r\n]+){0,2})/i)?.[1]?.replace(/\s+/g, ' ').trim() || null;
+const routeLine = chatText.match(/Founder route\s*(?:Â·|·|\|)\s*[^\r\n]+/i)?.[0] || '';
+const route = routeLine.replace(/\s+/g, ' ').trim() || null;
+const resolvedModel = routeLine.match(/deepseek\/(deepseek-v4-(?:pro|flash))/i)?.[1]?.toLowerCase() || null;
 const ignoredConsoleErrors = consoleErrors.filter((message) =>
   /Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
 );
@@ -195,8 +303,9 @@ const evidence = {
   checks: {
     submitted,
     responseVisible: responseCount >= 2,
-    founderRoute: /Founder route/i.test(chatText),
-    deepSeekV4: /deepseek\/deepseek-v4-(?:pro|flash)/i.test(chatText),
+    founderRoute: routeReceiptVisible,
+    deepSeekV4: Boolean(resolvedModel),
+    expectedModel: !expectedModel || resolvedModel === expectedModel,
     errorVisible: /Founder OS gateway returned|Authentication Fails|Bad gateway|invalid_request_error|Founder could not (?:send|reach)|Founder AI is temporarily unavailable|Founder session needs to be renewed/i.test(chatText),
   },
   chatTail: chatText,
@@ -213,6 +322,7 @@ if (
   !evidence.checks.responseVisible
   || !evidence.checks.founderRoute
   || !evidence.checks.deepSeekV4
+  || !evidence.checks.expectedModel
   || evidence.checks.errorVisible
   || criticalConsoleErrors.length > 0
   || pageErrors.length > 0

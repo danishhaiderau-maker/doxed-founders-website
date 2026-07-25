@@ -83,7 +83,7 @@ function defaultProcessExecutablePath(
 ): string | null {
   try {
     if (platform === 'win32') {
-      const command = `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop).ExecutablePath`;
+      const command = `(Get-Process -Id ${pid} -ErrorAction Stop).Path`;
       return execFileSync(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-Command', command],

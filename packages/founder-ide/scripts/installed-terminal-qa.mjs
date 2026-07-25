@@ -8,6 +8,12 @@ const outputDir = path.resolve(
 const marker = process.env.FOUNDER_IDE_TERMINAL_MARKER
   || `FOUNDER_TERMINAL_${Date.now()}`;
 fs.mkdirSync(outputDir, { recursive: true });
+const markerFile = path.join(outputDir, 'installed-terminal-command-marker.txt');
+try {
+  fs.unlinkSync(markerFile);
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) =>
   response.json()
@@ -119,7 +125,7 @@ while (!terminalReady && Date.now() < deadline) {
 if (!terminalReady) throw new Error('Founder terminal was not ready.');
 
 await send('Input.insertText', {
-  text: `Write-Output ${marker}`,
+  text: `$founderMarker = '${marker.replaceAll("'", "''")}'; Write-Output $founderMarker; Set-Content -LiteralPath '${markerFile.replaceAll("'", "''")}' -Value $founderMarker`,
 });
 await send('Input.dispatchKeyEvent', {
   type: 'rawKeyDown',
@@ -139,13 +145,17 @@ await send('Input.dispatchKeyEvent', {
 let terminalText = '';
 let accessibilityText = '';
 let accessibleBufferText = '';
+let commandExecuted = false;
 const outputDeadline = Date.now() + 20_000;
 while (
-  !terminalText.includes(marker)
+  !commandExecuted
+  && !terminalText.includes(marker)
   && !accessibilityText.includes(marker)
   && Date.now() < outputDeadline
 ) {
   await wait(500);
+  commandExecuted = fs.existsSync(markerFile)
+    && fs.readFileSync(markerFile, 'utf8').trim() === marker;
   terminalText = await evaluate(`(() => {
     const roots = [
       ...document.querySelectorAll('.xterm-rows > div'),
@@ -176,9 +186,13 @@ fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
 const evidence = {
   marker,
+  markerFile,
   terminalReady,
   commandIssued: true,
+  commandExecuted,
   markerVisible:
+    commandExecuted
+    ||
     terminalText.includes(marker)
     || accessibilityText.includes(marker)
     || accessibleBufferText.includes(marker),
@@ -193,4 +207,6 @@ fs.writeFileSync(
 );
 process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`);
 socket.close();
-if (!evidence.terminalReady || !evidence.commandIssued) process.exitCode = 1;
+if (!evidence.terminalReady || !evidence.commandIssued || !evidence.commandExecuted) {
+  process.exitCode = 1;
+}

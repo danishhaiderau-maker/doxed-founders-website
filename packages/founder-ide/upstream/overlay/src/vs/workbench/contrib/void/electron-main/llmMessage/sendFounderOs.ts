@@ -477,8 +477,19 @@ async function requestNativeTeamAdvice(
 	}
 }
 
-function gatewayTools(chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined): Array<Record<string, unknown>> {
-	return (availableTools(chatMode, mcpTools) ?? []).map((tool) => ({
+function gatewayTools(
+	chatMode: ChatMode | null,
+	mcpTools: InternalToolInfo[] | undefined,
+	workMode: ReturnType<typeof readNativeWorkMode>,
+): Array<Record<string, unknown>> {
+	if (workMode === 'ask') return [];
+	const tools = availableTools(chatMode, mcpTools) ?? [];
+	const allowedTools = workMode === 'plan'
+		? tools.filter((tool) =>
+			!/(?:apply|command|create|delete|edit|execute|insert|mkdir|move|patch|remove|rename|replace|run|shell|terminal|write)/i.test(tool.name),
+		)
+		: tools;
+	return allowedTools.map((tool) => ({
 		type: 'function',
 		function: {
 			name: tool.name,
@@ -531,6 +542,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	const { messages, onText, onFinalMessage, onError, _setAborter, loggingName, modelSelection, separateSystemMessage, chatMode, mcpTools } = params;
 
 	const openAiMessages = toOpenAiMessages(messages, separateSystemMessage);
+	const workMode = readNativeWorkMode();
 	const requestedModel = modelSelection?.modelName;
 	const escalationReason = requestedModel === 'founder-os-auto'
 		? nativeAutoEscalationReason(openAiMessages)
@@ -546,7 +558,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 	});
 	openAiMessages.splice(1, 0, {
 		role: 'system',
-		content: nativeWorkModeSystem(readNativeWorkMode()),
+		content: nativeWorkModeSystem(workMode),
 	});
 	const coordination = params.coordination
 		? beginNativeCoordination({
@@ -596,7 +608,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		founder_os_metadata: true,
 		...(escalationReason ? { metadata: { founder_auto_escalation: escalationReason } } : {}),
 	};
-	const tools = gatewayTools(chatMode, mcpTools);
+	const tools = gatewayTools(chatMode, mcpTools, workMode);
 	if (tools.length > 0) {
 		body.tools = tools;
 		body.tool_choice = 'auto';

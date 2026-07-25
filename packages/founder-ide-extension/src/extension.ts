@@ -425,7 +425,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.openProjectBrief', openProjectBrief),
   );
 
-  void applyFounderNavigationDefaults(context);
+  const navigationTimer = setTimeout(
+    () => void applyFounderNavigationDefaults(context),
+    15_000,
+  );
+  context.subscriptions.push({
+    dispose: () => clearTimeout(navigationTimer),
+  });
 
   // First-pass registration (synchronous so the model picker populates fast).
   registerOrNotify(context);
@@ -497,17 +503,29 @@ async function applyFounderNavigationDefaults(
   if (context.globalState.get<boolean>(migrationKey, false)) return;
 
   const workbench = vscode.workspace.getConfiguration('workbench');
-  await workbench.update(
-    'activityBar.location',
-    'hidden',
-    vscode.ConfigurationTarget.Global,
-  );
-  await vscode.workspace
-    .getConfiguration('window')
-    .update('menuBarVisibility', 'toggle', vscode.ConfigurationTarget.Global);
-  await vscode.workspace
-    .getConfiguration('founderOs')
-    .update('advancedIdeTools', false, vscode.ConfigurationTarget.Global);
+  if (workbench.get<string>('activityBar.location') !== 'hidden') {
+    await workbench.update(
+      'activityBar.location',
+      'hidden',
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  const windowConfig = vscode.workspace.getConfiguration('window');
+  if (windowConfig.get<string>('menuBarVisibility') !== 'toggle') {
+    await windowConfig.update(
+      'menuBarVisibility',
+      'toggle',
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  const founderConfig = vscode.workspace.getConfiguration('founderOs');
+  if (founderConfig.get<boolean>('advancedIdeTools') !== false) {
+    await founderConfig.update(
+      'advancedIdeTools',
+      false,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
   await context.globalState.update(migrationKey, true);
   await vscode.commands.executeCommand('workbench.view.extension.founderOs');
 }

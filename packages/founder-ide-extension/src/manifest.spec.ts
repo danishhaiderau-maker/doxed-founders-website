@@ -155,7 +155,7 @@ describe('Founder IDE extension manifest', () => {
       assert.ok(hubSource.includes(label), `${label} must be visible in Founder navigation`);
     }
     assert.match(extensionSource, /activityBar\.location[\s\S]*?'hidden'/);
-    assert.match(extensionSource, /menuBarVisibility', 'toggle'/);
+    assert.match(extensionSource, /menuBarVisibility[\s\S]*?'toggle'/);
     assert.match(hubSource, /Show'\} IDE rail/);
     assert.match(hubSource, /body\s*\{[\s\S]*?padding:\s*0;/);
     assert.match(hubSource, /overflow-x:\s*hidden;/);
@@ -171,5 +171,19 @@ describe('Founder IDE extension manifest', () => {
       hubSource,
       /case 'openRemote':[\s\S]*?advancedIdeTools[\s\S]*?true[\s\S]*?openRemoteView/,
     );
+  });
+
+  it('ships supported Founder-first layout settings as extension defaults', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
+    ) as {
+      contributes?: {
+        configurationDefaults?: Record<string, unknown>;
+      };
+    };
+    assert.deepEqual(manifest.contributes?.configurationDefaults, {
+      'workbench.activityBar.location': 'hidden',
+      'founderOs.advancedIdeTools': false,
+    });
   });
 });

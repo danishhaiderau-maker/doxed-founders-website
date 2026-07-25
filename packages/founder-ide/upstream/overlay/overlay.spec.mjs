@@ -226,6 +226,16 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /tool_calls = raw\.tool_calls/);
   });
 
+  it('keeps Ask tool-free and Plan non-mutating at the gateway boundary', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/sendFounderOs.ts',
+    );
+    assert.match(source, /if \(workMode === 'ask'\) return \[\]/);
+    assert.match(source, /workMode === 'plan'/);
+    assert.match(source, /nativeWorkModeSystem\(workMode\)/);
+    assert.match(source, /gatewayTools\(chatMode, mcpTools, workMode\)/);
+  });
+
   it('patches native chat metadata with the active workspace root', () => {
     const applyScript = read('../../../../scripts/apply-founder-customizations.ps1');
     assert.match(applyScript, /native chat workspace coordination/);
