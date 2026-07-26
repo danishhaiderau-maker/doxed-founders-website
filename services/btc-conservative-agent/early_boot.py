@@ -6,12 +6,27 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-_server: Optional[ThreadingHTTPServer] = None
+class _ResponsiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Keep boot liveness responsive behind a retrying reverse proxy."""
+
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 128
+    client_io_timeout_sec = 2.0
+
+    def get_request(self) -> tuple[socket.socket, tuple]:
+        request, client_address = super().get_request()
+        request.settimeout(self.client_io_timeout_sec)
+        return request, client_address
+
+
+_server: Optional[_ResponsiveThreadingHTTPServer] = None
 _thread: Optional[threading.Thread] = None
 _boot_version = "booting"
 _source_git_rev = "unknown"
@@ -33,7 +48,7 @@ def _write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: 
         handler.send_header("Content-Length", str(len(body)))
         handler.end_headers()
         handler.wfile.write(body)
-    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+    except (OSError, TimeoutError):
         # Health checkers and browsers routinely abandon the temporary boot
         # response while the full dashboard is taking ownership of the port.
         # That is a normal client disconnect, not a bot crash.
@@ -85,7 +100,7 @@ def start_early_ping_server(
                 return
             self._write_json(503, {"ok": False, "boot": "starting", "error": "dashboard loading"})
 
-    _server = ThreadingHTTPServer((host, int(port)), _Handler)
+    _server = _ResponsiveThreadingHTTPServer((host, int(port)), _Handler)
     _thread = threading.Thread(target=_server.serve_forever, name="early-ping", daemon=True)
     _thread.start()
 

@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import socket
 import unittest
 import urllib.request
 from pathlib import Path
@@ -19,6 +20,37 @@ class _DisconnectedSocket(io.BytesIO):
 
 
 class EarlyBootDisconnectTests(unittest.TestCase):
+    def test_boot_server_is_bounded_and_proxy_resilient(self):
+        self.assertTrue(early_boot._ResponsiveThreadingHTTPServer.daemon_threads)
+        self.assertFalse(early_boot._ResponsiveThreadingHTTPServer.block_on_close)
+        self.assertGreaterEqual(
+            early_boot._ResponsiveThreadingHTTPServer.request_queue_size,
+            128,
+        )
+        self.assertLessEqual(
+            early_boot._ResponsiveThreadingHTTPServer.client_io_timeout_sec,
+            2.0,
+        )
+
+    def test_accepted_client_receives_io_deadline(self):
+        server = early_boot._ResponsiveThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            early_boot.BaseHTTPRequestHandler,
+        )
+        client = socket.create_connection(server.server_address, timeout=2)
+        try:
+            accepted, _ = server.get_request()
+            try:
+                self.assertEqual(
+                    accepted.gettimeout(),
+                    early_boot._ResponsiveThreadingHTTPServer.client_io_timeout_sec,
+                )
+            finally:
+                accepted.close()
+        finally:
+            client.close()
+            server.server_close()
+
     def test_abandoned_health_response_is_not_raised(self):
         class Handler:
             wfile = _DisconnectedSocket()
