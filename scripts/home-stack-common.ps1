@@ -1475,11 +1475,20 @@ function Start-CloudflaredNamedHidden {
   Stop-Cloudflared | Out-Null
   Start-Sleep -Seconds 2
 
-  # Force --protocol http2 (or whatever $Protocol resolves to). Without this
-  # flag cloudflared defaults to "auto" which tries QUIC first and falls back
-  # only after long retries — exactly the storm that took the relay down for
-  # 3h59m on 2026-07-07. Set CLOUDFLARED_PROTOCOL=auto to revert.
-  $args = @("tunnel", "run", "--protocol", $Protocol)
+  # This Windows host has no reliable outbound IPv6/QUIC path, and the current
+  # cloudflared connectivity precheck can stall before it emits a log or opens a
+  # socket. Use the host-proven IPv4/HTTP2 path, disable cloudflared's redundant
+  # updater (Windows does not auto-update it anyway), and skip only that startup
+  # precheck. The live connector still retries and fails closed if the edge is
+  # actually unreachable. Set CLOUDFLARED_PROTOCOL=auto to revert the protocol.
+  $args = @(
+    "tunnel",
+    "--no-autoupdate",
+    "--no-prechecks",
+    "--edge-ip-version", "4",
+    "--protocol", $Protocol,
+    "run"
+  )
   if (Test-Path $tokenFile) {
     $token = (Get-Content $tokenFile -Raw).Trim()
     $args += @("--token", $token)

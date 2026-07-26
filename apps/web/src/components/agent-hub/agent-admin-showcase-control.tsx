@@ -454,7 +454,17 @@ export function AgentAdminShowcaseControl({
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
-        <StatusChip label={`Showcase bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
+        <StatusChip
+          label={`Showcase bot :${botPort}`}
+          ok={Boolean(status?.bot?.online) || Boolean(botConnected)}
+          sub={
+            status?.bot?.online
+              ? 'Local health confirmed'
+              : botConnected
+                ? 'Server health confirmed'
+                : undefined
+          }
+        />
         <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
         <StatusChip
           label="Fly bot (sin)"
