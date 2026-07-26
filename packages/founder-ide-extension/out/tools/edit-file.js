@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.editFileTool = void 0;
 /**
- * `founder.editFile` — LanguageModelTool.
+ * `founder-edit-file` — LanguageModelTool.
  *
  * The model emits a `LanguageModelToolCallPart` with `{ filePath, oldText, newText }`.
  * VS Code routes it to our `invoke`, which applies the change via
@@ -46,29 +46,33 @@ exports.editFileTool = void 0;
  * See `docs/FOUNDER-IDE-FORK-PLAN.md` §4.3 / §8.4.
  */
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("node:path"));
+const fs = __importStar(require("node:fs"));
+const node_crypto_1 = require("node:crypto");
+const agent_path_leases_1 = require("../agent-path-leases");
+const agent_task_context_1 = require("../agent-task-context");
+const agent_coordination_cloud_1 = require("../agent-coordination-cloud");
 function resolveUri(filePath) {
     if (!filePath || typeof filePath !== 'string')
         return null;
-    // Accept absolute paths, workspace-relative paths, and `file://` URIs.
-    if (filePath.startsWith('file://')) {
-        try {
-            return vscode.Uri.parse(filePath);
-        }
-        catch {
-            return null;
-        }
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root)
+        return null;
+    let candidate;
+    try {
+        candidate = filePath.startsWith('file://')
+            ? vscode.Uri.parse(filePath).fsPath
+            : path.isAbsolute(filePath)
+                ? filePath
+                : path.join(root, filePath);
     }
-    if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-        const root = vscode.workspace.workspaceFolders[0].uri;
-        const joined = vscode.Uri.joinPath(root, filePath);
-        // If the path is absolute on disk, joinPath still produces a file URI
-        // rooted at the workspace — normalize by checking for a drive letter / leading slash.
-        if (/^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('/')) {
-            return vscode.Uri.file(filePath);
-        }
-        return joined;
+    catch {
+        return null;
     }
-    return vscode.Uri.file(filePath);
+    const relative = path.relative(path.resolve(root), path.resolve(candidate));
+    if (relative.startsWith('..') || path.isAbsolute(relative))
+        return null;
+    return vscode.Uri.file(candidate);
 }
 async function fileExists(uri) {
     try {
@@ -82,6 +86,24 @@ async function fileExists(uri) {
 async function readFullFile(uri) {
     const buf = await vscode.workspace.fs.readFile(uri);
     return new TextDecoder('utf8').decode(buf);
+}
+async function isSafeWorkspaceTarget(uri, exists) {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root)
+        return false;
+    try {
+        if (exists && (await fs.promises.lstat(uri.fsPath)).isSymbolicLink()) {
+            return false;
+        }
+        const realRoot = await fs.promises.realpath(root);
+        const boundary = exists ? uri.fsPath : path.dirname(uri.fsPath);
+        const realBoundary = await fs.promises.realpath(boundary);
+        const relative = path.relative(realRoot, realBoundary);
+        return !relative.startsWith('..') && !path.isAbsolute(relative);
+    }
+    catch {
+        return false;
+    }
 }
 exports.editFileTool = {
     async prepareInvocation(options, _token) {
@@ -103,59 +125,113 @@ exports.editFileTool = {
                 new vscode.LanguageModelTextPart(`Error: invalid filePath "${input.filePath}".`),
             ]);
         }
-        let exists = await fileExists(uri);
+        const exists = await fileExists(uri);
+        if (!(await isSafeWorkspaceTarget(uri, exists))) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error: ${input.filePath} resolves outside the open workspace or through a symbolic link.`),
+            ]);
+        }
         if (!exists && !input.createIfMissing) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Error: file not found (${input.filePath}). Set createIfMissing=true to create it.`),
             ]);
         }
+        const existing = exists ? await readFullFile(uri) : '';
         // Resolve the edit range. If oldText is empty / file is missing, append.
         let range;
-        if (!exists || input.oldText.length === 0) {
-            // Append to end of file (or create empty).
-            let endLine = 0;
-            if (exists) {
-                const existing = await readFullFile(uri);
-                const lines = existing.split('\n');
-                endLine = Math.max(0, lines.length - 1);
-            }
-            range = new vscode.Range(endLine, Number.MAX_SAFE_INTEGER, endLine, Number.MAX_SAFE_INTEGER);
+        if (!exists) {
+            range = new vscode.Range(0, 0, 0, 0);
+        }
+        else if (input.oldText.length === 0) {
+            const end = offsetToPosition(existing, existing.length);
+            range = new vscode.Range(end, end);
         }
         else {
-            const existing = await readFullFile(uri);
             const idx = existing.indexOf(input.oldText);
             if (idx === -1) {
                 return new vscode.LanguageModelToolResult([
                     new vscode.LanguageModelTextPart(`Error: oldText not found in ${input.filePath}. The file has changed since the model last read it.`),
                 ]);
             }
+            if (existing.indexOf(input.oldText, idx + input.oldText.length) !== -1) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Error: oldText is ambiguous in ${input.filePath}. Include more surrounding text so it matches exactly once.`),
+                ]);
+            }
             const start = offsetToPosition(existing, idx);
             const end = offsetToPosition(existing, idx + input.oldText.length);
             range = new vscode.Range(start, end);
         }
-        const we = new vscode.WorkspaceEdit();
-        if (!exists && input.createIfMissing) {
-            // Create the file with the new content, then we still record a replace
-            // for the (empty) range so undo restores the prior (nonexistent) state.
-            we.createFile(uri, { ignoreIfExists: false, overwrite: false });
-        }
-        we.replace(uri, range, input.newText);
-        const ok = await vscode.workspace.applyEdit(we);
-        if (!ok) {
+        const changedBeforeApply = exists
+            ? (await readFullFile(uri).catch(() => null)) !== existing
+            : await fileExists(uri);
+        if (changedBeforeApply) {
             return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+                new vscode.LanguageModelTextPart(`Error: ${input.filePath} changed while the edit was being prepared. Read it again before editing.`),
             ]);
         }
-        // Persist so the editor shows it.
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart('Error: no workspace is open.'),
+            ]);
+        }
+        const activeTaskId = (0, agent_task_context_1.currentFounderTaskId)();
+        const taskId = activeTaskId ?? `standalone-edit-${(0, node_crypto_1.randomUUID)()}`;
+        const claim = agent_path_leases_1.founderPathLeases.claim(workspaceRoot, uri.fsPath, taskId);
+        if (!claim.ok) {
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error: ${claim.reason} Coordinate with that task before editing.`),
+            ]);
+        }
+        const releaseStandaloneClaim = () => {
+            if (!activeTaskId)
+                agent_path_leases_1.founderPathLeases.releaseTask(taskId);
+        };
+        const validation = agent_path_leases_1.founderPathLeases.validate(claim.lease);
+        if (!validation.ok) {
+            releaseStandaloneClaim();
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Error: ${validation.reason} Read the file and retry.`),
+            ]);
+        }
+        if (activeTaskId) {
+            const cloudClaim = await agent_coordination_cloud_1.founderCoordinationCloud.claim(activeTaskId, path.relative(workspaceRoot, uri.fsPath).replaceAll('\\', '/'));
+            if (!cloudClaim.ok) {
+                agent_path_leases_1.founderPathLeases.release(claim.lease);
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Error: ${cloudClaim.ownerTitle ?? 'Another Founder task'} already owns this path. Coordinate before editing.`),
+                ]);
+            }
+        }
         try {
-            await vscode.workspace.save(uri);
+            const we = new vscode.WorkspaceEdit();
+            if (!exists && input.createIfMissing) {
+                // Create the file with the new content, then we still record a replace
+                // for the (empty) range so undo restores the prior (nonexistent) state.
+                we.createFile(uri, { ignoreIfExists: false, overwrite: false });
+            }
+            we.replace(uri, range, input.newText);
+            const ok = await vscode.workspace.applyEdit(we);
+            if (!ok) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Error: applyEdit was rejected for ${input.filePath}.`),
+                ]);
+            }
+            // Persist so the editor shows it.
+            try {
+                await vscode.workspace.save(uri);
+            }
+            catch {
+                /* save is best-effort */
+            }
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`),
+            ]);
         }
-        catch {
-            /* save is best-effort */
+        finally {
+            releaseStandaloneClaim();
         }
-        return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart(`Edited ${input.filePath} — replaced ${input.oldText.length} chars with ${input.newText.length} chars.`),
-        ]);
     },
 };
 /** Convert an absolute offset within `text` to a {line, character} Position. */

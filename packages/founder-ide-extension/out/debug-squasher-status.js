@@ -51,22 +51,24 @@ exports.createDebugSquasherStatus = createDebugSquasherStatus;
  * Wired in extension.ts:activate() via createDebugSquasherStatus().
  */
 const vscode = __importStar(require("vscode"));
+const credentials_1 = require("./credentials");
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 let consentPromptShownThisSession = false;
 /**
  * Create + start the status bar poller. Returns a Disposable that cleans up
  * the status bar item + interval timer.
  */
-function createDebugSquasherStatus(context, getCredentials) {
+function createDebugSquasherStatus(context, getCredentials, options = {}) {
+    const showStatusBar = options.showStatusBar ?? true;
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     status.command = 'founderOs.openDebugSquasher';
     status.tooltip = 'Founder OS Debug Squasher — platform health check';
     context.subscriptions.push(status);
     const interval = setInterval(() => {
-        void poll(getCredentials, status, context);
+        void poll(getCredentials, status, context, showStatusBar);
     }, POLL_INTERVAL_MS);
     // First poll immediately so the bar shows real data on activation.
-    void poll(getCredentials, status, context);
+    void poll(getCredentials, status, context, showStatusBar);
     const commandDisposable = vscode.commands.registerCommand('founderOs.openDebugSquasher', () => openInBrowser(getCredentials));
     context.subscriptions.push(commandDisposable);
     return new vscode.Disposable(() => {
@@ -75,7 +77,7 @@ function createDebugSquasherStatus(context, getCredentials) {
         commandDisposable.dispose();
     });
 }
-async function poll(getCredentials, status, context) {
+async function poll(getCredentials, status, context, showStatusBar) {
     const creds = getCredentials();
     if (!creds) {
         status.hide();
@@ -85,6 +87,10 @@ async function poll(getCredentials, status, context) {
         const latest = await fetchLatest(creds);
         if (latest) {
             renderStatus(status, latest);
+            if (showStatusBar)
+                status.show();
+            else
+                status.hide();
             // One-shot consent prompt per session.
             if (!consentPromptShownThisSession) {
                 consentPromptShownThisSession = true;
@@ -93,13 +99,19 @@ async function poll(getCredentials, status, context) {
         }
         else {
             status.text = '$(question) Founder OS: No health check yet';
-            status.show();
+            if (showStatusBar)
+                status.show();
+            else
+                status.hide();
         }
     }
     catch {
         status.text = '$(circle-slash) Founder OS: health check unavailable';
         status.tooltip = 'Could not reach /api/debug-squasher/latest';
-        status.show();
+        if (showStatusBar)
+            status.show();
+        else
+            status.hide();
     }
 }
 function renderStatus(status, run) {
@@ -114,12 +126,11 @@ function renderStatus(status, run) {
         status.tooltip = `Debug Squasher: ${run.overall} — ${failed} check(s) failed. Click to open diagnoses.`;
         status.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     }
-    status.show();
 }
 async function fetchLatest(creds) {
     const url = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/latest`;
     const res = await fetch(url, {
-        headers: { Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}` },
+        headers: { Authorization: (0, credentials_1.authorizationHeaderFromCredentials)(creds) },
     });
     if (!res.ok)
         return null;
@@ -129,7 +140,7 @@ async function fetchLatest(creds) {
 function openInBrowser(getCredentials) {
     const creds = getCredentials();
     if (!creds) {
-        void vscode.window.showWarningMessage('Founder OS chat: pair a Founder Node first to view Debug Squasher results.');
+        void vscode.window.showWarningMessage('Connect Founder IDE to Founder OS before viewing Debug Squasher results.');
         return;
     }
     // Open the platform dashboard rather than a node-local URL — diagnoses live
@@ -145,7 +156,7 @@ async function maybePromptConsent(creds, _context) {
     try {
         const consentUrl = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/consent`;
         const headers = {
-            Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}`,
+            Authorization: (0, credentials_1.authorizationHeaderFromCredentials)(creds),
         };
         const checkRes = await fetch(consentUrl, { headers });
         if (!checkRes.ok)

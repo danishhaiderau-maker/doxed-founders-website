@@ -45,7 +45,7 @@ exports.profileForAlias = profileForAlias;
  * state so it survives reloads.
  *
  * Profiles (see task spec / design report §7):
- *   - Turbo      → founder-os-code      (speed + low DDollar cost)
+ *   - Turbo      → founder-os-fast      (speed + low managed cost)
  *   - Balanced   → founder-os-auto      (default routing)
  *   - Architect  → founder-os-reasoning (deep reasoning)
  *   - Autonomous → founder-os-reasoning (maps to architect for now)
@@ -62,34 +62,35 @@ exports.EXECUTION_PROFILES = [
     {
         id: 'turbo',
         label: 'Turbo',
-        detail: 'Optimize for speed and low DDollar cost (founder-os-code).',
-        aliasId: 'founder-os-code',
+        detail: 'DeepSeek V4 Flash for fast, cost-efficient work.',
+        aliasId: 'founder-os-fast',
         icon: '$(rocket)',
     },
     {
         id: 'balanced',
         label: 'Balanced',
-        detail: 'Default routing — let the Routing Engine decide (founder-os-auto).',
+        detail: 'DeepSeek V4 Flash by default, with explicit Pro modes when needed.',
         aliasId: 'founder-os-auto',
         icon: '$(symbol-enum)',
     },
     {
         id: 'architect',
         label: 'Architect',
-        detail: 'Prioritize deep reasoning (founder-os-reasoning).',
+        detail: 'DeepSeek V4 Pro for deliberate reasoning and architecture.',
         aliasId: 'founder-os-reasoning',
         icon: '$(beaker)',
     },
     {
         id: 'autonomous',
         label: 'Autonomous',
-        detail: 'Allow more expensive multi-step agent execution (maps to Architect for now).',
+        detail: 'Allow bounded multi-step execution with verification (maps to Reasoning for now).',
         aliasId: 'founder-os-reasoning',
         icon: '$(robot)',
     },
 ];
 const DEFAULT_PROFILE = 'balanced';
 const STATE_KEY = 'founderOs.executionProfile';
+const ALIAS_STATE_KEY = 'founderOs.managedModelAlias';
 function findProfile(id) {
     return exports.EXECUTION_PROFILES.find((p) => p.id === id);
 }
@@ -107,27 +108,35 @@ function profileForAlias(aliasId) {
 class ProfileManager {
     context;
     bar;
+    showStatusBar;
     current;
-    constructor(context) {
+    currentAliasId;
+    constructor(context, options = {}) {
         this.context = context;
+        this.showStatusBar = options.showStatusBar ?? true;
         this.bar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
         this.bar.command = 'founderOs.selectProfile';
         context.subscriptions.push(this.bar);
         const stored = context.workspaceState.get(STATE_KEY);
         this.current = findProfile(stored ?? DEFAULT_PROFILE) ?? findProfile(DEFAULT_PROFILE);
+        const storedAlias = context.workspaceState.get(ALIAS_STATE_KEY);
+        this.currentAliasId = (0, models_1.findModelAlias)(storedAlias ?? '')?.id ?? this.current.aliasId;
     }
     get profile() {
         return this.current;
     }
     /** Model alias the active profile routes through. */
     get alias() {
-        return (0, models_1.findModelAlias)(this.current.aliasId) ?? models_1.FOUNDER_OS_MODELS[0];
+        return (0, models_1.findModelAlias)(this.currentAliasId) ?? models_1.FOUNDER_OS_MODELS[0];
     }
     /** Show the status-bar item reflecting the active profile. */
     show() {
         this.bar.text = `${this.current.icon} ${this.current.label}`;
         this.bar.tooltip = `Founder OS execution profile: ${this.current.label}.\nModel: ${this.alias.id}.\nClick to change.`;
-        this.bar.show();
+        if (this.showStatusBar)
+            this.bar.show();
+        else
+            this.bar.hide();
     }
     /** Open the QuickPick and apply the selection. */
     async selectProfile() {
@@ -152,17 +161,35 @@ class ProfileManager {
         if (!next)
             return;
         if (next.id === this.current.id) {
+            this.currentAliasId = next.aliasId;
+            await this.context.workspaceState.update(ALIAS_STATE_KEY, next.aliasId);
             this.show();
             return;
         }
         this.current = next;
+        this.currentAliasId = next.aliasId;
         await this.context.workspaceState.update(STATE_KEY, next.id);
+        await this.context.workspaceState.update(ALIAS_STATE_KEY, next.aliasId);
         this.show();
         // Best-effort backend persistence. No controller exists for this yet, so
         // we don't actually fire the request — flip `persistToBackend` when
         // `/api/routing-engine/profile` ships.
         void persistToBackend(next).catch(() => undefined);
         void vscode.window.showInformationMessage(`Founder OS profile set to ${next.label} (model: ${next.aliasId}).`);
+    }
+    /** Select a concrete Founder managed route immediately. */
+    async setAlias(id) {
+        const alias = (0, models_1.findModelAlias)(id);
+        if (!alias)
+            throw new Error('Unknown Founder managed model route.');
+        this.currentAliasId = alias.id;
+        this.current = profileForAlias(alias.id);
+        await Promise.all([
+            this.context.workspaceState.update(ALIAS_STATE_KEY, alias.id),
+            this.context.workspaceState.update(STATE_KEY, this.current.id),
+        ]);
+        this.show();
+        void vscode.window.showInformationMessage(`${alias.name} is now active.`);
     }
     dispose() {
         this.bar.dispose();
