@@ -320,8 +320,16 @@ function Assert-BuiltInExtensionDependencies {
     param([Parameter(Mandatory = $true)][string]$Checkout)
 
     $required = @(
+        "extensions\node_modules\typescript\package.json",
+        "extensions\configuration-editing\node_modules\.package-lock.json",
+        "extensions\debug-auto-launch\node_modules\.package-lock.json",
+        "extensions\debug-server-ready\node_modules\.package-lock.json",
+        "extensions\extension-editing\node_modules\.package-lock.json",
         "extensions\git-base\node_modules\@types\node\package.json",
         "extensions\git\node_modules\@vscode\extension-telemetry\package.json",
+        "extensions\grunt\node_modules\.package-lock.json",
+        "extensions\gulp\node_modules\.package-lock.json",
+        "extensions\jake\node_modules\.package-lock.json",
         "extensions\emmet\node_modules\@emmetio\html-matcher\package.json",
         "extensions\css-language-features\node_modules\vscode-languageclient\package.json",
         "extensions\css-language-features\server\node_modules\vscode-languageserver\package.json",
@@ -335,10 +343,14 @@ function Assert-BuiltInExtensionDependencies {
         "extensions\markdown-math\node_modules\@vscode\markdown-it-katex\package.json",
         "extensions\media-preview\node_modules\@vscode\extension-telemetry\package.json",
         "extensions\merge-conflict\node_modules\@vscode\extension-telemetry\package.json",
-        "extensions\microsoft-authentication\node_modules\@azure\msal-node-extensions\package.json",
+        "extensions\microsoft-authentication\node_modules\@azure\msal-node-runtime\dist\msal-node-runtime.node",
+        "extensions\notebook-renderers\node_modules\.package-lock.json",
         "extensions\npm\node_modules\request-light\package.json",
+        "extensions\php-language-features\node_modules\@types\which\package.json",
+        "extensions\references-view\node_modules\.package-lock.json",
         "extensions\github\node_modules\@vscode\extension-telemetry\package.json",
         "extensions\simple-browser\node_modules\@vscode\extension-telemetry\package.json",
+        "extensions\tunnel-forwarding\node_modules\.package-lock.json",
         "extensions\typescript-language-features\node_modules\@vscode\extension-telemetry\package.json",
         "extensions\open-remote-ssh\node_modules\ssh2\package.json"
     )
