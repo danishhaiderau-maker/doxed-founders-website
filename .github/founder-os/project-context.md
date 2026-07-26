@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Bound relay execution snapshot lock waits (#50)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
