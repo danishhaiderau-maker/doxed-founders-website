@@ -20833,6 +20833,10 @@ _API_STATE_LOCK_TIMEOUT_SEC = max(
     0.1,
     float(os.getenv("API_STATE_LOCK_TIMEOUT_SEC", "2.0")),
 )
+_RELAY_EXECUTION_LOCK_TIMEOUT_SEC = max(
+    0.05,
+    float(os.getenv("RELAY_EXECUTION_LOCK_TIMEOUT_SEC", "0.25")),
+)
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
 _api_state_cache_lock = threading.Lock()
@@ -26587,7 +26591,10 @@ def _build_relay_execution_state_snapshot() -> dict:
     """
     now_ts = time.time()
     session_start = _showcase_trade_session_start()
-    with state_lock:
+    state_acquired = state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+    if not state_acquired:
+        raise TimeoutError("relay execution snapshot timed out waiting for state_lock")
+    try:
         debug_state = state.get("debug_state") or {}
         tick_px = state.get("price")
         price_ts = float(state.get("price_ts") or 0)
@@ -26612,7 +26619,12 @@ def _build_relay_execution_state_snapshot() -> dict:
             "live_armed": bool(state.get("live_armed", False)),
             "server_ts": utc_iso(),
         }
-    with trade_lock:
+    finally:
+        state_lock.release()
+    trade_acquired = trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+    if not trade_acquired:
+        raise TimeoutError("relay execution snapshot timed out waiting for trade_lock")
+    try:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
         recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
@@ -26624,7 +26636,11 @@ def _build_relay_execution_state_snapshot() -> dict:
             default_strategy=snapshot.get("strategy_mode", "-"),
             default_regime=snapshot.get("regime", "-"),
         )
+        # trade_lock is an RLock, so the slim mapper can safely reuse the same
+        # coherent acquisition without opening a second unbounded wait.
         trades_map_lite = _relay_trades_map_lite()
+    finally:
+        trade_lock.release()
     snapshot["orders"] = [
         _relay_order_row_lite(row, now_ts, tick_px)
         for row in pending_copy

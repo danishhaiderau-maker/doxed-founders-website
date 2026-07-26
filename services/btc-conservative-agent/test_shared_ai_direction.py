@@ -1,6 +1,7 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
 import inspect
+import threading
 import time
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
@@ -342,6 +343,34 @@ def run():
         "build_paper_order_book" not in execution_source
         and "build_state_integrity" not in execution_source,
     )
+    check(
+        "execution relay snapshot lock waits are bounded",
+        "state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source
+        and "trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source,
+    )
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_state_lock():
+        with bot.state_lock:
+            lock_held.set()
+            release_lock.wait(timeout=5)
+
+    holder = threading.Thread(target=_hold_state_lock, daemon=True)
+    holder.start()
+    check("execution lock saturation fixture acquired state lock", lock_held.wait(timeout=1))
+    try:
+        started = time.monotonic()
+        execution_response = bot.app.test_client().get("/api/relay-execution-state")
+        elapsed = time.monotonic() - started
+        check(
+            "execution relay endpoint fails closed without starving a request worker",
+            execution_response.status_code == 503 and elapsed < 1.5,
+        )
+    finally:
+        release_lock.set()
+        holder.join(timeout=1)
+
     old_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
     try:
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
