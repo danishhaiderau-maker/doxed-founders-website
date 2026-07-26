@@ -8,6 +8,10 @@ import {
   type AiSectionSlug,
   PROVIDER_SEEDS,
 } from './ai-routing.constants';
+import {
+  DEEPSEEK_V4_FLASH_MODEL,
+  normalizeRetiredDeepseekModel,
+} from '../ai-proxy/deepseek-model-policy';
 
 export type ProviderRow = {
   key: string;
@@ -64,6 +68,15 @@ export class AiRoutingService {
           update: {},
         });
       }
+      await this.prisma.aiRoutingProvider.updateMany({
+        where: {
+          key: 'deepseek',
+          defaultModel: { in: ['deepseek-chat', 'deepseek-reasoner'] },
+        },
+        data: {
+          defaultModel: DEEPSEEK_V4_FLASH_MODEL,
+        },
+      });
       for (const section of AI_SECTION_SLUGS) {
         const defaultKey = AI_SECTION_DEFAULT_PROVIDER[section];
         await this.prisma.aiSectionRouting.upsert({
@@ -129,7 +142,12 @@ export class AiRoutingService {
     const data: Record<string, unknown> = {};
     if (input.label !== undefined) data.label = input.label;
     if (input.baseUrl !== undefined) data.baseUrl = input.baseUrl;
-    if (input.defaultModel !== undefined) data.defaultModel = input.defaultModel;
+    if (input.defaultModel !== undefined) {
+      data.defaultModel =
+        key === 'deepseek'
+          ? normalizeRetiredDeepseekModel(input.defaultModel)
+          : input.defaultModel;
+    }
     if (input.adapter !== undefined) data.adapter = input.adapter;
     if (input.enabled !== undefined) data.enabled = input.enabled;
     if (encryptedApiKey !== undefined) data.encryptedApiKey = encryptedApiKey;
@@ -147,7 +165,10 @@ export class AiRoutingService {
         key,
         label: input.label,
         baseUrl: input.baseUrl,
-        defaultModel: input.defaultModel,
+        defaultModel:
+          key === 'deepseek'
+            ? normalizeRetiredDeepseekModel(input.defaultModel)
+            : input.defaultModel,
         adapter: input.adapter ?? 'openai_compat',
         enabled: input.enabled ?? false,
         encryptedApiKey: encryptedApiKey ?? null,

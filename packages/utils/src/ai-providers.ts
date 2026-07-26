@@ -98,7 +98,7 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     label: 'DeepSeek API',
     connectMode: 'api_key',
     needsApiKey: true,
-    defaultModel: 'deepseek-chat',
+    defaultModel: 'deepseek-v4-flash',
     billTip: 'Remote LLM — OpenAI-compatible DeepSeek key for specs and Founder Brain.',
     credentialProvider: 'deepseek',
   },
@@ -263,7 +263,7 @@ export const AI_PROVIDER_GUIDES: Partial<Record<AiProviderKey, AiProviderGuide>>
     keyUrl: 'https://platform.deepseek.com/api_keys',
     keyUrlLabel: 'platform.deepseek.com',
     keyPlaceholder: 'sk-…',
-    modelPlaceholder: 'deepseek-chat, deepseek-reasoner',
+    modelPlaceholder: 'deepseek-v4-flash, deepseek-v4-pro',
     steps: [
       'Create a key at platform.deepseek.com.',
       'Paste below → Connect & activate.',

@@ -53,7 +53,7 @@ export const PROVIDER_SEEDS: ProviderSeed[] = [
     key: 'deepseek',
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
-    defaultModel: 'deepseek-chat',
+    defaultModel: DEEPSEEK_V4_FLASH_MODEL,
     adapter: 'openai_compat',
   },
   {
@@ -99,3 +99,4 @@ export const PROVIDER_SEEDS: ProviderSeed[] = [
     adapter: 'openai_compat',
   },
 ];
+import { DEEPSEEK_V4_FLASH_MODEL } from '../ai-proxy/deepseek-model-policy';

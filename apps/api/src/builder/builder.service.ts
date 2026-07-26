@@ -77,6 +77,10 @@ import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtim
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
 import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
+import {
+  DEEPSEEK_V4_FLASH_MODEL,
+  normalizeRetiredDeepseekModel,
+} from '../ai-proxy/deepseek-model-policy';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -1857,7 +1861,7 @@ export class BuilderService {
           apiKey,
           system,
           userPrompt,
-          model ?? 'deepseek-chat',
+          normalizeRetiredDeepseekModel(model),
         );
       case AiProvider.OPENROUTER:
         this.recordLegacyStreamEgress(provider);
@@ -3040,7 +3044,7 @@ export class BuilderService {
             method: 'POST',
             headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              model: 'deepseek-chat',
+              model: DEEPSEEK_V4_FLASH_MODEL,
               messages: [{ role: 'user', content: 'ping' }],
               max_tokens: 8,
             }),
@@ -3197,7 +3201,7 @@ export class BuilderService {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model ?? 'deepseek-chat',
+        model: normalizeRetiredDeepseekModel(model),
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

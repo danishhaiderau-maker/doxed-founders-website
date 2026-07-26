@@ -9,6 +9,21 @@ import type { AiProxyTier } from '@dcf/utils';
 export const DEEPSEEK_V4_FLASH_MODEL = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL = 'deepseek-v4-pro';
 
+/** Translate only retired aliases; preserve explicit future/custom model IDs. */
+export function normalizeRetiredDeepseekModel(
+  model?: string | null,
+  fallback: 'fast' | 'reasoning' = 'fast',
+): string {
+  const normalized = model?.trim();
+  if (normalized === 'deepseek-reasoner') return DEEPSEEK_V4_PRO_MODEL;
+  if (!normalized || normalized === 'deepseek-chat') {
+    return fallback === 'reasoning'
+      ? DEEPSEEK_V4_PRO_MODEL
+      : DEEPSEEK_V4_FLASH_MODEL;
+  }
+  return normalized;
+}
+
 export type ForcedAliasIntent = 'simple_qa' | 'reasoning' | 'code';
 
 export type SupportedProxyProvider = 'glm' | 'deepseek';
