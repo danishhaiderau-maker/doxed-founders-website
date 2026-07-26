@@ -45,6 +45,8 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /if \(\$overlayApplied\)/);
   assert.match(script, /announcedCompileInputs/);
   assert.match(script, /FOUNDER_IDE_DEV_CACHE/);
+  assert.match(script, /FOUNDER_IDE_TSC/);
+  assert.match(script, /-TscPath \/ FOUNDER_IDE_TSC/);
   assert.match(script, /GetTempPath/);
   assert.doesNotMatch(script, /artifacts\\founder-ide-dev-cache/);
   assert.match(script, /function Start-PinnedNodeProcess/);

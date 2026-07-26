@@ -6,6 +6,7 @@ param(
     [string]$CheckoutPath = "",
     [string]$CacheRoot = "",
     [string]$NodePath = "",
+    [string]$TscPath = "",
     [string]$InstalledExe = "",
 
     [switch]$Force,
@@ -189,6 +190,7 @@ function Copy-ExtensionStage {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$StageRoot,
         [Parameter(Mandatory = $true)][string]$NodeExecutable,
+        [string]$TypeScriptCompiler = "",
         [Parameter(Mandatory = $true)][string]$ExtensionHash
     )
 
@@ -205,13 +207,17 @@ function Copy-ExtensionStage {
     }
     Copy-Item -LiteralPath (Join-Path $ExtensionRoot "resources") -Destination $StageRoot -Recurse -Force
 
+    if (-not $TypeScriptCompiler -and $env:FOUNDER_IDE_TSC) {
+        $TypeScriptCompiler = $env:FOUNDER_IDE_TSC
+    }
     $tscCandidates = @(
+        $TypeScriptCompiler,
         (Join-Path $ExtensionRoot "node_modules\typescript\bin\tsc"),
         (Join-Path $RepoRoot "node_modules\typescript\bin\tsc")
-    )
+    ) | Where-Object { $_ }
     $tsc = $tscCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
     if (-not $tsc) {
-        throw "TypeScript compiler not found in the extension or monorepo dependencies."
+        throw "TypeScript compiler not found. Install workspace dependencies or pass -TscPath / FOUNDER_IDE_TSC."
     }
 
     $started = Get-Date
@@ -286,6 +292,7 @@ $status = [ordered]@{
     expectedNode = [string]$manifest.toolchain_pins.node
     nodeExecutable = $nodeExecutable
     nodeVersion = (& $nodeExecutable --version).Trim()
+    typescriptCompiler = $TscPath
 }
 
 if ($Mode -eq "Status") {
@@ -300,6 +307,7 @@ $readyFile = Copy-ExtensionStage `
     -RepoRoot $repoRoot `
     -StageRoot $stageRoot `
     -NodeExecutable $nodeExecutable `
+    -TypeScriptCompiler $TscPath `
     -ExtensionHash $extensionHash
 $status.extensionStageReady = $true
 $status.extensionBuild = Get-Content -LiteralPath $readyFile -Raw | ConvertFrom-Json
