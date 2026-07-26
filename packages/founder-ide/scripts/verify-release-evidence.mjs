@@ -35,6 +35,31 @@ const REQUIRED_SETTINGS_CHECKS = [
   'customModel',
 ];
 
+const REQUIRED_WORK_MODES = ['ask', 'plan', 'build', 'debug', 'team'];
+
+const REQUIRED_VISUAL_INPUT_CHECKS = [
+  'picker',
+  'paste',
+  'drop',
+  'preview',
+  'remove',
+  'annotationAware',
+  'nonBlank',
+  'noOverflow',
+  'noOverlap',
+  'textFits',
+];
+
+const VISUAL_REVIEWER_KINDS = new Set([
+  'managed-ai',
+  'personal-ai',
+  'local-ai',
+  'human',
+]);
+
+const MAX_VISUAL_REVIEW_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_VISUAL_REVIEW_OUTPUT_BYTES = 128 * 1024;
+
 const LIKELY_SECRET_PATTERN =
   /bearer\s+[a-z0-9._-]{12,}|"(?:apiKey|nodeToken|accessToken|refreshToken)"\s*:\s*"[^"]+"|sk-[a-z0-9]{8,}/i;
 
@@ -102,6 +127,116 @@ function verifyRecordedFile(repoRoot, recorded, label) {
   return file;
 }
 
+function requireIsoTimestamp(value, label) {
+  assert.equal(typeof value, 'string', `${label} timestamp is missing`);
+  assert.ok(
+    Number.isFinite(Date.parse(value)),
+    `${label} timestamp is invalid`,
+  );
+}
+
+function verifyVisualReview({
+  repoRoot,
+  receipt,
+  evidenceFiles,
+  check,
+}) {
+  const visualReceipt = receipt.visualReview;
+  check(
+    visualReceipt && typeof visualReceipt === 'object',
+    'visual review receipt is missing',
+  );
+
+  const evidenceRecord = evidenceFiles.get(visualReceipt.evidencePath);
+  const annotatedInputRecord = evidenceFiles.get(visualReceipt.annotatedInputPath);
+  check(Boolean(evidenceRecord), 'visual review JSON is not in the evidence file manifest');
+  check(
+    Boolean(annotatedInputRecord),
+    'annotated visual input is not in the evidence file manifest',
+  );
+
+  const visual = readJson(
+    resolveInside(repoRoot, evidenceRecord.path),
+    'visual review evidence',
+  );
+  check(visual.schemaVersion === 1, 'visual review evidence schemaVersion must be 1');
+  check(visual.redacted === true, 'visual review evidence is not marked redacted');
+  check(
+    Number.isInteger(visual.inputBytes)
+      && visual.inputBytes > 0
+      && visual.inputBytes <= MAX_VISUAL_REVIEW_INPUT_BYTES,
+    'visual review input byte count is missing or outside its bound',
+  );
+  check(
+    Number.isInteger(visual.outputBytes)
+      && visual.outputBytes > 0
+      && visual.outputBytes <= MAX_VISUAL_REVIEW_OUTPUT_BYTES,
+    'visual review output byte count is missing or outside its bound',
+  );
+
+  for (const visualCheck of REQUIRED_VISUAL_INPUT_CHECKS) {
+    check(
+      visual.checks?.[visualCheck] === true,
+      `visual review failed check ${visualCheck}`,
+    );
+  }
+
+  for (const mode of REQUIRED_WORK_MODES) {
+    const modeReceipt = visualReceipt.modeScreenshots?.[mode];
+    const modeScreenshot = evidenceFiles.get(modeReceipt);
+    check(Boolean(modeScreenshot), `${mode} visual screenshot is not in the evidence file manifest`);
+    const modeEvidence = visual.modes?.[mode];
+    check(
+      modeEvidence?.attachmentSubmitted === true,
+      `${mode} did not submit the visual attachment`,
+    );
+    check(
+      modeEvidence?.visualContextPresent === true,
+      `${mode} did not inject bounded visual context`,
+    );
+    check(
+      modeEvidence?.responseVisible === true,
+      `${mode} has no visible final response`,
+    );
+    check(modeEvidence?.errorVisible === false, `${mode} shows a visual-input error`);
+  }
+
+  const reviewer = visual.reviewer;
+  check(
+    reviewer && VISUAL_REVIEWER_KINDS.has(reviewer.kind),
+    'visual reviewer kind is missing or unsupported',
+  );
+  check(reviewer.approved === true, 'visual reviewer did not approve the rendered result');
+  requireIsoTimestamp(reviewer.reviewedAt, 'visual review');
+
+  if (reviewer.kind === 'human') {
+    check(
+      typeof reviewer.signedBy === 'string' && reviewer.signedBy.trim().length >= 2,
+      'human visual sign-off identity is missing',
+    );
+  } else {
+    check(
+      typeof reviewer.profile === 'string' && reviewer.profile.trim().length > 0,
+      'AI visual reviewer profile is missing',
+    );
+    check(
+      typeof reviewer.model === 'string' && reviewer.model.trim().length > 0,
+      'AI visual reviewer model is missing',
+    );
+    check(
+      typeof reviewer.route === 'string' && reviewer.route.trim().length > 0,
+      'AI visual reviewer route is missing',
+    );
+    check(
+      typeof reviewer.resultSha256 === 'string'
+        && /^[A-F0-9]{64}$/.test(reviewer.resultSha256),
+      'AI visual review result hash is missing or malformed',
+    );
+  }
+
+  requireNoCriticalErrors(visual, 'visual review evidence');
+}
+
 export function getAuthenticodeStatus(artifactPath) {
   if (process.platform !== 'win32') {
     throw new Error('Authenticode verification requires Windows');
@@ -150,13 +285,16 @@ export function validateReleaseReceipt({
     assert.ok(condition, message);
   };
 
-  check(receipt.schemaVersion === 1, 'release receipt schemaVersion must be 1');
+  check(
+    receipt.schemaVersion === 1 || receipt.schemaVersion === 2,
+    'release receipt schemaVersion must be 1 or 2',
+  );
   check(
     typeof receipt.releaseVersion === 'string'
       && /^\d+\.\d+\.\d+$/.test(receipt.releaseVersion),
     'release receipt releaseVersion must be semver',
   );
-  check(receipt.channel === 'internal-test', 'unsigned 0.9.4 must remain internal-test');
+  check(receipt.channel === 'internal-test', 'unsigned release evidence must remain internal-test');
   check(
     receipt.artifact?.authenticodeStatus === 'NotSigned',
     'receipt must truthfully record Authenticode NotSigned',
@@ -253,6 +391,20 @@ export function validateReleaseReceipt({
     check(settings.checks?.[settingsCheck] === true, `settings failed check ${settingsCheck}`);
   }
   check(settings.checks?.voidSettings === false, 'settings evidence contains Void branding');
+
+  if (receipt.schemaVersion === 1) {
+    check(
+      receipt.releaseVersion === '0.9.4' && receipt.channel === 'internal-test',
+      'release schemaVersion 1 is historical evidence only; final candidates require schemaVersion 2',
+    );
+  } else {
+    verifyVisualReview({
+      repoRoot,
+      receipt,
+      evidenceFiles,
+      check,
+    });
+  }
 
   const releasesPath = resolveInside(repoRoot, receipt.documentation.releaseNotesPath);
   const releaseNotes = releaseSection(

@@ -607,6 +607,11 @@ gates.
 - [x] Add a fail-closed, testable release-evidence verifier that checks the
   installer bytes, SHA-256, Authenticode status, installed chat nonce and route,
   required viewports, settings, screenshots, and release-note references.
+  Schema v2 also requires one annotated input, picker/paste/drop/preview/remove
+  proof, bounded and redacted review evidence, visible results in Ask, Plan,
+  Build, Debug, and Team, plus either an identified AI reviewer with a stable
+  result hash or explicit timestamped human sign-off. Historical schema v1 is
+  accepted only for the unsigned 0.9.4 internal-test artifact.
 
 ## Immediate completion sequence from this checkpoint
 

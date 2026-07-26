@@ -21,7 +21,7 @@ function writeJson(root, relativePath, value) {
 
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-release-evidence-'));
-  const version = '0.9.4';
+  const version = '1.0.0';
   const nonce = 'V1-CORRECTED-20260723-1848';
   const artifactContents = Buffer.from('internal installer fixture');
   fs.writeFileSync(path.join(root, 'installer.exe'), artifactContents);
@@ -78,11 +78,62 @@ function buildFixture() {
     },
   });
   fs.writeFileSync(path.join(root, 'evidence/settings.png'), Buffer.from('settings png'));
+  fs.writeFileSync(path.join(root, 'evidence/annotated-input.png'), Buffer.from('annotated png'));
+  const modeScreenshots = {};
+  for (const mode of ['ask', 'plan', 'build', 'debug', 'team']) {
+    const screenshotPath = `evidence/visual-${mode}.png`;
+    fs.writeFileSync(path.join(root, screenshotPath), Buffer.from(`${mode} visual png`));
+    modeScreenshots[mode] = screenshotPath;
+  }
+  const visualResult = Buffer.from('bounded redacted visual review');
+  writeJson(root, 'evidence/visual-review.json', {
+    schemaVersion: 1,
+    redacted: true,
+    inputBytes: 2_048,
+    outputBytes: visualResult.length,
+    checks: {
+      picker: true,
+      paste: true,
+      drop: true,
+      preview: true,
+      remove: true,
+      annotationAware: true,
+      nonBlank: true,
+      noOverflow: true,
+      noOverlap: true,
+      textFits: true,
+    },
+    modes: Object.fromEntries(
+      ['ask', 'plan', 'build', 'debug', 'team'].map((mode) => [
+        mode,
+        {
+          attachmentSubmitted: true,
+          visualContextPresent: true,
+          responseVisible: true,
+          errorVisible: false,
+        },
+      ]),
+    ),
+    reviewer: {
+      kind: 'local-ai',
+      profile: 'Local vision',
+      model: 'qwen2.5vl:7b',
+      route: 'founder-local-vision',
+      approved: true,
+      reviewedAt: '2026-07-26T00:00:00.000Z',
+      resultSha256: sha(visualResult),
+    },
+    criticalConsoleErrors: [],
+    pageErrors: [],
+  });
   evidencePaths.push(
     'evidence/chat.json',
     'evidence/chat.png',
     'evidence/settings.json',
     'evidence/settings.png',
+    'evidence/annotated-input.png',
+    'evidence/visual-review.json',
+    ...Object.values(modeScreenshots),
   );
 
   const artifactHash = sha(artifactContents);
@@ -105,7 +156,7 @@ function buildFixture() {
   );
 
   const receipt = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     releaseVersion: version,
     channel: 'internal-test',
     bundleDirectory: 'evidence',
@@ -135,6 +186,11 @@ function buildFixture() {
       evidencePath: 'evidence/settings.json',
       screenshotPath: 'evidence/settings.png',
     },
+    visualReview: {
+      evidencePath: 'evidence/visual-review.json',
+      annotatedInputPath: 'evidence/annotated-input.png',
+      modeScreenshots,
+    },
     documentation: {
       releaseNotesPath: 'RELEASES.md',
     },
@@ -150,8 +206,8 @@ describe('Founder IDE release evidence verifier', () => {
       repoRoot: root,
       signatureStatus: 'NotSigned',
     });
-    assert.equal(result.receipt.releaseVersion, '0.9.4');
-    assert.ok(result.checks > 80);
+    assert.equal(result.receipt.releaseVersion, '1.0.0');
+    assert.ok(result.checks > 120);
   });
 
   it('rejects stale chat evidence without a visible Founder response', () => {
@@ -218,6 +274,64 @@ describe('Founder IDE release evidence verifier', () => {
     assert.throws(
       () => validateReleaseReceipt({ repoRoot: root, signatureStatus: 'NotSigned' }),
       /unlisted or missing/,
+    );
+  });
+
+  it('rejects a visual review that does not prove every Founder work mode', () => {
+    const { root, receipt } = buildFixture();
+    const visual = JSON.parse(
+      fs.readFileSync(path.join(root, receipt.visualReview.evidencePath), 'utf8'),
+    );
+    visual.modes.team.visualContextPresent = false;
+    writeJson(root, receipt.visualReview.evidencePath, visual);
+    receipt.files = receipt.files.map((record) =>
+      record.path === receipt.visualReview.evidencePath
+        ? describeFile(root, receipt.visualReview.evidencePath)
+        : record);
+    writeJson(root, 'artifacts/releases/0.9.4/release-receipt.json', receipt);
+    assert.throws(
+      () => validateReleaseReceipt({ repoRoot: root, signatureStatus: 'NotSigned' }),
+      /team did not inject bounded visual context/,
+    );
+  });
+
+  it('rejects an AI visual review without a stable result hash', () => {
+    const { root, receipt } = buildFixture();
+    const visual = JSON.parse(
+      fs.readFileSync(path.join(root, receipt.visualReview.evidencePath), 'utf8'),
+    );
+    visual.reviewer.resultSha256 = '';
+    writeJson(root, receipt.visualReview.evidencePath, visual);
+    receipt.files = receipt.files.map((record) =>
+      record.path === receipt.visualReview.evidencePath
+        ? describeFile(root, receipt.visualReview.evidencePath)
+        : record);
+    writeJson(root, 'artifacts/releases/0.9.4/release-receipt.json', receipt);
+    assert.throws(
+      () => validateReleaseReceipt({ repoRoot: root, signatureStatus: 'NotSigned' }),
+      /result hash/,
+    );
+  });
+
+  it('accepts explicit human sign-off when no approved vision model is available', () => {
+    const { root, receipt } = buildFixture();
+    const visual = JSON.parse(
+      fs.readFileSync(path.join(root, receipt.visualReview.evidencePath), 'utf8'),
+    );
+    visual.reviewer = {
+      kind: 'human',
+      signedBy: 'Release owner',
+      approved: true,
+      reviewedAt: '2026-07-26T00:00:00.000Z',
+    };
+    writeJson(root, receipt.visualReview.evidencePath, visual);
+    receipt.files = receipt.files.map((record) =>
+      record.path === receipt.visualReview.evidencePath
+        ? describeFile(root, receipt.visualReview.evidencePath)
+        : record);
+    writeJson(root, 'artifacts/releases/0.9.4/release-receipt.json', receipt);
+    assert.doesNotThrow(
+      () => validateReleaseReceipt({ repoRoot: root, signatureStatus: 'NotSigned' }),
     );
   });
 });
