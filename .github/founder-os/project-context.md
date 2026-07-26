@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Type-B opportunity research v2 and bounded bridge health (#53)
+Keep bot health and named tunnel online (#54)
 
 ## Last Activity
 
