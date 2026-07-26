@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Stabilize bot liveness under dashboard load (#49)
+Bound relay execution snapshot lock waits (#50)
 
 ## Last Activity
 
