@@ -20,6 +20,24 @@ describe('Founder IDE upstream overlay', () => {
     );
   });
 
+  it('ships persistent searchable Founder chat history controls', () => {
+    const selectorPath =
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarThreadSelector.tsx';
+    assert.ok(
+      manifest.files.some((entry) => entry.dest === selectorPath),
+      'chat history override must ship through the overlay',
+    );
+    const selector = read(selectorPath);
+    assert.match(selector, /founder\.thread-preferences\.v1/);
+    assert.match(selector, /placeholder='Search chats'/);
+    assert.match(selector, /Rename chat/);
+    assert.match(selector, /Pin chat/);
+    assert.match(selector, /Archive chat/);
+    assert.match(selector, /Restore chat/);
+    assert.match(selector, /preferences\.pinned\.includes/);
+    assert.match(selector, /preferences\.archived\.includes/);
+  });
+
   it('routes voice through the explicitly selected chat model', () => {
     const composer = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',

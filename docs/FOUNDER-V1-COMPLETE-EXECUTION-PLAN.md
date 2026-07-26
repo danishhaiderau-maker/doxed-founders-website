@@ -363,7 +363,7 @@ merge receipt, multi-agent task graph screenshots.
 - [ ] Prove that labelled hierarchy as the refreshed installed default layout
   at every release viewport, with no duplicate generic activity rail competing
   for primary navigation.
-- [ ] Give Projects and Chats first-class persistent navigation, searchable
+- [x] Give Projects and Chats first-class persistent navigation, searchable
   history, useful names, pin/archive controls, and a clear new-chat action.
 - [x] Widen the primary navigation enough for readable labels and project/chat
   context; use compact icons only for familiar secondary editor tools.
