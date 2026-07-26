@@ -6,6 +6,7 @@ import { isObservatoryEnabled, isPhase15TrustLayerEnabled } from '../phase15/pha
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import type { ReadinessScorecard } from '../demo/readiness-scorecard.types';
+import { isFounderAiRuntimeEnabled } from '../founder-ai-runtime/founder-ai-runtime.config';
 
 export type ObservatorySubsystemRow = {
   id: string;
@@ -168,8 +169,10 @@ export class ObservatoryService {
           break;
         }
         case 'ai-runtime.status':
-          status = process.env.AI_RUNTIME_ENABLED === 'true' ? 'green' : 'yellow';
-          coverage = process.env.AI_RUNTIME_ENABLED === 'true' ? 'Phase 1 enabled' : 'Phase 0 pilot';
+          status = isFounderAiRuntimeEnabled() ? 'green' : 'yellow';
+          coverage = isFounderAiRuntimeEnabled()
+            ? 'Mandatory Founder AI gateway enabled'
+            : 'Emergency legacy rollback explicitly enabled';
           break;
         case 'events.status':
           status = 'yellow';

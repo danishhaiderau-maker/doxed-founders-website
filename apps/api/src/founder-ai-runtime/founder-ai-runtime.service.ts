@@ -8,6 +8,7 @@ import { ContextBuilderService } from './context-builder.service';
 import { ModelRouterService } from './model-router.service';
 import { PromptCacheService } from './prompt-cache.service';
 import { ProviderEgressAuditService } from './provider-egress-audit.service';
+import { isFounderAiRuntimeEnabled } from './founder-ai-runtime.config';
 import {
   runtimeCallSiteForSection,
   type ProviderEgressBudgetDomain,
@@ -26,11 +27,7 @@ export type AiRuntimeInvokeContext = {
   request: AiRuntimeRequest;
 };
 
-/**
- * Central gateway for Founder OS AI calls (Phase 0).
- * Phase 0: prompt hash cache + intent routing metadata; provider calls remain
- * in BuilderService / AiInvokerService until Phase 1 mandatory gateway.
- */
+/** Central gateway for Founder OS managed and BYOK AI calls. */
 @Injectable()
 export class FounderAiRuntimeService {
   private readonly logger = new Logger(FounderAiRuntimeService.name);
@@ -43,10 +40,10 @@ export class FounderAiRuntimeService {
   ) {}
 
   isEnabled(): boolean {
-    return process.env.AI_RUNTIME_ENABLED === 'true';
+    return isFounderAiRuntimeEnabled();
   }
 
-  /** Classify intent and pick model tier (logged for telemetry; Phase 1 enforces). */
+  /** Classify intent and pick the enforced model route. */
   route(request: AiRuntimeRequest): ModelRoute {
     return this.modelRouter.route(request);
   }
@@ -97,8 +94,8 @@ export class FounderAiRuntimeService {
   }
 
   /**
-   * Single entry point — Phase 0 delegates to cache + optional invoke callback.
-   * Phase 1: all provider calls flow through here (no direct fetch in app code).
+   * Single entry point for governed routing, limits, cache, and provider
+   * attribution. The optional callback owns the adapter-specific network call.
    */
   async complete(
     request: AiRuntimeRequest,

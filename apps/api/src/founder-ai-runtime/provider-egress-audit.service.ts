@@ -9,6 +9,7 @@ import type {
   ProviderEgressEvent,
   ProviderEgressSnapshot,
 } from './provider-egress-audit.types';
+import { isProviderEgressEnforcementStrict } from './founder-ai-runtime.config';
 
 const MAX_AUDIT_EVENTS = 1_000;
 const RECENT_EVENT_LIMIT = 100;
@@ -87,8 +88,12 @@ export class ProviderEgressAuditService {
   record(input: RecordEgressInput): ProviderEgressEvent {
     const active = this.context.getStore();
     const boundary = active?.boundary ?? input.boundary ?? 'unscoped';
-    const callSiteId =
-      active?.callSiteId ?? input.callSiteId ?? 'ai_routing.other';
+    const callSiteId = active?.callSiteId ?? input.callSiteId;
+    if (!callSiteId) {
+      throw new Error(
+        'Provider egress requires a typed callSiteId or an active runtime context.',
+      );
+    }
     const budgetDomain =
       active?.budgetDomain ??
       input.budgetDomain ??
@@ -113,9 +118,15 @@ export class ProviderEgressAuditService {
     }
 
     if (boundary === 'unscoped') {
-      this.logger.warn(
-        `Unscoped provider egress callSite=${callSiteId} adapter=${input.adapterName} provider=${input.provider}`,
-      );
+      const message =
+        `Unscoped provider egress callSite=${callSiteId} ` +
+        `adapter=${input.adapterName} provider=${input.provider}`;
+      this.logger.warn(message);
+      if (isProviderEgressEnforcementStrict()) {
+        throw new Error(
+          `${message}. Route this call through FounderAiRuntimeService or register an explicit approved exception.`,
+        );
+      }
     }
     return event;
   }
@@ -129,6 +140,7 @@ export class ProviderEgressAuditService {
       bypassed: 0,
     };
     const byCallSite: Record<string, number> = {};
+    const unscopedCallSites = new Set<string>();
 
     for (const event of this.events) {
       byCallSite[event.callSiteId] =
@@ -143,6 +155,7 @@ export class ProviderEgressAuditService {
         counts.approvedExceptions += 1;
       } else {
         counts.bypassed += 1;
+        unscopedCallSites.add(event.callSiteId);
       }
     }
 
@@ -160,6 +173,7 @@ export class ProviderEgressAuditService {
       founderRuntimeCoverageRatio:
         policyCalls > 0 ? counts.founderRuntime / policyCalls : null,
       byCallSite,
+      unscopedCallSites: [...unscopedCallSites].sort(),
       recent: this.events.slice(-RECENT_EVENT_LIMIT),
     };
   }

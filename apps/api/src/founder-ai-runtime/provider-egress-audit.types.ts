@@ -13,7 +13,6 @@ export const PROVIDER_EGRESS_CALL_SITE_IDS = [
   'ai_routing.share_paraphrase',
   'ai_routing.wall_summarizer',
   'ai_routing.platform_brain',
-  'ai_routing.other',
   'ai_proxy.chat',
   'ai_proxy.intent_classifier',
   'ai_proxy.speech',
@@ -74,6 +73,7 @@ export type ProviderEgressSnapshot = {
   governedCoverageRatio: number | null;
   founderRuntimeCoverageRatio: number | null;
   byCallSite: Record<string, number>;
+  unscopedCallSites: string[];
   recent: ProviderEgressEvent[];
 };
 
@@ -110,7 +110,13 @@ export function runtimeCallSiteForSection(
 export function routedCallSiteForSection(
   section: string,
 ): ProviderEgressCallSiteId {
-  return ROUTED_CALL_SITE_BY_SECTION[section] ?? 'ai_routing.other';
+  const callSiteId = ROUTED_CALL_SITE_BY_SECTION[section];
+  if (!callSiteId) {
+    throw new Error(
+      `Unregistered AI routing section "${section}". Add a typed provider egress call-site ID before invoking a provider.`,
+    );
+  }
+  return callSiteId;
 }
 
 export function budgetDomainForBillingSource(

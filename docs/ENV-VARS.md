@@ -170,14 +170,14 @@ connecting GitHub won't upgrade until the TTL elapses or
 
 ## `AI_RUNTIME_ENABLED`
 
-**Default:** unset / `false` (runtime off)
-**Added:** 2026-07-06 (Founder AI Runtime Phase 0)
+**Default:** `true` (mandatory Founder AI gateway)
+**Added:** 2026-07-06; made default-on for V1
 
-When `true`, Founder Copilot, share paraphrase, and wall summarizer check
-the prompt hash cache in `FounderAiRuntimeService` before calling LLM
-providers. Cache hits skip provider calls entirely. Context pruning and
-output token caps apply on wired sections. When unset or `false`, cache
-and pruning are off; share/wall still use the runtime gateway with no-op cache.
+Unset, `true`, and unrecognized values keep the Founder AI Runtime enabled.
+The runtime owns routing, cache, context limits, output ceilings, and provider
+egress attribution. Set exactly `false` only as a temporary emergency rollback
+while diagnosing a runtime incident. That rollback reopens audited legacy
+provider paths and is not a supported steady-state V1 configuration.
 
 ### Where it's read
 
@@ -185,6 +185,25 @@ and pruning are off; share/wall still use the runtime gateway with no-op cache.
 - `apps/api/src/builder/builder.service.ts` — `tryCopilotChatCompletion` pilot path
 - `apps/api/src/share/share.service.ts` — paraphrase via runtime gateway
 - `apps/api/src/wall/wall.service.ts` — summarizer via runtime gateway
+
+## `PROVIDER_EGRESS_ENFORCEMENT`
+
+**Default:** `audit`
+**V1 release / controlled production value:** `strict`
+
+Provider adapters always record only safe identifiers: adapter, provider,
+typed call-site ID, runtime execution ID, budget domain, and timestamp. They
+never record prompts, responses, keys, file contents, or machine paths.
+
+| Value | Behavior |
+|---|---|
+| unset / `audit` | Record and warn on an unscoped provider call. |
+| `strict` | Record and then block an unscoped provider call before the network request. |
+
+Key verification and local Ollama are explicit approved exceptions. Trading
+inference uses its own service and budget domain; it must not be added to the
+Founder managed allowance. New AI routing section names must register a typed
+call-site ID or tests fail.
 
 ## `AI_RUNTIME_CONTEXT_PRUNING`
 
@@ -229,35 +248,27 @@ same variable when `REDIS_URL` backs the cache.
 
 Maximum LRU entries in the in-process prompt cache per API instance.
 
-## `AI_RUNTIME_FAST_MODEL`
+## Managed DeepSeek models
 
-**Default:** `deepseek-chat`
-**Added:** 2026-07-06
+`AI_RUNTIME_FAST_MODEL`, `AI_RUNTIME_REASONING_MODEL`, and
+`AI_RUNTIME_CODE_MODEL` were Phase 0 advisory variables and are no longer
+read. Remove them from deployment configuration.
 
-Model slug for simple Q&A and social-draft routing (advisory in Phase 0).
+- `DEEPSEEK_FAST_MODEL` defaults to `deepseek-v4-flash`.
+- `DEEPSEEK_CODING_MODEL` defaults to `deepseek-v4-pro`.
 
-## `AI_RUNTIME_REASONING_MODEL`
-
-**Default:** `deepseek-reasoner`
-**Added:** 2026-07-06
-
-Model slug for reasoning / regulatory / architecture prompts.
-
-## `AI_RUNTIME_CODE_MODEL`
-
-**Default:** `glm-5.2`
-**Added:** 2026-07-06
-
-Model slug for code-draft and implementation prompts.
+Founder-managed simple work uses Flash. Code and reasoning use Pro. Retired
+aliases such as `deepseek-chat` and `deepseek-reasoner` are translated only
+for legacy database cleanup and are never sent upstream.
 
 ## `GLM_API_KEY`
 
 **Default:** unset
 **Added:** 2026-07-06 (z.ai GLM Coding Plan)
 
-Platform GLM API key for Founder Brain coding tier. Preferred over encrypted
-promo / AI Routing keys when set on the Railway API service. Never commit to
-git — set in Railway only.
+Optional platform key retained for explicitly governed auxiliary features and
+provider verification. V1 managed Founder chat does not route to GLM. Personal
+GLM profiles belong in encrypted BYOK settings. Never commit this key to git.
 
 ## `GLM_API_BASE`
 
@@ -278,27 +289,18 @@ separate encrypted key via Admin → Agent Control.
 
 ## `FOUNDER_BRAIN_TWO_MODEL_ROUTING`
 
-**Default:** unset / `false`
-**Added:** 2026-07-06
+**Deprecated for V1 managed chat.**
 
-When `true`, Founder Brain runtime routes fast/simple intents to the fast
-provider and coding/architecture intents to the coding provider. Admin can
-also toggle via `/admin/control` → AI Keys → Founder Brain Providers (stored
-in `PlatformSettings.founderBrainProvidersJson`).
+The value may remain in historical settings, but the V1 managed router stays
+on DeepSeek. Remove this variable from new deployments.
 
 ## `FOUNDER_BRAIN_FAST_PROVIDER`
 
-**Default:** `deepseek`
-**Added:** 2026-07-06
-
-Provider slug for fast tier when two-model routing is on (`deepseek` or `glm`).
+**Deprecated for V1 managed chat.** Fast work uses DeepSeek V4 Flash.
 
 ## `FOUNDER_BRAIN_CODING_PROVIDER`
 
-**Default:** `glm`
-**Added:** 2026-07-06
-
-Provider slug for coding / reasoning tier when two-model routing is on.
+**Deprecated for V1 managed chat.** Code and reasoning use DeepSeek V4 Pro.
 
 ### Where Founder Brain provider env vars are read
 

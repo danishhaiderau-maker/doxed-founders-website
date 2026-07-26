@@ -162,9 +162,15 @@ result.
 - [x] Show both token and estimated-cost comparisons against an explicit named
   baseline; marketing percentages remain hidden until the benchmark proves
   them.
+- [x] Keep the Founder AI gateway enabled by default, require an explicit
+  emergency rollback to reopen legacy paths, and attribute every provider
+  boundary to a typed call-site ID and budget domain. Strict release mode
+  blocks unscoped egress before its network request; unknown routing sections
+  fail registration tests instead of disappearing into an `other` bucket.
 
 Evidence: repeatable benchmark dataset, cache hit tests, measured receipts,
-zero unsupported percentage claims.
+zero unsupported percentage claims, provider-egress snapshot and strict-mode
+tests.
 
 ## Stage 4 - Plans, quota, and cost reservation
 

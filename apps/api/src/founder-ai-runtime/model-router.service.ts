@@ -19,8 +19,6 @@ type FastLane = {
   providerKey: string;
   model: string;
 };
-type FallbackLane = FastLane;
-
 @Injectable()
 export class ModelRouterService {
   constructor(private readonly brainProviders: FounderBrainProvidersService) {}
@@ -46,25 +44,21 @@ export class ModelRouterService {
     const cfg = this.brainProviders.getSyncConfig();
 
     let fast: FastLane;
-    let fallback: FallbackLane;
     let tier: ModelRoute['tier'];
 
     switch (intent) {
       case 'code':
         fast = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
-        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
         tier = 'code';
         break;
       case 'reasoning':
-        fast = { providerKey: 'glm', model: cfg.glmCodingModel };
-        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        fast = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
         tier = 'reasoning';
         break;
       case 'summarize':
       case 'social_draft':
       case 'simple_qa':
         fast = { providerKey: 'deepseek', model: cfg.deepseekFastModel };
-        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
         tier = 'fast';
         break;
       default:
@@ -83,46 +77,27 @@ export class ModelRouterService {
     const intent = this.classifyIntent(request);
     const cfg = this.brainProviders.getSyncConfig();
 
-    let fallback: FallbackLane;
-    let tier: ModelRoute['tier'];
-
-    switch (intent) {
-      case 'code':
-        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
-        tier = 'code';
-        break;
-      case 'reasoning':
-        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
-        tier = 'reasoning';
-        break;
-      case 'summarize':
-      case 'social_draft':
-      case 'simple_qa':
-        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
-        tier = 'fast';
-        break;
-      default:
-        return this.defaultRoute(intent, request.section, cfg);
+    if (intent === 'code' || intent === 'reasoning') {
+      return {
+        intent,
+        providerKey: 'deepseek',
+        model: cfg.deepseekCodingModel,
+        tier: intent === 'code' ? 'code' : 'reasoning',
+      };
     }
-
-    return {
-      intent,
-      providerKey: fallback.providerKey,
-      model: fallback.model,
-      tier,
-    };
+    return this.defaultRoute(intent, request.section, cfg);
   }
 
   private defaultRoute(
     intent: AiRuntimeIntent,
     section: AiRuntimeSection,
-    cfg: { deepseekFastModel: string; glmFastModel: string },
+    cfg: { deepseekFastModel: string },
   ): ModelRoute {
     if (section === 'wall_summarizer') {
       return {
         intent,
-        providerKey: 'glm',
-        model: cfg.glmFastModel,
+        providerKey: 'deepseek',
+        model: cfg.deepseekFastModel,
         tier: 'fast',
       };
     }
