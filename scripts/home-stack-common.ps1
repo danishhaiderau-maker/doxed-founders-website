@@ -587,48 +587,44 @@ function Test-HttpAlive([string]$Url, [int]$TimeoutMs = 1500) {
   }
 }
 
-<# Probe several URLs in parallel with async HttpWebRequest so the bridge listener never
-blocks for sum(url timeouts) — runs in max(timeoutMs). Returns hashtable url -> bool. #>
+<# Probe several URLs in parallel with one cancellation-bounded HttpClient so the
+bridge listener never blocks for sum(url timeouts). Returns hashtable url -> bool. #>
 function Test-HttpAliveParallel([string[]]$Urls, [int]$TimeoutMs = 1500) {
   $out = @{}
-  $pending = @()
-  foreach ($u in $Urls) {
-    $out[$u] = $false
-    try {
-      $req = [System.Net.HttpWebRequest]::Create($u)
-      $req.Method = "GET"
-      $req.Timeout = 5000
-      $req.ReadWriteTimeout = $TimeoutMs
-      $iar = $req.BeginGetResponse($null, $req)
-      $pending += @{ Url = $u; Req = $req; Ar = $iar }
-    } catch {
-      # leave false
+  try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
+  $handler = New-Object System.Net.Http.HttpClientHandler
+  $handler.UseProxy = $false
+  $client = New-Object System.Net.Http.HttpClient($handler)
+  $client.Timeout = [TimeSpan]::FromMilliseconds([math]::Max(250, $TimeoutMs))
+  $tasks = @{}
+  try {
+    foreach ($u in $Urls) {
+      $out[$u] = $false
+      try { $tasks[$u] = $client.GetAsync($u) } catch { }
     }
-  }
-  if ($pending.Count -gt 0) {
-    # Poll each AsyncWaitHandle with WaitOne (STA-safe; WaitAll for multiple handles
-    # throws on a single-threaded apartment thread, which is the PowerShell default).
-    $deadline = [datetime]::Now.AddMilliseconds($TimeoutMs)
-    $remaining = [System.Collections.ArrayList]@($pending)
-    while ($remaining.Count -gt 0 -and [datetime]::Now -lt $deadline) {
-      $stillPending = [System.Collections.ArrayList]@()
-      foreach ($p in $remaining) {
-        if ($p.Ar.AsyncWaitHandle.WaitOne(50)) {
-          try {
-            $resp = $p.Req.EndGetResponse($p.Ar)
-            $code = [int]$resp.StatusCode
-            $resp.Close()
-            $out[$p.Url] = ($code -ge 200 -and $code -lt 500)
-          } catch {
-            # false (timeout / connection refused / >=500)
-          }
-        } else {
-          [void]$stillPending.Add($p)
-        }
-      }
-      $remaining = $stillPending
+    $deadline = [datetime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while (
+      @($tasks.Values | Where-Object { -not $_.IsCompleted }).Count -gt 0 -and
+      [datetime]::UtcNow -lt $deadline
+    ) {
+      Start-Sleep -Milliseconds 20
     }
-    # Anything still pending after the deadline: leave false (EndGetResponse would throw).
+    foreach ($u in $tasks.Keys) {
+      $task = $tasks[$u]
+      if (-not $task.IsCompleted -or $task.IsCanceled -or $task.IsFaulted) { continue }
+      try {
+        $resp = $task.GetAwaiter().GetResult()
+        $code = [int]$resp.StatusCode
+        $out[$u] = ($code -ge 200 -and $code -lt 500)
+        $resp.Dispose()
+      } catch { }
+    }
+  } finally {
+    # This is non-blocking and releases any unresolved DNS/TLS/socket work
+    # without calling HttpWebRequest.Abort on the serialized listener thread.
+    try { $client.CancelPendingRequests() } catch { }
+    $client.Dispose()
+    $handler.Dispose()
   }
   return $out
 }
@@ -706,37 +702,46 @@ function Test-TunnelHttpSmart {
   $result = @{ Healthy = $false; RateLimited = $false; StatusCode = 0; Error = $null }
   if (-not $Url) { $result.Error = "no-url"; return $result }
   $pingUrl = "$Url".TrimEnd('/') + "/api/ping"
+  $handler = $null
+  $client = $null
   try {
-    $req = [System.Net.HttpWebRequest]::Create($pingUrl)
-    $req.Method = "GET"
-    $req.Timeout = ($TimeoutSec * 1000)
-    $req.ReadWriteTimeout = ($TimeoutSec * 1000)
-    $req.UserAgent = $UserAgent
-    $req.KeepAlive = $false
-    $resp = $req.GetResponse()
-    $code = [int]$resp.StatusCode
-    $result.StatusCode = $code
-    $resp.Close()
-    if ($code -ge 200 -and $code -lt 400) {
-      $result.Healthy = $true
-    } elseif ($code -eq 429) {
-      $result.Healthy = $true
-      $result.RateLimited = $true
-    } else {
-      $result.Error = "http-$code"
+    try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.UseProxy = $false
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds([math]::Max(1, $TimeoutSec))
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd($UserAgent)
+    $task = $client.GetAsync($pingUrl)
+    $deadline = [datetime]::UtcNow.AddSeconds([math]::Max(1, $TimeoutSec))
+    while (-not $task.IsCompleted -and [datetime]::UtcNow -lt $deadline) {
+      Start-Sleep -Milliseconds 20
     }
-  } catch [System.Net.WebException] {
-    $code = 0
-    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
-    $result.StatusCode = $code
-    if ($code -eq 429) {
-      $result.Healthy = $true
-      $result.RateLimited = $true
+    if (-not $task.IsCompleted) {
+      $result.Error = "Timeout"
+    } elseif ($task.IsCanceled) {
+      $result.Error = "Timeout"
+    } elseif ($task.IsFaulted) {
+      $result.Error = "RequestFailed"
     } else {
-      $result.Error = $_.Exception.Status.ToString()
+      $resp = $task.GetAwaiter().GetResult()
+      $code = [int]$resp.StatusCode
+      $result.StatusCode = $code
+      $resp.Dispose()
+      if ($code -ge 200 -and $code -lt 400) {
+        $result.Healthy = $true
+      } elseif ($code -eq 429) {
+        $result.Healthy = $true
+        $result.RateLimited = $true
+      } else {
+        $result.Error = "http-$code"
+      }
     }
   } catch {
     $result.Error = $_.Exception.Message
+  } finally {
+    try { if ($client) { $client.CancelPendingRequests() } } catch { }
+    if ($client) { $client.Dispose() }
+    if ($handler) { $handler.Dispose() }
   }
   return $result
 }
