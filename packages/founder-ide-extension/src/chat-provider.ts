@@ -27,6 +27,12 @@ import {
   callGateway,
 } from './gateway-client';
 import { buildSystemPrompt } from './memory';
+import { describeManagedVisuals } from './managed-visual';
+import {
+  appendManagedVisualContext,
+  languageModelImageCount,
+  languageModelVisualAttachments,
+} from './language-model-visual';
 
 type ChatInformation = vscode.LanguageModelChatInformation;
 
@@ -42,7 +48,7 @@ function aliasToInfo(alias: FounderOsModelAlias): ChatInformation {
     tooltip: alias.tooltip,
     detail: alias.detail,
     capabilities: {
-      imageInput: false,
+      imageInput: true,
       toolCalling: false,
     },
   };
@@ -76,6 +82,33 @@ function roleToString(role: vscode.LanguageModelChatMessageRole): GatewayMessage
   // rely on the gateway / Memory Engine to manage system context.
   if (role === vscode.LanguageModelChatMessageRole.Assistant) return 'assistant';
   return 'user';
+}
+
+async function messagesToGateway(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+): Promise<GatewayMessage[]> {
+  const messageTexts = messages.map((message) =>
+    messageContentToText(message.content)
+  );
+  const attachments = languageModelVisualAttachments(messages);
+  const enrichedTexts = attachments.length > 0
+    ? appendManagedVisualContext(
+      messageTexts,
+      attachments,
+      await describeManagedVisuals({
+        attachments: attachments.map(({ name, mimeType, dataBase64 }) => ({
+          name,
+          mimeType,
+          dataBase64,
+        })),
+      }),
+    )
+    : messageTexts;
+  return messages.map((message, index) => ({
+    role: roleToString(message.role),
+    content: enrichedTexts[index],
+    name: message.name,
+  }));
 }
 
 export interface FounderOsChatProviderEvents {
@@ -135,15 +168,21 @@ export class FounderOsChatProvider
     const alias = findModelAlias(model.id) ?? FOUNDER_OS_MODELS[0];
     this.events.onRequestStart?.(alias.id);
 
-    // Convert VS Code messages → OpenAI-compatible messages. VS Code always
-    // sends a System message first when the Chat participant defines one; we
-    // pass it through unchanged so Memory Engine / system prompt injection
-    // (Phase 4) can prepend to it.
-    const gatewayMessages: GatewayMessage[] = messages.map((m) => ({
-      role: roleToString(m.role),
-      content: messageContentToText(m.content),
-      name: m.name,
-    }));
+    let gatewayMessages: GatewayMessage[];
+    try {
+      gatewayMessages = await messagesToGateway(messages);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (!token.isCancellationRequested) {
+        progress.report(
+          new vscode.LanguageModelTextPart(
+            `\n\n_Founder screenshot attachment error: ${errorMessage}_`,
+          ),
+        );
+      }
+      this.events.onRequestEnd?.(alias.id, false, errorMessage);
+      return;
+    }
 
     // Memory Engine injection (design report §8.3). Fetch project + founder
     // memory for the current workspace and prepend it as a system message.
@@ -224,9 +263,13 @@ export class FounderOsChatProvider
       typeof text === 'string'
         ? text
         : messageContentToText(text.content);
+    const imageTokens =
+      typeof text === 'string' ? 0 : languageModelImageCount(text) * 1_024;
     // Rough OpenAI-style estimate (~4 chars/token). Good enough for context
     // window management; the gateway does the real accounting server-side.
-    return Promise.resolve(Math.max(1, Math.ceil(str.length / 4)));
+    return Promise.resolve(
+      Math.max(1, Math.ceil(str.length / 4) + imageTokens),
+    );
   }
 }
 
