@@ -1935,6 +1935,56 @@ export class BuilderService {
   }
 
   /**
+   * Apply Founder Runtime controls to a lazy provider stream. The runtime
+   * context wraps each iterator operation so provider egress, later chunks,
+   * and cancellation share one execution identity.
+   */
+  private completionWithProviderStreamViaRuntime(
+    userId: string,
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model: string | undefined,
+    billingSource: LlmBillingSource,
+    founderBrainTask?: FounderBrainTask,
+  ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
+    if (!this.founderAiRuntime.isEnabled()) {
+      return this.completionWithProviderStream(
+        provider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+      );
+    }
+
+    const request: AiRuntimeRequest = {
+      userId,
+      system,
+      userPrompt,
+      section: 'copilot',
+      founderBrainTask,
+      skipCache: true,
+    };
+    return this.founderAiRuntime.stream(
+      request,
+      (_route, ctx) =>
+        this.completionWithProviderStream(
+          provider,
+          apiKey,
+          ctx.request.system,
+          ctx.request.userPrompt,
+          model,
+          ctx.maxOutputTokens,
+        ),
+      {
+        budgetDomain: budgetDomainForBillingSource(billingSource),
+      },
+    );
+  }
+
+  /**
    * Streaming variant of completionWithProvider. Yields text deltas as they
    * arrive from the LLM. Only OpenAI-compatible (DeepSeek, GLM, OpenAI,
    * OpenRouter) and Anthropic + Gemini stream natively; other providers fall
@@ -1946,6 +1996,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     model?: string,
+    maxOutputTokens?: number,
   ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
     switch (provider) {
       case AiProvider.OPENAI:
@@ -1956,6 +2007,7 @@ export class BuilderService {
           system,
           userPrompt,
           model ?? 'gpt-4o-mini',
+          maxOutputTokens,
         );
       case AiProvider.GLM:
         this.recordLegacyStreamEgress(provider);
@@ -1965,6 +2017,7 @@ export class BuilderService {
           system,
           userPrompt,
           model ?? getGlmDefaultModel(),
+          maxOutputTokens,
         );
       case AiProvider.DEEPSEEK:
         this.recordLegacyStreamEgress(provider);
@@ -1974,6 +2027,7 @@ export class BuilderService {
           system,
           userPrompt,
           normalizeRetiredDeepseekModel(model),
+          maxOutputTokens,
         );
       case AiProvider.OPENROUTER:
         this.recordLegacyStreamEgress(provider);
@@ -1983,6 +2037,7 @@ export class BuilderService {
           system,
           userPrompt,
           model ?? 'openrouter/auto',
+          maxOutputTokens,
           {
             'HTTP-Referer': 'https://doxxedcrypto.digital',
             'X-Title': 'Doxxed Founder OS',
@@ -1990,10 +2045,22 @@ export class BuilderService {
         );
       case AiProvider.ANTHROPIC:
         this.recordLegacyStreamEgress(provider);
-        return yield* this.streamAnthropic(apiKey, system, userPrompt, model);
+        return yield* this.streamAnthropic(
+          apiKey,
+          system,
+          userPrompt,
+          model,
+          maxOutputTokens,
+        );
       case AiProvider.GEMINI:
         this.recordLegacyStreamEgress(provider);
-        return yield* this.streamGemini(apiKey, system, userPrompt, model);
+        return yield* this.streamGemini(
+          apiKey,
+          system,
+          userPrompt,
+          model,
+          maxOutputTokens,
+        );
       default: {
         // Non-streaming providers: emit one chunk with the full text.
         const result = await this.completionWithProvider(
@@ -2002,6 +2069,7 @@ export class BuilderService {
           system,
           userPrompt,
           model,
+          maxOutputTokens,
         );
         if (result?.text) yield result.text;
         return result;
@@ -2026,6 +2094,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     model: string,
+    maxOutputTokens?: number,
     extraHeaders: Record<string, string> = {},
   ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
     const res = await fetch(url, {
@@ -2042,6 +2111,7 @@ export class BuilderService {
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.4,
+        ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}),
         stream: true,
         stream_options: { include_usage: true },
       }),
@@ -2058,11 +2128,15 @@ export class BuilderService {
     let buffer = '';
     let full = '';
     let usage: LlmUsage | null = null;
+    let completed = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          completed = true;
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf('\n')) >= 0) {
@@ -2088,6 +2162,9 @@ export class BuilderService {
         }
       }
     } finally {
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
       reader.releaseLock();
     }
 
@@ -2100,6 +2177,7 @@ export class BuilderService {
     system: string,
     user: string,
     model?: string,
+    maxOutputTokens?: number,
   ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -2110,7 +2188,7 @@ export class BuilderService {
       },
       body: JSON.stringify({
         model: model ?? 'claude-3-5-haiku-latest',
-        max_tokens: 2048,
+        max_tokens: maxOutputTokens ?? 2048,
         system,
         messages: [{ role: 'user', content: user }],
         stream: true,
@@ -2128,11 +2206,15 @@ export class BuilderService {
     let buffer = '';
     let full = '';
     let usage: LlmUsage | null = null;
+    let completed = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          completed = true;
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf('\n')) >= 0) {
@@ -2163,6 +2245,9 @@ export class BuilderService {
         }
       }
     } finally {
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
       reader.releaseLock();
     }
 
@@ -2175,6 +2260,7 @@ export class BuilderService {
     system: string,
     user: string,
     model?: string,
+    maxOutputTokens?: number,
   ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
     const modelId = model ?? 'gemini-2.0-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
@@ -2184,6 +2270,9 @@ export class BuilderService {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: user }] }],
+        ...(maxOutputTokens
+          ? { generationConfig: { maxOutputTokens } }
+          : {}),
       }),
       signal: AbortSignal.timeout(120_000),
     });
@@ -2198,11 +2287,15 @@ export class BuilderService {
     let buffer = '';
     let full = '';
     let usage: LlmUsage | null = null;
+    let completed = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          completed = true;
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf('\n')) >= 0) {
@@ -2232,6 +2325,9 @@ export class BuilderService {
         }
       }
     } finally {
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
       reader.releaseLock();
     }
 
@@ -2400,7 +2496,16 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const gen = this.completionWithProviderStream(provider, apiKey, effectiveSystem, userPrompt, model);
+        const gen = this.completionWithProviderStreamViaRuntime(
+          userId,
+          provider,
+          apiKey,
+          effectiveSystem,
+          userPrompt,
+          model,
+          billingSource,
+          founderBrainTask,
+        );
         const first = await gen.next();
         if (first.done) {
           // No content emitted at all — treat as empty.
@@ -2585,7 +2690,15 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg.defaultModel ?? undefined
           : cfg.defaultModel ?? undefined;
       try {
-        const gen = this.completionWithProviderStream(forceProvider, byokKey, system, userPrompt, model);
+        const gen = this.completionWithProviderStreamViaRuntime(
+          userId,
+          forceProvider,
+          byokKey,
+          system,
+          userPrompt,
+          model,
+          'byok',
+        );
         const first = await gen.next();
         if (first.done) {
           if (first.value?.text) {
@@ -2633,7 +2746,15 @@ export class BuilderService {
         : cfg.defaultModel ?? undefined;
 
     try {
-      const gen = this.completionWithProviderStream(forceProvider, apiKey, system, userPrompt, model);
+      const gen = this.completionWithProviderStreamViaRuntime(
+        userId,
+        forceProvider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+        billingSource,
+      );
       const first = await gen.next();
       if (first.done) {
         if (first.value?.text) {
@@ -2689,7 +2810,15 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
           : cfg?.defaultModel ?? undefined;
       try {
-        const gen = this.completionWithProviderStream(actualProvider, promoKey, system, userPrompt, model);
+        const gen = this.completionWithProviderStreamViaRuntime(
+          userId,
+          actualProvider,
+          promoKey,
+          system,
+          userPrompt,
+          model,
+          'platform_promo',
+        );
         const first = await gen.next();
         if (first.done) {
           if (first.value?.text) {
@@ -2727,12 +2856,14 @@ export class BuilderService {
     if (!platformKey) return null;
 
     try {
-      const gen = this.completionWithProviderStream(
+      const gen = this.completionWithProviderStreamViaRuntime(
+        userId,
         AiProvider.DEEPSEEK,
         platformKey,
         system,
         userPrompt,
         undefined,
+        'platform_brain',
       );
       const first = await gen.next();
       if (first.done) {

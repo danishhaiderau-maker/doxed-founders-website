@@ -21,6 +21,11 @@ export type AiRuntimeExecutionPolicy = {
   budgetDomain?: ProviderEgressBudgetDomain;
 };
 
+export type AiRuntimeInvokeContext = {
+  maxOutputTokens: number;
+  request: AiRuntimeRequest;
+};
+
 /**
  * Central gateway for Founder OS AI calls (Phase 0).
  * Phase 0: prompt hash cache + intent routing metadata; provider calls remain
@@ -97,7 +102,7 @@ export class FounderAiRuntimeService {
    */
   async complete(
     request: AiRuntimeRequest,
-    invoke?: (route: ModelRoute, ctx: { maxOutputTokens: number; request: AiRuntimeRequest }) => Promise<AiRuntimeResponse>,
+    invoke?: (route: ModelRoute, ctx: AiRuntimeInvokeContext) => Promise<AiRuntimeResponse>,
     policy?: AiRuntimeExecutionPolicy,
   ): Promise<AiRuntimeResponse> {
     const cached = await this.tryCacheHit(request);
@@ -122,6 +127,34 @@ export class FounderAiRuntimeService {
       await this.recordResponse(prepared, { ...result, intent: route.intent, cacheLevel: 'miss' });
     }
     return { ...result, intent: route.intent, cacheHit: false, cacheLevel: 'miss' };
+  }
+
+  /**
+   * Govern a lazy provider stream with the same routing, context-pruning,
+   * output-cap, and budget-domain policy as complete().
+   */
+  stream<TYield, TReturn, TNext = unknown>(
+    request: AiRuntimeRequest,
+    invoke: (
+      route: ModelRoute,
+      ctx: AiRuntimeInvokeContext,
+    ) => AsyncGenerator<TYield, TReturn, TNext>,
+    policy?: AiRuntimeExecutionPolicy,
+  ): AsyncGenerator<TYield, TReturn, TNext> {
+    const prepared = this.prepareRequest({ ...request, skipCache: true });
+    const route = this.modelRouter.route(prepared);
+    const maxOutputTokens =
+      this.contextBuilder.maxOutputTokens(route.intent);
+    const iterator = invoke(route, { maxOutputTokens, request: prepared });
+
+    return this.providerEgressAudit.wrapAsyncGeneratorWithContext(
+      {
+        boundary: 'founder_ai_runtime',
+        callSiteId: runtimeCallSiteForSection(prepared.section),
+        budgetDomain: policy?.budgetDomain ?? 'founder_managed',
+      },
+      iterator,
+    );
   }
 
   cacheStats() {

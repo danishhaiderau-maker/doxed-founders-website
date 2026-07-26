@@ -51,6 +51,39 @@ export class ProviderEgressAuditService {
     return this.context.run(next, work);
   }
 
+  /**
+   * Keep one audit context active for the full lifetime of a lazy stream.
+   * Async generators do not execute their body when created, so every
+   * iterator operation must re-enter the same context.
+   */
+  wrapAsyncGeneratorWithContext<TYield, TReturn, TNext = unknown>(
+    input: Omit<ProviderEgressContext, 'runtimeExecutionId'> & {
+      runtimeExecutionId?: string;
+    },
+    iterator: AsyncGenerator<TYield, TReturn, TNext>,
+  ): AsyncGenerator<TYield, TReturn, TNext> {
+    const parent = this.context.getStore();
+    const runtimeExecutionId =
+      input.runtimeExecutionId ??
+      parent?.runtimeExecutionId ??
+      randomUUID();
+    const context = { ...input, runtimeExecutionId };
+    const run = <T>(work: () => Promise<T>) =>
+      this.runWithContext(context, work);
+
+    return {
+      next: (...args: [] | [TNext]) =>
+        run(() => iterator.next(...args)),
+      return: (value: TReturn | PromiseLike<TReturn>) =>
+        run(() => iterator.return(value)),
+      throw: (error?: unknown) =>
+        run(() => iterator.throw(error)),
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    } as AsyncGenerator<TYield, TReturn, TNext>;
+  }
+
   record(input: RecordEgressInput): ProviderEgressEvent {
     const active = this.context.getStore();
     const boundary = active?.boundary ?? input.boundary ?? 'unscoped';

@@ -161,3 +161,126 @@ test('FounderAiRuntime.complete owns provider egress during its invoke callback'
   assert.equal(snapshot.founderRuntime, 1);
   assert.equal(snapshot.byCallSite['runtime.quick_build'], 1);
 });
+
+test('provider egress audit governs every lazy stream operation with one execution identity', async () => {
+  const audit = new ProviderEgressAuditService();
+  async function* source(): AsyncGenerator<string, string> {
+    try {
+      audit.record({
+        adapterName: 'builder.legacy-stream',
+        provider: 'deepseek',
+      });
+      yield 'first';
+      audit.record({
+        adapterName: 'builder.legacy-stream',
+        provider: 'deepseek',
+      });
+      yield 'second';
+      return 'complete';
+    } finally {
+      audit.record({
+        adapterName: 'builder.stream-cleanup',
+        provider: 'deepseek',
+      });
+    }
+  }
+
+  const stream = audit.wrapAsyncGeneratorWithContext(
+    {
+      boundary: 'founder_ai_runtime',
+      callSiteId: 'runtime.copilot',
+      budgetDomain: 'founder_byok',
+      runtimeExecutionId: 'stream-runtime-1',
+    },
+    source(),
+  );
+
+  assert.equal(audit.snapshot().total, 0);
+  assert.deepEqual(await stream.next(), { done: false, value: 'first' });
+  assert.deepEqual(await stream.next(), { done: false, value: 'second' });
+  assert.deepEqual(await stream.return('cancelled'), {
+    done: true,
+    value: 'cancelled',
+  });
+
+  const snapshot = audit.snapshot();
+  assert.equal(snapshot.total, 3);
+  assert.equal(snapshot.founderRuntime, 3);
+  assert.equal(snapshot.bypassed, 0);
+  assert.deepEqual(
+    new Set(snapshot.recent.map((event) => event.runtimeExecutionId)),
+    new Set(['stream-runtime-1']),
+  );
+  assert.ok(
+    snapshot.recent.every(
+      (event) =>
+        event.callSiteId === 'runtime.copilot' &&
+        event.budgetDomain === 'founder_byok',
+    ),
+  );
+});
+
+test('FounderAiRuntime.stream applies prepared context and output ceiling lazily', async () => {
+  const previous = process.env.AI_RUNTIME_ENABLED;
+  process.env.AI_RUNTIME_ENABLED = 'true';
+  const audit = new ProviderEgressAuditService();
+  try {
+    const runtime = new FounderAiRuntimeService(
+      {} as never,
+      {
+        route: () => ({
+          intent: 'code',
+          providerKey: 'deepseek',
+          model: 'deepseek-v4-pro',
+          tier: 'code',
+        }),
+      } as never,
+      {
+        prepareRequest: (request: { system: string }) => ({
+          ...request,
+          system: 'prepared-system',
+        }),
+        maxOutputTokens: () => 777,
+      } as never,
+      audit,
+    );
+    let invoked = false;
+
+    const stream = runtime.stream(
+      {
+        userId: 'user-1',
+        system: 'unpruned-system',
+        userPrompt: 'review',
+        section: 'copilot',
+      },
+      (_route, context) =>
+        (async function* () {
+          invoked = true;
+          assert.equal(context.request.system, 'prepared-system');
+          assert.equal(context.maxOutputTokens, 777);
+          audit.record({
+            adapterName: 'builder.legacy-stream',
+            provider: 'deepseek',
+          });
+          yield 'delta';
+          return 'done';
+        })(),
+      { budgetDomain: 'founder_managed' },
+    );
+
+    assert.equal(invoked, false);
+    assert.deepEqual(await stream.next(), { done: false, value: 'delta' });
+    assert.equal(invoked, true);
+    assert.deepEqual(await stream.next(), { done: true, value: 'done' });
+    assert.equal(
+      audit.snapshot().recent[0]?.budgetDomain,
+      'founder_managed',
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AI_RUNTIME_ENABLED;
+    } else {
+      process.env.AI_RUNTIME_ENABLED = previous;
+    }
+  }
+});

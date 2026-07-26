@@ -327,3 +327,168 @@ test('runtime output ceiling reaches the DeepSeek provider request body', async 
     }
   }
 });
+
+test('runtime governs DeepSeek stream reads with BYOK budget and output ceiling', async () => {
+  const previousEnabled = process.env.AI_RUNTIME_ENABLED;
+  const previousFetch = globalThis.fetch;
+  process.env.AI_RUNTIME_ENABLED = 'true';
+  let requestBody: Record<string, unknown> = {};
+  const encoder = new TextEncoder();
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"streamed"}}]}\n' +
+              'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":9}}\n' +
+              'data: [DONE]\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const { audit, runtime } = runtimeHarness();
+    const service = Object.create(BuilderService.prototype) as unknown as {
+      completionWithProviderStreamViaRuntime: (
+        userId: string,
+        provider: string,
+        apiKey: string,
+        system: string,
+        userPrompt: string,
+        model: string,
+        billingSource: 'byok',
+      ) => AsyncGenerator<
+        string,
+        {
+          text: string;
+          usage: { promptTokens: number; completionTokens: number } | null;
+        } | null
+      >;
+    };
+    Object.assign(service, {
+      founderAiRuntime: runtime,
+      providerEgressAudit: audit,
+    });
+
+    const stream = service.completionWithProviderStreamViaRuntime(
+      'founder-1',
+      'DEEPSEEK',
+      'stream-secret-never-recorded',
+      'system',
+      'stream answer',
+      'deepseek-v4-flash',
+      'byok',
+    );
+
+    assert.equal(audit.snapshot().total, 0);
+    assert.deepEqual(await stream.next(), {
+      done: false,
+      value: 'streamed',
+    });
+    const final = await stream.next();
+    assert.equal(final.done, true);
+    assert.deepEqual(final.value, {
+      text: 'streamed',
+      usage: { promptTokens: 21, completionTokens: 9 },
+    });
+    assert.equal(requestBody.max_tokens, 1_234);
+
+    const snapshot = audit.snapshot();
+    assert.equal(snapshot.founderRuntime, 1);
+    assert.equal(snapshot.bypassed, 0);
+    assert.equal(snapshot.recent[0]?.callSiteId, 'runtime.copilot');
+    assert.equal(snapshot.recent[0]?.budgetDomain, 'founder_byok');
+    assert.equal(
+      JSON.stringify(snapshot).includes('stream-secret-never-recorded'),
+      false,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousEnabled === undefined) {
+      delete process.env.AI_RUNTIME_ENABLED;
+    } else {
+      process.env.AI_RUNTIME_ENABLED = previousEnabled;
+    }
+  }
+});
+
+test('stopping a governed provider stream cancels the underlying network reader', async () => {
+  const previousEnabled = process.env.AI_RUNTIME_ENABLED;
+  const previousFetch = globalThis.fetch;
+  process.env.AI_RUNTIME_ENABLED = 'true';
+  let cancelled = false;
+  const encoder = new TextEncoder();
+  globalThis.fetch = (async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+          ),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const { audit, runtime } = runtimeHarness();
+    const service = Object.create(BuilderService.prototype) as unknown as {
+      completionWithProviderStreamViaRuntime: (
+        userId: string,
+        provider: string,
+        apiKey: string,
+        system: string,
+        userPrompt: string,
+        model: string,
+        billingSource: 'platform_promo',
+      ) => AsyncGenerator<
+        string,
+        { text: string; usage: null } | null
+      >;
+    };
+    Object.assign(service, {
+      founderAiRuntime: runtime,
+      providerEgressAudit: audit,
+    });
+
+    const stream = service.completionWithProviderStreamViaRuntime(
+      'founder-1',
+      'DEEPSEEK',
+      'managed-stream-secret',
+      'system',
+      'long answer',
+      'deepseek-v4-flash',
+      'platform_promo',
+    );
+
+    assert.equal((await stream.next()).value, 'partial');
+    await stream.return(null);
+    assert.equal(cancelled, true);
+    assert.equal(
+      audit.snapshot().recent[0]?.budgetDomain,
+      'founder_managed',
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousEnabled === undefined) {
+      delete process.env.AI_RUNTIME_ENABLED;
+    } else {
+      process.env.AI_RUNTIME_ENABLED = previousEnabled;
+    }
+  }
+});
