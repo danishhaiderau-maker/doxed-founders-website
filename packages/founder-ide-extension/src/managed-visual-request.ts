@@ -42,7 +42,7 @@ export type ManagedVisualRequestDeps = {
   platform?: NodeJS.Platform;
 };
 
-function normalizeAttachments(
+export function normalizeVisualAttachments(
   input: ManagedVisualInput,
 ): Array<{ name: string; mimeType: string; dataBase64: string }> {
   if (
@@ -113,7 +113,7 @@ export async function describeManagedVisualRequest(
   credentials: ManagedVisualCredentials,
   deps: ManagedVisualRequestDeps = {},
 ): Promise<ManagedVisualResult> {
-  const attachments = normalizeAttachments(input);
+  const attachments = normalizeVisualAttachments(input);
   const body = Buffer.from(JSON.stringify({ attachments }), 'utf8');
   const url =
     `${credentials.apiBaseUrl.replace(/\/$/, '')}/api/v1/images/descriptions`;

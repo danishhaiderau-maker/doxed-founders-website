@@ -41,6 +41,8 @@ function secret(overrides: Partial<PersonalAiProfileSecret> = {}): PersonalAiPro
     baseUrl: 'http://127.0.0.1:11434',
     apiKey: '',
     model: 'qwen3-coder',
+    visionModel: 'qwen3-coder',
+    useForVisuals: false,
     headers: {},
     enabled: true,
     hasApiKey: false,
@@ -98,6 +100,20 @@ describe('personal AI profile policy', () => {
   it('adds the Ollama OpenAI compatibility path', () => {
     assert.equal(personalAiApiBase(secret()), 'http://127.0.0.1:11434/v1');
   });
+
+  it('supports a separate screenshot model without changing the chat model', () => {
+    const profile = validatePersonalAiProfile({
+      name: 'Local multimodal',
+      kind: 'ollama',
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'qwen3-coder',
+      visionModel: 'qwen2.5vl',
+      useForVisuals: true,
+    });
+    assert.equal(profile.model, 'qwen3-coder');
+    assert.equal(profile.visionModel, 'qwen2.5vl');
+    assert.equal(profile.useForVisuals, true);
+  });
 });
 
 describe('PersonalAiProfileStore', () => {
@@ -120,6 +136,40 @@ describe('PersonalAiProfileStore', () => {
     assert.equal(store.activeId(), saved.id);
     await store.setEnabled(saved.id, false);
     assert.equal(store.activeId(), null);
+    store.dispose();
+  });
+
+  it('keeps exactly one enabled screenshot-reading profile', async () => {
+    const { context } = fakeContext();
+    const store = new PersonalAiProfileStore(context);
+    await store.ready();
+    const first = await store.save({
+      name: 'Local vision',
+      kind: 'ollama',
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'qwen3-coder',
+      visionModel: 'qwen2.5vl',
+      useForVisuals: true,
+    });
+    const second = await store.save({
+      name: 'Personal vision',
+      kind: 'openai-compatible',
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'private-key',
+      model: 'coding-model',
+      visionModel: 'vision-model',
+      useForVisuals: true,
+    });
+
+    assert.equal(store.visual()?.id, second.id);
+    assert.equal(
+      store.list().find((profile) => profile.id === first.id)?.useForVisuals,
+      false,
+    );
+    assert.equal(
+      store.list().find((profile) => profile.id === second.id)?.useForVisuals,
+      true,
+    );
     store.dispose();
   });
 });

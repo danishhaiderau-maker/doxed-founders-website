@@ -76,6 +76,7 @@ import {
   describeManagedVisuals,
   type ManagedVisualInput,
 } from './managed-visual';
+import { describePersonalVisuals } from './personal-visual-request';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -418,7 +419,13 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand(
       'founderOs.describeVisualAttachments',
-      (input: ManagedVisualInput) => describeManagedVisuals(input),
+      async (input: ManagedVisualInput) => {
+        await personalAiProfiles?.ready();
+        const personalVisualProfile = personalAiProfiles?.visual();
+        return personalVisualProfile
+          ? describePersonalVisuals(input, personalVisualProfile)
+          : describeManagedVisuals(input);
+      },
     ),
     vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
       await founderWorkspaceContext?.refresh(true);

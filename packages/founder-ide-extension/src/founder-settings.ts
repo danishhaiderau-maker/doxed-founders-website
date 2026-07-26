@@ -69,6 +69,8 @@ interface FounderSettingsMessage {
     baseUrl?: string;
     apiKey?: string;
     model?: string;
+    visionModel?: string;
+    useForVisuals?: boolean;
     headers?: string;
   };
 }
@@ -182,8 +184,14 @@ export class FounderSettingsPanel implements vscode.Disposable {
       try {
         const draft = personalDraftFromMessage(message.draft);
         const saved = await this.dependencies.personalAiProfiles.save(draft);
-        await this.dependencies.personalAiProfiles.select(saved.id);
-        void vscode.window.showInformationMessage(`${saved.name} saved securely and selected.`);
+        if (!saved.useForVisuals) {
+          await this.dependencies.personalAiProfiles.select(saved.id);
+        }
+        void vscode.window.showInformationMessage(
+          saved.useForVisuals
+            ? `${saved.name} will read screenshots. Your chat model is unchanged.`
+            : `${saved.name} saved securely and selected.`,
+        );
       } catch (error) {
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
       }
@@ -408,16 +416,16 @@ export class FounderSettingsPanel implements vscode.Disposable {
       ? personalProfiles.map((candidate) => `
           <div class="profile-row ${candidate.id === activePersonalId ? 'active' : ''}">
             <div class="profile-copy">
-              <div><strong>${escapeHtml(candidate.name)}</strong><span class="route-badge">${candidate.kind === 'ollama' ? 'Local' : 'Personal'}</span>${candidate.id === activePersonalId ? '<span class="active-badge">Active</span>' : ''}</div>
-              <span>${escapeHtml(candidate.model)} &middot; ${escapeHtml(candidate.baseUrl)}</span>
+              <div><strong>${escapeHtml(candidate.name)}</strong><span class="route-badge">${candidate.kind === 'ollama' ? 'Local' : 'Personal'}</span>${candidate.id === activePersonalId ? '<span class="active-badge">Active</span>' : ''}${candidate.useForVisuals ? '<span class="active-badge">Screenshots</span>' : ''}</div>
+              <span>${escapeHtml(candidate.model)} &middot; ${escapeHtml(candidate.baseUrl)}${candidate.useForVisuals ? ` &middot; vision ${escapeHtml(candidate.visionModel)}` : ''}</span>
               <span>${candidate.hasApiKey ? 'Encrypted key saved' : 'No key required'}${candidate.headerNames.length ? ` &middot; ${candidate.headerNames.length} custom header${candidate.headerNames.length === 1 ? '' : 's'}` : ''}</span>
             </div>
             <div class="profile-actions">
-              ${candidate.enabled && candidate.id !== activePersonalId ? `<button class="link-button" type="button" data-personal-select="${candidate.id}">Use</button>` : ''}
-              <button class="link-button" type="button" data-personal-test="${candidate.id}">Test</button>
-              <button class="link-button" type="button" data-personal-edit="${candidate.id}">Edit</button>
-              <button class="link-button" type="button" data-personal-toggle="${candidate.id}" data-enabled="${!candidate.enabled}">${candidate.enabled ? 'Disable' : 'Enable'}</button>
-              <button class="link-button danger" type="button" data-personal-delete="${candidate.id}">Delete</button>
+              ${candidate.enabled && candidate.id !== activePersonalId ? `<button class="link-button" type="button" data-personal-select="${escapeHtml(candidate.id)}">Use</button>` : ''}
+              <button class="link-button" type="button" data-personal-test="${escapeHtml(candidate.id)}">Test</button>
+              <button class="link-button" type="button" data-personal-edit="${escapeHtml(candidate.id)}">Edit</button>
+              <button class="link-button" type="button" data-personal-toggle="${escapeHtml(candidate.id)}" data-enabled="${!candidate.enabled}">${candidate.enabled ? 'Disable' : 'Enable'}</button>
+              <button class="link-button danger" type="button" data-personal-delete="${escapeHtml(candidate.id)}">Delete</button>
             </div>
           </div>`).join('')
       : '<div class="empty-state"><strong>No personal AI yet</strong><span>Add an OpenAI-compatible provider or local Ollama model below.</span></div>';
@@ -565,6 +573,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .field input:focus, .field select:focus, .field textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
     .form-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
     .form-title span, .field-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .check-field { display: flex; align-items: flex-start; gap: 9px; color: var(--text); font-size: 12px; line-height: 1.45; }
+    .check-field input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }
     @keyframes panel-in {
       from { opacity: 0; transform: translateY(3px); }
       to { opacity: 1; transform: translateY(0); }
@@ -657,8 +667,10 @@ export class FounderSettingsPanel implements vscode.Disposable {
             <div class="field"><label for="profile-name">Name</label><input id="profile-name" maxlength="60" required placeholder="My coding model"></div>
             <div class="field wide"><label for="profile-url">Base URL</label><input id="profile-url" required placeholder="https://provider.example/v1"></div>
             <div class="field"><label for="profile-model">Model ID</label><input id="profile-model" maxlength="200" required placeholder="provider-model-id"></div>
+            <div class="field"><label for="profile-vision-model">Screenshot model</label><input id="profile-vision-model" maxlength="200" placeholder="Same as Model ID when blank"><span class="field-hint">Use a multimodal model that can read PNG, JPEG, or WebP.</span></div>
             <div class="field"><label for="profile-key">API key</label><input id="profile-key" type="password" autocomplete="off" required placeholder="Required for remote providers"><span class="field-hint">Leave blank while editing to keep the encrypted key.</span></div>
             <div class="field wide"><label for="profile-headers">Optional headers (JSON)</label><textarea id="profile-headers" spellcheck="false" placeholder='{"X-Organization": "team-id"}'></textarea><span class="field-hint">Leave blank while editing to keep existing encrypted headers.</span></div>
+            <label class="check-field wide" for="profile-visuals"><input id="profile-visuals" type="checkbox"><span>Use this profile for screenshot reading. Only one Personal AI or Ollama profile can own screenshots at a time.</span></label>
           </div>
           <div class="button-row"><button class="primary" type="submit" id="profile-save">Save and use</button><button class="secondary" type="button" id="profile-cancel" hidden>Cancel edit</button></div>
         </form>
@@ -751,6 +763,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const profileName = document.getElementById('profile-name');
     const profileUrl = document.getElementById('profile-url');
     const profileModel = document.getElementById('profile-model');
+    const profileVisionModel = document.getElementById('profile-vision-model');
+    const profileVisuals = document.getElementById('profile-visuals');
     const profileKey = document.getElementById('profile-key');
     const profileHeaders = document.getElementById('profile-headers');
     const profileTitle = document.getElementById('profile-form-title');
@@ -781,6 +795,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
         profileName.value = profile.name;
         profileUrl.value = profile.baseUrl;
         profileModel.value = profile.model;
+        profileVisionModel.value = profile.visionModel || profile.model;
+        profileVisuals.checked = profile.useForVisuals === true;
         profileKey.value = '';
         profileKey.required = false;
         profileHeaders.value = '';
@@ -801,6 +817,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
           name: profileName.value,
           baseUrl: profileUrl.value,
           model: profileModel.value,
+          visionModel: profileVisionModel.value,
+          useForVisuals: profileVisuals.checked,
           apiKey: profileKey.value,
           headers: profileHeaders.value,
         },
@@ -849,6 +867,8 @@ function personalDraftFromMessage(
     baseUrl: value.baseUrl ?? '',
     apiKey: value.apiKey?.trim() || undefined,
     model: value.model ?? '',
+    visionModel: value.visionModel?.trim() || undefined,
+    useForVisuals: value.useForVisuals === true,
     headers,
   };
 }

@@ -265,7 +265,7 @@ admin and user usage screenshots.
   each structured description at 2,000 tokens, preserve attachments and typed
   text on failure, and show a clear fail-closed message when no permitted
   vision route is available.
-- [ ] Support a founder-selected Personal AI vision profile and a compatible
+- [x] Support a founder-selected Personal AI vision profile and a compatible
   local Ollama multimodal profile for the privacy path. Managed vision, if
   enabled, uses its own probed model, entitlement, reservation, and truthful
   receipt; it never silently changes the Founder Auto text route.

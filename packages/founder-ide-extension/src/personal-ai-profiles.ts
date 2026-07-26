@@ -10,6 +10,8 @@ export interface PersonalAiProfileDraft {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  visionModel?: string;
+  useForVisuals?: boolean;
   headers?: Record<string, string>;
   enabled?: boolean;
 }
@@ -20,6 +22,8 @@ export interface PersonalAiProfileSummary {
   kind: PersonalAiProfileKind;
   baseUrl: string;
   model: string;
+  visionModel: string;
+  useForVisuals: boolean;
   enabled: boolean;
   hasApiKey: boolean;
   headerNames: string[];
@@ -138,8 +142,10 @@ export function validatePersonalAiProfile(
 ): Omit<PersonalAiProfileSecret, 'id' | 'createdAt' | 'updatedAt' | 'hasApiKey' | 'headerNames'> {
   const name = draft.name.trim();
   const model = draft.model.trim();
+  const visionModel = draft.visionModel?.trim() || model;
   if (!name || name.length > 60) throw new Error('Profile name must be 1-60 characters.');
   if (!model || model.length > 200) throw new Error('Model ID must be 1-200 characters.');
+  if (visionModel.length > 200) throw new Error('Vision model ID must be 1-200 characters.');
   if (draft.kind !== 'openai-compatible' && draft.kind !== 'ollama') {
     throw new Error('Choose OpenAI-compatible or Ollama.');
   }
@@ -157,6 +163,8 @@ export function validatePersonalAiProfile(
     baseUrl,
     apiKey,
     model,
+    visionModel,
+    useForVisuals: draft.useForVisuals ?? existing?.useForVisuals ?? false,
     headers,
     enabled: draft.enabled ?? existing?.enabled ?? true,
   };
@@ -239,6 +247,8 @@ function isStoredProfile(value: unknown): value is PersonalAiProfileSecret {
     && typeof candidate.baseUrl === 'string'
     && typeof candidate.apiKey === 'string'
     && typeof candidate.model === 'string'
+    && (candidate.visionModel == null || typeof candidate.visionModel === 'string')
+    && (candidate.useForVisuals == null || typeof candidate.useForVisuals === 'boolean')
     && typeof candidate.enabled === 'boolean'
     && candidate.headers != null
     && typeof candidate.headers === 'object'
@@ -285,6 +295,13 @@ export class PersonalAiProfileStore implements vscode.Disposable {
     return profile ? { ...profile, headers: { ...profile.headers } } : null;
   }
 
+  visual(): PersonalAiProfileSecret | null {
+    const profile = this.profiles.find(
+      (candidate) => candidate.enabled && candidate.useForVisuals,
+    );
+    return profile ? { ...profile, headers: { ...profile.headers } } : null;
+  }
+
   get(id: string): PersonalAiProfileSecret | null {
     const profile = this.profiles.find((candidate) => candidate.id === id);
     return profile ? { ...profile, headers: { ...profile.headers } } : null;
@@ -303,10 +320,27 @@ export class PersonalAiProfileStore implements vscode.Disposable {
       hasApiKey: Boolean(value.apiKey),
       headerNames: Object.keys(value.headers),
     };
-    await this.nativeBridge?.save(next);
-    this.profiles = existing
+    const profiles = existing
       ? this.profiles.map((profile) => profile.id === existing.id ? next : profile)
       : [...this.profiles, next];
+    const priorVisualProfileIds = new Set(
+      profiles
+        .filter((profile) => profile.id !== next.id && profile.useForVisuals)
+        .map((profile) => profile.id),
+    );
+    this.profiles = next.useForVisuals
+      ? profiles.map((profile) => profile.id === next.id
+        ? profile
+        : { ...profile, useForVisuals: false })
+      : profiles;
+    await this.nativeBridge?.save(next);
+    if (next.useForVisuals && this.nativeBridge) {
+      for (const profile of this.profiles) {
+        if (priorVisualProfileIds.has(profile.id)) {
+          await this.nativeBridge.save(profile);
+        }
+      }
+    }
     await this.persist();
     this.fireChange();
     return summary(next);
@@ -368,7 +402,20 @@ export class PersonalAiProfileStore implements vscode.Disposable {
     try {
       const parsed = JSON.parse(serialized) as unknown;
       if (!Array.isArray(parsed)) return;
-      this.profiles = parsed.filter(isStoredProfile);
+      this.profiles = parsed
+        .filter(isStoredProfile)
+        .map((profile) => ({
+          ...profile,
+          visionModel: profile.visionModel?.trim() || profile.model,
+          useForVisuals: profile.useForVisuals === true,
+        }));
+      let visualClaimed = false;
+      this.profiles = this.profiles.map((profile) => {
+        if (!profile.useForVisuals) return profile;
+        if (visualClaimed) return { ...profile, useForVisuals: false };
+        visualClaimed = true;
+        return profile;
+      });
     } catch {
       this.profiles = [];
     }
