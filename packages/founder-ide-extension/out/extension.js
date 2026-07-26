@@ -83,6 +83,8 @@ const founder_agent_mode_1 = require("./founder-agent-mode");
 const founder_interface_mode_1 = require("./founder-interface-mode");
 const managed_voice_1 = require("./managed-voice");
 const managed_visual_1 = require("./managed-visual");
+const personal_visual_request_1 = require("./personal-visual-request");
+const project_history_1 = require("./project-history");
 let registeredParticipant;
 let profileManager;
 let costTracker;
@@ -103,6 +105,7 @@ let founderVerifiedSolutionMemory;
 let founderProjectActivity;
 let personalAiProfiles;
 let dailyQualityReviewDisposable;
+let founderProjectHistory;
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -143,6 +146,8 @@ function activate(context) {
     }));
     founderVerifiedSolutionMemory = new verified_solution_memory_1.FounderVerifiedSolutionMemory(path.join(context.globalStorageUri.fsPath, 'verified-solutions'));
     founderProjectActivity = new project_activity_1.FounderProjectActivityStore(path.join(context.globalStorageUri.fsPath, 'project-activity.json'));
+    founderProjectHistory = new project_history_1.FounderProjectHistory(context);
+    context.subscriptions.push(founderProjectHistory);
     dailyQualityReviewDisposable = (0, daily_quality_review_1.createDailyQualityReview)(context, {
         activity: founderProjectActivity,
         workspaceId: () => founderWorkspaceContext?.workspaceIdValue() ?? null,
@@ -246,7 +251,7 @@ function activate(context) {
     }), vscode.commands.registerCommand('founderOs.connectFounderOs', () => signInWithFounderId(context)), vscode.commands.registerCommand('founderOs.openVaultConfig', openVaultConfig), vscode.commands.registerCommand('founderOs.selectModel', selectModelAlias), vscode.commands.registerCommand('founderOs.selectProfile', () => profileManager?.selectProfile()), vscode.commands.registerCommand('founderOs.showCostBreakdown', () => costTracker?.showBreakdown()), vscode.commands.registerCommand('founderOs.resetCost', () => {
         costTracker?.reset();
         void vscode.window.showInformationMessage('Founder OS DDollar session counter reset.');
-    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openCompanion', async () => {
+    }), vscode.commands.registerCommand('founderOs.showGatewayMetadata', () => gatewayMetadataUi?.revealChannel()), vscode.commands.registerCommand('founderOs.recentGatewayMetadata', () => gatewayMetadataUi?.showRecent()), vscode.commands.registerCommand('founderOs.openHub', () => vscode.commands.executeCommand('workbench.view.extension.founderOs')), vscode.commands.registerCommand('founderOs.openProjects', () => founderProjectHistory?.show()), vscode.commands.registerCommand('founderOs.openCompanion', async () => {
         await vscode.workspace.getConfiguration('founderOs').update('companion.enabled', true, vscode.ConfigurationTarget.Global);
         founderCompanion?.syncEnabled();
     }), vscode.commands.registerCommand('founderOs.companionState', (state, title, detail) => {
@@ -304,7 +309,13 @@ function activate(context) {
             .update('agentMode', workMode === 'team' ? 'team' : 'focus', vscode.ConfigurationTarget.Global);
         founderHub?.refresh();
         return workMode;
-    }), vscode.commands.registerCommand('founderOs.transcribeVoice', (input) => (0, managed_voice_1.transcribeManagedVoice)(input)), vscode.commands.registerCommand('founderOs.describeVisualAttachments', (input) => (0, managed_visual_1.describeManagedVisuals)(input)), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
+    }), vscode.commands.registerCommand('founderOs.transcribeVoice', (input) => (0, managed_voice_1.transcribeManagedVoice)(input)), vscode.commands.registerCommand('founderOs.describeVisualAttachments', async (input) => {
+        await personalAiProfiles?.ready();
+        const personalVisualProfile = personalAiProfiles?.visual();
+        return personalVisualProfile
+            ? (0, personal_visual_request_1.describePersonalVisuals)(input, personalVisualProfile)
+            : (0, managed_visual_1.describeManagedVisuals)(input);
+    }), vscode.commands.registerCommand('founderOs.refreshProjectContext', async () => {
         await founderWorkspaceContext?.refresh(true);
         const summary = founderWorkspaceContext?.summary();
         void vscode.window.showInformationMessage(summary
@@ -388,6 +399,9 @@ async function applyFounderInterfaceMode(revealFounderHome) {
     }
     if (founder.get('advancedIdeTools') !== definition.advancedIdeTools) {
         await founder.update('advancedIdeTools', definition.advancedIdeTools, vscode.ConfigurationTarget.Global);
+    }
+    if (mode === 'founder') {
+        await vscode.commands.executeCommand('workbench.action.closePanel');
     }
     if (mode === 'founder' && revealFounderHome) {
         await vscode.commands.executeCommand('workbench.view.extension.founderOs');

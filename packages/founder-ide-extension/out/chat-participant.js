@@ -55,11 +55,15 @@ const founder_agent_mode_1 = require("./founder-agent-mode");
 const auto_escalation_1 = require("./auto-escalation");
 const verified_solution_memory_1 = require("./verified-solution-memory");
 const personal_ai_profiles_1 = require("./personal-ai-profiles");
+const completion_evidence_1 = require("./completion-evidence");
+const founder_agent_mode_2 = require("./founder-agent-mode");
 const MAX_TOOL_TURNS = 8;
-function availableFounderTools() {
+function availableFounderTools(mode) {
     const tools = vscode.lm.tools;
+    const allowedNames = new Set((0, completion_evidence_1.founderToolsForMode)(mode, [...(tools ?? [])].map((tool) => tool.name)));
     return [...(tools ?? [])]
         .filter((tool) => tool_names_1.FOUNDER_TOOL_NAMES.has(tool.name))
+        .filter((tool) => allowedNames.has(tool.name))
         .sort((left, right) => left.name.localeCompare(right.name));
 }
 function toolResultText(result) {
@@ -133,6 +137,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     const selectedModelId = personalProfile?.model ?? alias.id;
     deps.onRequestStart?.(selectedModelId);
     const agentMode = (0, founder_agent_mode_1.normalizeFounderAgentMode)(vscode.workspace.getConfiguration('founderOs').get('agentMode'));
+    const workMode = (0, founder_agent_mode_2.readFounderWorkMode)();
     const coordinationTaskId = deps.coordination?.begin(prompt, personalProfile ? `personal:${personalProfile.name}/${personalProfile.model}` : alias.id, agentMode);
     // Build the system prompt with Memory Engine context.
     let memoryText = '';
@@ -160,7 +165,11 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     const priorSolutions = workspaceId
         ? deps.solutionMemory?.contextFor(workspaceId, prompt, deps.projectContext?.allFileHashes() ?? []) ?? ''
         : '';
-    const identity = 'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+    const identity = [
+        'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.',
+        (0, completion_evidence_1.founderWorkModeInstruction)(workMode),
+        'Do not claim completion based on prose. Founder IDE evaluates locally observed edits and checks and appends the authoritative verification receipt.',
+    ].join(' ');
     const systemMessages = (0, prompt_efficiency_1.composeFounderPromptMessages)({
         identity,
         memory: memoryText,
@@ -187,6 +196,14 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
             status: 'reused',
             summary: 'Reused a matching read-only result after relevant context hashes were verified.',
             estimatedTokensAvoided: cached.estimatedTokensAvoided,
+            verification: (0, completion_evidence_1.evaluateFounderCompletionEvidence)({
+                mode: workMode,
+                goal: prompt,
+                finalAnswer: cached.text,
+                requestCompleted: true,
+                editedFiles: [],
+                passedChecks: [],
+            }),
         });
         return;
     }
@@ -220,6 +237,8 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     let activityProviderModel = null;
     let activityEditedFiles = [];
     let activityChecks = [];
+    let activityVerification = null;
+    let providerCompleted = false;
     const providerUsageEvidence = {};
     let inputCostComparison;
     const requestStartedAt = Date.now();
@@ -233,7 +252,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         });
     }
     try {
-        const tools = availableFounderTools();
+        const tools = availableFounderTools(workMode);
         let completed = false;
         let usedTools = false;
         let reusableAnswer = '';
@@ -370,10 +389,25 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         if (!completed && !token.isCancellationRequested) {
             stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
         }
-        ok = completed && !token.isCancellationRequested;
+        providerCompleted = completed && !token.isCancellationRequested;
         activitySummary = finalAnswer;
         activityEditedFiles = [...editedPaths];
         activityChecks = passedChecks.map((check) => check.command);
+        const completionReceipt = (0, completion_evidence_1.evaluateFounderCompletionEvidence)({
+            mode: workMode,
+            goal: prompt,
+            finalAnswer,
+            requestCompleted: providerCompleted,
+            editedFiles: activityEditedFiles,
+            passedChecks: activityChecks,
+        });
+        activityVerification = completionReceipt;
+        stream.markdown((0, completion_evidence_1.renderFounderCompletionReceipt)(completionReceipt));
+        ok = providerCompleted && completionReceipt.verdict === 'passed';
+        if (!ok && providerCompleted) {
+            errorMessage = `Verification incomplete: ${completionReceipt.missing.join('; ')}`;
+            activitySummary = errorMessage;
+        }
         if (ok && !usedTools && cacheInput && reusableAnswer) {
             deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
         }
@@ -401,7 +435,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         if (ok && escalationReason) {
             stream.markdown(`\n\n---\n**Founder Auto escalation** | Pro | ${escalationReason.replace('_', ' ')}`);
         }
-        if (ok) {
+        if (providerCompleted) {
             const latencyMs = Date.now() - requestStartedAt;
             const route = personalProfile
                 ? personalProfile.kind === 'ollama'
@@ -411,13 +445,13 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
             stream.markdown(`\n\n---\n**Founder route** | ${route} | ${latencyMs.toLocaleString()} ms`);
         }
         const providerUsage = providerUsageEvidence.value;
-        if (ok && providerUsage) {
+        if (providerCompleted && providerUsage) {
             const cacheRate = providerUsage.promptTokens > 0
                 ? Math.round((providerUsage.cachedInputTokens / providerUsage.promptTokens) * 10_000) / 100
                 : 0;
             stream.markdown(`\n\n**${personalProfile ? 'Provider' : 'DeepSeek'} cache evidence** | ${providerUsage.cachedInputTokens.toLocaleString()} hit | ${providerUsage.uncachedInputTokens.toLocaleString()} miss | ${cacheRate}% hit rate | ${providerUsage.outputTokens.toLocaleString()} output`);
         }
-        if (ok && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
+        if (providerCompleted && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
             stream.markdown(`\n\n**Estimated input comparison** | ${inputCostComparison.avoidedInputTokens.toLocaleString()} fewer input tokens | $${inputCostComparison.avoidedUsd.toFixed(6)} USD avoided | baseline: same request with full context and uncached ${activityProviderModel ?? 'DeepSeek'} input | ${inputCostComparison.priceVersion}`);
         }
     }
@@ -439,10 +473,13 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
             providerModel: activityProviderModel,
             editedFiles: activityEditedFiles,
             checks: activityChecks,
+            verification: activityVerification,
         });
     }
     if (!ok && errorMessage) {
-        stream.markdown(`\n\n_Founder OS request failed: ${errorMessage}_`);
+        stream.markdown(providerCompleted
+            ? `\n\n_Founder verification incomplete: ${errorMessage.replace(/^Verification incomplete:\s*/i, '')}_`
+            : `\n\n_Founder OS request failed: ${errorMessage}_`);
     }
 }
 function personalProviderUserMessage(profile, status) {

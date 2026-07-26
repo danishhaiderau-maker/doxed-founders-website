@@ -459,6 +459,7 @@
     "@types/node": "^20.11.30",
     "@types/vscode": "1.99.1",
     "@vscode/vsce": "^3.2.0",
+    "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
 }
