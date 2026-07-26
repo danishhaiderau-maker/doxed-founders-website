@@ -70,6 +70,9 @@ assert.doesNotMatch(
 );
 assert.match(common, /Set-Content -LiteralPath \$cloudflaredPidFile/);
 assert.match(common, /-PassThru/);
+assert.match(common, /"--no-autoupdate"/);
+assert.match(common, /"--no-prechecks"/);
+assert.match(common, /"--edge-ip-version", "4"/);
 
 assert.match(launcher, /\$script:BridgeTunnelCache/);
 assert.match(launcher, /Test-TunnelConnectorPresent \$probe/);
