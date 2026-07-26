@@ -200,4 +200,18 @@ describe('Founder IDE extension manifest', () => {
       'founderOs.advancedIdeTools': false,
     });
   });
+
+  it('does not invent managed usage when the live entitlement is unavailable', () => {
+    const settingsSource = readFileSync(join(__dirname, 'founder-settings.ts'), 'utf8');
+
+    assert.match(settingsSource, /const liveUsageAvailable = this\.entitlementState\.source === 'live'/);
+    assert.match(settingsSource, /: 'Usage unavailable'/);
+    assert.match(settingsSource, /: 'Remaining allowance unavailable'/);
+    assert.match(settingsSource, /: 'Reservations unavailable'/);
+    assert.match(settingsSource, /const usageProgress = liveUsageAvailable/);
+    assert.doesNotMatch(
+      settingsSource,
+      /<strong>\$\{usagePercent\.toFixed\(0\)\}% used<\/strong>/,
+    );
+  });
 });

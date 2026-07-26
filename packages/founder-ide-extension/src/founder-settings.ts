@@ -341,6 +341,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
       : entitlement.priceCentsMonthly === 0
         ? 'Free'
         : `$${(entitlement.priceCentsMonthly / 100).toFixed(0)}/month`;
+    const liveUsageAvailable = this.entitlementState.source === 'live';
     const usagePercent = managedTokens.cap > 0
       ? Math.min(100, Math.max(0, (managedTokens.used / managedTokens.cap) * 100))
       : 0;
@@ -357,18 +358,24 @@ export class FounderSettingsPanel implements vscode.Disposable {
       : this.entitlementState.source === 'signed-out'
         ? 'Sign in required'
         : 'Live usage unavailable';
-    const expiryLabel = managedTokens.daysRemaining == null
-      ? 'Allowance status is checked through Founder Node'
-      : `${managedTokens.daysRemaining} day${managedTokens.daysRemaining === 1 ? '' : 's'} remaining`;
-    const renewalLabel = managedTokens.resetsOrExpiresAt
+    const expiryLabel = liveUsageAvailable
+      ? managedTokens.daysRemaining == null
+        ? 'Allowance status is checked through Founder Node'
+        : `${managedTokens.daysRemaining} day${managedTokens.daysRemaining === 1 ? '' : 's'} remaining`
+      : this.entitlementState.source === 'signed-out'
+        ? 'Sign in to view renewal details'
+        : 'Renewal details unavailable';
+    const renewalLabel = liveUsageAvailable && managedTokens.resetsOrExpiresAt
       ? `Renews ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(managedTokens.resetsOrExpiresAt))}`
       : expiryLabel;
-    const lowQuota = this.entitlementState.source === 'live'
+    const lowQuota = liveUsageAvailable
       && managedTokens.eligible
       && remainingPercent <= 15;
-    const reservationLabel = managedTokens.reserved > 0
-      ? `${reservedPercent < 0.1 ? '<0.1' : reservedPercent.toFixed(1)}% reserved by work in progress`
-      : 'No quota currently reserved';
+    const reservationLabel = liveUsageAvailable
+      ? managedTokens.reserved > 0
+        ? `${reservedPercent < 0.1 ? '<0.1' : reservedPercent.toFixed(1)}% reserved by work in progress`
+        : 'No quota currently reserved'
+      : 'Reservations unavailable';
     const formatWeightedTokens = (value: number): string => new Intl.NumberFormat(
       undefined,
       { notation: 'compact', maximumFractionDigits: 1 },
@@ -376,9 +383,17 @@ export class FounderSettingsPanel implements vscode.Disposable {
     const quotaLabel = managedTokens.cap > 0
       ? `${formatWeightedTokens(managedTokens.cap)} weighted tokens/week`
       : 'Managed quota';
-    const remainingLabel = managedTokens.cap > 0
-      ? `${formatWeightedTokens(managedTokens.remaining)} remaining (${remainingPercent.toFixed(0)}%)`
-      : `${remainingPercent.toFixed(0)}% available`;
+    const usageHeadline = liveUsageAvailable
+      ? `${usagePercent.toFixed(0)}% used`
+      : 'Usage unavailable';
+    const remainingLabel = liveUsageAvailable
+      ? managedTokens.cap > 0
+        ? `${formatWeightedTokens(managedTokens.remaining)} remaining (${remainingPercent.toFixed(0)}%)`
+        : `${remainingPercent.toFixed(0)}% available`
+      : 'Remaining allowance unavailable';
+    const usageProgress = liveUsageAvailable
+      ? `<progress class="progress" aria-label="${escapeHtml(planLabel)} quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>`
+      : '<div class="progress unavailable" role="status" aria-label="Live managed usage unavailable"></div>';
 
     const modeButtons = FOUNDER_WORKSPACE_MODES.map(
       (candidate) => `
@@ -548,6 +563,7 @@ export class FounderSettingsPanel implements vscode.Disposable {
     .progress { width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 3px; background: var(--surface-hover); }
     .progress::-webkit-progress-bar { background: var(--surface-hover); }
     .progress::-webkit-progress-value { background: var(--positive); transition: width 180ms ease-out; }
+    .progress.unavailable { opacity: 0.55; }
     .usage-message { line-height: 1.5; }
     .usage-warning { color: var(--warning); font-size: 11px; font-weight: 600; line-height: 1.45; }
     .profile-row.active { border-color: color-mix(in srgb, var(--positive) 65%, var(--border)); }
@@ -633,8 +649,8 @@ export class FounderSettingsPanel implements vscode.Disposable {
         <p class="section-copy">${escapeHtml(planSummary)} Personal API keys and local models remain separate.</p>
         <div class="usage-card">
           <div class="usage-head"><strong>${escapeHtml(planLabel)}</strong><span>${escapeHtml([planPrice, entitlementStatus].filter(Boolean).join(' | '))}</span></div>
-          <div class="usage-values"><strong>${usagePercent.toFixed(0)}% used</strong><span>${escapeHtml(quotaLabel)}</span></div>
-          <progress class="progress" aria-label="${escapeHtml(planLabel)} quota usage" max="100" value="${usagePercent.toFixed(2)}">${usagePercent.toFixed(0)}%</progress>
+          <div class="usage-values"><strong>${escapeHtml(usageHeadline)}</strong><span>${escapeHtml(quotaLabel)}</span></div>
+          ${usageProgress}
           <div class="usage-values"><span>${escapeHtml(remainingLabel)}</span><span>${escapeHtml(reservationLabel)}</span></div>
           <div class="usage-values"><span>${escapeHtml(renewalLabel)}</span><span>Personal keys and local AI stay outside this quota</span></div>
           <div class="usage-values"><span>${entitlement.features.coordination ? 'Agent coordination' : 'Focused agent'}</span><span>${entitlement.features.remoteControl ? 'Remote control included' : 'Remote control on Builder'}</span></div>
