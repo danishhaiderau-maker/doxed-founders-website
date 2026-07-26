@@ -3,9 +3,12 @@ import math
 
 from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
+    RESEARCH_FEATURE_SCHEMA_VERSION,
     atr_percentile,
+    directional_movement_snapshot,
     normalize_adx,
     normalize_market_indicators,
+    volume_percentile,
 )
 
 
@@ -51,8 +54,22 @@ def run():
         candles=expanding,
     )
     check("normalization version stamped", payload["indicator_normalization_version"] == INDICATOR_NORMALIZATION_VERSION)
+    check("research feature schema stamped", payload["research_feature_schema_version"] == RESEARCH_FEATURE_SCHEMA_VERSION)
     check("combined payload has ADX", payload["adx"] == 31.0)
     check("combined payload has volatility", payload["volatility_percentile"] is not None)
+    directional = [
+        [i * 60_000, 100 + i - 0.2, 100 + i + 0.8, 100 + i - 0.7, 100 + i, 10 + i]
+        for i in range(80)
+    ]
+    dmi = directional_movement_snapshot(directional)
+    volume = volume_percentile(directional)
+    check("plus DI collected", dmi["plus_di"] is not None)
+    check("minus DI collected", dmi["minus_di"] is not None)
+    check("DI separation collected", dmi["di_separation"] is not None)
+    check("ADX slope collected", dmi["adx_slope_3"] is not None)
+    check("DMI is truthfully Wilder-smoothed", dmi["dmi_source"] == "wilder_dmi_14")
+    check("DMI period is explicit", dmi["dmi_period"] == 14)
+    check("volume percentile collected", volume["volume_percentile"] == 100.0)
     print(f"PASS: {passed} normalized indicator checks")
 
 

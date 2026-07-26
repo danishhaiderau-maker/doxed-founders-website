@@ -57,6 +57,17 @@ assert.match(common, /Get-FileLockOwnerProcessIdsFast/);
 assert.match(common, /Get-ProcessIdsByExecutableNameFast/);
 assert.match(common, /\$MaxStartSkewMinutes/);
 assert.match(common, /Test-TunnelConnectorPresent/);
+assert.match(common, /System\.Net\.Http\.HttpClient/);
+assert.match(common, /\$client\.CancelPendingRequests\(\)/);
+assert.match(common, /\$task\.IsCompleted/);
+assert.doesNotMatch(
+  common.slice(
+    common.indexOf("function Test-TunnelHttpSmart"),
+    common.indexOf("function Test-TunnelConnectorPresent"),
+  ),
+  /HttpWebRequest|\$req\.GetResponse\(\)|\$req\.Abort\(\)/,
+  "bridge tunnel probe must never use an unbounded synchronous response wait",
+);
 assert.match(common, /Set-Content -LiteralPath \$cloudflaredPidFile/);
 assert.match(common, /-PassThru/);
 

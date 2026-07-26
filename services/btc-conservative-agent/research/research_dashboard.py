@@ -1112,6 +1112,52 @@ def _typeb_payload():
     }
 
 
+def _typeb_research_v2_payload():
+    rep = _read_report("type_b_research_v2_report.json")
+    generated_at = rep.get("generated_at")
+    stale_age_sec = None
+    if generated_at:
+        try:
+            generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            if generated_dt.tzinfo is None:
+                generated_dt = generated_dt.replace(tzinfo=timezone.utc)
+            stale_age_sec = max(
+                0,
+                int((datetime.now(timezone.utc) - generated_dt.astimezone(timezone.utc)).total_seconds()),
+            )
+        except (TypeError, ValueError):
+            stale_age_sec = None
+    return {
+        "schema": rep.get("schema") or "type_b_research_v2_report_v1",
+        "collection_id": rep.get("collection_id") or "TYPE_B_RESEARCH_V2",
+        "generated_at": generated_at,
+        "analyzer_sync_id": rep.get("analyzer_sync_id"),
+        "expected_bot_version": rep.get("expected_bot_version"),
+        "error": rep.get("error"),
+        "stale_age_sec": stale_age_sec,
+        "stale": bool(stale_age_sec is None or stale_age_sec > 3600),
+        "independent_opportunities": int(rep.get("independent_opportunities") or 0),
+        "valid_holdout_opportunities": int(rep.get("valid_holdout_opportunities") or 0),
+        "completed_opportunities": int(rep.get("completed_opportunities") or 0),
+        "filled_opportunities": int(rep.get("filled_opportunities") or 0),
+        "type_b_outcomes": int(rep.get("type_b_outcomes") or 0),
+        "benchmark_net_pnl_usd": float(
+            rep.get("benchmark_net_pnl_usd", rep.get("net_pnl_usd")) or 0.0
+        ),
+        "net_pnl_usd": float(rep.get("net_pnl_usd") or 0.0),
+        "modes_observed": rep.get("modes_observed") or {},
+        "feature_coverage": rep.get("feature_coverage") or {},
+        "rolling_holdout": rep.get("rolling_holdout") or {},
+        "readiness": rep.get("readiness") or "COLLECTING",
+        "execution_policy": rep.get("execution_policy") or "ADVISORY_ONLY_NEVER_AUTO_APPLY",
+        "recent_opportunities": rep.get("recent_opportunities") or [],
+        "usage_note": rep.get("usage_note") or (
+            "One shared market opportunity equals one sample. Paper, live and shadow "
+            "are audit modes, never separate research samples."
+        ),
+    }
+
+
 def _chase_bucket_stats_from_trades(rows):
     order = ["0", "1", "2", "3", "4", "5+"]
     buckets = {k: {"trades": 0, "wins": 0, "sum_pnl_usd": 0.0, "win_rate_pct": 0.0, "ev_usd": 0.0, "avg_hold_min": None} for k in order}
@@ -1502,6 +1548,7 @@ def api_summary():
     real = _read_json("real_edge_summary.json")
     historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
     paused_shadow = _read_json("paused_shadow_research_report.json")
+    typeb_research_v2 = _typeb_research_v2_payload()
     retention = _read_json(RETENTION_STATUS_FILE)
     stale_meta = _summary_stale_meta(compact)
     p = dict(compact.get("performance") or {})
@@ -1534,6 +1581,7 @@ def api_summary():
         "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
         "paused_shadow_cohort": paused_shadow,
+        "type_b_research_v2": typeb_research_v2,
         "retention": retention,
     })
 
@@ -1606,6 +1654,11 @@ def api_spread_performance():
 @app.route("/api/typeb")
 def api_typeb():
     return jsonify(_typeb_payload())
+
+
+@app.route("/api/typeb-research-v2")
+def api_typeb_research_v2():
+    return jsonify(_typeb_research_v2_payload())
 
 
 @app.route("/api/chase-threshold")
@@ -2290,11 +2343,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <ol class="findings" id="findings-list"></ol>
   </section>
     <section id="sec-lanes">
-    <h2>Lane Laboratory</h2>
-    <p class="note" id="lanes-filter-note">Default: AI lanes + CONTINUOUS benchmark. Historical non-AI lanes stay in CSV; use Show all lanes for legacy COMBO/EDGE/CHASE.</p>
-    <label class="lane-toggle"><input type="checkbox" id="show-all-lanes"/> Show all lanes</label>
-    <p class="note" id="lanes-metrics-note">Executed session = closed paper/live lane fills in the current Fresh Collection. Shadow simulation = counterfactual fills that never reached the exchange and are never relay-eligible. These cohorts are separate and must not be added together.</p>
-    <table><thead><tr><th>Lane</th><th>Approvals</th><th title="Closed paper/live fills in the current Fresh Collection">Executed fills</th><th title="V2 checker-pass counterfactual simulations">Checker-pass sims</th><th title="V2 rejected counterfactual simulations">Reject CF sims</th><th title="Counterfactual blocked orders that later simulated a fill">Shadow filled sims</th><th title="P&amp;L from executed paper/live closes in this Fresh Collection">Executed-session P&amp;L</th><th title="Counterfactual P&amp;L from shadow simulations; never relay-eligible">Shadow-simulation P&amp;L</th><th>EV/approval</th><th title="Deduplicated executed fills across retained history">Historical fills</th><th>Historical P&amp;L</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <h2>Type-B Opportunity Collection</h2>
+    <p class="note" id="lanes-filter-note">One shared direction call is one independent opportunity. Paper, live and shadow are recorded as child audit evidence and never inflate the sample.</p>
+    <div class="kpis" id="opportunity-kpis"></div>
+    <div id="typeb-v2-health" class="empty-state" style="display:none"></div>
+    <table><thead><tr><th>Collection</th><th>Independent</th><th>Completed</th><th>Filled</th><th>Outcome Type B</th><th>Valid features</th><th>Benchmark outcome P&amp;L</th><th>Modes observed</th><th>Readiness</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <h3>Recent independent opportunities</h3>
+    <table><thead><tr><th>Created</th><th>Opportunity</th><th>Dir</th><th>Exact ADX</th><th>ADX bucket</th><th>+DI / -DI</th><th>Volume percentile</th><th>Volume ratio</th><th>Modes</th><th>Lane evidence</th><th>Status</th><th>Outcome</th></tr></thead><tbody id="opportunity-body"></tbody></table>
+    <p class="note">Raw lane verdicts and execution-mode events remain available in the V2 JSON report and JSONL audit stream; they are intentionally not shown as separate performance tiles.</p>
   </section>
     <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
@@ -2609,8 +2665,7 @@ async function loadSummary() {
   const re = d.real_edge || {};
   const hist = d.historical_cohort || {};
   const histPerf = hist.performance || {};
-  const paused = d.paused_shadow_cohort || {};
-  const pausedPerf = paused.overall || {};
+  const v2 = d.type_b_research_v2 || {};
   const retention = d.retention || {};
   const integrity = d.integrity || {};
   const iBanner = document.getElementById('integrity-banner');
@@ -2656,7 +2711,7 @@ async function loadSummary() {
     ['Win Rate', (p.win_rate_pct ?? 'n/a') + '%'],
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
-    ['Paused shadow closed', pausedPerf.closed ?? 0],
+    ['V2 opportunities', v2.independent_opportunities ?? 0],
     ['Storage cleanup', retention.status === 'COMPLETED'
       ? ((retention.rotated_raw_deleted ?? 0) + ' rotations · '
         + (retention.raw_db_rows_deleted ?? 0) + ' raw rows · '
@@ -2675,8 +2730,8 @@ async function loadSummary() {
     const dupes = hist.duplicates_removed ?? 0;
     const raw = hist.raw_rows ?? 0;
     cohortNote.textContent = hist.unique_trades != null
-      ? `Cohorts stay separate: Fresh Collection = current policy; Historical = ${hist.unique_trades} unique executed trades from ${raw} exported rows (${dupes} duplicates removed); Paused Shadow = counterfactual, never relay-eligible.`
-      : 'Cohorts stay separate: Fresh Collection is current policy; Paused Shadow is counterfactual and never relay-eligible. Historical archives have not been imported on this machine.';
+      ? `Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical executed research remains separate: ${hist.unique_trades} unique trades from ${raw} exported rows (${dupes} duplicates removed).`
+      : 'Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical archives have not been imported on this machine.';
   }
 }
 
@@ -2696,33 +2751,54 @@ async function loadFindings() {
 }
 
 async function loadLanes() {
-  const r = await fetch('/api/lanes' + laneQuery());
+  const r = await fetch('/api/typeb-research-v2');
   const d = await r.json();
   const note = document.getElementById('lanes-filter-note');
-  if (note) note.textContent = d.lane_filter_note || note.textContent;
-  document.getElementById('lane-body').innerHTML = (d.lanes||[]).map(row => {
-    let cls = '';
-    if (row.pathway_status === 'SHADOW_COLLECTING') cls = 'amber';
-    else if (row.retired || (row.pathway_status || '').includes('RETIRED')) cls = 'amber';
-    else if (row.status === 'UNDERPERFORMING') cls = 'red';
-    else if (row.status === 'BEATS BENCHMARK' || row.status === 'PRIMARY_PRODUCTION') cls = 'green';
-    let role = row.pathway_status || (row.retired ? 'RETIRED' : row.status);
-    if (row.lane === 'AI_SCAN' && row.coordinator_note) role = row.coordinator_note;
-    if (row.v2_metrics_note && row.lane && row.lane.includes('A160')) role = row.v2_metrics_note;
-    const atF = row.all_time_fills || 0;
-    const atP = row.all_time_pnl || 0;
-    const sh = row.shadow_filled || 0;
-    const shPnl = row.shadow_pnl || 0;
-    const chk = row.v2_checker_pass_sims || 0;
-    const rej = row.v2_reject_counterfactual_sims || 0;
-    const isScan = row.lane === 'AI_SCAN';
-    const ordN = row.orders_submitted || 0;
-    const paper = isScan ? 0 : ((row.trades || 0) === 0 && ordN ? `0/${ordN}ord` : row.trades);
-    const apprCell = isScan ? `${row.approves ?? 0} appr` : (row.approves ?? 0);
-    const rejCell = isScan ? `R:${row.coordinator_rejects||0} S:${row.coordinator_skipped||0} T:${row.coordinator_timeouts||0}` : (rej || '\u2014');
-    return `<tr class="${cls}"><td>${row.lane}</td><td>${apprCell}</td><td>${paper}</td><td>${isScan ? '\u2014' : (chk || '\u2014')}</td><td>${rejCell}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '\u2014'}</td><td>${atF ? '$'+fmtUsd(atP) : '\u2014'}</td><td title="${role}">${role.length > 48 ? role.slice(0,45)+'\u2026' : role}</td></tr>`;
-  }).join('') || '<tr><td colspan="12">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
-
+  if (note) note.textContent = d.usage_note || note.textContent;
+  const health = document.getElementById('typeb-v2-health');
+  if (health) {
+    const issues = [];
+    if (d.error) issues.push(`Analyzer error: ${d.error}`);
+    if (d.stale) issues.push(`V2 report is stale or missing (${d.stale_age_sec == null ? 'unknown age' : d.stale_age_sec + 's old'}).`);
+    if (d.analyzer_sync_id) issues.push(`Analyzer sync: ${d.analyzer_sync_id}`);
+    if (d.expected_bot_version) issues.push(`Expected bot: ${d.expected_bot_version}`);
+    health.style.display = issues.length ? 'block' : 'none';
+    health.textContent = issues.join(' \u00b7 ');
+  }
+  const holdout = d.rolling_holdout || {};
+  document.getElementById('opportunity-kpis').innerHTML = [
+    ['Independent opportunities', d.independent_opportunities || 0],
+    ['Completed', d.completed_opportunities || 0],
+    ['Type-B outcomes', d.type_b_outcomes || 0],
+    ['Rolling windows', holdout.windows_completed || 0],
+    ['Readiness', d.readiness || 'COLLECTING'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const modeText = Object.entries(d.modes_observed || {}).map(([mode,n]) => `${mode}: ${n}`).join(' \u00b7 ') || '\u2014';
+  const readyClass = d.readiness === 'RESEARCH_VALIDATED' ? 'green' : 'amber';
+  document.getElementById('lane-body').innerHTML =
+    `<tr class="${readyClass}"><td>${d.collection_id || 'TYPE_B_RESEARCH_V2'}</td>`
+    + `<td>${d.independent_opportunities || 0}</td><td>${d.completed_opportunities || 0}</td>`
+    + `<td>${d.filled_opportunities || 0}</td><td>${d.type_b_outcomes || 0}</td>`
+    + `<td>${d.valid_holdout_opportunities || 0}</td><td>$${fmtUsd(d.benchmark_net_pnl_usd || 0)}</td>`
+    + `<td>${modeText}</td><td>${d.readiness || 'COLLECTING'}</td></tr>`;
+  document.getElementById('opportunity-body').innerHTML = (d.recent_opportunities || []).slice().reverse().slice(0, 50).map(row => {
+    const f = row.entry_features || {};
+    const fp = row.entry_fingerprint || {};
+    const out = row.preferred_outcome || {};
+    const lanes = Object.keys(row.lanes || {}).length;
+    const created = row.created_ts ? new Date(row.created_ts).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : '\u2014';
+    const adx = f.adx == null ? '\u2014' : Number(f.adx).toFixed(2);
+    const plusDi = f.plus_di == null ? '\u2014' : Number(f.plus_di).toFixed(2);
+    const minusDi = f.minus_di == null ? '\u2014' : Number(f.minus_di).toFixed(2);
+    const volp = f.volume_percentile == null ? '\u2014' : Number(f.volume_percentile).toFixed(1) + '%';
+    const volr = f.volume_ratio == null ? '\u2014' : Number(f.volume_ratio).toFixed(2);
+    const pnl = out.net_pnl_usd == null ? '' : ` \u00b7 $${fmtUsd(out.net_pnl_usd)}`;
+    return `<tr><td>${created}</td><td>${row.opportunity_id || ''}</td><td>${row.direction || ''}</td>`
+      + `<td>${adx}</td><td>${fp.adx_5 || f.adx_bucket_5 || 'ADX_MISSING'}</td>`
+      + `<td>${plusDi} / ${minusDi}</td><td>${volp}</td><td>${volr}</td>`
+      + `<td>${(row.modes || []).join(', ') || '\u2014'}</td><td>${lanes}</td>`
+      + `<td>${row.status || 'COLLECTING'}</td><td>${row.outcome_label || '\u2014'}${pnl}</td></tr>`;
+  }).join('') || '<tr><td colspan="12">New V2 collection is empty. It starts after the clean reset and bot restart.</td></tr>';
 }
 async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());

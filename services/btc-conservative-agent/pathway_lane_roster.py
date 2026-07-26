@@ -1,5 +1,5 @@
 """
-Quality pathway roster -- v14-paused-shadow-executor-watchdog-adx-v3 (2026-07-21).
+Quality pathway roster -- v15-typeb-opportunity-v2 (2026-07-26).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)

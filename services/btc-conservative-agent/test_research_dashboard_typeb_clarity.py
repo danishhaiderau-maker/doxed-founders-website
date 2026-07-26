@@ -14,8 +14,16 @@ DASHBOARD_SOURCE = ROOT / "research" / "research_dashboard.py"
 
 def main() -> None:
     source = DASHBOARD_SOURCE.read_text(encoding="utf-8")
-    assert "Executed-session P&amp;L" in source
-    assert "Shadow-simulation P&amp;L" in source
+    assert "Type-B Opportunity Collection" in source
+    assert "One shared direction call is one independent opportunity" in source
+    assert 'id="opportunity-body"' in source
+    assert "Paper, live and shadow are recorded as child audit evidence" in source
+    assert "Benchmark outcome P&amp;L" in source
+    assert 'id="typeb-v2-health"' in source
+    assert '"stale_age_sec": stale_age_sec' in source
+    assert '"error": rep.get("error")' in source
+    assert "Executed-session P&amp;L" not in source
+    assert "Shadow-simulation P&amp;L" not in source
     assert "<th>Shadow Sims</th>" not in source
     assert "function fmtAdxBucket" in source
     assert "ADX 18–<30" in source
@@ -59,6 +67,22 @@ def main() -> None:
             (agent_root / "type_b_predictor_report.json").write_text(
                 json.dumps(report), encoding="utf-8"
             )
+            (agent_root / "type_b_research_v2_report.json").write_text(
+                json.dumps({
+                    "schema": "type_b_research_v2_report_v1",
+                    "collection_id": "TYPE_B_RESEARCH_V2",
+                    "independent_opportunities": 12,
+                    "valid_holdout_opportunities": 11,
+                    "completed_opportunities": 8,
+                    "filled_opportunities": 7,
+                    "type_b_outcomes": 3,
+                    "net_pnl_usd": 4.2,
+                    "modes_observed": {"PAPER": 6, "PAUSED_SHADOW": 6},
+                    "readiness": "COLLECTING",
+                    "recent_opportunities": [{"opportunity_id": "scan-v2"}],
+                }),
+                encoding="utf-8",
+            )
             research_dashboard.ROOT = agent_root
             research_dashboard.DATA_ROOT = agent_root
             research_dashboard._API_RESPONSE_CACHE.clear()
@@ -69,6 +93,11 @@ def main() -> None:
             assert payload["separators"][0]["delta_abs"] == 4.2
             assert payload["rules"][0]["rule"] == "ADX 18–<30"
             assert payload["predictor_readiness"]["total_trades"] == 150
+            v2_payload = research_dashboard._typeb_research_v2_payload()
+            assert v2_payload["independent_opportunities"] == 12
+            assert v2_payload["completed_opportunities"] == 8
+            assert v2_payload["modes_observed"]["PAUSED_SHADOW"] == 6
+            assert v2_payload["recent_opportunities"][0]["opportunity_id"] == "scan-v2"
     finally:
         research_dashboard._API_RESPONSE_CACHE.clear()
         research_dashboard.ROOT = original_root

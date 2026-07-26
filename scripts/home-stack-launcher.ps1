@@ -17,6 +17,13 @@ if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
+# Load HttpClient before the single-threaded listener accepts requests. On this
+# Windows host the first Add-Type can take several seconds under disk pressure;
+# paying that startup cost here keeps the first /status request cancellation-
+# bounded by the explicit probe deadlines below.
+try { Add-Type -AssemblyName System.Net.Http -ErrorAction Stop } catch {
+  Write-Warning "System.Net.Http preload failed: $($_.Exception.Message)"
+}
 $prefix = "http://127.0.0.1:$Port/"
 
 function Import-BotAdminToken {
