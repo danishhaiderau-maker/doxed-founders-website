@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -133,9 +136,17 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(installerSource, /FOUNDER_WORKBENCH_PATCH/);
     assert.match(installerSource, /founder-workbench\.desktop\.main\.js/);
     assert.match(installerSource, /InstallFounderWorkbenchPatch/);
+    assert.match(installerSource, /FOUNDER_WORKBENCH_STYLES_PATCH/);
+    assert.match(installerSource, /founder-workbench\.desktop\.main\.css/);
+    assert.match(installerSource, /InstallFounderWorkbenchStylesPatch/);
+    assert.match(installerSource, /Founder IDE scoped stylesheet installed\./);
     assert.match(installerSource, /AfterInstall: FinalizeFounderInstall/);
     assert.match(source, /\$workbenchPatch = Join-Path \$staging/);
     assert.match(source, /FOUNDER_WORKBENCH_PATCH=/);
+    assert.match(source, /\$workbenchStylesPatch = Join-Path \$staging/);
+    assert.match(source, /FOUNDER_WORKBENCH_STYLES_PATCH=/);
+    assert.match(source, /FOUNDER_SCOPED_UI_START/);
+    assert.match(source, /\.void-scope \.void-flex/);
   });
 
   it('ships the Founder workbench with its synchronized integrity manifest', () => {
@@ -149,7 +160,12 @@ describe('Founder IDE one-app installer orchestrator', () => {
       integritySync,
       /vs\/workbench\/workbench\.desktop\.main\.js/,
     );
+    assert.match(
+      integritySync,
+      /vs\/workbench\/workbench\.desktop\.main\.css/,
+    );
     assert.match(source, /sync-founder-integrity\.py/);
+    assert.match(source, /--workbench-css \$workbenchStyles/);
     assert.match(source, /\$productJsonPatch/);
     assert.match(source, /FOUNDER_PRODUCT_PATCH=/);
     assert.match(installerSource, /FOUNDER_PRODUCT_PATCH/);
@@ -158,6 +174,53 @@ describe('Founder IDE one-app installer orchestrator', () => {
       installerSource,
       /Founder IDE integrity manifest installed\./,
     );
+  });
+
+  it('synchronizes both Founder JavaScript and stylesheet checksums', () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-integrity-'));
+    try {
+      const workbench = path.join(temp, 'workbench.desktop.main.js');
+      const stylesheet = path.join(temp, 'workbench.desktop.main.css');
+      const product = path.join(temp, 'product.json');
+      const output = path.join(temp, 'output.json');
+      fs.writeFileSync(workbench, 'founder-workbench');
+      fs.writeFileSync(stylesheet, '.void-scope .void-flex{}');
+      fs.writeFileSync(product, JSON.stringify({
+        checksums: {
+          'vs/workbench/workbench.desktop.main.js': 'old-js',
+          'vs/workbench/workbench.desktop.main.css': 'old-css',
+        },
+      }));
+
+      const result = spawnSync(
+        process.env.PYTHON || 'python',
+        [
+          path.join(root, '..', 'scripts', 'sync-founder-integrity.py'),
+          '--workbench', workbench,
+          '--workbench-css', stylesheet,
+          '--product', product,
+          '--output', output,
+        ],
+        { encoding: 'utf8' },
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const synchronized = JSON.parse(fs.readFileSync(output, 'utf8'));
+      const digest = (value) => crypto
+        .createHash('sha256')
+        .update(value)
+        .digest('base64')
+        .replace(/=+$/, '');
+      assert.equal(
+        synchronized.checksums['vs/workbench/workbench.desktop.main.js'],
+        digest('founder-workbench'),
+      );
+      assert.equal(
+        synchronized.checksums['vs/workbench/workbench.desktop.main.css'],
+        digest('.void-scope .void-flex{}'),
+      );
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it('applies the compiled Founder navigation after the inner installer', () => {

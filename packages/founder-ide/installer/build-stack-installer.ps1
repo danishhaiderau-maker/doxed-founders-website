@@ -189,6 +189,52 @@ $workbenchBundle = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.
 if (-not (Test-Path $workbenchBundle)) {
     throw "Founder IDE workbench bundle not found at $workbenchBundle"
 }
+$workbenchStyles = Join-Path $ideRoot "resources\app\out\vs\workbench\workbench.desktop.main.css"
+$founderStyles = Join-Path $vscodeSource "src\vs\workbench\contrib\void\browser\react\src2\styles.css"
+if (-not (Test-Path $workbenchStyles)) {
+    throw "Founder IDE workbench stylesheet not found at $workbenchStyles"
+}
+if (-not (Test-Path $founderStyles)) {
+    throw "Founder scoped stylesheet not found at $founderStyles. Rebuild the Void React overlay before packaging."
+}
+$founderStylesText = [System.IO.File]::ReadAllText($founderStyles)
+$expectedFounderStyles = @(
+    ".void-scope .void-flex",
+    ".void-scope .void-hidden",
+    ".void-scope .void-h-7"
+)
+if ($expectedFounderStyles.Where({ -not $founderStylesText.Contains($_) }).Count -gt 0) {
+    throw "Founder scoped stylesheet is stale or incomplete: $founderStyles"
+}
+$founderStylesStart = "/* FOUNDER_SCOPED_UI_START */"
+$founderStylesEnd = "/* FOUNDER_SCOPED_UI_END */"
+$workbenchStylesText = [System.IO.File]::ReadAllText($workbenchStyles)
+$existingFounderStylesStart = $workbenchStylesText.IndexOf($founderStylesStart)
+if ($existingFounderStylesStart -ge 0) {
+    $existingFounderStylesEnd = $workbenchStylesText.IndexOf(
+        $founderStylesEnd,
+        $existingFounderStylesStart
+    )
+    if ($existingFounderStylesEnd -lt 0) {
+        throw "Founder scoped stylesheet marker is incomplete in $workbenchStyles"
+    }
+    $workbenchStylesText = $workbenchStylesText.Remove(
+        $existingFounderStylesStart,
+        ($existingFounderStylesEnd + $founderStylesEnd.Length) - $existingFounderStylesStart
+    ).TrimEnd()
+}
+$mergedWorkbenchStyles = @(
+    $workbenchStylesText.TrimEnd()
+    $founderStylesStart
+    $founderStylesText.Trim()
+    $founderStylesEnd
+) -join [Environment]::NewLine
+[System.IO.File]::WriteAllText(
+    $workbenchStyles,
+    $mergedWorkbenchStyles + [Environment]::NewLine,
+    (New-Object System.Text.UTF8Encoding($false))
+)
+Write-Host "[stack]   Founder scoped workbench stylesheet verified"
 $electronMainBundle = Join-Path $ideRoot "resources\app\out\main.js"
 if (-not (Test-Path $electronMainBundle)) {
     throw "Founder IDE Electron main bundle not found at $electronMainBundle"
@@ -423,6 +469,15 @@ if (-not (Test-Path $workbenchPatch) -or (Get-Item $workbenchPatch).Length -lt 1
 }
 Write-Host "[stack]   staged Founder workbench correction -> $workbenchPatch"
 
+$workbenchStylesPatch = Join-Path $staging "founder-workbench.desktop.main.css"
+Copy-Item $workbenchStyles $workbenchStylesPatch -Force
+$workbenchStylesPatchText = [System.IO.File]::ReadAllText($workbenchStylesPatch)
+if (-not $workbenchStylesPatchText.Contains($founderStylesStart) -or
+    -not $workbenchStylesPatchText.Contains(".void-scope .void-flex")) {
+    throw "Founder IDE scoped workbench stylesheet was not staged: $workbenchStylesPatch"
+}
+Write-Host "[stack]   staged Founder scoped stylesheet -> $workbenchStylesPatch"
+
 $productJson = Join-Path $ideAppRoot "product.json"
 $productJsonPatch = Join-Path $staging "founder-product.json"
 $integrityScript = Join-Path $MonorepoRoot "packages\founder-ide\scripts\sync-founder-integrity.py"
@@ -431,6 +486,7 @@ if (-not (Test-Path $integrityScript)) {
 }
 python $integrityScript `
     --workbench $workbenchBundle `
+    --workbench-css $workbenchStyles `
     --product $productJson `
     --output $productJson
 if ($LASTEXITCODE -ne 0) {
@@ -614,6 +670,7 @@ if (-not (Test-Path $iss)) { throw "founder-stack.iss not found." }
 # backslash paths produce "Unknown filename prefix" compile errors.
 $ideSetupAbs = ((Resolve-Path $ideSetup).Path) -replace '\\','/'
 $workbenchPatchAbs = ((Resolve-Path $workbenchPatch).Path) -replace '\\','/'
+$workbenchStylesPatchAbs = ((Resolve-Path $workbenchStylesPatch).Path) -replace '\\','/'
 $productJsonPatchAbs = ((Resolve-Path $productJsonPatch).Path) -replace '\\','/'
 $founderHubPatchAbs = ((Resolve-Path $founderHubPatch).Path) -replace '\\','/'
 
@@ -624,6 +681,7 @@ $founderHubPatchAbs = ((Resolve-Path $founderHubPatch).Path) -replace '\\','/'
     "/DFOUNDER_INSTALLER_SUFFIX=$installerSuffix" `
     "/DFOUNDER_IDE_SETUP=`"$ideSetupAbs`"" `
     "/DFOUNDER_WORKBENCH_PATCH=`"$workbenchPatchAbs`"" `
+    "/DFOUNDER_WORKBENCH_STYLES_PATCH=`"$workbenchStylesPatchAbs`"" `
     "/DFOUNDER_PRODUCT_PATCH=`"$productJsonPatchAbs`"" `
     "/DFOUNDER_HUB_PATCH=`"$founderHubPatchAbs`"" `
     $iss

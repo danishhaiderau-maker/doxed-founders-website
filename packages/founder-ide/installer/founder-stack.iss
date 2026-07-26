@@ -59,6 +59,10 @@
   #define FOUNDER_WORKBENCH_PATCH "..\..\..\staging\founder-workbench.desktop.main.js"
 #endif
 
+#ifndef FOUNDER_WORKBENCH_STYLES_PATCH
+  #define FOUNDER_WORKBENCH_STYLES_PATCH "..\..\..\staging\founder-workbench.desktop.main.css"
+#endif
+
 #ifndef FOUNDER_PRODUCT_PATCH
   #define FOUNDER_PRODUCT_PATCH "..\..\..\staging\founder-product.json"
 #endif
@@ -137,6 +141,7 @@ Source: "{#FOUNDER_IDE_SETUP}";  DestDir: "{tmp}"; Flags: deleteafterinstall noc
 ; The bootstrapper overlays the source-controlled, fail-closed workbench after
 ; the inner installer finishes so a cache cannot silently resurrect that bug.
 Source: "{#FOUNDER_WORKBENCH_PATCH}"; DestDir: "{tmp}"; DestName: "founder-workbench.desktop.main.js"; Flags: deleteafterinstall; Components: core
+Source: "{#FOUNDER_WORKBENCH_STYLES_PATCH}"; DestDir: "{tmp}"; DestName: "founder-workbench.desktop.main.css"; Flags: deleteafterinstall; Components: core
 Source: "{#FOUNDER_PRODUCT_PATCH}"; DestDir: "{tmp}"; DestName: "founder-product.json"; Flags: deleteafterinstall; Components: core
 Source: "{#FOUNDER_HUB_PATCH}"; DestDir: "{tmp}"; DestName: "founder-hub.js"; Flags: deleteafterinstall; Components: core
 ; Phase 7 — Private-mode binaries. Only staged when the build actually has
@@ -404,6 +409,24 @@ begin
   Log('Founder IDE integrity manifest installed.');
 end;
 
+procedure InstallFounderWorkbenchStylesPatch;
+var
+  SourcePath: string;
+  DestinationPath: string;
+begin
+  SourcePath := ExpandConstant('{tmp}\founder-workbench.desktop.main.css');
+  DestinationPath := ExpandConstant(
+    '{localappdata}\Programs\Founder IDE\resources\app\out\vs\workbench\workbench.desktop.main.css'
+  );
+  if not FileExists(SourcePath) then begin
+    RaiseException('Founder IDE scoped stylesheet is missing: ' + SourcePath);
+  end;
+  if not CopyFile(SourcePath, DestinationPath, False) then begin
+    RaiseException('Could not install the Founder IDE scoped stylesheet: ' + DestinationPath);
+  end;
+  Log('Founder IDE scoped stylesheet installed.');
+end;
+
 procedure InstallFounderHubPatch;
 var
   SourcePath: string;
@@ -490,6 +513,7 @@ end;
 procedure FinalizeFounderInstall;
 begin
   InstallFounderWorkbenchPatch;
+  InstallFounderWorkbenchStylesPatch;
   InstallFounderProductPatch;
   InstallFounderHubPatch;
   InstallFounderShortcuts;

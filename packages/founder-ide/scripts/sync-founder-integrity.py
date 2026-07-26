@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize the packaged workbench checksum in product.json."""
+"""Synchronize Founder-owned packaged workbench checksums in product.json."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 WORKBENCH_CHECKSUM_KEY = "vs/workbench/workbench.desktop.main.js"
+WORKBENCH_CSS_CHECKSUM_KEY = "vs/workbench/workbench.desktop.main.css"
 
 
 def sha256_base64(path: Path) -> str:
@@ -21,12 +22,15 @@ def sha256_base64(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workbench", required=True, type=Path)
+    parser.add_argument("--workbench-css", required=True, type=Path)
     parser.add_argument("--product", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
     if not args.workbench.is_file():
         raise SystemExit(f"Workbench bundle not found: {args.workbench}")
+    if not args.workbench_css.is_file():
+        raise SystemExit(f"Workbench stylesheet not found: {args.workbench_css}")
     if not args.product.is_file():
         raise SystemExit(f"Product manifest not found: {args.product}")
 
@@ -34,12 +38,19 @@ def main() -> int:
     checksums = product.get("checksums")
     if not isinstance(checksums, dict):
         raise SystemExit("Product manifest does not contain a checksums object")
-    if WORKBENCH_CHECKSUM_KEY not in checksums:
+    founder_artifacts = {
+        WORKBENCH_CHECKSUM_KEY: args.workbench,
+        WORKBENCH_CSS_CHECKSUM_KEY: args.workbench_css,
+    }
+    missing_keys = [key for key in founder_artifacts if key not in checksums]
+    if missing_keys:
         raise SystemExit(
-            f"Product manifest does not own {WORKBENCH_CHECKSUM_KEY}"
+            "Product manifest does not own required checksum keys: "
+            + ", ".join(missing_keys)
         )
 
-    checksums[WORKBENCH_CHECKSUM_KEY] = sha256_base64(args.workbench)
+    for key, artifact in founder_artifacts.items():
+        checksums[key] = sha256_base64(artifact)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(product, ensure_ascii=False, indent=2) + "\n",
@@ -47,7 +58,7 @@ def main() -> int:
     )
     print(
         "Founder IDE integrity manifest synchronized: "
-        f"{WORKBENCH_CHECKSUM_KEY}"
+        + ", ".join(founder_artifacts)
     )
     return 0
 
