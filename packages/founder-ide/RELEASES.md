@@ -427,9 +427,9 @@ machine — missing `jq`, `7-Zip`, `Rustup`, `Inno Setup`; Python 3.14 instead
 of the required 3.11). Only an interim "Lite" zip (Founder Node + extension
 `.vsix` + bootstrap script) was ever shipped.
 
-The 0.8.0 deliverables and VSCodium-specific build scripts have been
-**archived under `packages/founder-ide/legacy/`** (not deleted). See
-`legacy/README.md` for the archive manifest and the rollback procedure.
+The 0.8.0 deliverables and VSCodium-specific build scripts were removed from
+the active tree after the one-app Void release superseded them. Their exact
+content remains recoverable from Git history if a historical audit is needed.
 
-The Vault fork (0.9.0) inherits a complete AI-native UX instead of building
+The Void fork (0.9.0) inherits a complete AI-native UX instead of building
 one on top of VSCodium, so the VSCodium toolchain is no longer required.

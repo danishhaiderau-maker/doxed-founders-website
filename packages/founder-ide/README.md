@@ -43,10 +43,6 @@ packages/founder-ide/
 ├── installer/
 │   ├── founder-stack.iss                  # mode-aware one-app bootstrapper
 │   └── build-stack-installer.ps1          # orchestrator
-├── legacy/                                # ARCHIVED 0.8.0 VSCodium material
-│   ├── dist/Founder-Stack-Lite-0.8.0.zip
-│   ├── staging/                           # 0.8.0 release notes + lite installer
-│   └── build-vscodium/                    # legacy VSCodium build scripts
 └── config/
     └── build-env.sh                       # branding env vars
 ```
@@ -93,7 +89,7 @@ Pinned by `packages/founder-ide/upstream/overlay/MANIFEST.json` and enforced by
 - **Python 3.12** (NOT 3.13+ — node-gyp has no wheel for 3.13/3.14)
 - **Inno Setup 6** (preinstalled on `windows-2022` runners at
   `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`)
-- Git, jq, 7-Zip (only for the legacy VSCodium build path — see `legacy/`)
+- Git, jq, 7-Zip
 
 ~140 GB free disk. Clean CI build: 70–110 min (Electron download dominates).
 Warm-cache CI build: 30–45 min.

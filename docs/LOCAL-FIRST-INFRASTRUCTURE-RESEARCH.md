@@ -247,14 +247,17 @@ This means:
 
 ## 5. The All-in-One Package — Can We Bundle This Into Founder Stack?
 
-### Current Founder Stack Lite
+### Historical Founder Stack Lite (0.8.0)
 
-The existing `install-founder-stack-lite.ps1` bundles two components:
+The retired `install-founder-stack-lite.ps1` bundled two components:
 
 1. **Founder Node 0.8.0** — Electron tray app, local vault, metadata sync
 2. **Founder OS Chat extension** (`founder-ide-extension-0.1.0.vsix`) — registers the AI Gateway as a chat provider in VS Code / Cursor / VSCodium
 
-The full `Founder-Stack-Setup-<v>.exe` (Inno Setup) will additionally bundle a rebranded VSCodium fork ("Founder IDE"). See `packages/founder-ide/RELEASES.md`.
+The current one-app Founder IDE release uses the Void overlay and embedded
+Founder Node relay instead. The retired bootstrap and VSCodium build scripts
+remain recoverable from Git history, but are intentionally absent from the
+active source tree. See `packages/founder-ide/RELEASES.md`.
 
 ### What to add for Private mode
 

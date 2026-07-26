@@ -21,8 +21,6 @@ packages/founder-ide/installer/dist/
 packages/founder-ide/installer/final/
 packages/founder-ide/installer/staging/
 packages/founder-ide/dist/
-packages/founder-ide/staging/*.exe
-packages/founder-ide/staging/*.sha256
 .tools/
 apps/mobile-android/android/.gradle/
 apps/mobile-android/android/app/build/
