@@ -6,7 +6,15 @@
  * Pure / testable: takes the inputs, returns one of the 6 canonical states
  * + the icon/tooltip the status bar should display.
  */
-import type { PairingState } from '@dcf/founder-vault';
+// Keep the standalone extension build independent of private workspace
+// packages while matching the Founder Node pairing-state wire contract.
+export type PairingState =
+  | 'not_paired'
+  | 'pairing'
+  | 'paired_gateway_unreachable'
+  | 'connected'
+  | 'token_expired'
+  | 'revoked';
 
 export interface IdePairingInputs {
   /** True when the user is in the device-code flow (signIn command in flight). */

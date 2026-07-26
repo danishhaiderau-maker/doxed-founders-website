@@ -29,6 +29,7 @@ function record(
     editedFiles,
     checks: [],
     estimatedTokensAvoided: 0,
+    verification: null,
   };
 }
 
