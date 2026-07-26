@@ -10,6 +10,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
 const scriptPath = path.join(here, 'founder-ide-dev.ps1');
 const gulpfilePath = path.join(repoRoot, 'packages', 'founder-ide', 'build', 'founder-fast-gulpfile.js');
+const overlayManifestPath = path.join(
+  repoRoot,
+  'packages',
+  'founder-ide',
+  'upstream',
+  'overlay',
+  'MANIFEST.json',
+);
 
 test('fast Founder IDE workflow is non-destructive and preserves warm output', () => {
   const script = readFileSync(scriptPath, 'utf8');
@@ -70,9 +78,13 @@ test(
       },
     );
     const status = JSON.parse(stdout);
+    const overlayManifest = JSON.parse(readFileSync(overlayManifestPath, 'utf8'));
 
     assert.equal(status.mode, 'Status');
-    assert.equal(status.overlayFiles, 23);
+    // The cache key covers every manifest-owned file plus the manifest itself,
+    // overlay applier, fast gulpfile, and this workflow script.
+    assert.equal(status.overlayFiles, overlayManifest.files.length + 4);
+    assert.ok(status.overlayFiles >= 24);
     assert.ok(status.extensionFiles > 30);
     assert.match(status.overlayHash, /^[a-f0-9]{64}$/);
     assert.match(status.extensionHash, /^[a-f0-9]{64}$/);

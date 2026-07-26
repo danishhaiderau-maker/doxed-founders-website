@@ -43,6 +43,14 @@ import {
   type PersonalAiProfileSecret,
   type PersonalAiProfileStore,
 } from './personal-ai-profiles';
+import {
+  evaluateFounderCompletionEvidence,
+  founderToolsForMode,
+  founderWorkModeInstruction,
+  renderFounderCompletionReceipt,
+  type FounderCompletionEvidenceReceipt,
+} from './completion-evidence';
+import { readFounderWorkMode } from './founder-agent-mode';
 
 export interface ParticipantDeps {
   creds?: FounderOsCredentials;
@@ -78,12 +86,19 @@ export interface ParticipantDeps {
 
 const MAX_TOOL_TURNS = 8;
 
-function availableFounderTools(): readonly vscode.LanguageModelToolInformation[] {
+function availableFounderTools(
+  mode: ReturnType<typeof readFounderWorkMode>,
+): readonly vscode.LanguageModelToolInformation[] {
   const tools = (vscode.lm as unknown as {
     tools?: readonly vscode.LanguageModelToolInformation[];
   }).tools;
+  const allowedNames = new Set(founderToolsForMode(
+    mode,
+    [...(tools ?? [])].map((tool) => tool.name),
+  ));
   return [...(tools ?? [])]
     .filter((tool) => FOUNDER_TOOL_NAMES.has(tool.name))
+    .filter((tool) => allowedNames.has(tool.name))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -175,6 +190,7 @@ async function handleParticipantRequest(
   const agentMode = normalizeFounderAgentMode(
     vscode.workspace.getConfiguration('founderOs').get<string>('agentMode'),
   );
+  const workMode = readFounderWorkMode();
   const coordinationTaskId = deps.coordination?.begin(
     prompt,
     personalProfile ? `personal:${personalProfile.name}/${personalProfile.model}` : alias.id,
@@ -210,7 +226,11 @@ async function handleParticipantRequest(
         deps.projectContext?.allFileHashes() ?? [],
       ) ?? ''
     : '';
-  const identity = 'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.';
+  const identity = [
+    'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.',
+    founderWorkModeInstruction(workMode),
+    'Do not claim completion based on prose. Founder IDE evaluates locally observed edits and checks and appends the authoritative verification receipt.',
+  ].join(' ');
   const systemMessages = composeFounderPromptMessages({
     identity,
     memory: memoryText,
@@ -240,6 +260,14 @@ async function handleParticipantRequest(
       status: 'reused',
       summary: 'Reused a matching read-only result after relevant context hashes were verified.',
       estimatedTokensAvoided: cached.estimatedTokensAvoided,
+      verification: evaluateFounderCompletionEvidence({
+        mode: workMode,
+        goal: prompt,
+        finalAnswer: cached.text,
+        requestCompleted: true,
+        editedFiles: [],
+        passedChecks: [],
+      }),
     });
     return;
   }
@@ -276,6 +304,8 @@ async function handleParticipantRequest(
   let activityProviderModel: string | null = null;
   let activityEditedFiles: string[] = [];
   let activityChecks: string[] = [];
+  let activityVerification: FounderCompletionEvidenceReceipt | null = null;
+  let providerCompleted = false;
   const providerUsageEvidence: { value?: GatewayProviderUsage } = {};
   let inputCostComparison: GatewayFounderOsMetadata['inputCostComparison'];
   const requestStartedAt = Date.now();
@@ -289,7 +319,7 @@ async function handleParticipantRequest(
     });
   }
   try {
-    const tools = availableFounderTools();
+    const tools = availableFounderTools(workMode);
     let completed = false;
     let usedTools = false;
     let reusableAnswer = '';
@@ -446,10 +476,25 @@ async function handleParticipantRequest(
     if (!completed && !token.isCancellationRequested) {
       stream.markdown('\n\n_Founder OS stopped after the tool-turn safety limit._');
     }
-    ok = completed && !token.isCancellationRequested;
+    providerCompleted = completed && !token.isCancellationRequested;
     activitySummary = finalAnswer;
     activityEditedFiles = [...editedPaths];
     activityChecks = passedChecks.map((check) => check.command);
+    const completionReceipt = evaluateFounderCompletionEvidence({
+      mode: workMode,
+      goal: prompt,
+      finalAnswer,
+      requestCompleted: providerCompleted,
+      editedFiles: activityEditedFiles,
+      passedChecks: activityChecks,
+    });
+    activityVerification = completionReceipt;
+    stream.markdown(renderFounderCompletionReceipt(completionReceipt));
+    ok = providerCompleted && completionReceipt.verdict === 'passed';
+    if (!ok && providerCompleted) {
+      errorMessage = `Verification incomplete: ${completionReceipt.missing.join('; ')}`;
+      activitySummary = errorMessage;
+    }
     if (ok && !usedTools && cacheInput && reusableAnswer) {
       deps.resultCache?.put(cacheInput, reusableAnswer, reusableTokenEstimate);
     }
@@ -483,7 +528,7 @@ async function handleParticipantRequest(
         `\n\n---\n**Founder Auto escalation** | Pro | ${escalationReason.replace('_', ' ')}`,
       );
     }
-    if (ok) {
+    if (providerCompleted) {
       const latencyMs = Date.now() - requestStartedAt;
       const route = personalProfile
         ? personalProfile.kind === 'ollama'
@@ -493,7 +538,7 @@ async function handleParticipantRequest(
       stream.markdown(`\n\n---\n**Founder route** | ${route} | ${latencyMs.toLocaleString()} ms`);
     }
     const providerUsage = providerUsageEvidence.value;
-    if (ok && providerUsage) {
+    if (providerCompleted && providerUsage) {
       const cacheRate = providerUsage.promptTokens > 0
         ? Math.round((providerUsage.cachedInputTokens / providerUsage.promptTokens) * 10_000) / 100
         : 0;
@@ -501,7 +546,7 @@ async function handleParticipantRequest(
         `\n\n**${personalProfile ? 'Provider' : 'DeepSeek'} cache evidence** | ${providerUsage.cachedInputTokens.toLocaleString()} hit | ${providerUsage.uncachedInputTokens.toLocaleString()} miss | ${cacheRate}% hit rate | ${providerUsage.outputTokens.toLocaleString()} output`,
       );
     }
-    if (ok && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
+    if (providerCompleted && inputCostComparison && inputCostComparison.avoidedInputTokens > 0) {
       stream.markdown(
         `\n\n**Estimated input comparison** | ${inputCostComparison.avoidedInputTokens.toLocaleString()} fewer input tokens | $${inputCostComparison.avoidedUsd.toFixed(6)} USD avoided | baseline: same request with full context and uncached ${activityProviderModel ?? 'DeepSeek'} input | ${inputCostComparison.priceVersion}`,
       );
@@ -522,11 +567,14 @@ async function handleParticipantRequest(
       providerModel: activityProviderModel,
       editedFiles: activityEditedFiles,
       checks: activityChecks,
+      verification: activityVerification,
     });
   }
 
   if (!ok && errorMessage) {
-    stream.markdown(`\n\n_Founder OS request failed: ${errorMessage}_`);
+    stream.markdown(providerCompleted
+      ? `\n\n_Founder verification incomplete: ${errorMessage.replace(/^Verification incomplete:\s*/i, '')}_`
+      : `\n\n_Founder OS request failed: ${errorMessage}_`);
   }
 }
 

@@ -146,7 +146,7 @@
     "test:founder-ide:release-evidence": "node --test packages/founder-ide/scripts/verify-release-evidence.spec.mjs",
     "test:founder-ide:dev-workflow": "node --test packages/founder-ide/scripts/founder-ide-dev.spec.mjs",
     "test:founder-ide:overlay": "node --test packages/founder-ide/upstream/overlay/overlay.spec.mjs packages/founder-ide/installer/build-stack-installer.spec.mjs",
-    "test:founder-ide:provider-profiles": "tsx --test packages/founder-ide/scripts/founder-provider-profiles.spec.ts packages/founder-ide/scripts/founder-route-receipt.spec.ts packages/founder-ide/scripts/founder-second-brain.spec.ts packages/founder-ide/scripts/founder-native-skills.spec.ts",
+    "test:founder-ide:provider-profiles": "tsx --test packages/founder-ide/scripts/founder-provider-profiles.spec.ts packages/founder-ide/scripts/founder-route-receipt.spec.ts packages/founder-ide/scripts/founder-second-brain.spec.ts packages/founder-ide/scripts/founder-native-skills.spec.ts packages/founder-ide/scripts/founder-native-completion.spec.ts",
     "test:founder-node:ide-updater": "tsx --test apps/founder-node/test/ide-update-manager.spec.ts",
     "test:founder-ide": "npm run verify:founder-ide:update-manifest && npm run test:founder-ide:manifest && npm run test:founder-ide:release-evidence && npm run test:founder-ide:dev-workflow && npm run test:founder-ide:overlay && npm run test:founder-ide:provider-profiles && npm run test:founder-ide:smoke",
     "dev:founder-ide": "powershell -NoProfile -ExecutionPolicy Bypass -File packages/founder-ide/scripts/founder-ide-dev.ps1 -Mode Workbench",

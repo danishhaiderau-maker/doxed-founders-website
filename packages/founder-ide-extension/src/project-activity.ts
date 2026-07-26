@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { FounderCompletionEvidenceReceipt } from './completion-evidence';
 
 const SCHEMA_VERSION = 1 as const;
 const MAX_RECORDS = 300;
@@ -21,6 +22,7 @@ export interface FounderProjectActivityRecord {
   providerModel: string | null;
   editedFiles: string[];
   checks: string[];
+  verification: FounderCompletionEvidenceReceipt | null;
   estimatedTokensAvoided: number;
 }
 
@@ -36,6 +38,7 @@ export interface CompleteFounderProjectActivity {
   providerModel?: string | null;
   editedFiles?: string[];
   checks?: string[];
+  verification?: FounderCompletionEvidenceReceipt | null;
   estimatedTokensAvoided?: number;
   completedAt?: string;
 }
@@ -64,6 +67,7 @@ export class FounderProjectActivityStore {
       providerModel: null,
       editedFiles: [],
       checks: [],
+      verification: null,
       estimatedTokensAvoided: 0,
     });
     this.trimAndWrite();
@@ -85,6 +89,7 @@ export class FounderProjectActivityStore {
     record.providerModel = cleanOptional(input.providerModel, 160);
     record.editedFiles = compactList(input.editedFiles, 30, 260);
     record.checks = compactList(input.checks, 20, 300);
+    record.verification = sanitizeVerification(input.verification);
     record.estimatedTokensAvoided = boundedInteger(input.estimatedTokensAvoided);
     this.trimAndWrite();
     return true;
@@ -105,6 +110,8 @@ export class FounderProjectActivityStore {
     const unresolved = recent.filter((record) => record.status === 'failed' || record.status === 'running');
     const files = [...new Set(completed.flatMap((record) => record.editedFiles))].sort();
     const checks = [...new Set(completed.flatMap((record) => record.checks))].sort();
+    const passedReceipts = completed.filter((record) => record.verification?.verdict === 'passed').length;
+    const incompleteReceipts = recent.filter((record) => record.verification?.verdict === 'incomplete').length;
     const avoided = recent.reduce((total, record) => total + record.estimatedTokensAvoided, 0);
     const lines = [
       `# ${workspaceName} - Founder project brief`,
@@ -123,6 +130,7 @@ export class FounderProjectActivityStore {
       '',
       '## Evidence',
       `- Verified checks: ${checks.length > 0 ? checks.join('; ') : 'None recorded'}`,
+      `- Completion receipts: ${passedReceipts} passed; ${incompleteReceipts} incomplete`,
       `- Changed files: ${files.length > 0 ? files.join(', ') : 'None recorded'}`,
       `- Estimated tokens avoided: ${avoided.toLocaleString('en-US')}`,
       '',
@@ -161,7 +169,13 @@ function readState(file: string): FounderProjectActivityState {
     if (value.version !== SCHEMA_VERSION || !Array.isArray(value.records)) throw new Error('schema mismatch');
     return {
       version: SCHEMA_VERSION,
-      records: value.records.filter(isRecord).slice(0, MAX_RECORDS),
+      records: value.records
+        .filter(isRecord)
+        .map((record) => ({
+          ...record,
+          verification: sanitizeVerification(record.verification),
+        }))
+        .slice(0, MAX_RECORDS),
     };
   } catch {
     return { version: SCHEMA_VERSION, records: [] };
@@ -181,6 +195,11 @@ function isRecord(value: unknown): value is FounderProjectActivityRecord {
     && typeof record.summary === 'string'
     && Array.isArray(record.editedFiles)
     && Array.isArray(record.checks)
+    && (
+      record.verification === undefined
+      || record.verification === null
+      || typeof record.verification === 'object'
+    )
     && Number.isFinite(record.estimatedTokensAvoided);
 }
 
@@ -204,6 +223,32 @@ function boundedInteger(value: number | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? Math.min(1_000_000_000, Math.floor(value))
     : 0;
+}
+
+function sanitizeVerification(
+  value: FounderCompletionEvidenceReceipt | null | undefined,
+): FounderCompletionEvidenceReceipt | null {
+  if (!value || typeof value !== 'object') return null;
+  if (value.version !== 1 || (value.verdict !== 'passed' && value.verdict !== 'incomplete')) {
+    return null;
+  }
+  if (
+    (value.scope !== 'read_only' && value.scope !== 'workspace_change')
+    || !['ask', 'plan', 'build', 'debug', 'team'].includes(value.mode)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    verdict: value.verdict,
+    scope: value.scope,
+    mode: value.mode,
+    editedFileCount: boundedInteger(value.editedFileCount),
+    passedCheckCount: boundedInteger(value.passedCheckCount),
+    visualCheckCount: boundedInteger(value.visualCheckCount),
+    requirements: compactList([...value.requirements], 20, 100),
+    missing: compactList([...value.missing], 20, 240),
+  };
 }
 
 function briefLine(record: FounderProjectActivityRecord): string {

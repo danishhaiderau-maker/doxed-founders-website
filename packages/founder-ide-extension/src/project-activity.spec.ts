@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { FounderProjectActivityStore, workspaceActivityId } from './project-activity';
+import { evaluateFounderCompletionEvidence } from './completion-evidence';
 
 describe('Founder project activity', () => {
   it('links a goal and verified result to one workspace brief', () => {
@@ -19,6 +20,14 @@ describe('Founder project activity', () => {
       providerModel: 'deepseek-v4-flash',
       editedFiles: ['src/parser.ts'],
       checks: ['npm test'],
+      verification: evaluateFounderCompletionEvidence({
+        mode: 'debug',
+        goal: 'Fix the gateway parser',
+        finalAnswer: 'Parser fixed and stream verified.',
+        requestCompleted: true,
+        editedFiles: ['src/parser.ts'],
+        passedChecks: ['npm test'],
+      }),
       estimatedTokensAvoided: 420,
       completedAt: '2026-07-22T00:10:00.000Z',
     }), true);
@@ -27,6 +36,7 @@ describe('Founder project activity', () => {
     assert.match(brief, /Fix the gateway parser/);
     assert.match(brief, /deepseek\/deepseek-v4-flash/);
     assert.match(brief, /src\/parser\.ts/);
+    assert.match(brief, /Completion receipts: 1 passed; 0 incomplete/);
     assert.match(brief, /Estimated tokens avoided: 420/);
   });
 

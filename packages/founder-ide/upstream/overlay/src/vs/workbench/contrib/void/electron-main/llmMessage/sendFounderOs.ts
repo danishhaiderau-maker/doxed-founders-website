@@ -67,6 +67,10 @@ import {
 	stripUntrustedFounderRouteReceipts,
 	type FounderNativeEscalationReason,
 } from './founderNativeRouting.js';
+import {
+	evaluateNativeFounderCompletion,
+	founderNativeCompletionReceipt,
+} from './founderNativeCompletion.js';
 
 // ---------------------------------------------------------------------------
 // Credential discovery - mirrors credentials.ts. Reads the vault file that
@@ -573,7 +577,7 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 			: aliasForFeature(loggingName, 'chatMessages', chatMode);
 	openAiMessages.unshift({
 		role: 'system',
-		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the application shows the exact provider and model after the answer. Never write, imitate, quote, or predict a Founder route receipt; that trusted evidence is appended by the application. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route.',
+		content: 'You are Founder AI inside Founder IDE. If asked what you are, identify yourself as Founder AI. Explain that Founder Auto chooses an eligible route and that the application shows the exact provider and model after the answer. Never write, imitate, quote, or predict a Founder route or verification receipt; that trusted evidence is appended by the application. Never claim that you are merely a generic expert coding agent or that the product cannot identify its route. Do not claim completion based on prose; the application evaluates locally observed tool results.',
 	});
 	openAiMessages.splice(1, 0, {
 		role: 'system',
@@ -736,11 +740,22 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		onError({ message: 'Founder OS: The model returned an incomplete tool request.', fullError: null });
 		return;
 	}
+	const completion = toolCall
+		? null
+		: evaluateNativeFounderCompletion({
+			messages: openAiMessages,
+			mode: workMode,
+			goal: founderRequest,
+			finalAnswer: fullText,
+			requestCompleted: true,
+		});
 	const finalText = toolCall
 		? fullText
 		: `${stripUntrustedFounderRouteReceipts(fullText)}${isReviewReconciliation
 			? '\n\n**Second brain reconciliation** | read-only | dissent preserved | approval required'
-			: ''}${nativeSkillReceipt(skill, skillToolTurnsUsed)}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
+			: ''}${nativeSkillReceipt(skill, skillToolTurnsUsed)}${completion
+				? founderNativeCompletionReceipt(completion)
+				: ''}${founderRouteReceipt(routeMetadata, Date.now() - startedAt, escalationReason)}`;
 	const finalParams: Parameters<OnFinalMessage>[0] = {
 		fullText: finalText,
 		fullReasoning,
@@ -748,7 +763,8 @@ export async function sendFounderOsChat(params: FounderOsChatParams): Promise<vo
 		...(toolCall ? { toolCall } : {}),
 	};
 	onFinalMessage(finalParams);
-	coordination?.settle();
+	if (completion?.verdict === 'incomplete') coordination?.fail();
+	else coordination?.settle();
 
 	void (null as unknown as AnthropicReasoning);
 }

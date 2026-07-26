@@ -555,6 +555,13 @@ gates.
 
 - [ ] Enforce verify-then-show: tests, typecheck, build, visual check, and
   evidence receipt before an agent declares completion.
+  - [x] Enforce the source completion boundary in both extension chat and the
+    installed native chat engine. Ask and Plan reject mutation; implementation
+    requests require an observed owned edit; changed code requires a passing
+    test/build/typecheck/lint command; user-facing UI additionally requires a
+    passing visual/screenshot command. The application, not provider prose,
+    appends the trusted receipt, and extension receipts persist in the local
+    project activity ledger. Refreshed installed-app proof remains below.
 - [ ] Add a cheap independent self-critique pass against the original goal.
 - [ ] Treat visual verify-then-show as a first-class gate for user-facing UI
   work. Capture the changed state, combine a redacted screenshot with the

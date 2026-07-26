@@ -126,6 +126,12 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /\*\*Founder route\*\*/);
     assert.match(source, /founder_os_metadata: true/);
     assert.match(source, /Free: Flash/);
+    assert.match(source, /founderNativeCompletionReceipt/);
+    const completion = read(
+      'src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCompletion.ts',
+    );
+    assert.match(completion, /Founder IDE native verify-before-show completion boundary/);
+    assert.match(completion, /user-facing UI edits have no passing visual or screenshot evidence/);
   });
 
   it('keeps voice input and personal AI next to the native composer', () => {
