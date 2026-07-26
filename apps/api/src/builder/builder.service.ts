@@ -1014,13 +1014,9 @@ export class BuilderService {
   }
 
   /**
-   * AI Routing hook — if an admin has routed `section` to an enabled
-   * AiRoutingProvider with a key set, run the call through the generic
-   * AiInvokerService (centralised token logging, OpenAI-compatible + adapter
-   * dispatch). Returns null when the section is not routed or the routed
-   * provider is disabled / missing a key, so the existing cascade runs
-   * unchanged. This is intentionally surgical: the cascade below is NOT
-   * rewritten, only short-circuited when routing is configured.
+   * Preserve the administrator's provider selection while executing it through
+   * Founder AI Runtime. When the routed provider is unavailable, return null so
+   * the legacy cascade can continue without changing its provider order.
    */
   private async tryRoutedInvoker(
     section: 'copilot' | 'quick_build' | 'founder_draft',
@@ -1036,30 +1032,72 @@ export class BuilderService {
     try {
       const routedKey = await this.aiInvoker.resolveProviderKey(section);
       if (!routedKey) return null;
-      // Only short-circuit when the routed provider is actually enabled + keyed.
-      // resolveProviderKey does not check enabled/key, so probe via invoke; if
-      // it throws ServiceUnavailableException (disabled / no key), fall through.
-      const maxTokens = options?.runtimeRequest
-        ? this.founderAiRuntime.maxOutputTokensFor(options.runtimeRequest)
-        : undefined;
-      const result = await this.aiInvoker.invoke({
-        section,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.4,
-        maxTokens,
+
+      const runtimeRequest: AiRuntimeRequest = options?.runtimeRequest ?? {
         userId,
-        billingSource: 'platform_routed',
-      });
+        system,
+        userPrompt,
+        section,
+        founderBrainTask: options?.founderBrainTask,
+      };
+      const invokeRouted = async (
+        request: AiRuntimeRequest,
+        maxTokens?: number,
+      ) =>
+        this.aiInvoker.invoke({
+          section,
+          providerKey: routedKey,
+          messages: [
+            { role: 'system', content: request.system },
+            { role: 'user', content: request.userPrompt },
+          ],
+          temperature: 0.4,
+          maxTokens,
+          userId,
+          billingSource: 'platform_routed',
+        });
+
+      // Keep admin routing authoritative while moving the provider call through
+      // the Founder Runtime boundary for cache, limits, and egress accounting.
+      const runtimeResult = this.founderAiRuntime.isEnabled()
+        ? await this.founderAiRuntime.complete(
+            runtimeRequest,
+            async (_route, ctx) => {
+              const result = await invokeRouted(
+                ctx.request,
+                ctx.maxOutputTokens,
+              );
+              return {
+                ok: true,
+                text: result.content,
+                provider: result.provider,
+                model: result.model,
+                promptTokens: result.usage.promptTokens,
+                completionTokens: result.usage.completionTokens,
+              };
+            },
+          )
+        : null;
+      const result = runtimeResult?.ok
+        ? {
+            content: runtimeResult.text ?? '',
+            provider: String(runtimeResult.provider ?? routedKey),
+          }
+        : await invokeRouted(
+            runtimeRequest,
+            options?.runtimeRequest
+              ? this.founderAiRuntime.maxOutputTokensFor(runtimeRequest)
+              : undefined,
+          );
+
+      if (!result.content.trim()) return { ok: false };
       return {
         ok: true,
-        text: result.content,
+        text: result.content.trim(),
         // The cascade returns an AiProvider enum; routing is provider-key based
         // so map the routed provider key back to the closest enum value for
         // downstream label compatibility. Unknown keys collapse to DEEPSEEK.
-        provider: this.enumProviderForRoutingKey(routedKey),
+        provider: this.enumProviderForRoutingKey(result.provider),
         founderBrainTask: options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt),
       };
     } catch (err) {
@@ -1237,9 +1275,7 @@ export class BuilderService {
           provider: this.enumProviderForRoutingKey(String(runtimeResult.provider ?? 'deepseek')),
           founderBrainTask,
         };
-        return this.shouldUseCopilotRuntimeCache(options)
-          ? this.returnCopilotSuccess(preparedRequest, mapped)
-          : mapped;
+        return mapped;
       }
     }
 
@@ -1251,12 +1287,10 @@ export class BuilderService {
         userId,
         preparedRequest.system,
         preparedRequest.userPrompt,
-        { founderBrainTask: options?.founderBrainTask, runtimeRequest: preparedRequest },
+        { founderBrainTask: options?.founderBrainTask, runtimeRequest },
       );
       if (routed?.ok) {
-        return this.shouldUseCopilotRuntimeCache(options)
-          ? this.returnCopilotSuccess(preparedRequest, routed)
-          : routed;
+        return routed;
       }
     }
 
