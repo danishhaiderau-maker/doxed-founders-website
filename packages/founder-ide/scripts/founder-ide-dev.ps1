@@ -83,6 +83,34 @@ function Format-PositionalArgument {
     return '"{0}"' -f $Value.Replace('"', '\"')
 }
 
+function Start-PinnedNodeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeExecutable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$StandardOutput,
+        [Parameter(Mandatory = $true)][string]$StandardError
+    )
+
+    # build.js launches npx children. Put the pinned runtime first so those
+    # children cannot silently inherit a different system Node installation.
+    $previousPath = $env:PATH
+    $nodeDirectory = Split-Path -Parent $NodeExecutable
+    try {
+        $env:PATH = "$nodeDirectory;$previousPath"
+        return Start-Process `
+            -FilePath $NodeExecutable `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StandardOutput `
+            -RedirectStandardError $StandardError `
+            -PassThru
+    } finally {
+        $env:PATH = $previousPath
+    }
+}
+
 function Get-RecordedNodeProcess {
     param(
         [int]$ProcessId,
@@ -358,9 +386,9 @@ $watchProcess = if ($canReusePrevious) {
         -NotBefore $watchStartedAt
 }
 if (-not $watchProcess) {
-    $watchProcess = Start-Process `
-        -FilePath $nodeExecutable `
-        -ArgumentList @(
+    $watchProcess = Start-PinnedNodeProcess `
+        -NodeExecutable $nodeExecutable `
+        -Arguments @(
             "--max-old-space-size=8192",
             (Format-PositionalArgument $gulpCli),
             "--gulpfile",
@@ -368,10 +396,8 @@ if (-not $watchProcess) {
             "founder-watch-client"
         ) `
         -WorkingDirectory $CheckoutPath `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $watchOut `
-        -RedirectStandardError $watchErr `
-        -PassThru
+        -StandardOutput $watchOut `
+        -StandardError $watchErr
 }
 
 $reactBuild = Join-Path $CheckoutPath "src\vs\workbench\contrib\void\browser\react\build.js"
@@ -389,14 +415,12 @@ $reactProcess = if ($canReusePrevious) {
         -NotBefore $reactStartedAt
 }
 if (-not $reactProcess) {
-    $reactProcess = Start-Process `
-        -FilePath $nodeExecutable `
-        -ArgumentList @((Format-PositionalArgument $reactBuild), "--watch") `
+    $reactProcess = Start-PinnedNodeProcess `
+        -NodeExecutable $nodeExecutable `
+        -Arguments @((Format-PositionalArgument $reactBuild), "--watch") `
         -WorkingDirectory (Split-Path -Parent $reactBuild) `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $reactOut `
-        -RedirectStandardError $reactErr `
-        -PassThru
+        -StandardOutput $reactOut `
+        -StandardError $reactErr
 }
 
 $compileInputs = @()

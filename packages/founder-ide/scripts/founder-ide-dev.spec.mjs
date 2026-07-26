@@ -39,6 +39,10 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /FOUNDER_IDE_DEV_CACHE/);
   assert.match(script, /GetTempPath/);
   assert.doesNotMatch(script, /artifacts\\founder-ide-dev-cache/);
+  assert.match(script, /function Start-PinnedNodeProcess/);
+  assert.match(script, /\$nodeDirectory = Split-Path -Parent \$NodeExecutable/);
+  assert.match(script, /\$env:PATH = "\$nodeDirectory;\$previousPath"/);
+  assert.match(script, /-NodeExecutable \$nodeExecutable/);
 });
 
 test(

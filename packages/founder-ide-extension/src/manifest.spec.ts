@@ -155,6 +155,10 @@ describe('Founder IDE extension manifest', () => {
       assert.ok(hubSource.includes(label), `${label} must be visible in Founder navigation`);
     }
     assert.match(extensionSource, /applyFounderInterfaceMode\(true\)/);
+    assert.match(
+      extensionSource,
+      /executeCommand\('workbench\.action\.closePanel'\)/,
+    );
     assert.match(extensionSource, /definition\.activityBarLocation/);
     assert.match(extensionSource, /definition\.menuBarVisibility/);
     assert.match(hubSource, /Developer mode/);

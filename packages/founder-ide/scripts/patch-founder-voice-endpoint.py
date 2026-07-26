@@ -1,8 +1,9 @@
-"""Route the packaged Founder microphone through the saved GLM account region."""
+"""Keep packaged Founder voice aligned with the explicitly selected AI route."""
 
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +50,7 @@ OLD_TRANSCRIBE_BLOCK = """      const result = await commandService.executeComma
         "founder.personalAi.transcribe",
         { profileId: voiceProfile.id, audioBase64: founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate)) }
       );"""
-NEW_TRANSCRIBE_BLOCK = """      const audioBase64 = founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate));
+OLD_MANAGED_FALLBACK_BLOCK = """      const audioBase64 = founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate));
       let result;
       try {
         result = await commandService.executeCommand(
@@ -63,12 +64,48 @@ NEW_TRANSCRIBE_BLOCK = """      const audioBase64 = founderVoiceBase64(founderVo
           { profileId: voiceProfile.id, audioBase64 }
         );
       }"""
+NEW_TRANSCRIBE_BLOCK = """      const audioBase64 = founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate));
+      let result;
+      if (voiceProfile) {
+        result = await commandService.executeCommand(
+          "founder.personalAi.transcribe",
+          { profileId: voiceProfile.id, audioBase64 }
+        );
+      } else {
+        result = await commandService.executeCommand(
+          "founderOs.transcribeVoice",
+          { audioBase64 }
+        );
+      }"""
 OLD_PROFILE_REQUIREMENT = """    if (!voiceProfile) {
       setVoiceError("Connect and enable a GLM Personal AI profile before using voice input.");
       await commandService.executeCommand("founderOs.openSettings", "ai");
       return;
     }
 """
+OLD_BUNDLED_VOICE_PROFILE = re.compile(
+    r"""(?P<prefix>  const isDisabled = [^\n]+isFeatureNameDisabled\("Chat", (?P<settings>settingsState\d+)\);\n"""
+    r"""  const voiceSupported = \(0, (?P<react>import_react\d+)\.useMemo\)\(\(\) => founderVoiceSupported\(\), \[\]\);\n)"""
+    r"""  const voiceProfile = \(0, (?P=react)\.useMemo\)\(\(\) => reviewerProfiles\.find\(\(profile\) => \{\n"""
+    r"""    const identity2 = `\$\{profile\.label\} \$\{profile\.model\} \$\{profile\.baseUrl\}`\.toLowerCase\(\);\n"""
+    r"""    return identity2\.includes\("glm"\) \|\| identity2\.includes\("zhipu"\) \|\| identity2\.includes\("bigmodel\.cn"\) \|\| identity2\.includes\("z\.ai"\);\n"""
+    r"""  \}\), \[reviewerProfiles\]\);"""
+)
+
+
+def selected_profile_block(match: re.Match[str]) -> str:
+    settings = match.group("settings")
+    react = match.group("react")
+    return (
+        match.group("prefix")
+        + f"  const selectedChatModel = {settings}.modelSelectionOfFeature.Chat?.modelName;\n"
+        + f"  const voiceProfile = (0, {react}.useMemo)(() => reviewerProfiles.find((profile) => {{\n"
+        + "    const identity2 = `${profile.label} ${profile.model} ${profile.baseUrl}`.toLowerCase();\n"
+        + "    const isSelected = profile.label === selectedChatModel;\n"
+        + '    const isGlm = identity2.includes("glm") || identity2.includes("zhipu") || identity2.includes("bigmodel.cn") || identity2.includes("z.ai");\n'
+        + "    return isSelected && isGlm;\n"
+        + "  }), [reviewerProfiles, selectedChatModel]);"
+    )
 
 
 def patch(app: Path, workbench_override: Path | None = None, backup: bool = True) -> None:
@@ -86,13 +123,16 @@ def patch(app: Path, workbench_override: Path | None = None, backup: bool = True
         and NEW_PROFILE_BLOCK in data
         and "fetch(glmTranscriptionEndpoint(profile), {" in data
     )
-    managed_voice_patched = (
+    selected_voice_patched = (
         NEW_CAPTURE_GUARD in data
         and NEW_TRANSCRIBE_BLOCK in data
+        and "const selectedChatModel =" in data
+        and "return isSelected && isGlm;" in data
+        and OLD_MANAGED_FALLBACK_BLOCK not in data
         and OLD_PROFILE_REQUIREMENT not in data
     )
-    if region_patched and managed_voice_patched:
-        print("Founder voice uses managed speech with a saved-profile fallback")
+    if region_patched and selected_voice_patched:
+        print("Founder voice follows the explicitly selected chat model")
         return
 
     if not region_patched:
@@ -110,17 +150,40 @@ def patch(app: Path, workbench_override: Path | None = None, backup: bool = True
             1,
         )
 
-    if not managed_voice_patched:
-        for name, signature in (
-            ("capture guard", OLD_CAPTURE_GUARD),
-            ("transcription command", OLD_TRANSCRIBE_BLOCK),
-            ("BYOK-only requirement", OLD_PROFILE_REQUIREMENT),
+    if not selected_voice_patched:
+        if OLD_CAPTURE_GUARD in data:
+            if data.count(OLD_CAPTURE_GUARD) != 1:
+                raise SystemExit("Founder capture guard is ambiguous; no patch applied")
+            data = data.replace(OLD_CAPTURE_GUARD, NEW_CAPTURE_GUARD, 1)
+        elif NEW_CAPTURE_GUARD not in data:
+            raise SystemExit("Founder capture guard changed; no patch applied")
+
+        data, profile_replacements = OLD_BUNDLED_VOICE_PROFILE.subn(
+            selected_profile_block,
+            data,
+            count=1,
+        )
+        if profile_replacements == 0 and (
+            "const selectedChatModel =" not in data
+            or "return isSelected && isGlm;" not in data
         ):
-            if data.count(signature) != 1:
-                raise SystemExit(f"Founder {name} signature changed; no patch applied")
-        data = data.replace(OLD_CAPTURE_GUARD, NEW_CAPTURE_GUARD, 1)
-        data = data.replace(OLD_TRANSCRIBE_BLOCK, NEW_TRANSCRIBE_BLOCK, 1)
-        data = data.replace(OLD_PROFILE_REQUIREMENT, "", 1)
+            raise SystemExit("Founder selected voice-profile signature changed; no patch applied")
+
+        if OLD_MANAGED_FALLBACK_BLOCK in data:
+            if data.count(OLD_MANAGED_FALLBACK_BLOCK) != 1:
+                raise SystemExit("Founder managed fallback is ambiguous; no patch applied")
+            data = data.replace(OLD_MANAGED_FALLBACK_BLOCK, NEW_TRANSCRIBE_BLOCK, 1)
+        elif OLD_TRANSCRIBE_BLOCK in data:
+            if data.count(OLD_TRANSCRIBE_BLOCK) != 1:
+                raise SystemExit("Founder transcription command is ambiguous; no patch applied")
+            data = data.replace(OLD_TRANSCRIBE_BLOCK, NEW_TRANSCRIBE_BLOCK, 1)
+        elif NEW_TRANSCRIBE_BLOCK not in data:
+            raise SystemExit("Founder transcription command changed; no patch applied")
+
+        if OLD_PROFILE_REQUIREMENT in data:
+            if data.count(OLD_PROFILE_REQUIREMENT) != 1:
+                raise SystemExit("Founder BYOK-only requirement is ambiguous; no patch applied")
+            data = data.replace(OLD_PROFILE_REQUIREMENT, "", 1)
 
     backup_dir: Path | None = None
     if backup:
@@ -138,11 +201,15 @@ def patch(app: Path, workbench_override: Path | None = None, backup: bool = True
     if "fetch(GLM_TRANSCRIPTION_ENDPOINT, {" in verify:
         raise SystemExit("Legacy fixed-region Founder voice fetch still remains")
     if NEW_CAPTURE_GUARD not in verify or NEW_TRANSCRIBE_BLOCK not in verify:
-        raise SystemExit("Founder managed voice patch did not verify")
+        raise SystemExit("Founder selected voice route did not verify")
+    if "const selectedChatModel =" not in verify or "return isSelected && isGlm;" not in verify:
+        raise SystemExit("Founder microphone still ignores the selected chat model")
+    if OLD_MANAGED_FALLBACK_BLOCK in verify:
+        raise SystemExit("Founder microphone still silently falls back after a managed failure")
     if OLD_PROFILE_REQUIREMENT in verify:
         raise SystemExit("Founder microphone still requires a Personal AI profile")
     suffix = f"; backup: {backup_dir}" if backup_dir is not None else ""
-    print(f"Founder voice uses managed speech with a saved-profile fallback{suffix}")
+    print(f"Founder voice follows the explicitly selected chat model{suffix}")
 
 
 def main() -> None:

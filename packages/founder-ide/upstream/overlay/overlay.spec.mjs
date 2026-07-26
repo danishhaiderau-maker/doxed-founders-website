@@ -20,12 +20,15 @@ describe('Founder IDE upstream overlay', () => {
     );
   });
 
-  it('uses Founder managed speech first and keeps Personal AI as a fallback', () => {
+  it('routes voice through the explicitly selected chat model', () => {
     const composer = read(
       'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
     );
+    assert.match(composer, /const selectedChatModel =/);
+    assert.match(composer, /profile\.label === selectedChatModel/);
     assert.match(composer, /founderOs\.transcribeVoice/);
     assert.match(composer, /founder\.personalAi\.transcribe/);
+    assert.doesNotMatch(composer, /catch \(managedError\)/);
     assert.doesNotMatch(
       composer,
       /Connect and enable a GLM Personal AI profile before using voice input/,

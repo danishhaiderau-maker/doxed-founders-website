@@ -114,7 +114,7 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(settingsPatch, /personal AI settings action still opens the default tab/i);
   });
 
-  it('routes packaged voice through managed speech with a saved-profile fallback', () => {
+  it('routes packaged voice through the explicitly selected chat model', () => {
     const voicePatch = fs.readFileSync(
       path.join(root, '..', 'scripts', 'patch-founder-voice-endpoint.py'),
       'utf8',
@@ -125,8 +125,11 @@ describe('Founder IDE one-app installer orchestrator', () => {
     assert.match(voicePatch, /glmTranscriptionEndpoint\(profile\)/);
     assert.match(voicePatch, /founderOs\.transcribeVoice/);
     assert.match(voicePatch, /founder\.personalAi\.transcribe/);
-    assert.match(voicePatch, /managed speech with a saved-profile fallback/);
-    assert.match(voicePatch, /replace\(OLD_PROFILE_REQUIREMENT, "", 1\)/);
+    assert.match(voicePatch, /selectedChatModel/);
+    assert.match(voicePatch, /return isSelected && isGlm/);
+    assert.match(voicePatch, /explicitly selected chat model/);
+    assert.match(voicePatch, /OLD_MANAGED_FALLBACK_BLOCK/);
+    assert.match(voicePatch, /silently falls back after a managed failure/);
     assert.match(installerSource, /FOUNDER_WORKBENCH_PATCH/);
     assert.match(installerSource, /founder-workbench\.desktop\.main\.js/);
     assert.match(installerSource, /InstallFounderWorkbenchPatch/);

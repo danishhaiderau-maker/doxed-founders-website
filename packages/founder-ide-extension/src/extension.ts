@@ -533,6 +533,9 @@ async function applyFounderInterfaceMode(revealFounderHome: boolean): Promise<vo
       vscode.ConfigurationTarget.Global,
     );
   }
+  if (mode === 'founder') {
+    await vscode.commands.executeCommand('workbench.action.closePanel');
+  }
   if (mode === 'founder' && revealFounderHome) {
     await vscode.commands.executeCommand('workbench.view.extension.founderOs');
   }

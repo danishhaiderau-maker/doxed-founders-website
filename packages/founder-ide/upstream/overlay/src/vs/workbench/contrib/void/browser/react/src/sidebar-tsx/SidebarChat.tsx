@@ -3090,10 +3090,13 @@ export const SidebarChat = () => {
 	const isDisabled = (instructionsAreEmpty && visualAttachments.length === 0)
 		|| !!isFeatureNameDisabled('Chat', settingsState)
 	const voiceSupported = useMemo(() => founderVoiceSupported(), [])
+	const selectedChatModel = settingsState.modelSelectionOfFeature.Chat?.modelName
 	const voiceProfile = useMemo(() => reviewerProfiles.find(profile => {
 		const identity = `${profile.label} ${profile.model} ${profile.baseUrl}`.toLowerCase()
-		return identity.includes('glm') || identity.includes('zhipu') || identity.includes('bigmodel.cn') || identity.includes('z.ai')
-	}), [reviewerProfiles])
+		const isSelected = profile.label === selectedChatModel
+		const isGlm = identity.includes('glm') || identity.includes('zhipu') || identity.includes('bigmodel.cn') || identity.includes('z.ai')
+		return isSelected && isGlm
+	}), [reviewerProfiles, selectedChatModel])
 
 	const stopVoiceInput = useCallback(async (transcribe = true) => {
 		const recorder = voiceRecorderRef.current
@@ -3117,16 +3120,15 @@ export const SidebarChat = () => {
 		try {
 			const audioBase64 = founderVoiceBase64(founderVoiceWav(recorder.chunks, recorder.context.sampleRate))
 			let result: { text?: string } | undefined
-			try {
-				result = await commandService.executeCommand<{ text?: string }>(
-					'founderOs.transcribeVoice',
-					{ audioBase64 },
-				)
-			} catch (managedError) {
-				if (!voiceProfile) throw managedError
+			if (voiceProfile) {
 				result = await commandService.executeCommand<{ text?: string }>(
 					'founder.personalAi.transcribe',
 					{ profileId: voiceProfile.id, audioBase64 },
+				)
+			} else {
+				result = await commandService.executeCommand<{ text?: string }>(
+					'founderOs.transcribeVoice',
+					{ audioBase64 },
 				)
 			}
 			const transcript = result?.text?.trim() ?? ''
