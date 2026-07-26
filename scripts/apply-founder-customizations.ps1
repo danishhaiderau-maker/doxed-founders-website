@@ -134,6 +134,14 @@ foreach ($entry in $manifest.files) {
     if (-not (Test-Path $destParent)) {
         New-Item -ItemType Directory -Force -Path $destParent | Out-Null
     }
+    if (
+        $destExists -and
+        (Get-FileHash -LiteralPath $srcAbs -Algorithm SHA256).Hash -eq
+            (Get-FileHash -LiteralPath $destAbs -Algorithm SHA256).Hash
+    ) {
+        Write-Host ("[apply-founder]   {0,-7}  {1}" -f "current", $destRel) -ForegroundColor DarkGray
+        continue
+    }
     Copy-Item $srcAbs $destAbs -Force
     $copied++
     Write-Host ("[apply-founder]   {0,-7}  {1}" -f $mode, $destRel) -ForegroundColor Cyan
@@ -173,16 +181,17 @@ function Set-FounderSourceLiteral {
     $target = Join-Path $VscodiumCheckout $RelativePath
     if (-not (Test-Path $target)) { throw "Founder branding target missing: $target" }
     $content = Get-Content $target -Raw
+    if ($content.Contains($New)) {
+        Write-Host "[apply-founder]   reapply  $RelativePath" -ForegroundColor DarkCyan
+        return
+    }
     if ($content.Contains($Old)) {
         $content = $content.Replace($Old, $New)
         [System.IO.File]::WriteAllText($target, $content, [System.Text.UTF8Encoding]::new($false))
         Write-Host "[apply-founder]   brand    $RelativePath" -ForegroundColor Cyan
         return
     }
-    if (-not $content.Contains($New)) {
-        throw "Founder branding signature changed upstream in ${RelativePath}: '$Old'"
-    }
-    Write-Host "[apply-founder]   reapply  $RelativePath" -ForegroundColor DarkCyan
+    throw "Founder branding signature changed upstream in ${RelativePath}: '$Old'"
 }
 
 $telemetryService = "src\vs\platform\telemetry\common\telemetryService.ts"
@@ -252,6 +261,21 @@ Set-FounderSourceLiteral $legacyUpdater "Void Error:" "Founder IDE update error:
 Set-FounderSourceLiteral $legacyUpdater "reinstall Void" "reinstall Founder IDE"
 Set-FounderSourceLiteral $legacyUpdater "Void Update" "Founder IDE Update"
 Set-FounderSourceLiteral $legacyUpdater "Void: Check for Updates" "Founder IDE: Check for Updates"
+$legacyUpdaterPath = Join-Path $VscodiumCheckout $legacyUpdater
+$legacyUpdaterContent = Get-Content -LiteralPath $legacyUpdaterPath -Raw
+$normalizedLegacyUpdater = [regex]::Replace(
+    $legacyUpdaterContent,
+    "(?:false && ){2,}(registerAction2|registerWorkbenchContribution2)",
+    "false && `$1"
+)
+if ($normalizedLegacyUpdater -ne $legacyUpdaterContent) {
+    [System.IO.File]::WriteAllText(
+        $legacyUpdaterPath,
+        $normalizedLegacyUpdater,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "[apply-founder]   repair   $legacyUpdater" -ForegroundColor Yellow
+}
 
 $legacyUpdateMain = "src\vs\workbench\contrib\void\electron-main\voidUpdateMainService.ts"
 Set-FounderSourceLiteral $legacyUpdateMain "Restart Void to update!" "Restart Founder IDE to update!"

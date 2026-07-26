@@ -342,6 +342,9 @@ describe('Founder IDE upstream overlay', () => {
     }
     assert.match(applyScript, /false && registerAction2/);
     assert.match(applyScript, /false && registerWorkbenchContribution2/);
+    assert.match(applyScript, /\$content\.Contains\(\$New\)/);
+    assert.match(applyScript, /\(\?:false && \)\{2,\}/);
+    assert.match(applyScript, /Get-FileHash -LiteralPath \$srcAbs/);
     assert.match(applyScript, /Founder Node owns the signed manifest/);
   });
 

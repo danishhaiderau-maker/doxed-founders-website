@@ -9,6 +9,9 @@ param(
     [string]$TscPath = "",
     [string]$InstalledExe = "",
 
+    [ValidateRange(1, 120)]
+    [int]$WorkbenchReadyTimeoutMinutes = 45,
+
     [switch]$Force,
     [switch]$NoLaunch
 )
@@ -141,6 +144,242 @@ function Get-RecordedNodeProcess {
     return $process
 }
 
+function Get-LogTextSince {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [long]$Offset = 0
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ""
+    }
+    $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if (-not $text) {
+        return ""
+    }
+    if ($Offset -le 0) {
+        return $text
+    }
+    if ($Offset -gt $text.Length) {
+        return $text
+    }
+    if ($Offset -eq $text.Length) {
+        return ""
+    }
+    return $text.Substring([int]$Offset)
+}
+
+function Remove-AnsiEscapeSequences {
+    param([string]$Text)
+
+    if (-not $Text) {
+        return ""
+    }
+    return [regex]::Replace($Text, "$([char]27)\[[0-9;]*[A-Za-z]", "")
+}
+
+function Get-ExpectedWorkbenchOutputs {
+    param(
+        [Parameter(Mandatory = $true)][string]$Checkout,
+        [Parameter(Mandatory = $true)][string[]]$CompileInputs
+    )
+
+    foreach ($relativePath in $CompileInputs) {
+        $normalized = $relativePath.Replace("/", "\")
+        if (
+            -not $normalized.StartsWith("src\", [System.StringComparison]::OrdinalIgnoreCase) -or
+            $normalized -match "\\browser\\react\\src\\" -or
+            $normalized.EndsWith(".d.ts", [System.StringComparison]::OrdinalIgnoreCase)
+        ) {
+            continue
+        }
+        $extension = [System.IO.Path]::GetExtension($normalized)
+        if ($extension -notin @(".ts", ".tsx")) {
+            continue
+        }
+        $outputRelative = "out\" + $normalized.Substring(4)
+        $outputRelative = [System.IO.Path]::ChangeExtension($outputRelative, ".js")
+        [pscustomobject]@{
+            source = Join-Path $Checkout $normalized
+            output = Join-Path $Checkout $outputRelative
+        }
+    }
+}
+
+function Get-CheckoutCompileInputs {
+    param([Parameter(Mandatory = $true)][string]$Checkout)
+
+    $inputs = @(
+        & git -c "safe.directory=$Checkout" -C $Checkout diff --name-only -- `
+            "src/**/*.ts" `
+            "src/**/*.tsx"
+    )
+    $inputs += @(
+        & git -c "safe.directory=$Checkout" -C $Checkout ls-files --others --exclude-standard -- `
+            "src/**/*.ts" `
+            "src/**/*.tsx"
+    )
+    return @($inputs | Sort-Object -Unique)
+}
+
+function Get-CompileInputDigests {
+    param(
+        [Parameter(Mandatory = $true)][string]$Checkout,
+        [Parameter(Mandatory = $true)][string[]]$CompileInputs
+    )
+
+    $digests = @{}
+    foreach ($relativePath in $CompileInputs) {
+        $path = Join-Path $Checkout $relativePath
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $digests[$relativePath] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+    }
+    return $digests
+}
+
+function Get-ChangedCompileInputs {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Before,
+        [Parameter(Mandatory = $true)][hashtable]$After
+    )
+
+    $paths = @($Before.Keys) + @($After.Keys) | Sort-Object -Unique
+    return @(
+        $paths | Where-Object {
+            -not $Before.ContainsKey($_) -or
+            -not $After.ContainsKey($_) -or
+            $Before[$_] -ne $After[$_]
+        }
+    )
+}
+
+function Test-WorkbenchOutputsCurrent {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$ExpectedOutputs
+    )
+
+    foreach ($entry in $ExpectedOutputs) {
+        if (
+            -not (Test-Path -LiteralPath $entry.source -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $entry.output -PathType Leaf)
+        ) {
+            return $false
+        }
+        $sourceTime = (Get-Item -LiteralPath $entry.source).LastWriteTimeUtc
+        $outputTime = (Get-Item -LiteralPath $entry.output).LastWriteTimeUtc
+        if ($outputTime -lt $sourceTime) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-ExpectedReactOutputs {
+    param(
+        [Parameter(Mandatory = $true)][string]$Checkout,
+        [Parameter(Mandatory = $true)][string[]]$CompileInputs
+    )
+
+    $reactRoot = "src\vs\workbench\contrib\void\browser\react\src\"
+    foreach ($relativePath in $CompileInputs) {
+        $normalized = $relativePath.Replace("/", "\")
+        if (-not $normalized.StartsWith($reactRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $remainder = $normalized.Substring($reactRoot.Length)
+        $bundleName = $remainder.Split("\")[0]
+        if (-not $bundleName) {
+            continue
+        }
+        [pscustomobject]@{
+            source = Join-Path $Checkout $normalized
+            output = Join-Path $Checkout "src\vs\workbench\contrib\void\browser\react\out\$bundleName\index.js"
+        }
+    }
+}
+
+function Wait-ForWorkbenchCompile {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$OutputLog,
+        [Parameter(Mandatory = $true)][string]$ErrorLog,
+        [Parameter(Mandatory = $true)][long]$OutputOffset,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedOutputs,
+        [Parameter(Mandatory = $true)][TimeSpan]$Timeout
+    )
+
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            $stderr = Get-LogTextSince -Path $ErrorLog
+            throw "Founder workbench compiler exited before becoming ready (exit $($Process.ExitCode)). $stderr"
+        }
+
+        $newLog = Remove-AnsiEscapeSequences (
+            Get-LogTextSince -Path $OutputLog -Offset $OutputOffset
+        )
+        $mainCompileLines = @(
+            $newLog -split "\r?\n" |
+                Where-Object {
+                    $_ -match "Finished compilation with \d+ errors? after" -and
+                    $_ -notmatch "api-proposal-names"
+                }
+        )
+        $failedCompile = $mainCompileLines | Where-Object {
+            $_ -notmatch "Finished compilation with 0 errors? after"
+        } | Select-Object -First 1
+        if ($failedCompile) {
+            throw "Founder workbench compilation failed: $failedCompile"
+        }
+        if (
+            $mainCompileLines.Count -gt 0 -and
+            (Test-WorkbenchOutputsCurrent -ExpectedOutputs $ExpectedOutputs)
+        ) {
+            return [DateTime]::UtcNow
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    $stderr = Get-LogTextSince -Path $ErrorLog
+    throw "Founder workbench did not reach a verified compiler checkpoint within $([int]$Timeout.TotalMinutes) minutes. See $OutputLog and $ErrorLog. $stderr"
+}
+
+function Wait-ForReactCompile {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$OutputLog,
+        [Parameter(Mandatory = $true)][string]$ErrorLog,
+        [Parameter(Mandatory = $true)][long]$OutputOffset,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedOutputs,
+        [Parameter(Mandatory = $true)][TimeSpan]$Timeout
+    )
+
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            $stderr = Get-LogTextSince -Path $ErrorLog
+            throw "Founder React compiler exited before becoming ready (exit $($Process.ExitCode)). $stderr"
+        }
+
+        $newLog = Remove-AnsiEscapeSequences (
+            Get-LogTextSince -Path $OutputLog -Offset $OutputOffset
+        )
+        if (
+            $newLog -match "Build success in \d+ms" -and
+            (Test-WorkbenchOutputsCurrent -ExpectedOutputs $ExpectedOutputs)
+        ) {
+            return [DateTime]::UtcNow
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    $stderr = Get-LogTextSince -Path $ErrorLog
+    throw "Founder React UI did not reach a verified bundle checkpoint within $([int]$Timeout.TotalMinutes) minutes. See $OutputLog and $ErrorLog. $stderr"
+}
+
 function Assert-PinnedCheckout {
     param(
         [Parameter(Mandatory = $true)][string]$Checkout,
@@ -252,10 +491,13 @@ if (-not $CacheRoot) {
 }
 $CacheRoot = [System.IO.Path]::GetFullPath($CacheRoot)
 
-$overlayFiles = @($manifestPath, $applyScript, $fastGulpfile, $PSCommandPath)
+$overlayContentFiles = @($manifestPath, $applyScript)
 foreach ($entry in $manifest.files) {
-    $overlayFiles += Join-Path $overlayRoot ([string]$entry.src)
+    $overlayContentFiles += Join-Path $overlayRoot ([string]$entry.src)
 }
+$workflowFiles = @($fastGulpfile, $PSCommandPath)
+$overlayFiles = @($overlayContentFiles) + @($workflowFiles)
+$overlayContentHash = Get-CompositeHash -Paths $overlayContentFiles -BasePath $repoRoot
 $overlayHash = Get-CompositeHash -Paths $overlayFiles -BasePath $repoRoot
 
 $extensionFiles = @(
@@ -282,6 +524,7 @@ $status = [ordered]@{
     mode = $Mode
     repoRoot = $repoRoot
     overlayHash = $overlayHash
+    overlayContentHash = $overlayContentHash
     overlayFiles = $overlayFiles.Count
     extensionHash = $extensionHash
     extensionFiles = $extensionFiles.Count
@@ -355,8 +598,17 @@ $previousState = $null
 if (Test-Path $workbenchStateFile) {
     $previousState = Get-Content -LiteralPath $workbenchStateFile -Raw | ConvertFrom-Json
 }
+$compileInputsBefore = @(Get-CheckoutCompileInputs -Checkout $CheckoutPath)
+$compileDigestsBefore = Get-CompileInputDigests `
+    -Checkout $CheckoutPath `
+    -CompileInputs $compileInputsBefore
 $overlayApplied = $false
-if ($Force -or -not $previousState -or $previousState.overlayHash -ne $overlayHash) {
+if (
+    $Force -or
+    -not $previousState -or
+    -not $previousState.overlayContentHash -or
+    $previousState.overlayContentHash -ne $overlayContentHash
+) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $applyScript `
         -VscodiumCheckout $CheckoutPath `
         -MonorepoRoot $repoRoot
@@ -378,6 +630,18 @@ Copy-Item -LiteralPath $fastGulpfile -Destination $checkoutGulpfile -Force
 $env:FOUNDER_IDE_CHECKOUT = $CheckoutPath
 $watchOut = Join-Path $logRoot "workbench-watch.out.log"
 $watchErr = Join-Path $logRoot "workbench-watch.err.log"
+$watchLogOffset = if (Test-Path -LiteralPath $watchOut -PathType Leaf) {
+    (Get-Content -LiteralPath $watchOut -Raw -ErrorAction SilentlyContinue).Length
+} else {
+    0
+}
+$reactOut = Join-Path $logRoot "react-watch.out.log"
+$reactErr = Join-Path $logRoot "react-watch.err.log"
+$reactLogOffset = if (Test-Path -LiteralPath $reactOut -PathType Leaf) {
+    (Get-Content -LiteralPath $reactOut -Raw -ErrorAction SilentlyContinue).Length
+} else {
+    0
+}
 $canReusePrevious = $previousState `
     -and $previousState.checkout -eq $CheckoutPath `
     -and $previousState.upstreamCommit -eq [string]$manifest.upstream.commit `
@@ -409,8 +673,6 @@ if (-not $watchProcess) {
 }
 
 $reactBuild = Join-Path $CheckoutPath "src\vs\workbench\contrib\void\browser\react\build.js"
-$reactOut = Join-Path $logRoot "react-watch.out.log"
-$reactErr = Join-Path $logRoot "react-watch.err.log"
 $reactProcess = if ($canReusePrevious) {
     $reactStartedAt = if ($previousState.reactWatchStartedAt) {
         [DateTime]::Parse([string]$previousState.reactWatchStartedAt)
@@ -431,33 +693,113 @@ if (-not $reactProcess) {
         -StandardError $reactErr
 }
 
-$compileInputs = @()
-if ($overlayApplied) {
-    $compileInputs = @(
-        & git -c "safe.directory=$CheckoutPath" -C $CheckoutPath diff --name-only -- `
-            "src/**/*.ts" `
-            "src/**/*.tsx"
+$compileInputs = @(Get-CheckoutCompileInputs -Checkout $CheckoutPath)
+$compileDigestsAfter = Get-CompileInputDigests `
+    -Checkout $CheckoutPath `
+    -CompileInputs $compileInputs
+$changedCompileInputs = if ($overlayApplied) {
+    @(
+        Get-ChangedCompileInputs `
+            -Before $compileDigestsBefore `
+            -After $compileDigestsAfter
     )
-    $compileInputs += @(
-        & git -c "safe.directory=$CheckoutPath" -C $CheckoutPath ls-files --others --exclude-standard -- `
-            "src/**/*.ts" `
-            "src/**/*.tsx"
+} else {
+    @()
+}
+$changedWorkbenchInputs = @(
+    $changedCompileInputs | Where-Object {
+        $_.Replace("/", "\") -notmatch "\\browser\\react\\src\\"
+    }
+)
+$changedReactInputs = @(
+    $changedCompileInputs | Where-Object {
+        $_.Replace("/", "\") -match "\\browser\\react\\src\\"
+    }
+)
+
+$workbenchCompileReadyAt = if ($previousState -and $previousState.workbenchCompileReadyAt) {
+    [DateTime]::Parse([string]$previousState.workbenchCompileReadyAt).ToUniversalTime()
+} else {
+    $null
+}
+$compileRequired = $changedWorkbenchInputs.Count -gt 0 -or -not $workbenchCompileReadyAt
+if ($compileRequired) {
+    $expectedOutputs = @(
+        Get-ExpectedWorkbenchOutputs `
+            -Checkout $CheckoutPath `
+            -CompileInputs $compileInputs
     )
-    $compileInputs = @($compileInputs | Sort-Object -Unique)
-    if ($compileInputs.Count -gt 0) {
-        Start-Sleep -Seconds 2
-        foreach ($relativePath in $compileInputs) {
-            $inputPath = Join-Path $CheckoutPath $relativePath
-            if (Test-Path -LiteralPath $inputPath -PathType Leaf) {
-                [System.IO.File]::SetLastWriteTimeUtc($inputPath, [DateTime]::UtcNow)
+    if ($expectedOutputs.Count -eq 0) {
+        throw "Founder workbench readiness could not be verified because no compiled overlay outputs were identified."
+    }
+    $existingWorkbenchLog = Remove-AnsiEscapeSequences (
+        Get-LogTextSince -Path $watchOut
+    )
+    $latestWorkbenchCompile = @(
+        $existingWorkbenchLog -split "\r?\n" |
+            Where-Object {
+                $_ -match "Finished compilation with \d+ errors? after" -and
+                $_ -notmatch "api-proposal-names"
             }
-        }
+    ) | Select-Object -Last 1
+    if (
+        $latestWorkbenchCompile -match "Finished compilation with 0 errors? after" -and
+        (Test-WorkbenchOutputsCurrent -ExpectedOutputs $expectedOutputs)
+    ) {
+        $workbenchCompileReadyAt = [DateTime]::UtcNow
+    } else {
+        $workbenchCompileReadyAt = Wait-ForWorkbenchCompile `
+            -Process $watchProcess `
+            -OutputLog $watchOut `
+            -ErrorLog $watchErr `
+            -OutputOffset $watchLogOffset `
+            -ExpectedOutputs $expectedOutputs `
+            -Timeout ([TimeSpan]::FromMinutes($WorkbenchReadyTimeoutMinutes))
+    }
+}
+
+$reactCompileReadyAt = if ($previousState -and $previousState.reactCompileReadyAt) {
+    [DateTime]::Parse([string]$previousState.reactCompileReadyAt).ToUniversalTime()
+} else {
+    $null
+}
+$reactExpectedInputs = if ($changedReactInputs.Count -gt 0) {
+    $changedReactInputs
+} else {
+    $compileInputs
+}
+$expectedReactOutputs = @(
+    Get-ExpectedReactOutputs `
+        -Checkout $CheckoutPath `
+        -CompileInputs $reactExpectedInputs
+)
+$reactCompileRequired = $changedReactInputs.Count -gt 0 -or -not $reactCompileReadyAt
+if ($reactCompileRequired) {
+    $existingReactLog = Remove-AnsiEscapeSequences (
+        Get-LogTextSince -Path $reactOut
+    )
+    if (
+        $existingReactLog -match "Build success in \d+ms" -and
+        (Test-WorkbenchOutputsCurrent -ExpectedOutputs $expectedReactOutputs)
+    ) {
+        $reactCompileReadyAt = [DateTime]::UtcNow
+    } elseif ($expectedReactOutputs.Count -eq 0) {
+        throw "Founder React readiness could not be verified because no overlay bundles were identified."
+    } else {
+        $reactCompileReadyAt = Wait-ForReactCompile `
+            -Process $reactProcess `
+            -OutputLog $reactOut `
+            -ErrorLog $reactErr `
+            -OutputOffset $reactLogOffset `
+            -ExpectedOutputs $expectedReactOutputs `
+            -Timeout ([TimeSpan]::FromMinutes($WorkbenchReadyTimeoutMinutes))
     }
 }
 
 $stateUpdatedAt = (Get-Date).ToUniversalTime()
 $state = [ordered]@{
     overlayHash = $overlayHash
+    overlayContentHash = $overlayContentHash
     extensionHash = $extensionHash
     checkout = $CheckoutPath
     upstreamCommit = [string]$manifest.upstream.commit
@@ -465,9 +807,12 @@ $state = [ordered]@{
     startedAt = $stateUpdatedAt.ToString("o")
     workbenchWatchPid = $watchProcess.Id
     workbenchWatchStartedAt = $watchProcess.StartTime.ToUniversalTime().ToString("o")
+    workbenchCompileReadyAt = $workbenchCompileReadyAt.ToString("o")
     reactWatchPid = $reactProcess.Id
     reactWatchStartedAt = $reactProcess.StartTime.ToUniversalTime().ToString("o")
+    reactCompileReadyAt = $reactCompileReadyAt.ToString("o")
     announcedCompileInputs = $compileInputs.Count
+    changedCompileInputs = $changedCompileInputs.Count
     logs = $logRoot
 }
 $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $workbenchStateFile -Encoding UTF8

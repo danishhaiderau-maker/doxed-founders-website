@@ -41,9 +41,17 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /workbenchWatchStartedAt/);
   assert.match(script, /reactWatchStartedAt/);
   assert.match(script, /\$PSCommandPath/);
-  assert.match(script, /SetLastWriteTimeUtc/);
+  assert.doesNotMatch(script, /SetLastWriteTimeUtc/);
   assert.match(script, /if \(\$overlayApplied\)/);
   assert.match(script, /announcedCompileInputs/);
+  assert.match(script, /changedCompileInputs/);
+  assert.match(script, /overlayContentHash/);
+  assert.match(script, /Wait-ForWorkbenchCompile/);
+  assert.match(script, /Wait-ForReactCompile/);
+  assert.match(script, /Test-WorkbenchOutputsCurrent/);
+  assert.match(script, /workbenchCompileReadyAt/);
+  assert.match(script, /reactCompileReadyAt/);
+  assert.match(script, /did not reach a verified compiler checkpoint/);
   assert.match(script, /FOUNDER_IDE_DEV_CACHE/);
   assert.match(script, /FOUNDER_IDE_TSC/);
   assert.match(script, /-TscPath \/ FOUNDER_IDE_TSC/);
