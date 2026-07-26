@@ -7,6 +7,7 @@ import {
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { VisualAttachmentDto } from './dto/ai-proxy.dto';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 const GLM_VISION_ENDPOINT =
   'https://api.z.ai/api/paas/v4/chat/completions';
@@ -53,6 +54,7 @@ export class AiProxyVisualService {
   constructor(
     private readonly founderPromo: FounderPromoService,
     private readonly prisma: PrismaService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   async describe(
@@ -96,22 +98,35 @@ export class AiProxyVisualService {
 
     let response: Response;
     try {
-      response = await fetch(GLM_VISION_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
+      response = await this.providerEgressAudit.runWithContext(
+        {
+          boundary: 'managed_auxiliary',
+          callSiteId: 'ai_proxy.visual',
+          budgetDomain: 'founder_managed_vision',
         },
-        body: JSON.stringify({
-          model: GLM_VISION_MODEL,
-          messages: [{ role: 'user', content }],
-          thinking: { type: 'disabled' },
-          temperature: 0,
-          max_tokens: 4096,
-          response_format: { type: 'json_object' },
-        }),
-        signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
-      });
+        async () => {
+          this.providerEgressAudit.record({
+            adapterName: 'ai-proxy.glm-vision',
+            provider: 'glm',
+          });
+          return fetch(GLM_VISION_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: GLM_VISION_MODEL,
+              messages: [{ role: 'user', content }],
+              thinking: { type: 'disabled' },
+              temperature: 0,
+              max_tokens: 4096,
+              response_format: { type: 'json_object' },
+            }),
+            signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+          });
+        },
+      );
     } catch (error) {
       throw new BadGatewayException(
         error instanceof DOMException && error.name === 'TimeoutError'

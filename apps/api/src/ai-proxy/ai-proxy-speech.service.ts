@@ -4,6 +4,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 const GLM_SPEECH_ENDPOINT =
   'https://api.z.ai/api/paas/v4/audio/transcriptions';
@@ -19,7 +20,10 @@ export type FounderSpeechResult = {
 
 @Injectable()
 export class AiProxySpeechService {
-  constructor(private readonly founderPromo: FounderPromoService) {}
+  constructor(
+    private readonly founderPromo: FounderPromoService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
+  ) {}
 
   async transcribeWav(audio: Uint8Array): Promise<FounderSpeechResult> {
     const apiKey =
@@ -41,12 +45,25 @@ export class AiProxySpeechService {
 
     let response: Response;
     try {
-      response = await fetch(GLM_SPEECH_ENDPOINT, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-        signal: AbortSignal.timeout(SPEECH_TIMEOUT_MS),
-      });
+      response = await this.providerEgressAudit.runWithContext(
+        {
+          boundary: 'managed_auxiliary',
+          callSiteId: 'ai_proxy.speech',
+          budgetDomain: 'founder_managed_speech',
+        },
+        async () => {
+          this.providerEgressAudit.record({
+            adapterName: 'ai-proxy.glm-speech',
+            provider: 'glm',
+          });
+          return fetch(GLM_SPEECH_ENDPOINT, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}` },
+            body: form,
+            signal: AbortSignal.timeout(SPEECH_TIMEOUT_MS),
+          });
+        },
+      );
     } catch (error) {
       throw new BadGatewayException(
         error instanceof DOMException && error.name === 'TimeoutError'

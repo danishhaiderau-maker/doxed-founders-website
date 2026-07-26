@@ -5,6 +5,7 @@ import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { AiRoutingService } from '../ai-routing/ai-routing.service';
 import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 import type { ModelRoute } from './founder-ai-runtime.types';
+import { ProviderEgressAuditService } from './provider-egress-audit.service';
 import {
   DEFAULT_FOUNDER_BRAIN_PROVIDERS_CONFIG,
   FOUNDER_BRAIN_PROVIDER_ALLOWLIST,
@@ -26,6 +27,7 @@ export class FounderBrainProvidersService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly founderPromo: FounderPromoService,
     private readonly aiRouting: AiRoutingService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -159,38 +161,53 @@ export class FounderBrainProvidersService implements OnModuleInit {
     }
 
     try {
-      if (provider === 'glm') {
-        const res = await fetch(`${getGlmApiBaseUrl()}/models?limit=1`, {
-          headers: { Authorization: `Bearer ${key}` },
-        });
-        if (!res.ok) {
-          const body = await res.text().catch(() => '');
-          return {
+      const failure = await this.providerEgressAudit.runWithContext(
+        {
+          boundary: 'approved_exception',
+          callSiteId: 'founder_brain.provider_verification',
+          budgetDomain: 'provider_verification',
+        },
+        async () => {
+          this.providerEgressAudit.record({
+            adapterName: 'founder-brain.provider-verification',
             provider,
-            ok: false,
-            message: `GLM ping failed (${res.status}): ${body.slice(0, 120)}`,
-            latencyMs: Date.now() - started,
-          };
-        }
-      } else {
-        const res = await fetch(DEEPSEEK_CHAT_URL, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: this.cachedConfig.deepseekFastModel,
-            messages: [{ role: 'user', content: 'ping' }],
-            max_tokens: 8,
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.text().catch(() => '');
-          return {
-            provider,
-            ok: false,
-            message: `DeepSeek ping failed (${res.status}): ${body.slice(0, 120)}`,
-            latencyMs: Date.now() - started,
-          };
-        }
+          });
+          if (provider === 'glm') {
+            const res = await fetch(`${getGlmApiBaseUrl()}/models?limit=1`, {
+              headers: { Authorization: `Bearer ${key}` },
+            });
+            if (!res.ok) {
+              const body = await res.text().catch(() => '');
+              return `GLM ping failed (${res.status}): ${body.slice(0, 120)}`;
+            }
+          } else {
+            const res = await fetch(DEEPSEEK_CHAT_URL, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${key}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: this.cachedConfig.deepseekFastModel,
+                messages: [{ role: 'user', content: 'ping' }],
+                max_tokens: 8,
+              }),
+            });
+            if (!res.ok) {
+              const body = await res.text().catch(() => '');
+              return `DeepSeek ping failed (${res.status}): ${body.slice(0, 120)}`;
+            }
+          }
+          return null;
+        },
+      );
+      if (failure) {
+        return {
+          provider,
+          ok: false,
+          message: failure,
+          latencyMs: Date.now() - started,
+        };
       }
       return {
         provider,

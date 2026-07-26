@@ -76,6 +76,7 @@ import { AiInvokerService } from '../ai-routing/ai-invoker.service';
 import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { AiRuntimeRequest } from '../founder-ai-runtime/founder-ai-runtime.types';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -119,6 +120,7 @@ export class BuilderService {
     private readonly aiInvoker: AiInvokerService,
     private readonly founderAiRuntime: FounderAiRuntimeService,
     private readonly brainProviders: FounderBrainProvidersService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -1753,6 +1755,13 @@ export class BuilderService {
     userPrompt: string,
     model?: string,
   ): Promise<{ text: string; usage: LlmUsage | null } | null> {
+    this.providerEgressAudit.record({
+      adapterName: 'builder.legacy-provider',
+      provider,
+      boundary: 'unscoped',
+      callSiteId: 'builder.legacy_completion',
+      budgetDomain: 'unattributed_legacy',
+    });
     switch (provider) {
       case AiProvider.OPENAI:
         return this.callOpenAi(apiKey, system, userPrompt, model);
@@ -1790,6 +1799,7 @@ export class BuilderService {
   ): AsyncGenerator<string, { text: string; usage: LlmUsage | null } | null> {
     switch (provider) {
       case AiProvider.OPENAI:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamOpenAiCompatible(
           'https://api.openai.com/v1/chat/completions',
           apiKey,
@@ -1798,6 +1808,7 @@ export class BuilderService {
           model ?? 'gpt-4o-mini',
         );
       case AiProvider.GLM:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamOpenAiCompatible(
           `${getGlmApiBaseUrl()}/chat/completions`,
           apiKey,
@@ -1806,6 +1817,7 @@ export class BuilderService {
           model ?? getGlmDefaultModel(),
         );
       case AiProvider.DEEPSEEK:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamOpenAiCompatible(
           'https://api.deepseek.com/chat/completions',
           apiKey,
@@ -1814,6 +1826,7 @@ export class BuilderService {
           model ?? 'deepseek-chat',
         );
       case AiProvider.OPENROUTER:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamOpenAiCompatible(
           'https://openrouter.ai/api/v1/chat/completions',
           apiKey,
@@ -1826,8 +1839,10 @@ export class BuilderService {
           },
         );
       case AiProvider.ANTHROPIC:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamAnthropic(apiKey, system, userPrompt, model);
       case AiProvider.GEMINI:
+        this.recordLegacyStreamEgress(provider);
         return yield* this.streamGemini(apiKey, system, userPrompt, model);
       default: {
         // Non-streaming providers: emit one chunk with the full text.
@@ -1842,6 +1857,16 @@ export class BuilderService {
         return result;
       }
     }
+  }
+
+  private recordLegacyStreamEgress(provider: AiProvider): void {
+    this.providerEgressAudit.record({
+      adapterName: 'builder.legacy-stream',
+      provider,
+      boundary: 'unscoped',
+      callSiteId: 'builder.legacy_stream',
+      budgetDomain: 'unattributed_legacy',
+    });
   }
 
   /** Streams an OpenAI-compatible chat completion (DeepSeek, GLM, OpenAI, OpenRouter). */
@@ -2926,6 +2951,13 @@ export class BuilderService {
   }
 
   private async verifyAiKey(provider: string, key: string): Promise<{ accountName: string }> {
+    this.providerEgressAudit.record({
+      adapterName: 'builder.key-verification',
+      provider,
+      boundary: 'approved_exception',
+      callSiteId: 'builder.key_verification',
+      budgetDomain: 'provider_verification',
+    });
     switch (provider) {
       case 'openai': {
         const res = await fetch('https://api.openai.com/v1/models?limit=1', {
@@ -3011,6 +3043,13 @@ export class BuilderService {
   }
 
   private async verifyOllamaUrl(baseUrl: string): Promise<void> {
+    this.providerEgressAudit.record({
+      adapterName: 'builder.ollama-verification',
+      provider: 'ollama',
+      boundary: 'approved_exception',
+      callSiteId: 'builder.local_ollama',
+      budgetDomain: 'local_inference',
+    });
     const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) throw new BadRequestException('Cannot reach Ollama at that URL — is it running?');
   }
@@ -3200,6 +3239,13 @@ export class BuilderService {
     user: string,
     model: string,
   ): Promise<{ text: string; usage: LlmUsage | null }> {
+    this.providerEgressAudit.record({
+      adapterName: 'builder.ollama-local-inference',
+      provider: 'ollama',
+      boundary: 'approved_exception',
+      callSiteId: 'builder.local_ollama',
+      budgetDomain: 'local_inference',
+    });
     const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

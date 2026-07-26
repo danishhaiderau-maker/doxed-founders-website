@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { AiProxySpeechService } from './ai-proxy-speech.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 test('managed speech fails closed when no platform speech key exists', async () => {
-  const service = new AiProxySpeechService({
-    getDecryptedPlatformGlmSpeechKey: async () => null,
-  } as never);
+  const service = new AiProxySpeechService(
+    {
+      getDecryptedPlatformGlmSpeechKey: async () => null,
+    } as never,
+    new ProviderEgressAuditService(),
+  );
 
   await assert.rejects(
     () => service.transcribeWav(new Uint8Array(44)),
@@ -16,6 +20,7 @@ test('managed speech fails closed when no platform speech key exists', async () 
 
 test('managed speech keeps the platform key server-side', async () => {
   const originalFetch = globalThis.fetch;
+  const audit = new ProviderEgressAuditService();
   let authorization = '';
   let body: FormData | undefined;
   globalThis.fetch = async (_input, init) => {
@@ -31,9 +36,12 @@ test('managed speech keeps the platform key server-side', async () => {
   };
 
   try {
-    const service = new AiProxySpeechService({
-      getDecryptedPlatformGlmSpeechKey: async () => 'platform-secret',
-    } as never);
+    const service = new AiProxySpeechService(
+      {
+        getDecryptedPlatformGlmSpeechKey: async () => 'platform-secret',
+      } as never,
+      audit,
+    );
     const result = await service.transcribeWav(new Uint8Array(44));
 
     assert.equal(authorization, 'Bearer platform-secret');
@@ -44,6 +52,8 @@ test('managed speech keeps the platform key server-side', async () => {
       model: 'glm-asr-2512',
       route: 'founder-managed-speech',
     });
+    assert.equal(audit.snapshot().managedAuxiliary, 1);
+    assert.equal(audit.snapshot().byCallSite['ai_proxy.speech'], 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

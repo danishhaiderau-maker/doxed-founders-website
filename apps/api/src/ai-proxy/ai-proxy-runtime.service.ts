@@ -16,6 +16,7 @@ import { FlightRecorderService } from '../flight-recorder/flight-recorder.servic
 import { RoutingEngineService } from '../routing-engine/routing-engine.service';
 import { RetryDetectorService } from '../learning-engine/retry-detector.service';
 import { ContextBuilderService } from '../founder-ai-runtime/context-builder.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
@@ -108,6 +109,7 @@ export class AiProxyRuntimeService {
     private readonly retryDetector: RetryDetectorService,
     private readonly intentClassifier: IntentClassifierService,
     private readonly contextBuilder: ContextBuilderService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -281,15 +283,31 @@ export class AiProxyRuntimeService {
     }
 
     const started = Date.now();
-    const upstream = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: body.stream ? 'text/event-stream' : 'application/json',
+    const upstream = await this.providerEgressAudit.runWithContext(
+      {
+        boundary: 'ai_proxy_runtime',
+        callSiteId: 'ai_proxy.chat',
+        budgetDomain: 'founder_managed_chat',
+        runtimeExecutionId: route.requestId,
       },
-      body: JSON.stringify(payload),
-    });
+      async () => {
+        this.providerEgressAudit.record({
+          adapterName: 'ai-proxy.openai-compatible',
+          provider: route.providerKey,
+        });
+        return fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            Accept: body.stream
+              ? 'text/event-stream'
+              : 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+      },
+    );
 
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');

@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { AiProxyVisualService } from './ai-proxy-visual.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 const PNG_BASE64 = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -13,6 +14,7 @@ const PNG_BASE64 = Buffer.from([
 
 function createService(options?: { key?: string | null }) {
   const writes: unknown[] = [];
+  const audit = new ProviderEgressAuditService();
   const service = new AiProxyVisualService(
     {
       getDecryptedPlatformGlmVisionKey: async () =>
@@ -26,8 +28,9 @@ function createService(options?: { key?: string | null }) {
         },
       },
     } as never,
+    audit,
   );
-  return { service, writes };
+  return { service, writes, audit };
 }
 
 test('managed vision fails closed without a platform vision key', async () => {
@@ -98,7 +101,7 @@ test('managed vision keeps its key server-side and returns bounded annotation ev
   };
 
   try {
-    const { service, writes } = createService();
+  const { service, writes, audit } = createService();
     const result = await service.describe('user-1', [
       {
         name: 'annotated.png',
@@ -124,6 +127,8 @@ test('managed vision keeps its key server-side and returns bounded annotation ev
       route: 'founder-managed-vision',
     });
     assert.equal(writes.length, 1);
+    assert.equal(audit.snapshot().managedAuxiliary, 1);
+    assert.equal(audit.snapshot().byCallSite['ai_proxy.visual'], 1);
     assert.match(JSON.stringify(writes[0]), /ide\.annotated_screenshot/);
     assert.doesNotMatch(JSON.stringify(result), /platform-vision-secret/);
   } finally {

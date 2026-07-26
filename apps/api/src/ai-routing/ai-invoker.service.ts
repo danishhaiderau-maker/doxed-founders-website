@@ -8,6 +8,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
 import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
+import {
+  budgetDomainForBillingSource,
+  routedCallSiteForSection,
+} from '../founder-ai-runtime/provider-egress-audit.types';
 import { AiRoutingService } from './ai-routing.service';
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -59,6 +64,7 @@ export class AiInvokerService {
     private readonly routing: AiRoutingService,
     private readonly adoption: PlatformAdoptionService,
     private readonly brainProviders: FounderBrainProvidersService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   async invoke(options: InvokeOptions): Promise<InvokeResult> {
@@ -99,6 +105,17 @@ export class AiInvokerService {
     const temperature = options.temperature ?? 0.4;
     const baseUrl = providerKey === 'glm' ? getGlmApiBaseUrl() : provider.baseUrl;
 
+    const billingSource = options.billingSource ?? 'platform_routed';
+    this.providerEgressAudit.record({
+      adapterName:
+        provider.adapter === 'anthropic'
+          ? 'ai-invoker.anthropic'
+          : 'ai-invoker.openai-compatible',
+      provider: providerKey,
+      callSiteId: routedCallSiteForSection(section),
+      budgetDomain: budgetDomainForBillingSource(billingSource),
+    });
+
     let result: InvokeResult;
     try {
       if (provider.adapter === 'anthropic') {
@@ -119,7 +136,6 @@ export class AiInvokerService {
     }
 
     // Centralised token logging — best-effort, never throws into the request path.
-    const billingSource = options.billingSource ?? 'platform_routed';
     void this.adoption
       .recordAiUsage({
         userId: options.userId ?? '',

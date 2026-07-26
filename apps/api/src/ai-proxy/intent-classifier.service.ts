@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import { getGlmApiBaseUrl } from '../founder-os/glm-config';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 /**
  * Intent Classifier Service — Phase 5b.
@@ -36,7 +37,10 @@ export class IntentClassifierService {
   /** Hard cap on the GLM call — classification must never stall routing. */
   private readonly modelTimeoutMs = 1500;
 
-  constructor(private readonly brainProviders: FounderBrainProvidersService) {}
+  constructor(
+    private readonly brainProviders: FounderBrainProvidersService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
+  ) {}
 
   /**
    * Classify a prompt into one of the three routing tiers.
@@ -169,23 +173,36 @@ export class IntentClassifierService {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.modelTimeoutMs);
 
-      const response = await fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
+      const response = await this.providerEgressAudit.runWithContext(
+        {
+          boundary: 'managed_auxiliary',
+          callSiteId: 'ai_proxy.intent_classifier',
+          budgetDomain: 'founder_managed_routing',
         },
-        body: JSON.stringify({
-          model: this.classifierModel,
-          messages: [
-            { role: 'system', content: CLASSIFICATION_PROMPT },
-            { role: 'user', content: prompt.slice(0, 1000) },
-          ],
-          max_tokens: 10,
-          temperature: 0,
-        }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeout));
+        async () => {
+          this.providerEgressAudit.record({
+            adapterName: 'intent-classifier.openai-compatible',
+            provider: 'glm',
+          });
+          return fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: this.classifierModel,
+              messages: [
+                { role: 'system', content: CLASSIFICATION_PROMPT },
+                { role: 'user', content: prompt.slice(0, 1000) },
+              ],
+              max_tokens: 10,
+              temperature: 0,
+            }),
+            signal: controller.signal,
+          });
+        },
+      ).finally(() => clearTimeout(timeout));
 
       if (!response.ok) {
         this.logger.debug(

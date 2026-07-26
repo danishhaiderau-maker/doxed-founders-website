@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import { AiProxyRuntimeService } from './ai-proxy-runtime.service';
 import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
 import { ChatCompletionRequestDto } from './dto/ai-proxy.dto';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 
 function runtimeWithDecision(model: string, provider = 'deepseek') {
   const calls: Array<{ intent: string }> = [];
@@ -29,6 +30,7 @@ function runtimeWithDecision(model: string, provider = 'deepseek') {
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
     {} as never,
+    new ProviderEgressAuditService(),
   );
   return { runtime, calls };
 }
@@ -56,6 +58,7 @@ function runtimeWithV2Failure() {
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
     {} as never,
+    new ProviderEgressAuditService(),
   );
 }
 
@@ -185,6 +188,7 @@ test('Founder Agent tools and tool history reach the upstream provider', async (
   };
 
   try {
+    const audit = new ProviderEgressAuditService();
     const runtime = new AiProxyRuntimeService(
       {} as never,
       {} as never,
@@ -195,6 +199,7 @@ test('Founder Agent tools and tool history reach the upstream provider', async (
       {} as never,
       {} as never,
       { buildMemoryContext: async () => '' } as never,
+      audit,
     );
     const tools = [
       {
@@ -238,6 +243,8 @@ test('Founder Agent tools and tool history reach the upstream provider', async (
     );
 
     assert.equal(result.ok, true);
+    assert.equal(audit.snapshot().ideProxyRuntime, 1);
+    assert.equal(audit.snapshot().byCallSite['ai_proxy.chat'], 1);
     assert.deepEqual(sentBodies[0]?.tools, tools);
     assert.equal(sentBodies[0]?.tool_choice, 'auto');
     assert.deepEqual((sentBodies[0]?.messages as Array<Record<string, unknown>>)[0]?.tool_calls, [

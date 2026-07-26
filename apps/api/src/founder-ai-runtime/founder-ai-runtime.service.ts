@@ -7,6 +7,8 @@ import type {
 import { ContextBuilderService } from './context-builder.service';
 import { ModelRouterService } from './model-router.service';
 import { PromptCacheService } from './prompt-cache.service';
+import { ProviderEgressAuditService } from './provider-egress-audit.service';
+import { runtimeCallSiteForSection } from './provider-egress-audit.types';
 
 /**
  * Central gateway for Founder OS AI calls (Phase 0).
@@ -21,6 +23,7 @@ export class FounderAiRuntimeService {
     private readonly promptCache: PromptCacheService,
     private readonly modelRouter: ModelRouterService,
     private readonly contextBuilder: ContextBuilderService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   isEnabled(): boolean {
@@ -95,7 +98,14 @@ export class FounderAiRuntimeService {
       return { ok: false, intent: route.intent, model: route.model, cacheHit: false, cacheLevel: 'miss' };
     }
 
-    const result = await invoke(route, { maxOutputTokens, request: prepared });
+    const result = await this.providerEgressAudit.runWithContext(
+      {
+        boundary: 'founder_ai_runtime',
+        callSiteId: runtimeCallSiteForSection(prepared.section),
+        budgetDomain: 'founder_managed',
+      },
+      () => invoke(route, { maxOutputTokens, request: prepared }),
+    );
     if (result.ok) {
       await this.recordResponse(prepared, { ...result, intent: route.intent, cacheLevel: 'miss' });
     }

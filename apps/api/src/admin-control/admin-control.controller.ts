@@ -10,6 +10,7 @@ import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { BuilderScoreService } from '../founder-os/builder-score.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
+import { ProviderEgressAuditService } from '../founder-ai-runtime/provider-egress-audit.service';
 import { parseFounderBrainMode } from '@dcf/utils';
 
 @SkipThrottle()
@@ -22,6 +23,7 @@ export class AdminControlController {
     private readonly founderPromo: FounderPromoService,
     private readonly builderScore: BuilderScoreService,
     private readonly founderBrainProviders: FounderBrainProvidersService,
+    private readonly providerEgressAudit: ProviderEgressAuditService,
   ) {}
 
   @Public()
@@ -212,5 +214,18 @@ export class AdminControlController {
       return this.founderBrainProviders.testProvider(body.provider);
     }
     return this.founderBrainProviders.testAllProviders();
+  }
+
+  @UseGuards(AdminGuard)
+  @Get('ai-provider-egress')
+  getAiProviderEgress() {
+    return this.providerEgressAudit.snapshot();
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('ai-provider-egress/reset')
+  resetAiProviderEgress() {
+    this.providerEgressAudit.reset();
+    return this.providerEgressAudit.snapshot();
   }
 }

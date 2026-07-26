@@ -6,6 +6,7 @@ import { FounderAiRuntimeService } from './founder-ai-runtime.service';
 import { FounderBrainProvidersService } from './founder-brain-providers.service';
 import { ModelRouterService } from './model-router.service';
 import { PromptCacheService } from './prompt-cache.service';
+import { ProviderEgressAuditService } from './provider-egress-audit.service';
 
 @Global()
 @Module({
@@ -17,6 +18,7 @@ import { PromptCacheService } from './prompt-cache.service';
     ModelRouterService,
     ContextBuilderService,
     FounderBrainProvidersService,
+    ProviderEgressAuditService,
     FounderAiRuntimeService,
   ],
   exports: [
@@ -25,6 +27,7 @@ import { PromptCacheService } from './prompt-cache.service';
     ModelRouterService,
     ContextBuilderService,
     FounderBrainProvidersService,
+    ProviderEgressAuditService,
   ],
 })
 export class FounderAiRuntimeModule {}
