@@ -61,6 +61,7 @@ export async function callSurplusChat(params: {
   userPrompt: string;
   model?: string;
   baseUrl?: string;
+  maxOutputTokens?: number;
 }): Promise<{ text: string; usage: { promptTokens: number; completionTokens: number } | null } | null> {
   const root = normalizeSurplusBaseUrl(params.baseUrl);
   const res = await fetch(`${root}/chat/completions`, {
@@ -76,6 +77,7 @@ export async function callSurplusChat(params: {
         { role: 'user', content: params.userPrompt },
       ],
       temperature: 0.4,
+      ...(params.maxOutputTokens ? { max_tokens: params.maxOutputTokens } : {}),
     }),
     signal: AbortSignal.timeout(120_000),
   });

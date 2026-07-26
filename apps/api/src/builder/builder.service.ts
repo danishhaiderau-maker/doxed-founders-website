@@ -81,8 +81,14 @@ import {
   DEEPSEEK_V4_FLASH_MODEL,
   normalizeRetiredDeepseekModel,
 } from '../ai-proxy/deepseek-model-policy';
+import { budgetDomainForBillingSource } from '../founder-ai-runtime/provider-egress-audit.types';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
+type LlmBillingSource =
+  | 'byok'
+  | 'platform_promo'
+  | 'platform_brain'
+  | 'founder_os_local';
 
 /** Map an AiProvider to its promo credential provider key, or null if not a promo provider. */
 function promoProviderForAi(provider: AiProvider): PromoCredentialProvider | null {
@@ -1450,12 +1456,15 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const result = await this.completionWithProvider(
+        const result = await this.completionWithProviderViaRuntime(
+          userId,
           provider,
           apiKey,
           llmSystem,
           llmUserPrompt,
           model,
+          billingSource,
+          founderBrainTask,
         );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
@@ -1596,7 +1605,15 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg.defaultModel ?? undefined
           : cfg.defaultModel ?? undefined;
       try {
-        const result = await this.completionWithProvider(forceProvider, userApiKey.trim(), system, userPrompt, model);
+        const result = await this.completionWithProviderViaRuntime(
+          userId,
+          forceProvider,
+          userApiKey.trim(),
+          system,
+          userPrompt,
+          model,
+          'byok',
+        );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
@@ -1653,7 +1670,15 @@ export class BuilderService {
         : cfg.defaultModel ?? undefined;
 
     try {
-      const result = await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
+      const result = await this.completionWithProviderViaRuntime(
+        userId,
+        forceProvider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+        billingSource,
+      );
       if (result?.text?.trim()) {
         await this.logAiTokenUsage(
           userId,
@@ -1715,7 +1740,15 @@ export class BuilderService {
           ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
           : cfg?.defaultModel ?? undefined;
       try {
-        const result = await this.completionWithProvider(actualProvider, promoKey, system, userPrompt, model);
+        const result = await this.completionWithProviderViaRuntime(
+          userId,
+          actualProvider,
+          promoKey,
+          system,
+          userPrompt,
+          model,
+          'platform_promo',
+        );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
@@ -1757,12 +1790,14 @@ export class BuilderService {
     if (!platformKey) return null;
 
     try {
-      const result = await this.completionWithProvider(
+      const result = await this.completionWithProviderViaRuntime(
+        userId,
         AiProvider.DEEPSEEK,
         platformKey,
         system,
         userPrompt,
         undefined,
+        'platform_brain',
       );
       if (result?.text?.trim()) {
         await this.logAiTokenUsage(
@@ -1786,12 +1821,89 @@ export class BuilderService {
     return null;
   }
 
+  /**
+   * Apply Founder Runtime controls to a resolved provider without changing the
+   * caller's provider choice or billing source. Forced-provider and fallback
+   * calls skip prompt-cache reuse because their key/model selection is
+   * explicit; they still receive context pruning, output caps, and egress
+   * attribution.
+   */
+  private async completionWithProviderViaRuntime(
+    userId: string,
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model: string | undefined,
+    billingSource: LlmBillingSource,
+    founderBrainTask?: FounderBrainTask,
+  ): Promise<{ text: string; usage: LlmUsage | null } | null> {
+    if (!this.founderAiRuntime.isEnabled()) {
+      return this.completionWithProvider(
+        provider,
+        apiKey,
+        system,
+        userPrompt,
+        model,
+      );
+    }
+
+    const request: AiRuntimeRequest = {
+      userId,
+      system,
+      userPrompt,
+      section: 'copilot',
+      founderBrainTask,
+      skipCache: true,
+    };
+    const result = await this.founderAiRuntime.complete(
+      request,
+      async (_route, ctx) => {
+        const completion = await this.completionWithProvider(
+          provider,
+          apiKey,
+          ctx.request.system,
+          ctx.request.userPrompt,
+          model,
+          ctx.maxOutputTokens,
+        );
+        if (!completion?.text?.trim()) {
+          return { ok: false, provider, model };
+        }
+        return {
+          ok: true,
+          text: completion.text,
+          provider,
+          model,
+          promptTokens: completion.usage?.promptTokens,
+          completionTokens: completion.usage?.completionTokens,
+        };
+      },
+      {
+        budgetDomain: budgetDomainForBillingSource(billingSource),
+      },
+    );
+    if (!result.ok || !result.text?.trim()) return null;
+    const hasUsage =
+      result.promptTokens != null || result.completionTokens != null;
+    return {
+      text: result.text,
+      usage: hasUsage
+        ? {
+            promptTokens: result.promptTokens ?? 0,
+            completionTokens: result.completionTokens ?? 0,
+          }
+        : null,
+    };
+  }
+
   private async completionWithProvider(
     provider: AiProvider,
     apiKey: string,
     system: string,
     userPrompt: string,
     model?: string,
+    maxOutputTokens?: number,
   ): Promise<{ text: string; usage: LlmUsage | null } | null> {
     this.providerEgressAudit.record({
       adapterName: 'builder.legacy-provider',
@@ -1802,21 +1914,21 @@ export class BuilderService {
     });
     switch (provider) {
       case AiProvider.OPENAI:
-        return this.callOpenAi(apiKey, system, userPrompt, model);
+        return this.callOpenAi(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.GLM:
-        return this.callGlm(apiKey, system, userPrompt, model);
+        return this.callGlm(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.ANTHROPIC:
-        return this.callAnthropic(apiKey, system, userPrompt, model);
+        return this.callAnthropic(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.GEMINI:
-        return this.callGemini(apiKey, system, userPrompt, model);
+        return this.callGemini(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.DEEPSEEK:
-        return this.callDeepSeek(apiKey, system, userPrompt, model);
+        return this.callDeepSeek(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.OPENROUTER:
-        return this.callOpenRouter(apiKey, system, userPrompt, model);
+        return this.callOpenRouter(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.JATEVO:
-        return this.callJatevo(apiKey, system, userPrompt, model);
+        return this.callJatevo(apiKey, system, userPrompt, model, maxOutputTokens);
       case AiProvider.SURPLUS:
-        return this.callSurplus(apiKey, system, userPrompt, model);
+        return this.callSurplus(apiKey, system, userPrompt, model, maxOutputTokens);
       default:
         return null;
     }
@@ -3092,7 +3204,13 @@ export class BuilderService {
     if (!res.ok) throw new BadRequestException('Cannot reach Ollama at that URL — is it running?');
   }
 
-  private async callOpenAi(key: string, system: string, user: string, model?: string) {
+  private async callOpenAi(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -3103,6 +3221,7 @@ export class BuilderService {
           { role: 'user', content: user },
         ],
         temperature: 0.4,
+        ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}),
       }),
     });
     if (!res.ok) return null;
@@ -3117,7 +3236,13 @@ export class BuilderService {
   }
 
   /** GLM 5.2 (ZhipuAI) — OpenAI-compatible endpoint, cheapest promo LLM. */
-  private async callGlm(key: string, system: string, user: string, model?: string) {
+  private async callGlm(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const res = await fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -3128,6 +3253,7 @@ export class BuilderService {
           { role: 'user', content: user },
         ],
         temperature: 0.4,
+        ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}),
       }),
     });
     if (!res.ok) return null;
@@ -3141,7 +3267,13 @@ export class BuilderService {
     return { text, usage };
   }
 
-  private async callAnthropic(key: string, system: string, user: string, model?: string) {
+  private async callAnthropic(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -3151,7 +3283,7 @@ export class BuilderService {
       },
       body: JSON.stringify({
         model: model ?? 'claude-3-5-haiku-latest',
-        max_tokens: 2048,
+        max_tokens: maxOutputTokens ?? 2048,
         system,
         messages: [{ role: 'user', content: user }],
       }),
@@ -3166,7 +3298,13 @@ export class BuilderService {
     return { text, usage: parseAnthropicUsage(data) };
   }
 
-  private async callGemini(key: string, system: string, user: string, model?: string) {
+  private async callGemini(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const modelId = model ?? 'gemini-2.0-flash';
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${encodeURIComponent(key)}`,
@@ -3176,6 +3314,9 @@ export class BuilderService {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
           contents: [{ role: 'user', parts: [{ text: user }] }],
+          ...(maxOutputTokens
+            ? { generationConfig: { maxOutputTokens } }
+            : {}),
         }),
       },
     );
@@ -3196,7 +3337,13 @@ export class BuilderService {
     return { text, usage };
   }
 
-  private async callDeepSeek(key: string, system: string, user: string, model?: string) {
+  private async callDeepSeek(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const res = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -3207,6 +3354,7 @@ export class BuilderService {
           { role: 'user', content: user },
         ],
         temperature: 0.4,
+        ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}),
       }),
     });
     if (!res.ok) {
@@ -3222,25 +3370,45 @@ export class BuilderService {
     return { text, usage: parseOpenAiStyleUsage(data) };
   }
 
-  private async callJatevo(key: string, system: string, user: string, model?: string) {
+  private async callJatevo(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     return callJatevoChat({
       apiKey: key,
       system,
       userPrompt: user,
       model,
+      maxOutputTokens,
     });
   }
 
-  private async callSurplus(key: string, system: string, user: string, model?: string) {
+  private async callSurplus(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     return callSurplusChat({
       apiKey: key,
       system,
       userPrompt: user,
       model,
+      maxOutputTokens,
     });
   }
 
-  private async callOpenRouter(key: string, system: string, user: string, model?: string) {
+  private async callOpenRouter(
+    key: string,
+    system: string,
+    user: string,
+    model?: string,
+    maxOutputTokens?: number,
+  ) {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -3256,6 +3424,7 @@ export class BuilderService {
           { role: 'user', content: user },
         ],
         temperature: 0.4,
+        ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}),
       }),
     });
     if (!res.ok) {

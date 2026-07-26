@@ -8,7 +8,18 @@ import { ContextBuilderService } from './context-builder.service';
 import { ModelRouterService } from './model-router.service';
 import { PromptCacheService } from './prompt-cache.service';
 import { ProviderEgressAuditService } from './provider-egress-audit.service';
-import { runtimeCallSiteForSection } from './provider-egress-audit.types';
+import {
+  runtimeCallSiteForSection,
+  type ProviderEgressBudgetDomain,
+} from './provider-egress-audit.types';
+
+export type AiRuntimeExecutionPolicy = {
+  /**
+   * Accounting boundary for the provider call. BYOK must stay outside the
+   * Founder-managed allowance even though it uses the same runtime controls.
+   */
+  budgetDomain?: ProviderEgressBudgetDomain;
+};
 
 /**
  * Central gateway for Founder OS AI calls (Phase 0).
@@ -87,6 +98,7 @@ export class FounderAiRuntimeService {
   async complete(
     request: AiRuntimeRequest,
     invoke?: (route: ModelRoute, ctx: { maxOutputTokens: number; request: AiRuntimeRequest }) => Promise<AiRuntimeResponse>,
+    policy?: AiRuntimeExecutionPolicy,
   ): Promise<AiRuntimeResponse> {
     const cached = await this.tryCacheHit(request);
     if (cached) return cached;
@@ -102,7 +114,7 @@ export class FounderAiRuntimeService {
       {
         boundary: 'founder_ai_runtime',
         callSiteId: runtimeCallSiteForSection(prepared.section),
-        budgetDomain: 'founder_managed',
+        budgetDomain: policy?.budgetDomain ?? 'founder_managed',
       },
       () => invoke(route, { maxOutputTokens, request: prepared }),
     );
