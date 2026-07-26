@@ -282,6 +282,13 @@ def run():
     relay_source = inspect.getsource(bot.api_relay_state)
     check("relay-state uses a single in-flight snapshot refresh", "_RELAY_STATE_REFRESH_LOCK.acquire" in relay_source)
     check("relay-state request path is cache-only", "if not force_rebuild" in relay_source)
+    server_source = inspect.getsource(bot._create_dashboard_server)
+    check("dashboard normal client I/O is bounded", "_client_io_timeout_sec = 15.0" in server_source)
+    check("dashboard overload rejection I/O is bounded", "_overload_io_timeout_sec = 0.1" in server_source)
+    check(
+        "dashboard overload send cannot block accept loop",
+        "request.settimeout(self._overload_io_timeout_sec)" in server_source,
+    )
     check(
         "background refresher owns relay snapshot rebuilds",
         "api_relay_state(force_rebuild=True)" in inspect.getsource(bot._relay_state_cache_refresher_loop),

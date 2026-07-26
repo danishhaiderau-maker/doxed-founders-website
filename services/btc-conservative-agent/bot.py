@@ -30439,6 +30439,8 @@ def _create_dashboard_server():
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
         _thread_cap = threading.BoundedSemaphore(8)
+        _client_io_timeout_sec = 15.0
+        _overload_io_timeout_sec = 0.1
 
         def process_request(self, request, client_address):
             # Never block the accept loop waiting for a worker. If slow clients
@@ -30456,13 +30458,21 @@ def _create_dashboard_server():
                     + body
                 )
                 try:
+                    # The overload response runs on the accept loop itself.
+                    # A disconnected or back-pressured tunnel client must never
+                    # be allowed to block that loop and starve future probes.
+                    request.settimeout(self._overload_io_timeout_sec)
                     request.sendall(response)
-                except OSError:
+                except (OSError, TimeoutError):
                     pass
                 finally:
                     self.shutdown_request(request)
                 return
             try:
+                # Bound socket reads/writes for normal workers as well. App
+                # computation can take longer, but a dead tunnel client cannot
+                # retain one of the eight worker slots indefinitely.
+                request.settimeout(self._client_io_timeout_sec)
                 t = threading.Thread(
                     target=self._release_and_process,
                     args=(request, client_address),
