@@ -76,6 +76,7 @@ describe('Founder IDE extension manifest', () => {
     assert.ok(commands.has('founderOs.signOut'));
     assert.ok(commands.has('founderOs.openConnections'));
     assert.ok(commands.has('founderOs.openSettings'));
+    assert.ok(commands.has('founderOs.openProjects'));
     assert.ok(commands.has('founderOs.transcribeVoice'));
     assert.ok(commands.has('founderOs.refreshProjectContext'));
     const preferences = manifest.contributes?.menus?.['menubar/preferences'] ?? [];
@@ -174,6 +175,14 @@ describe('Founder IDE extension manifest', () => {
     assert.match(
       hubSource,
       /case 'openRemote':[\s\S]*?founderOs\.openRemoteControl/,
+    );
+    assert.match(
+      hubSource,
+      /case 'openProjects':[\s\S]*?founderOs\.openProjects/,
+    );
+    assert.match(
+      hubSource,
+      /case 'openChats':[\s\S]*?void\.historyAction/,
     );
   });
 

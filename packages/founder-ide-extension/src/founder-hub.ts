@@ -137,11 +137,16 @@ export class FounderHubProvider
         break;
       }
       case 'openProjects':
-        await vscode.commands.executeCommand('workbench.action.openRecent');
+        await vscode.commands.executeCommand('founderOs.openProjects');
         break;
-      case 'openChats':
+      case 'openChats': {
         await vscode.commands.executeCommand('founderOs.openChat');
+        const commands = new Set(await vscode.commands.getCommands(true));
+        if (commands.has('void.historyAction')) {
+          await vscode.commands.executeCommand('void.historyAction');
+        }
         break;
+      }
       case 'openAgents':
         await vscode.commands.executeCommand('founderOs.openAgents');
         break;

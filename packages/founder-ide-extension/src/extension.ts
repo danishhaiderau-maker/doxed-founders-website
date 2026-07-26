@@ -77,6 +77,7 @@ import {
   type ManagedVisualInput,
 } from './managed-visual';
 import { describePersonalVisuals } from './personal-visual-request';
+import { FounderProjectHistory } from './project-history';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -98,6 +99,7 @@ let founderVerifiedSolutionMemory: FounderVerifiedSolutionMemory | undefined;
 let founderProjectActivity: FounderProjectActivityStore | undefined;
 let personalAiProfiles: PersonalAiProfileStore | undefined;
 let dailyQualityReviewDisposable: vscode.Disposable | undefined;
+let founderProjectHistory: FounderProjectHistory | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -164,6 +166,8 @@ export function activate(context: vscode.ExtensionContext): void {
   founderProjectActivity = new FounderProjectActivityStore(
     path.join(context.globalStorageUri.fsPath, 'project-activity.json'),
   );
+  founderProjectHistory = new FounderProjectHistory(context);
+  context.subscriptions.push(founderProjectHistory);
   dailyQualityReviewDisposable = createDailyQualityReview(context, {
     activity: founderProjectActivity,
     workspaceId: () => founderWorkspaceContext?.workspaceIdValue() ?? null,
@@ -305,6 +309,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('founderOs.openHub', () =>
       vscode.commands.executeCommand('workbench.view.extension.founderOs'),
+    ),
+    vscode.commands.registerCommand('founderOs.openProjects', () =>
+      founderProjectHistory?.show(),
     ),
     vscode.commands.registerCommand('founderOs.openCompanion', async () => {
       await vscode.workspace.getConfiguration('founderOs').update(
