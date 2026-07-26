@@ -58,6 +58,13 @@ import io
 import itertools
 import zipfile
 from pathlib import Path
+from research_opportunity_v2 import (
+    EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
+    REPORT_FILE as TYPE_B_RESEARCH_V2_REPORT_NAME,
+    load_events as load_type_b_research_v2_events,
+    materialize as materialize_type_b_research_v2,
+    summarize as summarize_type_b_research_v2,
+)
 
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
@@ -100,6 +107,7 @@ TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
 TYPE_B_PREDICTOR_REPORT_FILE = "type_b_predictor_report.json"
 TYPE_B_ADX_V3_SHADOW_REPORT_FILE = "type_b_adx_v3_shadow_report.json"
+TYPE_B_RESEARCH_V2_REPORT_FILE = TYPE_B_RESEARCH_V2_REPORT_NAME
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
 CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
@@ -610,6 +618,7 @@ ANALYZER_JSON_REPORT_FILES = (
     CHASE_EFFICIENCY_MATRIX_REPORT_FILE,
     TYPE_B_PREDICTOR_REPORT_FILE,
     TYPE_B_ADX_V3_SHADOW_REPORT_FILE,
+    TYPE_B_RESEARCH_V2_REPORT_FILE,
     CHASE_THRESHOLD_REPORT_FILE,
     CHASE_DELAY_REPORT_FILE,
     EXIT_COMBINATIONS_REPORT_FILE,
@@ -670,6 +679,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
     ("Type B ADX V3 Shadow", TYPE_B_ADX_V3_SHADOW_REPORT_FILE, "Replay-only challenger decisions, direction balance, ADX bands, and promotion gate"),
+    ("Type B Research V2", TYPE_B_RESEARCH_V2_REPORT_FILE, "One row per independent opportunity across paper, live and shadow evidence"),
     ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
     ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
 )
@@ -15171,6 +15181,55 @@ def type_b_predictor_report(trades=None, session=None):
     return payload
 
 
+def type_b_research_v2_report():
+    """Build the independent-opportunity Type-B collection report."""
+    event_path = TYPE_B_RESEARCH_V2_EVENT_FILE
+    report_path = analyzer_report_path(TYPE_B_RESEARCH_V2_REPORT_FILE)
+    try:
+        events = load_type_b_research_v2_events(event_path)
+        opportunities = materialize_type_b_research_v2(events)
+        payload = summarize_type_b_research_v2(opportunities)
+        payload.update({
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "events_total": len(events),
+            "quality_gate": {
+                "minimum_independent_opportunities": TYPE_B_GATE_MIN_TRADES,
+                "minimum_feature_coverage_pct": 90,
+                "rolling_holdouts_required": 3,
+                "auto_apply": False,
+            },
+            # Bound dashboard/API payload size; the JSONL remains the canonical audit stream.
+            "recent_opportunities": opportunities[-200:],
+        })
+    except Exception as exc:
+        payload = {
+            "schema": "type_b_research_v2_report_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "independent_opportunities": 0,
+            "valid_holdout_opportunities": 0,
+            "completed_opportunities": 0,
+            "filled_opportunities": 0,
+            "type_b_outcomes": 0,
+            "readiness": "COLLECTING",
+            "execution_policy": "ADVISORY_ONLY_NEVER_AUTO_APPLY",
+            "error": f"{type(exc).__name__}: {exc}",
+            "recent_opportunities": [],
+        }
+    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        "  Type B Research V2: "
+        f"opportunities={payload.get('independent_opportunities', 0)} "
+        f"valid={payload.get('valid_holdout_opportunities', 0)} "
+        f"status={payload.get('readiness')} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
+
+
 def type_b_adx_v3_shadow_report(session=None):
     """Evaluate the non-monotonic ADX Type B challenger without promoting it."""
     if session is None:
@@ -16297,6 +16356,7 @@ def pre_test_analytics_reports(
     exit_ladder_simulator_report(trades=trades, session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     type_b_predictor_report(trades=trades, session=session)
+    type_b_research_v2_report()
     type_b_adx_v3_shadow_report(session=session)
     first_15m_outcome_report(trades=trades, session=session)
     scenario_c_leakage_report(trades=trades, session=session)

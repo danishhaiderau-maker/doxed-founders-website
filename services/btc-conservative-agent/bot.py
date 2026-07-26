@@ -94,6 +94,13 @@ from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
+from research_opportunity_v2 import (
+    COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
+    SCHEMA_VERSION as TYPE_B_RESEARCH_V2_SCHEMA,
+    append_event as append_type_b_research_v2_event,
+    child_event as type_b_research_v2_child_event,
+    opportunity_event as type_b_research_v2_opportunity_event,
+)
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
@@ -1032,6 +1039,13 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "signal_age_bucket": _signal_age_bucket(signal_age_sec),
         "research_lane": signal.get("research_lane") or order.get("research_lane"),
         "research_model": signal.get("research_model") or order.get("research_model"),
+        "shared_ai_call_id": (
+            order.get("shared_ai_call_id")
+            or signal.get("shared_ai_call_id")
+            or (ai or {}).get("shared_ai_call_id")
+            or signal.get("source_trade_id")
+        ),
+        "research_collection_mode": _type_b_research_v2_mode(),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
         "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
         "entry_levels_consumed": int((order.get("fill_sim") or {}).get("levels_consumed") or 0),
@@ -2811,6 +2825,10 @@ def csv_lane_meta(signal: dict = None) -> dict:
     return {
         "research_lane": lane,
         "research_model": (signal or {}).get("research_model") or research_lane_label(lane),
+        "shared_ai_call_id": (signal or {}).get("shared_ai_call_id"),
+        "shared_ai_call_ts": (signal or {}).get("shared_ai_call_ts"),
+        "research_schema": TYPE_B_RESEARCH_V2_SCHEMA,
+        "research_collection_id": TYPE_B_RESEARCH_V2_COLLECTION_ID,
     }
 
 def _signal_lane_from_ref(signal_ref: dict) -> str:
@@ -8437,13 +8455,27 @@ def build_full_feature_snapshot():
             candles=copy.deepcopy(latest_candles),
         )
         features.update({
+            "ema_slope": (
+                (float(features.get("ema9")) - float(features.get("ema21"))) / float(features.get("ema21"))
+                if features.get("ema21") not in (None, 0) else None
+            ),
             "adx": indicators.get("adx"),
             "adx_normalized": indicators.get("adx"),
             "adx_source": indicators.get("adx_source"),
+            "adx_derived": indicators.get("adx_derived"),
+            "adx_slope_3": indicators.get("adx_slope_3"),
+            "plus_di": indicators.get("plus_di"),
+            "minus_di": indicators.get("minus_di"),
+            "di_separation": indicators.get("di_separation"),
+            "dmi_source": indicators.get("dmi_source"),
+            "dmi_period": indicators.get("dmi_period"),
             "volatility_percentile": indicators.get("volatility_percentile"),
             "volatility_atr": indicators.get("atr"),
             "volatility_source": indicators.get("volatility_source"),
+            "volume_percentile": indicators.get("volume_percentile"),
+            "volume_percentile_source": indicators.get("volume_percentile_source"),
             "indicator_normalization_version": indicators.get("indicator_normalization_version"),
+            "research_feature_schema_version": indicators.get("research_feature_schema_version"),
         })
         with state_lock:
             state["feature_snapshot"] = features
@@ -11561,6 +11593,201 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
     )
 
 
+def _type_b_research_v2_mode() -> str:
+    if manual_admin_pause_active():
+        return "PAUSED_SHADOW"
+    with state_lock:
+        if state.get("live_armed") and state.get("bitfinex_live_enabled"):
+            return "LIVE"
+    return "PAPER"
+
+
+def _freeze_type_b_research_v2_entry_context(features: dict, ai_context: dict) -> dict:
+    """Freeze every market input before the shared model request begins."""
+    with state_lock:
+        return {
+            "features": copy.deepcopy(features or {}),
+            "ai_context": copy.deepcopy(ai_context or {}),
+            "market_context": copy.deepcopy(state.get("market_context") or {}),
+            "ema": copy.deepcopy(state.get("ema_status") or {}),
+            "funding": copy.deepcopy(state.get("funding") or {}),
+            "order_book": copy.deepcopy(state.get("order_book") or {}),
+            "regime": state.get("regime"),
+            "captured_at": utc_iso(),
+        }
+
+
+def _type_b_research_v2_entry_features(ai_result: dict, call_ts: str) -> tuple[dict, dict]:
+    frozen = copy.deepcopy(ai_result.get("_type_b_research_v2_entry_context") or {})
+    if not frozen:
+        raise RuntimeError("missing frozen pre-request entry context")
+    features = copy.deepcopy(frozen.get("features") or {})
+    ai_context = copy.deepcopy(frozen.get("ai_context") or {})
+    market_context = copy.deepcopy(frozen.get("market_context") or {})
+    ema = copy.deepcopy(frozen.get("ema") or {})
+    funding = copy.deepcopy(frozen.get("funding") or {})
+    order_book = copy.deepcopy(frozen.get("order_book") or {})
+    regime = frozen.get("regime")
+    trend = market_context.get("trend_strength") if isinstance(market_context.get("trend_strength"), dict) else {}
+    structure = market_context.get("market_structure") if isinstance(market_context.get("market_structure"), dict) else {}
+    ai_market_context = (
+        ai_context.get("market_context")
+        if isinstance(ai_context.get("market_context"), dict)
+        else {}
+    )
+    ai_structure = (
+        ai_market_context.get("market_structure")
+        if isinstance(ai_market_context.get("market_structure"), dict)
+        else {}
+    )
+    factors = ai_result.get("factors") or {}
+    direction = str(ai_result.get("candidate_direction") or ai_result.get("direction") or "UNKNOWN").upper()
+    long_score = ai_result.get("long_score", factors.get("long_score"))
+    short_score = ai_result.get("short_score", factors.get("short_score"))
+    spread = compute_directional_spread(direction, ai_result)
+    if long_score is None and short_score is None:
+        spread = None
+    try:
+        parsed_ts = datetime.fromisoformat(str(call_ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        parsed_ts = datetime.now(timezone.utc)
+    best_bid = order_book.get("best_bid") or order_book.get("bid")
+    best_ask = order_book.get("best_ask") or order_book.get("ask")
+    book_spread_bps = order_book.get("spread_bps")
+    try:
+        if book_spread_bps is None and best_bid and best_ask:
+            midpoint = (float(best_bid) + float(best_ask)) / 2.0
+            book_spread_bps = 10000.0 * (float(best_ask) - float(best_bid)) / midpoint if midpoint > 0 else None
+    except (TypeError, ValueError):
+        book_spread_bps = None
+    entry = {
+        "price": features.get("price") or ai_context.get("price"),
+        "adx": features.get("adx") if features.get("adx") is not None else trend.get("adx"),
+        "adx_derived": features.get("adx_derived"),
+        "dmi_period": features.get("dmi_period"),
+        "adx_slope_3": features.get("adx_slope_3"),
+        "plus_di": features.get("plus_di"),
+        "minus_di": features.get("minus_di"),
+        "di_separation": features.get("di_separation"),
+        "atr": features.get("volatility_atr"),
+        "volatility_percentile": features.get("volatility_percentile"),
+        "volume_ratio": features.get("volume_ratio"),
+        "volume_percentile": features.get("volume_percentile"),
+        "ret_1m": features.get("ret_1m"),
+        "ret_5m": features.get("ret_5m"),
+        "ema_slope": features.get("ema_slope"),
+        "structure": (
+            structure.get("structure_score")
+            if structure.get("structure_score") is not None
+            else ai_structure.get("structure_score")
+        ),
+        "momentum": _compute_momentum_metric(features),
+        "delta": features.get("delta"),
+        "imbalance": features.get("imbalance"),
+        "velocity": features.get("velocity"),
+        "directional_spread": spread,
+        "long_score": long_score,
+        "short_score": short_score,
+        "funding_rate_pct_8h": (
+            funding.get("rate_pct_per_8h")
+            if funding.get("rate_pct_per_8h") is not None
+            else (ai_context.get("funding") or {}).get("rate_pct_per_8h")
+        ),
+        "session_utc": _utc_session_label(parsed_ts.timestamp()),
+        "is_weekend": parsed_ts.weekday() >= 5,
+        "hour_utc": parsed_ts.hour,
+        "regime": regime,
+        "book_spread_bps": book_spread_bps,
+        "dist_to_support": features.get("dist_to_support"),
+        "dist_to_resistance": features.get("dist_to_resistance"),
+        "candle_range": features.get("candle_range"),
+        "body_ratio": features.get("body_ratio"),
+        "wick_ratio": features.get("wick_ratio"),
+        "reversal_risk_score": (
+            ai_result.get("reversal_risk_score")
+            if ai_result.get("reversal_risk_score") is not None
+            else ai_context.get("reversal_risk_score")
+        ),
+        "entry_stage": ai_result.get("entry_stage") or ai_context.get("entry_stage"),
+        "trend_health_state": (
+            ai_result.get("trend_health_state") or ai_context.get("trend_health_state")
+        ),
+    }
+    metadata = {
+        "indicator_normalization_version": features.get("indicator_normalization_version"),
+        "research_feature_schema_version": features.get("research_feature_schema_version"),
+        "adx_source": features.get("adx_source"),
+        "dmi_source": features.get("dmi_source"),
+        "dmi_period": features.get("dmi_period"),
+        "volatility_source": features.get("volatility_source"),
+        "volume_percentile_source": features.get("volume_percentile_source"),
+        "regime": regime,
+        "order_book": {
+            key: order_book.get(key)
+            for key in ("bid", "ask", "best_bid", "best_ask", "spread", "spread_bps", "last_update")
+            if order_book.get(key) is not None
+        },
+        "deepseek_model": ai_result.get("deepseek_model"),
+        "thinking_mode": ai_result.get("deepseek_thinking_mode"),
+        "entry_context_captured_at": frozen.get("captured_at"),
+        "ai_request_ts": call_ts,
+    }
+    return entry, metadata
+
+
+def _record_type_b_research_v2_opportunity(ai_result: dict, call_ts: str) -> None:
+    opportunity_id = _shared_ai_call_id(ai_result=ai_result)
+    if not opportunity_id:
+        logger.warning("[TYPE_B_RESEARCH_V2] missing shared opportunity id; event rejected")
+        return
+    try:
+        entry_features, metadata = _type_b_research_v2_entry_features(ai_result, call_ts)
+        append_type_b_research_v2_event(
+            os.getcwd(),
+            type_b_research_v2_opportunity_event(
+                opportunity_id=opportunity_id,
+                ts=call_ts,
+                direction=ai_result.get("candidate_direction") or ai_result.get("direction"),
+                entry_features=entry_features,
+                mode=_type_b_research_v2_mode(),
+                bot_version=EXECUTION_FIX_VERSION,
+                analyzer_sync_id=ANALYZER_SYNC_ID,
+                policy_version=_type_b_policy_version(),
+                metadata=metadata,
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"[TYPE_B_RESEARCH_V2] opportunity capture failed: {exc}")
+
+
+def _record_type_b_research_v2_child(
+    event: str,
+    opportunity_id: str,
+    *,
+    lane: str = None,
+    trade_id: str = None,
+    mode: str = None,
+    payload: dict = None,
+) -> None:
+    if not opportunity_id:
+        return
+    try:
+        append_type_b_research_v2_event(
+            os.getcwd(),
+            type_b_research_v2_child_event(
+                event=event,
+                opportunity_id=opportunity_id,
+                ts=utc_iso(),
+                lane=lane,
+                mode=mode or _type_b_research_v2_mode(),
+                trade_id=trade_id,
+                payload=payload,
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"[TYPE_B_RESEARCH_V2] child capture failed event={event}: {exc}")
+
+
 def _stamp_shared_ai_lane_verdict(
     call_id: str,
     lane: str,
@@ -11611,6 +11838,12 @@ def _stamp_shared_ai_lane_verdict(
                     row["type_b_verdict"] = verdict
                 state["ai_history_updated"] = time.time()
                 break
+    _record_type_b_research_v2_child(
+        "LANE_VERDICT",
+        call_id,
+        lane=lane,
+        payload=verdict,
+    )
 
 
 def _append_ai_history_row(ai_result: dict) -> None:
@@ -11618,7 +11851,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
     now_iso = utc_iso()
     call_id = _shared_ai_call_id(ai_result=ai_result)
     call_ts = str(
-        ai_result.get("shared_ai_call_ts")
+        ai_result.get("_type_b_research_v2_request_ts")
+        or ai_result.get("shared_ai_call_ts")
         or ai_result.get("ai_call_ts")
         or ai_result.get("completed_at")
         or now_iso
@@ -11682,6 +11916,14 @@ def _append_ai_history_row(ai_result: dict) -> None:
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
     if inserted:
+        eligible_v2_parent = bool(
+            is_ai_scan_lane(ai_result.get("research_lane"))
+            and not ai_result.get("shadow_only")
+            and str(ai_result.get("source") or "").upper() != "SPAWN"
+            and ai_result.get("_type_b_research_v2_entry_context")
+        )
+        if eligible_v2_parent:
+            _record_type_b_research_v2_opportunity(ai_result, call_ts)
         _relay_mirror(
             "AI_DECISION",
             {
@@ -13598,6 +13840,30 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
             row.get("exit_reason") or row.get("entry_outcome") or ""
         )
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
+    collection_mode = str(row.get("collection_mode") or "").upper()
+    v2_mode = (
+        "LAB" if collection_mode == "LAB"
+        else "PAUSED_SHADOW" if row.get("paused_shadow")
+        else "SHADOW"
+    )
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(row.get("shared_ai_call_id") or ""),
+        lane=lane,
+        trade_id=study_id,
+        mode=v2_mode,
+        payload={
+            "filled": bool(outcome.get("filled")),
+            "net_pnl_usd": outcome.get("net_pnl_usd"),
+            "max_mfe_pct": outcome.get("max_profit_margin_pct"),
+            "max_mae_pct": outcome.get("max_drawdown_margin_pct"),
+            "exit_reason": outcome.get("exit_reason") or outcome.get("entry_outcome"),
+            "entry_price": outcome.get("entry") if outcome.get("entry") is not None else outcome.get("fill_price"),
+            "exit_price": outcome.get("exit") if outcome.get("exit") is not None else outcome.get("exit_price"),
+            "tick_count": len(buf.get("ticks", [])),
+            "entry_mode": outcome.get("chase_mode") or row.get("chase_mode"),
+        },
+    )
     logger.info(
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
         f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} "
@@ -14986,7 +15252,10 @@ def evaluate_signal_with_ai(
     research_lane: str = RESEARCH_LANE_CONTINUOUS,
     shadow_only: bool = False,
     trigger_reason: str = "",
+    research_entry_features: dict = None,
 ):
+    request_ts = None
+    frozen_entry_context = None
     try:
         logger.info(
             f"[AI] START lane={research_lane} shadow={shadow_only} "
@@ -15033,6 +15302,11 @@ def evaluate_signal_with_ai(
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
+        request_ts = utc_iso()
+        frozen_entry_context = _freeze_type_b_research_v2_entry_context(
+            research_entry_features or {},
+            ctx,
+        )
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
             from demo_mode import cassette_lookup, cassette_record
             cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
@@ -15092,6 +15366,8 @@ def evaluate_signal_with_ai(
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
             "deepseek_model": _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "_type_b_research_v2_request_ts": request_ts,
+            "_type_b_research_v2_entry_context": frozen_entry_context,
         }
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
@@ -15172,6 +15448,9 @@ def evaluate_signal_with_ai(
         ai_result["research_lane"] = research_lane
         ai_result["shadow_only"] = shadow_only
         ai_result["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
+        if request_ts and frozen_entry_context:
+            ai_result["_type_b_research_v2_request_ts"] = request_ts
+            ai_result["_type_b_research_v2_entry_context"] = frozen_entry_context
         full_pipeline_trace("[AI]", "EVALUATE_CRASH", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_CRASH", raw_context.get("trade_id"))
         if not shadow_only:
@@ -18139,7 +18418,13 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                ai = evaluate_signal_with_ai(ctx, research_lane=research_lane, shadow_only=False)
+                ai = evaluate_signal_with_ai(
+                    ctx,
+                    research_lane=research_lane,
+                    shadow_only=False,
+                    trigger_reason=trigger_reason,
+                    research_entry_features=copy.deepcopy(features),
+                )
                 if is_ai_scan_lane(research_lane) and ai:
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
@@ -18211,6 +18496,11 @@ def process_signal(event: dict):
                 "features_at_signal": copy.deepcopy(state.get("feature_snapshot", {})),
                 "ai_input": copy.deepcopy(ctx),
                 "ai_output": copy.deepcopy(ai),
+                "shared_ai_call_id": _shared_ai_call_id(ai_result=ai, ctx=ctx),
+                "shared_ai_call_ts": (
+                    (ai or {}).get("shared_ai_call_ts")
+                    or (ctx or {}).get("shared_ai_call_ts")
+                ),
                 "timing": {"signal_ts": now, "order_ts": None, "fill_ts": None},
                 "near_miss": False,
                 "time_features": {},
@@ -19720,6 +20010,12 @@ def _record_expired_order(source: dict, reason: str):
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
         "max_price_since_order": fill_metrics.get("max_price_since_order"),
         "touched_limit": fill_metrics.get("touched_limit"),
+        "shared_ai_call_id": (
+            source.get("shared_ai_call_id")
+            or master.get("shared_ai_call_id")
+            or source.get("source_trade_id")
+            or master.get("source_trade_id")
+        ),
     }
     with trade_lock:
         expired_orders.append(row)
@@ -19758,6 +20054,32 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(row.get("shared_ai_call_id") or ""),
+        lane=row.get("research_lane"),
+        trade_id=tid,
+        mode=(
+            source.get("research_collection_mode")
+            or source.get("collection_mode")
+            or master.get("research_collection_mode")
+            or master.get("collection_mode")
+            or _type_b_research_v2_mode()
+        ),
+        payload={
+            "filled": False,
+            "net_pnl_usd": 0.0,
+            "max_mfe_pct": None,
+            "max_mae_pct": None,
+            "exit_reason": reason,
+            "entry_price": None,
+            "exit_price": None,
+            "limit_price": limit_price,
+            "age_sec": round(age, 3),
+            "touched_limit": fill_metrics.get("touched_limit"),
+            "missed_by_usd": fill_metrics.get("missed_by_usd"),
+        },
+    )
     genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
     _emit_genome_execution_event(genome_event, {
         "trade_id": tid,
@@ -20181,6 +20503,34 @@ def close_position(pos: dict, exit_reason: str):
         (master or {}).get("edge_score_at_entry"),
         exit_reason,
         net_pnl,
+    )
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(
+            (master or {}).get("shared_ai_call_id")
+            or pos.get("shared_ai_call_id")
+            or (master or {}).get("source_trade_id")
+            or ""
+        ),
+        lane=pos.get("research_lane") or (master or {}).get("research_lane"),
+        trade_id=trade_id,
+        mode=pos.get("research_collection_mode") or (
+            "LIVE" if lane_is_live(pos.get("research_lane")) else "PAPER"
+        ),
+        payload={
+            "filled": True,
+            "net_pnl_usd": round(net_pnl, 4),
+            "gross_pnl_usd": round(gross_pnl, 4),
+            "fees_usd": round(trading_fees, 4),
+            "funding_fees_usd": round(funding_total, 4),
+            "max_mfe_pct": pos.get("max_pnl_pct"),
+            "max_mae_pct": pos.get("max_drawdown"),
+            "exit_reason": exit_reason,
+            "entry_price": entry,
+            "exit_price": price,
+            "duration_sec": time.time() - pos.get("entry_ts", 0),
+            "limit_chase_count": int(pos.get("limit_chase_count") or 0),
+        },
     )
     log_trade_lifecycle(trade_row, pos, master)
     log_ai_confidence_calibration(trade_row, net_pnl)
@@ -23580,16 +23930,6 @@ HTML = """<!DOCTYPE html>
     <tbody id="expiredOrdersTable"></tbody>
 </table>
 
-<h2>Paused Shadow Research</h2>
-<p id="pausedShadowHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
-  Counterfactual paper outcomes collected while ADMIN_MANUAL is paused. These records are never relay-eligible and never enter global Positions or Pending Orders.
-</p>
-<div id="pausedShadowSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;"></div>
-<table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Lane Recorded (Melbourne)</th><th>Shared Call ID</th><th>Lane Trade ID</th><th>Lane</th><th>Dir</th><th>ADX</th><th>Status</th><th>Virtual Entry</th><th>Outcome</th><th>Net USD</th></tr></thead>
-    <tbody id="pausedShadowTable"></tbody>
-</table>
-
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
@@ -24234,13 +24574,6 @@ DASHBOARD_JS = """(function () {
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
           const pausedAll = d.paused_shadow_stats || {};
-          const pausedLane = (pausedAll.by_lane || {})[spec.lane] || {};
-          const pausedOpen = Number(pausedLane.open || 0);
-          const pausedClosed = Number(pausedLane.closed || 0);
-          const pausedFilled = Number(pausedLane.filled || 0);
-          const pausedPnl = Number(pausedLane.pnl_usd || 0);
-          const pausedWin = pausedLane.win_rate_pct;
-          const pausedActive = (pausedOpen + pausedClosed) > 0;
           const sourcePaused = pausedAll.manual_pause_active === true;
           const statRow = function (lbl, val, col) {
             return '<div style="text-align:center;"><div style="color:#6e7681;font-size:0.72em;">' + lbl + '</div>'
@@ -24280,17 +24613,9 @@ DASHBOARD_JS = """(function () {
               + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
               + '</div>')
             : '';
-          // During a manual pause every lane keeps a truthful zero-valued
-          // shadow panel, including CONTINUOUS. This makes it obvious that
-          // collection is active even before the first replay closes.
-          const pausedGrid = (sourcePaused || pausedActive)
-            ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#211536;border:1px solid #8957e5;border-radius:8px;">'
-              + statRow('Paused shadow', pausedOpen + ' open', '#a371f7')
-              + statRow('Shadow closed', pausedClosed, '#a371f7')
-              + statRow('Shadow filled', pausedFilled, '#a371f7')
-              + statRow('Shadow PnL', pausedClosed ? ('$' + pausedPnl.toFixed(2) + (pausedWin != null ? (' · ' + Number(pausedWin).toFixed(0) + '% WR') : '')) : 'pending', pausedPnl >= 0 ? '#3fb950' : '#f85149')
-              + '</div>')
-            : '';
+          // Shadow evidence remains in the V2 audit stream and unified
+          // research dashboard; do not duplicate it on every operational tile.
+          const pausedGrid = '';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + (v2Shadow
@@ -29279,6 +29604,35 @@ def log_shadow_outcome_jsonl(
         rotate_log(SHADOW_OUTCOME_FILE)
         with open(SHADOW_OUTCOME_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
+        _record_type_b_research_v2_child(
+            "OUTCOME",
+            str(row.get("shared_ai_call_id") or ""),
+            lane=buf.get("research_lane"),
+            trade_id=trade_id,
+            mode="PAUSED_SHADOW" if row.get("paused_shadow") else "SHADOW",
+            payload={
+                "filled": bool(outcome.get("filled")),
+                "net_pnl_usd": outcome.get("net_pnl_usd"),
+                "max_mfe_pct": (
+                    outcome.get("max_profit_margin_pct")
+                    if outcome.get("max_profit_margin_pct") is not None
+                    else outcome.get("max_favorable_pct")
+                    if outcome.get("max_favorable_pct") is not None
+                    else outcome.get("mfe_pct")
+                ),
+                "max_mae_pct": (
+                    outcome.get("max_drawdown_margin_pct")
+                    if outcome.get("max_drawdown_margin_pct") is not None
+                    else outcome.get("max_adverse_pct")
+                    if outcome.get("max_adverse_pct") is not None
+                    else outcome.get("mae_pct")
+                ),
+                "exit_reason": outcome.get("exit_reason") or outcome.get("entry_outcome"),
+                "entry_price": outcome.get("entry") if outcome.get("entry") is not None else outcome.get("fill_price"),
+                "exit_price": outcome.get("exit") if outcome.get("exit") is not None else outcome.get("exit_price"),
+                "tick_count": len(buf.get("ticks", [])),
+            },
+        )
         logger.info(
             f"[SHADOW_OUTCOME] trade_id={trade_id} reason={block_reason} filled={outcome.get('filled')} "
             f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"

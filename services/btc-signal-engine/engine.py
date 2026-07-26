@@ -94,6 +94,13 @@ from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
+from research_opportunity_v2 import (
+    COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
+    SCHEMA_VERSION as TYPE_B_RESEARCH_V2_SCHEMA,
+    append_event as append_type_b_research_v2_event,
+    child_event as type_b_research_v2_child_event,
+    opportunity_event as type_b_research_v2_opportunity_event,
+)
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
@@ -1032,6 +1039,13 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "signal_age_bucket": _signal_age_bucket(signal_age_sec),
         "research_lane": signal.get("research_lane") or order.get("research_lane"),
         "research_model": signal.get("research_model") or order.get("research_model"),
+        "shared_ai_call_id": (
+            order.get("shared_ai_call_id")
+            or signal.get("shared_ai_call_id")
+            or (ai or {}).get("shared_ai_call_id")
+            or signal.get("source_trade_id")
+        ),
+        "research_collection_mode": _type_b_research_v2_mode(),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
         "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
         "entry_levels_consumed": int((order.get("fill_sim") or {}).get("levels_consumed") or 0),
@@ -2811,6 +2825,10 @@ def csv_lane_meta(signal: dict = None) -> dict:
     return {
         "research_lane": lane,
         "research_model": (signal or {}).get("research_model") or research_lane_label(lane),
+        "shared_ai_call_id": (signal or {}).get("shared_ai_call_id"),
+        "shared_ai_call_ts": (signal or {}).get("shared_ai_call_ts"),
+        "research_schema": TYPE_B_RESEARCH_V2_SCHEMA,
+        "research_collection_id": TYPE_B_RESEARCH_V2_COLLECTION_ID,
     }
 
 def _signal_lane_from_ref(signal_ref: dict) -> str:
@@ -4915,12 +4933,13 @@ def projected_funding_to_next_settlement(pos: dict, funding: dict = None) -> flo
     hours = max(0.0, (next_ts - time.time()) / 3600.0)
     return funding_cost_for_position(pos, float(funding.get("rate") or 0.0), hours)
 
-def accrue_position_funding(pos: dict, now: float = None):
+def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = True):
     if not FUNDING_SIMULATION_ENABLED:
         return
     if now is None:
         now = time.time()
-    refresh_funding_state()
+    if refresh:
+        refresh_funding_state()
     with state_lock:
         rate = state.get("funding", {}).get("rate", 0.0)
     last = pos.get("last_funding_accrual_ts") or pos.get("entry_ts") or now
@@ -4940,7 +4959,7 @@ def process_funding_accrual():
         for pos in list(open_positions):
             if pos.get("status") != "OPEN":
                 continue
-            accrue_position_funding(pos, now)
+            accrue_position_funding(pos, now, refresh=False)
 
 def get_funding_snapshot_for_ai():
     refresh_funding_state()
@@ -6214,6 +6233,10 @@ def _load_local_dotenv():
 _load_local_dotenv()
 DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
+DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
@@ -6968,7 +6991,7 @@ def _report_showcase_inference_usage(
     completion_tokens: int,
     *,
     source: str = "showcase_bot",
-    model: str = "deepseek-chat",
+    model: str = None,
 ) -> None:
     """Enqueue DeepSeek token counts for batched push to the platform adoption chart."""
     url = SHOWCASE_INFERENCE_USAGE_URL
@@ -6978,7 +7001,7 @@ def _report_showcase_inference_usage(
         "promptTokens": int(prompt_tokens),
         "completionTokens": int(completion_tokens),
         "provider": "deepseek",
-        "model": model,
+        "model": model or _deepseek_model(),
         "source": source,
         "billingSource": "platform_showcase",
     }
@@ -8432,13 +8455,27 @@ def build_full_feature_snapshot():
             candles=copy.deepcopy(latest_candles),
         )
         features.update({
+            "ema_slope": (
+                (float(features.get("ema9")) - float(features.get("ema21"))) / float(features.get("ema21"))
+                if features.get("ema21") not in (None, 0) else None
+            ),
             "adx": indicators.get("adx"),
             "adx_normalized": indicators.get("adx"),
             "adx_source": indicators.get("adx_source"),
+            "adx_derived": indicators.get("adx_derived"),
+            "adx_slope_3": indicators.get("adx_slope_3"),
+            "plus_di": indicators.get("plus_di"),
+            "minus_di": indicators.get("minus_di"),
+            "di_separation": indicators.get("di_separation"),
+            "dmi_source": indicators.get("dmi_source"),
+            "dmi_period": indicators.get("dmi_period"),
             "volatility_percentile": indicators.get("volatility_percentile"),
             "volatility_atr": indicators.get("atr"),
             "volatility_source": indicators.get("volatility_source"),
+            "volume_percentile": indicators.get("volume_percentile"),
+            "volume_percentile_source": indicators.get("volume_percentile_source"),
             "indicator_normalization_version": indicators.get("indicator_normalization_version"),
+            "research_feature_schema_version": indicators.get("research_feature_schema_version"),
         })
         with state_lock:
             state["feature_snapshot"] = features
@@ -11556,6 +11593,201 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
     )
 
 
+def _type_b_research_v2_mode() -> str:
+    if manual_admin_pause_active():
+        return "PAUSED_SHADOW"
+    with state_lock:
+        if state.get("live_armed") and state.get("bitfinex_live_enabled"):
+            return "LIVE"
+    return "PAPER"
+
+
+def _freeze_type_b_research_v2_entry_context(features: dict, ai_context: dict) -> dict:
+    """Freeze every market input before the shared model request begins."""
+    with state_lock:
+        return {
+            "features": copy.deepcopy(features or {}),
+            "ai_context": copy.deepcopy(ai_context or {}),
+            "market_context": copy.deepcopy(state.get("market_context") or {}),
+            "ema": copy.deepcopy(state.get("ema_status") or {}),
+            "funding": copy.deepcopy(state.get("funding") or {}),
+            "order_book": copy.deepcopy(state.get("order_book") or {}),
+            "regime": state.get("regime"),
+            "captured_at": utc_iso(),
+        }
+
+
+def _type_b_research_v2_entry_features(ai_result: dict, call_ts: str) -> tuple[dict, dict]:
+    frozen = copy.deepcopy(ai_result.get("_type_b_research_v2_entry_context") or {})
+    if not frozen:
+        raise RuntimeError("missing frozen pre-request entry context")
+    features = copy.deepcopy(frozen.get("features") or {})
+    ai_context = copy.deepcopy(frozen.get("ai_context") or {})
+    market_context = copy.deepcopy(frozen.get("market_context") or {})
+    ema = copy.deepcopy(frozen.get("ema") or {})
+    funding = copy.deepcopy(frozen.get("funding") or {})
+    order_book = copy.deepcopy(frozen.get("order_book") or {})
+    regime = frozen.get("regime")
+    trend = market_context.get("trend_strength") if isinstance(market_context.get("trend_strength"), dict) else {}
+    structure = market_context.get("market_structure") if isinstance(market_context.get("market_structure"), dict) else {}
+    ai_market_context = (
+        ai_context.get("market_context")
+        if isinstance(ai_context.get("market_context"), dict)
+        else {}
+    )
+    ai_structure = (
+        ai_market_context.get("market_structure")
+        if isinstance(ai_market_context.get("market_structure"), dict)
+        else {}
+    )
+    factors = ai_result.get("factors") or {}
+    direction = str(ai_result.get("candidate_direction") or ai_result.get("direction") or "UNKNOWN").upper()
+    long_score = ai_result.get("long_score", factors.get("long_score"))
+    short_score = ai_result.get("short_score", factors.get("short_score"))
+    spread = compute_directional_spread(direction, ai_result)
+    if long_score is None and short_score is None:
+        spread = None
+    try:
+        parsed_ts = datetime.fromisoformat(str(call_ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        parsed_ts = datetime.now(timezone.utc)
+    best_bid = order_book.get("best_bid") or order_book.get("bid")
+    best_ask = order_book.get("best_ask") or order_book.get("ask")
+    book_spread_bps = order_book.get("spread_bps")
+    try:
+        if book_spread_bps is None and best_bid and best_ask:
+            midpoint = (float(best_bid) + float(best_ask)) / 2.0
+            book_spread_bps = 10000.0 * (float(best_ask) - float(best_bid)) / midpoint if midpoint > 0 else None
+    except (TypeError, ValueError):
+        book_spread_bps = None
+    entry = {
+        "price": features.get("price") or ai_context.get("price"),
+        "adx": features.get("adx") if features.get("adx") is not None else trend.get("adx"),
+        "adx_derived": features.get("adx_derived"),
+        "dmi_period": features.get("dmi_period"),
+        "adx_slope_3": features.get("adx_slope_3"),
+        "plus_di": features.get("plus_di"),
+        "minus_di": features.get("minus_di"),
+        "di_separation": features.get("di_separation"),
+        "atr": features.get("volatility_atr"),
+        "volatility_percentile": features.get("volatility_percentile"),
+        "volume_ratio": features.get("volume_ratio"),
+        "volume_percentile": features.get("volume_percentile"),
+        "ret_1m": features.get("ret_1m"),
+        "ret_5m": features.get("ret_5m"),
+        "ema_slope": features.get("ema_slope"),
+        "structure": (
+            structure.get("structure_score")
+            if structure.get("structure_score") is not None
+            else ai_structure.get("structure_score")
+        ),
+        "momentum": _compute_momentum_metric(features),
+        "delta": features.get("delta"),
+        "imbalance": features.get("imbalance"),
+        "velocity": features.get("velocity"),
+        "directional_spread": spread,
+        "long_score": long_score,
+        "short_score": short_score,
+        "funding_rate_pct_8h": (
+            funding.get("rate_pct_per_8h")
+            if funding.get("rate_pct_per_8h") is not None
+            else (ai_context.get("funding") or {}).get("rate_pct_per_8h")
+        ),
+        "session_utc": _utc_session_label(parsed_ts.timestamp()),
+        "is_weekend": parsed_ts.weekday() >= 5,
+        "hour_utc": parsed_ts.hour,
+        "regime": regime,
+        "book_spread_bps": book_spread_bps,
+        "dist_to_support": features.get("dist_to_support"),
+        "dist_to_resistance": features.get("dist_to_resistance"),
+        "candle_range": features.get("candle_range"),
+        "body_ratio": features.get("body_ratio"),
+        "wick_ratio": features.get("wick_ratio"),
+        "reversal_risk_score": (
+            ai_result.get("reversal_risk_score")
+            if ai_result.get("reversal_risk_score") is not None
+            else ai_context.get("reversal_risk_score")
+        ),
+        "entry_stage": ai_result.get("entry_stage") or ai_context.get("entry_stage"),
+        "trend_health_state": (
+            ai_result.get("trend_health_state") or ai_context.get("trend_health_state")
+        ),
+    }
+    metadata = {
+        "indicator_normalization_version": features.get("indicator_normalization_version"),
+        "research_feature_schema_version": features.get("research_feature_schema_version"),
+        "adx_source": features.get("adx_source"),
+        "dmi_source": features.get("dmi_source"),
+        "dmi_period": features.get("dmi_period"),
+        "volatility_source": features.get("volatility_source"),
+        "volume_percentile_source": features.get("volume_percentile_source"),
+        "regime": regime,
+        "order_book": {
+            key: order_book.get(key)
+            for key in ("bid", "ask", "best_bid", "best_ask", "spread", "spread_bps", "last_update")
+            if order_book.get(key) is not None
+        },
+        "deepseek_model": ai_result.get("deepseek_model"),
+        "thinking_mode": ai_result.get("deepseek_thinking_mode"),
+        "entry_context_captured_at": frozen.get("captured_at"),
+        "ai_request_ts": call_ts,
+    }
+    return entry, metadata
+
+
+def _record_type_b_research_v2_opportunity(ai_result: dict, call_ts: str) -> None:
+    opportunity_id = _shared_ai_call_id(ai_result=ai_result)
+    if not opportunity_id:
+        logger.warning("[TYPE_B_RESEARCH_V2] missing shared opportunity id; event rejected")
+        return
+    try:
+        entry_features, metadata = _type_b_research_v2_entry_features(ai_result, call_ts)
+        append_type_b_research_v2_event(
+            os.getcwd(),
+            type_b_research_v2_opportunity_event(
+                opportunity_id=opportunity_id,
+                ts=call_ts,
+                direction=ai_result.get("candidate_direction") or ai_result.get("direction"),
+                entry_features=entry_features,
+                mode=_type_b_research_v2_mode(),
+                bot_version=EXECUTION_FIX_VERSION,
+                analyzer_sync_id=ANALYZER_SYNC_ID,
+                policy_version=_type_b_policy_version(),
+                metadata=metadata,
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"[TYPE_B_RESEARCH_V2] opportunity capture failed: {exc}")
+
+
+def _record_type_b_research_v2_child(
+    event: str,
+    opportunity_id: str,
+    *,
+    lane: str = None,
+    trade_id: str = None,
+    mode: str = None,
+    payload: dict = None,
+) -> None:
+    if not opportunity_id:
+        return
+    try:
+        append_type_b_research_v2_event(
+            os.getcwd(),
+            type_b_research_v2_child_event(
+                event=event,
+                opportunity_id=opportunity_id,
+                ts=utc_iso(),
+                lane=lane,
+                mode=mode or _type_b_research_v2_mode(),
+                trade_id=trade_id,
+                payload=payload,
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"[TYPE_B_RESEARCH_V2] child capture failed event={event}: {exc}")
+
+
 def _stamp_shared_ai_lane_verdict(
     call_id: str,
     lane: str,
@@ -11606,6 +11838,12 @@ def _stamp_shared_ai_lane_verdict(
                     row["type_b_verdict"] = verdict
                 state["ai_history_updated"] = time.time()
                 break
+    _record_type_b_research_v2_child(
+        "LANE_VERDICT",
+        call_id,
+        lane=lane,
+        payload=verdict,
+    )
 
 
 def _append_ai_history_row(ai_result: dict) -> None:
@@ -11613,7 +11851,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
     now_iso = utc_iso()
     call_id = _shared_ai_call_id(ai_result=ai_result)
     call_ts = str(
-        ai_result.get("shared_ai_call_ts")
+        ai_result.get("_type_b_research_v2_request_ts")
+        or ai_result.get("shared_ai_call_ts")
         or ai_result.get("ai_call_ts")
         or ai_result.get("completed_at")
         or now_iso
@@ -11652,6 +11891,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
             int(ai_result.get("long_score", factors.get("long_score", 0)) or 0)
             - int(ai_result.get("short_score", factors.get("short_score", 0)) or 0)
         ),
+        "deepseek_model": ai_result.get("deepseek_model"),
+        "deepseek_thinking_mode": ai_result.get("deepseek_thinking_mode"),
         "research_lane": RESEARCH_LANE_AI_SCAN,
         "research_model": "Shared Direction Call",
         "lane_verdicts": copy.deepcopy(ai_result.get("lane_verdicts") or {}),
@@ -11675,6 +11916,14 @@ def _append_ai_history_row(ai_result: dict) -> None:
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
     if inserted:
+        eligible_v2_parent = bool(
+            is_ai_scan_lane(ai_result.get("research_lane"))
+            and not ai_result.get("shadow_only")
+            and str(ai_result.get("source") or "").upper() != "SPAWN"
+            and ai_result.get("_type_b_research_v2_entry_context")
+        )
+        if eligible_v2_parent:
+            _record_type_b_research_v2_opportunity(ai_result, call_ts)
         _relay_mirror(
             "AI_DECISION",
             {
@@ -11870,6 +12119,35 @@ def _deepseek_api_key():
     _load_local_dotenv()
     return (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 
+
+def _deepseek_config_receipt() -> tuple:
+    """Return configured values without validation so failures remain journalable."""
+    _load_local_dotenv()
+    model = (os.getenv("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL).strip().lower()
+    mode = (
+        os.getenv("DEEPSEEK_THINKING_MODE") or DEEPSEEK_DEFAULT_THINKING_MODE
+    ).strip().lower()
+    return model, mode
+
+
+def _deepseek_model() -> str:
+    """Resolve an explicit supported model; never fall back from a bad value silently."""
+    model, _ = _deepseek_config_receipt()
+    if model not in DEEPSEEK_SUPPORTED_MODELS:
+        supported = ", ".join(sorted(DEEPSEEK_SUPPORTED_MODELS))
+        raise RuntimeError(f"INVALID_DEEPSEEK_MODEL:{model}:supported={supported}")
+    return model
+
+
+def _deepseek_thinking_mode() -> str:
+    """Resolve V4 thinking mode independently so it can be shadow-tested safely."""
+    _, mode = _deepseek_config_receipt()
+    if mode not in DEEPSEEK_SUPPORTED_THINKING_MODES:
+        supported = ", ".join(sorted(DEEPSEEK_SUPPORTED_THINKING_MODES))
+        raise RuntimeError(f"INVALID_DEEPSEEK_THINKING_MODE:{mode}:supported={supported}")
+    return mode
+
+
 def _csv_row_to_ai_history(row: dict) -> dict:
     try:
         wp = float(row.get("win_prob") or 0)
@@ -11885,10 +12163,26 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         m = re.search(r"Decision:\s*(APPROVE|REJECT)", comment, re.IGNORECASE)
         if m:
             dec = m.group(1).upper()
+    raw_time = row.get("shared_ai_call_ts") or row.get("ts") or row.get("time") or "-"
+    call_id = row.get("shared_ai_call_id") or row.get("trade_id")
+    long_score = row.get("long_score") or row.get("bull_score") or 0
+    short_score = row.get("short_score") or row.get("bear_score") or 0
+    try:
+        long_score = int(float(long_score))
+    except (TypeError, ValueError):
+        long_score = 0
+    try:
+        short_score = int(float(short_score))
+    except (TypeError, ValueError):
+        short_score = 0
     return {
-        "time": row.get("ts") or row.get("time") or "-",
+        "time": raw_time,
+        "melbourne_time": _format_melbourne_hm(raw_time),
+        "session_ts": bot_start_time,
         "trade_id": row.get("trade_id"),
+        "shared_ai_call_id": call_id,
         "ai_direction_raw": row.get("ai_direction_raw") or row.get("dir"),
+        "candidate_direction": row.get("candidate_direction") or row.get("ai_direction_raw") or row.get("dir"),
         "final_direction": row.get("final_direction") or row.get("dir"),
         "inverted": str(row.get("inverted", "")).lower() in ("true", "1", "yes"),
         "decision": dec or "UNKNOWN",
@@ -11896,8 +12190,19 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         "comment": comment[:2000],
         "source": row.get("source", "CSV"),
         "ai_error": str(row.get("ai_error", "")).lower() in ("true", "1", "yes") or dec == "AI_ERROR",
+        "error_type": row.get("error_type"),
+        "error_detail": (row.get("error_detail") or "")[:500],
+        "latency_ms": row.get("latency_ms"),
+        "http_status": row.get("http_status"),
+        "edge_score": row.get("edge_score"),
+        "long_score": long_score,
+        "short_score": short_score,
+        "score_gap": abs(long_score - short_score),
+        "deepseek_model": row.get("deepseek_model"),
+        "deepseek_thinking_mode": row.get("deepseek_thinking_mode"),
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model") or research_lane_label(row.get("research_lane")),
+        "lane_verdicts": {},
     }
 
 def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
@@ -11911,24 +12216,49 @@ def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
     seen_paths = set()
     rows = []
     for path in paths:
-        if path in seen_paths or not os.path.isfile(path):
+        canonical_path = os.path.normcase(os.path.abspath(path))
+        if canonical_path in seen_paths or not os.path.isfile(canonical_path):
             continue
-        seen_paths.add(path)
+        seen_paths.add(canonical_path)
         for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
             try:
-                with open(path, newline="", encoding=enc) as f:
+                with open(canonical_path, newline="", encoding=enc) as f:
                     rows.extend(list(csv.DictReader(f)))
                 break
             except UnicodeDecodeError:
                 continue
             except Exception as e:
-                logger.debug(f"[AI HISTORY CSV] read failed {path}: {e}")
+                logger.debug(f"[AI HISTORY CSV] read failed {canonical_path}: {e}")
                 break
     if not rows:
         return []
     rows.sort(key=lambda r: r.get("ts") or r.get("time") or "")
     out = [_csv_row_to_ai_history(r) for r in rows[-max(limit * 3, limit):]]
     return out[-limit:]
+
+
+def _restore_session_ai_history_from_csv(limit: int = 50) -> list:
+    """Restore current-session AI rows from the crash-safe CSV journal."""
+    csv_rows = _load_recent_ai_history_from_csv(max(limit * 4, limit))
+    session_rows = _session_ai_history(csv_rows, max(limit * 2, limit))
+    by_call = {}
+    for row in session_rows:
+        call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
+        if not call_id:
+            continue
+        previous = by_call.get(call_id)
+        if previous is None or (row.get("time") or "") >= (previous.get("time") or ""):
+            by_call[call_id] = row
+    restored = sorted(by_call.values(), key=lambda row: row.get("time") or "")[-limit:]
+    with state_lock:
+        state["ai_history"] = restored
+        state["ai_history_updated"] = time.time() if restored else 0.0
+    logger.info(
+        f"[AI HISTORY] restored={len(restored)} current-session rows from journal "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return restored
+
 
 def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
     if RESEARCH_AI_SOLE_AUTHORITY or is_research_data_collection():
@@ -11973,12 +12303,20 @@ def call_deepseek_api(messages, temperature=0.4):
     api_key = _deepseek_api_key()
     if not api_key:
         raise RuntimeError("MISSING_API_KEY")
+    model = _deepseek_model()
+    thinking_mode = _deepseek_thinking_mode()
+    request_payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "thinking": {"type": thinking_mode},
+    }
     t0 = time.time()
     try:
         res = requests.post(
             DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "deepseek-chat", "messages": messages, "temperature": temperature},
+            json=request_payload,
             timeout=AI_TIMEOUT_SEC,
         )
     except requests.RequestException as e:
@@ -12013,12 +12351,13 @@ def call_deepseek_api(messages, temperature=0.4):
         )
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
-    _report_showcase_inference_usage(prompt_tokens, completion_tokens)
+    _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
     return text, latency_ms
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
     err_type = type(exc).__name__
     detail = str(exc)[:1500]
+    configured_model, configured_thinking_mode = _deepseek_config_receipt()
     if getattr(exc, "http_status", None):
         http_status = exc.http_status
     if latency_ms is None and getattr(exc, "latency_ms", None):
@@ -12038,6 +12377,8 @@ def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None)
         "source": "ERROR",
         "approved": False,
         "trade_id": trade_id,
+        "deepseek_model": configured_model,
+        "deepseek_thinking_mode": configured_thinking_mode,
     }
 
 def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extra=None, force=False):
@@ -12108,6 +12449,7 @@ def log_ai_error_row(ai_result, ctx=None):
 
 def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     try:
+        configured_model, configured_thinking_mode = _deepseek_config_receipt()
         with csv_lock:
             row = {
                 "ts": utc_iso(),
@@ -12131,6 +12473,16 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 "factor_gate": ai_result.get("factor_gate"),
                 "bull_score": ai_result.get("bull_score", 0),
                 "bear_score": ai_result.get("bear_score", 0),
+                "shared_ai_call_id": _shared_ai_call_id(ai_result=ai_result),
+                "shared_ai_call_ts": ai_result.get("shared_ai_call_ts") or ai_result.get("ai_call_ts"),
+                "candidate_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+                "final_direction": ai_result.get("candidate_direction") or ai_result.get("direction"),
+                "long_score": ai_result.get("long_score", 0),
+                "short_score": ai_result.get("short_score", 0),
+                "deepseek_model": ai_result.get("deepseek_model") or configured_model,
+                "deepseek_thinking_mode": (
+                    ai_result.get("deepseek_thinking_mode") or configured_thinking_mode
+                ),
                 **csv_research_meta(),
             }
             dynamic_csv_writer(CSV_AI_TRANCHE, row)
@@ -13488,6 +13840,30 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
             row.get("exit_reason") or row.get("entry_outcome") or ""
         )
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
+    collection_mode = str(row.get("collection_mode") or "").upper()
+    v2_mode = (
+        "LAB" if collection_mode == "LAB"
+        else "PAUSED_SHADOW" if row.get("paused_shadow")
+        else "SHADOW"
+    )
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(row.get("shared_ai_call_id") or ""),
+        lane=lane,
+        trade_id=study_id,
+        mode=v2_mode,
+        payload={
+            "filled": bool(outcome.get("filled")),
+            "net_pnl_usd": outcome.get("net_pnl_usd"),
+            "max_mfe_pct": outcome.get("max_profit_margin_pct"),
+            "max_mae_pct": outcome.get("max_drawdown_margin_pct"),
+            "exit_reason": outcome.get("exit_reason") or outcome.get("entry_outcome"),
+            "entry_price": outcome.get("entry") if outcome.get("entry") is not None else outcome.get("fill_price"),
+            "exit_price": outcome.get("exit") if outcome.get("exit") is not None else outcome.get("exit_price"),
+            "tick_count": len(buf.get("ticks", [])),
+            "entry_mode": outcome.get("chase_mode") or row.get("chase_mode"),
+        },
+    )
     logger.info(
         f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
         f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} "
@@ -14876,7 +15252,10 @@ def evaluate_signal_with_ai(
     research_lane: str = RESEARCH_LANE_CONTINUOUS,
     shadow_only: bool = False,
     trigger_reason: str = "",
+    research_entry_features: dict = None,
 ):
+    request_ts = None
+    frozen_entry_context = None
     try:
         logger.info(
             f"[AI] START lane={research_lane} shadow={shadow_only} "
@@ -14923,9 +15302,14 @@ def evaluate_signal_with_ai(
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
+        request_ts = utc_iso()
+        frozen_entry_context = _freeze_type_b_research_v2_entry_context(
+            research_entry_features or {},
+            ctx,
+        )
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
             from demo_mode import cassette_lookup, cassette_record
-            cassette_resp = cassette_lookup("deepseek-chat", temperature, prompt[:256])
+            cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
             if cassette_resp:
                 response_data = cassette_resp.get("response", cassette_resp.get("body", {}))
                 text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -14980,6 +15364,10 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
+            "deepseek_model": _deepseek_model(),
+            "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "_type_b_research_v2_request_ts": request_ts,
+            "_type_b_research_v2_entry_context": frozen_entry_context,
         }
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
@@ -15060,6 +15448,9 @@ def evaluate_signal_with_ai(
         ai_result["research_lane"] = research_lane
         ai_result["shadow_only"] = shadow_only
         ai_result["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
+        if request_ts and frozen_entry_context:
+            ai_result["_type_b_research_v2_request_ts"] = request_ts
+            ai_result["_type_b_research_v2_entry_context"] = frozen_entry_context
         full_pipeline_trace("[AI]", "EVALUATE_CRASH", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_CRASH", raw_context.get("trade_id"))
         if not shadow_only:
@@ -18027,7 +18418,13 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                ai = evaluate_signal_with_ai(ctx, research_lane=research_lane, shadow_only=False)
+                ai = evaluate_signal_with_ai(
+                    ctx,
+                    research_lane=research_lane,
+                    shadow_only=False,
+                    trigger_reason=trigger_reason,
+                    research_entry_features=copy.deepcopy(features),
+                )
                 if is_ai_scan_lane(research_lane) and ai:
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
@@ -18099,6 +18496,11 @@ def process_signal(event: dict):
                 "features_at_signal": copy.deepcopy(state.get("feature_snapshot", {})),
                 "ai_input": copy.deepcopy(ctx),
                 "ai_output": copy.deepcopy(ai),
+                "shared_ai_call_id": _shared_ai_call_id(ai_result=ai, ctx=ctx),
+                "shared_ai_call_ts": (
+                    (ai or {}).get("shared_ai_call_ts")
+                    or (ctx or {}).get("shared_ai_call_ts")
+                ),
                 "timing": {"signal_ts": now, "order_ts": None, "fill_ts": None},
                 "near_miss": False,
                 "time_features": {},
@@ -19608,6 +20010,12 @@ def _record_expired_order(source: dict, reason: str):
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
         "max_price_since_order": fill_metrics.get("max_price_since_order"),
         "touched_limit": fill_metrics.get("touched_limit"),
+        "shared_ai_call_id": (
+            source.get("shared_ai_call_id")
+            or master.get("shared_ai_call_id")
+            or source.get("source_trade_id")
+            or master.get("source_trade_id")
+        ),
     }
     with trade_lock:
         expired_orders.append(row)
@@ -19646,6 +20054,32 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(row.get("shared_ai_call_id") or ""),
+        lane=row.get("research_lane"),
+        trade_id=tid,
+        mode=(
+            source.get("research_collection_mode")
+            or source.get("collection_mode")
+            or master.get("research_collection_mode")
+            or master.get("collection_mode")
+            or _type_b_research_v2_mode()
+        ),
+        payload={
+            "filled": False,
+            "net_pnl_usd": 0.0,
+            "max_mfe_pct": None,
+            "max_mae_pct": None,
+            "exit_reason": reason,
+            "entry_price": None,
+            "exit_price": None,
+            "limit_price": limit_price,
+            "age_sec": round(age, 3),
+            "touched_limit": fill_metrics.get("touched_limit"),
+            "missed_by_usd": fill_metrics.get("missed_by_usd"),
+        },
+    )
     genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
     _emit_genome_execution_event(genome_event, {
         "trade_id": tid,
@@ -20070,6 +20504,34 @@ def close_position(pos: dict, exit_reason: str):
         exit_reason,
         net_pnl,
     )
+    _record_type_b_research_v2_child(
+        "OUTCOME",
+        str(
+            (master or {}).get("shared_ai_call_id")
+            or pos.get("shared_ai_call_id")
+            or (master or {}).get("source_trade_id")
+            or ""
+        ),
+        lane=pos.get("research_lane") or (master or {}).get("research_lane"),
+        trade_id=trade_id,
+        mode=pos.get("research_collection_mode") or (
+            "LIVE" if lane_is_live(pos.get("research_lane")) else "PAPER"
+        ),
+        payload={
+            "filled": True,
+            "net_pnl_usd": round(net_pnl, 4),
+            "gross_pnl_usd": round(gross_pnl, 4),
+            "fees_usd": round(trading_fees, 4),
+            "funding_fees_usd": round(funding_total, 4),
+            "max_mfe_pct": pos.get("max_pnl_pct"),
+            "max_mae_pct": pos.get("max_drawdown"),
+            "exit_reason": exit_reason,
+            "entry_price": entry,
+            "exit_price": price,
+            "duration_sec": time.time() - pos.get("entry_ts", 0),
+            "limit_chase_count": int(pos.get("limit_chase_count") or 0),
+        },
+    )
     log_trade_lifecycle(trade_row, pos, master)
     log_ai_confidence_calibration(trade_row, net_pnl)
     log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
@@ -20476,6 +20938,7 @@ expired_orders: List[Dict] = []
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
+_DASHBOARD_BOOTSTRAP_COMPLETE = False
 
 # ============================================================================
 # EMERGENCY HARDENING — AI-key drain protection (2026-07-03)
@@ -20622,6 +21085,38 @@ def _emergency_api_guard():
     path = request.path or ""
     method = (request.method or "GET").upper()
 
+    # Bind the bounded Flask server at the start of main() so /api/ping stays
+    # responsive while persistent paper state is restored. Never expose a
+    # partially restored relay/dashboard snapshot during that handoff. The
+    # regular /health and dashboard handlers acquire state_lock; allowing them
+    # through while main() is restoring state can consume every bounded worker
+    # and starve /api/ping. Return a minimal boot response here instead.
+    if not _DASHBOARD_BOOTSTRAP_COMPLETE:
+        if path in ("/", "/health", "/status", "/api/status"):
+            return jsonify(
+                {
+                    "ok": True,
+                    "status": "starting",
+                    "boot": "starting",
+                    "bot_pid": os.getpid(),
+                    **_dashboard_owner_metadata(),
+                    "bot_version": EXECUTION_FIX_VERSION,
+                    "server_ts": utc_iso(),
+                }
+            ), 200
+        if path in ("/api/ping", "/api/build"):
+            return None
+        response = jsonify(
+            {
+                "ok": False,
+                "boot": "starting",
+                "error": "dashboard state is restoring",
+            }
+        )
+        response.status_code = 503
+        response.headers["Retry-After"] = "1"
+        return response
+
     # Only police /api/* (plus /debug_state and /). Static assets untouched.
     is_api = path.startswith("/api/") or path in ("/debug_state",)
     if not is_api and path != "/":
@@ -20680,6 +21175,18 @@ state_lock = threading.RLock()
 trade_lock = threading.RLock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
+_API_STATE_REFRESH_INTERVAL_SEC = max(
+    5.0,
+    float(os.getenv("API_STATE_REFRESH_INTERVAL_SEC", "10.0")),
+)
+_API_STATE_LOCK_TIMEOUT_SEC = max(
+    0.1,
+    float(os.getenv("API_STATE_LOCK_TIMEOUT_SEC", "2.0")),
+)
+_RELAY_EXECUTION_LOCK_TIMEOUT_SEC = max(
+    0.05,
+    float(os.getenv("RELAY_EXECUTION_LOCK_TIMEOUT_SEC", "0.25")),
+)
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
 _api_state_cache_lock = threading.Lock()
@@ -20707,10 +21214,12 @@ bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
 
 
 def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.0):
-    """load_markets() at import time is fragile — a single transient SSL/network
-    hiccup to api-pub.bitfinex.com (SSLEOFError, ConnectionReset, timeout) would
-    crash the bot with exit 1 before main() runs. Retry with backoff instead so
-    the bot survives transient Bitfinex/ISP/Python-3.14 TLS quirks at boot."""
+    """Load exchange metadata when explicitly requested.
+
+    The normal bot path leaves this lazy so the dashboard can bind and become
+    healthy before an external Bitfinex metadata request. CCXT loads markets on
+    demand in the market-data workers, where normal retry handling applies.
+    """
     if (os.getenv("SKIP_EXCHANGE_MARKET_LOAD") or "").strip().lower() in (
         "1", "true", "yes", "on",
     ):
@@ -20726,7 +21235,15 @@ def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.
     raise last_err
 
 
-MARKETS = _load_markets_with_retry(bitfinex_public)
+EAGER_EXCHANGE_MARKET_LOAD = (
+    (os.getenv("EAGER_EXCHANGE_MARKET_LOAD") or "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+MARKETS = (
+    _load_markets_with_retry(bitfinex_public)
+    if EAGER_EXCHANGE_MARKET_LOAD
+    else {}
+)
 bitfinex_private = ccxt.bitfinex({
     "apiKey": api_key,
     "secret": api_secret,
@@ -23396,7 +23913,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Positions</h2>
 <table>
-    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th><th>Action</th></tr></thead>
     <tbody id="positionsTable"></tbody>
 </table>
 
@@ -23411,16 +23928,6 @@ HTML = """<!DOCTYPE html>
 <table>
     <thead><tr><th>Expired Time (Melbourne)</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
-</table>
-
-<h2>Paused Shadow Research</h2>
-<p id="pausedShadowHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
-  Counterfactual paper outcomes collected while ADMIN_MANUAL is paused. These records are never relay-eligible and never enter global Positions or Pending Orders.
-</p>
-<div id="pausedShadowSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;"></div>
-<table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Lane Recorded (Melbourne)</th><th>Shared Call ID</th><th>Lane Trade ID</th><th>Lane</th><th>Dir</th><th>ADX</th><th>Status</th><th>Virtual Entry</th><th>Outcome</th><th>Net USD</th></tr></thead>
-    <tbody id="pausedShadowTable"></tbody>
 </table>
 
 <h2>Trades</h2>
@@ -23675,6 +24182,12 @@ DASHBOARD_JS = """(function () {
         alert('Save failed: ' + (e && e.message ? e.message : 'network error'));
         return null;
       }
+    }
+    async function closeShowcasePosition(tradeId) {
+      if (!tradeId) return;
+      if (!confirm('Close showcase paper position ' + tradeId + ' now? This does not close a Bitfinex position.')) return;
+      const res = await post('/api/positions/close', {trade_id: tradeId});
+      if (res && res.ok) await refresh();
     }
     async function updateThreshold(value) {
       await post('/api/set_threshold', {value: parseFloat(value)});
@@ -24061,13 +24574,6 @@ DASHBOARD_JS = """(function () {
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
           const pausedAll = d.paused_shadow_stats || {};
-          const pausedLane = (pausedAll.by_lane || {})[spec.lane] || {};
-          const pausedOpen = Number(pausedLane.open || 0);
-          const pausedClosed = Number(pausedLane.closed || 0);
-          const pausedFilled = Number(pausedLane.filled || 0);
-          const pausedPnl = Number(pausedLane.pnl_usd || 0);
-          const pausedWin = pausedLane.win_rate_pct;
-          const pausedActive = (pausedOpen + pausedClosed) > 0;
           const sourcePaused = pausedAll.manual_pause_active === true;
           const statRow = function (lbl, val, col) {
             return '<div style="text-align:center;"><div style="color:#6e7681;font-size:0.72em;">' + lbl + '</div>'
@@ -24107,17 +24613,9 @@ DASHBOARD_JS = """(function () {
               + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
               + '</div>')
             : '';
-          // During a manual pause every lane keeps a truthful zero-valued
-          // shadow panel, including CONTINUOUS. This makes it obvious that
-          // collection is active even before the first replay closes.
-          const pausedGrid = (sourcePaused || pausedActive)
-            ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#211536;border:1px solid #8957e5;border-radius:8px;">'
-              + statRow('Paused shadow', pausedOpen + ' open', '#a371f7')
-              + statRow('Shadow closed', pausedClosed, '#a371f7')
-              + statRow('Shadow filled', pausedFilled, '#a371f7')
-              + statRow('Shadow PnL', pausedClosed ? ('$' + pausedPnl.toFixed(2) + (pausedWin != null ? (' · ' + Number(pausedWin).toFixed(0) + '% WR') : '')) : 'pending', pausedPnl >= 0 ? '#3fb950' : '#f85149')
-              + '</div>')
-            : '';
+          // Shadow evidence remains in the V2 audit stream and unified
+          // research dashboard; do not duplicate it on every operational tile.
+          const pausedGrid = '';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + (v2Shadow
@@ -24932,6 +25430,7 @@ DASHBOARD_JS = """(function () {
             <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
             <td>${l.tp || '-'}</td>
             <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
+            <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
           </tr>
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
@@ -26038,6 +26537,7 @@ def api_ping():
     """Lightweight liveness probe — returns immediately without heavy analytics."""
     return jsonify({
         "ok": True,
+        "boot": "ready" if _DASHBOARD_BOOTSTRAP_COMPLETE else "starting",
         "bot_pid": os.getpid(),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
@@ -26416,7 +26916,10 @@ def _build_relay_execution_state_snapshot() -> dict:
     """
     now_ts = time.time()
     session_start = _showcase_trade_session_start()
-    with state_lock:
+    state_acquired = state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+    if not state_acquired:
+        raise TimeoutError("relay execution snapshot timed out waiting for state_lock")
+    try:
         debug_state = state.get("debug_state") or {}
         tick_px = state.get("price")
         price_ts = float(state.get("price_ts") or 0)
@@ -26441,7 +26944,12 @@ def _build_relay_execution_state_snapshot() -> dict:
             "live_armed": bool(state.get("live_armed", False)),
             "server_ts": utc_iso(),
         }
-    with trade_lock:
+    finally:
+        state_lock.release()
+    trade_acquired = trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+    if not trade_acquired:
+        raise TimeoutError("relay execution snapshot timed out waiting for trade_lock")
+    try:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
         recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
@@ -26453,7 +26961,11 @@ def _build_relay_execution_state_snapshot() -> dict:
             default_strategy=snapshot.get("strategy_mode", "-"),
             default_regime=snapshot.get("regime", "-"),
         )
+        # trade_lock is an RLock, so the slim mapper can safely reuse the same
+        # coherent acquisition without opening a second unbounded wait.
         trades_map_lite = _relay_trades_map_lite()
+    finally:
+        trade_lock.release()
     snapshot["orders"] = [
         _relay_order_row_lite(row, now_ts, tick_px)
         for row in pending_copy
@@ -26762,19 +27274,35 @@ def _build_api_state_snapshot():
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
-        with state_lock:
-            snapshot = copy.deepcopy(state)
-            snapshot.pop("order_book", None)
+        state_acquired = state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        if not state_acquired:
+            raise TimeoutError("api-state snapshot timed out waiting for state_lock")
+        try:
+            # The raw order book is large and fast-moving. Deep-copying it only
+            # to discard it afterwards held state_lock for up to 38 seconds,
+            # starving the dashboard, webhook reads, and /api/ping.
+            snapshot = copy.deepcopy(
+                {key: value for key, value in state.items() if key != "order_book"}
+            )
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
-        with trade_lock:
+        finally:
+            state_lock.release()
+        trade_acquired = trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        if not trade_acquired:
+            raise TimeoutError("api-state snapshot timed out waiting for trade_lock")
+        try:
             trades_copy = _snapshot_trades_for_api(session_start)
             expired_orders_total = len(expired_orders)
             expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
-                    accrue_position_funding(pos, now_ts)
+                    # Snapshot construction must never perform exchange I/O.
+                    # A Bitfinex TLS outage previously held trade_lock through
+                    # several retry ladders for 15+ minutes, starving the
+                    # dashboard and making its listener appear dead.
+                    accrue_position_funding(pos, now_ts, refresh=False)
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
             active_list, exposure_count = _collect_dashboard_active_signals(
@@ -26797,6 +27325,8 @@ def _build_api_state_snapshot():
                 }
                 for ln in PATHWAY_LAB_LANES
             }
+        finally:
+            trade_lock.release()
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
@@ -26944,8 +27474,11 @@ def _build_api_state_snapshot():
         sync_cooldown_debug_state()
         branding = build_dashboard_display(snapshot)
         snapshot.update(branding)
-        with state_lock:
-            state.update(branding)
+        if state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
+            try:
+                state.update(branding)
+            finally:
+                state_lock.release()
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
             "count": get_active_signal_count(),
@@ -26999,9 +27532,13 @@ def _build_api_state_snapshot():
         snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
         snapshot["smart_submit_enabled"] = smart_submit_enabled()
         snapshot["research_config"] = research_config_for_dashboard()
-        with state_lock:
+        if not state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
+            raise TimeoutError("api-state snapshot timed out waiting for final state_lock")
+        try:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
+        finally:
+            state_lock.release()
         snapshot["display_timezone"] = "Australia/Melbourne"
         snapshot["server_ts_melbourne"] = _format_melbourne_hm(snapshot.get("server_ts") or utc_iso())
         snapshot["ai_input_time_melbourne"] = (
@@ -27045,7 +27582,7 @@ def _start_api_state_cache_refresher():
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         logger.info(
-            "[API STATE] independent dashboard (1.5s) and relay "
+            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s) and relay "
             f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
         )
 
@@ -27059,7 +27596,7 @@ def _api_state_cache_refresher_loop():
                 _api_state_cache["built_at"] = time.time()
         except Exception as e:
             logger.error(f"/api/state background refresher error: {e}")
-        shutdown_event.wait(1.5)
+        shutdown_event.wait(_API_STATE_REFRESH_INTERVAL_SEC)
 
 
 def _relay_state_cache_refresher_loop():
@@ -27196,48 +27733,24 @@ def api_state():
             if not admin_authed:
                 resp.headers["X-Api-State-Sanitized"] = "1"
             return resp
-    # Cold-start fallback: cache empty before the refresher has populated it.
-    # Build once synchronously so the first dashboard poll still works, and seed
-    # the cache so subsequent polls hit.
-    try:
-        snap = _build_api_state_snapshot()
-        with _api_state_cache_lock:
-            _api_state_cache["payload"] = snap
-            _api_state_cache["built_at"] = time.time()
-        payload = snap if admin_authed else _sanitize_public_state(snap)
-        resp = jsonify(payload)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["X-Api-State-Cache"] = "miss-fallback"
-        if not admin_authed:
-            resp.headers["X-Api-State-Sanitized"] = "1"
-        return resp
-    except Exception as e:
-        logger.error(f"/api/state error: {str(e)}")
-        err_payload = {
-            "api_state_error": str(e)[:500],
-            "bot_version": EXECUTION_FIX_VERSION,
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "bot_pid": os.getpid(),
-            "bot_cwd": os.getcwd(),
-            "dashboard_port": DASHBOARD_PORT,
-            "dashboard_url": dashboard_public_url(),
-            "deepseek_key_present": bool(_deepseek_api_key()),
-            "research_lane_enabled": research_lane_enabled_map(),
-            "continuous_ai_research_enabled": continuous_ai_research_enabled(),
-        }
-        # Error payload contains only operational metadata, no strategy internals.
-        if not admin_authed:
-            err_payload = {
-                "api_state_error": err_payload["api_state_error"],
-                "bot_version": err_payload["bot_version"],
-                "bot_pid": err_payload["bot_pid"],
-                "dashboard_port": err_payload["dashboard_port"],
-                "dashboard_url": err_payload["dashboard_url"],
-            }
-        resp = jsonify(err_payload)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        return resp, 500
+    # Cache warming must never consume a request worker. During the July 26
+    # incident, eight simultaneous dashboard polls all entered the synchronous
+    # fallback and waited behind trade/state locks for ~97 seconds. That
+    # exhausted the bounded server and made /api/ping look dead, so the external
+    # monitor killed a process that was still progressing. Only the dedicated
+    # refresher may build this presentation snapshot.
+    resp = jsonify({
+        "api_state_error": "dashboard snapshot is warming",
+        "bot_version": EXECUTION_FIX_VERSION,
+        "bot_pid": os.getpid(),
+        **_dashboard_owner_metadata(),
+        "retry_after_sec": 2,
+    })
+    resp.status_code = 503
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Retry-After"] = "2"
+    resp.headers["X-Api-State-Cache"] = "warming"
+    return resp
 
 
 @app.route('/health')
@@ -27301,6 +27814,46 @@ def api_resume():
     set_execution_paused("")
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})
+
+
+@app.route('/api/positions/close', methods=['POST'])
+def api_close_showcase_position():
+    """Close one exact showcase paper position through normal accounting."""
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    with state_lock:
+        matches = [
+            pos for pos in open_positions
+            if str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+        ]
+    if not matches:
+        return jsonify({"error": "open showcase position not found", "trade_id": trade_id}), 404
+    if len(matches) != 1:
+        logger.error(
+            "[ADMIN] Refusing ambiguous paper close trade_id=%s matches=%s",
+            trade_id,
+            len(matches),
+        )
+        return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
+    close_position(matches[0], "ADMIN_MANUAL_CLOSE")
+    with state_lock:
+        still_open = any(
+            str(pos.get("trade_id") or "") == trade_id
+            and pos.get("status") != "CLOSED"
+            for pos in open_positions
+        )
+    if still_open:
+        return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
+    return jsonify({
+        "status": "closed",
+        "trade_id": trade_id,
+        "scope": "showcase_paper_only",
+    })
+
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -29051,6 +29604,35 @@ def log_shadow_outcome_jsonl(
         rotate_log(SHADOW_OUTCOME_FILE)
         with open(SHADOW_OUTCOME_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
+        _record_type_b_research_v2_child(
+            "OUTCOME",
+            str(row.get("shared_ai_call_id") or ""),
+            lane=buf.get("research_lane"),
+            trade_id=trade_id,
+            mode="PAUSED_SHADOW" if row.get("paused_shadow") else "SHADOW",
+            payload={
+                "filled": bool(outcome.get("filled")),
+                "net_pnl_usd": outcome.get("net_pnl_usd"),
+                "max_mfe_pct": (
+                    outcome.get("max_profit_margin_pct")
+                    if outcome.get("max_profit_margin_pct") is not None
+                    else outcome.get("max_favorable_pct")
+                    if outcome.get("max_favorable_pct") is not None
+                    else outcome.get("mfe_pct")
+                ),
+                "max_mae_pct": (
+                    outcome.get("max_drawdown_margin_pct")
+                    if outcome.get("max_drawdown_margin_pct") is not None
+                    else outcome.get("max_adverse_pct")
+                    if outcome.get("max_adverse_pct") is not None
+                    else outcome.get("mae_pct")
+                ),
+                "exit_reason": outcome.get("exit_reason") or outcome.get("entry_outcome"),
+                "entry_price": outcome.get("entry") if outcome.get("entry") is not None else outcome.get("fill_price"),
+                "exit_price": outcome.get("exit") if outcome.get("exit") is not None else outcome.get("exit_price"),
+                "tick_count": len(buf.get("ticks", [])),
+            },
+        )
         logger.info(
             f"[SHADOW_OUTCOME] trade_id={trade_id} reason={block_reason} filled={outcome.get('filled')} "
             f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
@@ -30160,6 +30742,13 @@ def _ensure_flask_port_available(port: int = None):
     if sys.platform != "win32":
         logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
+    # The process singleton is already held. Avoid a full Windows process/TCP
+    # table scan when the socket is plainly free; netstat can take minutes on
+    # a busy host and previously turned a successful early-server handoff into
+    # a false fatal startup error. If something really answers, retain the
+    # fail-closed PID ownership check below.
+    if not _port_is_open("127.0.0.1", int(port)):
+        return
     try:
         out = subprocess.check_output(
             ["netstat", "-ano"],
@@ -30195,21 +30784,49 @@ def _create_dashboard_server():
     # spawns one uncapped OS thread per request. When /api/state slowed to ~8s,
     # threads piled up to 720+ over ~2h and the bot got hard OOM-killed. We host
     # the app on a bounded werkzeug server instead — at most 8 concurrent request
-    # threads (BoundedSemaphore); the socket backlog (request_queue_size=64)
-    # queues overflow in the OS before accept(). waitress is NOT available on
-    # Python 3.14 here, so we use werkzeug (ships with Flask, no new dependency).
+    # threads (BoundedSemaphore); requests above the cap receive a fast 503 so
+    # the accept loop and health endpoint cannot be starved. waitress is NOT
+    # available on Python 3.14 here, so we use werkzeug (ships with Flask, no
+    # new dependency).
     from werkzeug.serving import ThreadedWSGIServer
 
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
         _thread_cap = threading.BoundedSemaphore(8)
+        _client_io_timeout_sec = 15.0
+        _overload_io_timeout_sec = 0.1
 
         def process_request(self, request, client_address):
-            # Block until a thread slot is free; the socket backlog holds the
-            # pending connection so the client waits instead of the server
-            # spawning a new thread per request (the OOM root cause).
-            self._thread_cap.acquire()
+            # Never block the accept loop waiting for a worker. If slow clients
+            # hold all eight slots, blocking here fills the socket backlog and
+            # eventually makes even /api/ping connection-refused. Reject
+            # overload quickly so health probes remain truthful.
+            if not self._thread_cap.acquire(blocking=False):
+                body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
+                response = (
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json; charset=utf-8\r\n"
+                    + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                    + b"Connection: close\r\n"
+                    + b"Retry-After: 1\r\n\r\n"
+                    + body
+                )
+                try:
+                    # The overload response runs on the accept loop itself.
+                    # A disconnected or back-pressured tunnel client must never
+                    # be allowed to block that loop and starve future probes.
+                    request.settimeout(self._overload_io_timeout_sec)
+                    request.sendall(response)
+                except (OSError, TimeoutError):
+                    pass
+                finally:
+                    self.shutdown_request(request)
+                return
             try:
+                # Bound socket reads/writes for normal workers as well. App
+                # computation can take longer, but a dead tunnel client cannot
+                # retain one of the eight worker slots indefinitely.
+                request.settimeout(self._client_io_timeout_sec)
                 t = threading.Thread(
                     target=self._release_and_process,
                     args=(request, client_address),
@@ -30511,7 +31128,7 @@ def apply_trade_pnl(trade_row):
 
 def main():
     global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
-    global _PROCESS_SINGLETON, BOT_INSTANCE_ID
+    global _PROCESS_SINGLETON, BOT_INSTANCE_ID, _DASHBOARD_BOOTSTRAP_COMPLETE
     try:
         # The lock directory must be machine-wide, not relative to this repo.
         # The command center can coexist with archived/alternate checkouts; a
@@ -30534,6 +31151,7 @@ def main():
     # Bind before loading state, starting market feeds, or making any AI call.
     # A port conflict is therefore fatal to the entire bot, never just a web thread.
     dashboard_httpd = _create_dashboard_server()
+    threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
     prune_aux_logs_on_startup()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
@@ -30578,6 +31196,7 @@ def main():
     with state_lock:
         state["ai_history"] = []
         state["bot_start_time"] = bot_start_time
+    _restore_session_ai_history_from_csv(50)
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
@@ -30605,7 +31224,7 @@ def main():
     except Exception as exc:
         logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
-    threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
+    _DASHBOARD_BOOTSTRAP_COMPLETE = True
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
