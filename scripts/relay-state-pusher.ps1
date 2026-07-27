@@ -14,12 +14,16 @@ $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 
 $pusherLock = Join-Path $repoRoot ".home-relay-pusher.lock"
+$pusherPidFile = Join-Path $repoRoot ".home-relay-pusher.pid"
+$pusherHeartbeatFile = Join-Path $repoRoot ".home-relay-pusher.heartbeat"
 try {
   $script:RelayLockHandle = [System.IO.File]::Open($pusherLock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
   Write-Host "relay-state-pusher: another instance is running - exit"
   exit 0
 }
+Set-Content -LiteralPath $pusherPidFile -Value "$PID" -NoNewline -Encoding UTF8
+Set-Content -LiteralPath $pusherHeartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
 
 function Read-DotEnv([string]$Path) {
   $map = @{}
@@ -77,6 +81,10 @@ function Log([string]$msg) {
 Log "relay-state-pusher started bot=$botBase api=$pushUrl interval=${IntervalSec}s"
 
 while ($true) {
+  # The stack supervisor uses this native file heartbeat plus the exact PID
+  # marker to distinguish a healthy pusher from a dead/stuck process without
+  # enumerating Win32_Process (which can wedge on this host).
+  Set-Content -LiteralPath $pusherHeartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
   try {
     $resp = Invoke-RestMethod -Uri "$botBase/api/relay-state" -TimeoutSec 90 -Headers @{ Accept = "application/json" }
     if ($resp) {

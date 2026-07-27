@@ -849,14 +849,12 @@ function Stop-RecordedProcess(
 }
 
 function Stop-RelayStatePusher {
-  $killed = @()
-  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.CommandLine -and $_.CommandLine -like "*relay-state-pusher.ps1*"
-    } | ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      $killed += $_.ProcessId
-    }
+  # Exact PID ownership avoids the Win32_Process provider, which has repeatedly
+  # stalled on this PC and previously prevented deterministic pusher recovery.
+  $pidFile = Join-Path $repoRoot ".home-relay-pusher.pid"
+  $killed = @(Stop-RecordedProcess $pidFile @("powershell", "pwsh", "cmd"))
+  Remove-Item -LiteralPath (Join-Path $repoRoot ".home-relay-pusher.heartbeat") -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path $repoRoot ".home-relay-pusher.lock") -Force -ErrorAction SilentlyContinue
   return $killed
 }
 

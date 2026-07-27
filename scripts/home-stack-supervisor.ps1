@@ -38,6 +38,7 @@ param(
   [int]$AnalyzerCooldownSec = 600,
   [int]$TunnelCooldownSec = 900,
   [int]$BridgeCooldownSec = 300,
+  [int]$RelayPusherCooldownSec = 120,
   # Crash-loop circuit breaker (see UPTIME CONTRACT above).
   [int]$MaxBotRestartsInWindow = 5,
   [int]$BotRestartWindowMin = 5
@@ -156,6 +157,42 @@ function Restart-BridgeComponent {
   Stop-ListenPortFast $BridgePort | Out-Null
   Start-Sleep -Seconds 2
   Start-VisibleConsole (Join-Path $scriptDir "home-stack-launcher.ps1") @() -Title "Doxed Home Bridge :$BridgePort"
+}
+
+function Test-RelayStatePusherFresh {
+  $heartbeatFile = Join-Path $repoRoot ".home-relay-pusher.heartbeat"
+  $pidFile = Join-Path $repoRoot ".home-relay-pusher.pid"
+  if (-not (Test-Path -LiteralPath $heartbeatFile) -or -not (Test-Path -LiteralPath $pidFile)) {
+    return $false
+  }
+  try {
+    $heartbeat = [datetime]::Parse(
+      (Get-Content -LiteralPath $heartbeatFile -Raw -ErrorAction Stop).Trim(),
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    )
+    $ageSec = ((Get-Date).ToUniversalTime() - $heartbeat).TotalSeconds
+    $pusherPid = [int](Get-Content -LiteralPath $pidFile -Raw -ErrorAction Stop).Trim()
+    return (
+      $ageSec -ge 0 -and
+      $ageSec -le 180 -and
+      $pusherPid -gt 0 -and
+      (Test-ProcessIdAliveFast $pusherPid)
+    )
+  } catch {
+    return $false
+  }
+}
+
+function Restart-RelayStatePusher {
+  if (Test-HomeStackUserStopped) {
+    Log "relay-state-pusher recovery skipped - user stopped stack"
+    return
+  }
+  Log "RECOVER relay-state-pusher - replace stale owner with one signed publisher"
+  Stop-RelayStatePusher | Out-Null
+  Start-Sleep -Seconds 1
+  Start-HiddenPs1 -ScriptPath (Join-Path $scriptDir "relay-state-pusher.ps1") -ExtraArgs @("-BotPort", "$BotPort")
 }
 
 function Test-AutoRestartMonitorFresh {
@@ -325,13 +362,14 @@ Prevent-Sleep
 Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Use-NamedTunnel)"
 
 $fail = @{
-  bot = 0; analyzer = 0; tunnel = 0; bridge = 0
+  bot = 0; analyzer = 0; tunnel = 0; bridge = 0; pusher = 0
 }
 $lastRecover = @{
   bot = [datetime]::MinValue
   analyzer = [datetime]::MinValue
   tunnel = [datetime]::MinValue
   bridge = [datetime]::MinValue
+  pusher = [datetime]::MinValue
 }
 # Rolling timestamps of bot recoveries (for the crash-loop circuit breaker).
 $botRestartTimes = [System.Collections.Generic.List[datetime]]::new()
@@ -359,6 +397,7 @@ while ($true) {
   $botServing = $botRuntime.Responding
   $analyzerOk = Test-AnalyzerHealthy
   $bridgeOk = Test-BridgeHealthy
+  $pusherOk = Test-RelayStatePusherFresh
   # Do not enumerate Windows processes in the progress loop.  The public
   # tunnel probe below is the authoritative health signal; this label records
   # that a tunnel URL is configured, not an unbounded process-table lookup.
@@ -372,6 +411,7 @@ while ($true) {
   if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
+  if ($pusherOk) { $fail.pusher = 0 } else { $fail.pusher++ }
 
   # Diagnostic only: a bounded accepting socket with a failed HTTP probe is
   # sufficient evidence of a hung server. Never enumerate the TCP table here.
@@ -395,7 +435,12 @@ while ($true) {
   } else {
     "revision=unproven"
   }
-  Log ("tick bot=$botOk serving=$botServing analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge) $revisionTag $startupTag $backoffTag url=$tunnelUrl")
+  Log ("tick bot=$botOk serving=$botServing analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk pusher=$pusherOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge)/p$($fail.pusher) $revisionTag $startupTag $backoffTag url=$tunnelUrl")
+
+  if ($botServing -and $fail.pusher -ge 2) {
+    $lastRecover.pusher = Invoke-Recovery "relay-state-pusher" { Restart-RelayStatePusher } $lastRecover.pusher $RelayPusherCooldownSec
+    $fail.pusher = 0
+  }
 
   if ($fail.bridge -ge $FailThreshold) {
     $lastRecover.bridge = Invoke-Recovery "bridge" { Restart-BridgeComponent } $lastRecover.bridge $BridgeCooldownSec

@@ -23,6 +23,7 @@ const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
 const health = read("home-stack-health.ps1");
 const supervisor = read("home-stack-supervisor.ps1");
+const relayPusher = read("relay-state-pusher.ps1");
 const hiddenPs1 = common.slice(
   common.indexOf("function Start-HiddenPs1"),
   common.indexOf("function Start-VisibleConsole"),
@@ -186,11 +187,29 @@ assert.match(supervisor, /\$botRevisionDeferred/);
 assert.match(supervisor, /revision=stale-deferred/);
 assert.match(startEverything, /Bot update deferred - source book is active or unavailable/);
 assert.match(startEverything, /Replacing stale bot revision from verified flat source boundary/);
+assert.match(relayPusher, /\.home-relay-pusher\.pid/);
+assert.match(relayPusher, /\.home-relay-pusher\.heartbeat/);
+assert.match(relayPusher, /Set-Content -LiteralPath \$pusherHeartbeatFile/);
+assert.match(supervisor, /function Test-RelayStatePusherFresh/);
+assert.match(supervisor, /Test-ProcessIdAliveFast \$pusherPid/);
+assert.match(supervisor, /function Restart-RelayStatePusher/);
+assert.match(supervisor, /\$fail\.pusher -ge 2/);
+assert.match(common, /Stop-RecordedProcess \$pidFile @\("powershell", "pwsh", "cmd"\)/);
+assert.doesNotMatch(
+  executableLines(
+    common.slice(
+      common.indexOf("function Stop-RelayStatePusher"),
+      common.indexOf("function Stop-HomeStackSupervisor"),
+    ),
+  ),
+  /Get-CimInstance|Win32_Process/,
+  "relay pusher shutdown must use its exact PID marker, not process enumeration",
+);
 
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 87,
+    checks: 96,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -217,6 +236,7 @@ console.log(
       "an unkillable elevated watchdog cannot block recovery while the stop sentinel is active",
       "healthy services keep their legitimate startup-lock owners",
       "analyzer health validates the actual canonical report output root",
+      "relay snapshot publishing is heartbeat-tracked and self-recovers by exact PID",
     ],
   }),
 );
