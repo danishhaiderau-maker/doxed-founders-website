@@ -185,6 +185,11 @@ assert.match(
 );
 assert.match(supervisor, /\$botRevisionDeferred/);
 assert.match(supervisor, /revision=stale-deferred/);
+assert.match(
+  supervisor,
+  /\(Test-AutoRestartMonitorFresh\) -and -not \$botRevisionRestartSafe/,
+  "a fresh crash monitor must not indefinitely defer a verified-flat revision upgrade",
+);
 assert.match(startEverything, /Bot update deferred - source book is active or unavailable/);
 assert.match(startEverything, /Replacing stale bot revision from verified flat source boundary/);
 assert.match(relayPusher, /\.home-relay-pusher\.pid/);
@@ -209,7 +214,7 @@ assert.doesNotMatch(
 console.log(
   JSON.stringify({
     ok: true,
-    checks: 96,
+    checks: 97,
     guarantees: [
       "recovery paths avoid blocking process providers",
       "cloudflared is enumerated natively and PID-tracked",
@@ -237,6 +242,7 @@ console.log(
       "healthy services keep their legitimate startup-lock owners",
       "analyzer health validates the actual canonical report output root",
       "relay snapshot publishing is heartbeat-tracked and self-recovers by exact PID",
+      "verified-flat revision upgrades are not deferred to a crash-only monitor",
     ],
   }),
 );
