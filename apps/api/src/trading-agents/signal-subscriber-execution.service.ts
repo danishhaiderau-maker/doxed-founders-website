@@ -859,6 +859,7 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
   divergences: T[],
   entryEnabled: boolean,
   copyDirection?: 'LONG' | 'SHORT' | null,
+  relayArmedAtMs?: number | null,
 ): T[] {
   return divergences.filter(
     (d) => {
@@ -867,6 +868,17 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
         d.type === 'SHOWCASE_POSITION_NOT_MIRRORED';
       if (!sourceOnly) return true;
       if (!entryEnabled) return false;
+      const sourceCreatedAtMs = Number(
+        (d as T & { sourceCreatedAtMs?: number }).sourceCreatedAtMs,
+      );
+      if (
+        relayArmedAtMs != null &&
+        Number.isFinite(relayArmedAtMs) &&
+        Number.isFinite(sourceCreatedAtMs) &&
+        sourceCreatedAtMs <= relayArmedAtMs
+      ) {
+        return false;
+      }
       const showcaseDirection = String(
         (d as T & { showcaseDir?: string }).showcaseDir ?? '',
       ).toUpperCase();
@@ -876,7 +888,30 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
         showcaseDirection !== copyDirection
       );
     },
-  );
+    );
+}
+
+function sourceEntityCreatedAtMs(
+  entity: Record<string, unknown>,
+): number | null {
+  for (const raw of [
+    entity.created_ts,
+    entity.entry_ts,
+    entity.signal_created_ts,
+    entity.ts,
+  ]) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      return raw > 1_000_000_000_000 ? raw : raw * 1000;
+    }
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+    }
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 export function flatSignedFastPathPreflight(input: {
@@ -2838,6 +2873,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       deltaUsd?: number;
       showcaseDir?: string;
       copyDir?: string;
+      sourceCreatedAtMs?: number;
     };
     const divergences: MirrorDiffDivergence[] = [];
 
@@ -2916,6 +2952,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         tradeId: o.trade_id,
         showcaseLimit: o.limit_price,
         showcaseDir: o.side,
+        sourceCreatedAtMs:
+          sourceEntityCreatedAtMs(o as Record<string, unknown>) ?? undefined,
       });
     }
 
@@ -2928,6 +2966,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         type: 'SHOWCASE_POSITION_NOT_MIRRORED',
         tradeId: tid,
         showcaseDir: pos.dir ?? pos.side,
+        sourceCreatedAtMs:
+          sourceEntityCreatedAtMs(pos as Record<string, unknown>) ?? undefined,
       });
     }
     for (const p of copyOpen) {
@@ -2944,6 +2984,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
 
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+
     const copyDirections = new Set(
       [...copyPending, ...copyOpen]
         .map((participant) => metaById.get(participant.id)?.direction)
@@ -2957,15 +3004,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       divergences,
       entryEnabled,
       copyDirection,
+      relayArmTimestampMs(dash),
     );
 
     // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
-    const fresh = await this.prisma.tradingAgentInstance.findUnique({
-      where: { id: instance.id },
-      select: { dashboardState: true },
-    });
-    if (!fresh) return;
-    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     const prev = (dash.mirrorDiff ?? {}) as {
       rolling?: {
         ticks?: number;

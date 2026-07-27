@@ -97,6 +97,9 @@ export type BotApiState = {
     unreal_usd?: number;
     current_price?: number;
     trade_id?: string;
+    /** Source creation/fill time (Unix seconds or milliseconds). */
+    entry_ts?: number | string;
+    created_ts?: number | string;
     /** Accrued funding on the raw open_positions object (present even on /api/relay-state). */
     funding_fees?: number;
     leverage?: number;
@@ -109,6 +112,8 @@ export type BotApiState = {
     signal_price?: number;
     age_min?: number;
     trade_id?: string;
+    /** Source order creation time (Unix seconds or milliseconds). */
+    created_ts?: number | string;
   }>;
   expired_orders?: Array<{
     trade_id?: string;

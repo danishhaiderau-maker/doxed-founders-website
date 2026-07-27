@@ -568,6 +568,27 @@ test('active merged book suppresses only the expected opposing showcase leg', ()
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true, 'LONG'), diffs.slice(1));
 });
 
+test('active NEXT_FRESH_ONLY relay suppresses source-only entities born before arm', () => {
+  const armedAt = Date.parse('2026-07-27T10:00:00.000Z');
+  const diffs = [
+    {
+      type: 'SHOWCASE_POSITION_NOT_MIRRORED',
+      tradeId: 'pre-arm-position',
+      sourceCreatedAtMs: armedAt - 1,
+    },
+    {
+      type: 'SHOWCASE_ORDER_NOT_MIRRORED',
+      tradeId: 'fresh-order',
+      sourceCreatedAtMs: armedAt + 1,
+    },
+    { type: 'COPY_POSITION_NO_SHOWCASE', tradeId: 'copy-risk' },
+  ];
+  assert.deepEqual(
+    reportableMirrorDiffsForRelayMode(diffs, true, null, armedAt),
+    diffs.slice(1),
+  );
+});
+
 test('showcase fill makes a still-pending copy fail closed even while relay is paused', () => {
   const bot = {
     orders: [],
