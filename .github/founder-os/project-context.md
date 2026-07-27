@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Keep bot health and named tunnel online (#54)
+Merge pull request #55 from danishhaiderau-maker/agent/relay-pusher-self-recovery
 
 ## Last Activity
 
