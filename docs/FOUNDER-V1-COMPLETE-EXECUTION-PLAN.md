@@ -351,6 +351,29 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Prove replay, dependency release, supersession, overlap, stale fencing,
   bounded retry/stall escalation, independent-scope concurrency, and verified
   merge behavior across multiple chats.
+- [ ] Add one editable, versioned Goal Contract with objective, invariants,
+  budgets, success evidence, status, and amendment history. Keep Goal, Task,
+  Decision, and Evidence as separate concepts so progress remains legible.
+- [ ] Add a persistent "Needs your decision" inbox. Present two or three
+  context-specific options, put one evidence-backed recommendation first,
+  accept a custom answer, and block only dependent tasks while unrelated work
+  continues.
+- [ ] Let a read-only Research task continue while a founder is away and attach
+  its findings to the pending decision. Never let research, a timeout, or a
+  default option authorize deletion, deployment, secret use, or an external
+  write.
+- [ ] Make housekeeping an editable goal: incrementally identify generated,
+  cached, duplicate, obsolete, stale-worktree, and archive candidates; show
+  size, references, evidence, risk, and the recommended action; preview the
+  exact selected change; checkpoint when restoration is possible; and require
+  explicit founder approval before deletion.
+- [ ] Apply goal amendments at task/action boundaries. Show affected tasks,
+  invalidated assumptions, salvageable work, budget/timeline impact, and
+  accept/revise/reject/defer choices before incrementing the goal version.
+- [ ] Keep committed product intent small and reviewable. Store the Goal
+  Contract and durable decisions with the project, keep leases/heartbeats and
+  private runtime episodes in ignored local state, and generate trajectory
+  views from the event log rather than maintaining noisy duplicate files.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
 merge receipt, multi-agent task graph screenshots.
