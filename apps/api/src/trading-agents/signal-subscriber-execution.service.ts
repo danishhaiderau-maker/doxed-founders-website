@@ -47,7 +47,10 @@ import {
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
-import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
+import {
+  BitfinexTradingClient,
+  type BitfinexActiveOrder,
+} from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
   cancelOrderWithRetry,
@@ -240,7 +243,8 @@ export type PendingFillReconcileDecision = {
  *
  * The grace applies only when the entire raw exchange delta can be owned by
  * a same-direction participant whose exchange-proven managed entry has
- * disappeared from the active book, and there are no foreign active orders.
+ * either disappeared from the active book or reports enough filled quantity
+ * to explain the delta, and there are no foreign active orders.
  * Any other mismatch pauses immediately, and an unattributed managed fill
  * fails closed after the bounded grace.
  */
@@ -254,7 +258,11 @@ export function pendingFillReconcileDecision(input: {
     bitfinexOrderId?: number;
   }>;
   managedOrderIds: Iterable<number>;
-  activeOrderIds: Iterable<number>;
+  activeOrders: Iterable<{
+    id: number;
+    amount: number;
+    amountOrig: number;
+  }>;
   prior?: {
     firstObservedAtMs: number;
     direction: 'LONG' | 'SHORT';
@@ -275,8 +283,10 @@ export function pendingFillReconcileDecision(input: {
 
   const direction: 'LONG' | 'SHORT' = deltaSats > 0 ? 'LONG' : 'SHORT';
   const managed = new Set(input.managedOrderIds);
-  const active = new Set(input.activeOrderIds);
-  for (const orderId of active) {
+  const active = new Map(
+    [...input.activeOrders].map((order) => [order.id, order]),
+  );
+  for (const orderId of active.keys()) {
     if (!managed.has(orderId)) {
       return {
         defer: false,
@@ -290,12 +300,33 @@ export function pendingFillReconcileDecision(input: {
 
   const owners = input.pending
     .filter(
-      (row) =>
-        row.direction === direction &&
-        row.bitfinexOrderId != null &&
-        managed.has(row.bitfinexOrderId) &&
-        !active.has(row.bitfinexOrderId) &&
-        Math.abs(btcToSats(row.qty ?? 0)) >= Math.abs(deltaSats),
+      (row) => {
+        if (
+          row.direction !== direction ||
+          row.bitfinexOrderId == null ||
+          !managed.has(row.bitfinexOrderId)
+        ) {
+          return false;
+        }
+
+        const order = active.get(row.bitfinexOrderId);
+        if (!order) {
+          return Math.abs(btcToSats(row.qty ?? 0)) >= Math.abs(deltaSats);
+        }
+
+        const originalSats = btcToSats(order.amountOrig);
+        const remainingSats = btcToSats(order.amount);
+        const orderDirection: 'LONG' | 'SHORT' =
+          originalSats > 0 ? 'LONG' : 'SHORT';
+        const filledSats = Math.max(
+          0,
+          Math.abs(originalSats) - Math.abs(remainingSats),
+        );
+        return (
+          orderDirection === direction &&
+          filledSats >= Math.abs(deltaSats)
+        );
+      },
     )
     .sort((a, b) => a.participantId.localeCompare(b.participantId));
   if (owners.length !== 1) {
@@ -2125,6 +2156,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
 
     let activeOrderIdSet = new Set<number>();
+    let activeOrdersSnapshot: BitfinexActiveOrder[] = [];
     if (instance.exchangeProvider === 'bitfinex') {
       try {
         this.currentStage = 'BITFINEX_MARGIN_CHECK';
@@ -2136,6 +2168,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         await this.cancelAbsurdPendingOrders(creds, instance.userId);
         this.currentStage = 'BITFINEX_ACTIVE_ORDERS';
         const activeOrders = await this.activeTrading.listActiveOrders(creds);
+        activeOrdersSnapshot = activeOrders;
         activeOrderIdSet = new Set(activeOrders.map((o) => o.id));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -2450,7 +2483,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       openParticipantAfter,
       creds,
       managedOrderIds,
-      activeOrderIdSet,
+      activeOrdersSnapshot,
       execMetaById,
       simActive,
     );
@@ -3566,7 +3599,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     participants: Array<{ id: string; status: SignalCycleStatus }>,
     creds: ExchangeCredentials,
     managedOrderIds: Set<number>,
-    activeOrderIds: Set<number>,
+    activeOrders: BitfinexActiveOrder[],
     execMetaById: Map<string, ExecutionPayload>,
     simActive: boolean,
   ): Promise<boolean> {
@@ -3642,7 +3675,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       signedDeltaBtc: summary.directionConflict ? 0 : delta,
       pending,
       managedOrderIds,
-      activeOrderIds,
+      activeOrders,
       prior:
         priorGrace != null && Number.isFinite(priorGrace.firstObservedAtMs)
           ? priorGrace

@@ -265,7 +265,7 @@ test('managed pending fill gets one bounded ledger-reconcile grace window', () =
       },
     ],
     managedOrderIds: [241167676255],
-    activeOrderIds: [],
+    activeOrders: [],
   });
   assert.deepEqual(first, {
     defer: true,
@@ -287,7 +287,7 @@ test('managed pending fill gets one bounded ledger-reconcile grace window', () =
       },
     ],
     managedOrderIds: [241167676255],
-    activeOrderIds: [],
+    activeOrders: [],
     prior: {
       firstObservedAtMs: first.firstObservedAtMs!,
       direction: 'SHORT',
@@ -298,8 +298,8 @@ test('managed pending fill gets one bounded ledger-reconcile grace window', () =
   assert.equal(nextTick.firstObservedAtMs, nowMs);
 });
 
-test('pending fill grace refuses an entry whose managed remainder is still active', () => {
-  const decision = pendingFillReconcileDecision({
+test('pending fill grace accepts only exchange-proven filled quantity from an active managed order', () => {
+  const unchanged = pendingFillReconcileDecision({
     nowMs: 1_000,
     signedDeltaBtc: 0.01,
     pending: [
@@ -311,11 +311,45 @@ test('pending fill grace refuses an entry whose managed remainder is still activ
       },
     ],
     managedOrderIds: [123],
-    activeOrderIds: [123],
+    activeOrders: [{ id: 123, amount: 0.03, amountOrig: 0.03 }],
   });
-  assert.equal(decision.defer, false);
-  assert.equal(decision.reason, 'NO_MANAGED_PENDING_OWNER');
-  assert.equal(decision.direction, 'LONG');
+  assert.equal(unchanged.defer, false);
+  assert.equal(unchanged.reason, 'NO_MANAGED_PENDING_OWNER');
+  assert.equal(unchanged.direction, 'LONG');
+
+  const partial = pendingFillReconcileDecision({
+    nowMs: 1_000,
+    signedDeltaBtc: 0.01,
+    pending: [
+      {
+        participantId: 'participant-long',
+        direction: 'LONG',
+        qty: 0.03,
+        bitfinexOrderId: 123,
+      },
+    ],
+    managedOrderIds: [123],
+    activeOrders: [{ id: 123, amount: 0.02, amountOrig: 0.03 }],
+  });
+  assert.equal(partial.defer, true);
+  assert.equal(partial.reason, 'DEFER_PENDING_FILL');
+
+  const unexplainedExcess = pendingFillReconcileDecision({
+    nowMs: 1_000,
+    signedDeltaBtc: 0.02,
+    pending: [
+      {
+        participantId: 'participant-long',
+        direction: 'LONG',
+        qty: 0.03,
+        bitfinexOrderId: 123,
+      },
+    ],
+    managedOrderIds: [123],
+    activeOrders: [{ id: 123, amount: 0.02, amountOrig: 0.03 }],
+  });
+  assert.equal(unexplainedExcess.defer, false);
+  assert.equal(unexplainedExcess.reason, 'NO_MANAGED_PENDING_OWNER');
 });
 
 test('pending fill grace fails closed for foreign orders, wrong ownership, and expiry', () => {
@@ -336,7 +370,7 @@ test('pending fill grace fails closed for foreign orders, wrong ownership, and e
     pendingFillReconcileDecision({
       ...base,
       nowMs: 1_000,
-      activeOrderIds: [999],
+      activeOrders: [{ id: 999, amount: -0.01, amountOrig: -0.01 }],
     }).reason,
     'FOREIGN_ACTIVE_ORDER',
   );
@@ -345,7 +379,7 @@ test('pending fill grace fails closed for foreign orders, wrong ownership, and e
       ...base,
       nowMs: 1_000,
       signedDeltaBtc: 0.0307,
-      activeOrderIds: [],
+      activeOrders: [],
     }).reason,
     'NO_MANAGED_PENDING_OWNER',
   );
@@ -363,7 +397,7 @@ test('pending fill grace fails closed for foreign orders, wrong ownership, and e
         },
       ],
       managedOrderIds: [123, 124],
-      activeOrderIds: [],
+      activeOrders: [],
     }).reason,
     'AMBIGUOUS_MANAGED_PENDING_OWNER',
   );
@@ -371,7 +405,7 @@ test('pending fill grace fails closed for foreign orders, wrong ownership, and e
     pendingFillReconcileDecision({
       ...base,
       nowMs: 16_001,
-      activeOrderIds: [],
+      activeOrders: [],
       prior: {
         firstObservedAtMs: 1_000,
         direction: 'SHORT',
