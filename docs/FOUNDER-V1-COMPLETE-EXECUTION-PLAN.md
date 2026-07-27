@@ -366,7 +366,7 @@ screenshots, quota tests, native final-response screenshots.
   its findings to the pending decision. Never let research, a timeout, or a
   default option authorize deletion, deployment, secret use, or an external
   write.
-- [ ] Make housekeeping an editable goal: incrementally identify generated,
+- [x] Make housekeeping an editable goal: incrementally identify generated,
   cached, duplicate, obsolete, stale-worktree, and archive candidates; show
   size, references, evidence, risk, and the recommended action; preview the
   exact selected change; checkpoint when restoration is possible; and require

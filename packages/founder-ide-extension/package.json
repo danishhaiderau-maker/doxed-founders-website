@@ -327,6 +327,14 @@
         "title": "Founder: Open project brief"
       },
       {
+        "command": "founderOs.auditHousekeeping",
+        "title": "Founder: Review housekeeping goal"
+      },
+      {
+        "command": "founderOs.applyApprovedHousekeeping",
+        "title": "Founder: Apply approved housekeeping"
+      },
+      {
         "command": "founderOs.runDailyQualityReview",
         "title": "Founder: Run daily quality review"
       },
@@ -460,7 +468,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "package": "vsce package --no-yarn --no-dependencies",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/completion-evidence.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-goal-cloud.spec.ts src/founder-goal-context.spec.ts src/founder-goal-state.spec.ts src/founder-hub-state.spec.ts src/founder-interface-mode.spec.ts src/founder-shortcuts-state.spec.ts src/language-model-visual.spec.ts src/managed-visual-request.spec.ts src/managed-voice-request.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/personal-visual-request.spec.ts src/project-activity.spec.ts src/project-history-state.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/workspace-housekeeping-audit.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/ipc/workspace-endpoint.spec.ts src/gateway-client.spec.ts"
+    "test": "tsx --test src/agent-coordination-state.spec.ts src/agent-coordination-cloud.spec.ts src/agent-path-leases.spec.ts src/auto-escalation.spec.ts src/completion-evidence.spec.ts src/daily-quality-review.spec.ts src/embedded-relay.spec.ts src/entitlements.spec.ts src/founder-agent-mode.spec.ts src/founder-goal-cloud.spec.ts src/founder-goal-context.spec.ts src/founder-goal-state.spec.ts src/founder-hub-state.spec.ts src/founder-interface-mode.spec.ts src/founder-shortcuts-state.spec.ts src/language-model-visual.spec.ts src/managed-visual-request.spec.ts src/managed-voice-request.spec.ts src/manifest.spec.ts src/personal-ai-profiles.spec.ts src/personal-visual-request.spec.ts src/project-activity.spec.ts src/project-history-state.spec.ts src/prompt-efficiency.spec.ts src/safe-result-cache.spec.ts src/verified-solution-memory.spec.ts src/workspace-context-state.spec.ts src/workspace-housekeeping-audit.spec.ts src/workspace-housekeeping-executor.spec.ts src/ipc/protocol.spec.ts src/ipc/server.spec.ts src/ipc/workspace-endpoint.spec.ts src/gateway-client.spec.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

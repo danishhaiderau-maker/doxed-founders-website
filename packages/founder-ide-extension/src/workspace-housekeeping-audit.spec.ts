@@ -73,6 +73,33 @@ describe('workspace housekeeping audit', () => {
 
     assert.deepEqual(audit.candidates, []);
   });
+
+  it('identifies archives, suspicious old copies, and exact duplicates as review-only', async () => {
+    const root = await createWorkspace();
+    const duplicate = Buffer.alloc(1_200_000, 7);
+    await fs.writeFile(path.join(root, 'release.zip'), 'archive');
+    await fs.writeFile(path.join(root, 'settings.ts.bak'), 'old copy');
+    await fs.writeFile(path.join(root, 'copy-a.bin'), duplicate);
+    await fs.writeFile(path.join(root, 'copy-b.bin'), duplicate);
+
+    const audit = await auditWorkspaceHousekeeping(root);
+    const archive = audit.candidates.find(
+      (candidate) => candidate.category === 'archive',
+    );
+    const obsolete = audit.candidates.find(
+      (candidate) => candidate.category === 'obsolete_source',
+    );
+    const duplicates = audit.candidates.filter(
+      (candidate) => candidate.category === 'duplicate',
+    );
+
+    assert.equal(archive?.recommendedAction, 'keep');
+    assert.equal(obsolete?.recommendedAction, 'keep');
+    assert.equal(duplicates.length, 2);
+    assert.equal(duplicates.every((candidate) =>
+      candidate.recommendedAction === 'keep'), true);
+    assert.deepEqual(duplicates[0]?.referencedBy, ['copy-b.bin']);
+  });
 });
 
 async function createWorkspace() {

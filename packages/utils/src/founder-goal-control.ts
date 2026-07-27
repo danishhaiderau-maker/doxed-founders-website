@@ -100,6 +100,7 @@ export type FounderDecisionResolution = {
 export type FounderHousekeepingCandidate = {
   id: string;
   path: string;
+  workspaceFolder?: string;
   sizeBytes: number;
   category:
     | 'generated'
@@ -112,6 +113,11 @@ export type FounderHousekeepingCandidate = {
   referencedBy: string[];
   recommendedAction: 'keep' | 'archive' | 'delete';
   reversible: boolean;
+  auditFingerprint?: string;
+  restorePlan?: {
+    kind: 'regenerate' | 'checkpoint' | 'manual_review';
+    instructions: string;
+  };
 };
 
 export type FounderGoalControlState = {

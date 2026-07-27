@@ -17,6 +17,7 @@ export interface FounderGoalUiOption {
 export interface FounderHousekeepingUiCandidate {
   id: string;
   path: string;
+  workspaceFolder: string;
   sizeBytes: number;
   category:
     | 'generated'
@@ -26,8 +27,14 @@ export interface FounderHousekeepingUiCandidate {
     | 'stale_worktree'
     | 'archive';
   evidence: string[];
+  referencedBy: string[];
   recommendedAction: 'keep' | 'archive' | 'delete';
   reversible: boolean;
+  auditFingerprint: string;
+  restorePlan: {
+    kind: 'regenerate' | 'checkpoint' | 'manual_review';
+    instructions: string;
+  };
 }
 
 export interface FounderDecisionResearchFinding {
@@ -273,7 +280,9 @@ export function createFounderHousekeepingDecision(
     evidence: [
       `Goal version reviewed: ${state.version}`,
       'The audit is read-only. Approval does not itself delete files.',
-      'A deleting agent must re-check every selected path immediately before acting.',
+      'A deleting agent must re-check every selected path and audit fingerprint immediately before acting.',
+      'Approval never expires into consent and cannot be supplied by research or another agent.',
+      'After approval, Founder asks for one final local confirmation before deleting generated files.',
     ],
     housekeepingCandidates: normalizedCandidates,
     createdAt: now.toISOString(),
@@ -615,9 +624,26 @@ function normalizeHousekeepingCandidate(
     || candidate.recommendedAction === 'delete'
     ? candidate.recommendedAction
     : 'keep';
+  const workspaceFolder = typeof candidate.workspaceFolder === 'string'
+    ? candidate.workspaceFolder.replace(/\s+/g, ' ').trim().slice(0, 240)
+    : '';
+  const auditFingerprint = typeof candidate.auditFingerprint === 'string'
+    && /^[a-f0-9]{64}$/i.test(candidate.auditFingerprint)
+    ? candidate.auditFingerprint.toLowerCase()
+    : '';
+  const rawRestorePlan = candidate.restorePlan;
+  const restoreKind = rawRestorePlan?.kind === 'regenerate'
+    || rawRestorePlan?.kind === 'checkpoint'
+    || rawRestorePlan?.kind === 'manual_review'
+    ? rawRestorePlan.kind
+    : 'manual_review';
+  const restoreInstructions = typeof rawRestorePlan?.instructions === 'string'
+    ? rawRestorePlan.instructions.replace(/\s+/g, ' ').trim().slice(0, 500)
+    : 'Review this candidate manually before changing it.';
   return {
     id,
     path,
+    workspaceFolder,
     sizeBytes: Number.isFinite(candidate.sizeBytes)
       ? Math.max(0, Math.floor(Number(candidate.sizeBytes)))
       : 0,
@@ -629,8 +655,23 @@ function normalizeHousekeepingCandidate(
         .filter(Boolean)
         .slice(0, 20)
       : [],
+    referencedBy: Array.isArray(candidate.referencedBy)
+      ? candidate.referencedBy
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.replaceAll('\\', '/').trim().slice(0, 1_000))
+        .filter(Boolean)
+        .slice(0, 20)
+      : [],
     recommendedAction,
-    reversible: candidate.reversible === true,
+    reversible:
+      candidate.reversible === true
+      && Boolean(auditFingerprint)
+      && restoreKind !== 'manual_review',
+    auditFingerprint,
+    restorePlan: {
+      kind: restoreKind,
+      instructions: restoreInstructions,
+    },
   };
 }
 

@@ -254,6 +254,21 @@ export class FounderHubProvider
         });
         await this.persistGoalState();
         this.refresh();
+        if (
+          decision.kind === 'housekeeping'
+          && selectedOptionId === 'approve_selected'
+        ) {
+          const action = await vscode.window.showInformationMessage(
+            'Housekeeping permission is recorded. Independent work can continue; generated files are unchanged until the final local confirmation.',
+            'Review and delete',
+          );
+          if (action === 'Review and delete') {
+            await vscode.commands.executeCommand(
+              'founderOs.applyApprovedHousekeeping',
+              decision.id,
+            );
+          }
+        }
       } catch (error) {
         void vscode.window.showErrorMessage(
           error instanceof Error ? error.message : String(error),
@@ -525,10 +540,14 @@ export class FounderHubProvider
             ${candidate.recommendedAction === 'delete' && candidate.reversible ? 'checked' : ''}
           />
           <span class="housekeeping-copy">
-            <strong>${escapeHtml(candidate.path)}</strong>
+            <strong>${escapeHtml(candidate.workspaceFolder ? `${candidate.workspaceFolder}/${candidate.path}` : candidate.path)}</strong>
             <span>${escapeHtml(candidate.category.replaceAll('_', ' '))} | ${escapeHtml(formatFounderGoalBytes(candidate.sizeBytes))} | ${candidate.reversible ? 'restorable' : 'not automatically restorable'}</span>
             ${candidate.evidence.slice(0, 2).map((item) =>
               `<small>${escapeHtml(item)}</small>`).join('')}
+            <small>Restore: ${escapeHtml(candidate.restorePlan.instructions)}</small>
+            ${candidate.referencedBy.length
+              ? `<small>References: ${escapeHtml(candidate.referencedBy.slice(0, 3).join(', '))}</small>`
+              : ''}
           </span>
         </label>
       `).join('')
@@ -1217,7 +1236,7 @@ export class FounderHubProvider
           <div class="housekeeping-preview" aria-live="polite">
             <strong data-housekeeping-preview-count>0 paths selected</strong>
             <span data-housekeeping-preview-size>0 B</span>
-            <small>Preview only. Approval is scoped to the exact checked paths and does not itself delete anything.</small>
+            <small>Preview only. Approval is scoped to the checked fingerprints; deletion requires a second local confirmation and a fresh audit.</small>
           </div>
           <div class="housekeeping-list" aria-label="Housekeeping candidates">
             ${housekeepingCandidates}

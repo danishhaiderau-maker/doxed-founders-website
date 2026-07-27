@@ -58,6 +58,7 @@ type CloudDecision = {
   housekeepingCandidates?: Array<{
     id: string;
     path: string;
+    workspaceFolder?: string;
     sizeBytes: number;
     category:
       | 'generated'
@@ -70,6 +71,11 @@ type CloudDecision = {
     referencedBy: string[];
     recommendedAction: 'keep' | 'archive' | 'delete';
     reversible: boolean;
+    auditFingerprint?: string;
+    restorePlan?: {
+      kind: 'regenerate' | 'checkpoint' | 'manual_review';
+      instructions: string;
+    };
   }>;
   researchFindings?: FounderDecisionResearchFinding[];
 };
@@ -361,7 +367,7 @@ function decisionToCloud(
     proposedGoalObjective: decision.proposedGoalObjective,
     housekeepingCandidates: decision.housekeepingCandidates?.map((item) => ({
       ...item,
-      referencedBy: [],
+      referencedBy: [...(item.referencedBy ?? [])],
     })),
     researchFindings: structuredClone(decision.researchFindings),
   };
@@ -403,11 +409,18 @@ function cloudDecisionToUi(
     housekeepingCandidates: decision.housekeepingCandidates?.map((item) => ({
       id: item.id,
       path: item.path,
+      workspaceFolder: item.workspaceFolder ?? '',
       sizeBytes: item.sizeBytes,
       category: item.category,
       evidence: [...item.evidence],
+      referencedBy: [...item.referencedBy],
       recommendedAction: item.recommendedAction,
       reversible: item.reversible,
+      auditFingerprint: item.auditFingerprint ?? '',
+      restorePlan: item.restorePlan ?? {
+        kind: 'manual_review',
+        instructions: 'Review this candidate manually before changing it.',
+      },
     })),
     selectedOptionId: resolution?.selectedOptionId
       ?? local?.selectedOptionId,

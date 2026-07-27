@@ -29,6 +29,7 @@ import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
 import { GatewayMetadataUi } from './gateway-metadata-ui';
 import { auditWorkspaceHousekeeping } from './workspace-housekeeping-audit';
+import { applyApprovedHousekeeping } from './workspace-housekeeping-executor';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
 // Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
@@ -101,6 +102,13 @@ let founderProjectActivity: FounderProjectActivityStore | undefined;
 let personalAiProfiles: PersonalAiProfileStore | undefined;
 let dailyQualityReviewDisposable: vscode.Disposable | undefined;
 let founderProjectHistory: FounderProjectHistory | undefined;
+
+function formatHousekeepingBytes(value: number): string {
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_024 ** 2) return `${(value / 1_024).toFixed(1)} KB`;
+  if (value < 1_024 ** 3) return `${(value / 1_024 ** 2).toFixed(1)} MB`;
+  return `${(value / 1_024 ** 3).toFixed(1)} GB`;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   startEmbeddedRelay();
@@ -459,10 +467,8 @@ export function activate(context: vscode.ExtensionContext): void {
               result.candidates.map((candidate) => ({
                 ...candidate,
                 id: `${roots[rootIndex]!.name}:${candidate.id}`,
-                path:
-                  roots.length === 1
-                    ? candidate.path
-                    : `${roots[rootIndex]!.name}/${candidate.path}`,
+                workspaceFolder: roots[rootIndex]!.name,
+                path: candidate.path,
                 evidence: [
                   ...candidate.evidence,
                   ...(result.truncated
@@ -487,6 +493,83 @@ export function activate(context: vscode.ExtensionContext): void {
         await founderHub?.queueHousekeepingReview(candidates);
         await vscode.commands.executeCommand('workbench.view.extension.founderOs');
         await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
+      },
+    ),
+    vscode.commands.registerCommand(
+      'founderOs.applyApprovedHousekeeping',
+      async (decisionId?: unknown) => {
+        const state = founderHub?.goalSnapshot();
+        const approved = state?.decisions
+          .filter((decision) =>
+            decision.kind === 'housekeeping'
+            && decision.status === 'resolved'
+            && decision.selectedOptionId === 'approve_selected'
+            && (typeof decisionId !== 'string' || decision.id === decisionId))
+          .sort((left, right) =>
+            (right.resolvedAt ?? '').localeCompare(left.resolvedAt ?? ''))[0];
+        if (!approved) {
+          void vscode.window.showInformationMessage(
+            'No approved housekeeping goal is ready to apply.',
+          );
+          return;
+        }
+        if (context.workspaceState.get<boolean>(
+          `founder.housekeeping.executed.${approved.id}`,
+        )) {
+          void vscode.window.showInformationMessage(
+            'This housekeeping approval was already applied.',
+          );
+          return;
+        }
+        const selected = (approved.housekeepingCandidates ?? []).filter(
+          (candidate) =>
+            approved.selectedCandidateIds?.includes(candidate.id),
+        );
+        const totalBytes = selected.reduce(
+          (total, candidate) => total + candidate.sizeBytes,
+          0,
+        );
+        const confirmation = await vscode.window.showWarningMessage(
+          `Delete ${selected.length} approved generated path`
+            + `${selected.length === 1 ? '' : 's'} `
+            + `(${formatHousekeepingBytes(totalBytes)})? Founder will re-audit every path first.`,
+          { modal: true },
+          'Delete approved generated files',
+        );
+        if (confirmation !== 'Delete approved generated files') return;
+        try {
+          const receipt = await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: 'Founder is applying approved housekeeping',
+              cancellable: false,
+            },
+            () => applyApprovedHousekeeping({
+              decision: approved,
+              workspaces: (vscode.workspace.workspaceFolders ?? []).map(
+                (folder) => ({
+                  name: folder.name,
+                  path: folder.uri.fsPath,
+                }),
+              ),
+              checkpointDirectory: path.join(
+                context.globalStorageUri.fsPath,
+                'housekeeping-checkpoints',
+              ),
+            }),
+          );
+          await context.workspaceState.update(
+            `founder.housekeeping.executed.${approved.id}`,
+            true,
+          );
+          void vscode.window.showInformationMessage(
+            `Housekeeping complete. Reclaimed ${formatHousekeepingBytes(receipt.reclaimedBytes)} from ${receipt.deletedPaths.length} approved path${receipt.deletedPaths.length === 1 ? '' : 's'}.`,
+          );
+        } catch (error) {
+          void vscode.window.showErrorMessage(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       },
     ),
     vscode.commands.registerCommand(
