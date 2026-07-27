@@ -30,6 +30,14 @@ export interface FounderHousekeepingUiCandidate {
   reversible: boolean;
 }
 
+export interface FounderDecisionResearchFinding {
+  id: string;
+  title: string;
+  summary: string;
+  sources: string[];
+  createdAt: string;
+}
+
 export interface FounderGoalUiDecision {
   id: string;
   kind: 'goal_amendment' | 'permission' | 'housekeeping' | 'research_preference';
@@ -41,6 +49,8 @@ export interface FounderGoalUiDecision {
   risk: 'read_only' | 'reversible_write' | 'external_write' | 'destructive';
   status: 'pending' | 'resolved' | 'cancelled';
   evidence: string[];
+  blockingTaskIds: string[];
+  researchFindings: FounderDecisionResearchFinding[];
   proposedGoalObjective?: string;
   housekeepingCandidates?: FounderHousekeepingUiCandidate[];
   selectedCandidateIds?: string[];
@@ -156,6 +166,8 @@ export function createFounderGoalAmendmentDecision(
     independentWorkMayContinue: true,
     risk: 'reversible_write',
     status: 'pending',
+    blockingTaskIds: [],
+    researchFindings: [],
     evidence: [
       `Current goal version: ${state.version}`,
       'Completed external actions are not reversed by a goal amendment.',
@@ -213,6 +225,8 @@ export function createFounderHousekeepingDecision(
     independentWorkMayContinue: true,
     risk: reversible ? 'reversible_write' : 'destructive',
     status: 'pending',
+    blockingTaskIds: [],
+    researchFindings: [],
     evidence: [
       `Goal version reviewed: ${state.version}`,
       'The audit is read-only. Approval does not itself delete files.',
@@ -238,6 +252,58 @@ export function enqueueFounderDecision(
     ...state,
     decisions: [...state.decisions, normalized].slice(-50),
   };
+}
+
+export function attachFounderDecisionResearch(
+  state: FounderGoalUiState,
+  input: {
+    decisionId: string;
+    finding: unknown;
+    now?: Date;
+  },
+): FounderGoalUiState {
+  const decision = state.decisions.find(
+    (item) => item.id === input.decisionId && item.status === 'pending',
+  );
+  if (!decision) throw new Error('Founder decision is not pending.');
+  const finding = normalizeResearchFinding(
+    input.finding,
+    input.now ?? new Date(),
+  );
+  if (!finding) throw new Error('Founder research finding is invalid.');
+  const existing = decision.researchFindings.find(
+    (item) => item.id === finding.id,
+  );
+  if (existing && JSON.stringify(existing) !== JSON.stringify(finding)) {
+    throw new Error('Research finding id already belongs to different evidence.');
+  }
+  if (existing) return state;
+  const updatedAt = (input.now ?? new Date()).toISOString();
+  return {
+    ...state,
+    updatedAt,
+    decisions: state.decisions.map((item) =>
+      item.id === decision.id
+        ? {
+          ...item,
+          researchFindings: [...item.researchFindings, finding].slice(-20),
+        }
+        : item,
+    ),
+  };
+}
+
+export function founderGoalUiTaskCanContinue(
+  state: FounderGoalUiState,
+  taskId: string,
+): boolean {
+  const normalizedTaskId = taskId.trim();
+  if (!normalizedTaskId) return false;
+  return !state.decisions.some(
+    (decision) =>
+      decision.status === 'pending'
+      && decision.blockingTaskIds.includes(normalizedTaskId),
+  );
 }
 
 export function resolveFounderGoalUiDecision(
@@ -369,6 +435,14 @@ function normalizeDecision(value: unknown): FounderGoalUiDecision | null {
         .filter(Boolean)
         .slice(0, 20)
       : [],
+    blockingTaskIds: normalizeIds(candidate.blockingTaskIds, 100),
+    researchFindings: Array.isArray(candidate.researchFindings)
+      ? candidate.researchFindings
+        .map((item) => normalizeResearchFinding(item))
+        .filter((item): item is FounderDecisionResearchFinding =>
+          Boolean(item))
+        .slice(-20)
+      : [],
     createdAt: validIso(candidate.createdAt) ?? new Date().toISOString(),
     ...(typeof candidate.proposedGoalObjective === 'string'
       && candidate.proposedGoalObjective.trim()
@@ -497,6 +571,38 @@ function normalizeHousekeepingCandidate(
   };
 }
 
+function normalizeResearchFinding(
+  value: unknown,
+  fallbackCreatedAt = new Date(),
+): FounderDecisionResearchFinding | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<FounderDecisionResearchFinding>;
+  const id = compactText(candidate.id, 120);
+  const title = compactText(candidate.title, 160);
+  const summary = compactText(candidate.summary, 2_000);
+  if (
+    !id
+    || !title
+    || !summary
+    || likelyContainsSecret(title)
+    || likelyContainsSecret(summary)
+  ) return null;
+  const sources = Array.isArray(candidate.sources)
+    ? candidate.sources
+      .map((item) => compactText(item, 1_000))
+      .filter((item): item is string => Boolean(item))
+      .filter((item) => !likelyContainsSecret(item))
+      .slice(0, 12)
+    : [];
+  return {
+    id,
+    title,
+    summary,
+    sources,
+    createdAt: validIso(candidate.createdAt) ?? fallbackCreatedAt.toISOString(),
+  };
+}
+
 function normalizeSelectedCandidateIds(
   value: unknown,
   candidates: FounderHousekeepingUiCandidate[],
@@ -513,6 +619,27 @@ function normalizeSelectedCandidateIds(
       .map((item) => item.trim())
       .filter((item) => allowed.has(item)),
   )).slice(0, 100);
+}
+
+function normalizeIds(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .map((item) => compactText(item, 120))
+      .filter((item): item is string => Boolean(item)),
+  )).slice(0, limit);
+}
+
+function compactText(value: unknown, limit: number): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\s+/g, ' ').trim().slice(0, limit);
+  return normalized || null;
+}
+
+function likelyContainsSecret(value: string): boolean {
+  return /\b(?:api[_-]?key|access[_-]?token|authorization|bearer)\b\s*[:=]\s*\S+/i
+    .test(value)
+    || /[?&](?:token|api[_-]?key|access[_-]?token)=/i.test(value);
 }
 
 export function formatFounderGoalBytes(value: number): string {

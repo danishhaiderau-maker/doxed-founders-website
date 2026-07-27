@@ -13,6 +13,7 @@ import {
   normalizeFounderInterfaceMode,
 } from './founder-interface-mode';
 import {
+  attachFounderDecisionResearch,
   createFounderGoalAmendmentDecision,
   createFounderHousekeepingDecision,
   enqueueFounderDecision,
@@ -319,6 +320,22 @@ export class FounderHubProvider
     this.refresh();
   }
 
+  async appendDecisionResearch(input: unknown): Promise<void> {
+    if (!input || typeof input !== 'object') {
+      throw new Error('Decision research input is invalid.');
+    }
+    const candidate = input as { decisionId?: unknown; finding?: unknown };
+    if (typeof candidate.decisionId !== 'string') {
+      throw new Error('Decision research requires a decision id.');
+    }
+    this.goalState = attachFounderDecisionResearch(this.goalState, {
+      decisionId: candidate.decisionId,
+      finding: candidate.finding,
+    });
+    await this.persistGoalState();
+    this.refresh();
+  }
+
   goalSnapshot(): FounderGoalUiState {
     return structuredClone(this.goalState);
   }
@@ -380,6 +397,25 @@ export class FounderHubProvider
             `<li>${escapeHtml(item)}</li>`).join('')}
         </ul>
       `
+      : '';
+    const decisionResearch = decision?.researchFindings.length
+      ? `
+        <div class="decision-research">
+          <strong>Research added while you were away</strong>
+          ${decision.researchFindings.slice(-3).map((finding) => `
+            <article>
+              <span>${escapeHtml(finding.title)}</span>
+              <p>${escapeHtml(finding.summary)}</p>
+              ${finding.sources.length
+                ? `<small>${escapeHtml(finding.sources.slice(0, 2).join(' | '))}</small>`
+                : ''}
+            </article>
+          `).join('')}
+        </div>
+      `
+      : '';
+    const blockedTasks = decision?.blockingTaskIds.length
+      ? `<p class="decision-blocked">Paused only: ${escapeHtml(decision.blockingTaskIds.slice(0, 4).join(', '))}</p>`
       : '';
     const housekeepingCandidates = decision?.kind === 'housekeeping'
       ? (decision.housekeepingCandidates ?? []).map((candidate) => `
@@ -902,6 +938,25 @@ export class FounderHubProvider
     .housekeeping-copy small {
       color: var(--muted);
     }
+    .decision-research {
+      display: grid;
+      gap: 5px;
+      padding: 7px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 9px;
+    }
+    .decision-research article {
+      display: grid;
+      gap: 2px;
+    }
+    .decision-research p,
+    .decision-research small,
+    .decision-blocked {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.4;
+    }
     .decision-options {
       display: grid;
       gap: 4px;
@@ -1033,6 +1088,8 @@ export class FounderHubProvider
         </div>
         <p class="decision-question">${escapeHtml(decision.question)}</p>
         ${decisionEvidence}
+        ${decisionResearch}
+        ${blockedTasks}
         ${housekeepingCandidates ? `
           <div class="housekeeping-list" aria-label="Housekeeping candidates">
             ${housekeepingCandidates}

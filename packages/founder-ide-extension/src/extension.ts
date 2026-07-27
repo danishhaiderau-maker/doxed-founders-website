@@ -431,6 +431,10 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
       },
     ),
+    vscode.commands.registerCommand(
+      'founderOs.appendDecisionResearch',
+      async (input: unknown) => founderHub?.appendDecisionResearch(input),
+    ),
     vscode.commands.registerCommand('founderOs.getGoalState', () =>
       founderHub?.goalSnapshot(),
     ),

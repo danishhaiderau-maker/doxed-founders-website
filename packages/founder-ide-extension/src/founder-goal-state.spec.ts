@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  attachFounderDecisionResearch,
   createFounderGoalAmendmentDecision,
   createFounderHousekeepingDecision,
   enqueueFounderDecision,
+  founderGoalUiTaskCanContinue,
   initialFounderGoalState,
   normalizeFounderGoalState,
   pendingFounderGoalDecisions,
@@ -37,6 +39,8 @@ const decision: FounderGoalUiDecision = {
   risk: 'destructive',
   status: 'pending',
   evidence: ['2 generated directories, 1.4 GB total'],
+  blockingTaskIds: ['cleanup-task'],
+  researchFindings: [],
   createdAt: '2026-07-27T00:00:00.000Z',
 };
 
@@ -184,6 +188,68 @@ describe('Founder IDE goal state', () => {
       now,
     });
     assert.equal(rejected.decisions[0]?.selectedCandidateIds, undefined);
+  });
+
+  it('attaches bounded research without resolving permission or blocking unrelated work', () => {
+    const state = enqueueFounderDecision(
+      initialFounderGoalState('Founder IDE', now),
+      decision,
+    );
+    const researched = attachFounderDecisionResearch(state, {
+      decisionId: decision.id,
+      finding: {
+        id: 'finding-1',
+        title: 'Cache evidence',
+        summary: 'The generated output is reproducible from committed source.',
+        sources: ['packages/founder-ide-extension/tsconfig.json'],
+        createdAt: now.toISOString(),
+      },
+      now,
+    });
+    assert.equal(researched.decisions[0]?.status, 'pending');
+    assert.equal(researched.decisions[0]?.researchFindings.length, 1);
+    assert.equal(founderGoalUiTaskCanContinue(researched, 'cleanup-task'), false);
+    assert.equal(founderGoalUiTaskCanContinue(researched, 'research-more'), true);
+    assert.equal(
+      attachFounderDecisionResearch(researched, {
+        decisionId: decision.id,
+        finding: researched.decisions[0]?.researchFindings[0],
+        now,
+      }),
+      researched,
+    );
+    assert.throws(
+      () => attachFounderDecisionResearch(researched, {
+        decisionId: decision.id,
+        finding: {
+          id: 'secret',
+          title: 'Unsafe',
+          summary: 'api_key=do-not-store-this',
+          sources: [],
+          createdAt: now.toISOString(),
+        },
+      }),
+      /invalid/,
+    );
+    const resolved = resolveFounderGoalUiDecision(researched, {
+      decisionId: decision.id,
+      selectedOptionId: 'review',
+      now,
+    });
+    assert.equal(founderGoalUiTaskCanContinue(resolved, 'cleanup-task'), true);
+    assert.throws(
+      () => attachFounderDecisionResearch(resolved, {
+        decisionId: decision.id,
+        finding: {
+          id: 'too-late',
+          title: 'Late research',
+          summary: 'This must not rewrite a resolved decision.',
+          sources: [],
+          createdAt: now.toISOString(),
+        },
+      }),
+      /not pending/,
+    );
   });
 
   it('rejects an unknown option and disallowed custom answer', () => {
