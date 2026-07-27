@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge pull request #58 from danishhaiderau-maker/agent/prearm-mirror-suppression
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
