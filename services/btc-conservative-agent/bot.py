@@ -18,6 +18,7 @@ import json
 import uuid
 import requests
 import glob
+import itertools
 import re
 import copy
 import shutil
@@ -21196,6 +21197,14 @@ _RELAY_EXECUTION_LOCK_TIMEOUT_SEC = max(
 )
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
+_RELAY_TRADES_MAP_MAX = max(
+    64,
+    int(os.getenv("RELAY_TRADES_MAP_MAX", "512")),
+)
+_DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS = frozenset({
+    "order_book",
+    "ai_history",
+})
 _api_state_cache_lock = threading.Lock()
 _api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
 csv_lock = threading.RLock()
@@ -26378,7 +26387,65 @@ def _relay_signal_ref_lite(sig: dict) -> dict:
     }
 
 
-def _relay_trades_map_lite() -> dict:
+_DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
+    "trade_id", "research_lane", "research_model", "final_direction", "dir",
+    "ai_win_prob", "regime", "strategy", "strategy_birth", "created_ts",
+    "created_ts_ts", "closed_ts", "closed_ts_ts", "timing", "expires_ts",
+    "status", "outcome", "fill_price", "fill_ts", "exit_price",
+    "net_pnl_usd", "exit_reason", "trigger", "signal_price", "limit_price",
+    "planned_limit_price", "original_limit_price", "limit_chase_count",
+    "entry_mode", "dashboard_virtual_chase_count",
+    "chase_3plus_virtual_chase_count", "chase_3plus_activation_reason",
+    "entry_path", "order_placed", "pull_req", "max_pull", "regime_birth",
+})
+
+
+def _dashboard_signal_ref_lite(sig: dict) -> dict:
+    """Copy only fields required by active-signal and relay rendering."""
+    if not isinstance(sig, dict):
+        return {}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in sig.items()
+        if key in _DASHBOARD_ACTIVE_SIGNAL_KEYS
+    }
+
+
+def _snapshot_bounded_trades_map_locked(
+    pending_orders_list,
+    positions_list,
+    max_entries: int = _RELAY_TRADES_MAP_MAX,
+) -> dict:
+    """Bound work under ``trade_lock`` while always retaining active trade IDs."""
+    selected = {}
+    active_ids = {
+        str(row.get("trade_id"))
+        for row in list(pending_orders_list or []) + list(positions_list or [])
+        if isinstance(row, dict) and row.get("trade_id")
+    }
+
+    def _add(tid, entry):
+        if not tid or not isinstance(entry, dict):
+            return
+        sig = entry.get("signal_ref")
+        if not isinstance(sig, dict):
+            return
+        selected[str(tid)] = {"signal_ref": _dashboard_signal_ref_lite(sig)}
+
+    for tid in active_ids:
+        _add(tid, trades_map.get(tid))
+
+    remaining = max(0, int(max_entries) - len(selected))
+    if remaining:
+        for tid, entry in itertools.islice(reversed(trades_map.items()), remaining):
+            _add(tid, entry)
+    return selected
+
+
+def _relay_trades_map_lite(
+    trades_map_src: dict = None,
+    trades_src: list = None,
+) -> dict:
     """Slim trades_map for NestJS relay closure sync — includes recently closed (~24h)."""
     lite = {}
     cutoff = time.time() - RELAY_TRADES_MAP_RETENTION_SEC
@@ -26392,31 +26459,37 @@ def _relay_trades_map_lite() -> dict:
             return
         lite[key] = {"signal_ref": _relay_signal_ref_lite(sig)}
 
-    with trade_lock:
-        for tid, entry in trades_map.items():
-            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
-            if isinstance(sig, dict):
-                _merge(str(sig.get("trade_id") or tid), sig)
-        for t in reversed(trades):
-            tid = t.get("trade_id")
-            if not tid or str(tid) in lite:
-                continue
-            exit_ts = t.get("ts") or t.get("exit_ts") or t.get("closed_ts")
-            parsed_ts = parse_ts(exit_ts) if isinstance(exit_ts, str) else (exit_ts or 0)
-            if parsed_ts and parsed_ts < cutoff:
-                continue
-            lite[str(tid)] = {
-                "signal_ref": {
-                    "trade_id": tid,
-                    "status": "CLOSED",
-                    "exit_reason": t.get("exit_reason"),
-                    "exit_price": t.get("exit"),
-                    "fill_price": t.get("entry"),
-                    "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net"),
-                    "closed_ts": exit_ts if isinstance(exit_ts, str) else None,
-                    "research_lane": t.get("research_lane"),
-                }
+    if trades_map_src is None or trades_src is None:
+        with trade_lock:
+            if trades_map_src is None:
+                trades_map_src = _snapshot_bounded_trades_map_locked([], [])
+            if trades_src is None:
+                trades_src = list(trades[-_RELAY_TRADES_MAP_MAX:])
+
+    for tid, entry in (trades_map_src or {}).items():
+        sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+        if isinstance(sig, dict):
+            _merge(str(sig.get("trade_id") or tid), sig)
+    for t in reversed(trades_src or []):
+        tid = t.get("trade_id")
+        if not tid or str(tid) in lite:
+            continue
+        exit_ts = t.get("ts") or t.get("exit_ts") or t.get("closed_ts")
+        parsed_ts = parse_ts(exit_ts) if isinstance(exit_ts, str) else (exit_ts or 0)
+        if parsed_ts and parsed_ts < cutoff:
+            continue
+        lite[str(tid)] = {
+            "signal_ref": {
+                "trade_id": tid,
+                "status": "CLOSED",
+                "exit_reason": t.get("exit_reason"),
+                "exit_price": t.get("exit"),
+                "fill_price": t.get("entry"),
+                "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net"),
+                "closed_ts": exit_ts if isinstance(exit_ts, str) else None,
+                "research_lane": t.get("research_lane"),
             }
+        }
     return lite
 
 
@@ -26963,19 +27036,25 @@ def _build_relay_execution_state_snapshot() -> dict:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
         recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
+        relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
         recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
-        active_list, _ = _collect_dashboard_active_signals(
+        bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
             positions_copy,
-            trades_map,
-            default_strategy=snapshot.get("strategy_mode", "-"),
-            default_regime=snapshot.get("regime", "-"),
         )
-        # trade_lock is an RLock, so the slim mapper can safely reuse the same
-        # coherent acquisition without opening a second unbounded wait.
-        trades_map_lite = _relay_trades_map_lite()
     finally:
         trade_lock.release()
+    active_list, _ = _collect_dashboard_active_signals(
+        pending_copy,
+        positions_copy,
+        bounded_trades_map,
+        default_strategy=snapshot.get("strategy_mode", "-"),
+        default_regime=snapshot.get("regime", "-"),
+    )
+    trades_map_lite = _relay_trades_map_lite(
+        bounded_trades_map,
+        relay_trades_copy,
+    )
     snapshot["orders"] = [
         _relay_order_row_lite(row, now_ts, tick_px)
         for row in pending_copy
@@ -27092,17 +27171,15 @@ def api_relay_state(force_rebuild: bool = False):
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
+            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
             trades_for_relay = [
                 _relay_trade_row_lite(copy.deepcopy(row))
                 for row in _snapshot_trades_for_api(session_start)
                 if isinstance(row, dict)
             ]
-            active_list, _exposure = _collect_dashboard_active_signals(
+            bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
-                trades_map,
-                default_strategy=snapshot.get("strategy", "-"),
-                default_regime=state.get("regime", "-"),
             )
             orders = []
             tick_px = snapshot.get("price")
@@ -27113,6 +27190,13 @@ def api_relay_state(force_rebuild: bool = False):
                     oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
                 orders.append(oc)
             expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
+        active_list, _exposure = _collect_dashboard_active_signals(
+            pending_orders_copy,
+            positions_copy,
+            bounded_trades_map,
+            default_strategy=snapshot.get("strategy", "-"),
+            default_regime=snapshot.get("regime", "-"),
+        )
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
         snapshot["trades"] = trades_for_relay
@@ -27127,7 +27211,10 @@ def api_relay_state(force_rebuild: bool = False):
         snapshot["ai_execution_bands"] = get_ai_execution_bands()
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         _enrich_orders_for_relay(snapshot)
-        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["trades_map"] = _relay_trades_map_lite(
+            bounded_trades_map,
+            relay_trades_copy,
+        )
         snapshot["paper_book"] = build_paper_order_book(_DASHBOARD_TRADES_MAX)
         snapshot["server_ts"] = utc_iso()
         bridge = get_genome_bridge()
@@ -27291,9 +27378,11 @@ def _build_api_state_snapshot():
             # The raw order book is large and fast-moving. Deep-copying it only
             # to discard it afterwards held state_lock for up to 38 seconds,
             # starving the dashboard, webhook reads, and /api/ping.
-            snapshot = copy.deepcopy(
-                {key: value for key, value in state.items() if key != "order_book"}
-            )
+            snapshot = copy.deepcopy({
+                key: value
+                for key, value in state.items()
+                if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
+            })
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
@@ -27315,19 +27404,11 @@ def _build_api_state_snapshot():
                     accrue_position_funding(pos, now_ts, refresh=False)
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
-            active_list, exposure_count = _collect_dashboard_active_signals(
+            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+            bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
-                trades_map,
-                default_strategy=snapshot.get("strategy", "-"),
-                default_regime=snapshot.get("regime", "-"),
             )
-            pending_by_tid = {o.get("trade_id"): o for o in pending_orders_copy if o.get("trade_id")}
-            for sig in active_list:
-                tid = sig.get("trade_id")
-                if tid and not sig.get("fill_price"):
-                    po = pending_by_tid.get(tid) or {}
-                    sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
             lane_position_counts = {
                 ln: {
                     "open": len(lane_open_positions.get(ln, [])),
@@ -27337,6 +27418,19 @@ def _build_api_state_snapshot():
             }
         finally:
             trade_lock.release()
+        active_list, exposure_count = _collect_dashboard_active_signals(
+            pending_orders_copy,
+            positions_copy,
+            bounded_trades_map,
+            default_strategy=snapshot.get("strategy", "-"),
+            default_regime=snapshot.get("regime", "-"),
+        )
+        pending_by_tid = {o.get("trade_id"): o for o in pending_orders_copy if o.get("trade_id")}
+        for sig in active_list:
+            tid = sig.get("trade_id")
+            if tid and not sig.get("fill_price"):
+                po = pending_by_tid.get(tid) or {}
+                sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
@@ -27496,7 +27590,10 @@ def _build_api_state_snapshot():
             "signals": active_list,
         }
         _enrich_orders_for_relay(snapshot)
-        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["trades_map"] = _relay_trades_map_lite(
+            bounded_trades_map,
+            relay_trades_copy,
+        )
         snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
