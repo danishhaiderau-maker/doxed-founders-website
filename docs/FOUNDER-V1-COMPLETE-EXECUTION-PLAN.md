@@ -354,6 +354,10 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Add one editable, versioned Goal Contract with objective, invariants,
   budgets, success evidence, status, and amendment history. Keep Goal, Task,
   Decision, and Evidence as separate concepts so progress remains legible.
+- [x] Inject the bounded current Goal Contract into every Founder AI request as
+  its North Star. Include the version, objective, pending decisions, and exact
+  blocked task ids; require evidence against the request and parent goal; never
+  let the model infer permission or silently expand or replace the goal.
 - [x] Add a persistent "Needs your decision" inbox. Present two or three
   context-specific options, put one evidence-backed recommendation first,
   accept a custom answer, and block only dependent tasks while unrelated work
@@ -393,8 +397,8 @@ authorized deletion executor remain unchecked.
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
 merge receipt, multi-agent task graph screenshots, concurrent decision-write
 test, paired-node credential/no-token-in-URL test, offline-resolution sync
-test, API regression 288/288, utility regression 95/95, and native-extension
-regression 203/203.
+test, bounded North-Star prompt tests, API regression 288/288, utility
+regression 95/95, and native-extension regression 206/206.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 

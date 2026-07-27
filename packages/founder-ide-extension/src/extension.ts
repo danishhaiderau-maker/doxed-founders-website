@@ -778,6 +778,9 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     resultCache: founderSafeResultCache,
     solutionMemory: founderVerifiedSolutionMemory,
     projectActivity: founderProjectActivity,
+    goalControl: {
+      snapshot: () => founderHub?.goalSnapshot() ?? null,
+    },
     onRequestStart: (modelId) => {
       pairingStatusBar?.setRequestInFlight(modelId);
       founderCompanion?.setPlanning('Planning the route', modelId);

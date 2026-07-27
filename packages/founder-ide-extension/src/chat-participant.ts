@@ -51,6 +51,8 @@ import {
   type FounderCompletionEvidenceReceipt,
 } from './completion-evidence';
 import { readFounderWorkMode } from './founder-agent-mode';
+import type { FounderGoalUiState } from './founder-goal-state';
+import { renderFounderGoalContext } from './founder-goal-context';
 
 export interface ParticipantDeps {
   creds?: FounderOsCredentials;
@@ -82,6 +84,9 @@ export interface ParticipantDeps {
   resultCache?: FounderSafeResultCache;
   solutionMemory?: FounderVerifiedSolutionMemory;
   projectActivity?: FounderProjectActivityStore;
+  goalControl?: {
+    snapshot(): FounderGoalUiState | null;
+  };
 }
 
 const MAX_TOOL_TURNS = 8;
@@ -226,6 +231,9 @@ async function handleParticipantRequest(
         deps.projectContext?.allFileHashes() ?? [],
       ) ?? ''
     : '';
+  const goalContext = renderFounderGoalContext(
+    deps.goalControl?.snapshot() ?? null,
+  );
   const identity = [
     'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.',
     founderWorkModeInstruction(workMode),
@@ -235,7 +243,9 @@ async function handleParticipantRequest(
     identity,
     memory: memoryText,
     projectContext: projectContextText,
-    additionalStableContext: priorSolutions,
+    additionalStableContext: [goalContext, priorSolutions]
+      .filter(Boolean)
+      .join('\n\n'),
     coordination: coordinationText,
   });
 
