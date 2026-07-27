@@ -1005,6 +1005,13 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "qty": order.get("qty") or signal.get("qty"),
         "leverage": _state_leverage(),
         "entry_ts": fill_ts,
+        # Preserve the source entity's birth watermark after a pending order
+        # becomes a position. NEXT_FRESH_ONLY must compare the original signal
+        # creation time, not the later fill time, or a pre-arm order that fills
+        # after Start is incorrectly reported as a fresh source-only gap.
+        "created_ts": signal_ts or order_created or fill_ts,
+        "signal_created_ts": signal_ts or order.get("signal_created_ts"),
+        "order_created_ts": order_created,
         "sl": entry * (1 - sl_price_pct(_state_leverage())) if direction == "LONG" else entry * (1 + sl_price_pct(_state_leverage())),
         "tp": compute_tp(entry, direction, TP_TARGET_PCT, _state_leverage()),
         "regime_birth": signal.get("regime", "UNKNOWN"),
@@ -26898,6 +26905,9 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "tp": row.get("tp"),
         "leverage": row.get("leverage"),
         "funding_fees": row.get("funding_fees"),
+        "created_ts": row.get("created_ts") or row.get("signal_created_ts"),
+        "signal_created_ts": row.get("signal_created_ts") or row.get("created_ts"),
+        "order_created_ts": row.get("order_created_ts"),
         "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
         "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
         "current_price": tick_px,

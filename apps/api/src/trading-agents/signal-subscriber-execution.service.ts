@@ -900,27 +900,48 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
     );
 }
 
-function sourceEntityCreatedAtMs(
+export function sourceEntityCreatedAtMs(
   entity: Record<string, unknown>,
 ): number | null {
   for (const raw of [
     entity.created_ts,
-    entity.entry_ts,
     entity.signal_created_ts,
-    entity.ts,
+    entity.order_created_ts,
   ]) {
-    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-      return raw > 1_000_000_000_000 ? raw : raw * 1000;
-    }
-    if (typeof raw !== 'string' || !raw.trim()) continue;
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric) && numeric > 0) {
-      return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
-    }
-    const parsed = Date.parse(raw);
-    if (Number.isFinite(parsed)) return parsed;
+    const parsed = sourceTimestampMs(raw);
+    if (parsed != null) return parsed;
+  }
+  // Compatibility for positions created by bot revisions that retained only
+  // fill time plus the measured signal age. This reconstructs the original
+  // source birth watermark so a pre-arm pending order cannot appear fresh
+  // merely because it filled after NEXT_FRESH_ONLY was armed.
+  const entryAtMs = sourceTimestampMs(entity.entry_ts ?? entity.fill_ts);
+  const signalAgeSec = Number(entity.signal_age_sec);
+  if (
+    entryAtMs != null &&
+    Number.isFinite(signalAgeSec) &&
+    signalAgeSec >= 0
+  ) {
+    return entryAtMs - signalAgeSec * 1000;
+  }
+  for (const raw of [entity.entry_ts, entity.fill_ts, entity.ts]) {
+    const parsed = sourceTimestampMs(raw);
+    if (parsed != null) return parsed;
   }
   return null;
+}
+
+function sourceTimestampMs(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw > 1_000_000_000_000 ? raw : raw * 1000;
+  }
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function flatSignedFastPathPreflight(input: {
