@@ -27,6 +27,7 @@ import {
   marketCloseReductionConfirmed,
   mergedDirectionCompatible,
   pendingEntryMayOwnExchangePosition,
+  pendingFillReconcileDecision,
   pendingCopyShowcaseDisposition,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -247,6 +248,203 @@ test('orphan adoption defers to a same-direction pending entry that may own the 
       { direction: 'SHORT' },
     ]),
     false,
+  );
+});
+
+test('managed pending fill gets one bounded ledger-reconcile grace window', () => {
+  const nowMs = Date.parse('2026-07-27T12:45:25.000Z');
+  const first = pendingFillReconcileDecision({
+    nowMs,
+    signedDeltaBtc: -0.0307,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT',
+        qty: 0.0307,
+        bitfinexOrderId: 241167676255,
+      },
+    ],
+    managedOrderIds: [241167676255],
+    activeOrderIds: [],
+  });
+  assert.deepEqual(first, {
+    defer: true,
+    reason: 'DEFER_PENDING_FILL',
+    direction: 'SHORT',
+    ownerParticipantIds: ['participant-1'],
+    firstObservedAtMs: nowMs,
+  });
+
+  const nextTick = pendingFillReconcileDecision({
+    nowMs: nowMs + 5_000,
+    signedDeltaBtc: -0.0307,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT',
+        qty: 0.0307,
+        bitfinexOrderId: 241167676255,
+      },
+    ],
+    managedOrderIds: [241167676255],
+    activeOrderIds: [],
+    prior: {
+      firstObservedAtMs: first.firstObservedAtMs!,
+      direction: 'SHORT',
+      ownerParticipantIds: first.ownerParticipantIds,
+    },
+  });
+  assert.equal(nextTick.defer, true);
+  assert.equal(nextTick.firstObservedAtMs, nowMs);
+});
+
+test('pending fill grace refuses an entry whose managed remainder is still active', () => {
+  const decision = pendingFillReconcileDecision({
+    nowMs: 1_000,
+    signedDeltaBtc: 0.01,
+    pending: [
+      {
+        participantId: 'participant-long',
+        direction: 'LONG',
+        qty: 0.03,
+        bitfinexOrderId: 123,
+      },
+    ],
+    managedOrderIds: [123],
+    activeOrderIds: [123],
+  });
+  assert.equal(decision.defer, false);
+  assert.equal(decision.reason, 'NO_MANAGED_PENDING_OWNER');
+  assert.equal(decision.direction, 'LONG');
+});
+
+test('pending fill grace fails closed for foreign orders, wrong ownership, and expiry', () => {
+  const base = {
+    signedDeltaBtc: -0.0307,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT' as const,
+        qty: 0.0307,
+        bitfinexOrderId: 123,
+      },
+    ],
+    managedOrderIds: [123],
+  };
+
+  assert.equal(
+    pendingFillReconcileDecision({
+      ...base,
+      nowMs: 1_000,
+      activeOrderIds: [999],
+    }).reason,
+    'FOREIGN_ACTIVE_ORDER',
+  );
+  assert.equal(
+    pendingFillReconcileDecision({
+      ...base,
+      nowMs: 1_000,
+      signedDeltaBtc: 0.0307,
+      activeOrderIds: [],
+    }).reason,
+    'NO_MANAGED_PENDING_OWNER',
+  );
+  assert.equal(
+    pendingFillReconcileDecision({
+      ...base,
+      nowMs: 1_000,
+      pending: [
+        ...base.pending,
+        {
+          participantId: 'participant-2',
+          direction: 'SHORT',
+          qty: 0.0307,
+          bitfinexOrderId: 124,
+        },
+      ],
+      managedOrderIds: [123, 124],
+      activeOrderIds: [],
+    }).reason,
+    'AMBIGUOUS_MANAGED_PENDING_OWNER',
+  );
+  assert.equal(
+    pendingFillReconcileDecision({
+      ...base,
+      nowMs: 16_001,
+      activeOrderIds: [],
+      prior: {
+        firstObservedAtMs: 1_000,
+        direction: 'SHORT',
+        ownerParticipantIds: ['participant-1'],
+      },
+      graceMs: 15_000,
+    }).reason,
+    'GRACE_EXPIRED',
+  );
+});
+
+test('ledger reconcile defers a proven pending fill without pausing or accepting another entry', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let paused = false;
+  const persisted: { dashboard: Record<string, unknown> | null } = {
+    dashboard: null,
+  };
+  service.buildVirtualLotSummary = async () => ({
+    openQty: 0,
+    signedOpenQty: 0,
+    open: 0,
+    pending: 1,
+    directionConflict: false,
+  });
+  service.activeTrading = {
+    getOpenPositionDetail: async () => ({
+      amount: -0.0307,
+      symbol: 'tBTCF0:USTF0',
+      direction: 'SHORT',
+    }),
+    getMarkPrice: async () => 65_100,
+  };
+  service.relaySim = {
+    buildReconcileSnapshot: () => ({ alert: true }),
+  };
+  service.prisma = {
+    tradingAgentInstance: {
+      findUnique: async () => ({ dashboardState: {} }),
+      update: async ({ data }: any) => {
+        persisted.dashboard = data.dashboardState;
+      },
+    },
+  };
+  service.pauseRelayForPositionMismatch = async () => {
+    paused = true;
+  };
+  service.logger = { warn: () => undefined };
+
+  const reconciled = await service.reconcileLotLedger(
+    'agent-1',
+    { id: 'instance-1', userId: 'user-1', dashboardState: {} },
+    [{ id: 'participant-1', status: SignalCycleStatus.PENDING_ENTRY }],
+    {},
+    new Set([123]),
+    new Set(),
+    new Map([
+      [
+        'participant-1',
+        {
+          direction: 'SHORT',
+          qty: 0.0307,
+          bitfinexOrderId: 123,
+        },
+      ],
+    ]),
+    false,
+  );
+
+  assert.equal(reconciled, false);
+  assert.equal(paused, false);
+  assert.equal(
+    (persisted.dashboard?.pendingFillReconcileGrace as Record<string, unknown>)?.reason,
+    'DEFER_PENDING_FILL',
   );
 });
 
