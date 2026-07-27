@@ -4,7 +4,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
-import { generateNonce, type IpcMessage } from 'founder-ide-extension/ipc';
 import {
   findComposerWithRecentUserText,
   focusComposerInWorkspaceState,
@@ -21,6 +20,7 @@ import {
   isFounderIdeProvider,
   type PendingDispatch,
 } from './founder-ide-dispatch-protocol';
+import { sendFounderIdeRequestAndWait } from './founder-ide-dispatch-result';
 
 export type { PendingDispatch } from './founder-ide-dispatch-protocol';
 
@@ -71,10 +71,6 @@ type SendKeysStep = {
   keys: string;
   delayMs: number;
 };
-
-function ipcEnvelope() {
-  return { nonce: generateNonce(), ts: new Date().toISOString() };
-}
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -144,116 +140,6 @@ export async function completeDispatch(
   }
 }
 
-function waitForFounderIdeResult(
-  client: IdeIpcClient,
-  request: IpcMessage,
-): Promise<string> {
-  if (
-    request.type !== 'chatPrompt' &&
-    request.type !== 'workspaceReadRequest' &&
-    request.type !== 'proposedEdit' &&
-    request.type !== 'commandRequest'
-  ) {
-    return Promise.reject(new Error(`Unsupported Founder IDE action: ${request.type}`));
-  }
-  const requestId = request.requestId;
-
-  return new Promise((resolve, reject) => {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    const timeoutMs =
-      request.type === 'commandRequest'
-        ? Math.max(30_000, Math.min((request.timeoutMs ?? 30_000) + 30_000, 330_000))
-        : request.type === 'workspaceReadRequest'
-          ? 30_000
-          : request.type === 'chatPrompt'
-            ? 30_000
-            : 10 * 60_000;
-    const cleanup = () => {
-      clearTimeout(timer);
-      client.off('message', onMessage);
-    };
-    const finish = (result: string) => {
-      cleanup();
-      resolve(result);
-    };
-    const onMessage = (message: IpcMessage) => {
-      if (!('requestId' in message) || message.requestId !== requestId) return;
-      if (request.type === 'chatPrompt' && message.type === 'chatPromptResult') {
-        finish(
-          JSON.stringify({
-            kind: 'chat',
-            delivered: message.delivered,
-            ...(message.error ? { error: message.error } : {}),
-          }),
-        );
-        return;
-      }
-      if (
-        request.type === 'workspaceReadRequest' &&
-        message.type === 'workspaceReadResult'
-      ) {
-        finish(
-          JSON.stringify({
-            kind: 'workspace',
-            nodes: message.nodes,
-            ...(message.error ? { error: message.error } : {}),
-          }),
-        );
-        return;
-      }
-      if (request.type === 'proposedEdit' && message.type === 'editReviewResult') {
-        finish(
-          JSON.stringify({
-            kind: 'edit',
-            approved: message.approved,
-            ...(message.reason ? { reason: message.reason } : {}),
-          }),
-        );
-        return;
-      }
-      if (request.type !== 'commandRequest') return;
-      if (message.type === 'commandReviewResult' && !message.approved) {
-        finish(
-          JSON.stringify({
-            kind: 'command',
-            approved: false,
-            exitCode: 126,
-            stdout: '',
-            stderr: message.reason ?? 'user_denied',
-          }),
-        );
-        return;
-      }
-      if (message.type === 'commandOutput') {
-        (message.stream === 'stderr' ? stderr : stdout).push(message.chunk);
-        if (message.exitCode !== undefined && message.exitCode !== null) {
-          finish(
-            JSON.stringify({
-              kind: 'command',
-              approved: true,
-              exitCode: message.exitCode,
-              stdout: stdout.join('').slice(-12_000),
-              stderr: stderr.join('').slice(-8_000),
-            }),
-          );
-        }
-      }
-    };
-    const timer = setTimeout(() => {
-      client.send({
-        type: 'cancel',
-        requestId,
-        reason: 'remote_dispatch_timeout',
-        ...ipcEnvelope(),
-      });
-      cleanup();
-      reject(new Error('Founder IDE action timed out waiting for local review'));
-    }, timeoutMs);
-    client.on('message', onMessage);
-  });
-}
-
 async function executeFounderIdeDispatch(
   apiBaseUrl: string,
   nodeId: string,
@@ -263,10 +149,7 @@ async function executeFounderIdeDispatch(
 ): Promise<void> {
   try {
     const request = buildFounderIdeMessage(dispatch);
-    if (!client.send(request)) {
-      throw new Error('Founder IDE authenticated pipe is unavailable');
-    }
-    const result = await waitForFounderIdeResult(client, request);
+    const result = await sendFounderIdeRequestAndWait(client, request);
     await completeDispatch(apiBaseUrl, nodeId, nodeToken, dispatch.id, { result });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

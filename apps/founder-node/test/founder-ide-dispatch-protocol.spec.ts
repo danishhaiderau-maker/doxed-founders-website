@@ -6,6 +6,9 @@ import {
   isFounderIdeProvider,
   type PendingDispatch,
 } from '../src/founder-ide-dispatch-protocol';
+import { EventEmitter } from 'node:events';
+import { sendFounderIdeRequestAndWait } from '../src/founder-ide-dispatch-result';
+import type { IpcMessage } from 'founder-ide-extension/ipc';
 
 function dispatch(prompt: string): PendingDispatch {
   return {
@@ -71,5 +74,48 @@ describe('Founder IDE relay protocol', () => {
       isDispatchForNode({ ...exact, nodeId: null }, 'node-abc'),
       false,
     );
+  });
+
+  it('starts listening before sending so an immediate IDE result is not lost', async () => {
+    class ImmediateClient extends EventEmitter {
+      send(message: IpcMessage): boolean {
+        if (message.type === 'chatPrompt') {
+          this.emit('message', {
+            type: 'chatPromptResult',
+            requestId: message.requestId,
+            delivered: true,
+            nonce: 'nonce-response-1234567890',
+            ts: new Date().toISOString(),
+          } satisfies IpcMessage);
+        }
+        return true;
+      }
+    }
+
+    const client = new ImmediateClient();
+    const request = buildFounderIdeMessage(dispatch('Review the current workspace.'));
+    const result = JSON.parse(
+      await sendFounderIdeRequestAndWait(client, request),
+    ) as { kind: string; delivered: boolean };
+
+    assert.deepEqual(result, { kind: 'chat', delivered: true });
+    assert.equal(client.listenerCount('message'), 0);
+  });
+
+  it('removes the response listener when the authenticated pipe cannot send', async () => {
+    class ClosedClient extends EventEmitter {
+      send(): boolean {
+        return false;
+      }
+    }
+
+    const client = new ClosedClient();
+    const request = buildFounderIdeMessage(dispatch('Review the current workspace.'));
+
+    await assert.rejects(
+      sendFounderIdeRequestAndWait(client, request),
+      /authenticated pipe is unavailable/,
+    );
+    assert.equal(client.listenerCount('message'), 0);
   });
 });
