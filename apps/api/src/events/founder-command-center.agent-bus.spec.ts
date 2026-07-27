@@ -26,6 +26,47 @@ function ledgerPayload(
 }
 
 describe('FounderCommandCenter AgentBus v2 integration', () => {
+  it('generates a bounded trajectory view from the append-only event ledger', async () => {
+    const rows = [
+      { payload: ledgerPayload('task-a', 'CREATED', 1) },
+      { payload: ledgerPayload('task-a', 'CLAIMED', 2) },
+      { payload: ledgerPayload('task-a', 'STARTED', 3) },
+      { payload: ledgerPayload('task-a', 'VERIFYING', 4) },
+      { payload: ledgerPayload('task-a', 'COMPLETED', 5) },
+    ];
+    const prisma = {
+      founder: {
+        findUnique: async () => ({ id: 'founder-1' }),
+      },
+      founderEvent: {
+        findMany: async () => rows,
+      },
+    };
+    const service = new FounderCommandCenterService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    const trajectory = await service.getAgentTrajectory('user-1', 2);
+
+    assert.equal(trajectory.generatedFrom, 'founder_event.agent_bus_v2');
+    assert.equal(trajectory.totalEvents, 5);
+    assert.deepEqual(
+      trajectory.events.map((event) => event.type),
+      ['VERIFYING', 'COMPLETED'],
+    );
+    assert.deepEqual(trajectory.handoffs, [
+      { handoffId: 'task-a', state: 'complete' },
+    ]);
+  });
+
   it('releases a persisted dependency once and records an idempotent lifecycle', async () => {
     const rows = [
       { payload: ledgerPayload('prior-build', 'CREATED', 1) },

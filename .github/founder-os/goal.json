@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "updatedAt": "2026-07-28T00:00:00.000Z",
+  "currentGoal": "Complete Founder OS V1 stages 0 through 11 with installed, end-to-end evidence.",
+  "goal": {
+    "id": "founder-os-v1",
+    "version": 1,
+    "objective": "Complete Founder OS V1 stages 0 through 11 with installed, end-to-end evidence.",
+    "constraints": [
+      "Do not delete local data without explicit founder approval.",
+      "Do not expose provider keys, prompts, private paths, or private execution history.",
+      "Keep trading and analyzer release ownership isolated.",
+      "Report external signing, clean-machine, staging, and soak blockers honestly."
+    ],
+    "successEvidence": [
+      {
+        "id": "tests",
+        "label": "Focused and full automated suites pass",
+        "kind": "test",
+        "required": true
+      },
+      {
+        "id": "installed",
+        "label": "Installed Founder IDE passes visual and interaction QA",
+        "kind": "visual",
+        "required": true
+      },
+      {
+        "id": "remote",
+        "label": "Founder Node remote control passes end to end",
+        "kind": "remote",
+        "required": true
+      },
+      {
+        "id": "release",
+        "label": "Clean-machine release evidence is recorded",
+        "kind": "receipt",
+        "required": true
+      }
+    ],
+    "status": "active",
+    "updatedAt": "2026-07-28T00:00:00.000Z"
+  },
+  "durableDecisions": []
+}

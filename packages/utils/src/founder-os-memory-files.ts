@@ -1,9 +1,20 @@
 import type { VaultMergePatch } from './vault-merge.js';
+import {
+  type FounderDecisionKind,
+  type FounderDecisionRequest,
+  type FounderDecisionResolution,
+  type FounderGoalContract,
+  validateFounderDecisionRequest,
+  validateFounderGoal,
+} from './founder-goal-control.js';
 
 export const FOUNDER_OS_MEMORY_DIR = '.github/founder-os';
+const FOUNDER_GOAL_CONTROL_KEY = '_founderGoalControl';
+const MAX_DURABLE_DECISIONS = 25;
 
 export const FOUNDER_OS_MEMORY_FILES = {
   projectContext: `${FOUNDER_OS_MEMORY_DIR}/project-context.md`,
+  goalContract: `${FOUNDER_OS_MEMORY_DIR}/goal.json`,
   roadmap: `${FOUNDER_OS_MEMORY_DIR}/roadmap.md`,
   tasks: `${FOUNDER_OS_MEMORY_DIR}/tasks.json`,
   decisions: `${FOUNDER_OS_MEMORY_DIR}/decisions.md`,
@@ -21,6 +32,22 @@ export type FounderOsTasksFile = {
     kind: string;
     done: boolean;
   }>;
+};
+
+export type FounderOsDurableDecision = {
+  id: string;
+  kind: Extract<FounderDecisionKind, 'goal_amendment' | 'research_preference'>;
+  title: string;
+  outcome: string;
+  resolvedAt: string;
+};
+
+export type FounderOsGoalContractFile = {
+  version: 1;
+  updatedAt: string;
+  currentGoal: string;
+  goal: FounderGoalContract | null;
+  durableDecisions: FounderOsDurableDecision[];
 };
 
 export type NotificationBuyerMeta = {
@@ -241,13 +268,83 @@ export function buildRoadmapMarkdown(
 export function buildTasksJsonFile(input: {
   currentGoal: string;
   tasks: FounderOsTasksFile['tasks'];
+  updatedAt: string;
 }): FounderOsTasksFile {
   return {
     version: 1,
-    updatedAt: new Date().toISOString(),
+    updatedAt: input.updatedAt,
     currentGoal: input.currentGoal,
     tasks: input.tasks,
   };
+}
+
+export function buildGoalContractJsonFile(input: {
+  memoryGraph: unknown;
+  fallbackGoal: string;
+  updatedAt: string;
+}): FounderOsGoalContractFile {
+  const state = latestGoalControlState(input.memoryGraph);
+  const storedGoal =
+    state?.goal && validateFounderGoal(state.goal).length === 0
+      ? structuredClone(state.goal)
+      : null;
+  const goal = storedGoal ? publicGoalContract(storedGoal) : null;
+  const resolutions = new Map(
+    (state?.resolutions ?? [])
+      .filter(isDecisionResolution)
+      .map((resolution) => [resolution.requestId, resolution]),
+  );
+  const durableDecisions = (state?.decisions ?? [])
+    .filter(
+      (
+        decision,
+      ): decision is FounderDecisionRequest & {
+        kind: FounderOsDurableDecision['kind'];
+      } =>
+        isDurableDecision(decision)
+        && validateFounderDecisionRequest(decision).length === 0,
+    )
+    .map((decision) =>
+      durableDecisionSummary(decision, resolutions.get(decision.id)))
+    .filter(
+      (decision): decision is FounderOsDurableDecision => Boolean(decision),
+    )
+    .sort((left, right) => left.resolvedAt.localeCompare(right.resolvedAt))
+    .slice(-MAX_DURABLE_DECISIONS);
+
+  return {
+    version: 1,
+    updatedAt: latestIsoTimestamp([
+      input.updatedAt,
+      state?.updatedAt,
+      goal?.updatedAt,
+      ...durableDecisions.map((decision) => decision.resolvedAt),
+    ]) ?? input.updatedAt,
+    currentGoal:
+      goal?.objective.trim()
+      || safePublicText(input.fallbackGoal, 1_200)
+      || 'Define your next milestone',
+    goal,
+    durableDecisions,
+  };
+}
+
+export function parseGoalContractJson(
+  raw: string,
+): FounderOsGoalContractFile | null {
+  try {
+    const parsed = JSON.parse(raw) as FounderOsGoalContractFile;
+    if (
+      parsed?.version !== 1
+      || typeof parsed.currentGoal !== 'string'
+      || !Array.isArray(parsed.durableDecisions)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export function parseTasksJson(raw: string): FounderOsTasksFile | null {
@@ -280,4 +377,135 @@ export function buildDecisionsMarkdown(): string {
     '_Record key product and technical decisions here. Founder OS appends during copilot sessions._',
     '',
   ].join('\n');
+}
+
+type StoredGoalControlState = {
+  goal?: FounderGoalContract | null;
+  decisions?: FounderDecisionRequest[];
+  resolutions?: FounderDecisionResolution[];
+  updatedAt?: string;
+};
+
+function latestGoalControlState(
+  memoryGraph: unknown,
+): StoredGoalControlState | null {
+  if (!isRecord(memoryGraph)) return null;
+  const stored = memoryGraph[FOUNDER_GOAL_CONTROL_KEY];
+  if (!isRecord(stored)) return null;
+  const candidates =
+    stored.schemaVersion === 1 && isRecord(stored.workspaces)
+      ? Object.values(stored.workspaces).filter(isRecord)
+      : [stored];
+  return (
+    candidates
+      .map((candidate) => candidate as StoredGoalControlState)
+      .sort((left, right) =>
+        validIso(right.updatedAt).localeCompare(validIso(left.updatedAt)))[0]
+    ?? null
+  );
+}
+
+function isDurableDecision(
+  decision: unknown,
+): decision is FounderDecisionRequest & {
+  kind: FounderOsDurableDecision['kind'];
+} {
+  return (
+    isRecord(decision)
+    && decision.status === 'resolved'
+    && (
+      decision.kind === 'goal_amendment'
+      || decision.kind === 'research_preference'
+    )
+  );
+}
+
+function durableDecisionSummary(
+  decision: FounderDecisionRequest & {
+    kind: FounderOsDurableDecision['kind'];
+  },
+  resolution: FounderDecisionResolution | undefined,
+): FounderOsDurableDecision | null {
+  if (!resolution) return null;
+  const option = decision.options
+    .filter((candidate): candidate is NonNullable<typeof candidate> =>
+      Boolean(candidate))
+    .find((candidate) => candidate.id === resolution.selectedOptionId);
+  const outcome =
+    decision.kind === 'goal_amendment'
+    && decision.proposedGoalObjective?.trim()
+      ? decision.proposedGoalObjective.trim()
+      : option?.label.trim()
+        || (resolution.customAnswer?.trim()
+          ? 'Custom founder decision recorded privately'
+          : '');
+  if (!outcome) return null;
+  return {
+    id: decision.id,
+    kind: decision.kind,
+    title: safePublicText(decision.title, 240),
+    outcome: safePublicText(outcome, 1_200),
+    resolvedAt: resolution.resolvedAt,
+  };
+}
+
+function publicGoalContract(goal: FounderGoalContract): FounderGoalContract {
+  return {
+    ...goal,
+    id: cleanPublicText(goal.id, 160),
+    objective: safePublicText(goal.objective, 1_200),
+    constraints: goal.constraints
+      .map((constraint) => safePublicText(constraint, 500))
+      .filter(Boolean)
+      .slice(0, 30),
+    successEvidence: goal.successEvidence.slice(0, 30).map((evidence) => ({
+      ...evidence,
+      id: cleanPublicText(evidence.id, 160),
+      label: safePublicText(evidence.label, 500),
+    })),
+  };
+}
+
+function safePublicText(value: string, max: number): string {
+  const clean = cleanPublicText(value, max);
+  return looksSecretLike(clean) ? '[redacted from repository]' : clean;
+}
+
+function cleanPublicText(value: string, max: number): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function looksSecretLike(value: string): boolean {
+  return /(bearer\s+[a-z0-9._-]{12,}|(?:api[_ -]?key|secret|token)\s*[:=]\s*\S{8,}|sk-[a-z0-9_-]{12,})/i
+    .test(value);
+}
+
+function isDecisionResolution(
+  value: unknown,
+): value is FounderDecisionResolution {
+  return (
+    isRecord(value)
+    && typeof value.requestId === 'string'
+    && typeof value.resolvedAt === 'string'
+    && Number.isFinite(Date.parse(value.resolvedAt))
+    && (value.resolvedBy === 'founder' || value.resolvedBy === 'approved_policy')
+  );
+}
+
+function latestIsoTimestamp(values: Array<string | undefined>): string | null {
+  return values
+    .map(validIso)
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? null;
+}
+
+function validIso(value: unknown): string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+    ? value
+    : '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

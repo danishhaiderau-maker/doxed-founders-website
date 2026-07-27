@@ -374,7 +374,7 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Apply goal amendments at task/action boundaries. Show affected tasks,
   invalidated assumptions, salvageable work, budget/timeline impact, and
   accept/revise/reject/defer choices before incrementing the goal version.
-- [ ] Keep committed product intent small and reviewable. Store the Goal
+- [x] Keep committed product intent small and reviewable. Store the Goal
   Contract and durable decisions with the project, keep leases/heartbeats and
   private runtime episodes in ignored local state, and generate trajectory
   views from the event log rather than maintaining noisy duplicate files.

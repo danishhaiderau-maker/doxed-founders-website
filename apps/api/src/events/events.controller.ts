@@ -64,6 +64,18 @@ export class EventsController {
     return this.commandCenter.getActiveAgentRun(user.id);
   }
 
+  @Get('copilot/agent-trajectory')
+  agentTrajectory(
+    @CurrentUser() user: AuthUser,
+    @Query('limit') limit?: string,
+  ) {
+    const requested = Number(limit);
+    return this.commandCenter.getAgentTrajectory(
+      user.id,
+      Number.isFinite(requested) ? requested : 100,
+    );
+  }
+
   @Get('copilot/goal-control')
   goalControl(
     @CurrentUser() user: AuthUser,

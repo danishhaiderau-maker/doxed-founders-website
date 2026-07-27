@@ -126,6 +126,26 @@ export class FounderCommandCenterService {
     return this.agentRuns.resolveDecision(userId, input, workspaceKey);
   }
 
+  async getAgentTrajectory(userId: string, requestedLimit = 100) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+    const replay = await this.loadAgentBusLedger(founder.id);
+    const limit = Math.max(1, Math.min(Math.floor(requestedLimit), 500));
+    const events = replay.acceptedEvents.slice(-limit);
+    return {
+      generatedFrom: 'founder_event.agent_bus_v2' as const,
+      generatedAt: events.at(-1)?.at ?? null,
+      totalEvents: replay.acceptedEvents.length,
+      events,
+      handoffs: Array.from(replay.stateByHandoff.entries()).map(
+        ([handoffId, state]) => ({ handoffId, state }),
+      ),
+    };
+  }
+
   async getFounderQueue(userId: string) {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
