@@ -39,9 +39,42 @@ import {
   relayArmTimestampMs,
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
+  shouldRetryImmediateFlatReconcile,
   shouldClearShowcaseStatusError,
   sourceEntityCreatedAtMs,
 } from './signal-subscriber-execution.service';
+
+test('retries immediate-flat proof only for an unambiguous managed exit race', () => {
+  const base = {
+    signedExchangeAmount: 0,
+    signedLedgerOpenAmount: -0.03085,
+    openLots: 1,
+    pendingLots: 0,
+    directionConflict: false,
+    foreignActiveOrders: 0,
+  };
+  assert.equal(shouldRetryImmediateFlatReconcile(base), true);
+  assert.equal(
+    shouldRetryImmediateFlatReconcile({ ...base, signedExchangeAmount: -0.03085 }),
+    false,
+  );
+  assert.equal(
+    shouldRetryImmediateFlatReconcile({ ...base, signedLedgerOpenAmount: 0 }),
+    false,
+  );
+  assert.equal(
+    shouldRetryImmediateFlatReconcile({ ...base, pendingLots: 1 }),
+    false,
+  );
+  assert.equal(
+    shouldRetryImmediateFlatReconcile({ ...base, directionConflict: true }),
+    false,
+  );
+  assert.equal(
+    shouldRetryImmediateFlatReconcile({ ...base, foreignActiveOrders: 1 }),
+    false,
+  );
+});
 
 test('showcase close fails closed when linked entry remainder state is unreadable', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
