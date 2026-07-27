@@ -258,6 +258,11 @@ export function createFounderHousekeepingDecision(
         description: 'Reject this housekeeping batch without deleting files.',
         ...(!reversible ? { recommended: true } : {}),
       },
+      {
+        id: 'research_more',
+        label: 'Research more',
+        description: 'Keep permission pending while read-only research adds evidence.',
+      },
     ],
     allowCustomAnswer: true,
     independentWorkMayContinue: true,
@@ -374,6 +379,23 @@ export function resolveFounderGoalUiDecision(
   }
   if (decision.kind === 'goal_amendment' && selectedOptionId === 'defer') {
     return state;
+  }
+  if (decision.kind === 'housekeeping' && selectedOptionId === 'research_more') {
+    return state;
+  }
+  if (decision.kind === 'housekeeping' && customAnswer) {
+    const answeredAt = input.now ?? new Date();
+    return attachFounderDecisionResearch(state, {
+      decisionId: decision.id,
+      finding: {
+        id: `founder-guidance-${randomUUID()}`,
+        title: 'Founder housekeeping instructions',
+        summary: customAnswer,
+        sources: ['Founder decision inbox'],
+        createdAt: answeredAt.toISOString(),
+      },
+      now: answeredAt,
+    });
   }
   const selectedCandidateIds = decision.kind === 'housekeeping'
     && selectedOptionId === 'approve_selected'

@@ -237,6 +237,15 @@ export class FounderHubProvider
           );
           return;
         }
+        if (
+          decision.kind === 'housekeeping'
+          && selectedOptionId === 'research_more'
+        ) {
+          void vscode.window.showInformationMessage(
+            'Founder kept housekeeping permission pending. Read-only research can continue and attach evidence.',
+          );
+          return;
+        }
         this.goalState = resolveFounderGoalUiDecision(this.goalState, {
           decisionId: decision.id,
           selectedOptionId,
@@ -511,6 +520,7 @@ export class FounderHubProvider
           <input
             type="checkbox"
             data-housekeeping-candidate="${escapeHtml(candidate.id)}"
+            data-housekeeping-size="${candidate.sizeBytes}"
             ${candidate.recommendedAction !== 'delete' ? 'disabled' : ''}
             ${candidate.recommendedAction === 'delete' && candidate.reversible ? 'checked' : ''}
           />
@@ -997,6 +1007,23 @@ export class FounderHubProvider
       font-size: 9px;
       line-height: 1.35;
     }
+    .housekeeping-preview {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 3px 8px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--founder-green) 7%, transparent);
+      font-size: 9px;
+    }
+    .housekeeping-preview strong { font-size: 10px; }
+    .housekeeping-preview span { color: var(--founder-green); }
+    .housekeeping-preview small {
+      grid-column: 1 / -1;
+      color: var(--muted);
+      line-height: 1.4;
+    }
     .housekeeping-list {
       display: grid;
       gap: 5px;
@@ -1187,6 +1214,11 @@ export class FounderHubProvider
         ${decisionResearch}
         ${blockedTasks}
         ${housekeepingCandidates ? `
+          <div class="housekeeping-preview" aria-live="polite">
+            <strong data-housekeeping-preview-count>0 paths selected</strong>
+            <span data-housekeeping-preview-size>0 B</span>
+            <small>Preview only. Approval is scoped to the exact checked paths and does not itself delete anything.</small>
+          </div>
           <div class="housekeeping-list" aria-label="Housekeeping candidates">
             ${housekeepingCandidates}
           </div>
@@ -1198,7 +1230,7 @@ export class FounderHubProvider
             type="button"
             data-decision-id="${escapeHtml(decision.id)}"
             data-option-id="__custom__"
-          ><strong>${decision.kind === 'goal_amendment' ? 'Revise goal' : 'Write another answer'}</strong><span>${decision.kind === 'goal_amendment' ? 'Edit the proposed North Star, then apply it at the next safe boundary.' : 'Give Founder different instructions.'}</span></button>
+          ><strong>${decision.kind === 'goal_amendment' ? 'Revise goal' : decision.kind === 'housekeeping' ? 'Edit cleanup goal' : 'Write another answer'}</strong><span>${decision.kind === 'goal_amendment' ? 'Edit the proposed North Star, then apply it at the next safe boundary.' : decision.kind === 'housekeeping' ? 'Add founder instructions without granting deletion permission.' : 'Give Founder different instructions.'}</span></button>
         ` : ''}
         <p class="decision-footnote">${
           decision.independentWorkMayContinue
@@ -1270,6 +1302,43 @@ export class FounderHubProvider
         });
       });
     }
+    const housekeepingInputs = Array.from(
+      document.querySelectorAll('[data-housekeeping-candidate]'),
+    );
+    const formatBytes = (bytes) => {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const unit = Math.min(
+        Math.floor(Math.log(bytes) / Math.log(1024)),
+        units.length - 1,
+      );
+      const value = bytes / (1024 ** unit);
+      return value.toFixed(value >= 10 || unit === 0 ? 0 : 1)
+        + ' ' + units[unit];
+    };
+    const refreshHousekeepingPreview = () => {
+      const selected = housekeepingInputs.filter((input) => input.checked);
+      const totalBytes = selected.reduce(
+        (total, input) =>
+          total + Number(input.dataset.housekeepingSize || 0),
+        0,
+      );
+      const count = document.querySelector(
+        '[data-housekeeping-preview-count]',
+      );
+      const size = document.querySelector(
+        '[data-housekeeping-preview-size]',
+      );
+      if (count) {
+        count.textContent = selected.length + ' path'
+          + (selected.length === 1 ? '' : 's') + ' selected';
+      }
+      if (size) size.textContent = formatBytes(totalBytes);
+    };
+    for (const input of housekeepingInputs) {
+      input.addEventListener('change', refreshHousekeepingPreview);
+    }
+    refreshHousekeepingPreview();
   </script>
 </body>
 </html>`;

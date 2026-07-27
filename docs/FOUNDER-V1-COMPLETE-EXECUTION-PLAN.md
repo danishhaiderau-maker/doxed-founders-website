@@ -391,8 +391,11 @@ transaction/compare-and-swap remains an infrastructure hardening item.
 Housekeeping now has a bounded, read-only, no-content scan for exact
 reproducible-cache paths; it cannot delete, does not follow links, and
 downgrades incomplete measurements to keep. Duplicate/source-obsolescence
-analysis, stale-worktree review, restore checkpoints, and the separately
-authorized deletion executor remain unchecked.
+analysis and stale-worktree review remain unchecked. The decision surface now
+shows an exact live preview of checked paths and bytes, accepts revised founder
+instructions without granting permission, and can wait for additional
+read-only research while unrelated work continues. Restore checkpoints and the
+separately authorized deletion executor remain unchecked.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
 merge receipt, multi-agent task graph screenshots, concurrent decision-write

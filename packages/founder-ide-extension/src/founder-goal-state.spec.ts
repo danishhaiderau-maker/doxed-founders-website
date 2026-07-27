@@ -235,6 +235,45 @@ describe('Founder IDE goal state', () => {
     assert.equal(rejected.decisions[0]?.selectedCandidateIds, undefined);
   });
 
+  it('keeps housekeeping pending for more research or revised founder instructions', () => {
+    const state = initialFounderGoalState('Founder IDE', now);
+    const housekeeping = createFounderHousekeepingDecision(
+      state,
+      [{
+        id: 'cache-output',
+        path: 'packages/founder-ide-extension/out',
+        sizeBytes: 125_000_000,
+        category: 'generated',
+        evidence: ['Rebuilt by the extension compiler.'],
+        recommendedAction: 'delete',
+        reversible: true,
+      }],
+      now,
+    );
+    const queued = enqueueFounderDecision(state, housekeeping);
+    const researching = resolveFounderGoalUiDecision(queued, {
+      decisionId: housekeeping.id,
+      selectedOptionId: 'research_more',
+      now,
+    });
+    assert.equal(researching, queued);
+    assert.equal(pendingFounderGoalDecisions(researching).length, 1);
+
+    const revised = resolveFounderGoalUiDecision(queued, {
+      decisionId: housekeeping.id,
+      customAnswer:
+        'Exclude every release artifact and inspect only reproducible caches.',
+      now: new Date('2026-07-27T04:00:00.000Z'),
+    });
+    assert.equal(pendingFounderGoalDecisions(revised).length, 1);
+    assert.equal(revised.decisions[0]?.researchFindings.length, 1);
+    assert.equal(
+      revised.decisions[0]?.researchFindings[0]?.summary,
+      'Exclude every release artifact and inspect only reproducible caches.',
+    );
+    assert.equal(revised.decisions[0]?.selectedCandidateIds, undefined);
+  });
+
   it('attaches bounded research without resolving permission or blocking unrelated work', () => {
     const state = enqueueFounderDecision(
       initialFounderGoalState('Founder IDE', now),
