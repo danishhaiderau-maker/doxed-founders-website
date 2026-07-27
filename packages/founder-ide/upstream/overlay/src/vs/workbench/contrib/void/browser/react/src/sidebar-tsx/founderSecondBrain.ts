@@ -9,6 +9,7 @@ type FounderReviewMessage = {
 };
 
 export type FounderSecondBrainIntent = 'qa' | 'audit' | 'competition' | 'housekeeping';
+export type FounderSecondBrainCadence = 'manual' | '4_tasks' | '8_tasks';
 
 interface FounderSecondBrainContext {
 	schema_version: 1;
@@ -53,6 +54,16 @@ export const founderSecondBrainIntents: ReadonlyArray<{
 		label: 'Check workspace health',
 		instruction: 'Inspect the workspace for obsolete duplicate source trees, generated artifacts committed as source, stale scripts, conflicting implementations, abandoned branches, secret-bearing files, and large reproducible caches. Recommend only evidence-backed cleanup. Do not delete, move, edit, or commit anything; separate safe-to-regenerate artifacts from source that requires human approval.',
 	},
+];
+
+export const founderSecondBrainCadences: ReadonlyArray<{
+	id: FounderSecondBrainCadence;
+	label: string;
+	taskInterval: number | null;
+}> = [
+	{ id: 'manual', label: 'Manual', taskInterval: null },
+	{ id: '4_tasks', label: '4 tasks', taskInterval: 4 },
+	{ id: '8_tasks', label: '8 tasks', taskInterval: 8 },
 ];
 
 const MAX_SECTION_CHARS = 8_000;
@@ -150,6 +161,38 @@ export function buildFounderSecondBrainReconciliationPrompt(
 		'Return concise markdown with: Decision, Accepted verified findings, Rejected or unverified claims, Smallest correction, Required checks, Dissent preserved, and Approval required.',
 		'If evidence is insufficient, say so. Never apply the correction in this turn.',
 	].join('\n');
+}
+
+export function countFounderCompletedTasks(
+	messages: readonly FounderReviewMessage[],
+): number {
+	let count = 0;
+	let currentTurnIsReview = false;
+	for (const message of messages) {
+		if (message.role === 'user') {
+			const text = message.content ?? '';
+			currentTurnIsReview = text.includes('[FOUNDER_SECOND_BRAIN_V1]')
+				|| text.includes('[FOUNDER_SECOND_BRAIN_RECONCILE_V1]');
+			continue;
+		}
+		if (message.role !== 'assistant' || currentTurnIsReview) continue;
+		const text = message.displayContent ?? message.content ?? '';
+		if (text.trim()) count += 1;
+	}
+	return count;
+}
+
+export function founderSecondBrainReviewDue(input: {
+	cadence: FounderSecondBrainCadence;
+	completedTasks: number;
+	lastReviewedTaskCount: number;
+}): boolean {
+	const cadence = founderSecondBrainCadences.find(candidate => candidate.id === input.cadence)
+		?? founderSecondBrainCadences[0];
+	if (cadence.taskInterval === null) return false;
+	const completedTasks = Math.max(0, Math.floor(input.completedTasks));
+	const lastReviewed = Math.max(0, Math.floor(input.lastReviewedTaskCount));
+	return completedTasks - lastReviewed >= cadence.taskInterval;
 }
 
 function recentContext(

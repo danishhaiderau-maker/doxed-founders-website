@@ -267,6 +267,16 @@ function Test-WorkbenchOutputsCurrent {
             return $false
         }
         $sourceTime = (Get-Item -LiteralPath $entry.source).LastWriteTimeUtc
+        if ($entry.PSObject.Properties.Name -contains "transformed") {
+            if (-not (Test-Path -LiteralPath $entry.transformed -PathType Leaf)) {
+                return $false
+            }
+            $transformedTime = (Get-Item -LiteralPath $entry.transformed).LastWriteTimeUtc
+            if ($transformedTime -lt $sourceTime) {
+                return $false
+            }
+            $sourceTime = $transformedTime
+        }
         $outputTime = (Get-Item -LiteralPath $entry.output).LastWriteTimeUtc
         if ($outputTime -lt $sourceTime) {
             return $false
@@ -294,7 +304,42 @@ function Get-ExpectedReactOutputs {
         }
         [pscustomobject]@{
             source = Join-Path $Checkout $normalized
+            transformed = Join-Path $Checkout "src\vs\workbench\contrib\void\browser\react\src2\$remainder"
             output = Join-Path $Checkout "src\vs\workbench\contrib\void\browser\react\out\$bundleName\index.js"
+        }
+    }
+}
+
+function Sync-ReactOutputsToWorkbenchOut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Checkout,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedOutputs
+    )
+
+    $sourceRoot = (Resolve-Path -LiteralPath (Join-Path $Checkout "src")).Path
+    $sourcePrefix = $sourceRoot.TrimEnd("\") + "\"
+    $runtimeRoot = Join-Path $Checkout "out"
+    foreach ($entry in @($ExpectedOutputs | Sort-Object output -Unique)) {
+        if (-not (Test-Path -LiteralPath $entry.output -PathType Leaf)) {
+            throw "Founder React bundle is missing after a successful build: $($entry.output)"
+        }
+        $resolvedOutput = (Resolve-Path -LiteralPath $entry.output).Path
+        if (-not $resolvedOutput.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Founder React bundle resolved outside the source tree: $($entry.output)"
+        }
+        $relativeOutput = $resolvedOutput.Substring($sourcePrefix.Length)
+        $runtimeOutput = Join-Path $runtimeRoot $relativeOutput
+        $runtimeDirectory = Split-Path -Parent $runtimeOutput
+        New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
+
+        $temporaryOutput = "$runtimeOutput.founder-$PID.tmp"
+        Copy-Item -LiteralPath $entry.output -Destination $temporaryOutput -Force
+        Move-Item -LiteralPath $temporaryOutput -Destination $runtimeOutput -Force
+
+        $sourceHash = (Get-FileHash -LiteralPath $entry.output -Algorithm SHA256).Hash
+        $runtimeHash = (Get-FileHash -LiteralPath $runtimeOutput -Algorithm SHA256).Hash
+        if ($sourceHash -ne $runtimeHash) {
+            throw "Founder React runtime bundle did not match the validated build output: $runtimeOutput"
         }
     }
 }
@@ -689,7 +734,17 @@ if (-not (Test-Path $gulpCli)) {
     throw "Warm checkout dependencies are missing: $gulpCli"
 }
 $checkoutGulpfile = Join-Path $CheckoutPath ".founder-fast-gulpfile.cjs"
-Copy-Item -LiteralPath $fastGulpfile -Destination $checkoutGulpfile -Force
+$copyFastGulpfile = $true
+if (Test-Path -LiteralPath $checkoutGulpfile -PathType Leaf) {
+    $sourceGulpHash = (Get-FileHash -LiteralPath $fastGulpfile -Algorithm SHA256).Hash
+    $checkoutGulpHash = (Get-FileHash -LiteralPath $checkoutGulpfile -Algorithm SHA256).Hash
+    $copyFastGulpfile = $sourceGulpHash -ne $checkoutGulpHash
+}
+if ($copyFastGulpfile) {
+    $temporaryGulpfile = "$checkoutGulpfile.founder-$PID.tmp"
+    Copy-Item -LiteralPath $fastGulpfile -Destination $temporaryGulpfile -Force
+    Move-Item -LiteralPath $temporaryGulpfile -Destination $checkoutGulpfile -Force
+}
 
 $env:FOUNDER_IDE_CHECKOUT = $CheckoutPath
 $watchOut = Join-Path $logRoot "workbench-watch.out.log"
@@ -862,6 +917,45 @@ if ($reactCompileRequired) {
             -Timeout ([TimeSpan]::FromMinutes($WorkbenchReadyTimeoutMinutes))
     }
 }
+if ($changedReactInputs.Count -gt 0) {
+    # scope-tailwind and tsup run as independent watchers. A transformed source
+    # can change while tsup's first long build is already in flight, producing a
+    # fresh-timestamp bundle from the previous transform. Finalize once, in
+    # order, after both watcher checkpoints so the runtime cannot load stale UI.
+    $tsupCli = Join-Path $CheckoutPath "node_modules\tsup\dist\cli-default.js"
+    if (-not (Test-Path -LiteralPath $tsupCli -PathType Leaf)) {
+        throw "Founder React finalizer is missing: $tsupCli"
+    }
+    $reactFinalizeOut = Join-Path $logRoot "react-finalize.out.log"
+    $reactFinalizeErr = Join-Path $logRoot "react-finalize.err.log"
+    $reactFinalizeProcess = Start-PinnedNodeProcess `
+        -NodeExecutable $nodeExecutable `
+        -Arguments @((Format-PositionalArgument $tsupCli)) `
+        -WorkingDirectory (Split-Path -Parent $reactBuild) `
+        -StandardOutput $reactFinalizeOut `
+        -StandardError $reactFinalizeErr
+    if (-not $reactFinalizeProcess.WaitForExit([int]([TimeSpan]::FromMinutes($WorkbenchReadyTimeoutMinutes).TotalMilliseconds))) {
+        Stop-Process -Id $reactFinalizeProcess.Id -Force -ErrorAction SilentlyContinue
+        throw "Founder React final bundle timed out. See $reactFinalizeOut and $reactFinalizeErr."
+    }
+    # PowerShell 5 can expose an empty ExitCode immediately after the timed
+    # overload returns, especially when stdout/stderr are redirected. The
+    # parameterless wait flushes the async readers before the process refresh.
+    $reactFinalizeProcess.WaitForExit()
+    $reactFinalizeProcess.Refresh()
+    $reactFinalizeExitCode = [int]$reactFinalizeProcess.ExitCode
+    if ($reactFinalizeExitCode -ne 0) {
+        $stderr = Get-LogTextSince -Path $reactFinalizeErr
+        throw "Founder React final bundle failed (exit $reactFinalizeExitCode). $stderr"
+    }
+    if (-not (Test-WorkbenchOutputsCurrent -ExpectedOutputs $expectedReactOutputs)) {
+        throw "Founder React final bundle completed without current transformed outputs."
+    }
+    $reactCompileReadyAt = [DateTime]::UtcNow
+}
+Sync-ReactOutputsToWorkbenchOut `
+    -Checkout $CheckoutPath `
+    -ExpectedOutputs $expectedReactOutputs
 
 $expectedBuiltInExtensionOutputs = @(
     Get-ExpectedBuiltInExtensionOutputs -Checkout $CheckoutPath

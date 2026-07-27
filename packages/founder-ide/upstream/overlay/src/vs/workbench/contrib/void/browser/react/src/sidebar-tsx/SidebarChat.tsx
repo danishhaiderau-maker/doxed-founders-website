@@ -35,7 +35,16 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
 import { readFounderProviderProfiles } from '../../../../common/founderProviderProfiles.js';
-import { buildFounderSecondBrainPrompt, buildFounderSecondBrainReconciliationPrompt, founderSecondBrainIntents, FounderSecondBrainIntent } from './founderSecondBrain.js';
+import {
+	buildFounderSecondBrainPrompt,
+	buildFounderSecondBrainReconciliationPrompt,
+	countFounderCompletedTasks,
+	founderSecondBrainCadences,
+	founderSecondBrainIntents,
+	founderSecondBrainReviewDue,
+	FounderSecondBrainCadence,
+	FounderSecondBrainIntent,
+} from './founderSecondBrain.js';
 
 
 
@@ -3033,6 +3042,28 @@ const EditToolSoFar = ({ toolCallSoFar, }: { toolCallSoFar: RawToolCallObj }) =>
 }
 
 
+const FOUNDER_SECOND_BRAIN_CADENCE_KEY = 'founder.secondBrain.cadence.v1'
+
+const founderSecondBrainProgressKey = (threadId: string) =>
+	`founder.secondBrain.progress.v1.${threadId}`
+
+const readFounderSecondBrainCadence = (): FounderSecondBrainCadence => {
+	const stored = window.localStorage.getItem(FOUNDER_SECOND_BRAIN_CADENCE_KEY)
+	return founderSecondBrainCadences.some(candidate => candidate.id === stored)
+		? stored as FounderSecondBrainCadence
+		: '4_tasks'
+}
+
+const readFounderSecondBrainProgress = (
+	threadId: string,
+	completedTasks: number,
+): number => {
+	const stored = Number(window.localStorage.getItem(founderSecondBrainProgressKey(threadId)))
+	return Number.isFinite(stored) && stored >= 0
+		? Math.min(Math.floor(stored), completedTasks)
+		: completedTasks
+}
+
 export const SidebarChat = () => {
 	const textAreaRef = useRef<HTMLTextAreaElement | null>(null)
 	const textAreaFnsRef = useRef<TextAreaFns | null>(null)
@@ -3069,6 +3100,42 @@ export const SidebarChat = () => {
 
 	const currentThread = chatThreadsService.getCurrentThread()
 	const previousMessages = currentThread?.messages ?? []
+	const completedTaskCount = useMemo(
+		() => countFounderCompletedTasks(previousMessages),
+		[previousMessages],
+	)
+	const [reviewCadence, setReviewCadence] = useState<FounderSecondBrainCadence>(
+		() => readFounderSecondBrainCadence(),
+	)
+	const [lastReviewedTaskCount, setLastReviewedTaskCount] = useState(
+		() => readFounderSecondBrainProgress(currentThread.id, completedTaskCount),
+	)
+	useEffect(() => {
+		setLastReviewedTaskCount(
+			readFounderSecondBrainProgress(currentThread.id, completedTaskCount),
+		)
+	}, [currentThread.id])
+	const secondBrainReviewDue = founderSecondBrainReviewDue({
+		cadence: reviewCadence,
+		completedTasks: completedTaskCount,
+		lastReviewedTaskCount,
+	})
+	const updateReviewCadence = useCallback((cadence: FounderSecondBrainCadence) => {
+		window.localStorage.setItem(FOUNDER_SECOND_BRAIN_CADENCE_KEY, cadence)
+		window.localStorage.setItem(
+			founderSecondBrainProgressKey(currentThread.id),
+			String(completedTaskCount),
+		)
+		setReviewCadence(cadence)
+		setLastReviewedTaskCount(completedTaskCount)
+	}, [completedTaskCount, currentThread.id])
+	const markSecondBrainReviewed = useCallback(() => {
+		window.localStorage.setItem(
+			founderSecondBrainProgressKey(currentThread.id),
+			String(completedTaskCount),
+		)
+		setLastReviewedTaskCount(completedTaskCount)
+	}, [completedTaskCount, currentThread.id])
 
 	const selections = currentThread.state.stagingSelections
 	const setSelections = (s: StagingSelectionItem[]) => { chatThreadsService.setCurrentThreadState({ stagingSelections: s }) }
@@ -3342,6 +3409,7 @@ export const SidebarChat = () => {
 				),
 				true,
 			)
+			markSecondBrainReviewed()
 		} finally {
 			if (typeof priorModel === 'string' && priorModel.startsWith('founder-os-')) {
 				await commandService.executeCommand('founder.managedAi.select', priorModel)
@@ -3354,6 +3422,7 @@ export const SidebarChat = () => {
 		currentThread.id,
 		chatThreadsService,
 		isRunning,
+		markSecondBrainReviewed,
 		onSubmit,
 		previousMessages,
 		reviewIntent,
@@ -3518,16 +3587,38 @@ export const SidebarChat = () => {
 							{intent.label}
 						</option>)}
 					</select>
-				</> : <span className='min-w-0 flex-1 truncate px-2 text-[11px] text-void-fg-3'>Connect a Personal AI reviewer</span>}
+				</> : null}
+				<select
+					className='h-7 min-w-0 flex-1 border-l border-void-border-2 bg-transparent px-1.5 text-[11px] text-void-fg-2 outline-none'
+					aria-label='Second brain review cadence'
+					value={reviewCadence}
+					onChange={event => updateReviewCadence(event.target.value as FounderSecondBrainCadence)}
+					disabled={!!isRunning}
+					title='Founder reminds you when an independent review is due. It never spends reviewer tokens without your click.'
+				>
+					{founderSecondBrainCadences.map(cadence => <option key={cadence.id} value={cadence.id}>
+						{cadence.label}
+					</option>)}
+				</select>
 			</div>
 			<button
 				type='button'
-				className='h-7 shrink-0 rounded border border-void-border-2 bg-void-bg-1 px-2.5 text-[11px] font-medium text-void-fg-2 hover:border-void-border-1 hover:bg-void-bg-2 hover:text-void-fg-1 disabled:cursor-not-allowed disabled:opacity-50'
-				title={reviewerProfiles.length > 0 ? 'Run an independent read-only review' : 'Connect a Personal AI reviewer'}
+				className={`h-7 shrink-0 rounded border px-2.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50 ${
+					secondBrainReviewDue
+						? 'border-void-warning bg-void-bg-2 text-void-fg-1'
+						: 'border-void-border-2 bg-void-bg-1 text-void-fg-2 hover:border-void-border-1 hover:bg-void-bg-2 hover:text-void-fg-1'
+				}`}
+				title={reviewerProfiles.length > 0
+					? secondBrainReviewDue
+						? 'An independent checkpoint review is due. Founder will not spend reviewer tokens until you click.'
+						: 'Run an independent read-only review'
+					: 'Connect a Personal AI reviewer'}
 				disabled={!!isRunning}
 				onClick={() => void runSecondBrainReview()}
 			>
-				{reviewerProfiles.length > 0 ? 'Ask AI' : 'Connect'}
+				{reviewerProfiles.length > 0
+					? secondBrainReviewDue ? 'Review due' : 'Ask AI'
+					: 'Connect'}
 			</button>
 		</div>
 		{visualAttachments.length > 0 ? <div className='flex min-w-0 gap-1.5 overflow-x-auto pb-0.5' aria-label='Attached screenshots'>

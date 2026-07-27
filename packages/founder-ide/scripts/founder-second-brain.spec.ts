@@ -3,7 +3,9 @@ import { describe, it } from 'node:test';
 import {
   buildFounderSecondBrainPrompt,
   buildFounderSecondBrainReconciliationPrompt,
+  countFounderCompletedTasks,
   founderSecondBrainIntents,
+  founderSecondBrainReviewDue,
 } from '../upstream/overlay/src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/founderSecondBrain';
 import {
   buildFounderReviewEvidencePack,
@@ -51,6 +53,44 @@ describe('Founder Second brain boundary', () => {
     assert.match(prompt, /obsolete duplicate source trees/);
     assert.match(prompt, /Do not delete, move, edit, or commit anything/);
     assert.match(prompt, /"allow_workspace_mutation":false/);
+  });
+
+  it('defers expert review until a selected task checkpoint without hidden spending', () => {
+    const messages = [
+      { role: 'user', content: 'Build one' },
+      { role: 'assistant', displayContent: 'One is complete.' },
+      { role: 'user', content: '[FOUNDER_SECOND_BRAIN_V1] review one' },
+      { role: 'assistant', displayContent: '{"verdict":"pass"}' },
+      { role: 'user', content: '[FOUNDER_SECOND_BRAIN_RECONCILE_V1] reconcile' },
+      { role: 'assistant', displayContent: 'Decision: accepted.' },
+      { role: 'user', content: 'Build two' },
+      { role: 'assistant', displayContent: 'Two is complete.' },
+      { role: 'user', content: 'Build three' },
+      { role: 'assistant', displayContent: 'Three is complete.' },
+      { role: 'user', content: 'Build four' },
+      { role: 'assistant', displayContent: 'Four is complete.' },
+    ];
+    assert.equal(countFounderCompletedTasks(messages), 4);
+    assert.equal(founderSecondBrainReviewDue({
+      cadence: 'manual',
+      completedTasks: 20,
+      lastReviewedTaskCount: 0,
+    }), false);
+    assert.equal(founderSecondBrainReviewDue({
+      cadence: '4_tasks',
+      completedTasks: 4,
+      lastReviewedTaskCount: 0,
+    }), true);
+    assert.equal(founderSecondBrainReviewDue({
+      cadence: '4_tasks',
+      completedTasks: 7,
+      lastReviewedTaskCount: 4,
+    }), false);
+    assert.equal(founderSecondBrainReviewDue({
+      cadence: '8_tasks',
+      completedTasks: 12,
+      lastReviewedTaskCount: 4,
+    }), true);
   });
 
   it('recognizes only the latest founder review request', () => {

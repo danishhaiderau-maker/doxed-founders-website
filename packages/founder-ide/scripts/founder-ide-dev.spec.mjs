@@ -34,7 +34,7 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /extensionDevelopmentPath/);
   assert.match(script, /Format-NamedArgument/);
   assert.match(script, /Format-PositionalArgument \$gulpCli/);
-  assert.match(script, /Copy-Item -LiteralPath \$fastGulpfile -Destination \$checkoutGulpfile -Force/);
+  assert.match(script, /Copy-Item -LiteralPath \$fastGulpfile -Destination \$temporaryGulpfile -Force/);
   assert.match(script, /Format-PositionalArgument \$checkoutGulpfile/);
   assert.match(script, /Format-PositionalArgument \$reactBuild/);
   assert.match(script, /Get-RecordedNodeProcess/);
@@ -49,6 +49,16 @@ test('fast Founder IDE workflow is non-destructive and preserves warm output', (
   assert.match(script, /overlayContentHash/);
   assert.match(script, /Wait-ForTypeScriptCompile/);
   assert.match(script, /Wait-ForReactCompile/);
+  assert.match(script, /\$sourceGulpHash = \(Get-FileHash -LiteralPath \$fastGulpfile -Algorithm SHA256\)\.Hash/);
+  assert.match(script, /\$copyFastGulpfile = \$sourceGulpHash -ne \$checkoutGulpHash/);
+  assert.match(script, /function Sync-ReactOutputsToWorkbenchOut/);
+  assert.match(script, /Move-Item -LiteralPath \$temporaryOutput -Destination \$runtimeOutput -Force/);
+  assert.match(script, /Founder React runtime bundle did not match the validated build output/);
+  assert.match(script, /node_modules\\tsup\\dist\\cli-default\.js/);
+  assert.match(script, /\$reactFinalizeProcess\.WaitForExit\(\)/);
+  assert.match(script, /\$reactFinalizeProcess\.Refresh\(\)/);
+  assert.match(script, /\$reactFinalizeExitCode = \[int\]\$reactFinalizeProcess\.ExitCode/);
+  assert.match(script, /Founder React final bundle completed without current transformed outputs/);
   assert.match(script, /Get-ExpectedBuiltInExtensionOutputs/);
   assert.match(script, /"node_modules\\gulp\\bin\\gulp\.js"/);
   assert.match(script, /compile-extension:git-base/);
