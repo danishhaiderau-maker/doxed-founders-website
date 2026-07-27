@@ -32,10 +32,13 @@ const MUTATING_TOOL =
 	/(?:^|_)(?:apply|create|delete|edit|insert|mkdir|move|patch|remove|rename|replace|rewrite|write)(?:_|$)/i;
 const VERIFICATION_COMMAND =
 	/\b(?:build|check|jest|lint|node\s+--test|npm\s+(?:run\s+)?test|playwright|pnpm\s+(?:run\s+)?test|pytest|test|tsc|typecheck|verify|vitest)\b/i;
-const VISUAL_CHECK =
-	/\b(?:playwright|screenshot|visual(?:\s|-)?(?:audit|check|test|verify|verification)|viewport|pixel)\b/i;
 const UI_PATH =
 	/(?:^|\/)(?:apps\/web|browser\/react|components?|pages?|views?|webview|ui)(?:\/|$)|\.(?:css|less|scss|sass|tsx|jsx|html)$/i;
+const UNSAFE_COMMAND_COMPOSITION = /(?:\r|\n|&&|\|\||[;|`<>])/;
+const VISUAL_SCRIPT =
+	/(?:^|[-:._])(?:e2e|playwright|screenshot|ui[-:]?qa|visual)(?:$|[-:._])/i;
+const VISUAL_FILE =
+	/(?:^|[\\/])(?:installed-[\w.-]+-qa|[\w.-]*(?:playwright|screenshot|visual)[\w.-]*)\.(?:c?js|mjs|ts)$/i;
 
 export function evaluateNativeFounderCompletion(input: {
 	messages: readonly FounderNativeEvidenceMessage[];
@@ -64,7 +67,7 @@ export function evaluateNativeFounderCompletion(input: {
 				const command = typeof args.command === 'string' ? args.command.trim() : '';
 				if (command && VERIFICATION_COMMAND.test(command) && successfulCommand(result)) {
 					passedChecks.push(command);
-					if (VISUAL_CHECK.test(command)) visualChecks.push(command);
+					if (isNativeFounderVisualVerificationCommand(command)) visualChecks.push(command);
 				}
 			}
 		}
@@ -106,6 +109,25 @@ export function evaluateNativeFounderCompletion(input: {
 		visualChecks: uniqueVisual,
 		missing,
 	};
+}
+
+export function isNativeFounderVisualVerificationCommand(command: string): boolean {
+	const normalized = command.trim().replace(/\s+/g, ' ');
+	if (!normalized || normalized.length > 1_000) return false;
+	if (UNSAFE_COMMAND_COMPOSITION.test(normalized)) return false;
+	if (/^(?:npx|pnpm\s+exec|yarn\s+exec)\s+playwright\s+test(?:\s|$)/i.test(normalized)) {
+		return true;
+	}
+	const packageScript = normalized.match(
+		/^(?:npm(?:\.cmd)?|pnpm|yarn)\s+(?:run\s+)?([a-z0-9:._-]+)(?:\s+--(?:\s|$).*)?$/i,
+	);
+	if (packageScript) return VISUAL_SCRIPT.test(packageScript[1] ?? '');
+	const fileRunner = normalized.match(
+		/^(?:node(?:\.exe)?|tsx)\s+(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s.*)?$/i,
+	);
+	return Boolean(fileRunner && VISUAL_FILE.test(
+		fileRunner[1] ?? fileRunner[2] ?? fileRunner[3] ?? '',
+	));
 }
 
 export function founderNativeCompletionReceipt(

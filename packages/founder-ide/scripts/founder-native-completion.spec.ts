@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   evaluateNativeFounderCompletion,
   founderNativeCompletionReceipt,
+  isNativeFounderVisualVerificationCommand,
   type FounderNativeEvidenceMessage,
 } from '../upstream/overlay/src/vs/workbench/contrib/void/electron-main/llmMessage/founderNativeCompletion';
 
@@ -123,6 +124,28 @@ describe('Founder native completion evidence', () => {
     assert.match(ui.missing.join(' '), /no passing visual/);
     assert.equal(visual.verdict, 'passed');
     assert.match(founderNativeCompletionReceipt(visual), /Passed \| 1 file \| 2 checks/);
+  });
+
+  it('requires a dedicated visual runner rather than a visual keyword', () => {
+    assert.equal(isNativeFounderVisualVerificationCommand('echo screenshot'), false);
+    assert.equal(
+      isNativeFounderVisualVerificationCommand('npm run typecheck -- screenshot'),
+      false,
+    );
+    assert.equal(
+      isNativeFounderVisualVerificationCommand('npm run test:playwright && echo passed'),
+      false,
+    );
+    assert.equal(
+      isNativeFounderVisualVerificationCommand('npm run test:playwright -- navigation'),
+      true,
+    );
+    assert.equal(
+      isNativeFounderVisualVerificationCommand(
+        'node packages/founder-ide/scripts/installed-founder-navigation-qa.mjs',
+      ),
+      true,
+    );
   });
 
   it('ignores earlier turns and failed tool results', () => {

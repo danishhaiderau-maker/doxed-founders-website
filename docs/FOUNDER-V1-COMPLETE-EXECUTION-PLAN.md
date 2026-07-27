@@ -620,6 +620,10 @@ gates.
   original goal, affected UI contract, diff summary, and deterministic
   DOM/console/network evidence, then ask a read-only independent vision
   reviewer for a structured verdict, defects, risks, and evidence references.
+  - [x] Reject keyword-only and shell-composed visual claims in both native and
+    extension completion boundaries. Only a successful dedicated Playwright,
+    screenshot-QA, visual-audit, UI-QA, or end-to-end runner can satisfy the
+    deterministic visual-command prerequisite.
 - [ ] Run deterministic visual checks for every UI change and use local vision
   first when configured. A founder-selected Personal AI vision model may be
   used with consent; if no permitted vision route exists, never label the

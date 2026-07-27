@@ -29,8 +29,11 @@ const IMPLEMENTATION_REQUEST =
   /\b(?:add|build|change|create|delete|deliver|fix|implement|install|integrate|make|modify|remove|rename|replace|ship|update|wire)\b/i;
 const UI_PATH =
   /(?:^|\/)(?:apps\/web|browser\/react|components?|pages?|views?|webview|ui)(?:\/|$)|\.(?:css|less|scss|sass|tsx|jsx|html)$/i;
-const VISUAL_CHECK =
-  /\b(?:playwright|screenshot|visual(?:\s|-)?(?:audit|check|test|verify|verification)|viewport|pixel)\b/i;
+const UNSAFE_COMMAND_COMPOSITION = /(?:\r|\n|&&|\|\||[;|`<>])/;
+const VISUAL_SCRIPT =
+  /(?:^|[-:._])(?:e2e|playwright|screenshot|ui[-:]?qa|visual)(?:$|[-:._])/i;
+const VISUAL_FILE =
+  /(?:^|[\\/])(?:installed-[\w.-]+-qa|[\w.-]*(?:playwright|screenshot|visual)[\w.-]*)\.(?:c?js|mjs|ts)$/i;
 
 /**
  * Deterministic completion policy. Provider prose is untrusted; only locally
@@ -42,7 +45,7 @@ export function evaluateFounderCompletionEvidence(
 ): FounderCompletionEvidenceReceipt {
   const editedFiles = compactList(input.editedFiles);
   const passedChecks = compactList(input.passedChecks);
-  const visualChecks = passedChecks.filter((command) => VISUAL_CHECK.test(command));
+  const visualChecks = passedChecks.filter(isFounderVisualVerificationCommand);
   const readOnly = input.mode === 'ask' || input.mode === 'plan';
   const implementationRequested = IMPLEMENTATION_REQUEST.test(input.goal);
   const uiChanged = editedFiles.some((file) => UI_PATH.test(normalizePath(file)));
@@ -85,6 +88,30 @@ export function evaluateFounderCompletionEvidence(
     requirements,
     missing,
   };
+}
+
+/**
+ * Accept only dedicated visual runners. A keyword anywhere in a successful
+ * shell command is not evidence: `echo screenshot` and chained commands must
+ * never satisfy the completion boundary.
+ */
+export function isFounderVisualVerificationCommand(command: string): boolean {
+  const normalized = command.trim().replace(/\s+/g, ' ');
+  if (!normalized || normalized.length > 1_000) return false;
+  if (UNSAFE_COMMAND_COMPOSITION.test(normalized)) return false;
+  if (/^(?:npx|pnpm\s+exec|yarn\s+exec)\s+playwright\s+test(?:\s|$)/i.test(normalized)) {
+    return true;
+  }
+  const packageScript = normalized.match(
+    /^(?:npm(?:\.cmd)?|pnpm|yarn)\s+(?:run\s+)?([a-z0-9:._-]+)(?:\s+--(?:\s|$).*)?$/i,
+  );
+  if (packageScript) return VISUAL_SCRIPT.test(packageScript[1] ?? '');
+  const fileRunner = normalized.match(
+    /^(?:node(?:\.exe)?|tsx)\s+(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s.*)?$/i,
+  );
+  return Boolean(fileRunner && VISUAL_FILE.test(
+    fileRunner[1] ?? fileRunner[2] ?? fileRunner[3] ?? '',
+  ));
 }
 
 export function founderWorkModeInstruction(mode: FounderWorkMode): string {

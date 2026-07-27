@@ -4,6 +4,7 @@ import {
   evaluateFounderCompletionEvidence,
   founderToolsForMode,
   founderWorkModeInstruction,
+  isFounderVisualVerificationCommand,
   renderFounderCompletionReceipt,
 } from './completion-evidence';
 
@@ -89,6 +90,32 @@ describe('Founder completion evidence', () => {
     assert.match(incomplete.missing.join(' '), /no passing visual/);
     assert.equal(passed.verdict, 'passed');
     assert.equal(passed.visualCheckCount, 1);
+  });
+
+  it('rejects visual keywords and shell composition as completion evidence', () => {
+    assert.equal(isFounderVisualVerificationCommand('echo screenshot'), false);
+    assert.equal(
+      isFounderVisualVerificationCommand('npm run typecheck -- screenshot'),
+      false,
+    );
+    assert.equal(
+      isFounderVisualVerificationCommand('npm run test:playwright && echo passed'),
+      false,
+    );
+    assert.equal(
+      isFounderVisualVerificationCommand('npm run test:playwright -- founder-nav'),
+      true,
+    );
+    assert.equal(
+      isFounderVisualVerificationCommand('npx playwright test founder-nav.spec.ts'),
+      true,
+    );
+    assert.equal(
+      isFounderVisualVerificationCommand(
+        'node packages/founder-ide/scripts/installed-founder-navigation-qa.mjs',
+      ),
+      true,
+    );
   });
 
   it('passes a verified non-UI implementation and exposes safe mode contracts', () => {
