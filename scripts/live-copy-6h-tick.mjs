@@ -67,7 +67,17 @@ async function fetchBot() {
   return { ok: false, source: 'unreachable', positions: [], pendingOrders: [] };
 }
 
-function syncVerdict({ bot, copyOpen, copyPending, copyAll, showcaseOpen, dash, alerts }) {
+function syncVerdict({
+  bot,
+  copyOpen,
+  copyPending,
+  copyAll,
+  showcaseOpen,
+  expectedMissedShowcase,
+  entryEnabled,
+  dash,
+  alerts,
+}) {
   if (!bot.ok) return { verdict: 'FAIL', reason: 'showcase_unreachable' };
   if (dash?.lastError) alerts.push(`lastError:${dash.lastError}`);
   const md = dash?.mirrorDiff;
@@ -80,9 +90,16 @@ function syncVerdict({ bot, copyOpen, copyPending, copyAll, showcaseOpen, dash, 
   }
   if (md?.counts?.total > 0) alerts.push(`MIRROR_DIFF:${md.counts.total}`);
 
-  const missEntry = [...showcaseOpen].filter((t) => !copyAll.has(t));
+  const actionableShowcaseOpen = new Set(
+    entryEnabled
+      ? [...showcaseOpen].filter((t) => !expectedMissedShowcase.has(t))
+      : [],
+  );
+  const missEntry = [...actionableShowcaseOpen].filter((t) => !copyAll.has(t));
   const orphan = [...copyOpen].filter((t) => !showcaseOpen.has(t));
-  const pendingWorking = [...showcaseOpen].filter((t) => !copyOpen.has(t) && copyAll.has(t));
+  const pendingWorking = [...actionableShowcaseOpen].filter(
+    (t) => !copyOpen.has(t) && copyAll.has(t),
+  );
 
   if (missEntry.length) alerts.push(`missEntry:${missEntry.map((t) => t.slice(0, 10)).join(',')}`);
   if (orphan.length) alerts.push(`orphan:${orphan.map((t) => t.slice(0, 10)).join(',')}`);
@@ -99,11 +116,11 @@ function syncVerdict({ bot, copyOpen, copyPending, copyAll, showcaseOpen, dash, 
   if (alerts.length || pendingWorking.length) {
     return { verdict: 'WARN', reason: alerts.join('; ') || 'pending_working' };
   }
-  if (showcaseOpen.size === 0 && copyOpen.size === 0) {
+  if (actionableShowcaseOpen.size === 0 && copyOpen.size === 0) {
     return { verdict: 'PASS', reason: 'both_flat' };
   }
-  const matched = [...showcaseOpen].filter((t) => copyOpen.has(t)).length;
-  if (matched === showcaseOpen.size && orphan.length === 0) {
+  const matched = [...actionableShowcaseOpen].filter((t) => copyOpen.has(t)).length;
+  if (matched === actionableShowcaseOpen.size && orphan.length === 0) {
     return { verdict: 'PASS', reason: 'action_match' };
   }
   return { verdict: 'WARN', reason: 'partial_match' };
@@ -157,6 +174,38 @@ try {
     .map((p) => ({ tradeId: p.cycle.tradeId, status: p.status }));
   const copyAll = new Set(participants.map((p) => p.cycle.tradeId));
   const showcaseOpen = new Set((bot.positions || []).map((p) => p.trade_id).filter(Boolean));
+  const expectedMissedShowcase = new Set();
+  if (inst && showcaseOpen.size > 0) {
+    const missedFillEvents = await prisma.signalCycleEvent.findMany({
+      where: {
+        eventType: 'EXPIRED',
+        cycle: {
+          agentId: inst.agentId,
+          tradeId: { in: [...showcaseOpen] },
+        },
+        participant: {
+          userId: inst.userId,
+          status: 'EXPIRED',
+        },
+      },
+      select: {
+        payload: true,
+        cycle: { select: { tradeId: true } },
+      },
+    });
+    for (const event of missedFillEvents) {
+      const payload =
+        event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+          ? event.payload
+          : null;
+      if (
+        payload?.event === 'MISSED_SHOWCASE_FILL' ||
+        payload?.reason === 'MISSED_SHOWCASE_FILL'
+      ) {
+        expectedMissedShowcase.add(event.cycle.tradeId);
+      }
+    }
+  }
 
   const alerts = [];
   const { verdict, reason } = syncVerdict({
@@ -165,6 +214,8 @@ try {
     copyPending,
     copyAll,
     showcaseOpen,
+    expectedMissedShowcase,
+    entryEnabled: inst?.status === 'ACTIVE',
     dash,
     alerts,
   });
@@ -197,6 +248,7 @@ try {
       lastError: inst?.lastError ?? null,
       open: [...copyOpen],
       pending: copyPending,
+      expectedMissedShowcase: [...expectedMissedShowcase],
       reconcile: dash.copyRelayReconcile ?? null,
       executorHealth:
         dash.relayExecutor ?? dash.executorHealth ?? dash.relayExecutorHealth ?? null,

@@ -589,6 +589,32 @@ test('active NEXT_FRESH_ONLY relay suppresses source-only entities born before a
   );
 });
 
+test('active relay suppresses a source position only after an audited missed-showcase expiry', () => {
+  const diffs = [
+    {
+      type: 'SHOWCASE_POSITION_NOT_MIRRORED',
+      tradeId: 'audited-missed-fill',
+      sourceCreatedAtMs: Date.parse('2026-07-27T10:22:00.000Z'),
+    },
+    {
+      type: 'SHOWCASE_POSITION_NOT_MIRRORED',
+      tradeId: 'unexplained-fresh-gap',
+      sourceCreatedAtMs: Date.parse('2026-07-27T10:23:00.000Z'),
+    },
+    { type: 'COPY_POSITION_NO_SHOWCASE', tradeId: 'copy-risk' },
+  ];
+  assert.deepEqual(
+    reportableMirrorDiffsForRelayMode(
+      diffs,
+      true,
+      null,
+      Date.parse('2026-07-27T10:21:00.000Z'),
+      new Set(['audited-missed-fill']),
+    ),
+    diffs.slice(1),
+  );
+});
+
 test('showcase fill makes a still-pending copy fail closed even while relay is paused', () => {
   const bot = {
     orders: [],
