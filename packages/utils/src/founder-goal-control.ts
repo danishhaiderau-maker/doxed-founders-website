@@ -75,11 +75,13 @@ export type FounderDecisionRequest = {
   status: 'pending' | 'resolved' | 'cancelled';
   autoResolveOptionId?: string;
   expiresAt?: string;
+  housekeepingCandidates?: FounderHousekeepingCandidate[];
 };
 
 export type FounderDecisionResolution = {
   requestId: string;
   selectedOptionId?: string;
+  selectedCandidateIds?: string[];
   customAnswer?: string;
   resolvedAt: string;
   resolvedBy: 'founder' | 'approved_policy';
@@ -181,6 +183,7 @@ export function resolveFounderDecision(
   input: {
     selectedOptionId?: string;
     customAnswer?: string;
+    selectedCandidateIds?: string[];
     resolvedBy?: FounderDecisionResolution['resolvedBy'];
     now?: Date;
   },
@@ -202,6 +205,21 @@ export function resolveFounderDecision(
   if (!selectedOptionId && !customAnswer) {
     throw new Error('Select an option or provide a custom answer.');
   }
+  const selectedCandidateIds =
+    request.kind === 'housekeeping'
+    && selectedOptionId === 'approve_selected'
+      ? normalizeSelectedHousekeepingIds(
+        input.selectedCandidateIds,
+        request.housekeepingCandidates ?? [],
+      )
+      : [];
+  if (
+    request.kind === 'housekeeping'
+    && selectedOptionId === 'approve_selected'
+    && selectedCandidateIds.length === 0
+  ) {
+    throw new Error('Select at least one housekeeping candidate.');
+  }
   const resolvedBy = input.resolvedBy ?? 'founder';
   if (resolvedBy === 'approved_policy' && !canUseApprovedPolicy(request)) {
     throw new Error('This decision requires the founder.');
@@ -209,6 +227,7 @@ export function resolveFounderDecision(
   return {
     requestId: request.id,
     ...(selectedOptionId ? { selectedOptionId } : {}),
+    ...(selectedCandidateIds.length > 0 ? { selectedCandidateIds } : {}),
     ...(customAnswer ? { customAnswer } : {}),
     resolvedAt: (input.now ?? new Date()).toISOString(),
     resolvedBy,
@@ -255,25 +274,20 @@ export function createHousekeepingDecision(
       + `(${formatBytes(deleteBytes)}). What should Founder do?`,
     options: [
       {
-        id: 'review_each',
-        label: 'Review each',
-        description: 'Open the evidence list and choose files individually.',
-        impact: 'No file is deleted until its checkbox is approved.',
-        recommended: true,
+        id: 'approve_selected',
+        label: 'Approve checked',
+        description: 'Grant permission only for checked deletion candidates.',
+        impact: reversible
+          ? 'A checkpoint is retained for restore.'
+          : 'At least one selected deletion is not automatically reversible.',
+        ...(reversible ? { recommended: true } : {}),
       },
       {
         id: 'keep_all',
         label: 'Keep everything',
         description: 'Cancel this deletion batch.',
         impact: 'No disk space is reclaimed.',
-      },
-      {
-        id: 'approve_selected',
-        label: 'Approve selected',
-        description: 'Delete only the already selected candidates.',
-        impact: reversible
-          ? 'A checkpoint is retained for restore.'
-          : 'At least one selected deletion is not automatically reversible.',
+        ...(!reversible ? { recommended: true } : {}),
       },
     ],
     allowCustomAnswer: true,
@@ -284,7 +298,26 @@ export function createHousekeepingDecision(
     ),
     createdAt: (input.createdAt ?? new Date()).toISOString(),
     status: 'pending',
+    housekeepingCandidates: input.candidates,
   };
+}
+
+function normalizeSelectedHousekeepingIds(
+  value: unknown,
+  candidates: FounderHousekeepingCandidate[],
+): string[] {
+  if (!Array.isArray(value)) return [];
+  const allowed = new Set(
+    candidates
+      .filter((candidate) => candidate.recommendedAction === 'delete')
+      .map((candidate) => candidate.id),
+  );
+  return Array.from(new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => allowed.has(item)),
+  )).slice(0, 100);
 }
 
 function formatBytes(value: number): string {

@@ -128,6 +128,28 @@ describe('Founder goal control', () => {
     assert.match(request.question, /1 proposed deletion/);
     assert.equal(validateFounderDecisionRequest(request).length, 0);
     assert.equal(request.autoResolveOptionId, undefined);
+    assert.equal(request.options[0].id, 'approve_selected');
+    assert.throws(
+      () => resolveFounderDecision(request, {
+        selectedOptionId: 'approve_selected',
+        selectedCandidateIds: [],
+      }),
+      /Select at least one/,
+    );
+    assert.deepEqual(
+      resolveFounderDecision(request, {
+        selectedOptionId: 'approve_selected',
+        selectedCandidateIds: ['cache-a', 'source-a', 'unknown'],
+      }).selectedCandidateIds,
+      ['cache-a'],
+    );
+    assert.equal(
+      resolveFounderDecision(request, {
+        selectedOptionId: 'keep_all',
+        selectedCandidateIds: ['cache-a'],
+      }).selectedCandidateIds,
+      undefined,
+    );
   });
 
   it('rejects malformed decision choices and unsafe auto-resolution', () => {
