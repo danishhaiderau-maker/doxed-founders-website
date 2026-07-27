@@ -610,7 +610,11 @@ gates.
     passing visual/screenshot command. The application, not provider prose,
     appends the trusted receipt, and extension receipts persist in the local
     project activity ledger. Refreshed installed-app proof remains below.
-- [ ] Add a cheap independent self-critique pass against the original goal.
+- [x] Add a cheap independent self-critique pass against the original goal.
+  Founder Second Brain can run manually or after four/eight completed tasks,
+  uses a founder-selected Personal AI outside managed quota, receives a
+  redacted read-only evidence snapshot including the durable Goal contract,
+  and returns structured findings for Founder AI to reconcile without editing.
 - [ ] Treat visual verify-then-show as a first-class gate for user-facing UI
   work. Capture the changed state, combine a redacted screenshot with the
   original goal, affected UI contract, diff summary, and deterministic

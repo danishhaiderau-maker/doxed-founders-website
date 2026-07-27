@@ -151,6 +151,10 @@ describe('Founder Second brain boundary', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'founder-review-'));
     fs.mkdirSync(path.join(root, '.github', 'founder-os'), { recursive: true });
     fs.writeFileSync(
+      path.join(root, '.github', 'founder-os', 'goal.json'),
+      '{"version":3,"objective":"Ship the verified Founder IDE"}',
+    );
+    fs.writeFileSync(
       path.join(root, '.github', 'founder-os', 'project-context.md'),
       'Project graph\napi_key=do-not-leak',
     );
@@ -173,8 +177,9 @@ describe('Founder Second brain boundary', () => {
       'M src/login.ts',
       '?? tests/login.spec.ts',
     ]);
+    assert.match(pack?.goal ?? '', /Ship the verified Founder IDE/);
     assert.match(pack?.project_context ?? '', /api_key=\[REDACTED\]/);
-    assert.match(founderReviewEvidenceMessage(pack), /founder_second_brain_workspace_evidence/);
+    assert.match(founderReviewEvidenceMessage(pack), /authoritative North Star/);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
