@@ -166,9 +166,11 @@ docs/exports/*.zip
 # Home bot runtime markers (local only)
 .home-bot-mode
 .home-bot-auto-restart.heartbeat
+.home-*.heartbeat
 .local-collection-mode
 .local-collection-analyzer.lock
 .home-tunnel-url
+.home-tunnel-restarting
 .home-tunnel.log
 .home-wire.log
 .chrome-railway-profile/
@@ -329,6 +331,7 @@ services/btc-conservative-agent/past_analysis/
 /trend_health.csv
 /pathway_lane_specs.json
 services/btc-conservative-agent/pathway_lane_specs.json
+services/btc-conservative-agent/.runtime-locks/
 
 # Transient handoff / analysis docs -- policy-untracked (item 17.4).
 # These are session artifacts that should never be committed; agents and
