@@ -188,6 +188,25 @@ export function exchangeOrderFilledQtySats(order: {
   );
 }
 
+/** Exact race shape in which the full immediate-flat proof may be retried. */
+export function shouldRetryImmediateFlatReconcile(input: {
+  signedExchangeAmount: number;
+  signedLedgerOpenAmount: number;
+  openLots: number;
+  pendingLots: number;
+  directionConflict: boolean;
+  foreignActiveOrders: number;
+}): boolean {
+  return (
+    btcToSats(input.signedExchangeAmount) === 0 &&
+    btcToSats(input.signedLedgerOpenAmount) !== 0 &&
+    input.openLots > 0 &&
+    input.pendingLots === 0 &&
+    !input.directionConflict &&
+    input.foreignActiveOrders === 0
+  );
+}
+
 /**
  * Remove exchange orders already attributed to a current virtual lot. The
  * expensive expired-participant recovery query is needed only for genuinely
@@ -3728,6 +3747,58 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           `owners=${fillGrace.ownerParticipantIds.join(',')} — deferring this tick without new entries`,
       );
       return false;
+    }
+
+    // A managed stop/manual close may flatten Bitfinex after the early
+    // immediate-flat read but before this later ledger read. Re-run the
+    // existing full immediate-flat proof only for that exact race. It reads
+    // every managed order, cancels any stale remainder, re-confirms exchange
+    // zero, and records EXIT. Unknown exchange orders remain fail-closed.
+    if (
+      btcToSats(signedExchangeAmount) === 0 &&
+      btcToSats(signedLedgerOpenAmount) !== 0 &&
+      summary.open > 0 &&
+      summary.pending === 0 &&
+      !summary.directionConflict
+    ) {
+      let freshActiveOrders: BitfinexActiveOrder[];
+      try {
+        freshActiveOrders = await this.activeTrading.listActiveOrders(creds);
+      } catch (err) {
+        const message =
+          `IMMEDIATE_FLAT_RETRY_ORDER_READ_FAILED: cannot prove active orders are managed; ` +
+          `${err instanceof Error ? err.message : String(err)}`;
+        await this.pauseRelayForPositionMismatch(instance, message);
+        return false;
+      }
+      const foreignActiveOrders = freshActiveOrders.filter(
+        (order) => !managedOrderIds.has(order.id),
+      ).length;
+      if (
+        shouldRetryImmediateFlatReconcile({
+          signedExchangeAmount,
+          signedLedgerOpenAmount,
+          openLots: summary.open,
+          pendingLots: summary.pending,
+          directionConflict: summary.directionConflict,
+          foreignActiveOrders,
+        })
+      ) {
+        this.logger.warn(
+          `Managed exit race ${instance.userId}: Bitfinex flattened after the early read; ` +
+          'retrying immediate-flat reconciliation before mismatch pause.',
+        );
+        const reconciled = await this.reconcileImmediateExchangeFlat(
+          agentId,
+          instance,
+          creds,
+          {},
+          simActive,
+        );
+        // The summary above is stale after a successful EXIT. End the tick and
+        // require the next one to rebuild all ledger/order state.
+        if (reconciled) return false;
+      }
     }
 
     this.logger.warn(
