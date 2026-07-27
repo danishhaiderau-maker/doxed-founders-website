@@ -38,7 +38,7 @@ type PendingAttachment = {
   name: string;
   previewUrl?: string;
   category?: string;
-  /** data: URL for images — Founder Node can paste into Cursor clipboard */
+  /** data: URL for images that Founder Node can relay to the selected desktop IDE. */
   dataUrl?: string;
 };
 
@@ -59,19 +59,10 @@ import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { formatMessageProviderLabel } from '@/lib/copilot-ai-stack';
+import { ideProviderLabel } from '@/lib/ide-provider-label';
 
 const FOUNDER_NODE_DOWNLOAD_URL = '/downloads#founder-node';
 const FOUNDER_BRAIN_MODE_STORAGE_KEY = 'dcf.founder-brain.mode';
-
-type IdeOption = { key: string; label: string };
-
-const IDES: IdeOption[] = [
-  { key: 'cursor', label: 'Cursor' },
-  { key: 'vscode', label: 'VS Code' },
-  { key: 'windsurf', label: 'Windsurf' },
-  { key: 'openhands', label: 'OpenHands' },
-  { key: 'claude_code', label: 'Claude Code' },
-];
 
 type IdeWorkspace = {
   id: string;
@@ -342,7 +333,6 @@ export function MinimalDevWorkspace({
   const [nodeStatus, setNodeStatus] = useState({ desktopOnline: false, cursorConnected: false, founderNodeOnline: false });
   const [pairedNodes, setPairedNodes] = useState<FounderNodeStatusRow[]>([]);
   const [founderBrainMode, setFounderBrainMode] = useState<FounderBrainMode>('automatic');
-  const [selectedIde, setSelectedIde] = useState<string>('cursor');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -593,17 +583,17 @@ export function MinimalDevWorkspace({
     const items: WorkspaceItem[] = [];
     const seen = new Set<string>();
     for (const iw of ideWorkspaces) {
-      const id = 'cursor:' + iw.id;
+      const id = `${iw.ideProvider || 'ide'}:${iw.id}`;
       if (seen.has(id)) continue;
       seen.add(id);
-      items.push({ id, label: iw.title, sub: iw.branch ? iw.branch : (iw.repository ? (iw.repository.split('/').pop() || iw.repository) : iw.ideProvider), source: 'cursor', ideProvider: iw.ideProvider, branch: iw.branch, agentStatus: iw.hasActiveAgent ? 'running' : undefined, lastActive: iw.lastActiveAt });
+      items.push({ id, label: iw.title, sub: iw.branch ? iw.branch : (iw.repository ? (iw.repository.split('/').pop() || iw.repository) : ideProviderLabel(iw.ideProvider)), source: 'cursor', ideProvider: iw.ideProvider, branch: iw.branch, agentStatus: iw.hasActiveAgent ? 'running' : undefined, lastActive: iw.lastActiveAt });
     }
     if (bridge?.nodes?.length) {
       for (const n of bridge.nodes) {
         const id = 'bridge:' + n.nodeId;
         if (seen.has(id)) continue;
         seen.add(id);
-        items.push({ id, label: n.taskLabel || n.label || 'Cursor workspace', sub: n.branch ? 'branch: ' + n.branch : 'live', source: 'bridge', branch: n.branch, agentStatus: n.agentStatus, lastActive: n.updatedAt });
+        items.push({ id, label: n.taskLabel || n.label || 'Desktop workspace', sub: n.branch ? 'branch: ' + n.branch : 'live', source: 'bridge', branch: n.branch, agentStatus: n.agentStatus, lastActive: n.updatedAt });
       }
     }
     for (const c of connected) {
@@ -672,10 +662,9 @@ export function MinimalDevWorkspace({
   );
   const founderBrainOnline = founderNodeHeartbeating || workspaceConnected;
 
-  // Group Cursor chat sessions by their owning workspace so the sidebar
+  // Group desktop chat sessions by their owning workspace so the sidebar
   // reads like WhatsApp's conversation list (chats grouped per workspace)
-  // rather than a flat task list. Cursor sessions carry a `workspaceId`
-  // matching the UUID in the workspaces list's `cursor:<uuid>` id; sessions
+  // rather than a flat task list. Sessions carry a `workspaceId`; sessions
   // we can't match fall back to their repository folder name, then to a
   // catch-all "Other chats" bucket.
   const sessionsByWorkspace = useMemo<
@@ -683,9 +672,10 @@ export function MinimalDevWorkspace({
   >(() => {
     const wsByUuid = new Map<string, IdeWorkspace>();
     for (const w of ideWorkspaces) {
-      if (w.ideProvider !== 'cursor') continue;
-      const uuid = w.id.startsWith('cursor:') ? w.id.slice('cursor:'.length) : w.id;
-      wsByUuid.set(uuid, w);
+      wsByUuid.set(w.id, w);
+      const prefix = `${w.ideProvider || 'ide'}:`;
+      wsByUuid.set(`${w.ideProvider || 'ide'}:${w.id}`, w);
+      if (w.id.startsWith(prefix)) wsByUuid.set(w.id.slice(prefix.length), w);
     }
     const groups = new Map<string, { label: string; sessions: BridgeSession[] }>();
     for (const s of sessions) {
@@ -735,6 +725,7 @@ export function MinimalDevWorkspace({
     if (!selectedSessionId) return null;
     return sessions.find((s) => s.id === selectedSessionId) ?? pinnedSession;
   }, [sessions, selectedSessionId, pinnedSession]);
+  const selectedSessionProviderLabel = ideProviderLabel(selectedSession?.ideProvider);
   const selectedAgentTyping =
     optimisticAgentTyping ||
     selectedSession?.agentTyping === true ||
@@ -894,6 +885,7 @@ export function MinimalDevWorkspace({
     (
       dispatchId: string,
       nodeOnline: boolean,
+      targetLabel: string,
       onDone: (outcome: 'delivered' | 'queued' | 'failed', detail?: string) => void,
     ) => {
       stopDispatchPoll();
@@ -914,14 +906,14 @@ export function MinimalDevWorkspace({
           if (status.status === 'DISPATCHED' && !status.delivered) {
             onDone(
               'failed',
-              status.result?.replace(/^error:\s*/i, '') ?? 'Cursor delivery did not complete on your PC',
+              status.result?.replace(/^error:\s*/i, '') ?? `${targetLabel} delivery did not complete on your PC`,
             );
             return;
           }
           if (status.status === 'DISPATCHING') {
-            setDispatchNotice('Delivering to Cursor on your PC…');
+            setDispatchNotice(`Delivering to ${targetLabel} on your PC…`);
           } else if (status.status === 'PENDING' && nodeOnline) {
-            setDispatchNotice('Delivering to Cursor on your PC…');
+            setDispatchNotice(`Delivering to ${targetLabel} on your PC…`);
           } else if (status.status === 'PENDING' && !nodeOnline) {
             onDone('queued');
             return;
@@ -973,7 +965,7 @@ export function MinimalDevWorkspace({
 
     if (dispatchToSelectedSession && authStale) {
       setError(SESSION_EXPIRED_MESSAGE);
-      setDispatchNotice('Sign in again to dispatch to Cursor.');
+      setDispatchNotice(`Sign in again to dispatch to ${ideProviderLabel(sessionForDispatch?.ideProvider)}.`);
       setTimeout(() => setDispatchNotice(null), 8000);
       return;
     }
@@ -991,7 +983,7 @@ export function MinimalDevWorkspace({
       attachmentsForSend.length > 0
         ? '\n\n[Attachments: ' + attachmentsForSend.map((a) => a.name).join(', ') + ']'
         : '';
-    // Embed image data URLs for Founder Node clipboard paste (stripped before Cursor sees text).
+    // Embed image data URLs for Founder Node relay (stripped before the IDE sees text).
     const imageBlocks = attachmentsForSend
       .filter((a) => a.dataUrl && a.dataUrl.startsWith('data:image/'))
       .map(
@@ -1015,12 +1007,14 @@ export function MinimalDevWorkspace({
     setBusy(true);
     setError(null);
 
-    // Cursor session selected → remote control only; no platform Brain / RULE_BASED fallback.
+    // Desktop session selected: remote control only; no platform Brain / RULE_BASED fallback.
     if (dispatchToSelectedSession && sessionForDispatch) {
+      const ideProvider = sessionForDispatch.ideProvider || 'cursor';
+      const targetLabel = ideProviderLabel(ideProvider);
       if (fullPrompt.length > DISPATCH_PAYLOAD_MAX_CHARS) {
         const msg =
           'Message too large (usually a photo). Try a smaller image or fewer attachments.';
-        setDispatchNotice(`Cursor dispatch failed: ${msg}`);
+        setDispatchNotice(`${targetLabel} dispatch failed: ${msg}`);
         setError(msg);
         setBusy(false);
         sendingRef.current = false;
@@ -1045,7 +1039,6 @@ export function MinimalDevWorkspace({
           timestamp: new Date().toISOString(),
         },
       ]);
-      const ideProvider = sessionForDispatch.ideProvider || 'cursor';
       try {
         const created = await dispatchToIdeSession(
           accessToken,
@@ -1058,20 +1051,20 @@ export function MinimalDevWorkspace({
         if (!founderNodeHeartbeating) {
           if (accountHasPairedNode) {
             setDispatchNotice(
-              'Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to Cursor.',
+              `Queued on server — Founder Node offline on your PC. Open Founder Node on your desktop to deliver to ${targetLabel}.`,
             );
           } else {
             setDispatchNotice(
-              'Queued on server — install and pair Founder Node on your PC to deliver to Cursor.',
+              `Queued on server — install and pair Founder Node on your PC to deliver to ${targetLabel}.`,
             );
           }
           setTimeout(() => setDispatchNotice(null), 20_000);
         } else {
-          setDispatchNotice('Delivering to Cursor on your PC…');
-          pollDispatchDelivery(created.id, true, (outcome, detail) => {
+          setDispatchNotice(`Delivering to ${targetLabel} on your PC…`);
+          pollDispatchDelivery(created.id, true, targetLabel, (outcome, detail) => {
             if (outcome === 'delivered') {
               setOptimisticAgentTyping(true);
-              setDispatchNotice('Delivered to Cursor — agent is working…');
+              setDispatchNotice(`Delivered to ${targetLabel} — agent is working…`);
               setTimeout(() => setOptimisticAgentTyping(false), 45_000);
               setTimeout(() => setDispatchNotice(null), 12_000);
             } else if (outcome === 'queued') {
@@ -1081,16 +1074,16 @@ export function MinimalDevWorkspace({
               setTimeout(() => setDispatchNotice(null), 20_000);
             } else {
               setDispatchNotice(
-                `Cursor delivery failed on your PC${detail ? `: ${detail.slice(0, 160)}` : ''}. Check Founder Node tray and that Cursor is open.`,
+                `${targetLabel} delivery failed on your PC${detail ? `: ${detail.slice(0, 160)}` : ''}. Check Founder Node tray and that ${targetLabel} is open.`,
               );
-              setError(detail ?? 'Cursor delivery failed on your PC');
+              setError(detail ?? `${targetLabel} delivery failed on your PC`);
               setTimeout(() => setDispatchNotice(null), 16_000);
             }
           });
         }
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : 'Failed to dispatch to Cursor';
-        setDispatchNotice(`Cursor dispatch failed: ${msg}`);
+        const msg = e instanceof Error ? e.message : `Failed to dispatch to ${targetLabel}`;
+        setDispatchNotice(`${targetLabel} dispatch failed: ${msg}`);
         setError(msg);
         setTimeout(() => setDispatchNotice(null), 8000);
       } finally {
@@ -1197,7 +1190,7 @@ export function MinimalDevWorkspace({
           {workspaces.length === 0 && (
             <div className='px-3 py-6 text-center text-xs text-zinc-600'>
               {pairingMismatchHint ??
-                `No workspaces detected. Make sure Founder Node ${FOUNDER_NODE_MIN_VERSION_LABEL} is running, Cursor is open, and tray shows Last sync: just now.`}
+                `No workspaces detected. Make sure Founder Node ${FOUNDER_NODE_MIN_VERSION_LABEL} is running, your desktop IDE is open, and tray shows Last sync: just now.`}
             </div>
           )}
           {workspaces.map((w) => (
@@ -1213,7 +1206,7 @@ export function MinimalDevWorkspace({
 
           {sessions.length > 0 && (
             <div className='mt-3'>
-              <div className='px-3 pb-1 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>Cursor Chats</div>
+              <div className='px-3 pb-1 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-zinc-500'>Desktop Chats</div>
               {sessionsByWorkspace.map((g) => {
                 const collapsed = collapsedWorkspaces.has(g.key);
                 return (
@@ -1312,18 +1305,11 @@ export function MinimalDevWorkspace({
                 </span>
               </div>
               <div className='ml-auto flex flex-wrap items-center gap-2'>
-                <select
-                  value={selectedIde}
-                  onChange={(e) => setSelectedIde(e.target.value)}
-                  className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-400/40'
-                  aria-label='IDE target'
-                >
-                  {IDES.map((ide) => (
-                    <option key={ide.key} value={ide.key}>
-                      {ide.label}
-                    </option>
-                  ))}
-                </select>
+                {selectedSession ? (
+                  <span className='rounded-md border border-white/10 bg-[#12121a] px-2 py-1 text-xs text-zinc-400'>
+                    To {selectedSessionProviderLabel}
+                  </span>
+                ) : null}
                 <select
                   value={founderBrainMode}
                   onChange={(e) =>
@@ -1404,7 +1390,7 @@ export function MinimalDevWorkspace({
                     (cursorConnected ? 'bg-emerald-400' : 'bg-zinc-600')
                   }
                 />
-                <span className='text-zinc-500'>Cursor</span>
+                <span className='text-zinc-500'>Desktop IDE</span>
                 <span className='ml-auto text-zinc-200'>
                   {cursorConnected ? 'Connected' : 'Not connected'}
                 </span>
@@ -1430,8 +1416,8 @@ export function MinimalDevWorkspace({
             {selectedSession && !founderNodeHeartbeating && (
               <div className='mt-3 rounded-lg border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-xs text-amber-200/90'>
                 {accountHasPairedNode
-                  ? 'Founder Node is offline on your PC. Messages queue on the server — open Founder Node on your desktop to deliver them to Cursor.'
-                  : 'Pair Founder Node on your PC to relay phone messages into Cursor. Until then, dispatches stay queued on the server.'}
+                  ? `Founder Node is offline on your PC. Messages queue on the server — open Founder Node on your desktop to deliver them to ${selectedSessionProviderLabel}.`
+                  : `Pair Founder Node on your PC to relay phone messages into ${selectedSessionProviderLabel}. Until then, dispatches stay queued on the server.`}
               </div>
             )}
           </div>
@@ -1441,7 +1427,7 @@ export function MinimalDevWorkspace({
           <div className='flex flex-col items-center justify-center gap-4 px-6 py-12 text-center'>
             <div className='max-w-md'>
               <h2 className='text-lg font-semibold text-zinc-100'>Connect your IDE</h2>
-              <p className='mt-2 text-sm text-zinc-400'>To see your Cursor workspaces here, install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL} on your laptop. It automatically detects your Cursor sessions and streams them here.</p>
+              <p className='mt-2 text-sm text-zinc-400'>To see your desktop workspaces here, install Founder Node {FOUNDER_NODE_MIN_VERSION_LABEL} on your laptop. It securely connects supported IDE sessions to this workspace.</p>
               {pairingMismatchHint && (
                 <p className='mt-3 rounded-lg border border-amber-400/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200/90'>
                   {pairingMismatchHint}
@@ -1463,7 +1449,7 @@ export function MinimalDevWorkspace({
                   Or download directly from GitHub releases
                 </a>
               </div>
-              <CollapsibleInfo title='Setup steps' hint='Pair & open Cursor' accent='emerald'>
+              <CollapsibleInfo title='Setup steps' hint='Pair & open your IDE' accent='emerald'>
                 <ol className='space-y-2 text-left text-sm text-zinc-300'>
                   <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
                     <span className='font-semibold text-emerald-400'>1.</span> Download and install Founder Node from the links above.
@@ -1472,7 +1458,7 @@ export function MinimalDevWorkspace({
                     <span className='font-semibold text-emerald-400'>2.</span> Pair it with your account using the pairing code in the Founder Node tray menu (no sign-in required).
                   </li>
                   <li className='rounded-lg border border-white/5 bg-white/5 px-4 py-2.5'>
-                    <span className='font-semibold text-emerald-400'>3.</span> Open Cursor — workspaces appear here automatically.
+                    <span className='font-semibold text-emerald-400'>3.</span> Open Founder IDE or another supported IDE — workspaces appear here automatically.
                   </li>
                 </ol>
               </CollapsibleInfo>
@@ -1700,9 +1686,9 @@ export function MinimalDevWorkspace({
                 rows={1}
                 placeholder={
                   selectedSession
-                    ? 'Reply to this Cursor chat — delivered via Founder Node on your PC'
+                    ? `Reply to this ${selectedSessionProviderLabel} chat — delivered securely through Founder Node`
                     : sessions.length > 0
-                      ? 'Select a Cursor chat in the sidebar to dispatch to your IDE'
+                      ? 'Select a desktop chat in the sidebar to continue remotely'
                       : 'Message Founder OS — shift+enter for newline'
                 }
                 className='min-h-[40px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-3 py-2 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40 sm:min-h-[44px] sm:px-4 sm:py-3 sm:text-sm'

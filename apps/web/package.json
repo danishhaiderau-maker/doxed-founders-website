@@ -9,7 +9,8 @@
     "lint": "next lint",
     "qa:founder-os:visual": "node scripts/founder-os-workspace-visual-qa.mjs",
     "qa:founder-shell:visual": "node scripts/founder-shell-visual-qa.mjs",
-    "test:founder-shell-visual-qa": "node --test scripts/founder-shell-visual-qa.spec.mjs"
+    "test:founder-shell-visual-qa": "node --test scripts/founder-shell-visual-qa.spec.mjs",
+    "test:founder-remote": "tsx --test src/lib/ide-provider-label.spec.ts"
   },
   "dependencies": {
     "@dcf/config": "*",
