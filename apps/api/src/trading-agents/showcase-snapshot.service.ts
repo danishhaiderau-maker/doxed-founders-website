@@ -1,4 +1,9 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -30,11 +35,40 @@ export class ShowcaseSnapshotService {
   }
 
   async ingest(body: ShowcaseSnapshotBody) {
-    const seq = BigInt(body.snapshot_seq ?? 0);
-    const snapshot = (body.snapshot ?? body) as Prisma.InputJsonValue;
+    const rawSeq = body.snapshot_seq;
+    if (typeof rawSeq !== 'number' || !Number.isSafeInteger(rawSeq) || rawSeq <= 0) {
+      throw new BadRequestException('snapshot_seq must be a positive safe integer');
+    }
+    const seq = BigInt(rawSeq);
+    const rawSnapshot = body.snapshot ?? body;
+    if (!rawSnapshot || typeof rawSnapshot !== 'object' || Array.isArray(rawSnapshot)) {
+      throw new BadRequestException('snapshot must be an object');
+    }
+    const identity = rawSnapshot as Record<string, unknown>;
+    const instanceId =
+      typeof identity.bot_instance_id === 'string' ? identity.bot_instance_id.trim() : '';
+    const sourceRevision =
+      typeof identity.source_git_rev === 'string' ? identity.source_git_rev.trim() : '';
+    const sourceTimestamp =
+      typeof identity.server_ts === 'string'
+        ? Date.parse(identity.server_ts)
+        : Number.NaN;
+    const sourceAgeMs = Date.now() - sourceTimestamp;
+    if (
+      identity.dashboard_owner !== true
+      || identity.dashboard_port !== 7002
+      || !instanceId
+      || !sourceRevision
+      || !Number.isFinite(sourceTimestamp)
+      || sourceAgeMs < -10_000
+      || sourceAgeMs > 120_000
+    ) {
+      throw new BadRequestException('snapshot did not prove a fresh canonical :7002 owner');
+    }
+    const snapshot = rawSnapshot as Prisma.InputJsonValue;
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     const prev = row?.showcaseRelaySnapshotSeq ?? BigInt(0);
-    if (seq > 0n && seq <= prev) {
+    if (seq <= prev) {
       return { ok: true, skipped: true, snapshot_seq: Number(prev) };
     }
     await this.prisma.platformSettings.upsert({

@@ -2,7 +2,7 @@
 # Bot remains authoritative; Railway serves cache-first for Agent Hub.
 param(
   [int]$BotPort = 0,
-  [int]$IntervalSec = 4,
+  [int]$IntervalSec = 2,
   [string]$ApiUrl = "https://doxed-founders-website-production.up.railway.app"
 )
 
@@ -16,6 +16,7 @@ if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 $pusherLock = Join-Path $repoRoot ".home-relay-pusher.lock"
 $pusherPidFile = Join-Path $repoRoot ".home-relay-pusher.pid"
 $pusherHeartbeatFile = Join-Path $repoRoot ".home-relay-pusher.heartbeat"
+$pusherSuccessFile = Join-Path $repoRoot ".home-relay-pusher.success"
 try {
   $script:RelayLockHandle = [System.IO.File]::Open($pusherLock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
@@ -62,8 +63,21 @@ if (-not $secret) {
   exit 1
 }
 
+# Windows PowerShell's Invoke-RestMethod follows the system proxy/TLS path,
+# which intermittently wedged for 30-90 seconds on this host while curl and
+# direct HTTPS were healthy. Keep one direct no-proxy HttpClient instead.
+Add-Type -AssemblyName System.Net.Http
+$httpHandler = New-Object System.Net.Http.HttpClientHandler
+$httpHandler.UseProxy = $false
+$httpClient = New-Object System.Net.Http.HttpClient($httpHandler)
+$httpClient.Timeout = [TimeSpan]::FromSeconds(8)
+$httpClient.DefaultRequestHeaders.Add("X-Bot-Control-Secret", $secret)
+
 $logFile = Join-Path $repoRoot ".home-relay-pusher.log"
-$seq = 0
+# A process-local counter restarting at 1 caused Railway to reject every new
+# snapshot after a publisher restart whenever the stored sequence was larger.
+# Unix milliseconds are monotonic across restarts and safely exact in JSON.
+[long]$seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $botBase = "http://127.0.0.1:$BotPort"
 $pushUrl = ($ApiUrl.TrimEnd("/") + "/api/internal/showcase-snapshot")
 
@@ -86,19 +100,41 @@ while ($true) {
   # enumerating Win32_Process (which can wedge on this host).
   Set-Content -LiteralPath $pusherHeartbeatFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
   try {
-    $resp = Invoke-RestMethod -Uri "$botBase/api/relay-state" -TimeoutSec 90 -Headers @{ Accept = "application/json" }
+    # This endpoint is local and cache-backed. One wedged read must not freeze
+    # the publisher for 90 seconds while production's cache ages out.
+    $resp = Invoke-RestMethod -Uri "$botBase/api/relay-state" -TimeoutSec 5 -Headers @{ Accept = "application/json" }
     if ($resp) {
-      $seq += 1
+      $nowSeq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      $seq = [Math]::Max(($seq + 1), $nowSeq)
       $body = @{
         snapshot_seq = $seq
         snapshot     = $resp
         bot_version  = $resp.bot_version
         server_ts    = $resp.server_ts
       } | ConvertTo-Json -Compress -Depth 12
-      Invoke-RestMethod -Method Post -Uri $pushUrl -TimeoutSec 30 `
-        -Headers @{ "Content-Type" = "application/json"; "X-Bot-Control-Secret" = $secret } `
-        -Body $body | Out-Null
-      if ($seq -eq 1 -or ($seq % 30) -eq 0) {
+      $httpResponse = $null
+      $content = New-Object System.Net.Http.StringContent(
+        $body,
+        [System.Text.Encoding]::UTF8,
+        "application/json"
+      )
+      try {
+        $httpResponse = $httpClient.PostAsync($pushUrl, $content).GetAwaiter().GetResult()
+        $ackText = $httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $httpResponse.IsSuccessStatusCode) {
+          throw "snapshot push HTTP $([int]$httpResponse.StatusCode): $ackText"
+        }
+        $ack = if ($ackText) { $ackText | ConvertFrom-Json } else { @{} }
+      } finally {
+        if ($httpResponse) { $httpResponse.Dispose() }
+        $content.Dispose()
+      }
+      if ($ack.skipped -eq $true) {
+        Log "push rejected as stale seq=$seq stored=$($ack.snapshot_seq)"
+      } else {
+        Set-Content -LiteralPath $pusherSuccessFile -Value (Get-Date -Format o) -NoNewline -Encoding UTF8
+      }
+      if (($seq % 30) -eq 0) {
         Log "push ok seq=$seq bot=$($resp.bot_version)"
       }
     }

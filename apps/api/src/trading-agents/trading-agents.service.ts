@@ -707,35 +707,19 @@ export class TradingAgentsService implements OnModuleInit {
     if (slug !== 'conservative-btc') {
       return { ok: false, fly: false, cloudflare: false, botConnected: false, error: 'only conservative-btc' };
     }
-    const flyUrl = this.botBridge.getFlyUrl();
-    const cfUrl = (await this.botBridge.resolveBotUrl()) ?? 'https://bot.doxxedcrypto.digital';
-    const probeOnce = async (base: string, path = '/api/ping'): Promise<boolean> => {
-      try {
-        const res = await fetch(`${base}${path}`, {
-          signal: AbortSignal.timeout(10_000),
-          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
-        });
-        return res.ok;
-      } catch {
-        return false;
-      }
-    };
-    const probe = async (base: string, path = '/api/ping'): Promise<boolean> => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (await probeOnce(base, path)) return true;
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
-      }
-      return false;
-    };
-    const [fly, cloudflare] = await Promise.all([probe(flyUrl), probe(cfUrl)]);
-    // Canonical showcase is the home tunnel — Fly is legacy and must not gate botConnected.
-    const ok = cloudflare;
+    const canonical = await this.botBridge.fetchPublicShowcaseState(true).catch(() => null);
+    const ok = Boolean(canonical);
+    const fromCloudflare = ok && canonical?.snapshot_source !== 'railway_cache';
     return {
       ok,
-      fly,
-      cloudflare,
-      botConnected: cloudflare,
-      source: cloudflare ? 'cloudflare' : fly ? 'fly-legacy-only' : 'unreachable',
+      fly: false,
+      cloudflare: fromCloudflare,
+      botConnected: ok,
+      source: ok
+        ? canonical?.snapshot_source === 'railway_cache'
+          ? 'railway-snapshot'
+          : 'cloudflare-fallback'
+        : 'unreachable',
     };
   }
 
