@@ -10,7 +10,7 @@ const canonicalState = {
   price: 64_000,
 };
 
-function makeBridge() {
+function makeBridge(snapshot: Record<string, unknown> | null = null, at: Date | null = null) {
   const config = {
     get: () => undefined,
   };
@@ -23,13 +23,63 @@ function makeBridge() {
   };
   const snapshots = {
     getCachedSnapshot: async () => ({
-      snapshot: null,
-      at: null,
-      snapshot_seq: null,
+      snapshot,
+      at,
+      snapshot_seq: snapshot ? Date.now() : null,
     }),
   };
   return new BotBridgeService(config as never, prisma as never, snapshots as never);
 }
+
+test('uses a fresh canonical outbound snapshot without touching Cloudflare', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('unexpected', { status: 500 });
+  };
+
+  try {
+    const pushed = {
+      ...canonicalState,
+      source_git_rev: 'dc55f47673ff',
+      server_ts: new Date().toISOString(),
+    };
+    const bridge = makeBridge(pushed, new Date());
+    const state = await bridge.fetchStateForExecution(true);
+    assert.equal(state?.bot_instance_id, canonicalState.bot_instance_id);
+    assert.equal(state?.snapshot_source, 'railway_cache');
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('rejects stale or foreign outbound snapshots and fails closed when tunnel is down', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('tunnel down', { status: 502 });
+
+  try {
+    for (const pushed of [
+      {
+        ...canonicalState,
+        source_git_rev: 'dc55f47673ff',
+        server_ts: new Date(Date.now() - 20_000).toISOString(),
+      },
+      {
+        ...canonicalState,
+        dashboard_port: 7003,
+        source_git_rev: 'dc55f47673ff',
+        server_ts: new Date().toISOString(),
+      },
+    ]) {
+      const bridge = makeBridge(pushed, new Date());
+      assert.equal(await bridge.fetchStateForExecution(true), null);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('coalesces concurrent forced execution fetches into one tunnel request', async () => {
   const originalFetch = globalThis.fetch;

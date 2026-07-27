@@ -2,13 +2,12 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { flyControlBot, getShowcaseHost, pauseTradingAgent, resumeTradingAgent, fetchServerBotHealth } from '@/lib/api';
+import { pauseTradingAgent, resumeTradingAgent, fetchServerBotHealth } from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
 const DEFAULT_ANALYZER_PORT = 9001; // :9500 was a phantom port — bot.py confirms nothing listens there
 const PUBLIC_BOT_URL = 'https://bot.doxxedcrypto.digital';
-const FLY_BOT_URL = 'https://doxed-btc-bot.fly.dev';
 
 type HomeStatus = {
   mode?: string;
@@ -17,7 +16,6 @@ type HomeStatus = {
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
   tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
-  fly?: { online?: boolean; url?: string };
 };
 
 function botPortFrom(status: HomeStatus | null): number {
@@ -49,11 +47,10 @@ async function probeLocalHealth(url: string): Promise<boolean> {
 async function probeDirectHomeStatus(): Promise<HomeStatus> {
   const botPort = DEFAULT_BOT_PORT;
   const analyzerPort = DEFAULT_ANALYZER_PORT;
-  const [botOk, analyzerOk, tunnelOk, flyOk] = await Promise.all([
+  const [botOk, analyzerOk, tunnelOk] = await Promise.all([
     probeLocalHealth(`http://127.0.0.1:${botPort}/api/ping`),
     probeLocalHealth(`http://127.0.0.1:${analyzerPort}/api/status`),
     probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`),
-    probeLocalHealth(`${FLY_BOT_URL}/api/ping`),
   ]);
   return {
     mode: 'production',
@@ -61,7 +58,6 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
     bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
     analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
     tunnel: { live: tunnelOk, url: PUBLIC_BOT_URL, enabled: true, cloudflaredRunning: tunnelOk },
-    fly: { online: flyOk, url: FLY_BOT_URL },
   };
 }
 
@@ -73,13 +69,10 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
   const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
   if (raw.ok) {
-    const [tunnelProbe, flyProbe] = await Promise.all([
+    const [tunnelProbe] = await Promise.all([
       raw.tunnel?.live === undefined || raw.tunnel?.live === false
         ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`)
         : Promise.resolve(Boolean(raw.tunnel?.live)),
-      raw.fly?.online === undefined
-        ? probeLocalHealth(`${FLY_BOT_URL}/api/ping`)
-        : Promise.resolve(Boolean(raw.fly?.online)),
     ]);
     return {
       ...raw,
@@ -95,26 +88,22 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
         url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
         enabled: raw.tunnel?.enabled ?? true,
       },
-      fly: { online: Boolean(raw.fly?.online) || flyProbe, url: FLY_BOT_URL },
     };
   }
 
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
   const tunnelLive = Boolean(raw.tunnel?.live);
-  const flyOnline = Boolean(raw.fly?.online);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
   const needsAnalyzerProbe =
     !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
   const needsTunnelProbe = !tunnelLive && raw.tunnel?.live === undefined;
-  const needsFlyProbe = !flyOnline && raw.fly?.online === undefined;
 
-  const [botProbe, analyzerProbe, tunnelProbe, flyProbe] = await Promise.all([
+  const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
     needsBotProbe ? probeLocalHealth(`${botDash}/api/ping`) : Promise.resolve(botOnline),
     needsAnalyzerProbe ? probeLocalHealth(`${analyzerDash}api/status`) : Promise.resolve(analyzerOnline),
     needsTunnelProbe ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`) : Promise.resolve(tunnelLive),
-    needsFlyProbe ? probeLocalHealth(`${FLY_BOT_URL}/api/ping`) : Promise.resolve(flyOnline),
   ]);
 
   return {
@@ -131,7 +120,6 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
       url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
       enabled: raw.tunnel?.enabled ?? true,
     },
-    fly: { online: flyOnline || flyProbe, url: FLY_BOT_URL },
   };
 }
 
@@ -210,9 +198,7 @@ export function AgentAdminShowcaseControl({
   const [status, setStatus] = useState<HomeStatus | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
-  const [showcaseHost, setShowcaseHost] = useState<'fly' | 'local'>('local');
-  const [serverFlyOnline, setServerFlyOnline] = useState<boolean | null>(null);
-  const isFly = showcaseHost === 'fly';
+  const [serverUplinkOnline, setServerUplinkOnline] = useState<boolean | null>(null);
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
@@ -250,15 +236,14 @@ export function AgentAdminShowcaseControl({
     return () => clearInterval(t);
   }, [refreshStatus]);
 
-  // Server-side Fly.io + Cloudflare reachability probe. The browser-side probe of
-  // Fly fails on CORS/region (false negative), so the command center relies on this
-  // server-side signal as the primary source for the "Fly bot (sin)" status chip.
+  // Server-side canonical snapshot reachability. This proves the authenticated
+  // outbound home-bot uplink without making Cloudflare part of the money path.
   useEffect(() => {
     let cancelled = false;
     const probe = async () => {
       try {
         const json = await fetchServerBotHealth('conservative-btc');
-        if (!cancelled) setServerFlyOnline(Boolean(json.fly || json.cloudflare || json.ok));
+        if (!cancelled) setServerUplinkOnline(Boolean(json.botConnected || json.ok));
       } catch {
         // leave as-is; client-side probe remains a secondary fallback
       }
@@ -268,21 +253,6 @@ export function AgentAdminShowcaseControl({
     return () => {
       cancelled = true;
       clearInterval(t);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const json = await getShowcaseHost();
-        if (!cancelled && json.host) setShowcaseHost(json.host);
-      } catch {
-        // default to local
-      }
-    })();
-    return () => {
-      cancelled = true;
     };
   }, []);
 
@@ -342,30 +312,6 @@ export function AgentAdminShowcaseControl({
     }
   }
 
-  async function runFly(action: 'start' | 'stop', id: string) {
-    setBusy(id);
-    setMsg(null);
-    setStartSteps(
-      action === 'start'
-        ? 'Starting remote Fly bot — scaling the Fly machine up. Polling until /api/ping is healthy (up to ~90s)...'
-        : 'Stopping remote Fly bot — gracefully stopping the Fly machine (preserved, not destroyed)...',
-    );
-    try {
-      const res = await flyControlBot(token, action);
-      setMsg(res.message ?? (res.ok ? `Fly bot ${action}ed.` : `Fly ${action} did not confirm.`));
-      if (res.ok) {
-        onUpdated?.();
-        setTimeout(() => onUpdated?.(), 5000);
-        setTimeout(() => onUpdated?.(), 15000);
-      }
-      if (action === 'stop') setStartSteps(null);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : `Fly ${action} failed`);
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function toggleExecution() {
     setExecBusy(true);
     setMsg(null);
@@ -409,16 +355,13 @@ export function AgentAdminShowcaseControl({
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
         Home PC command center
-        {isFly && (
-          <span className="ml-2 rounded bg-sky-500/20 px-1.5 py-0.5 text-sky-300">Fly remote mode</span>
-        )}
       </p>
       <p className="mt-1 text-xs text-zinc-400">
         Runs the <strong>doxxedcrypto.digital</strong> showcase stack on this PC: conservative BTC signals
         at <strong>:{botPort}</strong>, research at <strong>:{analyzerPort}</strong>, bridge at{' '}
         <strong>:7810</strong>. The public site and Bitfinex relay reach your bot through{' '}
-        <strong className="text-sky-300">Fly.io</strong> (primary, stable) with the Cloudflare tunnel as a
-        fallback. Open{' '}
+        <strong className="text-sky-300">signed webhooks + Railway snapshots</strong>. Cloudflare is an
+        optional dashboard/admin fallback. Open{' '}
         <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
           Agent Hub
         </a>{' '}
@@ -467,9 +410,9 @@ export function AgentAdminShowcaseControl({
         />
         <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
         <StatusChip
-          label="Fly bot (sin)"
-          ok={Boolean(serverFlyOnline ?? botConnected ?? status?.fly?.online)}
-          sub={FLY_BOT_URL}
+          label="Signed snapshot uplink"
+          ok={Boolean(serverUplinkOnline ?? botConnected)}
+          sub="Home :7002 → Railway"
         />
         <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />
         <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
@@ -479,8 +422,8 @@ export function AgentAdminShowcaseControl({
         <button
           type="button"
           disabled={busy === START_SHOWCASE.id}
-          title={isFly ? 'Start the remote Fly.io bot machine (scale up)' : START_SHOWCASE.hint}
-          onClick={() => void (isFly ? runFly('start', START_SHOWCASE.id) : runLocal(START_SHOWCASE.path, START_SHOWCASE.id))}
+          title={START_SHOWCASE.hint}
+          onClick={() => void runLocal(START_SHOWCASE.path, START_SHOWCASE.id)}
           className="min-w-[160px] flex-1 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-500 disabled:opacity-50 sm:flex-none"
         >
           {busy === START_SHOWCASE.id ? 'Starting…' : START_SHOWCASE.label}
@@ -488,8 +431,8 @@ export function AgentAdminShowcaseControl({
         <button
           type="button"
           disabled={busy === STOP_SHOWCASE.id}
-          title={isFly ? 'Stop the remote Fly.io bot machine (graceful, preserved)' : STOP_SHOWCASE.hint}
-          onClick={() => void (isFly ? runFly('stop', STOP_SHOWCASE.id) : runLocal(STOP_SHOWCASE.path, STOP_SHOWCASE.id))}
+          title={STOP_SHOWCASE.hint}
+          onClick={() => void runLocal(STOP_SHOWCASE.path, STOP_SHOWCASE.id)}
           className="min-w-[160px] flex-1 rounded-xl bg-red-700 px-5 py-3 text-sm font-bold text-white hover:bg-red-600 disabled:opacity-50 sm:flex-none"
         >
           {busy === STOP_SHOWCASE.id ? 'Stopping…' : STOP_SHOWCASE.label}
@@ -559,9 +502,6 @@ export function AgentAdminShowcaseControl({
         <a href={PUBLIC_BOT_URL} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
           Public bot URL →
         </a>
-        <a href={FLY_BOT_URL} target="_blank" rel="noreferrer" className="text-sky-300 hover:underline">
-          Fly bot (sin) →
-        </a>
         <a
           href={`${botDash}/api/export_csv`}
           target="_blank"
@@ -579,8 +519,8 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <p className="mt-2 text-[10px] text-zinc-600">
-        Named Cloudflare tunnel → bot.doxxedcrypto.digital. Start showcase handles bridge, bot, analyzer, tunnel, and
-        auto-wire in one sequence.
+        Money path: signed webhooks + authenticated Railway snapshots. Cloudflare only exposes the optional public bot
+        and analyzer dashboard. Start showcase still manages that fallback tunnel.
       </p>
 
       {status?.analyzer?.note && (

@@ -62,6 +62,13 @@ export class BotBridgeService {
     1_500,
     Math.min(3_000, Number(process.env.BOT_BRIDGE_EXEC_TIMEOUT_MS ?? 2_500)),
   );
+  private readonly pushedExecutionMaxAgeMs = Math.max(
+    4_000,
+    Math.min(
+      15_000,
+      Number(process.env.BOT_BRIDGE_PUSHED_EXEC_MAX_AGE_MS ?? 8_000),
+    ),
+  );
   private dbUrlCache: { url: string | null; at: number } | null = null;
   /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
   private execCached: BotApiState | null = null;
@@ -94,8 +101,6 @@ export class BotBridgeService {
 
   /** Default canonical showcase bot URL (Cloudflare tunnel — has been flaky with HTTP 530). */
   private readonly DEFAULT_CF_URL = 'https://bot.doxxedcrypto.digital';
-  /** Stable Fly.io trading-only bot — used as the PRIMARY endpoint for health + state pulls. */
-  private readonly DEFAULT_FLY_URL = 'https://doxed-btc-bot.fly.dev';
 
   getBotUrl(): string | null {
     const url = (
@@ -104,12 +109,6 @@ export class BotBridgeService {
       ''
     ).trim();
     return url ? url.replace(/\/$/, '') : null;
-  }
-
-  /** Stable Fly.io endpoint — env override wins, else the well-known fly.dev URL. */
-  getFlyUrl(): string {
-    const env = (this.config.get<string>('BOT_FLY_URL') ?? '').trim();
-    return (env ? env : this.DEFAULT_FLY_URL).replace(/\/$/, '');
   }
 
   /** Home tunnel URL is wired to Neon first; env vars need a Railway restart to catch up. */
@@ -141,23 +140,6 @@ export class BotBridgeService {
   /** Canonical showcase URL — home bot :7002 via Cloudflare tunnel ONLY. */
   async resolveShowcaseUrl(): Promise<string> {
     return (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
-  }
-
-  /** Ordered candidate bot URLs for legacy health probes.
-   *  Canonical showcase is Cloudflare first; Fly is a separate legacy instance and must
-   *  never win showcase state races (split-brain). */
-  async resolveBotUrls(): Promise<string[]> {
-    const cf = await this.resolveShowcaseUrl();
-    const fly = this.getFlyUrl();
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const u of [cf, fly]) {
-      if (!u) continue;
-      if (seen.has(u)) continue;
-      seen.add(u);
-      out.push(u);
-    }
-    return out;
   }
 
   async isEnabledAsync(): Promise<boolean> {
@@ -253,6 +235,13 @@ export class BotBridgeService {
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
     }
+    const pushed = await this.fetchCachedRelaySnapshot(15_000);
+    if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) {
+      this.cached = pushed;
+      this.lastFetchAt = now;
+      this.lastLiveFetchAt = now;
+      return pushed;
+    }
     const data = await this.fetchShowcaseState(['/api/relay-state', '/api/state'], {
       relayTimeout: 20_000,
       stateTimeout: 30_000,
@@ -264,12 +253,6 @@ export class BotBridgeService {
       this.lastFetchAt = fetchedAt;
       this.lastLiveFetchAt = fetchedAt;
       return data;
-    }
-    const cached = await this.fetchCachedRelaySnapshot(this.cumulativeStaleMs);
-    if (cached) {
-      this.cached = cached;
-      this.lastFetchAt = now;
-      return cached;
     }
     return null;
   }
@@ -284,7 +267,7 @@ export class BotBridgeService {
         this.logger.warn(`Cached showcase snapshot stale (${Math.round(ageMs / 1000)}s) — falling back to live bot`);
         return null;
       }
-      const state = cached.snapshot as BotApiState;
+      const state = { ...(cached.snapshot as BotApiState) };
       state.snapshot_seq = cached.snapshot_seq;
       state.snapshot_source = 'railway_cache';
       return state;
@@ -302,12 +285,36 @@ export class BotBridgeService {
    *  Fail-closed: when the canonical showcase bot is unreachable this returns null and the
    *  executor HOLDS; it must never trade on the Fly bot's state. Health/admin/public dashboard
    *  reads keep the Fly race via fetchState / fetchStateForAdmin / fetchHealth. */
+  private isCanonicalPushedSnapshot(state: BotApiState, maxAgeMs: number): boolean {
+    const instanceId = state.bot_instance_id?.trim();
+    const sourceRevision = state.source_git_rev?.trim();
+    const sourceAt = state.server_ts ? Date.parse(state.server_ts) : Number.NaN;
+    const sourceAgeMs = Date.now() - sourceAt;
+    return Boolean(
+      state.snapshot_source === 'railway_cache'
+      && state.dashboard_owner === true
+      && state.dashboard_port === 7002
+      && instanceId
+      && sourceRevision
+      && !state.api_state_error
+      && Number.isFinite(sourceAt)
+      && sourceAgeMs >= -10_000
+      && sourceAgeMs <= maxAgeMs,
+    );
+  }
+
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
     const now = Date.now();
     // `force` bypasses the display cache, not this execution cache. Otherwise
     // every caller in the same relay tick creates an identical tunnel request.
     if (this.execCached && now - this.execFetchAt < this.execCacheMs) {
       return this.execCached;
+    }
+    const pushed = await this.fetchCachedRelaySnapshot(this.pushedExecutionMaxAgeMs);
+    if (pushed && this.isCanonicalPushedSnapshot(pushed, this.pushedExecutionMaxAgeMs)) {
+      this.execCached = pushed;
+      this.execFetchAt = Date.now();
+      return pushed;
     }
     const data = await this.fetchShowcaseState(
       ['/api/relay-execution-state', '/api/relay-state'],
@@ -346,6 +353,13 @@ export class BotBridgeService {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
+    }
+    const pushed = await this.fetchCachedRelaySnapshot(15_000);
+    if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) {
+      this.cached = pushed;
+      this.lastFetchAt = now;
+      this.lastLiveFetchAt = now;
+      return pushed;
     }
     const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
     try {
@@ -518,61 +532,6 @@ export class BotBridgeService {
     return null;
   }
 
-  /** Race all candidate bot URLs in parallel for each path.
-   *  Returns the first valid 200 JSON state — online if EITHER endpoint responds.
-   *  Uses Promise.any so the first 200 wins without waiting on dead endpoints. */
-  private async fetchStateFromCandidates(
-    paths: string[],
-    opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
-  ): Promise<BotApiState | null> {
-    const bases = await this.resolveBotUrls();
-    if (bases.length === 0) return null;
-    for (const path of paths) {
-      const timeoutMs = path.includes('relay-state') ? opts.relayTimeout : opts.stateTimeout;
-      // Each probe rejects on failure/null so Promise.any only resolves on a real hit.
-      const probes = bases.map(
-        (base) =>
-          new Promise<BotApiState>((resolve, reject) => {
-            fetch(`${base}${path}`, {
-              signal: AbortSignal.timeout(timeoutMs),
-              headers: {
-                Accept: 'application/json',
-                'User-Agent': opts.userAgent,
-              },
-            })
-              .then(async (res) => {
-                if (!res.ok) {
-                  this.logger.warn(`Bot ${base}${path} HTTP ${res.status}`);
-                  reject(new Error(`HTTP ${res.status}`));
-                  return;
-                }
-                const data = (await res.json()) as BotApiState;
-                if (!data || typeof data !== 'object') {
-                  reject(new Error('invalid state body'));
-                  return;
-                }
-                if (bases.length > 1) {
-                  this.logger.log(`Bot state fetched from ${base}${path}`);
-                }
-                resolve(data);
-              })
-              .catch((err: unknown) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                this.logger.warn(`Bot ${base}${path} fetch failed: ${msg}`);
-                reject(err instanceof Error ? err : new Error(msg));
-              });
-          }),
-      );
-      try {
-        // First valid state wins; remaining probes are abandoned.
-        return await Promise.any(probes);
-      } catch {
-        // All probes for this path failed — try the next path.
-      }
-    }
-    return null;
-  }
-
   /** True when the canonical Cloudflare showcase tunnel responds.
    *  Mirrors fetchHealth()'s probe pattern: race `/api/ping` AND `/health`
    *  across ALL candidate bot URLs (Cloudflare + Fly legacy) with
@@ -585,25 +544,21 @@ export class BotBridgeService {
    *  does keeps the status dot consistent with the dashboard's botConnected
    *  flag — they now use the same reachability definition. */
   async isReachable(force = false): Promise<boolean> {
-    const bases = await this.resolveBotUrls();
-    if (bases.length === 0) return false;
+    const pushed = await this.fetchCachedRelaySnapshot(15_000);
+    if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
+    const base = await this.resolveShowcaseUrl();
     const probes: Promise<boolean>[] = [];
-    for (const base of bases) {
-      for (const path of ['/api/ping', '/health'] as const) {
-        // Each probe REJECTs on any non-success so Promise.any only resolves
-        // to true on a real 200. Resolving false would let Promise.any
-        // short-circuit on a failure before a later probe succeeds.
-        probes.push(
-          (async () => {
-            const res = await fetch(`${base}${path}`, {
-              signal: AbortSignal.timeout(12_000),
-              headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return true as const;
-          })(),
-        );
-      }
+    for (const path of ['/api/ping', '/health'] as const) {
+      probes.push(
+        (async () => {
+          const res = await fetch(`${base}${path}`, {
+            signal: AbortSignal.timeout(5_000),
+            headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return true as const;
+        })(),
+      );
     }
     try {
       await Promise.any(probes);
@@ -680,29 +635,39 @@ export class BotBridgeService {
   /** Health probe — race Fly + Cloudflare in parallel; online if either responds 200.
    *  Promise.any returns on the first 200 without waiting on dead endpoints. */
   async fetchHealth() {
-    const bases = await this.resolveBotUrls();
+    const state = await this.fetchPublicShowcaseState(true);
+    if (state) {
+      return {
+        ok: true,
+        bot_instance_id: state.bot_instance_id ?? null,
+        dashboard_owner: state.dashboard_owner ?? false,
+        dashboard_port: state.dashboard_port ?? null,
+        source_git_rev: state.source_git_rev ?? null,
+        server_ts: state.server_ts ?? null,
+        source: state.snapshot_source ?? 'cloudflare-fallback',
+      };
+    }
+    const base = await this.resolveShowcaseUrl();
     const probes: Promise<Record<string, unknown>>[] = [];
-    for (const base of bases) {
-      for (const path of ['/api/ping', '/health']) {
-        probes.push(
-          new Promise<Record<string, unknown>>((resolve, reject) => {
-            fetch(`${base}${path}`, {
-              signal: AbortSignal.timeout(8_000),
-              headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+    for (const path of ['/api/ping', '/health']) {
+      probes.push(
+        new Promise<Record<string, unknown>>((resolve, reject) => {
+          fetch(`${base}${path}`, {
+            signal: AbortSignal.timeout(5_000),
+            headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+          })
+            .then(async (res) => {
+              if (!res.ok) {
+                reject(new Error(`HTTP ${res.status}`));
+                return;
+              }
+              resolve((await res.json()) as Record<string, unknown>);
             })
-              .then(async (res) => {
-                if (!res.ok) {
-                  reject(new Error(`HTTP ${res.status}`));
-                  return;
-                }
-                resolve((await res.json()) as Record<string, unknown>);
-              })
-              .catch((err: unknown) => {
-                reject(err instanceof Error ? err : new Error(String(err)));
-              });
-          }),
-        );
-      }
+            .catch((err: unknown) => {
+              reject(err instanceof Error ? err : new Error(String(err)));
+            });
+        }),
+      );
     }
     try {
       return await Promise.any(probes);

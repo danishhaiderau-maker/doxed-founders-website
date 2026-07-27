@@ -345,6 +345,7 @@ services/btc-conservative-agent/.runtime-locks/
 /services/*.pkl
 .home-analyzer-user-stopped
 .home-analyzer-*
+.home-relay-pusher.*
 # packages/founder-ide/upstream/ holds the local Void checkout + build trees
 # (gitignored — multi-GB of build output), EXCEPT the overlay/ subdirectory
 # which IS tracked because CI (build-founder-ide.yml) needs MANIFEST.json +

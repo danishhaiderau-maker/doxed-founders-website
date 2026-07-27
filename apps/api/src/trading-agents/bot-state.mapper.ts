@@ -8,6 +8,8 @@ export type BotApiState = {
   dashboard_pid?: number | null;
   dashboard_port?: number | null;
   source_git_rev?: string | null;
+  server_ts?: string | null;
+  api_state_error?: string | null;
   price?: number | null;
   account_balance?: number;
   equity?: number;
