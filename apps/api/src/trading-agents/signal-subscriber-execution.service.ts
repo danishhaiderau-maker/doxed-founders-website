@@ -76,6 +76,7 @@ const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
+const PENDING_FILL_RECONCILE_GRACE_MS = 15_000;
 
 export type RelayExecutorHealthSnapshot = {
   healthy: boolean;
@@ -215,6 +216,127 @@ export function pendingEntryMayOwnExchangePosition(
     if ((meta.qty ?? 0) >= MIN_QTY_BTC) return true;
   }
   return false;
+}
+
+export type PendingFillReconcileDecision = {
+  defer: boolean;
+  reason:
+    | 'DEFER_PENDING_FILL'
+    | 'NO_POSITION_DELTA'
+    | 'NO_MANAGED_PENDING_OWNER'
+    | 'AMBIGUOUS_MANAGED_PENDING_OWNER'
+    | 'FOREIGN_ACTIVE_ORDER'
+    | 'GRACE_EXPIRED';
+  direction: 'LONG' | 'SHORT' | null;
+  ownerParticipantIds: string[];
+  firstObservedAtMs: number | null;
+};
+
+/**
+ * A Bitfinex fill can become visible a few seconds before its trades endpoint
+ * exposes enough detail for the participant ledger to move PENDING_ENTRY →
+ * OPEN. During that bounded exchange-consistency window, defer the current
+ * tick without allowing new entries instead of permanently pausing the relay.
+ *
+ * The grace applies only when the entire raw exchange delta can be owned by
+ * a same-direction participant whose exchange-proven managed entry has
+ * disappeared from the active book, and there are no foreign active orders.
+ * Any other mismatch pauses immediately, and an unattributed managed fill
+ * fails closed after the bounded grace.
+ */
+export function pendingFillReconcileDecision(input: {
+  nowMs: number;
+  signedDeltaBtc: number;
+  pending: Array<{
+    participantId: string;
+    direction?: 'LONG' | 'SHORT';
+    qty?: number;
+    bitfinexOrderId?: number;
+  }>;
+  managedOrderIds: Iterable<number>;
+  activeOrderIds: Iterable<number>;
+  prior?: {
+    firstObservedAtMs: number;
+    direction: 'LONG' | 'SHORT';
+    ownerParticipantIds: string[];
+  } | null;
+  graceMs?: number;
+}): PendingFillReconcileDecision {
+  const deltaSats = btcToSats(input.signedDeltaBtc);
+  if (deltaSats === 0) {
+    return {
+      defer: false,
+      reason: 'NO_POSITION_DELTA',
+      direction: null,
+      ownerParticipantIds: [],
+      firstObservedAtMs: null,
+    };
+  }
+
+  const direction: 'LONG' | 'SHORT' = deltaSats > 0 ? 'LONG' : 'SHORT';
+  const managed = new Set(input.managedOrderIds);
+  const active = new Set(input.activeOrderIds);
+  for (const orderId of active) {
+    if (!managed.has(orderId)) {
+      return {
+        defer: false,
+        reason: 'FOREIGN_ACTIVE_ORDER',
+        direction,
+        ownerParticipantIds: [],
+        firstObservedAtMs: null,
+      };
+    }
+  }
+
+  const owners = input.pending
+    .filter(
+      (row) =>
+        row.direction === direction &&
+        row.bitfinexOrderId != null &&
+        managed.has(row.bitfinexOrderId) &&
+        !active.has(row.bitfinexOrderId) &&
+        Math.abs(btcToSats(row.qty ?? 0)) >= Math.abs(deltaSats),
+    )
+    .sort((a, b) => a.participantId.localeCompare(b.participantId));
+  if (owners.length !== 1) {
+    return {
+      defer: false,
+      reason:
+        owners.length === 0
+          ? 'NO_MANAGED_PENDING_OWNER'
+          : 'AMBIGUOUS_MANAGED_PENDING_OWNER',
+      direction,
+      ownerParticipantIds: [],
+      firstObservedAtMs: null,
+    };
+  }
+
+  const ownerParticipantIds = owners.map((row) => row.participantId);
+  const priorMatches =
+    input.prior?.direction === direction &&
+    input.prior.ownerParticipantIds.length === ownerParticipantIds.length &&
+    input.prior.ownerParticipantIds.every((id, index) => id === ownerParticipantIds[index]);
+  const firstObservedAtMs = priorMatches
+    ? input.prior!.firstObservedAtMs
+    : input.nowMs;
+  const graceMs = Math.max(1, input.graceMs ?? PENDING_FILL_RECONCILE_GRACE_MS);
+  if (input.nowMs - firstObservedAtMs > graceMs) {
+    return {
+      defer: false,
+      reason: 'GRACE_EXPIRED',
+      direction,
+      ownerParticipantIds,
+      firstObservedAtMs,
+    };
+  }
+
+  return {
+    defer: true,
+    reason: 'DEFER_PENDING_FILL',
+    direction,
+    ownerParticipantIds,
+    firstObservedAtMs,
+  };
 }
 
 /** A market close is complete only after the exchange position reflects it. */
@@ -2328,6 +2450,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       openParticipantAfter,
       creds,
       managedOrderIds,
+      activeOrderIdSet,
+      execMetaById,
       simActive,
     );
     if (!ledgerReconciled) return;
@@ -3441,7 +3565,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     instance: TradingAgentInstance,
     participants: Array<{ id: string; status: SignalCycleStatus }>,
     creds: ExchangeCredentials,
-    _managedOrderIds: Set<number>,
+    managedOrderIds: Set<number>,
+    activeOrderIds: Set<number>,
+    execMetaById: Map<string, ExecutionPayload>,
     simActive: boolean,
   ): Promise<boolean> {
     const summary = await this.buildVirtualLotSummary(participants);
@@ -3482,11 +3608,64 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!fresh) return false;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     const simActiveNow = isCopyRelaySimActive(dash);
+    const priorGraceRaw = dash.pendingFillReconcileGrace;
+    const priorGraceObject =
+      priorGraceRaw && typeof priorGraceRaw === 'object' && !Array.isArray(priorGraceRaw)
+        ? (priorGraceRaw as Record<string, unknown>)
+        : null;
+    const priorGrace =
+      priorGraceObject &&
+      typeof priorGraceObject.firstObservedAt === 'string' &&
+      (priorGraceObject.direction === 'LONG' || priorGraceObject.direction === 'SHORT') &&
+      Array.isArray(priorGraceObject.ownerParticipantIds)
+        ? {
+            firstObservedAtMs: Date.parse(priorGraceObject.firstObservedAt),
+            direction: priorGraceObject.direction as 'LONG' | 'SHORT',
+            ownerParticipantIds: priorGraceObject.ownerParticipantIds
+              .filter((id): id is string => typeof id === 'string')
+              .sort(),
+          }
+        : null;
+    const pending = participants
+      .filter((row) => row.status === SignalCycleStatus.PENDING_ENTRY)
+      .map((row) => {
+        const meta = execMetaById.get(row.id);
+        return {
+          participantId: row.id,
+          direction: meta?.direction,
+          qty: meta?.qty,
+          bitfinexOrderId: meta?.bitfinexOrderId,
+        };
+      });
+    const fillGrace = pendingFillReconcileDecision({
+      nowMs: Date.now(),
+      signedDeltaBtc: summary.directionConflict ? 0 : delta,
+      pending,
+      managedOrderIds,
+      activeOrderIds,
+      prior:
+        priorGrace != null && Number.isFinite(priorGrace.firstObservedAtMs)
+          ? priorGrace
+          : null,
+    });
+    const pendingFillReconcileGrace = fillGrace.defer
+      ? {
+          firstObservedAt: new Date(fillGrace.firstObservedAtMs!).toISOString(),
+          expiresAt: new Date(
+            fillGrace.firstObservedAtMs! + PENDING_FILL_RECONCILE_GRACE_MS,
+          ).toISOString(),
+          direction: fillGrace.direction,
+          deltaBtc: delta,
+          ownerParticipantIds: fillGrace.ownerParticipantIds,
+          reason: fillGrace.reason,
+        }
+      : null;
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
         dashboardState: applyDashboardPatch(dash, {
           copyRelayReconcile: reconcile,
+          pendingFillReconcileGrace,
           ...(simActiveNow
             ? {
                 copyRelaySim: {
@@ -3508,6 +3687,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (btcToSats(delta) === 0) return true;
+
+    if (fillGrace.defer) {
+      this.logger.warn(
+        `Pending fill reconcile grace ${instance.userId}: exchange ${signedExchangeAmount.toFixed(8)} BTC vs ` +
+          `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (delta ${delta.toFixed(8)}); ` +
+          `owners=${fillGrace.ownerParticipantIds.join(',')} — deferring this tick without new entries`,
+      );
+      return false;
+    }
 
     this.logger.warn(
       `Virtual lot drift ${instance.userId}: exchange ${signedExchangeAmount.toFixed(8)} BTC vs ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}, ${summary.open} open)`,
@@ -3549,9 +3737,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const message =
-      `RECONCILE ALERT: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
-      `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
-      'Relay paused; no blind close or ledger rewrite was attempted.';
+      fillGrace.reason === 'GRACE_EXPIRED'
+        ? `PENDING_FILL_RECONCILE_GRACE_EXPIRED: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
+          `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
+          'Managed fill attribution did not converge within 15 seconds; relay paused.'
+        : `RECONCILE ALERT: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
+          `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
+          'Relay paused; no blind close or ledger rewrite was attempted.';
     await this.pauseRelayForPositionMismatch(instance, message);
     return false;
   }
