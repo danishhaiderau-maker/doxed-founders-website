@@ -420,6 +420,20 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
       },
     ),
+    vscode.commands.registerCommand(
+      'founderOs.queueHousekeepingReview',
+      async (candidates: unknown) => {
+        if (!Array.isArray(candidates)) {
+          throw new Error('Housekeeping candidates must be an array.');
+        }
+        await founderHub?.queueHousekeepingReview(candidates);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
+      },
+    ),
+    vscode.commands.registerCommand('founderOs.getGoalState', () =>
+      founderHub?.goalSnapshot(),
+    ),
     vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
       founderShortcuts?.refresh(),
     ),

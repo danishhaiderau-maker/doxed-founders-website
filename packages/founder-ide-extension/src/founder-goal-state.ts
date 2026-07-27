@@ -14,6 +14,22 @@ export interface FounderGoalUiOption {
   recommended?: boolean;
 }
 
+export interface FounderHousekeepingUiCandidate {
+  id: string;
+  path: string;
+  sizeBytes: number;
+  category:
+    | 'generated'
+    | 'cache'
+    | 'duplicate'
+    | 'obsolete_source'
+    | 'stale_worktree'
+    | 'archive';
+  evidence: string[];
+  recommendedAction: 'keep' | 'archive' | 'delete';
+  reversible: boolean;
+}
+
 export interface FounderGoalUiDecision {
   id: string;
   kind: 'goal_amendment' | 'permission' | 'housekeeping' | 'research_preference';
@@ -26,6 +42,8 @@ export interface FounderGoalUiDecision {
   status: 'pending' | 'resolved' | 'cancelled';
   evidence: string[];
   proposedGoalObjective?: string;
+  housekeepingCandidates?: FounderHousekeepingUiCandidate[];
+  selectedCandidateIds?: string[];
   selectedOptionId?: string;
   customAnswer?: string;
   createdAt: string;
@@ -147,6 +165,64 @@ export function createFounderGoalAmendmentDecision(
   };
 }
 
+export function createFounderHousekeepingDecision(
+  state: FounderGoalUiState,
+  candidates: unknown[],
+  now = new Date(),
+): FounderGoalUiDecision {
+  const normalizedCandidates = candidates
+    .map(normalizeHousekeepingCandidate)
+    .filter((candidate): candidate is FounderHousekeepingUiCandidate =>
+      Boolean(candidate))
+    .slice(0, 100);
+  const deletionCandidates = normalizedCandidates.filter(
+    (candidate) => candidate.recommendedAction === 'delete',
+  );
+  if (deletionCandidates.length === 0) {
+    throw new Error('Housekeeping found no deletion candidates to review.');
+  }
+  const deleteBytes = deletionCandidates.reduce(
+    (total, candidate) => total + candidate.sizeBytes,
+    0,
+  );
+  const reversible = deletionCandidates.every(
+    (candidate) => candidate.reversible,
+  );
+  return {
+    id: `housekeeping-${randomUUID()}`,
+    kind: 'housekeeping',
+    title: 'Review housekeeping',
+    question:
+      `Founder found ${deletionCandidates.length} proposed deletion`
+      + `${deletionCandidates.length === 1 ? '' : 's'} (${formatBytes(deleteBytes)}).`,
+    options: [
+      {
+        id: 'approve_selected',
+        label: 'Approve checked',
+        description: 'Grant permission only for the checked deletion candidates.',
+        ...(reversible ? { recommended: true } : {}),
+      },
+      {
+        id: 'keep_all',
+        label: 'Keep everything',
+        description: 'Reject this housekeeping batch without deleting files.',
+        ...(!reversible ? { recommended: true } : {}),
+      },
+    ],
+    allowCustomAnswer: true,
+    independentWorkMayContinue: true,
+    risk: reversible ? 'reversible_write' : 'destructive',
+    status: 'pending',
+    evidence: [
+      `Goal version reviewed: ${state.version}`,
+      'The audit is read-only. Approval does not itself delete files.',
+      'A deleting agent must re-check every selected path immediately before acting.',
+    ],
+    housekeepingCandidates: normalizedCandidates,
+    createdAt: now.toISOString(),
+  };
+}
+
 export function enqueueFounderDecision(
   state: FounderGoalUiState,
   decision: unknown,
@@ -170,6 +246,7 @@ export function resolveFounderGoalUiDecision(
     decisionId: string;
     selectedOptionId?: string;
     customAnswer?: string;
+    selectedCandidateIds?: string[];
     now?: Date;
   },
 ): FounderGoalUiState {
@@ -191,6 +268,20 @@ export function resolveFounderGoalUiDecision(
   if (!selectedOptionId && !customAnswer) {
     throw new Error('Choose an option or provide an answer.');
   }
+  const selectedCandidateIds = decision.kind === 'housekeeping'
+    && selectedOptionId === 'approve_selected'
+    ? normalizeSelectedCandidateIds(
+      input.selectedCandidateIds,
+      decision.housekeepingCandidates ?? [],
+    )
+    : [];
+  if (
+    decision.kind === 'housekeeping'
+    && selectedOptionId === 'approve_selected'
+    && selectedCandidateIds.length === 0
+  ) {
+    throw new Error('Select at least one housekeeping candidate.');
+  }
   const resolvedAt = (input.now ?? new Date()).toISOString();
   const resolvedState: FounderGoalUiState = {
     ...state,
@@ -202,6 +293,9 @@ export function resolveFounderGoalUiDecision(
           status: 'resolved' as const,
           ...(selectedOptionId ? { selectedOptionId } : {}),
           ...(customAnswer ? { customAnswer } : {}),
+          ...(selectedCandidateIds.length > 0
+            ? { selectedCandidateIds }
+            : {}),
           resolvedAt,
         }
         : item,
@@ -285,6 +379,24 @@ function normalizeDecision(value: unknown): FounderGoalUiDecision | null {
           .slice(0, 500),
       }
       : {}),
+    ...(Array.isArray(candidate.housekeepingCandidates)
+      ? {
+        housekeepingCandidates: candidate.housekeepingCandidates
+          .map(normalizeHousekeepingCandidate)
+          .filter((item): item is FounderHousekeepingUiCandidate =>
+            Boolean(item))
+          .slice(0, 100),
+      }
+      : {}),
+    ...(Array.isArray(candidate.selectedCandidateIds)
+      ? {
+        selectedCandidateIds: candidate.selectedCandidateIds
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim().slice(0, 120))
+          .filter(Boolean)
+          .slice(0, 100),
+      }
+      : {}),
     ...(typeof candidate.selectedOptionId === 'string'
       ? { selectedOptionId: candidate.selectedOptionId.trim().slice(0, 120) }
       : {}),
@@ -339,6 +451,79 @@ function normalizeKind(value: unknown): FounderGoalUiDecision['kind'] {
     || value === 'housekeeping'
     ? value
     : 'research_preference';
+}
+
+function normalizeHousekeepingCandidate(
+  value: unknown,
+): FounderHousekeepingUiCandidate | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<FounderHousekeepingUiCandidate>;
+  const id = typeof candidate.id === 'string'
+    ? candidate.id.trim().slice(0, 120)
+    : '';
+  const path = typeof candidate.path === 'string'
+    ? candidate.path.replaceAll('\\', '/').trim().slice(0, 1_000)
+    : '';
+  if (!id || !path) return null;
+  const category = candidate.category === 'generated'
+    || candidate.category === 'cache'
+    || candidate.category === 'duplicate'
+    || candidate.category === 'obsolete_source'
+    || candidate.category === 'stale_worktree'
+    || candidate.category === 'archive'
+    ? candidate.category
+    : 'generated';
+  const recommendedAction = candidate.recommendedAction === 'keep'
+    || candidate.recommendedAction === 'archive'
+    || candidate.recommendedAction === 'delete'
+    ? candidate.recommendedAction
+    : 'keep';
+  return {
+    id,
+    path,
+    sizeBytes: Number.isFinite(candidate.sizeBytes)
+      ? Math.max(0, Math.floor(Number(candidate.sizeBytes)))
+      : 0,
+    category,
+    evidence: Array.isArray(candidate.evidence)
+      ? candidate.evidence
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.replace(/\s+/g, ' ').trim().slice(0, 500))
+        .filter(Boolean)
+        .slice(0, 20)
+      : [],
+    recommendedAction,
+    reversible: candidate.reversible === true,
+  };
+}
+
+function normalizeSelectedCandidateIds(
+  value: unknown,
+  candidates: FounderHousekeepingUiCandidate[],
+): string[] {
+  if (!Array.isArray(value)) return [];
+  const allowed = new Set(
+    candidates
+      .filter((candidate) => candidate.recommendedAction === 'delete')
+      .map((candidate) => candidate.id),
+  );
+  return Array.from(new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => allowed.has(item)),
+  )).slice(0, 100);
+}
+
+export function formatFounderGoalBytes(value: number): string {
+  return formatBytes(Math.max(0, Math.floor(value)));
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_024 ** 2) return `${(value / 1_024).toFixed(1)} KB`;
+  if (value < 1_024 ** 3) return `${(value / 1_024 ** 2).toFixed(1)} MB`;
+  return `${(value / 1_024 ** 3).toFixed(1)} GB`;
 }
 
 function validIso(value: unknown): string | null {

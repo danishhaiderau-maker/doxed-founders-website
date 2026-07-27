@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   createFounderGoalAmendmentDecision,
+  createFounderHousekeepingDecision,
   enqueueFounderDecision,
   initialFounderGoalState,
   normalizeFounderGoalState,
@@ -124,6 +125,65 @@ describe('Founder IDE goal state', () => {
     );
     assert.equal(resolved.objective, state.objective);
     assert.equal(resolved.version, 1);
+  });
+
+  it('keeps housekeeping read-only until selected candidates are approved', () => {
+    const state = initialFounderGoalState('Founder IDE', now);
+    const housekeeping = createFounderHousekeepingDecision(
+      state,
+      [
+        {
+          id: 'cache-output',
+          path: 'packages/founder-ide-extension/out',
+          sizeBytes: 125_000_000,
+          category: 'generated',
+          evidence: ['Rebuilt by the extension compiler.'],
+          recommendedAction: 'delete',
+          reversible: true,
+        },
+        {
+          id: 'source-file',
+          path: 'packages/founder-ide-extension/src/extension.ts',
+          sizeBytes: 10_000,
+          category: 'obsolete_source',
+          evidence: ['Still imported by the extension entry point.'],
+          recommendedAction: 'keep',
+          reversible: false,
+        },
+      ],
+      now,
+    );
+    assert.equal(housekeeping.status, 'pending');
+    assert.equal(housekeeping.risk, 'reversible_write');
+    assert.match(housekeeping.question, /119\.2 MB/);
+    const queued = enqueueFounderDecision(state, housekeeping);
+    assert.throws(
+      () => resolveFounderGoalUiDecision(queued, {
+        decisionId: housekeeping.id,
+        selectedOptionId: 'approve_selected',
+        selectedCandidateIds: [],
+        now,
+      }),
+      /Select at least one/,
+    );
+    const resolved = resolveFounderGoalUiDecision(queued, {
+      decisionId: housekeeping.id,
+      selectedOptionId: 'approve_selected',
+      selectedCandidateIds: ['cache-output', 'source-file', 'unknown'],
+      now,
+    });
+    assert.deepEqual(
+      resolved.decisions[0]?.selectedCandidateIds,
+      ['cache-output'],
+    );
+    assert.equal(resolved.objective, state.objective);
+    const rejected = resolveFounderGoalUiDecision(queued, {
+      decisionId: housekeeping.id,
+      selectedOptionId: 'keep_all',
+      selectedCandidateIds: ['cache-output'],
+      now,
+    });
+    assert.equal(rejected.decisions[0]?.selectedCandidateIds, undefined);
   });
 
   it('rejects an unknown option and disallowed custom answer', () => {

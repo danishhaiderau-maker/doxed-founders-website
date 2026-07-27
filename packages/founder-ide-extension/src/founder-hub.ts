@@ -14,7 +14,9 @@ import {
 } from './founder-interface-mode';
 import {
   createFounderGoalAmendmentDecision,
+  createFounderHousekeepingDecision,
   enqueueFounderDecision,
+  formatFounderGoalBytes,
   initialFounderGoalState,
   normalizeFounderGoalState,
   pendingFounderGoalDecisions,
@@ -59,6 +61,7 @@ interface FounderHubMessage {
   agentMode?: FounderAgentMode;
   decisionId?: string;
   optionId?: string;
+  selectedCandidateIds?: string[];
 }
 
 export class FounderHubProvider
@@ -166,6 +169,7 @@ export class FounderHubProvider
           decisionId: decision.id,
           selectedOptionId,
           customAnswer,
+          selectedCandidateIds: message.selectedCandidateIds,
         });
         await this.persistGoalState();
         this.refresh();
@@ -304,6 +308,21 @@ export class FounderHubProvider
     this.refresh();
   }
 
+  async queueHousekeepingReview(
+    candidates: unknown[],
+  ): Promise<void> {
+    this.goalState = enqueueFounderDecision(
+      this.goalState,
+      createFounderHousekeepingDecision(this.goalState, candidates),
+    );
+    await this.persistGoalState();
+    this.refresh();
+  }
+
+  goalSnapshot(): FounderGoalUiState {
+    return structuredClone(this.goalState);
+  }
+
   private async persistGoalState(): Promise<void> {
     await this.context.workspaceState.update(
       'founder.goalState',
@@ -361,6 +380,24 @@ export class FounderHubProvider
             `<li>${escapeHtml(item)}</li>`).join('')}
         </ul>
       `
+      : '';
+    const housekeepingCandidates = decision?.kind === 'housekeeping'
+      ? (decision.housekeepingCandidates ?? []).map((candidate) => `
+        <label class="housekeeping-candidate">
+          <input
+            type="checkbox"
+            data-housekeeping-candidate="${escapeHtml(candidate.id)}"
+            ${candidate.recommendedAction !== 'delete' ? 'disabled' : ''}
+            ${candidate.recommendedAction === 'delete' && candidate.reversible ? 'checked' : ''}
+          />
+          <span class="housekeeping-copy">
+            <strong>${escapeHtml(candidate.path)}</strong>
+            <span>${escapeHtml(candidate.category.replaceAll('_', ' '))} | ${escapeHtml(formatFounderGoalBytes(candidate.sizeBytes))} | ${candidate.reversible ? 'restorable' : 'not automatically restorable'}</span>
+            ${candidate.evidence.slice(0, 2).map((item) =>
+              `<small>${escapeHtml(item)}</small>`).join('')}
+          </span>
+        </label>
+      `).join('')
       : '';
     const agentRows = this.agentAwareness.tasks.map((task) => `
       <div class="agent-row ${task.conflict ? 'conflict' : ''}">
@@ -831,6 +868,40 @@ export class FounderHubProvider
       font-size: 9px;
       line-height: 1.35;
     }
+    .housekeeping-list {
+      display: grid;
+      gap: 5px;
+      max-height: 190px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .housekeeping-candidate {
+      display: grid;
+      grid-template-columns: 16px minmax(0, 1fr);
+      gap: 6px;
+      align-items: start;
+      padding: 7px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .housekeeping-candidate input {
+      margin: 2px 0 0;
+    }
+    .housekeeping-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      font-size: 9px;
+      line-height: 1.35;
+    }
+    .housekeeping-copy strong {
+      overflow-wrap: anywhere;
+    }
+    .housekeeping-copy span,
+    .housekeeping-copy small {
+      color: var(--muted);
+    }
     .decision-options {
       display: grid;
       gap: 4px;
@@ -962,6 +1033,11 @@ export class FounderHubProvider
         </div>
         <p class="decision-question">${escapeHtml(decision.question)}</p>
         ${decisionEvidence}
+        ${housekeepingCandidates ? `
+          <div class="housekeeping-list" aria-label="Housekeeping candidates">
+            ${housekeepingCandidates}
+          </div>
+        ` : ''}
         <div class="decision-options">${decisionOptions}</div>
         ${decision.allowCustomAnswer ? `
           <button
@@ -1030,10 +1106,14 @@ export class FounderHubProvider
     });
     for (const button of document.querySelectorAll('[data-decision-id]')) {
       button.addEventListener('click', () => {
+        const selectedCandidateIds = Array.from(
+          document.querySelectorAll('[data-housekeeping-candidate]:checked'),
+        ).map((input) => input.dataset.housekeepingCandidate);
         vscode.postMessage({
           type: 'resolveDecision',
           decisionId: button.dataset.decisionId,
           optionId: button.dataset.optionId,
+          selectedCandidateIds,
         });
       });
     }
