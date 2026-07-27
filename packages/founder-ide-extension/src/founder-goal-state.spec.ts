@@ -97,9 +97,28 @@ describe('Founder IDE goal state', () => {
       state,
       'Ship Founder IDE with verified goal control',
       now,
+      [
+        {
+          id: 'builder-task',
+          title: 'Build goal controls',
+          status: 'working',
+          files: ['src/goal.ts'],
+        },
+        {
+          id: 'completed-task',
+          title: 'Finish navigation',
+          status: 'complete',
+          files: ['src/nav.ts'],
+        },
+      ],
     );
     const queued = enqueueFounderDecision(state, amendment);
     assert.equal(queued.objective, state.objective);
+    assert.deepEqual(amendment.blockingTaskIds, ['builder-task']);
+    assert.match(amendment.evidence.join('\n'), /Affected tasks: Build goal controls/);
+    assert.match(amendment.evidence.join('\n'), /Budget impact: recalculate/);
+    assert.equal(founderGoalUiTaskCanContinue(queued, 'builder-task'), false);
+    assert.equal(founderGoalUiTaskCanContinue(queued, 'unrelated-task'), true);
     const resolved = resolveFounderGoalUiDecision(queued, {
       decisionId: amendment.id,
       selectedOptionId: 'apply',
@@ -110,6 +129,32 @@ describe('Founder IDE goal state', () => {
       'Ship Founder IDE with verified goal control',
     );
     assert.equal(resolved.version, 2);
+  });
+
+  it('defers a goal amendment without resolving it or changing the goal', () => {
+    const state = initialFounderGoalState('Founder IDE', now);
+    const amendment = createFounderGoalAmendmentDecision(
+      state,
+      'Ship a revised Founder IDE',
+      now,
+      [{
+        id: 'active-task',
+        title: 'Build Founder IDE',
+        status: 'verifying',
+        files: [],
+      }],
+    );
+    const queued = enqueueFounderDecision(state, amendment);
+    const deferred = resolveFounderGoalUiDecision(queued, {
+      decisionId: amendment.id,
+      selectedOptionId: 'defer',
+      now: new Date('2026-07-27T03:30:00.000Z'),
+    });
+    assert.equal(deferred, queued);
+    assert.equal(pendingFounderGoalDecisions(deferred).length, 1);
+    assert.equal(deferred.objective, state.objective);
+    assert.equal(founderGoalUiTaskCanContinue(deferred, 'active-task'), false);
+    assert.equal(founderGoalUiTaskCanContinue(deferred, 'other-task'), true);
   });
 
   it('can reject a proposed goal without disturbing the active goal', () => {

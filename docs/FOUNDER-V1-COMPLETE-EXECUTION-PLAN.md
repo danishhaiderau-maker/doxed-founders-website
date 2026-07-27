@@ -371,7 +371,7 @@ screenshots, quota tests, native final-response screenshots.
   size, references, evidence, risk, and the recommended action; preview the
   exact selected change; checkpoint when restoration is possible; and require
   explicit founder approval before deletion.
-- [ ] Apply goal amendments at task/action boundaries. Show affected tasks,
+- [x] Apply goal amendments at task/action boundaries. Show affected tasks,
   invalidated assumptions, salvageable work, budget/timeline impact, and
   accept/revise/reject/defer choices before incrementing the goal version.
 - [ ] Keep committed product intent small and reviewable. Store the Goal

@@ -38,6 +38,13 @@ export interface FounderDecisionResearchFinding {
   createdAt: string;
 }
 
+export interface FounderGoalActiveTask {
+  id: string;
+  title: string;
+  status: 'working' | 'waiting' | 'blocked' | 'verifying' | 'complete';
+  files: string[];
+}
+
 export interface FounderGoalUiDecision {
   id: string;
   kind: 'goal_amendment' | 'permission' | 'housekeeping' | 'research_preference';
@@ -139,11 +146,32 @@ export function createFounderGoalAmendmentDecision(
   state: FounderGoalUiState,
   proposedObjective: string,
   now = new Date(),
+  activeTasks: FounderGoalActiveTask[] = [],
 ): FounderGoalUiDecision {
   const normalized = proposedObjective.replace(/\s+/g, ' ').trim().slice(0, 500);
   if (!normalized || normalized === state.objective) {
     throw new Error('The proposed goal must be different from the current goal.');
   }
+  const affectedTasks = activeTasks
+    .filter((task) => task.status !== 'complete')
+    .map((task) => ({
+      id: task.id.trim().slice(0, 120),
+      title: task.title.replace(/\s+/g, ' ').trim().slice(0, 140),
+      status: task.status,
+      files: task.files
+        .filter((file): file is string => typeof file === 'string')
+        .map((file) => file.replaceAll('\\', '/').trim().slice(0, 300))
+        .filter(Boolean)
+        .slice(0, 5),
+    }))
+    .filter((task) => task.id && task.title)
+    .slice(0, 20);
+  const affectedSummary = affectedTasks.length > 0
+    ? affectedTasks
+      .slice(0, 5)
+      .map((task) => `${task.title} (${task.status})`)
+      .join('; ')
+    : 'No active tasks were detected.';
   return {
     id: `goal-amendment-${randomUUID()}`,
     kind: 'goal_amendment',
@@ -161,15 +189,25 @@ export function createFounderGoalAmendmentDecision(
         label: 'Keep current goal',
         description: 'Reject this proposal and continue with the current goal.',
       },
+      {
+        id: 'defer',
+        label: 'Decide later',
+        description: 'Keep this question in the inbox while unrelated work continues.',
+      },
     ],
     allowCustomAnswer: true,
     independentWorkMayContinue: true,
     risk: 'reversible_write',
     status: 'pending',
-    blockingTaskIds: [],
+    blockingTaskIds: affectedTasks.map((task) => task.id),
     researchFindings: [],
     evidence: [
       `Current goal version: ${state.version}`,
+      `Affected tasks: ${affectedSummary}`,
+      'Invalidated assumptions: affected tasks must re-check their plan before the next action.',
+      'Salvageable work: completed verified artifacts remain; in-flight edits require review.',
+      'Budget impact: recalculate after affected tasks replan; no estimate has been inferred.',
+      'Timeline impact: recalculate after affected tasks replan; no estimate has been inferred.',
       'Completed external actions are not reversed by a goal amendment.',
     ],
     proposedGoalObjective: normalized,
@@ -333,6 +371,9 @@ export function resolveFounderGoalUiDecision(
   }
   if (!selectedOptionId && !customAnswer) {
     throw new Error('Choose an option or provide an answer.');
+  }
+  if (decision.kind === 'goal_amendment' && selectedOptionId === 'defer') {
+    return state;
   }
   const selectedCandidateIds = decision.kind === 'housekeeping'
     && selectedOptionId === 'approve_selected'

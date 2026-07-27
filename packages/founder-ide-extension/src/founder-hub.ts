@@ -192,7 +192,12 @@ export class FounderHubProvider
       if (objective) {
         this.goalState = enqueueFounderDecision(
           this.goalState,
-          createFounderGoalAmendmentDecision(this.goalState, objective),
+          createFounderGoalAmendmentDecision(
+            this.goalState,
+            objective,
+            new Date(),
+            this.agentAwareness.tasks,
+          ),
         );
         await this.persistGoalState();
         this.refresh();
@@ -223,6 +228,15 @@ export class FounderHubProvider
         if (!customAnswer) return;
       }
       try {
+        if (
+          decision.kind === 'goal_amendment'
+          && selectedOptionId === 'defer'
+        ) {
+          void vscode.window.showInformationMessage(
+            'Founder kept this goal change in Needs your decision. Unrelated work can continue.',
+          );
+          return;
+        }
         this.goalState = resolveFounderGoalUiDecision(this.goalState, {
           decisionId: decision.id,
           selectedOptionId,
@@ -464,7 +478,10 @@ export class FounderHubProvider
     const decisionEvidence = decision?.evidence.length
       ? `
         <ul class="decision-evidence">
-          ${decision.evidence.slice(0, 3).map((item) =>
+          ${decision.evidence.slice(
+            0,
+            decision.kind === 'goal_amendment' ? 8 : 3,
+          ).map((item) =>
             `<li>${escapeHtml(item)}</li>`).join('')}
         </ul>
       `
@@ -1181,7 +1198,7 @@ export class FounderHubProvider
             type="button"
             data-decision-id="${escapeHtml(decision.id)}"
             data-option-id="__custom__"
-          ><strong>Write another answer</strong><span>Give Founder different instructions.</span></button>
+          ><strong>${decision.kind === 'goal_amendment' ? 'Revise goal' : 'Write another answer'}</strong><span>${decision.kind === 'goal_amendment' ? 'Edit the proposed North Star, then apply it at the next safe boundary.' : 'Give Founder different instructions.'}</span></button>
         ` : ''}
         <p class="decision-footnote">${
           decision.independentWorkMayContinue
