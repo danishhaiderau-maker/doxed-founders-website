@@ -465,11 +465,15 @@ while ($true) {
       # restart the supervisor manually after fixing the root cause.
       Log "RECOVER bot skipped - crash-loop breaker tripped ($MaxBotRestartsInWindow in $BotRestartWindowMin min). Manual intervention required."
       $fail.bot = 0
-    } elseif (Test-AutoRestartMonitorFresh) {
+    } elseif ((Test-AutoRestartMonitorFresh) -and -not $botRevisionRestartSafe) {
       # The dedicated monitor owns bot replacement. In the 2026-07-25 outage
       # it restarted the bot while this supervisor simultaneously entered
       # Restart-BotComponent, creating competing starters. Let the monitor
       # finish its bounded backoff; take over only after it becomes stale.
+      # A verified-flat revision upgrade is different: the crash monitor does
+      # not inspect git revisions and therefore can never complete that work.
+      # In that case this supervisor must replace the monitor + bot exactly
+      # once through Restart-BotComponent.
       Log "RECOVER bot deferred - dedicated auto-restart monitor is fresh"
       $fail.bot = 0
     } else {
