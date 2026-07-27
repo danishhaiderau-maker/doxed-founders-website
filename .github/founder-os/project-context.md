@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge pull request #61 from danishhaiderau-maker/agent/fix-fill-reconcile-pause
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
