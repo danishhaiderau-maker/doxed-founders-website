@@ -54,6 +54,14 @@ export type FounderDecisionOption = {
   recommended?: boolean;
 };
 
+export type FounderDecisionResearchFinding = {
+  id: string;
+  title: string;
+  summary: string;
+  sources: string[];
+  createdAt: string;
+};
+
 export type FounderDecisionRequest = {
   id: string;
   goalId: string;
@@ -76,6 +84,7 @@ export type FounderDecisionRequest = {
   autoResolveOptionId?: string;
   expiresAt?: string;
   housekeepingCandidates?: FounderHousekeepingCandidate[];
+  researchFindings?: FounderDecisionResearchFinding[];
 };
 
 export type FounderDecisionResolution = {
@@ -102,6 +111,13 @@ export type FounderHousekeepingCandidate = {
   referencedBy: string[];
   recommendedAction: 'keep' | 'archive' | 'delete';
   reversible: boolean;
+};
+
+export type FounderGoalControlState = {
+  goal: FounderGoalContract | null;
+  decisions: FounderDecisionRequest[];
+  resolutions: FounderDecisionResolution[];
+  updatedAt: string;
 };
 
 export function validateFounderGoal(

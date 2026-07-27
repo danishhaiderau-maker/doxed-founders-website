@@ -79,6 +79,41 @@ export class FounderCommandCenterService {
     return this.builder.refreshActiveAgentRun(userId);
   }
 
+  getGoalControl(userId: string) {
+    return this.agentRuns.getGoalControl(userId);
+  }
+
+  saveGoal(userId: string, goal: import('@dcf/utils').FounderGoalContract) {
+    return this.agentRuns.saveGoal(userId, goal);
+  }
+
+  queueDecision(
+    userId: string,
+    decision: import('@dcf/utils').FounderDecisionRequest,
+  ) {
+    return this.agentRuns.queueDecision(userId, decision);
+  }
+
+  appendDecisionResearch(
+    userId: string,
+    decisionId: string,
+    finding: import('@dcf/utils').FounderDecisionResearchFinding,
+  ) {
+    return this.agentRuns.appendDecisionResearch(userId, decisionId, finding);
+  }
+
+  resolveDecision(
+    userId: string,
+    input: {
+      requestId: string;
+      selectedOptionId?: string;
+      selectedCandidateIds?: string[];
+      customAnswer?: string;
+    },
+  ) {
+    return this.agentRuns.resolveDecision(userId, input);
+  }
+
   async getFounderQueue(userId: string) {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
@@ -596,6 +631,38 @@ export class FounderCommandCenterService {
         skipped.push(h.id);
         continue;
       }
+      const blockingDecisionIds = await this.agentRuns.getBlockingDecisionIds(
+        userId,
+        h.id,
+      );
+      if (blockingDecisionIds.length > 0) {
+        if (state === 'planned') {
+          const claimed = await this.persistAgentBusTransition({
+            founderId: founder.id,
+            projectId: project,
+            userId,
+            handoff: h,
+            type: 'CLAIMED',
+            actor,
+          });
+          if (claimed) state = 'claimed';
+        }
+        if (state === 'claimed' || state === 'running' || state === 'blocked') {
+          await this.persistAgentBusTransition({
+            founderId: founder.id,
+            projectId: project,
+            userId,
+            handoff: h,
+            type: 'BLOCKED',
+            actor,
+            reason:
+              `Waiting for founder decision ${blockingDecisionIds.join(', ')}`
+                .slice(0, 500),
+          });
+        }
+        skipped.push(h.id);
+        continue;
+      }
       if (state === 'blocked') {
         const resumed = await this.persistAgentBusTransition({
           founderId: founder.id,
@@ -906,6 +973,18 @@ export class FounderCommandCenterService {
         where: { id: taskId, founderId: founder.id },
       });
       if (!task) throw new NotFoundException('Task not found');
+      const blockingDecisionIds = await this.agentRuns.getBlockingDecisionIds(
+        userId,
+        taskId,
+      );
+      if (blockingDecisionIds.length > 0) {
+        return {
+          action: 'decision_required' as const,
+          message: 'This task is waiting for your decision.',
+          taskId,
+          blockingDecisionIds,
+        };
+      }
 
       const memory = await this.copilot.getProjectMemory(userId);
       const dispatch = await this.builder.executeBuildTask(userId, {

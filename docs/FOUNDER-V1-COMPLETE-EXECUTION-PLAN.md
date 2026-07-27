@@ -351,14 +351,14 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Prove replay, dependency release, supersession, overlap, stale fencing,
   bounded retry/stall escalation, independent-scope concurrency, and verified
   merge behavior across multiple chats.
-- [ ] Add one editable, versioned Goal Contract with objective, invariants,
+- [x] Add one editable, versioned Goal Contract with objective, invariants,
   budgets, success evidence, status, and amendment history. Keep Goal, Task,
   Decision, and Evidence as separate concepts so progress remains legible.
 - [ ] Add a persistent "Needs your decision" inbox. Present two or three
   context-specific options, put one evidence-backed recommendation first,
   accept a custom answer, and block only dependent tasks while unrelated work
   continues.
-- [ ] Let a read-only Research task continue while a founder is away and attach
+- [x] Let a read-only Research task continue while a founder is away and attach
   its findings to the pending decision. Never let research, a timeout, or a
   default option authorize deletion, deployment, secret use, or an external
   write.
@@ -375,8 +375,20 @@ screenshots, quota tests, native final-response screenshots.
   private runtime episodes in ignored local state, and generate trajectory
   views from the event log rather than maintaining noisy duplicate files.
 
+Current Stage 6 boundary: the installed IDE has an editable local Goal surface,
+the authenticated API has a durable per-founder Goal/Decision/Research ledger,
+and executable AgentBus/build-queue work fails closed on an exact pending
+decision while unrelated work continues. The two ledgers are not yet
+automatically synchronized, so the persistent cross-device decision inbox
+remains unchecked. Housekeeping now has a bounded, read-only, no-content scan
+for exact reproducible-cache paths; it cannot delete, does not follow links,
+and downgrades incomplete measurements to keep. Duplicate/source-obsolescence
+analysis, stale-worktree review, restore checkpoints, and the separately
+authorized deletion executor remain unchecked.
+
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
-merge receipt, multi-agent task graph screenshots.
+merge receipt, multi-agent task graph screenshots, API regression 285/285,
+utility regression 95/95, and native-extension regression 200/200.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 

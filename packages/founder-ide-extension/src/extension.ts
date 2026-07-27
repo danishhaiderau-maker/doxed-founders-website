@@ -28,6 +28,7 @@ import { readWorkspaceTool } from './tools/read-workspace';
 import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
 import { GatewayMetadataUi } from './gateway-metadata-ui';
+import { auditWorkspaceHousekeeping } from './workspace-housekeeping-audit';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
 // Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
@@ -425,6 +426,62 @@ export function activate(context: vscode.ExtensionContext): void {
       async (candidates: unknown) => {
         if (!Array.isArray(candidates)) {
           throw new Error('Housekeeping candidates must be an array.');
+        }
+        await founderHub?.queueHousekeepingReview(candidates);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
+      },
+    ),
+    vscode.commands.registerCommand(
+      'founderOs.auditHousekeeping',
+      async () => {
+        const roots = vscode.workspace.workspaceFolders ?? [];
+        if (roots.length === 0) {
+          void vscode.window.showInformationMessage(
+            'Open a project before running housekeeping.',
+          );
+          return;
+        }
+        const candidates = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Founder is reviewing workspace housekeeping',
+            cancellable: false,
+          },
+          async () => {
+            const results = await Promise.all(
+              roots.map((folder) =>
+                auditWorkspaceHousekeeping(folder.uri.fsPath),
+              ),
+            );
+            return results.flatMap((result, rootIndex) =>
+              result.candidates.map((candidate) => ({
+                ...candidate,
+                id: `${roots[rootIndex]!.name}:${candidate.id}`,
+                path:
+                  roots.length === 1
+                    ? candidate.path
+                    : `${roots[rootIndex]!.name}/${candidate.path}`,
+                evidence: [
+                  ...candidate.evidence,
+                  ...(result.truncated
+                    ? ['The workspace audit reached a safety bound.']
+                    : []),
+                ],
+              })),
+            );
+          },
+        );
+        const deletions = candidates.filter(
+          (candidate) => candidate.recommendedAction === 'delete',
+        );
+        if (deletions.length === 0) {
+          void vscode.window.showInformationMessage(
+            candidates.length > 0
+              ? 'Founder found generated outputs to review, but no path is safe enough to recommend deleting.'
+              : 'Founder found no bounded housekeeping candidates.',
+          );
+          return;
         }
         await founderHub?.queueHousekeepingReview(candidates);
         await vscode.commands.executeCommand('workbench.view.extension.founderOs');

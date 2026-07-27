@@ -49,6 +49,7 @@ type FounderHubAction =
   | 'openNodeConfig'
   | 'showUsage'
   | 'openProjectBrief'
+  | 'auditHousekeeping'
   | 'toggleAdvancedTools'
   | 'toggleCompanion';
 
@@ -290,6 +291,9 @@ export class FounderHubProvider
         break;
       case 'openProjectBrief':
         await vscode.commands.executeCommand('founderOs.openProjectBrief');
+        break;
+      case 'auditHousekeeping':
+        await vscode.commands.executeCommand('founderOs.auditHousekeeping');
         break;
       case 'toggleAdvancedTools': {
         await vscode.commands.executeCommand('founderOs.toggleInterfaceMode');
@@ -861,6 +865,11 @@ export class FounderHubProvider
       cursor: pointer;
       font-size: 10px;
     }
+    .goal-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .decision-panel {
       display: grid;
       gap: 7px;
@@ -1070,7 +1079,10 @@ export class FounderHubProvider
     <section class="goal-panel" aria-label="Pursuing goal">
       <div class="goal-head">
         <span class="goal-label">Pursuing goal</span>
-        <button class="goal-edit" type="button" data-edit-goal>Edit</button>
+        <span class="goal-actions">
+          <button class="goal-edit" type="button" data-action="auditHousekeeping">Housekeeping</button>
+          <button class="goal-edit" type="button" data-edit-goal>Edit</button>
+        </span>
       </div>
       <p class="goal-objective">${escapeHtml(this.goalState.objective)}</p>
       <span class="goal-meta">${escapeHtml(goalStatus)} · Version ${this.goalState.version}</span>

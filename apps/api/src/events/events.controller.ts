@@ -1,6 +1,11 @@
 import { Body, Controller, Get, Headers, HttpException, Post, Res, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
-import type { DeviceMemoryPayload } from '@dcf/utils';
+import type {
+  DeviceMemoryPayload,
+  FounderDecisionRequest,
+  FounderDecisionResearchFinding,
+  FounderGoalContract,
+} from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { EventsService } from './events.service';
@@ -57,6 +62,57 @@ export class EventsController {
   @Get('copilot/active-agent-run')
   activeAgentRun(@CurrentUser() user: AuthUser) {
     return this.commandCenter.getActiveAgentRun(user.id);
+  }
+
+  @Get('copilot/goal-control')
+  goalControl(@CurrentUser() user: AuthUser) {
+    return this.commandCenter.getGoalControl(user.id);
+  }
+
+  @Post('copilot/goal-control/goal')
+  saveGoal(
+    @CurrentUser() user: AuthUser,
+    @Body() body: FounderGoalContract,
+  ) {
+    return this.commandCenter.saveGoal(user.id, body);
+  }
+
+  @Post('copilot/goal-control/decisions')
+  queueDecision(
+    @CurrentUser() user: AuthUser,
+    @Body() body: FounderDecisionRequest,
+  ) {
+    return this.commandCenter.queueDecision(user.id, body);
+  }
+
+  @Post('copilot/goal-control/decisions/research')
+  appendDecisionResearch(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      decisionId: string;
+      finding: FounderDecisionResearchFinding;
+    },
+  ) {
+    return this.commandCenter.appendDecisionResearch(
+      user.id,
+      body.decisionId,
+      body.finding,
+    );
+  }
+
+  @Post('copilot/goal-control/decisions/resolve')
+  resolveDecision(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      requestId: string;
+      selectedOptionId?: string;
+      selectedCandidateIds?: string[];
+      customAnswer?: string;
+    },
+  ) {
+    return this.commandCenter.resolveDecision(user.id, body);
   }
 
   @Get('copilot/founder-graph')
