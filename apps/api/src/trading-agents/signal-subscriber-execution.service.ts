@@ -860,6 +860,7 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
   entryEnabled: boolean,
   copyDirection?: 'LONG' | 'SHORT' | null,
   relayArmedAtMs?: number | null,
+  expectedMissedShowcaseTradeIds: ReadonlySet<string> = new Set(),
 ): T[] {
   return divergences.filter(
     (d) => {
@@ -876,6 +877,14 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
         Number.isFinite(relayArmedAtMs) &&
         Number.isFinite(sourceCreatedAtMs) &&
         sourceCreatedAtMs <= relayArmedAtMs
+      ) {
+        return false;
+      }
+      const tradeId = String((d as T & { tradeId?: string }).tradeId ?? '');
+      if (
+        d.type === 'SHOWCASE_POSITION_NOT_MIRRORED' &&
+        tradeId &&
+        expectedMissedShowcaseTradeIds.has(tradeId)
       ) {
         return false;
       }
@@ -3000,11 +3009,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ),
     );
     const copyDirection = copyDirections.size === 1 ? [...copyDirections][0] : null;
+    const sourceOnlyPositionTradeIds = divergences
+      .filter((d) => d.type === 'SHOWCASE_POSITION_NOT_MIRRORED' && d.tradeId)
+      .map((d) => d.tradeId as string);
+    const expectedMissedShowcaseTradeIds = new Set<string>();
+    if (sourceOnlyPositionTradeIds.length > 0) {
+      const missedFillEvents = await this.prisma.signalCycleEvent.findMany({
+        where: {
+          eventType: 'EXPIRED',
+          cycle: {
+            agentId,
+            tradeId: { in: sourceOnlyPositionTradeIds },
+          },
+          participant: {
+            userId: instance.userId,
+            status: SignalCycleStatus.EXPIRED,
+          },
+        },
+        select: {
+          payload: true,
+          cycle: { select: { tradeId: true } },
+        },
+      });
+      for (const event of missedFillEvents) {
+        const payload =
+          event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+            ? (event.payload as Record<string, unknown>)
+            : null;
+        if (
+          payload?.event === 'MISSED_SHOWCASE_FILL' ||
+          payload?.reason === 'MISSED_SHOWCASE_FILL'
+        ) {
+          expectedMissedShowcaseTradeIds.add(event.cycle.tradeId);
+        }
+      }
+    }
     const reportableDivergences = reportableMirrorDiffsForRelayMode(
       divergences,
       entryEnabled,
       copyDirection,
       relayArmTimestampMs(dash),
+      expectedMissedShowcaseTradeIds,
     );
 
     // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
