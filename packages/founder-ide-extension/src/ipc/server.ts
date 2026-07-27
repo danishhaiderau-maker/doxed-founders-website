@@ -6,9 +6,9 @@
  * a CLIENT via Founder Node's HTTPS relay (Task 5).
  *
  * Security model:
- *   - The pipe is named `\\.\pipe\founder-ide-{installId}` on Windows and
- *     `/tmp/founder-ide-{installId}.sock` on Unix. The `installId` is per
- *     install, so a malicious install can't hijack another install's pipe.
+ *   - Each IDE window owns `founder-ide-{installId}-{endpointId}` and writes
+ *     a short-lived, non-secret discovery record. Founder Node therefore
+ *     addresses an exact workspace instead of whichever window opened first.
  *   - Every connecting client MUST send `IpcHello` with the install's
  *     `ipcSecret` as the first frame. We compare in constant time and close
  *     the connection on mismatch (after emitting authState=revoked).
@@ -42,6 +42,14 @@ import {
   type IpcHeartbeat,
   type IpcMessage,
 } from './protocol.js';
+import {
+  createWorkspaceEndpointPresence,
+  pipePathForEndpoint,
+  pruneStaleWorkspaceEndpointPresences,
+  removeWorkspaceEndpointPresence,
+  writeWorkspaceEndpointPresence,
+  type WorkspaceEndpointOptions,
+} from './workspace-endpoint.js';
 
 /** Heartbeat interval — both sides emit every 15s to keep the pipe alive. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -68,6 +76,9 @@ let ipcSecret: string | null = null;
 const clients = new Set<ActiveClient>();
 let lastCompanionState: IpcCompanionState | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
+let presenceTimer: NodeJS.Timeout | null = null;
+let endpointPresence: ReturnType<typeof createWorkspaceEndpointPresence> | null = null;
+let endpointVaultRoot: string | undefined;
 
 /**
  * Resolve the install identity from ~/FounderVault/install.json or
@@ -108,16 +119,6 @@ function resolveInstallIdentity(): { installId: string; ipcSecret: string } | nu
   return null;
 }
 
-/** Compute the pipe path for the current platform + installId. */
-function pipePathFor(installId: string): string {
-  if (process.platform === 'win32') {
-    return `\\\\.\\pipe\\founder-ide-${installId}`;
-  }
-  // macOS / Linux: use /tmp — same-machine only, so /tmp is fine. The
-  // installId-specific suffix prevents cross-install collisions.
-  return `/tmp/founder-ide-${installId}.sock`;
-}
-
 /** Constant-time string comparison. */
 function constantTimeEquals(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -132,8 +133,13 @@ function constantTimeEquals(a: string, b: string): boolean {
  * is on disk yet — the extension should call startIpcServer() again after
  * pairing completes.
  */
-export async function startIpcServer(): Promise<net.Server | null> {
-  if (server) return server;
+export async function startIpcServer(
+  options: WorkspaceEndpointOptions = {},
+): Promise<net.Server | null> {
+  if (server) {
+    updateWorkspacePresence(options);
+    return server;
+  }
   const identity = resolveInstallIdentity();
   if (!identity) {
     console.warn('Founder OS IPC server: no install identity yet (not paired).');
@@ -141,8 +147,10 @@ export async function startIpcServer(): Promise<net.Server | null> {
   }
   installId = identity.installId;
   ipcSecret = identity.ipcSecret;
+  endpointVaultRoot = options.vaultRoot;
+  endpointPresence = createWorkspaceEndpointPresence(options);
 
-  const pipePath = pipePathFor(installId);
+  const pipePath = pipePathForEndpoint(installId, endpointPresence.endpointId);
   // On Unix, remove a stale socket file from a previous run.
   if (process.platform !== 'win32') {
     try {
@@ -156,7 +164,8 @@ export async function startIpcServer(): Promise<net.Server | null> {
     const srv = net.createServer((socket) => onClientConnected(socket));
     const onStartupError = (err: NodeJS.ErrnoException) => {
       if (process.platform === 'win32' && err.code === 'EADDRINUSE') {
-        console.info('Founder OS IPC is already served by another Founder IDE window.');
+        console.warn('Founder OS IPC endpoint id collision; refusing ambiguous startup.');
+        endpointPresence = null;
         resolve(null);
         return;
       }
@@ -170,7 +179,35 @@ export async function startIpcServer(): Promise<net.Server | null> {
       });
       server = srv;
       console.log(`Founder OS IPC server listening on ${pipePath}`);
-      // Heartbeat sweep — drop dead clients every 15s.
+      try {
+        pruneStaleWorkspaceEndpointPresences(endpointVaultRoot);
+        endpointPresence = writeWorkspaceEndpointPresence(
+          endpointPresence!,
+          endpointVaultRoot,
+        );
+      } catch (error) {
+        server = null;
+        endpointPresence = null;
+        try {
+          srv.close();
+        } catch {
+          // The endpoint is already failing closed.
+        }
+        reject(error);
+        return;
+      }
+      presenceTimer = setInterval(() => {
+        if (!endpointPresence) return;
+        try {
+          endpointPresence = writeWorkspaceEndpointPresence(
+            endpointPresence,
+            endpointVaultRoot,
+          );
+        } catch (error) {
+          console.warn('Founder OS IPC presence heartbeat failed:', error);
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+      // Client heartbeat sweep — drop dead clients every 15s.
       heartbeatTimer = setInterval(() => sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
       resolve(srv);
     });
@@ -179,6 +216,10 @@ export async function startIpcServer(): Promise<net.Server | null> {
 
 /** Stop the server + close all client connections. Safe to call multiple times. */
 export function stopIpcServer(): void {
+  if (presenceTimer) {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
@@ -199,8 +240,34 @@ export function stopIpcServer(): void {
     }
     server = null;
   }
+  if (endpointPresence) {
+    removeWorkspaceEndpointPresence(endpointPresence.endpointId, endpointVaultRoot);
+    endpointPresence = null;
+  }
+  endpointVaultRoot = undefined;
   installId = null;
   ipcSecret = null;
+}
+
+function updateWorkspacePresence(options: WorkspaceEndpointOptions): void {
+  if (!endpointPresence) return;
+  const next = createWorkspaceEndpointPresence(
+    options,
+    endpointPresence.endpointId,
+    new Date(endpointPresence.startedAt),
+  );
+  endpointPresence = {
+    ...next,
+    heartbeatAt: endpointPresence.heartbeatAt,
+  };
+  try {
+    endpointPresence = writeWorkspaceEndpointPresence(
+      endpointPresence,
+      options.vaultRoot ?? endpointVaultRoot,
+    );
+  } catch (error) {
+    console.warn('Founder OS IPC presence update failed:', error);
+  }
 }
 
 /** Number of currently-authenticated clients. Exposed for diagnostics + tests. */
@@ -452,9 +519,10 @@ function sweepDeadClients(): void {
 
 // Exported for tests only — not part of the public surface.
 export const __testHooks = {
-  pipePathFor,
+  pipePathFor: pipePathForEndpoint,
   resolveInstallIdentity,
   constantTimeEquals,
   handleHello,
   clients,
+  endpointPresence: () => endpointPresence,
 };

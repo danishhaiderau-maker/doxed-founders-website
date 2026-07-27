@@ -13,7 +13,7 @@ import {
 } from './cursor-discovery';
 import { readNodeConfig } from './vault-manager';
 import { throwIfFounderNodeAuthResponse } from './sync-client';
-import type { IdeIpcClient } from './ide-ipc-client';
+import type { IpcMessage } from 'founder-ide-extension/ipc';
 import {
   buildFounderIdeMessage,
   isDispatchForNode,
@@ -144,7 +144,7 @@ async function executeFounderIdeDispatch(
   apiBaseUrl: string,
   nodeId: string,
   nodeToken: string,
-  client: IdeIpcClient,
+  client: FounderIdeDispatchClient,
   dispatch: PendingDispatch,
 ): Promise<void> {
   try {
@@ -833,7 +833,7 @@ export async function executeCursorDispatch(
  */
 export async function processPendingDispatches(
   vaultRoot: string,
-  founderIdeClient?: IdeIpcClient | null,
+  resolveFounderIdeClient?: FounderIdeClientResolver,
 ): Promise<void> {
   if (dispatchCycleInFlight) return;
   const config = readNodeConfig(vaultRoot);
@@ -858,15 +858,36 @@ export async function processPendingDispatches(
         );
         continue;
       }
-      if (
-        isFounderIdeProvider(candidate.ideProvider) &&
-        !founderIdeClient?.isHandshakeActive()
-      ) {
-        continue;
-      }
       const lastAt = lastDispatchBySession.get(candidate.sessionId) ?? 0;
       if (Date.now() - lastAt < SESSION_DISPATCH_COOLDOWN_MS) {
         continue;
+      }
+      if (isFounderIdeProvider(candidate.ideProvider)) {
+        const exactClient = resolveFounderIdeClient?.(candidate.sessionId) ?? null;
+        if (!exactClient?.isHandshakeActive()) {
+          const unavailable = await claimPendingDispatch(
+            config.apiBaseUrl,
+            config.nodeId,
+            config.nodeToken,
+            candidate.id,
+          );
+          if (!unavailable) continue;
+          processed += 1;
+          await completeDispatch(
+            config.apiBaseUrl,
+            config.nodeId,
+            config.nodeToken,
+            unavailable.id,
+            {
+              error:
+                'The selected Founder IDE workspace is no longer connected. '
+                + 'The request was not sent to another window.',
+            },
+          ).catch((error) => {
+            console.error('Failed to report disconnected Founder IDE workspace:', error);
+          });
+          continue;
+        }
       }
 
       const fingerprint = dispatchFingerprint(candidate.sessionId, candidate.prompt);
@@ -889,7 +910,24 @@ export async function processPendingDispatches(
 
       processed += 1;
       lastDispatchBySession.set(claimed.sessionId, Date.now());
-      if (isFounderIdeProvider(claimed.ideProvider) && founderIdeClient) {
+      if (isFounderIdeProvider(claimed.ideProvider)) {
+        const founderIdeClient = resolveFounderIdeClient?.(claimed.sessionId) ?? null;
+        if (!founderIdeClient?.isHandshakeActive()) {
+          await completeDispatch(
+            config.apiBaseUrl,
+            config.nodeId,
+            config.nodeToken,
+            claimed.id,
+            {
+              error:
+                'The selected Founder IDE workspace is no longer connected. '
+                + 'The request was not sent to another window.',
+            },
+          ).catch((error) => {
+            console.error('Failed to report disconnected Founder IDE workspace:', error);
+          });
+          continue;
+        }
         await executeFounderIdeDispatch(
           config.apiBaseUrl,
           config.nodeId,
@@ -905,3 +943,14 @@ export async function processPendingDispatches(
     dispatchCycleInFlight = false;
   }
 }
+
+export interface FounderIdeDispatchClient {
+  isHandshakeActive(): boolean;
+  send(message: IpcMessage): boolean;
+  on(event: 'message', listener: (message: IpcMessage) => void): unknown;
+  off(event: 'message', listener: (message: IpcMessage) => void): unknown;
+}
+
+export type FounderIdeClientResolver = (
+  sessionId: string,
+) => FounderIdeDispatchClient | null;

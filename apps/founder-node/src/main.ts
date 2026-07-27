@@ -152,10 +152,9 @@ import {
 } from './pairing-state';
 // Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
 import {
-  IdeIpcClient,
   ensureIdeInstallIdentity,
-  startIdeIpcClient,
 } from './ide-ipc-client';
+import { IdeIpcWorkspaceRegistry } from './ide-ipc-workspace-registry';
 // Phase 3 — report IDE handshake state to the API so the adapter can decide
 // isConnected() in real time. Defined inline (small) to avoid pulling a new
 // dependency for a single fetch helper.
@@ -286,44 +285,43 @@ let pairingInProgress = false;
  * Phase 3 — named-pipe IPC client (connects to the IDE extension's server).
  * Owned here so the heartbeat loop can read ideHandshakeActive from it.
  */
-let ideIpcClient: IdeIpcClient | null = null;
+let ideIpcRegistry: IdeIpcWorkspaceRegistry | null = null;
+let companionOwnerEndpointId: string | null = null;
 
 function ensureIdeIpcClient(vaultRoot: string): boolean {
-  if (ideIpcClient || !readNodeConfig(vaultRoot)) return false;
+  if (!readNodeConfig(vaultRoot)) return false;
+  if (ideIpcRegistry) {
+    ideIpcRegistry.refresh();
+    return false;
+  }
 
-  ideIpcClient = startIdeIpcClient();
+  ideIpcRegistry = new IdeIpcWorkspaceRegistry(vaultRoot);
   setDesktopCompanionActionHandler((action) => {
-    ideIpcClient?.send({
+    const message = {
       type: 'companionAction',
       action,
       nonce: generateNonce(),
       ts: new Date().toISOString(),
-    });
+    } as const;
+    const delivered = companionOwnerEndpointId
+      ? ideIpcRegistry?.sendToEndpoint(companionOwnerEndpointId, message) ?? false
+      : false;
+    if (!delivered) ideIpcRegistry?.sendToPreferred(message);
   });
-  ideIpcClient.on('connected', () => {
+  ideIpcRegistry.on('stateChanged', () => {
     const config = readNodeConfig(vaultRoot);
     if (config) {
       reportIdeHandshake(
         config.apiBaseUrl,
         config.nodeId,
         config.nodeToken,
-        true,
+        ideIpcRegistry?.hasActiveHandshake() ?? false,
       );
     }
   });
-  ideIpcClient.on('disconnected', () => {
-    const config = readNodeConfig(vaultRoot);
-    if (config) {
-      reportIdeHandshake(
-        config.apiBaseUrl,
-        config.nodeId,
-        config.nodeToken,
-        false,
-      );
-    }
-  });
-  ideIpcClient.on('message', (message) => {
+  ideIpcRegistry.on('message', (endpointId, message) => {
     if (message.type !== 'companionState') return;
+    companionOwnerEndpointId = endpointId;
     updateDesktopCompanion({
       visible: message.visible,
       state: message.state,
@@ -332,6 +330,7 @@ function ensureIdeIpcClient(vaultRoot: string): boolean {
       reducedMotion: message.reducedMotion,
     });
   });
+  ideIpcRegistry.refresh();
   return true;
 }
 
@@ -342,7 +341,7 @@ function reportCurrentIdeHandshake(vaultRoot: string): void {
     config.apiBaseUrl,
     config.nodeId,
     config.nodeToken,
-    ideIpcClient?.isHandshakeActive() ?? false,
+    ideIpcRegistry?.hasActiveHandshake() ?? false,
   );
 }
 
@@ -425,8 +424,9 @@ function disconnectIdeIpcClient(vaultRoot: string): void {
       false,
     );
   }
-  ideIpcClient?.disconnect();
-  ideIpcClient = null;
+  ideIpcRegistry?.disconnectAll();
+  ideIpcRegistry = null;
+  companionOwnerEndpointId = null;
 }
 
 function watchForNodeConfig(vaultRoot: string): void {
@@ -456,7 +456,7 @@ function watchForNodeConfig(vaultRoot: string): void {
             | 'insider'
             | undefined) ?? 'stable',
         allowUnsigned: process.env.FOUNDER_STACK_ALLOW_UNSIGNED === '1',
-        handshakeProbe: () => ideIpcClient?.isHandshakeActive() ?? false,
+        handshakeProbe: () => ideIpcRegistry?.hasActiveHandshake() ?? false,
       });
       notifyDesktop(
         EMBEDDED_RELAY_MODE ? 'Founder IDE connected' : 'Founder Node connected',
@@ -479,18 +479,8 @@ const FOUNDER_IDE_CAPABILITIES: BridgeCapabilityReport = {
 };
 
 function discoverFounderIdeSessions(nodeId: string): BridgeSession[] {
-  if (!ideIpcClient?.isHandshakeActive()) return [];
-  return [
-    {
-      id: `founder-ide:${nodeId}`,
-      workspaceId: `founder-ide:${nodeId}`,
-      title: 'Founder IDE',
-      subtitle: 'Connected through Founder Node',
-      ideProvider: 'founder-ide',
-      restorable: true,
-      lastActiveAt: new Date().toISOString(),
-    },
-  ];
+  void nodeId;
+  return ideIpcRegistry?.discoverSessions() ?? [];
 }
 
 const inferenceUsageReporter = new InferenceUsageReporter();
@@ -741,6 +731,7 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
 
   sessionSyncInFlight = true;
   try {
+    ideIpcRegistry?.refresh();
     const cursorSessions = discoverCursorSessions();
     const claudeSessions = discoverClaudeCodeSessions();
     const sessions = [
@@ -758,7 +749,10 @@ async function runSessionMessageSync(vaultRoot: string): Promise<void> {
 
     // Claim IDE dispatches on the fast loop so a Send from Founder OS reaches
     // Cursor within a few seconds, not only on the 30s full sync.
-    await processPendingDispatches(vaultRoot, ideIpcClient);
+    await processPendingDispatches(
+      vaultRoot,
+      (sessionId) => ideIpcRegistry?.resolveSession(sessionId) ?? null,
+    );
   } catch (err) {
     console.warn('Session message sync failed:', err);
   } finally {
@@ -799,7 +793,18 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     const claudeSessions = discoverClaudeCodeSessions();
     const founderIdeWorkspaces = discoverFounderIdeAgentWorkspaces();
     const founderIdeAgents = discoverFounderIdeAgents();
-    const workspaces = [...founderIdeWorkspaces, ...cursorWorkspaces, ...claudeWorkspaces];
+    ideIpcRegistry?.refresh();
+    const founderIdeConnectedWorkspaces = ideIpcRegistry?.discoverWorkspaces() ?? [];
+    const workspaces = [
+      ...new Map(
+        [
+          ...founderIdeConnectedWorkspaces,
+          ...founderIdeWorkspaces,
+          ...cursorWorkspaces,
+          ...claudeWorkspaces,
+        ].map((workspace) => [workspace.id, workspace]),
+      ).values(),
+    ];
     const agents = [...founderIdeAgents, ...cursorAgents, ...claudeAgents];
     const sessions = [
       ...discoverFounderIdeSessions(config.nodeId),
@@ -1338,7 +1343,7 @@ app.whenReady().then(() => {
     allowUnsigned: process.env.FOUNDER_STACK_ALLOW_UNSIGNED === '1',
     // An IDE update is healthy only after Founder Node completes the
     // authenticated named-pipe handshake with the installed extension.
-    handshakeProbe: () => ideIpcClient?.isHandshakeActive() ?? false,
+    handshakeProbe: () => ideIpcRegistry?.hasActiveHandshake() ?? false,
   });
   startIdeAutoUpdateChecks();
   // Refresh the tray tooltip periodically so IDE-update state transitions

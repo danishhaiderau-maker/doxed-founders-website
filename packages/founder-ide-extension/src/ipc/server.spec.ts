@@ -82,7 +82,9 @@ function connectAndHello(opts: {
   const installId = opts.installId ?? TEST_INSTALL_ID;
   const ipcSecret = opts.ipcSecret ?? TEST_IPC_SECRET;
   const protocolVersion = opts.protocolVersion ?? IPC_PROTOCOL_VERSION;
-  const pipePath = __testHooks.pipePathFor(TEST_INSTALL_ID);
+  const endpoint = __testHooks.endpointPresence();
+  assert.ok(endpoint, 'server endpoint presence should exist');
+  const pipePath = __testHooks.pipePathFor(TEST_INSTALL_ID, endpoint.endpointId);
 
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(pipePath);
@@ -151,7 +153,9 @@ describe('IPC server (Phase 3, Task 3)', () => {
   });
 
   it('listens on the installId-specific pipe path', () => {
-    const pipePath = __testHooks.pipePathFor(TEST_INSTALL_ID);
+    const endpoint = __testHooks.endpointPresence();
+    assert.ok(endpoint, 'server endpoint presence should exist');
+    const pipePath = __testHooks.pipePathFor(TEST_INSTALL_ID, endpoint.endpointId);
     // The server should be listening — connecting a socket should succeed.
     assert.doesNotThrow(() => {
       const probe = net.createConnection(pipePath);

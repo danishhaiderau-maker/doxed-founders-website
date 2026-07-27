@@ -6,9 +6,9 @@
  * the API and the IDE.
  *
  * Lifecycle:
- *   1. connectToIde() is called from main.ts shortly after the IDE process
- *      is detected. Looks up installId + ipcSecret from install.json /
- *      node-config.json and connects to `\\.\pipe\founder-ide-{installId}`.
+ *   1. The workspace registry discovers a short-lived endpoint record, then
+ *      this client reads installId + ipcSecret from install.json /
+ *      node-config.json and connects to that exact IDE window.
  *   2. Sends `IpcHello` with protocolVersion + installId + ipcSecret +
  *      capabilities. Waits for `IpcAuthState(state=connected)`.
  *   3. On success: emits `connected`, propagates `ideHandshakeActive = true`
@@ -105,8 +105,10 @@ export interface IdeIpcClientEvents {
 }
 
 /** Resolve install identity from install.json or node-config.json. */
-function resolveInstallIdentity(): { installId: string; ipcSecret: string } | null {
-  const vault = path.join(os.homedir(), 'FounderVault');
+function resolveInstallIdentity(
+  vaultRoot = path.join(os.homedir(), 'FounderVault'),
+): { installId: string; ipcSecret: string } | null {
+  const vault = vaultRoot;
   const sidecar = path.join(vault, 'install.json');
   try {
     if (fs.existsSync(sidecar)) {
@@ -138,12 +140,29 @@ function resolveInstallIdentity(): { installId: string; ipcSecret: string } | nu
   return null;
 }
 
-/** Compute the pipe path for the current platform + installId. */
-export function pipePathFor(installId: string): string {
+const ENDPOINT_ID_PATTERN = /^[0-9a-f-]{36}$/;
+
+/** Compute the pipe path for the current platform + install/window endpoint. */
+export function pipePathFor(installId: string, endpointId?: string): string {
+  const suffix = endpointId
+    ? `-${validateEndpointId(endpointId)}`
+    : '';
   if (process.platform === 'win32') {
-    return `\\\\.\\pipe\\founder-ide-${installId}`;
+    return `\\\\.\\pipe\\founder-ide-${installId}${suffix}`;
   }
-  return `/tmp/founder-ide-${installId}.sock`;
+  return `/tmp/founder-ide-${installId}${suffix}.sock`;
+}
+
+function validateEndpointId(endpointId: string): string {
+  if (!ENDPOINT_ID_PATTERN.test(endpointId)) {
+    throw new Error('Founder IDE endpoint id is invalid.');
+  }
+  return endpointId;
+}
+
+export interface IdeIpcClientOptions {
+  endpointId?: string;
+  vaultRoot?: string;
 }
 
 /**
@@ -164,9 +183,15 @@ export class IdeIpcClient extends EventEmitter {
   private activelyClosed = false;
   private handshakeComplete = false;
   private identity: { installId: string; ipcSecret: string } | null = null;
+  readonly endpointId: string | null;
+  private readonly vaultRoot?: string;
 
-  constructor() {
+  constructor(options: IdeIpcClientOptions = {}) {
     super();
+    this.endpointId = options.endpointId
+      ? validateEndpointId(options.endpointId)
+      : null;
+    this.vaultRoot = options.vaultRoot;
   }
 
   /**
@@ -178,7 +203,7 @@ export class IdeIpcClient extends EventEmitter {
    * without retrying — the caller should call connect() again after pairing.
    */
   connect(): Promise<boolean> {
-    this.identity = resolveInstallIdentity();
+    this.identity = resolveInstallIdentity(this.vaultRoot);
     if (!this.identity) {
       return Promise.resolve(false);
     }
@@ -261,7 +286,10 @@ export class IdeIpcClient extends EventEmitter {
    */
   private attemptConnection(): Promise<boolean> {
     if (!this.identity) return Promise.resolve(false);
-    const pipePath = pipePathFor(this.identity.installId);
+    const pipePath = pipePathFor(
+      this.identity.installId,
+      this.endpointId ?? undefined,
+    );
 
     return new Promise<boolean>((resolve) => {
       let settled = false;
@@ -404,9 +432,10 @@ export class IdeIpcClient extends EventEmitter {
  * Convenience entry point: build a client, connect it, log lifecycle events.
  * Used by main.ts to spin up the client after the IDE process is detected.
  */
-export function startIdeIpcClient(): IdeIpcClient {
-  const client = new IdeIpcClient();
-  client.on('connected', () => console.log('[ide-ipc] connected to IDE'));
+export function startIdeIpcClient(options: IdeIpcClientOptions = {}): IdeIpcClient {
+  const client = new IdeIpcClient(options);
+  const label = options.endpointId ? ` workspace ${options.endpointId}` : '';
+  client.on('connected', () => console.log(`[ide-ipc] connected to IDE${label}`));
   client.on('disconnected', (reason) => console.log(`[ide-ipc] disconnected: ${reason}`));
   client.on('authState', (state, reason) =>
     console.log(`[ide-ipc] authState=${state}${reason ? ` (${reason})` : ''}`),

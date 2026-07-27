@@ -182,7 +182,7 @@ export function activate(context: vscode.ExtensionContext): void {
   founderAuthenticationProvider = new FounderAuthenticationProvider({
     onDidSignIn: async () => {
       await syncVaultIntoSettings();
-      await startIpcServer();
+      await startWorkspaceIpcServer();
       registerOrNotify(context);
       pairingStatusBar?.setGatewayResult('ok');
       founderHub?.refresh();
@@ -480,7 +480,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // first and both converge on the same authenticated endpoint.
     ensureInstallIdentity();
   }
-  startIpcServer().catch((err) => {
+  startWorkspaceIpcServer().catch((err) => {
     console.warn('Founder OS IPC server failed to start:', err);
   });
 
@@ -488,7 +488,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // pairing isn't manual every session. Fire-and-forget; re-registers after.
   void syncVaultIntoSettings().then((synced) => {
     if (synced) {
-      void startIpcServer();
+      void startWorkspaceIpcServer();
       registerOrNotify(context);
     }
     founderAuthenticationProvider?.refresh();
@@ -499,6 +499,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Re-resolve when relevant settings change.
   context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void startWorkspaceIpcServer();
+    }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('founderOs')) {
         if (e.affectsConfiguration('founderOs.interfaceMode')) {
@@ -518,7 +521,7 @@ export function activate(context: vscode.ExtensionContext): void {
   watchVaultFile(context, () => {
     void syncVaultIntoSettings().then((synced) => {
       if (synced) {
-        void startIpcServer();
+        void startWorkspaceIpcServer();
         registerOrNotify(context);
       }
       founderAuthenticationProvider?.refresh();
@@ -651,6 +654,14 @@ export function deactivate(): void {
   stopIpcServer();
 }
 
+function startWorkspaceIpcServer(): Promise<import('node:net').Server | null> {
+  const workspace = vscode.workspace.workspaceFolders?.[0];
+  return startIpcServer({
+    workspacePath: workspace?.uri.fsPath ?? null,
+    workspaceName: workspace?.name ?? null,
+  });
+}
+
 /** Register the chat participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context: vscode.ExtensionContext): void {
   const creds = resolveCredentials();
@@ -771,7 +782,7 @@ async function signInWithFounderId(context: vscode.ExtensionContext): Promise<vo
     if (!session) return;
     // Reload from the vault file so the chat provider picks up the new creds.
     await syncVaultIntoSettings();
-    await startIpcServer();
+    await startWorkspaceIpcServer();
     registerOrNotify(context);
     pairingStatusBar.setGatewayResult('ok');
     founderHub?.refresh();
