@@ -16,7 +16,7 @@
     "pack:linux": "electron-builder --linux",
     "mcp:code-intelligence": "node dist/code-intelligence-mcp.js",
     "lint": "echo 'no lint configured'",
-    "test": "tsx --test test/code-intelligence-index.spec.ts test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/founder-ide-dispatch-protocol.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts"
+    "test": "tsx --test test/code-intelligence-index.spec.ts test/deployment-mode-status.spec.ts test/desktop-companion.spec.ts test/founder-ide-agent-discovery.spec.ts test/founder-ide-dispatch-protocol.spec.ts test/ide-ipc-client.spec.ts test/ide-update-manager.spec.ts test/runtime-mode.spec.ts test/startup-ownership.spec.ts"
   },
   "dependencies": {
     "@dcf/founder-vault": "*",

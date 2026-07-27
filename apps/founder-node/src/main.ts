@@ -20,6 +20,7 @@ import {
   ensureOnlyOneFounderNodeProcess,
   releaseGlobalInstanceLock,
 } from './single-instance';
+import { claimStartupOwnership } from './startup-ownership';
 import {
   defaultVaultRoot,
   ensureVault,
@@ -230,14 +231,20 @@ try {
 
 configureSharedElectronUserData();
 
-/** Cross-path lock (portable + NSIS) then Electron single-instance. */
-if (!enforceSingleFounderNodeInstance()) {
-  app.quit();
-  process.exit(0);
-}
-
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+/**
+ * Electron's shared-profile lock must come first. Every Founder IDE window
+ * activates the embedded launcher; checking the destructive cross-path
+ * fallback first let concurrent launches kill the healthy relay before they
+ * discovered that another Electron owner was already active.
+ */
+const startupOwnership = claimStartupOwnership({
+  requestElectronLock: () => app.requestSingleInstanceLock(),
+  releaseElectronLock: () => app.releaseSingleInstanceLock(),
+  acquireGlobalLock: enforceSingleFounderNodeInstance,
+});
+const gotSingleInstanceLock = startupOwnership === 'acquired';
 if (!gotSingleInstanceLock) {
+  console.log(`Founder Node: startup delegated (${startupOwnership})`);
   app.quit();
   process.exit(0);
 }
