@@ -300,10 +300,59 @@ def run():
     )
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(
-        "dashboard snapshot excludes the raw order book before deepcopy",
-        'if key != "order_book"' in dashboard_snapshot_source
+        "dashboard snapshot excludes unbounded state collections before deepcopy",
+        "if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS" in dashboard_snapshot_source
+        and "order_book" in bot._DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
+        and "ai_history" in bot._DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
         and 'snapshot.pop("order_book"' not in dashboard_snapshot_source,
     )
+    bounded_map_source = inspect.getsource(bot._snapshot_bounded_trades_map_locked)
+    check(
+        "relay trades-map work is bounded under the money-path lock",
+        "itertools.islice(reversed(trades_map.items()), remaining)" in bounded_map_source
+        and bot._RELAY_TRADES_MAP_MAX >= 64,
+    )
+    original_trades_map = bot.trades_map
+    try:
+        bot.trades_map = {
+            f"history-{i}": {
+                "signal_ref": {
+                    "trade_id": f"history-{i}",
+                    "status": "BLOCKED",
+                    "created_ts_ts": i,
+                    "research_lane": "CONTINUOUS",
+                    "oversized_research_payload": "x" * 10_000,
+                }
+            }
+            for i in range(bot._RELAY_TRADES_MAP_MAX * 4)
+        }
+        bot.trades_map["active-lock-test"] = {
+            "signal_ref": {
+                "trade_id": "active-lock-test",
+                "status": "ORDERED",
+                "order_placed": True,
+                "created_ts_ts": 1,
+                "research_lane": "CONTINUOUS",
+                "oversized_research_payload": "x" * 1_000_000,
+            }
+        }
+        started = time.monotonic()
+        with bot.trade_lock:
+            bounded = bot._snapshot_bounded_trades_map_locked(
+                [{"trade_id": "active-lock-test"}],
+                [],
+            )
+        elapsed = time.monotonic() - started
+        check(
+            "bounded relay snapshot preserves active ID and strips research payload",
+            "active-lock-test" in bounded
+            and len(bounded) <= bot._RELAY_TRADES_MAP_MAX
+            and "oversized_research_payload"
+            not in bounded["active-lock-test"]["signal_ref"]
+            and elapsed < 0.5,
+        )
+    finally:
+        bot.trades_map = original_trades_map
     check(
         "dashboard presentation refresh is not an aggressive hot loop",
         bot._API_STATE_REFRESH_INTERVAL_SEC >= 5.0,
@@ -345,6 +394,11 @@ def run():
         and "trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)" in dashboard_snapshot_source,
     )
     execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
+    check(
+        "relay active-signal rendering runs after releasing trade_lock",
+        execution_source.find("trade_lock.release()")
+        < execution_source.find("_collect_dashboard_active_signals("),
+    )
     check(
         "execution relay snapshot excludes presentation ledgers",
         "build_paper_order_book" not in execution_source
