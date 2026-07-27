@@ -13,12 +13,12 @@ import {
   normalizeFounderInterfaceMode,
 } from './founder-interface-mode';
 import {
+  createFounderGoalAmendmentDecision,
   enqueueFounderDecision,
   initialFounderGoalState,
   normalizeFounderGoalState,
   pendingFounderGoalDecisions,
   resolveFounderGoalUiDecision,
-  updateFounderGoalObjective,
   type FounderGoalUiDecision,
   type FounderGoalUiState,
 } from './founder-goal-state';
@@ -129,9 +129,9 @@ export class FounderHubProvider
           value.trim().length < 8 ? 'Use at least 8 characters.' : null,
       });
       if (objective) {
-        this.goalState = updateFounderGoalObjective(
+        this.goalState = enqueueFounderDecision(
           this.goalState,
-          objective,
+          createFounderGoalAmendmentDecision(this.goalState, objective),
         );
         await this.persistGoalState();
         this.refresh();
@@ -353,6 +353,14 @@ export class FounderHubProvider
           </button>
         `)
         .join('')
+      : '';
+    const decisionEvidence = decision?.evidence.length
+      ? `
+        <ul class="decision-evidence">
+          ${decision.evidence.slice(0, 3).map((item) =>
+            `<li>${escapeHtml(item)}</li>`).join('')}
+        </ul>
+      `
       : '';
     const agentRows = this.agentAwareness.tasks.map((task) => `
       <div class="agent-row ${task.conflict ? 'conflict' : ''}">
@@ -802,6 +810,27 @@ export class FounderHubProvider
       font-size: 10px;
       line-height: 1.45;
     }
+    .decision-context {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 9px;
+    }
+    .decision-risk {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 5px;
+    }
+    .decision-evidence {
+      display: grid;
+      gap: 3px;
+      margin: 0;
+      padding-left: 16px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.35;
+    }
     .decision-options {
       display: grid;
       gap: 4px;
@@ -927,7 +956,12 @@ export class FounderHubProvider
           <strong>Needs your decision</strong>
           <span class="decision-count">${pendingDecisions.length} waiting</span>
         </div>
+        <div class="decision-context">
+          <strong>${escapeHtml(decision.title)}</strong>
+          <span class="decision-risk">${escapeHtml(decision.risk.replaceAll('_', ' '))}</span>
+        </div>
         <p class="decision-question">${escapeHtml(decision.question)}</p>
+        ${decisionEvidence}
         <div class="decision-options">${decisionOptions}</div>
         ${decision.allowCustomAnswer ? `
           <button

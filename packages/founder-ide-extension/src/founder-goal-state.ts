@@ -16,6 +16,7 @@ export interface FounderGoalUiOption {
 
 export interface FounderGoalUiDecision {
   id: string;
+  kind: 'goal_amendment' | 'permission' | 'housekeeping' | 'research_preference';
   title: string;
   question: string;
   options: [FounderGoalUiOption, FounderGoalUiOption, FounderGoalUiOption?];
@@ -23,6 +24,8 @@ export interface FounderGoalUiDecision {
   independentWorkMayContinue: boolean;
   risk: 'read_only' | 'reversible_write' | 'external_write' | 'destructive';
   status: 'pending' | 'resolved' | 'cancelled';
+  evidence: string[];
+  proposedGoalObjective?: string;
   selectedOptionId?: string;
   customAnswer?: string;
   createdAt: string;
@@ -104,6 +107,46 @@ export function updateFounderGoalObjective(
   };
 }
 
+export function createFounderGoalAmendmentDecision(
+  state: FounderGoalUiState,
+  proposedObjective: string,
+  now = new Date(),
+): FounderGoalUiDecision {
+  const normalized = proposedObjective.replace(/\s+/g, ' ').trim().slice(0, 500);
+  if (!normalized || normalized === state.objective) {
+    throw new Error('The proposed goal must be different from the current goal.');
+  }
+  return {
+    id: `goal-amendment-${randomUUID()}`,
+    kind: 'goal_amendment',
+    title: 'Review goal change',
+    question: `Replace "${state.objective}" with "${normalized}"?`,
+    options: [
+      {
+        id: 'apply',
+        label: 'Apply new goal',
+        description: 'Use the proposed goal at the next safe task boundary.',
+        recommended: true,
+      },
+      {
+        id: 'keep',
+        label: 'Keep current goal',
+        description: 'Reject this proposal and continue with the current goal.',
+      },
+    ],
+    allowCustomAnswer: true,
+    independentWorkMayContinue: true,
+    risk: 'reversible_write',
+    status: 'pending',
+    evidence: [
+      `Current goal version: ${state.version}`,
+      'Completed external actions are not reversed by a goal amendment.',
+    ],
+    proposedGoalObjective: normalized,
+    createdAt: now.toISOString(),
+  };
+}
+
 export function enqueueFounderDecision(
   state: FounderGoalUiState,
   decision: unknown,
@@ -149,8 +192,9 @@ export function resolveFounderGoalUiDecision(
     throw new Error('Choose an option or provide an answer.');
   }
   const resolvedAt = (input.now ?? new Date()).toISOString();
-  return {
+  const resolvedState: FounderGoalUiState = {
     ...state,
+    updatedAt: resolvedAt,
     decisions: state.decisions.map((item) =>
       item.id === decision.id
         ? {
@@ -163,6 +207,22 @@ export function resolveFounderGoalUiDecision(
         : item,
     ),
   };
+  if (decision.kind !== 'goal_amendment') return resolvedState;
+  if (customAnswer) {
+    return updateFounderGoalObjective(
+      resolvedState,
+      customAnswer,
+      input.now ?? new Date(),
+    );
+  }
+  if (selectedOptionId === 'apply' && decision.proposedGoalObjective) {
+    return updateFounderGoalObjective(
+      resolvedState,
+      decision.proposedGoalObjective,
+      input.now ?? new Date(),
+    );
+  }
+  return resolvedState;
 }
 
 export function pendingFounderGoalDecisions(
@@ -193,6 +253,7 @@ function normalizeDecision(value: unknown): FounderGoalUiDecision | null {
   if (options.filter((option) => option.recommended).length > 1) return null;
   return {
     id,
+    kind: normalizeKind(candidate.kind),
     title,
     question,
     options: [
@@ -207,7 +268,23 @@ function normalizeDecision(value: unknown): FounderGoalUiDecision | null {
       candidate.status === 'resolved' || candidate.status === 'cancelled'
         ? candidate.status
         : 'pending',
+    evidence: Array.isArray(candidate.evidence)
+      ? candidate.evidence
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.replace(/\s+/g, ' ').trim().slice(0, 500))
+        .filter(Boolean)
+        .slice(0, 20)
+      : [],
     createdAt: validIso(candidate.createdAt) ?? new Date().toISOString(),
+    ...(typeof candidate.proposedGoalObjective === 'string'
+      && candidate.proposedGoalObjective.trim()
+      ? {
+        proposedGoalObjective: candidate.proposedGoalObjective
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 500),
+      }
+      : {}),
     ...(typeof candidate.selectedOptionId === 'string'
       ? { selectedOptionId: candidate.selectedOptionId.trim().slice(0, 120) }
       : {}),
@@ -254,6 +331,14 @@ function normalizeRisk(value: unknown): FounderGoalUiDecision['risk'] {
     || value === 'destructive'
     ? value
     : 'read_only';
+}
+
+function normalizeKind(value: unknown): FounderGoalUiDecision['kind'] {
+  return value === 'goal_amendment'
+    || value === 'permission'
+    || value === 'housekeeping'
+    ? value
+    : 'research_preference';
 }
 
 function validIso(value: unknown): string | null {

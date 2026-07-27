@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  createFounderGoalAmendmentDecision,
   enqueueFounderDecision,
   initialFounderGoalState,
   normalizeFounderGoalState,
@@ -10,8 +11,11 @@ import {
   type FounderGoalUiDecision,
 } from './founder-goal-state';
 
+const now = new Date('2026-07-27T00:00:00.000Z');
+
 const decision: FounderGoalUiDecision = {
   id: 'decision-housekeeping',
+  kind: 'housekeeping',
   title: 'Review housekeeping',
   question: 'What should Founder remove?',
   options: [
@@ -31,6 +35,7 @@ const decision: FounderGoalUiDecision = {
   independentWorkMayContinue: true,
   risk: 'destructive',
   status: 'pending',
+  evidence: ['2 generated directories, 1.4 GB total'],
   createdAt: '2026-07-27T00:00:00.000Z',
 };
 
@@ -79,6 +84,46 @@ describe('Founder IDE goal state', () => {
     });
     assert.equal(pendingFounderGoalDecisions(resolved).length, 0);
     assert.equal(resolved.decisions[0]?.selectedOptionId, 'review');
+  });
+
+  it('reviews a goal amendment before changing the active goal', () => {
+    const state = initialFounderGoalState('Founder IDE', now);
+    const amendment = createFounderGoalAmendmentDecision(
+      state,
+      'Ship Founder IDE with verified goal control',
+      now,
+    );
+    const queued = enqueueFounderDecision(state, amendment);
+    assert.equal(queued.objective, state.objective);
+    const resolved = resolveFounderGoalUiDecision(queued, {
+      decisionId: amendment.id,
+      selectedOptionId: 'apply',
+      now: new Date('2026-07-27T03:00:00.000Z'),
+    });
+    assert.equal(
+      resolved.objective,
+      'Ship Founder IDE with verified goal control',
+    );
+    assert.equal(resolved.version, 2);
+  });
+
+  it('can reject a proposed goal without disturbing the active goal', () => {
+    const state = initialFounderGoalState('Founder IDE', now);
+    const amendment = createFounderGoalAmendmentDecision(
+      state,
+      'Replace the product with an unrelated experiment',
+      now,
+    );
+    const resolved = resolveFounderGoalUiDecision(
+      enqueueFounderDecision(state, amendment),
+      {
+        decisionId: amendment.id,
+        selectedOptionId: 'keep',
+        now,
+      },
+    );
+    assert.equal(resolved.objective, state.objective);
+    assert.equal(resolved.version, 1);
   });
 
   it('rejects an unknown option and disallowed custom answer', () => {
