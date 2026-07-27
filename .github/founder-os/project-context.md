@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge pull request #59 from danishhaiderau-maker/agent/missed-showcase-diagnostic-suppression
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
