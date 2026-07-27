@@ -39,6 +39,7 @@ import {
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
   shouldClearShowcaseStatusError,
+  sourceEntityCreatedAtMs,
 } from './signal-subscriber-execution.service';
 
 test('showcase close fails closed when linked entry remainder state is unreadable', async () => {
@@ -586,6 +587,25 @@ test('active NEXT_FRESH_ONLY relay suppresses source-only entities born before a
   assert.deepEqual(
     reportableMirrorDiffsForRelayMode(diffs, true, null, armedAt),
     diffs.slice(1),
+  );
+});
+
+test('source position birth time survives a post-arm fill', () => {
+  const signalCreatedAt = Date.parse('2026-07-27T10:48:10.315Z');
+  const filledAt = Date.parse('2026-07-27T10:58:14.056Z');
+  assert.equal(
+    sourceEntityCreatedAtMs({
+      signal_created_ts: signalCreatedAt / 1000,
+      entry_ts: filledAt / 1000,
+    }),
+    signalCreatedAt,
+  );
+  assert.equal(
+    sourceEntityCreatedAtMs({
+      entry_ts: filledAt / 1000,
+      signal_age_sec: (filledAt - signalCreatedAt) / 1000,
+    }),
+    signalCreatedAt,
   );
 });
 

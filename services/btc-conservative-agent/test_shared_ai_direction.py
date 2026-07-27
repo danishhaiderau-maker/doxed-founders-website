@@ -355,6 +355,31 @@ def run():
         "state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source
         and "trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source,
     )
+    relay_position = bot._relay_position_row_lite(
+        {
+            "trade_id": "cont-pre-arm",
+            "status": "OPEN",
+            "dir": "LONG",
+            "entry": 65000.0,
+            "created_ts": 1_774_608_490.315,
+            "signal_created_ts": 1_774_608_490.315,
+            "order_created_ts": 1_774_608_492.003,
+            "entry_ts": 1_774_609_094.056,
+            "signal_age_sec": 603.741,
+        },
+        65010.0,
+    )
+    check(
+        "relay position preserves source birth watermark after fill",
+        relay_position.get("created_ts") == 1_774_608_490.315
+        and relay_position.get("signal_created_ts") == 1_774_608_490.315
+        and relay_position.get("order_created_ts") == 1_774_608_492.003,
+    )
+    check(
+        "open position builder persists source birth lineage",
+        '"created_ts": signal_ts or order_created or fill_ts' in inspect.getsource(bot._build_open_position)
+        and '"signal_created_ts": signal_ts or order.get("signal_created_ts")' in inspect.getsource(bot._build_open_position),
+    )
     lock_held = threading.Event()
     release_lock = threading.Event()
 
