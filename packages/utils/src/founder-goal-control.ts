@@ -83,6 +83,7 @@ export type FounderDecisionRequest = {
   status: 'pending' | 'resolved' | 'cancelled';
   autoResolveOptionId?: string;
   expiresAt?: string;
+  proposedGoalObjective?: string;
   housekeepingCandidates?: FounderHousekeepingCandidate[];
   researchFindings?: FounderDecisionResearchFinding[];
 };

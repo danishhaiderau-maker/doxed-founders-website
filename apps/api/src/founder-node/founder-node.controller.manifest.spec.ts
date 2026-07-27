@@ -31,10 +31,11 @@ function makeRes(): ExpressResponseStub {
   };
 }
 
-// Minimal stub of the five controller dependencies. Manifest serving
+// Minimal stub of the controller dependencies. Manifest serving
 // touches none of them, so they can be no-ops with loose typing.
 function makeController() {
   return new FounderNodeController(
+    {} as never,
     {} as never,
     {} as never,
     {} as never,

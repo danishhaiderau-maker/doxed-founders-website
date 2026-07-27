@@ -354,7 +354,7 @@ screenshots, quota tests, native final-response screenshots.
 - [x] Add one editable, versioned Goal Contract with objective, invariants,
   budgets, success evidence, status, and amendment history. Keep Goal, Task,
   Decision, and Evidence as separate concepts so progress remains legible.
-- [ ] Add a persistent "Needs your decision" inbox. Present two or three
+- [x] Add a persistent "Needs your decision" inbox. Present two or three
   context-specific options, put one evidence-backed recommendation first,
   accept a custom answer, and block only dependent tasks while unrelated work
   continues.
@@ -375,20 +375,26 @@ screenshots, quota tests, native final-response screenshots.
   private runtime episodes in ignored local state, and generate trajectory
   views from the event log rather than maintaining noisy duplicate files.
 
-Current Stage 6 boundary: the installed IDE has an editable local Goal surface,
-the authenticated API has a durable per-founder Goal/Decision/Research ledger,
-and executable AgentBus/build-queue work fails closed on an exact pending
-decision while unrelated work continues. The two ledgers are not yet
-automatically synchronized, so the persistent cross-device decision inbox
-remains unchecked. Housekeeping now has a bounded, read-only, no-content scan
-for exact reproducible-cache paths; it cannot delete, does not follow links,
-and downgrades incomplete measurements to keep. Duplicate/source-obsolescence
+Current Stage 6 boundary: the installed IDE has an editable Goal surface and a
+persistent "Needs your decision" inbox synchronized through the authenticated,
+paired Founder Node identity. Goal state is scoped by a path-free workspace
+identity, stays usable offline, uploads offline decisions and research after
+reconnection, and merges concurrent same-process writes instead of silently
+dropping one device's decision. Executable AgentBus/build-queue work fails
+closed on an exact pending decision while unrelated work continues. This V1
+merge is serialized within one API process; a future multi-replica database
+transaction/compare-and-swap remains an infrastructure hardening item.
+Housekeeping now has a bounded, read-only, no-content scan for exact
+reproducible-cache paths; it cannot delete, does not follow links, and
+downgrades incomplete measurements to keep. Duplicate/source-obsolescence
 analysis, stale-worktree review, restore checkpoints, and the separately
 authorized deletion executor remain unchecked.
 
 Evidence: race tests, stale-lease tests, cross-chat overlap demonstration,
-merge receipt, multi-agent task graph screenshots, API regression 285/285,
-utility regression 95/95, and native-extension regression 200/200.
+merge receipt, multi-agent task graph screenshots, concurrent decision-write
+test, paired-node credential/no-token-in-URL test, offline-resolution sync
+test, API regression 288/288, utility regression 95/95, and native-extension
+regression 203/203.
 
 ## Stage 7 - Founder-native Apple-inspired IDE and website UI
 

@@ -186,6 +186,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await startWorkspaceIpcServer();
       registerOrNotify(context);
       pairingStatusBar?.setGatewayResult('ok');
+      await founderHub?.syncGoalControl();
       founderHub?.refresh();
       founderSettings?.refresh();
       founderShortcuts?.refresh();

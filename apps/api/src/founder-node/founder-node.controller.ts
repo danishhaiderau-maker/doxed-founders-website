@@ -6,12 +6,18 @@ import {
   Get,
   Param,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { DeviceMemoryPayload } from '@dcf/utils';
+import type {
+  FounderDecisionRequest,
+  FounderDecisionResearchFinding,
+  FounderGoalContract,
+} from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
@@ -22,6 +28,7 @@ import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
+import { FounderCommandCenterService } from '../events/founder-command-center.service';
 import type { Response } from 'express';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -57,7 +64,88 @@ export class FounderNodeController {
     private readonly syncJobs: FounderNodeSyncService,
     private readonly vaultSync: FounderNodeVaultSyncService,
     private readonly ideBridge: IdeBridgeService,
+    private readonly commandCenter: FounderCommandCenterService,
   ) {}
+
+  @UseGuards(FounderNodeGuard)
+  @Get('goal-control')
+  goalControl(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Query('workspaceKey') workspaceKey?: string,
+  ) {
+    return this.commandCenter.getGoalControl(
+      req.founderNode.userId,
+      workspaceKey,
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('goal-control/goal')
+  saveGoal(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: FounderGoalContract & { workspaceKey?: string },
+  ) {
+    const { workspaceKey, ...goal } = body;
+    return this.commandCenter.saveGoal(
+      req.founderNode.userId,
+      goal,
+      workspaceKey,
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('goal-control/decisions')
+  queueDecision(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: FounderDecisionRequest & { workspaceKey?: string },
+  ) {
+    const { workspaceKey, ...decision } = body;
+    return this.commandCenter.queueDecision(
+      req.founderNode.userId,
+      decision,
+      workspaceKey,
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('goal-control/decisions/research')
+  appendDecisionResearch(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body()
+    body: {
+      decisionId: string;
+      finding: FounderDecisionResearchFinding;
+      workspaceKey?: string;
+    },
+  ) {
+    return this.commandCenter.appendDecisionResearch(
+      req.founderNode.userId,
+      body.decisionId,
+      body.finding,
+      body.workspaceKey,
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('goal-control/decisions/resolve')
+  resolveDecision(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body()
+    body: {
+      requestId: string;
+      selectedOptionId?: string;
+      selectedCandidateIds?: string[];
+      customAnswer?: string;
+      workspaceKey?: string;
+    },
+  ) {
+    const { workspaceKey, ...resolution } = body;
+    return this.commandCenter.resolveDecision(
+      req.founderNode.userId,
+      resolution,
+      workspaceKey,
+    );
+  }
 
   @Post('pairing-code')
   createPairingCode(

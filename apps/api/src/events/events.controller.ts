@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpException, Post, Res, HttpStatus } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpException, Post, Query, Res, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
 import type {
   DeviceMemoryPayload,
@@ -65,24 +65,29 @@ export class EventsController {
   }
 
   @Get('copilot/goal-control')
-  goalControl(@CurrentUser() user: AuthUser) {
-    return this.commandCenter.getGoalControl(user.id);
+  goalControl(
+    @CurrentUser() user: AuthUser,
+    @Query('workspaceKey') workspaceKey?: string,
+  ) {
+    return this.commandCenter.getGoalControl(user.id, workspaceKey);
   }
 
   @Post('copilot/goal-control/goal')
   saveGoal(
     @CurrentUser() user: AuthUser,
-    @Body() body: FounderGoalContract,
+    @Body() body: FounderGoalContract & { workspaceKey?: string },
   ) {
-    return this.commandCenter.saveGoal(user.id, body);
+    const { workspaceKey, ...goal } = body;
+    return this.commandCenter.saveGoal(user.id, goal, workspaceKey);
   }
 
   @Post('copilot/goal-control/decisions')
   queueDecision(
     @CurrentUser() user: AuthUser,
-    @Body() body: FounderDecisionRequest,
+    @Body() body: FounderDecisionRequest & { workspaceKey?: string },
   ) {
-    return this.commandCenter.queueDecision(user.id, body);
+    const { workspaceKey, ...decision } = body;
+    return this.commandCenter.queueDecision(user.id, decision, workspaceKey);
   }
 
   @Post('copilot/goal-control/decisions/research')
@@ -92,12 +97,14 @@ export class EventsController {
     body: {
       decisionId: string;
       finding: FounderDecisionResearchFinding;
+      workspaceKey?: string;
     },
   ) {
     return this.commandCenter.appendDecisionResearch(
       user.id,
       body.decisionId,
       body.finding,
+      body.workspaceKey,
     );
   }
 
@@ -110,9 +117,15 @@ export class EventsController {
       selectedOptionId?: string;
       selectedCandidateIds?: string[];
       customAnswer?: string;
+      workspaceKey?: string;
     },
   ) {
-    return this.commandCenter.resolveDecision(user.id, body);
+    const { workspaceKey, ...resolution } = body;
+    return this.commandCenter.resolveDecision(
+      user.id,
+      resolution,
+      workspaceKey,
+    );
   }
 
   @Get('copilot/founder-graph')

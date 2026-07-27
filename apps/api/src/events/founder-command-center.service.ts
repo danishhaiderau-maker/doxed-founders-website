@@ -79,27 +79,38 @@ export class FounderCommandCenterService {
     return this.builder.refreshActiveAgentRun(userId);
   }
 
-  getGoalControl(userId: string) {
-    return this.agentRuns.getGoalControl(userId);
+  getGoalControl(userId: string, workspaceKey?: string) {
+    return this.agentRuns.getGoalControl(userId, workspaceKey);
   }
 
-  saveGoal(userId: string, goal: import('@dcf/utils').FounderGoalContract) {
-    return this.agentRuns.saveGoal(userId, goal);
+  saveGoal(
+    userId: string,
+    goal: import('@dcf/utils').FounderGoalContract,
+    workspaceKey?: string,
+  ) {
+    return this.agentRuns.saveGoal(userId, goal, workspaceKey);
   }
 
   queueDecision(
     userId: string,
     decision: import('@dcf/utils').FounderDecisionRequest,
+    workspaceKey?: string,
   ) {
-    return this.agentRuns.queueDecision(userId, decision);
+    return this.agentRuns.queueDecision(userId, decision, workspaceKey);
   }
 
   appendDecisionResearch(
     userId: string,
     decisionId: string,
     finding: import('@dcf/utils').FounderDecisionResearchFinding,
+    workspaceKey?: string,
   ) {
-    return this.agentRuns.appendDecisionResearch(userId, decisionId, finding);
+    return this.agentRuns.appendDecisionResearch(
+      userId,
+      decisionId,
+      finding,
+      workspaceKey,
+    );
   }
 
   resolveDecision(
@@ -110,8 +121,9 @@ export class FounderCommandCenterService {
       selectedCandidateIds?: string[];
       customAnswer?: string;
     },
+    workspaceKey?: string,
   ) {
-    return this.agentRuns.resolveDecision(userId, input);
+    return this.agentRuns.resolveDecision(userId, input, workspaceKey);
   }
 
   async getFounderQueue(userId: string) {

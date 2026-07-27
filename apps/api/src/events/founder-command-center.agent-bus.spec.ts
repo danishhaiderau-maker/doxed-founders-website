@@ -391,4 +391,162 @@ describe('FounderAgentRunService goal control', () => {
       /secret-like/i,
     );
   });
+
+  it('keeps project goals separate while enforcing exact task decisions globally', async () => {
+    let memoryGraph: Record<string, unknown> = {};
+    const prisma = {
+      founderBuilderSettings: {
+        findUnique: async () => ({ memoryGraph }),
+        upsert: async (input: {
+          update: { memoryGraph: Record<string, unknown> };
+        }) => {
+          memoryGraph = structuredClone(input.update.memoryGraph);
+          return { memoryGraph };
+        },
+      },
+    };
+    const service = new FounderAgentRunService(prisma as never);
+    const first: FounderGoalContract = {
+      id: 'goal-first',
+      version: 1,
+      objective: 'Ship the first project',
+      constraints: [],
+      successEvidence: [
+        { id: 'tests', label: 'Tests pass', kind: 'test', required: true },
+      ],
+      status: 'active',
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    const second: FounderGoalContract = {
+      ...first,
+      id: 'goal-second',
+      objective: 'Ship the second project',
+      updatedAt: new Date(2_000).toISOString(),
+    };
+
+    await service.saveGoal('user-1', first, 'workspace-first');
+    await service.saveGoal('user-1', second, 'workspace-second');
+    await service.queueDecision('user-1', {
+      id: 'second-project-decision',
+      goalId: second.id,
+      goalVersion: second.version,
+      kind: 'permission',
+      risk: 'external_write',
+      title: 'Approve publishing',
+      question: 'Should Founder publish the second project?',
+      options: [
+        {
+          id: 'wait',
+          label: 'Wait',
+          description: 'Keep the release local.',
+          impact: 'No external change.',
+          recommended: true,
+        },
+        {
+          id: 'publish',
+          label: 'Publish',
+          description: 'Publish after the release gate.',
+          impact: 'Creates an external release.',
+        },
+      ],
+      allowCustomAnswer: false,
+      blockingTaskIds: ['publish-second'],
+      independentWorkMayContinue: true,
+      evidence: [],
+      createdAt: new Date(3_000).toISOString(),
+      status: 'pending',
+    }, 'workspace-second');
+
+    assert.equal(
+      (await service.getGoalControl('user-1', 'workspace-first')).goal?.id,
+      first.id,
+    );
+    assert.equal(
+      (await service.getGoalControl('user-1', 'workspace-second')).goal?.id,
+      second.id,
+    );
+    assert.equal(await service.taskCanContinue('user-1', 'publish-second'), false);
+    assert.equal(await service.taskCanContinue('user-1', 'build-first'), true);
+  });
+
+  it('keeps concurrent device decisions instead of losing the first write', async () => {
+    let memoryGraph: Record<string, unknown> = {};
+    const prisma = {
+      founderBuilderSettings: {
+        findUnique: async () => ({ memoryGraph }),
+        upsert: async (input: {
+          update: { memoryGraph: Record<string, unknown> };
+        }) => {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          memoryGraph = structuredClone(input.update.memoryGraph);
+          return { memoryGraph };
+        },
+      },
+    };
+    const service = new FounderAgentRunService(prisma as never);
+    const goal: FounderGoalContract = {
+      id: 'goal-concurrent',
+      version: 1,
+      objective: 'Keep every founder decision',
+      constraints: [],
+      successEvidence: [
+        { id: 'tests', label: 'Tests pass', kind: 'test', required: true },
+      ],
+      status: 'active',
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    const decision = (id: string): FounderDecisionRequest => ({
+      id,
+      goalId: goal.id,
+      goalVersion: goal.version,
+      kind: 'research_preference',
+      risk: 'read_only',
+      title: `Review ${id}`,
+      question: `Which option should ${id} use?`,
+      options: [
+        {
+          id: 'bounded',
+          label: 'Bounded',
+          description: 'Use bounded research.',
+          impact: 'Independent work continues.',
+          recommended: true,
+        },
+        {
+          id: 'broad',
+          label: 'Broad',
+          description: 'Use broad research.',
+          impact: 'Uses more time.',
+        },
+      ],
+      allowCustomAnswer: false,
+      blockingTaskIds: [id],
+      independentWorkMayContinue: true,
+      evidence: [],
+      createdAt: new Date(id === 'decision-a' ? 2_000 : 3_000).toISOString(),
+      status: 'pending',
+    });
+
+    await service.saveGoal('user-1', goal, 'workspace-concurrent');
+    await Promise.all([
+      service.queueDecision(
+        'user-1',
+        decision('decision-a'),
+        'workspace-concurrent',
+      ),
+      service.queueDecision(
+        'user-1',
+        decision('decision-b'),
+        'workspace-concurrent',
+      ),
+    ]);
+
+    const state = await service.getGoalControl(
+      'user-1',
+      'workspace-concurrent',
+    );
+    assert.deepEqual(
+      state.decisions.map((item) => item.id),
+      ['decision-a', 'decision-b'],
+    );
+  });
 });

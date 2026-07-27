@@ -25,6 +25,10 @@ import {
   type FounderGoalUiDecision,
   type FounderGoalUiState,
 } from './founder-goal-state';
+import {
+  synchronizeFounderGoalState,
+} from './founder-goal-cloud';
+import { workspaceActivityId } from './project-activity';
 
 type FounderHubAction =
   | 'signIn'
@@ -79,6 +83,9 @@ export class FounderHubProvider
     tasks: [],
   };
   private goalState: FounderGoalUiState;
+  private goalSyncState: 'local' | 'syncing' | 'synced' | 'offline' = 'local';
+  private goalSyncInFlight: Promise<void> | null = null;
+  private goalSyncRequested = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     const workspaceName =
@@ -87,6 +94,11 @@ export class FounderHubProvider
       context.workspaceState.get<unknown>('founder.goalState'),
       workspaceName,
     );
+    const timer = setInterval(() => {
+      void this.syncGoalControl();
+    }, 120_000);
+    timer.unref?.();
+    this.disposables.push(new vscode.Disposable(() => clearInterval(timer)));
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -101,6 +113,7 @@ export class FounderHubProvider
       ),
     );
     this.refresh();
+    void this.syncGoalControl();
   }
 
   refresh(): void {
@@ -117,6 +130,49 @@ export class FounderHubProvider
     this.goalState = enqueueFounderDecision(this.goalState, decision);
     await this.persistGoalState();
     this.refresh();
+  }
+
+  async syncGoalControl(): Promise<void> {
+    if (this.goalSyncInFlight) {
+      this.goalSyncRequested = true;
+      return this.goalSyncInFlight;
+    }
+    const credentials = resolveCredentials();
+    const workspaceKey = workspaceActivityId(
+      vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+    );
+    if (!credentials || !workspaceKey) {
+      this.goalSyncState = 'local';
+      this.refresh();
+      return;
+    }
+    this.goalSyncState = 'syncing';
+    this.refresh();
+    const sync = synchronizeFounderGoalState(
+      this.goalState,
+      credentials,
+      workspaceKey,
+    )
+      .then(async (state) => {
+        this.goalState = state;
+        this.goalSyncState = 'synced';
+        await this.context.workspaceState.update(
+          'founder.goalState',
+          this.goalState,
+        );
+      })
+      .catch(() => {
+        this.goalSyncState = 'offline';
+      })
+      .finally(() => {
+        this.goalSyncInFlight = null;
+        const shouldRepeat = this.goalSyncRequested;
+        this.goalSyncRequested = false;
+        this.refresh();
+        if (shouldRepeat) void this.syncGoalControl();
+      });
+    this.goalSyncInFlight = sync;
+    return sync;
   }
 
   dispose(): void {
@@ -349,6 +405,9 @@ export class FounderHubProvider
       'founder.goalState',
       this.goalState,
     );
+    this.goalSyncState = resolveCredentials() ? 'syncing' : 'local';
+    this.refresh();
+    void this.syncGoalControl();
   }
 
   private renderHtml(): string {
@@ -378,6 +437,14 @@ export class FounderHubProvider
     const decision = pendingDecisions[0];
     const goalStatus = this.goalState.status[0]!.toUpperCase()
       + this.goalState.status.slice(1);
+    const goalSyncLabel =
+      this.goalSyncState === 'synced'
+        ? 'Synced'
+        : this.goalSyncState === 'syncing'
+          ? 'Syncing'
+          : this.goalSyncState === 'offline'
+            ? 'Saved locally'
+            : 'On this device';
     const decisionOptions = decision
       ? decision.options
         .filter((option): option is NonNullable<typeof option> => Boolean(option))
@@ -1085,7 +1152,7 @@ export class FounderHubProvider
         </span>
       </div>
       <p class="goal-objective">${escapeHtml(this.goalState.objective)}</p>
-      <span class="goal-meta">${escapeHtml(goalStatus)} · Version ${this.goalState.version}</span>
+      <span class="goal-meta">${escapeHtml(goalStatus)} · Version ${this.goalState.version} · ${goalSyncLabel}</span>
     </section>
 
     ${decision ? `
