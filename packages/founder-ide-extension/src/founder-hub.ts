@@ -12,6 +12,16 @@ import {
 import {
   normalizeFounderInterfaceMode,
 } from './founder-interface-mode';
+import {
+  enqueueFounderDecision,
+  initialFounderGoalState,
+  normalizeFounderGoalState,
+  pendingFounderGoalDecisions,
+  resolveFounderGoalUiDecision,
+  updateFounderGoalObjective,
+  type FounderGoalUiDecision,
+  type FounderGoalUiState,
+} from './founder-goal-state';
 
 type FounderHubAction =
   | 'signIn'
@@ -40,9 +50,15 @@ type FounderHubAction =
   | 'toggleCompanion';
 
 interface FounderHubMessage {
-  type: 'action' | 'selectAgentMode';
+  type:
+    | 'action'
+    | 'selectAgentMode'
+    | 'editGoal'
+    | 'resolveDecision';
   action?: FounderHubAction;
   agentMode?: FounderAgentMode;
+  decisionId?: string;
+  optionId?: string;
 }
 
 export class FounderHubProvider
@@ -57,8 +73,16 @@ export class FounderHubProvider
     conflictCount: 0,
     tasks: [],
   };
+  private goalState: FounderGoalUiState;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    const workspaceName =
+      vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'this project';
+    this.goalState = normalizeFounderGoalState(
+      context.workspaceState.get<unknown>('founder.goalState'),
+      workspaceName,
+    );
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -84,12 +108,75 @@ export class FounderHubProvider
     this.refresh();
   }
 
+  async queueDecision(decision: unknown): Promise<void> {
+    this.goalState = enqueueFounderDecision(this.goalState, decision);
+    await this.persistGoalState();
+    this.refresh();
+  }
+
   dispose(): void {
     for (const disposable of this.disposables) disposable.dispose();
     this.disposables.length = 0;
   }
 
   private async handleMessage(message: FounderHubMessage): Promise<void> {
+    if (message.type === 'editGoal') {
+      const objective = await vscode.window.showInputBox({
+        title: 'Edit pursuing goal',
+        prompt: 'Describe the outcome Founder AI must keep pursuing.',
+        value: this.goalState.objective,
+        validateInput: (value) =>
+          value.trim().length < 8 ? 'Use at least 8 characters.' : null,
+      });
+      if (objective) {
+        this.goalState = updateFounderGoalObjective(
+          this.goalState,
+          objective,
+        );
+        await this.persistGoalState();
+        this.refresh();
+      }
+      return;
+    }
+
+    if (
+      message.type === 'resolveDecision'
+      && message.decisionId
+      && message.optionId
+    ) {
+      const decision = this.goalState.decisions.find(
+        (item) => item.id === message.decisionId && item.status === 'pending',
+      );
+      if (!decision) return;
+      let customAnswer: string | undefined;
+      let selectedOptionId: string | undefined = message.optionId;
+      if (message.optionId === '__custom__') {
+        selectedOptionId = undefined;
+        customAnswer = await vscode.window.showInputBox({
+          title: decision.title,
+          prompt: decision.question,
+          placeHolder: 'Write your answer',
+          validateInput: (value) =>
+            value.trim().length < 2 ? 'Write an answer or cancel.' : null,
+        });
+        if (!customAnswer) return;
+      }
+      try {
+        this.goalState = resolveFounderGoalUiDecision(this.goalState, {
+          decisionId: decision.id,
+          selectedOptionId,
+          customAnswer,
+        });
+        await this.persistGoalState();
+        this.refresh();
+      } catch (error) {
+        void vscode.window.showErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      return;
+    }
+
     if (message.type === 'selectAgentMode' && message.agentMode) {
       const agentMode = normalizeFounderAgentMode(message.agentMode);
       await vscode.workspace
@@ -217,6 +304,13 @@ export class FounderHubProvider
     this.refresh();
   }
 
+  private async persistGoalState(): Promise<void> {
+    await this.context.workspaceState.update(
+      'founder.goalState',
+      this.goalState,
+    );
+  }
+
   private renderHtml(): string {
     const nonce = randomBytes(16).toString('hex');
     const config = vscode.workspace.getConfiguration('founderOs');
@@ -240,6 +334,26 @@ export class FounderHubProvider
     const agentLabel = this.agentAwareness.activeCount === 0
       ? 'No active tasks'
       : `${this.agentAwareness.activeCount} active${this.agentAwareness.conflictCount > 0 ? ` | ${this.agentAwareness.conflictCount} coordinating` : ''}`;
+    const pendingDecisions = pendingFounderGoalDecisions(this.goalState);
+    const decision = pendingDecisions[0];
+    const goalStatus = this.goalState.status[0]!.toUpperCase()
+      + this.goalState.status.slice(1);
+    const decisionOptions = decision
+      ? decision.options
+        .filter((option): option is NonNullable<typeof option> => Boolean(option))
+        .map((option) => `
+          <button
+            class="decision-option ${option.recommended ? 'recommended' : ''}"
+            type="button"
+            data-decision-id="${escapeHtml(decision.id)}"
+            data-option-id="${escapeHtml(option.id)}"
+          >
+            <strong>${escapeHtml(option.label)}${option.recommended ? ' · Recommended' : ''}</strong>
+            <span>${escapeHtml(option.description)}</span>
+          </button>
+        `)
+        .join('')
+      : '';
     const agentRows = this.agentAwareness.tasks.map((task) => `
       <div class="agent-row ${task.conflict ? 'conflict' : ''}">
         <span class="agent-signal" aria-hidden="true"></span>
@@ -631,6 +745,88 @@ export class FounderHubProvider
     .agent-copy span, .agent-state { color: var(--muted); font-size: 9px; }
     .agent-row.conflict .agent-state { color: var(--founder-amber); }
 
+    .goal-panel {
+      display: grid;
+      gap: 7px;
+      padding: 12px 2px;
+      border-top: 1px solid var(--border);
+    }
+    .goal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .goal-label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .goal-meta {
+      color: var(--muted);
+      font-size: 9px;
+    }
+    .goal-objective {
+      overflow-wrap: anywhere;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.45;
+    }
+    .goal-edit {
+      border: 0;
+      background: transparent;
+      color: var(--vscode-textLink-foreground);
+      cursor: pointer;
+      font-size: 10px;
+    }
+    .decision-panel {
+      display: grid;
+      gap: 7px;
+      padding: 12px 2px;
+      border-top: 1px solid var(--border);
+    }
+    .decision-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .decision-count {
+      color: var(--founder-amber);
+      font-size: 9px;
+    }
+    .decision-question {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .decision-options {
+      display: grid;
+      gap: 4px;
+    }
+    .decision-option {
+      display: grid;
+      gap: 2px;
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px;
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+    }
+    .decision-option:hover {
+      background: var(--vscode-list-hoverBackground);
+    }
+    .decision-option.recommended {
+      border-color: color-mix(in srgb, var(--founder-green) 55%, var(--border));
+    }
+    .decision-option strong { font-size: 10px; }
+    .decision-option span { color: var(--muted); font-size: 9px; line-height: 1.35; }
+    .decision-footnote { color: var(--muted); font-size: 9px; line-height: 1.4; }
+
     .account-footer {
       margin-top: auto;
       padding-top: 14px;
@@ -716,6 +912,39 @@ export class FounderHubProvider
       </button>
     </nav>
 
+    <section class="goal-panel" aria-label="Pursuing goal">
+      <div class="goal-head">
+        <span class="goal-label">Pursuing goal</span>
+        <button class="goal-edit" type="button" data-edit-goal>Edit</button>
+      </div>
+      <p class="goal-objective">${escapeHtml(this.goalState.objective)}</p>
+      <span class="goal-meta">${escapeHtml(goalStatus)} · Version ${this.goalState.version}</span>
+    </section>
+
+    ${decision ? `
+      <section class="decision-panel" aria-label="Needs your decision">
+        <div class="decision-title">
+          <strong>Needs your decision</strong>
+          <span class="decision-count">${pendingDecisions.length} waiting</span>
+        </div>
+        <p class="decision-question">${escapeHtml(decision.question)}</p>
+        <div class="decision-options">${decisionOptions}</div>
+        ${decision.allowCustomAnswer ? `
+          <button
+            class="decision-option"
+            type="button"
+            data-decision-id="${escapeHtml(decision.id)}"
+            data-option-id="__custom__"
+          ><strong>Write another answer</strong><span>Give Founder different instructions.</span></button>
+        ` : ''}
+        <p class="decision-footnote">${
+          decision.independentWorkMayContinue
+            ? 'Independent work continues while this waits.'
+            : 'Dependent work is paused at a safe boundary.'
+        }</p>
+      </section>
+    ` : ''}
+
     <section class="agent-mode" aria-label="Agent mode">
       <div class="agent-mode-head"><strong>Agent mode</strong><span>${escapeHtml(agentModeDefinition.label)}</span></div>
       <div class="mode-switch" role="group" aria-label="Founder agent mode">${agentModeButtons}</div>
@@ -759,6 +988,19 @@ export class FounderHubProvider
     for (const button of document.querySelectorAll('[data-agent-mode]')) {
       button.addEventListener('click', () => {
         vscode.postMessage({ type: 'selectAgentMode', agentMode: button.dataset.agentMode });
+      });
+    }
+    const editGoal = document.querySelector('[data-edit-goal]');
+    editGoal?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'editGoal' });
+    });
+    for (const button of document.querySelectorAll('[data-decision-id]')) {
+      button.addEventListener('click', () => {
+        vscode.postMessage({
+          type: 'resolveDecision',
+          decisionId: button.dataset.decisionId,
+          optionId: button.dataset.optionId,
+        });
       });
     }
   </script>

@@ -412,6 +412,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.refreshHub', () =>
       founderHub?.refresh(),
     ),
+    vscode.commands.registerCommand(
+      'founderOs.queueDecision',
+      async (decision: unknown) => {
+        await founderHub?.queueDecision(decision);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${FounderHubProvider.viewId}.focus`);
+      },
+    ),
     vscode.commands.registerCommand('founderOs.refreshShortcuts', () =>
       founderShortcuts?.refresh(),
     ),
