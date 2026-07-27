@@ -4,7 +4,11 @@ export interface FounderInterfaceModeDefinition {
   id: FounderInterfaceMode;
   label: string;
   activityBarLocation: 'hidden' | 'default';
-  menuBarVisibility: 'toggle' | 'classic';
+  menuBarVisibility: 'hidden' | 'classic';
+  commandCenter: boolean;
+  layoutControl: boolean;
+  statusBarVisible: boolean;
+  editorTabs: 'single' | 'multiple';
   advancedIdeTools: boolean;
 }
 
@@ -13,7 +17,11 @@ export const FOUNDER_INTERFACE_MODES: readonly FounderInterfaceModeDefinition[] 
     id: 'founder',
     label: 'Founder mode',
     activityBarLocation: 'hidden',
-    menuBarVisibility: 'toggle',
+    menuBarVisibility: 'hidden',
+    commandCenter: false,
+    layoutControl: false,
+    statusBarVisible: false,
+    editorTabs: 'single',
     advancedIdeTools: false,
   },
   {
@@ -21,6 +29,10 @@ export const FOUNDER_INTERFACE_MODES: readonly FounderInterfaceModeDefinition[] 
     label: 'Developer mode',
     activityBarLocation: 'default',
     menuBarVisibility: 'classic',
+    commandCenter: true,
+    layoutControl: true,
+    statusBarVisible: true,
+    editorTabs: 'multiple',
     advancedIdeTools: true,
   },
 ] as const;

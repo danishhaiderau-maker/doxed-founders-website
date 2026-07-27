@@ -19,7 +19,11 @@ describe('Founder interface modes', () => {
         id: 'founder',
         label: 'Founder mode',
         activityBarLocation: 'hidden',
-        menuBarVisibility: 'toggle',
+        menuBarVisibility: 'hidden',
+        commandCenter: false,
+        layoutControl: false,
+        statusBarVisible: false,
+        editorTabs: 'single',
         advancedIdeTools: false,
       },
       {
@@ -27,6 +31,10 @@ describe('Founder interface modes', () => {
         label: 'Developer mode',
         activityBarLocation: 'default',
         menuBarVisibility: 'classic',
+        commandCenter: true,
+        layoutControl: true,
+        statusBarVisible: true,
+        editorTabs: 'multiple',
         advancedIdeTools: true,
       },
     ]);

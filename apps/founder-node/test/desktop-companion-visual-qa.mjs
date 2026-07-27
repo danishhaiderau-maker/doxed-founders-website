@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 
 const endpoint = process.env.FOUNDER_COMPANION_CDP || 'http://127.0.0.1:9451';
 const outputDir = path.resolve(process.env.FOUNDER_COMPANION_QA_DIR || 'artifacts/dragon-visual-qa');
+const skipNativeDrag = process.env.FOUNDER_COMPANION_SKIP_NATIVE_DRAG === '1';
 fs.mkdirSync(outputDir, { recursive: true });
 
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
@@ -96,8 +97,13 @@ const baseline = await evaluate(`(() => {
 })()`);
 await screenshot('dragon-idle.png');
 
-let dragEvidence = { tested: false };
-if (process.platform === 'win32') {
+let dragEvidence = {
+  tested: false,
+  reason: process.platform === 'win32' && skipNativeDrag
+    ? 'skipped-by-environment'
+    : 'unsupported-platform',
+};
+if (process.platform === 'win32' && !skipNativeDrag) {
   const moveCursor = (x, y) => execFileSync(
     'powershell.exe',
     [

@@ -8,7 +8,7 @@ type FounderReviewMessage = {
 	displayContent?: string;
 };
 
-export type FounderSecondBrainIntent = 'qa' | 'audit' | 'competition';
+export type FounderSecondBrainIntent = 'qa' | 'audit' | 'competition' | 'housekeeping';
 
 interface FounderSecondBrainContext {
 	schema_version: 1;
@@ -47,6 +47,11 @@ export const founderSecondBrainIntents: ReadonlyArray<{
 		id: 'competition',
 		label: 'Check competitive advantage',
 		instruction: 'Assess the product decision against credible current alternatives. Identify what is genuinely differentiated, what is commodity, what a competitor does better, and the smallest change that materially improves the founder advantage.',
+	},
+	{
+		id: 'housekeeping',
+		label: 'Check workspace health',
+		instruction: 'Inspect the workspace for obsolete duplicate source trees, generated artifacts committed as source, stale scripts, conflicting implementations, abandoned branches, secret-bearing files, and large reproducible caches. Recommend only evidence-backed cleanup. Do not delete, move, edit, or commit anything; separate safe-to-regenerate artifacts from source that requires human approval.',
 	},
 ];
 

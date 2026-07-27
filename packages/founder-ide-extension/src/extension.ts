@@ -398,6 +398,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('founderOs.openSettings', (tab?: unknown) =>
       founderSettings?.show(normalizeFounderSettingsTab(tab)),
     ),
+    vscode.commands.registerCommand('founderOs.toggleInterfaceMode', async () => {
+      const founder = vscode.workspace.getConfiguration('founderOs');
+      const current = normalizeFounderInterfaceMode(
+        founder.get<string>('interfaceMode'),
+      );
+      await founder.update(
+        'interfaceMode',
+        current === 'founder' ? 'developer' : 'founder',
+        vscode.ConfigurationTarget.Global,
+      );
+    }),
     vscode.commands.registerCommand('founderOs.refreshHub', () =>
       founderHub?.refresh(),
     ),
@@ -537,6 +548,34 @@ async function applyFounderInterfaceMode(revealFounderHome: boolean): Promise<vo
     await windowConfig.update(
       'menuBarVisibility',
       definition.menuBarVisibility,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  if (windowConfig.get<boolean>('commandCenter') !== definition.commandCenter) {
+    await windowConfig.update(
+      'commandCenter',
+      definition.commandCenter,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  if (workbench.get<boolean>('layoutControl.enabled') !== definition.layoutControl) {
+    await workbench.update(
+      'layoutControl.enabled',
+      definition.layoutControl,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  if (workbench.get<boolean>('statusBar.visible') !== definition.statusBarVisible) {
+    await workbench.update(
+      'statusBar.visible',
+      definition.statusBarVisible,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  if (workbench.get<string>('editor.showTabs') !== definition.editorTabs) {
+    await workbench.update(
+      'editor.showTabs',
+      definition.editorTabs,
       vscode.ConfigurationTarget.Global,
     );
   }

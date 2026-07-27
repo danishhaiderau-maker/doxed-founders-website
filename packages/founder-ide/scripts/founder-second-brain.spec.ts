@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   buildFounderSecondBrainPrompt,
   buildFounderSecondBrainReconciliationPrompt,
+  founderSecondBrainIntents,
 } from '../upstream/overlay/src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/founderSecondBrain';
 import {
   buildFounderReviewEvidencePack,
@@ -32,6 +33,24 @@ describe('Founder Second brain boundary', () => {
     assert.match(prompt, /"allow_workspace_mutation":false/);
     assert.match(prompt, /"verdict":"pass \| needs_correction \| insufficient_evidence"/);
     assert.doesNotMatch(prompt, /do-not-leak/);
+  });
+
+  it('offers read-only workspace housekeeping as an independent opinion', () => {
+    const housekeeping = founderSecondBrainIntents.find(
+      intent => intent.id === 'housekeeping',
+    );
+    assert.equal(housekeeping?.label, 'Check workspace health');
+    const prompt = buildFounderSecondBrainPrompt(
+      [
+        { role: 'user', content: 'Keep this workspace efficient.' },
+        { role: 'assistant', displayContent: 'The implementation is complete.' },
+      ],
+      'housekeeping',
+      'Kimi reviewer',
+    );
+    assert.match(prompt, /obsolete duplicate source trees/);
+    assert.match(prompt, /Do not delete, move, edit, or commit anything/);
+    assert.match(prompt, /"allow_workspace_mutation":false/);
   });
 
   it('recognizes only the latest founder review request', () => {

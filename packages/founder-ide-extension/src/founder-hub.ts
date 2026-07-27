@@ -1,12 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { readVaultConfig, resolveCredentials } from './credentials';
-import {
-  FOUNDER_WORKSPACE_MODES,
-  normalizeWorkspaceMode,
-  workspaceModeDefinition,
-  type FounderWorkspaceMode,
-} from './founder-hub-state';
 import type { FounderAgentAwarenessSummary } from './agent-awareness';
 import {
   FOUNDER_AGENT_MODES,
@@ -16,7 +10,6 @@ import {
   type FounderAgentMode,
 } from './founder-agent-mode';
 import {
-  founderInterfaceModeDefinition,
   normalizeFounderInterfaceMode,
 } from './founder-interface-mode';
 
@@ -28,6 +21,8 @@ type FounderHubAction =
   | 'openProjects'
   | 'openChats'
   | 'openAgents'
+  | 'openPreview'
+  | 'openDeploy'
   | 'openFiles'
   | 'openSearch'
   | 'openSourceControl'
@@ -45,9 +40,8 @@ type FounderHubAction =
   | 'toggleCompanion';
 
 interface FounderHubMessage {
-  type: 'action' | 'selectMode' | 'selectAgentMode';
+  type: 'action' | 'selectAgentMode';
   action?: FounderHubAction;
-  mode?: FounderWorkspaceMode;
   agentMode?: FounderAgentMode;
 }
 
@@ -106,15 +100,6 @@ export class FounderHubProvider
       return;
     }
 
-    if (message.type === 'selectMode' && message.mode) {
-      const mode = normalizeWorkspaceMode(message.mode);
-      await vscode.workspace
-        .getConfiguration('founderOs')
-        .update('workspaceMode', mode, vscode.ConfigurationTarget.Global);
-      this.refresh();
-      return;
-    }
-
     if (message.type !== 'action' || !message.action) return;
     switch (message.action) {
       case 'signIn':
@@ -149,6 +134,31 @@ export class FounderHubProvider
       }
       case 'openAgents':
         await vscode.commands.executeCommand('founderOs.openAgents');
+        break;
+      case 'openPreview': {
+        const previewUrl = vscode.workspace
+          .getConfiguration('founderOs')
+          .get<string>('previewUrl', 'http://localhost:3000')
+          .trim();
+        try {
+          await vscode.commands.executeCommand(
+            'simpleBrowser.api.open',
+            vscode.Uri.parse(previewUrl),
+            {
+              viewColumn: vscode.ViewColumn.Active,
+              preserveFocus: false,
+            },
+          );
+          await vscode.commands.executeCommand(
+            'workbench.action.focusActiveEditorGroup',
+          );
+        } catch {
+          await vscode.env.openExternal(vscode.Uri.parse(previewUrl));
+        }
+        break;
+      }
+      case 'openDeploy':
+        await vscode.commands.executeCommand('founderOs.openConnectionsView');
         break;
       case 'openFiles':
         await vscode.commands.executeCommand('workbench.view.explorer');
@@ -190,13 +200,7 @@ export class FounderHubProvider
         await vscode.commands.executeCommand('founderOs.openProjectBrief');
         break;
       case 'toggleAdvancedTools': {
-        const founder = vscode.workspace.getConfiguration('founderOs');
-        const current = normalizeFounderInterfaceMode(founder.get<string>('interfaceMode'));
-        await founder.update(
-          'interfaceMode',
-          current === 'founder' ? 'developer' : 'founder',
-          vscode.ConfigurationTarget.Global,
-        );
+        await vscode.commands.executeCommand('founderOs.toggleInterfaceMode');
         break;
       }
       case 'toggleCompanion': {
@@ -216,13 +220,10 @@ export class FounderHubProvider
   private renderHtml(): string {
     const nonce = randomBytes(16).toString('hex');
     const config = vscode.workspace.getConfiguration('founderOs');
-    const mode = normalizeWorkspaceMode(config.get<string>('workspaceMode'));
-    const modeDefinition = workspaceModeDefinition(mode);
     const agentMode = normalizeFounderAgentMode(config.get<string>('agentMode'));
     const agentModeDefinition = founderAgentModeDefinition(agentMode);
     const companionEnabled = config.get<boolean>('companion.enabled', true);
     const interfaceMode = normalizeFounderInterfaceMode(config.get<string>('interfaceMode'));
-    const interfaceDefinition = founderInterfaceModeDefinition(interfaceMode);
     const workspaceLabel =
       vscode.workspace.workspaceFolders?.[0]?.name?.trim() || 'Open a project';
     const credentials = resolveCredentials();
@@ -247,15 +248,6 @@ export class FounderHubProvider
       </div>
     `).join('');
 
-    const modeButtons = FOUNDER_WORKSPACE_MODES.map(
-      (candidate) => `
-        <button
-          class="mode-button ${candidate.id === mode ? 'selected' : ''}"
-          type="button"
-          data-mode="${candidate.id}"
-          aria-pressed="${candidate.id === mode}"
-        >${escapeHtml(candidate.label)}</button>`,
-    ).join('');
     const agentModeButtons = FOUNDER_AGENT_MODES.map(
       (candidate) => `
         <button
@@ -265,6 +257,22 @@ export class FounderHubProvider
           aria-pressed="${candidate.id === agentMode}"
         >${escapeHtml(candidate.label)}</button>`,
     ).join('');
+    const developerTools = interfaceMode === 'developer'
+      ? `
+        <section class="section">
+          <details open>
+            <summary>Developer tools <span class="summary-value">${escapeHtml(workspaceLabel)}</span></summary>
+            <div class="tool-list">
+              <button class="tool-item" type="button" data-action="openFiles"><strong>Files</strong><span>Workspace</span></button>
+              <button class="tool-item" type="button" data-action="openSearch"><strong>Search</strong><span>Code and text</span></button>
+              <button class="tool-item" type="button" data-action="openTerminal"><strong>Terminal</strong><span>Commands</span></button>
+              <button class="tool-item" type="button" data-action="runTask"><strong>Run task</strong><span>Build or test</span></button>
+              <button class="tool-item" type="button" data-action="openExtensions"><strong>Extensions</strong><span>Advanced</span></button>
+              <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>Founder mode</strong><span>Return to the focused AI workspace</span></button>
+            </div>
+          </details>
+        </section>`
+      : '';
 
     return `<!doctype html>
 <html lang="en">
@@ -681,9 +689,19 @@ export class FounderHubProvider
         <span class="nav-copy"><strong>Agents</strong><span>${escapeHtml(agentLabel)}</span></span>
         <span class="nav-arrow" aria-hidden="true">&gt;</span>
       </button>
+      <button class="nav-item" type="button" data-action="openPreview">
+        <span class="nav-icon" aria-hidden="true">B</span>
+        <span class="nav-copy"><strong>Browser</strong><span>Preview what Founder AI is building</span></span>
+        <span class="nav-arrow" aria-hidden="true">&gt;</span>
+      </button>
       <button class="nav-item" type="button" data-action="openSourceControl">
-        <span class="nav-icon" aria-hidden="true">G</span>
-        <span class="nav-copy"><strong>Graph</strong><span>Changes, commits, and history</span></span>
+        <span class="nav-icon" aria-hidden="true">C</span>
+        <span class="nav-copy"><strong>Changes</strong><span>Visual graph and AI review</span></span>
+        <span class="nav-arrow" aria-hidden="true">&gt;</span>
+      </button>
+      <button class="nav-item" type="button" data-action="openDeploy">
+        <span class="nav-icon" aria-hidden="true">D</span>
+        <span class="nav-copy"><strong>Deploy</strong><span>Ship through connected services</span></span>
         <span class="nav-arrow" aria-hidden="true">&gt;</span>
       </button>
       <button class="nav-item" type="button" data-action="openRemote">
@@ -711,42 +729,7 @@ export class FounderHubProvider
       </section>
     ` : ''}
 
-    <section class="section">
-      <details open>
-        <summary>Build and ship <span class="summary-value">${escapeHtml(workspaceLabel)}</span></summary>
-        <div class="tool-list">
-          <button class="tool-item" type="button" data-action="openFiles"><strong>Files</strong><span>Workspace</span></button>
-          <button class="tool-item" type="button" data-action="openSearch"><strong>Search</strong><span>Code and text</span></button>
-          <button class="tool-item" type="button" data-action="openSourceControl"><strong>Changes</strong><span>Review and commit</span></button>
-          <button class="tool-item" type="button" data-action="openTerminal"><strong>Terminal</strong><span>Commands</span></button>
-          <button class="tool-item" type="button" data-action="runTask"><strong>Run task</strong><span>Build or test</span></button>
-          <button class="tool-item" type="button" data-action="openProjectBrief"><strong>Project brief</strong><span>Last 24 hours and next work</span></button>
-          <button class="tool-item" type="button" data-action="openExtensions"><strong>Extensions</strong><span>Advanced</span></button>
-          <button class="tool-item" type="button" data-action="toggleAdvancedTools"><strong>${interfaceMode === 'founder' ? 'Developer mode' : 'Founder mode'}</strong><span>${interfaceMode === 'founder' ? 'Show the complete IDE toolset' : 'Return to the focused Founder workspace'}</span></button>
-        </div>
-      </details>
-    </section>
-
-    <section class="section">
-      <details>
-        <summary>Infrastructure <span class="summary-value">${escapeHtml(modeDefinition.label)}</span></summary>
-        <div class="mode-switch" role="group" aria-label="Infrastructure mode">${modeButtons}</div>
-        <div class="mode-summary">
-          <strong>${escapeHtml(modeDefinition.summary)}</strong>
-          <span>${escapeHtml(modeDefinition.services)}</span>
-        </div>
-      </details>
-    </section>
-
-    <section class="section">
-      <details>
-        <summary>Interface <span class="summary-value">${escapeHtml(interfaceDefinition.label)}</span></summary>
-        <div class="mode-summary">
-          <strong>${escapeHtml(interfaceDefinition.label)}</strong>
-          <span>${interfaceMode === 'founder' ? 'Chat, preview, changes, deploy, and agent status stay in focus.' : 'Files, terminal, source control, debugging, and extensions stay visible.'}</span>
-        </div>
-      </details>
-    </section>
+    ${developerTools}
 
     <footer class="account-footer">
       <div class="account-main">
@@ -761,6 +744,7 @@ export class FounderHubProvider
         <button class="text-button" type="button" data-action="showUsage">Usage</button>
         <button class="text-button" type="button" data-action="toggleCompanion">${companionEnabled ? 'Hide Dragon' : 'Show Dragon'}</button>
         <button class="text-button" type="button" data-action="openSettings">Settings</button>
+        ${interfaceMode === 'founder' ? '<button class="text-button" type="button" data-action="toggleAdvancedTools">Developer mode</button>' : ''}
       </div>
     </footer>
   </main>
@@ -770,11 +754,6 @@ export class FounderHubProvider
     for (const button of document.querySelectorAll('[data-action]')) {
       button.addEventListener('click', () => {
         vscode.postMessage({ type: 'action', action: button.dataset.action });
-      });
-    }
-    for (const button of document.querySelectorAll('[data-mode]')) {
-      button.addEventListener('click', () => {
-        vscode.postMessage({ type: 'selectMode', mode: button.dataset.mode });
       });
     }
     for (const button of document.querySelectorAll('[data-agent-mode]')) {

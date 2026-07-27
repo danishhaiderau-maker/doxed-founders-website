@@ -33,6 +33,9 @@
   "contributes": {
     "configurationDefaults": {
       "workbench.activityBar.location": "hidden",
+      "workbench.layoutControl.enabled": false,
+      "workbench.statusBar.visible": false,
+      "workbench.editor.showTabs": "single",
       "founderOs.interfaceMode": "founder",
       "founderOs.advancedIdeTools": false
     },
@@ -300,6 +303,10 @@
       {
         "command": "founderOs.openSettings",
         "title": "Founder: Open settings"
+      },
+      {
+        "command": "founderOs.toggleInterfaceMode",
+        "title": "Founder: Switch Founder / Developer mode"
       },
       {
         "command": "founderOs.refreshHub",

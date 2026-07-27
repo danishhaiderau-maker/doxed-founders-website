@@ -76,6 +76,7 @@ describe('Founder IDE extension manifest', () => {
     assert.ok(commands.has('founderOs.signOut'));
     assert.ok(commands.has('founderOs.openConnections'));
     assert.ok(commands.has('founderOs.openSettings'));
+    assert.ok(commands.has('founderOs.toggleInterfaceMode'));
     assert.ok(commands.has('founderOs.openProjects'));
     assert.ok(commands.has('founderOs.transcribeVoice'));
     assert.ok(commands.has('founderOs.refreshProjectContext'));
@@ -149,7 +150,9 @@ describe('Founder IDE extension manifest', () => {
       '<strong>Projects</strong>',
       '<strong>Chats</strong>',
       '<strong>Agents</strong>',
-      '<strong>Graph</strong>',
+      '<strong>Browser</strong>',
+      '<strong>Changes</strong>',
+      '<strong>Deploy</strong>',
       '<strong>Remote</strong>',
       '<strong>Connect</strong>',
     ]) {
@@ -162,6 +165,10 @@ describe('Founder IDE extension manifest', () => {
     );
     assert.match(extensionSource, /definition\.activityBarLocation/);
     assert.match(extensionSource, /definition\.menuBarVisibility/);
+    assert.match(extensionSource, /definition\.commandCenter/);
+    assert.match(extensionSource, /definition\.layoutControl/);
+    assert.match(extensionSource, /definition\.statusBarVisible/);
+    assert.match(extensionSource, /definition\.editorTabs/);
     assert.match(hubSource, /Developer mode/);
     assert.match(hubSource, /Founder mode/);
     assert.match(hubSource, /body\s*\{[\s\S]*?padding:\s*0;/);
@@ -184,6 +191,14 @@ describe('Founder IDE extension manifest', () => {
       hubSource,
       /case 'openChats':[\s\S]*?void\.historyAction/,
     );
+    assert.match(
+      hubSource,
+      /case 'openPreview':[\s\S]*?simpleBrowser\.api\.open/,
+    );
+    assert.match(
+      hubSource,
+      /case 'openDeploy':[\s\S]*?founderOs\.openConnectionsView/,
+    );
   });
 
   it('ships supported Founder-first layout settings as extension defaults', () => {
@@ -196,6 +211,9 @@ describe('Founder IDE extension manifest', () => {
     };
     assert.deepEqual(manifest.contributes?.configurationDefaults, {
       'workbench.activityBar.location': 'hidden',
+      'workbench.layoutControl.enabled': false,
+      'workbench.statusBar.visible': false,
+      'workbench.editor.showTabs': 'single',
       'founderOs.interfaceMode': 'founder',
       'founderOs.advancedIdeTools': false,
     });
