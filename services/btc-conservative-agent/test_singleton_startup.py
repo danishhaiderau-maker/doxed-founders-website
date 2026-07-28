@@ -89,6 +89,15 @@ def run():
         and "503 Service Unavailable" in server_source
         and "dashboard_busy" in server_source,
     )
+    check(
+        "relay authority and operator controls have reserved worker capacity",
+        "_priority_thread_cap = threading.BoundedSemaphore(4)" in server_source
+        and 'b"/api/relay-execution-state"' in server_source
+        and 'b"/api/pause"' in server_source
+        and 'b"/api/resume"' in server_source
+        and "socket.MSG_PEEK" in server_source
+        and "request_cap.release()" in server_source,
+    )
 
     snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(

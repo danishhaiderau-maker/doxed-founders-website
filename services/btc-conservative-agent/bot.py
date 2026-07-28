@@ -31147,16 +31147,48 @@ def _create_dashboard_server():
 
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
-        _thread_cap = threading.BoundedSemaphore(8)
+        _general_thread_cap = threading.BoundedSemaphore(8)
+        _priority_thread_cap = threading.BoundedSemaphore(4)
+        _priority_paths = (
+            b"/api/relay-execution-state",
+            b"/api/relay-state",
+            b"/api/ping",
+            b"/api/pause",
+            b"/api/resume",
+            b"/health",
+            b"/api/status",
+            b"/status",
+        )
         _client_io_timeout_sec = 15.0
         _overload_io_timeout_sec = 0.1
+
+        def _request_cap(self, request):
+            """Reserve four workers for money-path/control traffic.
+
+            Cloudflare, Agent Hub, the relay pusher, and local diagnostics can
+            synchronize after a restart. Presentation polls may consume all
+            eight general workers, but they must never crowd out canonical
+            authority, health, or the operator's safety controls.
+            """
+            try:
+                import socket
+
+                request.settimeout(0.05)
+                head = request.recv(1024, socket.MSG_PEEK)
+                first_line = head.split(b"\r\n", 1)[0]
+                if any(b" " + path + b" " in first_line for path in self._priority_paths):
+                    return self._priority_thread_cap
+            except (OSError, TimeoutError):
+                pass
+            return self._general_thread_cap
 
         def process_request(self, request, client_address):
             # Never block the accept loop waiting for a worker. If slow clients
             # hold all eight slots, blocking here fills the socket backlog and
             # eventually makes even /api/ping connection-refused. Reject
             # overload quickly so health probes remain truthful.
-            if not self._thread_cap.acquire(blocking=False):
+            request_cap = self._request_cap(request)
+            if not request_cap.acquire(blocking=False):
                 body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
                 response = (
                     b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -31184,20 +31216,20 @@ def _create_dashboard_server():
                 request.settimeout(self._client_io_timeout_sec)
                 t = threading.Thread(
                     target=self._release_and_process,
-                    args=(request, client_address),
+                    args=(request, client_address, request_cap),
                 )
                 if self.daemon_threads:
                     t.daemon = True
                 t.start()
             except Exception:
-                self._thread_cap.release()
+                request_cap.release()
                 raise
 
-        def _release_and_process(self, request, client_address):
+        def _release_and_process(self, request, client_address, request_cap):
             try:
                 self.process_request_thread(request, client_address)
             finally:
-                self._thread_cap.release()
+                request_cap.release()
 
     try:
         httpd = _BoundedThreadedWSGIServer(
@@ -31212,7 +31244,8 @@ def _create_dashboard_server():
 def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
-        f"(bounded werkzeug server, max_threads=8, backlog=64) [PIPELINE ENFORCEMENT]"
+        f"(bounded werkzeug server, general_threads=8, priority_threads=4, backlog=64) "
+        "[PIPELINE ENFORCEMENT]"
     )
     try:
         httpd.serve_forever()
