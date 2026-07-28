@@ -6085,11 +6085,29 @@ export function fetchFounderNodeStatus(token: string) {
 
 export function authorizeFounderNodeDevice(
   token: string,
-  input: { userCode: string; label?: string; platform?: string },
+  input: { userCode: string },
 ) {
   return apiFetch<{ authorized: true; founderId: string; nodeId: string }>(
     '/founder-node/device-code/authorize',
     { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export interface FounderNodeDevicePreview {
+  userCode: string;
+  deviceLabel: string;
+  platform: string | null;
+  appVersion: string | null;
+  installFingerprint: string;
+  requestedAt: string;
+  expiresAt: string;
+}
+
+export function inspectFounderNodeDevice(token: string, userCode: string) {
+  return apiFetch<FounderNodeDevicePreview>(
+    '/founder-node/device-code/inspect',
+    { method: 'POST', body: JSON.stringify({ userCode }) },
     token,
   );
 }

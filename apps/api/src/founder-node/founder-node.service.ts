@@ -19,7 +19,7 @@ import type {
 } from '@dcf/founder-vault';
 import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderCopilotService } from '../events/founder-copilot.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
@@ -275,7 +275,14 @@ export class FounderNodeService {
    * authorize time.
    */
   async createDeviceCode(
-    opts?: { userId?: string; installId?: string; ipcSecret?: string },
+    opts?: {
+      userId?: string;
+      installId?: string;
+      ipcSecret?: string;
+      deviceLabel?: string;
+      platform?: string;
+      appVersion?: string;
+    },
   ): Promise<DeviceCodeGrant> {
     // Expire any prior pending device codes for this user so only one is
     // active at a time — avoids "which code did I just generate?" confusion.
@@ -311,6 +318,9 @@ export class FounderNodeService {
         // fresh node with the caller's installId + ipcSecret in one shot.
         installId: opts?.installId ?? null,
         ipcSecretHash,
+        deviceLabel: this.boundedDeviceMetadata(opts?.deviceLabel, 80),
+        platform: this.boundedDeviceMetadata(opts?.platform, 40),
+        appVersion: this.boundedDeviceMetadata(opts?.appVersion, 40),
       },
     });
 
@@ -321,6 +331,64 @@ export class FounderNodeService {
       verificationUriComplete: `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
       expiresAt: expiresAt.toISOString(),
       interval: DEVICE_CODE_INTERVAL_S,
+    };
+  }
+
+  /**
+   * Bind a readable user code to the signed-in founder and return only the
+   * bounded, non-secret details required for an informed approval.
+   * Authorization remains a separate action after this preview.
+   */
+  async inspectDeviceCode(
+    userId: string,
+    userCode: string,
+  ): Promise<{
+    userCode: string;
+    deviceLabel: string;
+    platform: string | null;
+    appVersion: string | null;
+    installFingerprint: string;
+    requestedAt: string;
+    expiresAt: string;
+  }> {
+    const normalized = userCode.trim().toUpperCase();
+    let row = await this.prisma.founderNodeDeviceCode.findUnique({
+      where: { userCode: normalized },
+    });
+    if (!row || (row.userId !== null && row.userId !== userId)) {
+      throw new NotFoundException('Device code not found');
+    }
+    if (row.status !== 'pending' || row.expiresAt < new Date()) {
+      throw new BadRequestException('Device code is no longer available');
+    }
+
+    if (row.userId === null) {
+      const claimed = await this.prisma.founderNodeDeviceCode.updateMany({
+        where: { id: row.id, status: 'pending', userId: null },
+        data: { userId },
+      });
+      if (claimed.count !== 1) {
+        throw new BadRequestException('Device code is no longer available');
+      }
+      row = { ...row, userId };
+    }
+
+    const fingerprint = createHash('sha256')
+      .update(row.installId ?? row.id)
+      .digest('hex')
+      .slice(0, 12)
+      .toUpperCase()
+      .match(/.{1,4}/g)!
+      .join('-');
+
+    return {
+      userCode: row.userCode,
+      deviceLabel: row.deviceLabel?.trim() || `Founder IDE ${fingerprint}`,
+      platform: row.platform,
+      appVersion: row.appVersion,
+      installFingerprint: fingerprint,
+      requestedAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
     };
   }
 
@@ -475,12 +543,9 @@ export class FounderNodeService {
     const row = await this.prisma.founderNodeDeviceCode.findUnique({
       where: { userCode: normalized },
     });
-    // A grant is claimable by this founder if it's anonymous (userId null,
-    // the standard RFC 8628 tray flow) OR if it was pre-bound to them by the
-    // web app. A grant pre-bound to a DIFFERENT user is not claimable — that
-    // would let any logged-in founder hijack another's pending grant by
-    // guessing the userCode.
-    if (!row || (row.userId !== null && row.userId !== userId)) {
+    // A signed-in founder must inspect and bind the request before approval.
+    // The readable code is an authorization handle, never direct device access.
+    if (!row || row.userId !== userId) {
       throw new NotFoundException('Device code not found');
     }
     if (row.status === 'expired' || row.expiresAt < new Date()) {
@@ -522,12 +587,12 @@ export class FounderNodeService {
         create: {
           userId,
           nodeId,
-          label: opts.label.trim() || 'Founder Node',
+          label: row.deviceLabel?.trim() || `Founder IDE ${nodeId.slice(-8)}`,
           secretHash,
           status: 'online',
           lastSeenAt: new Date(),
-          platform: opts.platform ?? null,
-          appVersion: opts.appVersion ?? null,
+          platform: row.platform,
+          appVersion: row.appVersion,
           vaultHealthy: true,
           founderId: userId,
           tokenExpiresAt,
@@ -537,12 +602,12 @@ export class FounderNodeService {
         },
         update: {
           userId,
-          label: opts.label.trim() || 'Founder Node',
+          label: row.deviceLabel?.trim() || `Founder IDE ${nodeId.slice(-8)}`,
           secretHash,
           status: 'online',
           lastSeenAt: new Date(),
-          platform: opts.platform ?? null,
-          appVersion: opts.appVersion ?? null,
+          platform: row.platform,
+          appVersion: row.appVersion,
           vaultHealthy: true,
           founderId: userId,
           tokenExpiresAt,
@@ -879,6 +944,14 @@ export class FounderNodeService {
       encryptedVaultBlob: row.encryptedVaultBlob,
       updatedAt: row.updatedAt.toISOString(),
     };
+  }
+
+  private boundedDeviceMetadata(
+    value: string | undefined,
+    maxLength: number,
+  ): string | null {
+    const normalized = value?.trim().replace(/[\u0000-\u001f\u007f]/g, '');
+    return normalized ? normalized.slice(0, maxLength) : null;
   }
 
   private generatePairingCode(): string {

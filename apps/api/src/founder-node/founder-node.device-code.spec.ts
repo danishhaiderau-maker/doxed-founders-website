@@ -76,6 +76,9 @@ function makeStubPrisma() {
           founderId: data.founderId ?? null,
           installId: data.installId ?? null,
           ipcSecretHash: data.ipcSecretHash ?? null,
+          deviceLabel: data.deviceLabel ?? null,
+          platform: data.platform ?? null,
+          appVersion: data.appVersion ?? null,
           tokenExpiresAt: data.tokenExpiresAt ?? null,
           lastPolledAt: data.lastPolledAt ?? null,
           createdAt: new Date(),
@@ -270,12 +273,16 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       const grant = await svc.createDeviceCode({
         installId: 'install-secure',
         ipcSecret,
+        deviceLabel: 'Secure IDE',
+        platform: 'win32',
+        appVersion: '1.0.0',
       });
       const deviceRow = prisma._deviceCodes[0];
       assert.ok(deviceRow.ipcSecretHash);
       assert.notEqual(deviceRow.ipcSecretHash, ipcSecret);
       assert.equal(await bcrypt.compare(ipcSecret, deviceRow.ipcSecretHash!), true);
 
+      await svc.inspectDeviceCode('founder-secure', grant.userCode);
       const authorized = await svc.authorizeDeviceCode(
         'founder-secure',
         grant.userCode,
@@ -283,6 +290,28 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       );
       const node = prisma._nodes.find((candidate) => candidate.nodeId === authorized.nodeId);
       assert.equal(node?.ipcSecretHash, deviceRow.ipcSecretHash);
+      assert.equal(node?.label, 'Secure IDE');
+      assert.equal(node?.platform, 'win32');
+      assert.equal(node?.appVersion, '1.0.0');
+    });
+
+    it('stores bounded device metadata for the signed-in approval preview', async () => {
+      const grant = await svc.createDeviceCode({
+        installId: 'install-preview',
+        deviceLabel: `  ${'Laptop'.repeat(20)}\u0000  `,
+        platform: 'win32',
+        appVersion: '1.2.3',
+      });
+      const preview = await svc.inspectDeviceCode('founder-preview', grant.userCode);
+
+      assert.equal(preview.deviceLabel.length <= 80, true);
+      assert.equal(preview.deviceLabel.includes('\u0000'), false);
+      assert.equal(preview.platform, 'win32');
+      assert.equal(preview.appVersion, '1.2.3');
+      assert.match(preview.installFingerprint, /^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
+      assert.equal(prisma._deviceCodes[0].userId, 'founder-preview');
+      assert.equal('ipcSecretHash' in preview, false);
+      assert.equal('installId' in preview, false);
     });
 
     it('deviceCode is 64 hex chars (32 random bytes)', async () => {
@@ -308,6 +337,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       const grant = await svc.createDeviceCode();
       const userId = 'user-1';
       const nodeId = 'fn_' + 'a'.repeat(64);
+      await svc.inspectDeviceCode(userId, grant.userCode);
       await svc.authorizeDeviceCode(userId, grant.userCode, {
         nodeId,
         label: 'MacBook',
@@ -375,6 +405,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
 
     it('the authorized grant is single-use — second poll returns expired', async () => {
       const grant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('user-1', grant.userCode);
       await svc.authorizeDeviceCode('user-1', grant.userCode, {
         nodeId: 'fn_node1',
         label: 'Node 1',
@@ -388,6 +419,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
 
     it('allows only one winner when two authorized polls race', async () => {
       const grant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('user-1', grant.userCode);
       await svc.authorizeDeviceCode('user-1', grant.userCode, {
         label: 'Node 1',
       });
@@ -417,6 +449,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
   describe('authorizeDeviceCode', () => {
     it('mints nodeId when the browser flow does not provide one', async () => {
       const grant = await svc.createDeviceCode({ installId: 'install-browser' });
+      await svc.inspectDeviceCode('user-browser', grant.userCode);
       const result = await svc.authorizeDeviceCode('user-browser', grant.userCode, {
         label: 'Founder IDE on Windows',
       });
@@ -434,6 +467,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       const userId = 'founder-1';
       const nodeId = 'fn_' + 'b'.repeat(64);
 
+      await svc.inspectDeviceCode(userId, grant.userCode);
       const result = await svc.authorizeDeviceCode(userId, grant.userCode, {
         nodeId,
         label: 'Workstation',
@@ -454,11 +488,13 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
     it('does not let a legacy client reassign another founder nodeId', async () => {
       const nodeId = `fn_${'c'.repeat(64)}`;
       const ownerGrant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('owner-user', ownerGrant.userCode);
       await svc.authorizeDeviceCode('owner-user', ownerGrant.userCode, {
         nodeId,
         label: 'Owner laptop',
       });
       const attackerGrant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('other-user', attackerGrant.userCode);
 
       await assert.rejects(
         () =>
@@ -471,15 +507,11 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       assert.equal(prisma._nodes.find((node) => node.nodeId === nodeId)?.userId, 'owner-user');
     });
 
-    it('allows only one founder to authorize a pending grant', async () => {
+    it('allows only one founder to claim and inspect a pending grant', async () => {
       const grant = await svc.createDeviceCode();
       const results = await Promise.allSettled([
-        svc.authorizeDeviceCode('founder-a', grant.userCode, {
-          label: 'Founder A laptop',
-        }),
-        svc.authorizeDeviceCode('founder-b', grant.userCode, {
-          label: 'Founder B laptop',
-        }),
+        svc.inspectDeviceCode('founder-a', grant.userCode),
+        svc.inspectDeviceCode('founder-b', grant.userCode),
       ]);
       assert.equal(
         results.filter((result) => result.status === 'fulfilled').length,
@@ -491,8 +523,19 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
       );
     });
 
+    it('requires an explicit signed-in preview before authorization', async () => {
+      const grant = await svc.createDeviceCode();
+      await assert.rejects(
+        () => svc.authorizeDeviceCode('user-1', grant.userCode, {
+          label: 'Uninspected laptop',
+        }),
+        /not found/i,
+      );
+    });
+
     it('rejects an already-authorized grant', async () => {
       const grant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('user-1', grant.userCode);
       await svc.authorizeDeviceCode('user-1', grant.userCode, {
         nodeId: 'fn_n1',
         label: 'N1',
@@ -508,6 +551,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
 
     it('rejects an expired grant', async () => {
       const grant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('user-1', grant.userCode);
       // Force the row into the expired state.
       const row = prisma._deviceCodes[0];
       row.expiresAt = new Date(Date.now() - 1000);
@@ -522,6 +566,7 @@ describe('FounderNodeService — device-code (RFC 8628) contract', () => {
 
     it('rejects a denied grant', async () => {
       const grant = await svc.createDeviceCode();
+      await svc.inspectDeviceCode('user-1', grant.userCode);
       await svc.denyDeviceCode('user-1', grant.userCode);
       await assert.rejects(
         () => svc.authorizeDeviceCode('user-1', grant.userCode, {

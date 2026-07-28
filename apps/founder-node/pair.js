@@ -17,7 +17,7 @@
  */
 (function () {
   /** @typedef {{ status: 'pending'|'authorized'|'expired'|'denied'|'slow_down', interval?:number, error?:string }} PollResult */
-  /** @typedef {{ userCode:string, verificationUri:string, verificationUriComplete:string, expiresAt:string, interval:number, installId:string }} DeviceGrant */
+  /** @typedef {{ userCode:string, verificationUri:string, verificationUriComplete:string, expiresAt:string, interval:number, installFingerprint:string }} DeviceGrant */
 
   if (!window.founderNodePair) {
     document.body.innerHTML =
@@ -28,6 +28,8 @@
   // ─── Device-code first-run screen ──────────────────────────────────────
   /** @type {HTMLElement|null} */
   const userCodeEl = document.getElementById('userCode');
+  /** @type {HTMLElement|null} */
+  const installFingerprintEl = document.getElementById('installFingerprint');
   /** @type {HTMLElement|null} */
   const statusEl = document.getElementById('dcStatus');
   const statusMsg = statusEl?.querySelector('.msg');
@@ -61,12 +63,14 @@
   async function startDeviceCode() {
     if (!userCodeEl) return;
     userCodeEl.textContent = '····-····';
+    if (installFingerprintEl) installFingerprintEl.textContent = '---- ---- ----';
     setStatus('Requesting code…', '');
     try {
       /** @type {DeviceGrant} */
       const grant = await window.founderNodePair.startDeviceCode();
       currentGrant = grant;
       userCodeEl.textContent = grant.userCode;
+      if (installFingerprintEl) installFingerprintEl.textContent = grant.installFingerprint;
       setStatus('Waiting for authorization…', '');
       // Begin polling loop after the first interval.
       schedulePoll(grant.interval * 1000);

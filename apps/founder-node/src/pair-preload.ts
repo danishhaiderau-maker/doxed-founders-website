@@ -21,7 +21,7 @@ export type DeviceGrant = {
   verificationUriComplete: string;
   expiresAt: string;
   interval: number;
-  installId: string;
+  installFingerprint: string;
 };
 
 /**

@@ -2221,6 +2221,13 @@ model FounderNodeDeviceCode {
   founderId       String?
   installId       String?
   ipcSecretHash   String?   @db.Text
+  /**
+   * Bounded, device-supplied metadata shown to the signed-in founder before
+   * authorization. These fields are never accepted from the approval browser.
+   */
+  deviceLabel     String?
+  platform        String?
+  appVersion      String?
   tokenExpiresAt  DateTime?
   /**
    * Server-side timestamp of the last /device-code/poll request for this

@@ -276,7 +276,13 @@ export class FounderNodeController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('device-code')
   createDeviceCode(
-    @Body() body?: { installId?: string; ipcSecret?: string },
+    @Body() body?: {
+      installId?: string;
+      ipcSecret?: string;
+      deviceLabel?: string;
+      platform?: string;
+      appVersion?: string;
+    },
   ) {
     const ipcSecret = body?.ipcSecret?.trim();
     if (ipcSecret && !/^[0-9a-f]{64}$/i.test(ipcSecret)) {
@@ -289,7 +295,26 @@ export class FounderNodeController {
     return this.nodes.createDeviceCode({
       installId: body?.installId,
       ipcSecret,
+      deviceLabel: body?.deviceLabel,
+      platform: body?.platform,
+      appVersion: body?.appVersion,
     });
+  }
+
+  /**
+   * Claim a pending readable code for the signed-in founder and show the
+   * server-held device details before any authorization can occur.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('device-code/inspect')
+  inspectDeviceCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { userCode: string },
+  ) {
+    if (!body.userCode?.trim()) {
+      throw new BadRequestException('userCode required');
+    }
+    return this.nodes.inspectDeviceCode(user.id, body.userCode);
   }
 
   /**
@@ -337,25 +362,21 @@ export class FounderNodeController {
    * node, flips the grant to 'authorized', stashes the tokens for the next
    * /device-code/poll to return.
    *
-   * The web UI (apps/web/) is Worker 1's territory if it lives there; this is
-   * just the API. The web page calls POST /founder-node/device-code/authorize
-   * with { userCode, label }. The API mints nodeId when older clients do not
-   * supply one, keeping the browser flow free of local secrets.
+   * The web page submits only the readable userCode. Device identity and
+   * metadata are taken from the original local grant, keeping the browser
+   * flow free of local secrets and unable to choose a node identity.
    */
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('device-code/authorize')
   authorizeDeviceCode(
     @CurrentUser() user: AuthUser,
-    @Body() body: { userCode: string; nodeId?: string; label?: string; platform?: string; appVersion?: string },
+    @Body() body: { userCode: string },
   ) {
     if (!body.userCode?.trim()) {
       throw new BadRequestException('userCode required');
     }
     return this.nodes.authorizeDeviceCode(user.id, body.userCode, {
-      nodeId: body.nodeId,
-      label: body.label ?? 'Founder IDE',
-      platform: body.platform,
-      appVersion: body.appVersion,
+      label: 'Founder IDE',
     });
   }
 

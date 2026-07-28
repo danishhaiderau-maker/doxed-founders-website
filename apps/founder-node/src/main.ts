@@ -134,6 +134,7 @@ import {
 } from './desktop-companion';
 // Phase 2 — device-code first-run + pairing state machine.
 import {
+  installFingerprint,
   newInstallId,
   newIpcSecret,
   requestDeviceCode,
@@ -1557,6 +1558,11 @@ app.whenReady().then(() => {
       apiBaseUrl,
       install.installId,
       install.ipcSecret,
+      {
+        deviceLabel: os.hostname() || 'Founder IDE',
+        platform: process.platform,
+        appVersion: app.getVersion() || FOUNDER_NODE_LOCAL_VERSION,
+      },
     );
     activeDeviceCode = {
       deviceCode: grant.deviceCode,
@@ -1568,7 +1574,7 @@ app.whenReady().then(() => {
           `${grant.verificationUri}?user_code=${encodeURIComponent(grant.userCode)}`,
         expiresAt: grant.expiresAt,
         interval: grant.interval,
-        installId: install.installId,
+        installFingerprint: installFingerprint(install.installId),
       },
     };
     pairingInProgress = true;

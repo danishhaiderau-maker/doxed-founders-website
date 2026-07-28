@@ -14,7 +14,7 @@
  * node-config.json alongside the installId / ipcSecret that were presented
  * in the original grant request.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 /** RFC 8628 grant shape returned by POST /device-code. */
 export interface DeviceCodeGrant {
@@ -37,8 +37,8 @@ export interface DeviceCodeRendererGrant {
   verificationUriComplete: string;
   expiresAt: string;
   interval: number;
-  /** Echoed so the renderer can show the install id it's bound to. */
-  installId: string;
+  /** Non-secret digest the founder can compare with the browser approval page. */
+  installFingerprint: string;
 }
 
 /** Normalized poll result surfaced to the renderer. */
@@ -74,6 +74,16 @@ export function newIpcSecret(): string {
   return randomBytes(32).toString('hex');
 }
 
+/** Derive a short, readable, non-secret fingerprint for pairing verification. */
+export function installFingerprint(installId: string): string {
+  const digest = createHash('sha256')
+    .update(installId)
+    .digest('hex')
+    .slice(0, 12)
+    .toUpperCase();
+  return digest.match(/.{1,4}/g)?.join('-') ?? digest;
+}
+
 /**
  * Start a device-code grant. Calls POST /api/founder-node/device-code with
  * the install's installId (so authorize can pair a node bound to this
@@ -83,11 +93,22 @@ export async function requestDeviceCode(
   apiBaseUrl: string,
   installId: string,
   ipcSecret: string,
+  metadata: {
+    deviceLabel: string;
+    platform: string;
+    appVersion: string;
+  },
 ): Promise<{ grant: DeviceCodeGrant; installId: string }> {
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/device-code'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ installId, ipcSecret }),
+    body: JSON.stringify({
+      installId,
+      ipcSecret,
+      deviceLabel: metadata.deviceLabel,
+      platform: metadata.platform,
+      appVersion: metadata.appVersion,
+    }),
   });
   const body = (await res.json().catch(() => null)) as (DeviceCodeGrant & {
     message?: string | string[];

@@ -20,6 +20,9 @@
     /* ─── Device-code first-run screen ─── */
     #deviceCodeScreen { display: flex; flex-direction: column; gap: 0; }
     .userCode { font-family: 'Cascadia Code', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 2.5rem; font-weight: 700; letter-spacing: 0.15em; text-align: center; padding: 24px 0; color: #fafafa; background: #18181b; border: 1px solid #3f3f46; border-radius: 12px; margin: 16px 0; user-select: all; }
+    .fingerprint { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #3f3f46; border-radius: 8px; background: #18181b; }
+    .fingerprint span { color: #a1a1aa; font-size: 0.75rem; }
+    .fingerprint code { color: #e4e4e7; font-size: 0.8rem; letter-spacing: 0.08em; }
     .status { text-align: center; font-size: 0.875rem; color: #a1a1aa; margin: 8px 0 16px; }
     .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #fbbf24; margin-right: 6px; vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
     .status.ok .dot { background: #34d399; animation: none; }
@@ -39,6 +42,11 @@
     <p>Open the link below in your browser to authorize this machine. The code below is pre-filled when you click the button.</p>
 
     <div class="userCode" id="userCode">····-····</div>
+    <div class="fingerprint">
+      <span>Install fingerprint</span>
+      <code id="installFingerprint">---- ---- ----</code>
+    </div>
+    <p class="small">Before approving, confirm the browser shows this same fingerprint.</p>
 
     <div class="status" id="dcStatus"><span class="dot"></span><span class="msg">Requesting code…</span></div>
 

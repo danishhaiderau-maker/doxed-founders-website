@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { signIn, useSession } from 'next-auth/react';
 import { useSearchParams } from 'next/navigation';
 import { Check, Laptop, ShieldCheck, X } from 'lucide-react';
@@ -8,6 +8,8 @@ import { SiteBrand } from '@/components/site-nav';
 import {
   authorizeFounderNodeDevice,
   denyFounderNodeDevice,
+  inspectFounderNodeDevice,
+  type FounderNodeDevicePreview,
 } from '@/lib/api';
 
 type ResultState = 'idle' | 'authorizing' | 'authorized' | 'denied';
@@ -25,22 +27,46 @@ export default function FounderIdAuthorizeClient() {
   );
   const [result, setResult] = useState<ResultState>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<FounderNodeDevicePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const accessToken = session?.accessToken ?? null;
   const callbackUrl =
     typeof window === 'undefined'
       ? `/founder-id/authorize?user_code=${encodeURIComponent(userCode)}`
       : `${window.location.pathname}${window.location.search}`;
 
+  useEffect(() => {
+    if (!accessToken || !userCode) {
+      setPreview(null);
+      return;
+    }
+    let cancelled = false;
+    setPreviewLoading(true);
+    setError(null);
+    void inspectFounderNodeDevice(accessToken, userCode)
+      .then((nextPreview) => {
+        if (!cancelled) setPreview(nextPreview);
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setPreview(null);
+          setError(cause instanceof Error ? cause.message : 'Could not inspect this device.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, userCode]);
+
   async function authorize() {
     if (!accessToken || !userCode) return;
     setResult('authorizing');
     setError(null);
     try {
-      await authorizeFounderNodeDevice(accessToken, {
-        userCode,
-        label: `Founder IDE on ${navigator.platform || 'desktop'}`,
-        platform: navigator.platform || 'desktop',
-      });
+      await authorizeFounderNodeDevice(accessToken, { userCode });
       setResult('authorized');
     } catch (cause) {
       setResult('idle');
@@ -97,6 +123,34 @@ export default function FounderIdAuthorizeClient() {
                 <code className="text-sm font-semibold text-white">{userCode || 'Missing'}</code>
               </div>
 
+              {previewLoading && (
+                <p className="mt-4 text-sm text-zinc-500">Checking the device request...</p>
+              )}
+
+              {preview && (
+                <div className="mt-4 border border-zinc-800 bg-zinc-950 px-4 py-4">
+                  <p className="text-sm font-semibold text-white">{preview.deviceLabel}</p>
+                  <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+                    <dt className="text-zinc-500">System</dt>
+                    <dd className="text-right text-zinc-300">
+                      {[preview.platform, preview.appVersion].filter(Boolean).join(' · ') || 'Not reported'}
+                    </dd>
+                    <dt className="text-zinc-500">Install fingerprint</dt>
+                    <dd className="text-right font-mono text-zinc-300">
+                      {preview.installFingerprint}
+                    </dd>
+                    <dt className="text-zinc-500">Request expires</dt>
+                    <dd className="text-right text-zinc-300">
+                      {new Date(preview.expiresAt).toLocaleString()}
+                    </dd>
+                  </dl>
+                  <p className="mt-4 text-xs leading-5 text-zinc-500">
+                    Approve only if this matches the Founder IDE in front of you.
+                    The readable code cannot control the computer by itself.
+                  </p>
+                </div>
+              )}
+
               {!userCode && (
                 <p className="mt-4 text-sm text-red-300">
                   This link has no valid device code. Start sign-in again from Founder IDE.
@@ -124,7 +178,7 @@ export default function FounderIdAuthorizeClient() {
                 <div className="mt-6 flex gap-3">
                   <button
                     type="button"
-                    disabled={!userCode || result === 'authorizing'}
+                    disabled={!userCode || !preview || previewLoading || result === 'authorizing'}
                     onClick={() => void authorize()}
                     className="flex flex-1 items-center justify-center gap-2 bg-emerald-400 px-4 py-3 text-sm font-semibold text-black hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -133,7 +187,7 @@ export default function FounderIdAuthorizeClient() {
                   </button>
                   <button
                     type="button"
-                    disabled={!userCode || result === 'authorizing'}
+                    disabled={!userCode || !preview || previewLoading || result === 'authorizing'}
                     onClick={() => void deny()}
                     className="border border-zinc-700 px-4 py-3 text-sm font-medium text-zinc-300 hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
