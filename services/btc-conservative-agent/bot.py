@@ -29038,11 +29038,47 @@ def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label:
     return False
 
 def load_positions():
-    if state.get("strategy_mode") != "RESEARCH" and os.path.exists(POSITIONS_FILE):
-        with positions_file_lock:
-            with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
-                with state_lock:
-                    open_positions.extend(json.load(f))
+    if not os.path.exists(POSITIONS_FILE):
+        return
+    with positions_file_lock:
+        with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
+            persisted = json.load(f)
+    if isinstance(persisted, dict):
+        persisted = persisted.get("positions") or []
+    if not isinstance(persisted, list):
+        logger.warning("[POSITIONS] ignored malformed startup snapshot")
+        return
+    # A process restart must not silently erase an in-flight paper lifecycle.
+    # Fresh-data resets explicitly clear this file, so restoring valid OPEN
+    # rows in RESEARCH mode is both crash-safe and consistent with an operator
+    # requested wipe.  Preserve identity and never duplicate a row if startup
+    # recovery is invoked more than once.
+    restored = 0
+    with trade_lock:
+        known = {
+            str(pos.get("trade_id"))
+            for pos in open_positions
+            if isinstance(pos, dict) and pos.get("trade_id")
+        }
+        for pos in persisted:
+            if (
+                not isinstance(pos, dict)
+                or pos.get("status") != "OPEN"
+                or not pos.get("trade_id")
+                or float(pos.get("entry") or 0) <= 0
+            ):
+                continue
+            trade_id = str(pos.get("trade_id"))
+            if trade_id in known:
+                continue
+            lane_register_open_position(pos)
+            known.add(trade_id)
+            restored += 1
+    if restored:
+        logger.warning(
+            f"[POSITIONS] restored {restored} open lifecycle(s) after restart "
+            f"mode={state.get('strategy_mode')} [PIPELINE ENFORCEMENT]"
+        )
 
 def save_positions():
     with state_lock:

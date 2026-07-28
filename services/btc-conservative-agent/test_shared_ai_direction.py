@@ -527,6 +527,50 @@ def run():
         release_state.set()
         state_holder.join(timeout=1)
 
+    original_positions_file = bot.POSITIONS_FILE
+    original_open_positions = bot.open_positions
+    original_lane_open_positions = bot.lane_open_positions
+    original_strategy_mode = bot.state.get("strategy_mode")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot.POSITIONS_FILE = os.path.join(tmp, "open_positions.json")
+            restart_position = {
+                "trade_id": "paper-restart-lifecycle",
+                "status": "OPEN",
+                "dir": "LONG",
+                "entry": 65000.0,
+                "qty": 0.03,
+                "research_lane": bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            }
+            with open(bot.POSITIONS_FILE, "w", encoding="utf-8") as handle:
+                json.dump([restart_position], handle)
+            bot.open_positions = []
+            bot.lane_open_positions = {
+                **original_lane_open_positions,
+                bot.RESEARCH_LANE_TYPE_B_HUNTER_V1: [],
+            }
+            with bot.state_lock:
+                bot.state["strategy_mode"] = "RESEARCH"
+            bot.load_positions()
+            bot.load_positions()
+            check(
+                "research restart restores one persisted open paper lifecycle",
+                len(bot.open_positions) == 1
+                and bot.open_positions[0].get("trade_id") == "paper-restart-lifecycle"
+                and len(
+                    bot.lane_open_positions.get(
+                        bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
+                        [],
+                    )
+                ) == 1,
+            )
+    finally:
+        bot.POSITIONS_FILE = original_positions_file
+        bot.open_positions = original_open_positions
+        bot.lane_open_positions = original_lane_open_positions
+        with bot.state_lock:
+            bot.state["strategy_mode"] = original_strategy_mode
+
     original_refresh_bbo = bot.refresh_bbo_state
     original_refresh_book = bot.refresh_order_book_state
     original_funding = bot.process_funding_accrual
