@@ -1,0 +1,127 @@
+# Founder V1 Clean Integration Evidence
+
+Date: 2026-07-28
+
+This record describes the local Founder V1 integration candidate. It is not a
+production deployment receipt and it does not claim that the installed,
+clean-machine, signing, remote-production, or soak gates are complete.
+
+## Candidate identity
+
+- Branch: `release/founder-v1-clean-integration`
+- Candidate: `8590cbf3bf8f7aa6c3c886c0e54c6ac66fd58e36`
+- Fork point: `22fa7dd697c9adb5676fef358e39646049df81c6`
+- Required safety ancestor `06c7d02e408fddb7875a741ebcc8a6415ca9a797`:
+  present
+- Founder commits after the fork point: 76
+- Current local `origin/master`: `8cffb3d53bfd1760e6ba4ff4566303757a7b985a`
+- Current relationship to local `origin/master`: 76 ahead, 2 behind
+- Changed files in the Founder delta: 350
+- Protected trading/analyzer/workflow paths in the Founder delta: 0
+- Worktree status at evidence capture: clean
+- Conflict markers: none
+- `git diff --check`: pass
+
+`origin/master` advanced after this candidate was created. The two later commits
+are trading-owned changes. The final release candidate must be rebuilt or
+rebased from the then-current production-safe master and re-run the ancestry,
+protected-path, API, web, desktop, and executor dependency checks before any
+merge or deployment.
+
+## Automated evidence
+
+The following checks passed on this clean integration candidate. The final
+Dragon commit changes only the desktop companion HTML and its focused test; the
+unrelated full-suite evidence below was gathered on the same integration line
+before that two-file visual change.
+
+| Surface | Evidence |
+| --- | --- |
+| API | 34 suites, 307 tests passed |
+| API TypeScript | no-output compile passed |
+| API emit compile | passed |
+| Web | Next.js 15.5.18 production build passed; 58 static pages generated |
+| Founder IDE extension | 52 suites, 213 tests passed |
+| Founder Node | 22 suites, 60 tests passed |
+| Founder Node TypeScript | build passed |
+| Shared utils | 99 tests passed |
+| Founder release manifest | 18 tests passed |
+| Release evidence contract | 8 tests passed |
+| Fast development workflow | 2 tests passed |
+| Overlay and installer contracts | 40 tests passed |
+| Provider profiles, native completion, Skills, and Second Brain | 25 tests passed |
+| Website shell predicate | 6 tests passed |
+| Website remote label | 3 tests passed |
+
+The clean extension output was generated before the Founder Node suite because
+the Node relay protocol imports the compiled extension protocol. Generated
+extension output changes were restored after verification and were not included
+in the Dragon commit.
+
+## Living Dragon visual evidence
+
+Playwright rendered the actual transparent companion surface at 360 by 300 CSS
+pixels with a device scale factor of 2.
+
+- States inspected: idle, working, coordinating, success, attention
+- Images loaded: yes
+- Horizontal overflow: none
+- Vertical overflow: none
+- Transparent page background: preserved
+- Idle motion: two frames 900 ms apart changed 79,106 of 432,000 pixels
+  (18.31 percent), proving that the resting state is animated
+- A disconnected artifact in the idle source image was detected by visual QA
+  and masked without changing the Dragon or nest artwork
+- Reduced-motion rules disable the new state animations
+- Focused companion tests: 2 passed
+- Full Founder Node suite after dependency build: 60 passed
+
+Temporary local render evidence:
+`%TEMP%\founder-dragon-qa-20260728\`
+
+## Proven source capabilities
+
+The current source and contract suites prove the presence of these V1 building
+blocks:
+
+- one-app embedded Founder Node runtime ownership
+- authenticated and replay-protected IDE IPC
+- multi-workspace endpoint discovery and routing
+- Founder-managed DeepSeek and personal AI profile contracts
+- managed and personal visual input contracts
+- managed voice transport contracts
+- local Ollama compatibility
+- bounded workspace context graph with symbols, imports, reverse dependencies,
+  active-file PageRank seeding, and a sub-4K-token 10,000-file repository map
+- prompt prefix stability, bounded tool output, safe result caching, and
+  verified-solution memory
+- AgentBus V2 dependencies, scope claims, fencing tokens, ledger replay, stall
+  thresholds, and completion receipts
+- evidence-gated workspace housekeeping with exact approved paths and restore
+  receipts
+- Founder-first navigation, project history, goal state, Skills, and Second
+  Brain contracts
+- a transparent, draggable, always-on-top Founder Dragon companion with
+  resting, listening, planning, working, coordinating, verifying, delivered,
+  attention, error, offline, and update states
+
+## Gates still open
+
+Automated source evidence is not sufficient to claim V1 complete. These gates
+remain required:
+
+1. Rebase or replay the Founder delta onto the latest production-safe master,
+   followed by the full protected-path and dependency audit.
+2. Install the resulting one-app package and run native visual and interaction
+   QA for navigation, chat, attachments, microphone, settings, BYOK, Ollama,
+   Skills, Second Brain, terminal fallback, and all Founder modes.
+3. Prove the installed Founder Node remote pairing and authenticated action loop
+   end to end without exposing a reusable pairing secret.
+4. Audit the deployed website and admin controls against the shipped IDE
+   capacity and correct stale or misleading product claims.
+5. Produce a signed clean-machine installer receipt, or record signing as an
+   explicit external blocker for a clearly labelled beta channel.
+6. Complete clean Windows VM install/uninstall/update/rollback evidence.
+7. Complete the required stability/soak period.
+
+Until those gates have evidence, Founder V1 remains an active release goal.
