@@ -179,7 +179,19 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         );
       }
 
-      if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);
+      // The dashboard response is the strongest source of truth because it
+      // carries the same live bot snapshot used to render positions/orders.
+      // Do not let a separate, transiently stale status probe paint the hero
+      // "Offline" while that snapshot is actively streaming current data.
+      if (dashR.status === 'fulfilled' && dashR.value.botConnected) {
+        setPublicStatus(
+          dashR.value.executionPaused
+            ? { status: 'updating', label: 'Agent updating' }
+            : { status: 'online', label: 'Agent online' },
+        );
+      } else if (statusR.status === 'fulfilled') {
+        setPublicStatus(statusR.value);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load live data');
     } finally {
