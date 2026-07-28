@@ -88,7 +88,10 @@ def run():
 
         bot.requests.post = fake_post
         bot._report_showcase_inference_usage = fake_usage
-        text, latency_ms = bot.call_deepseek_api([{"role": "user", "content": "test"}])
+        text, latency_ms = bot.call_deepseek_api(
+            [{"role": "user", "content": "test"}],
+            purpose="trading_direction",
+        )
         check("successful V4 response parses", text == "ok" and latency_ms >= 0)
         check("request uses Flash", captured["json"]["model"] == "deepseek-v4-flash")
         check(
@@ -96,6 +99,41 @@ def run():
             captured["json"]["thinking"] == {"type": "disabled"},
         )
         check("usage records exact model", captured["usage"][2]["model"] == "deepseek-v4-flash")
+        blocked_snapshot = dict(captured)
+        try:
+            bot.call_deepseek_api(
+                [{"role": "user", "content": "analyze research"}],
+                purpose="research_report",
+            )
+            research_blocked = False
+        except RuntimeError as exc:
+            research_blocked = str(exc) == "AI_PURPOSE_BLOCKED:research_report"
+        check("non-trading AI purpose fails before network", research_blocked)
+        check("blocked research purpose made no request", captured == blocked_snapshot)
+        check(
+            "retired V2 research AI cannot be environment-enabled",
+            bot.TRADING_AI_ONLY and not bot._v2_research_collection_active(),
+        )
+        analyzer_source = (
+            Path(__file__).with_name("analyzer_research_engine_v62.py")
+        ).read_text(encoding="utf-8")
+        dashboard_source = (
+            Path(__file__).parent / "research" / "research_dashboard.py"
+        ).read_text(encoding="utf-8")
+        forbidden_egress = (
+            "api.deepseek.com",
+            "requests.post(",
+            "httpx.post(",
+            "OpenAI(",
+        )
+        check(
+            "deterministic analyzer has no AI-provider egress",
+            not any(marker in analyzer_source for marker in forbidden_egress),
+        )
+        check(
+            "research dashboard has no AI-provider egress",
+            not any(marker in dashboard_source for marker in forbidden_egress),
+        )
         with bot.state_lock:
             bot.state["ai_history"] = []
         bot._append_ai_history_row(
