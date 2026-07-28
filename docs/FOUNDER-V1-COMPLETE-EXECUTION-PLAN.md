@@ -1,6 +1,6 @@
 # Founder OS V1 Complete Execution Plan
 
-Status date: 2026-07-26
+Status date: 2026-07-29
 
 This is the canonical implementation checklist for Founder IDE, embedded
 Founder Node, the Founder website, and the V1 release. A feature is complete
@@ -45,6 +45,19 @@ only when its acceptance evidence exists. Chat claims are not evidence.
   do not become a new permanent activity icon each time a capability is added.
   Every skill declares tools, permissions, budget, evidence, and output
   contract.
+- New V1 capabilities are extension-first. Change the workbench core only when
+  the extension, embedded Founder Node, or website boundary cannot provide the
+  capability, and record that reason in the release evidence. This keeps
+  ordinary product iteration on the fast build lane.
+- The existing working system is presumed valuable. Before editing, every
+  implementation plan declares `reuse`, `extend`, or `replace`, identifies
+  affected architecture nodes and protected scopes, and sets a rewrite budget.
+  Replacement, deletion, public-API removal, or a budget increase requires
+  evidence and explicit approval rather than model preference.
+- Second Brain review is advisory and bounded. It cites evidence, records
+  confidence and dissent, and stops after three discussion rounds. The editing
+  agent remains responsible for the implementation; the founder remains the
+  final authority.
 - Independent review is a first-class "Second brain" workflow, not seven
   generic prompt chips. The founder chooses an enabled Personal AI profile and
   one review goal: QA the result, audit the approach, check competitive
@@ -646,6 +659,10 @@ gates.
   later owned Stage 11 changes require one final refresh.
 - [ ] Rebuild the installer after the final owned changes, then regenerate and
   validate the canonical release receipt against that exact artifact.
+  The receipt must include the preservation preflight, actual files and
+  architecture nodes changed, public APIs or components removed, rewrite-budget
+  variance, behavior-preservation checks, and the reason for every core
+  workbench change that could not be delivered extension-first.
 - [x] Add an explicit fast-compression installer-QA profile so install,
   shortcut, upgrade, and uninstall checks do not pay release-compression cost.
   Keep `lzma2/ultra64` and deterministic release settings unchanged for the
