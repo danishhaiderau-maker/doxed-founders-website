@@ -18003,23 +18003,33 @@ def fill_order(order):
     pipeline_state_sync()
 
 def process_positions():
-    refresh_bbo_state()
-    refresh_order_book_state()
-    price = state.get("price")
-    if price is None or price <= 0:
+    # heartbeat_loop and position_manager both provide lifecycle redundancy.
+    # Let only one of them evaluate positions at a time so depth simulation,
+    # EXIT_TRIGGERED telemetry and slow close work cannot run twice. This lock
+    # is deliberately independent of state_lock/trade_lock and non-blocking:
+    # redundant workers skip a busy cycle instead of starving API snapshots.
+    if not position_evaluation_lock.acquire(blocking=False):
         return
-    now = time.time()
-    process_funding_accrual()
-    with trade_lock:
-        positions = [
-            pos for pos in open_positions
-            if isinstance(pos, dict) and pos.get("status") == "OPEN"
-        ]
-    # Exit evaluation can close a position, persist research artifacts, and
-    # publish relay events. Never hold the global snapshot lock across it.
-    for pos in positions:
-        mark = get_executable_mark_price(pos, fallback=price)
-        _apply_position_exits(pos, mark, now)
+    try:
+        refresh_bbo_state()
+        refresh_order_book_state()
+        price = state.get("price")
+        if price is None or price <= 0:
+            return
+        now = time.time()
+        process_funding_accrual()
+        with trade_lock:
+            positions = [
+                pos for pos in open_positions
+                if isinstance(pos, dict) and pos.get("status") == "OPEN"
+            ]
+        # Exit evaluation can close a position, persist research artifacts, and
+        # publish relay events. Never hold the global snapshot lock across it.
+        for pos in positions:
+            mark = get_executable_mark_price(pos, fallback=price)
+            _apply_position_exits(pos, mark, now)
+    finally:
+        position_evaluation_lock.release()
 
 def place_postonly_tp(pos, target_pct):
     entry = pos.get("entry", 0)
@@ -21259,6 +21269,7 @@ def _emergency_api_guard():
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
 position_close_lock = threading.RLock()
+position_evaluation_lock = threading.Lock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(

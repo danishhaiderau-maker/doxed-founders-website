@@ -470,6 +470,21 @@ def run():
         < process_positions_source.find("_apply_position_exits("),
     )
     check(
+        "position lifecycle has one non-blocking evaluation owner",
+        "position_evaluation_lock.acquire(blocking=False)" in process_positions_source
+        and "position_evaluation_lock.release()" in process_positions_source,
+    )
+    bot.position_evaluation_lock.acquire()
+    try:
+        started = time.perf_counter()
+        bot.process_positions()
+        check(
+            "redundant position lifecycle worker skips a busy owner",
+            time.perf_counter() - started < 0.25,
+        )
+    finally:
+        bot.position_evaluation_lock.release()
+    check(
         "expired-order persistence runs after releasing trade_lock",
         cleanup_expired_source.find("with trade_lock:")
         < cleanup_expired_source.find("_record_expired_order("),
