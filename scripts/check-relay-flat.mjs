@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PrismaClient } from '@prisma/client';
+import prismaPackage from '../node_modules/.prisma/client/default.js';
 import { getVaultDir } from './secrets-vault-path.mjs';
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
@@ -32,6 +32,7 @@ for (const envFile of [
   }
 }
 
+const { PrismaClient } = prismaPackage;
 const prisma = new PrismaClient();
 const adminToken =
   process.env.BOT_ADMIN_TOKEN?.trim()
