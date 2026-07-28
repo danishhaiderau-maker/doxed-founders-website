@@ -17985,11 +17985,15 @@ def process_positions():
     now = time.time()
     process_funding_accrual()
     with trade_lock:
-        for pos in list(open_positions):
-            if not isinstance(pos, dict) or pos.get("status") != "OPEN":
-                continue
-            mark = get_executable_mark_price(pos, fallback=price)
-            _apply_position_exits(pos, mark, now)
+        positions = [
+            pos for pos in open_positions
+            if isinstance(pos, dict) and pos.get("status") == "OPEN"
+        ]
+    # Exit evaluation can close a position, persist research artifacts, and
+    # publish relay events. Never hold the global snapshot lock across it.
+    for pos in positions:
+        mark = get_executable_mark_price(pos, fallback=price)
+        _apply_position_exits(pos, mark, now)
 
 def place_postonly_tp(pos, target_pct):
     entry = pos.get("entry", 0)
@@ -20226,29 +20230,36 @@ def cleanup_expired_orders():
     now = time.time()
     expired_n = 0
     with trade_lock:
-        for order in list(pending_orders):
-            created = order.get("created_ts")
-            if not created or created <= 0:
-                _agent_dbg("H2", "cleanup_expired_orders", "bad_created_ts", {"trade_id": order.get("trade_id"), "created_ts": created})
+        candidates = list(pending_orders)
+    for order in candidates:
+        created = order.get("created_ts")
+        if not created or created <= 0:
+            _agent_dbg("H2", "cleanup_expired_orders", "bad_created_ts", {"trade_id": order.get("trade_id"), "created_ts": created})
+            continue
+        age = now - created
+        entry_deadline = float(
+            order.get("entry_expires_ts")
+            or (float(created) + LIMIT_ORDER_MAX_AGE_SEC)
+        )
+        if now < entry_deadline:
+            continue
+        # Claim removal atomically. Persistence/funnel/logging then run without
+        # starving /api/relay-execution-state.
+        with trade_lock:
+            if order not in pending_orders or order.get("status") != "PENDING":
                 continue
-            age = now - created
-            entry_deadline = float(
-                order.get("entry_expires_ts")
-                or (float(created) + LIMIT_ORDER_MAX_AGE_SEC)
-            )
-            if now >= entry_deadline:
-                if order in pending_orders:
-                    lane_unregister_pending_order(order)
-                _record_expired_order(order, "TTL_EXPIRED")
-                sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
-                try:
-                    from execution_funnel import funnel_on_expire
-                    funnel_on_expire(order, "TTL_EXPIRED")
-                except Exception:
-                    pass
-                expired_n += 1
-                _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": len(pending_orders)})
-                logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
+            lane_unregister_pending_order(order)
+            pending_left = len(pending_orders)
+        _record_expired_order(order, "TTL_EXPIRED")
+        sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
+        try:
+            from execution_funnel import funnel_on_expire
+            funnel_on_expire(order, "TTL_EXPIRED")
+        except Exception:
+            pass
+        expired_n += 1
+        _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": pending_left})
+        logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
     if expired_n:
         pipeline_state_sync()
 
@@ -20285,7 +20296,7 @@ def position_manager():
         set_execution_paused("THREAD_CRASH")
 
 def close_position(pos: dict, exit_reason: str):
-    """Close sim position — never hold state_lock while acquiring trade_lock (WS tick deadlock)."""
+    """Close sim position without starving global API snapshot locks."""
     if not validate_state():
         return
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -20298,7 +20309,10 @@ def close_position(pos: dict, exit_reason: str):
     price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
         pos["exit_fill_sim"] = exit_sim
-    with state_lock:
+    # Closing performs persistence, research logging, relay publication and
+    # optional exchange work. Serialize close claims on a dedicated lock rather
+    # than holding state_lock/trade_lock across that slow work.
+    with position_close_lock:
         if pos not in open_positions:
             return
         if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -21207,6 +21221,7 @@ def _emergency_api_guard():
 
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
+position_close_lock = threading.RLock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(

@@ -434,6 +434,102 @@ def run():
         "state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source
         and "trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in execution_source,
     )
+    process_positions_source = inspect.getsource(bot.process_positions)
+    cleanup_expired_source = inspect.getsource(bot.cleanup_expired_orders)
+    close_position_source = inspect.getsource(bot.close_position)
+    check(
+        "position exits run after releasing trade_lock",
+        process_positions_source.find("with trade_lock:")
+        < process_positions_source.find("for pos in positions:")
+        and process_positions_source.find("for pos in positions:")
+        < process_positions_source.find("_apply_position_exits("),
+    )
+    check(
+        "expired-order persistence runs after releasing trade_lock",
+        cleanup_expired_source.find("with trade_lock:")
+        < cleanup_expired_source.find("_record_expired_order("),
+    )
+    check(
+        "position close uses a dedicated serialization lock",
+        "with position_close_lock:" in close_position_source
+        and "with state_lock:" not in close_position_source.split("trade_row = {", 1)[0]
+        and "with trade_lock:" not in close_position_source.split("trade_row = {", 1)[0],
+    )
+
+    original_refresh_bbo = bot.refresh_bbo_state
+    original_refresh_book = bot.refresh_order_book_state
+    original_funding = bot.process_funding_accrual
+    original_apply_exits = bot._apply_position_exits
+    original_positions = bot.open_positions
+    exit_started = threading.Event()
+    release_exit = threading.Event()
+    try:
+        bot.refresh_bbo_state = lambda: None
+        bot.refresh_order_book_state = lambda: None
+        bot.process_funding_accrual = lambda: None
+        with bot.state_lock:
+            bot.state["price"] = 65000.0
+        bot.open_positions = [{"trade_id": "lock-soak", "status": "OPEN"}]
+
+        def _slow_exit(*_args, **_kwargs):
+            exit_started.set()
+            release_exit.wait(timeout=5)
+
+        bot._apply_position_exits = _slow_exit
+        worker = threading.Thread(target=bot.process_positions, daemon=True)
+        worker.start()
+        check("slow position-exit fixture started", exit_started.wait(timeout=1))
+        acquired = bot.trade_lock.acquire(timeout=0.5)
+        check("slow position-exit work does not hold trade_lock", acquired)
+        if acquired:
+            bot.trade_lock.release()
+    finally:
+        release_exit.set()
+        if "worker" in locals():
+            worker.join(timeout=1)
+        bot.refresh_bbo_state = original_refresh_bbo
+        bot.refresh_order_book_state = original_refresh_book
+        bot.process_funding_accrual = original_funding
+        bot._apply_position_exits = original_apply_exits
+        bot.open_positions = original_positions
+
+    original_record_expired = bot._record_expired_order
+    original_pending = bot.pending_orders
+    original_lane_pending = bot.lane_pending_orders
+    expiry_started = threading.Event()
+    release_expiry = threading.Event()
+    try:
+        expired_order = {
+            "trade_id": "lock-expiry",
+            "status": "PENDING",
+            "created_ts": time.time() - bot.LIMIT_ORDER_MAX_AGE_SEC - 10,
+            "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+        }
+        bot.pending_orders = [expired_order]
+        bot.lane_pending_orders = {
+            **original_lane_pending,
+            bot.RESEARCH_LANE_CONTINUOUS: [expired_order],
+        }
+
+        def _slow_expiry(*_args, **_kwargs):
+            expiry_started.set()
+            release_expiry.wait(timeout=5)
+
+        bot._record_expired_order = _slow_expiry
+        expiry_worker = threading.Thread(target=bot.cleanup_expired_orders, daemon=True)
+        expiry_worker.start()
+        check("slow order-expiry fixture started", expiry_started.wait(timeout=1))
+        acquired = bot.trade_lock.acquire(timeout=0.5)
+        check("slow order-expiry persistence does not hold trade_lock", acquired)
+        if acquired:
+            bot.trade_lock.release()
+    finally:
+        release_expiry.set()
+        if "expiry_worker" in locals():
+            expiry_worker.join(timeout=1)
+        bot._record_expired_order = original_record_expired
+        bot.pending_orders = original_pending
+        bot.lane_pending_orders = original_lane_pending
     relay_position = bot._relay_position_row_lite(
         {
             "trade_id": "cont-pre-arm",
