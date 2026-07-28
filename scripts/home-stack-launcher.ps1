@@ -243,17 +243,16 @@ function Invoke-TradingControl([ValidateSet("pause", "resume")][string]$Action) 
 
 function Invoke-StartAllGlobal {
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-  Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
-    "-BotPort", "$BotPort",
-    "-AnalyzerPort", "$AnalyzerPort"
-  ) -Title "Doxed Start Everything"
+  # Keep the single-threaded bridge listener responsive. The worker owns the
+  # visible orchestration window; the HTTP request only queues that work.
+  Invoke-HomeCommandBackground "start-all-global"
 }
 
 function Invoke-StopAllGlobal {
-  Start-VisibleConsole (Join-Path $scriptDir "home-stack-stop-everything.ps1") @(
-    "-BotPort", "$BotPort",
-    "-AnalyzerPort", "$AnalyzerPort"
-  ) -Title "Doxed Stop Everything"
+  # Stop can enumerate/terminate several process trees. Never hold the bridge
+  # request channel across that work or later Start/health requests will appear
+  # dead until the stop finishes.
+  Invoke-HomeCommandBackground "stop-all-global"
 }
 
 function Invoke-RestartBridge {

@@ -78,6 +78,21 @@ assert.match(common, /"--edge-ip-version", "4"/);
 assert.match(launcher, /\$script:BridgeTunnelCache/);
 assert.match(launcher, /Test-TunnelConnectorPresent \$probe/);
 assert.match(launcher, /Timeout = 7000/);
+const startAllGlobal = launcher.slice(
+  launcher.indexOf("function Invoke-StartAllGlobal"),
+  launcher.indexOf("function Invoke-StopAllGlobal"),
+);
+const stopAllGlobal = launcher.slice(
+  launcher.indexOf("function Invoke-StopAllGlobal"),
+  launcher.indexOf("function Invoke-RestartBridge"),
+);
+assert.match(startAllGlobal, /Invoke-HomeCommandBackground "start-all-global"/);
+assert.match(stopAllGlobal, /Invoke-HomeCommandBackground "stop-all-global"/);
+assert.doesNotMatch(
+  executableLines(startAllGlobal + stopAllGlobal),
+  /\bStart-VisibleConsole\b|home-stack-(?:start|stop)-everything\.ps1/,
+  "global Start/Stop HTTP routes must queue work without blocking the bridge listener",
+);
 assert.match(watchdog, /Timeout = 7000/);
 assert.match(ensureBridge, /Timeout = 7000/);
 assert.match(ensureBridge, /Stop-RecordedProcess \$bridgePidFile/);
