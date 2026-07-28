@@ -23106,9 +23106,51 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
     """Pathway Lab tiles — static lane defs from code; merge session stats from JSON."""
     global _cached_pathway_lane_specs
     if for_api and not _API_STATE_INLINE_RESEARCH_AGGREGATES:
-        if (_cached_pathway_lane_specs or {}).get("lanes"):
-            return _cached_pathway_lane_specs
-        payload = build_static_pathway_lane_specs()
+        # The analyzer owns the expensive aggregation. The API snapshot may
+        # read its small materialized JSON, but must never rescan raw ledgers.
+        # This also primes tile statistics after a source-only restart.
+        static_payload = build_static_pathway_lane_specs()
+        path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
+        analyzer_mtime = None
+        try:
+            analyzer_mtime = os.path.getmtime(path)
+        except OSError:
+            pass
+        cached = _cached_pathway_lane_specs or {}
+        if (
+            cached.get("lanes")
+            and cached.get("_cached_analyzer_mtime") == analyzer_mtime
+            and cached.get("_cached_static_version") == EXECUTION_FIX_VERSION
+        ):
+            return cached
+        if analyzer_mtime is not None:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    analyzer_payload = json.load(f)
+                analyzer_by_lane = {
+                    str(row.get("lane") or ""): row
+                    for row in (analyzer_payload.get("lanes") or [])
+                    if row.get("lane")
+                }
+                merged_lanes = []
+                for spec in static_payload.get("lanes") or []:
+                    row = copy.deepcopy(spec)
+                    analyzer_row = analyzer_by_lane.get(str(spec.get("lane") or "")) or {}
+                    for key in ("session_stats", "delta_vs_benchmark"):
+                        if analyzer_row.get(key) is not None:
+                            row[key] = copy.deepcopy(analyzer_row[key])
+                    merged_lanes.append(row)
+                payload = copy.deepcopy(static_payload)
+                payload["lanes"] = merged_lanes
+                payload["session_stats_source"] = "analyzer"
+                payload["session_stats_generated_at"] = analyzer_payload.get("generated_at")
+                payload["_cached_analyzer_mtime"] = analyzer_mtime
+                payload["_cached_static_version"] = EXECUTION_FIX_VERSION
+                _cached_pathway_lane_specs = payload
+                return payload
+            except Exception as e:
+                logger.debug(f"[PATHWAY_LANE_SPECS] analyzer cache load failed: {e}")
+        payload = static_payload
         payload["session_stats_deferred"] = True
         payload["session_stats_source"] = "analyzer"
         return payload
