@@ -3890,6 +3890,7 @@ def circuit_breaker_cancel_pending(reason: str):
 
 def set_execution_paused(reason: str):
     global last_console_update
+    cancel_reason = None
     with state_lock:
         if reason == "":
             # [DEMO_PAUSE_2026-07-08] Keep SIMULATION_ONLY sticky while
@@ -3917,8 +3918,13 @@ def set_execution_paused(reason: str):
             state["execution_reason"] = reason
             state["_pause_priority"] = priority
             logger.warning(f"[EXECUTION] paused: {reason} [PIPELINE ENFORCEMENT]")
-            circuit_breaker_cancel_pending(reason)
-            return
+            cancel_reason = reason
+    # Persistence/cancellation may wait on filesystem or trade state. Never
+    # hold the global state lock across either operation: health, canonical
+    # relay snapshots, and the admin response must remain independently
+    # responsive while a control action is being finalized.
+    if cancel_reason:
+        circuit_breaker_cancel_pending(cancel_reason)
 
 
 def manual_admin_pause_active() -> bool:
@@ -28075,7 +28081,7 @@ def api_pause():
     with state_lock:
         state["manual_admin_pause"] = True
         state["live_armed"] = False
-        save_persistent_config()
+    save_persistent_config()
     set_execution_paused("ADMIN_MANUAL")
     logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
@@ -28084,7 +28090,7 @@ def api_pause():
 def api_resume():
     with state_lock:
         state["manual_admin_pause"] = False
-        save_persistent_config()
+    save_persistent_config()
     set_execution_paused("")
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})

@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -362,6 +363,50 @@ check(
 )
 with bot.replay_lock:
     bot.replay_buffers.pop("pause-shadow-visible-1", None)
+
+
+print("\n[15] Admin controls never hold state_lock across slow persistence/cancellation")
+reset_state()
+lock_observations = []
+
+
+def observe_state_lock(label):
+    acquired = threading.Event()
+
+    def probe():
+        if bot.state_lock.acquire(timeout=0.25):
+            acquired.set()
+            bot.state_lock.release()
+
+    worker = threading.Thread(target=probe)
+    worker.start()
+    worker.join(timeout=0.5)
+    lock_observations.append((label, acquired.is_set()))
+
+
+bot.save_persistent_config = lambda: observe_state_lock("persist")
+original_cancel = bot.circuit_breaker_cancel_pending
+bot.circuit_breaker_cancel_pending = lambda reason: (
+    observe_state_lock("cancel"),
+    0,
+)[1]
+with bot.app.test_request_context("/api/pause", method="POST"):
+    pause_response = bot.api_pause()
+with bot.app.test_request_context("/api/resume", method="POST"):
+    resume_response = bot.api_resume()
+check("pause endpoint succeeds", pause_response.status_code == 200)
+check("resume endpoint succeeds", resume_response.status_code == 200)
+check(
+    "state lock released before persistence and cancellation",
+    lock_observations == [
+        ("persist", True),
+        ("cancel", True),
+        ("persist", True),
+    ],
+    detail=str(lock_observations),
+)
+bot.circuit_breaker_cancel_pending = original_cancel
+bot.save_persistent_config = lambda: None
 
 
 print("\n" + "=" * 72)
