@@ -118,10 +118,13 @@
       display: grid;
       width: 210px;
       height: 210px;
+      isolation: isolate;
       place-items: end center;
       transform-origin: 50% 90%;
     }
     .dragon {
+      position: relative;
+      z-index: 3;
       display: block;
       max-width: 100%;
       max-height: 100%;
@@ -129,6 +132,131 @@
       filter: drop-shadow(0 10px 12px rgba(0, 0, 0, 0.24));
       pointer-events: none;
     }
+    .dragon.arriving { animation: state-arrive 240ms cubic-bezier(.2,.8,.2,1) both; }
+    .idle .dragon,
+    .offline .dragon {
+      clip-path: inset(10% 10% 0 0);
+    }
+    .nest-light {
+      position: absolute;
+      z-index: 0;
+      right: 31px;
+      bottom: 12px;
+      width: 146px;
+      height: 30px;
+      border-radius: 50%;
+      background: rgba(228, 168, 83, 0.13);
+      box-shadow: 0 0 20px rgba(228, 168, 83, 0.2);
+      opacity: 0;
+      transform: scale(.78);
+      transition: opacity 180ms ease, transform 180ms ease;
+      pointer-events: none;
+    }
+    .idle .nest-light {
+      opacity: 1;
+      transform: scale(1);
+      animation: nest-warmth 3.6s ease-in-out infinite;
+    }
+    .motion-trails,
+    .signal-rings,
+    .delivery-embers,
+    .coordination-orbit {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .motion-trails span {
+      position: absolute;
+      left: 13px;
+      width: 78px;
+      height: 2px;
+      border-radius: 2px;
+      background: rgba(47, 128, 237, 0.58);
+      transform: translateX(-22px);
+    }
+    .motion-trails span:nth-child(1) { top: 72px; animation-delay: -260ms; }
+    .motion-trails span:nth-child(2) { top: 101px; width: 56px; animation-delay: -520ms; }
+    .motion-trails span:nth-child(3) { top: 132px; width: 68px; animation-delay: -80ms; }
+    .working .motion-trails,
+    .coordinating .motion-trails { opacity: 1; }
+    .working .motion-trails span,
+    .coordinating .motion-trails span { animation: trail-pass 720ms ease-in infinite; }
+    .signal-rings::before,
+    .signal-rings::after {
+      position: absolute;
+      top: 45px;
+      right: 24px;
+      width: 58px;
+      height: 58px;
+      border: 2px solid rgba(47, 128, 237, 0.54);
+      border-radius: 50%;
+      content: "";
+    }
+    .signal-rings::after { animation-delay: -700ms; }
+    .listening .signal-rings,
+    .planning .signal-rings,
+    .verifying .signal-rings,
+    .attention .signal-rings,
+    .update .signal-rings { opacity: 1; }
+    .listening .signal-rings::before,
+    .listening .signal-rings::after,
+    .planning .signal-rings::before,
+    .planning .signal-rings::after,
+    .verifying .signal-rings::before,
+    .verifying .signal-rings::after,
+    .attention .signal-rings::before,
+    .attention .signal-rings::after,
+    .update .signal-rings::before,
+    .update .signal-rings::after { animation: signal-expand 1.4s ease-out infinite; }
+    .planning .signal-rings::before,
+    .planning .signal-rings::after,
+    .verifying .signal-rings::before,
+    .verifying .signal-rings::after,
+    .attention .signal-rings::before,
+    .attention .signal-rings::after,
+    .update .signal-rings::before,
+    .update .signal-rings::after { border-color: rgba(228, 168, 83, 0.58); }
+    .coordination-orbit {
+      inset: 32px 18px 20px 18px;
+      overflow: visible;
+      border: 1px solid rgba(47, 128, 237, 0.28);
+      border-radius: 50%;
+    }
+    .coordination-orbit::before,
+    .coordination-orbit::after {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 8px;
+      height: 8px;
+      margin: -4px;
+      border-radius: 50%;
+      background: #5aa0f2;
+      box-shadow: 0 0 9px rgba(47, 128, 237, 0.74);
+      content: "";
+    }
+    .coordination-orbit::after { animation-delay: -900ms; }
+    .coordinating .coordination-orbit { opacity: 1; }
+    .coordinating .coordination-orbit::before,
+    .coordinating .coordination-orbit::after { animation: orbit-node 1.8s linear infinite; }
+    .delivery-embers span {
+      position: absolute;
+      left: 28px;
+      bottom: 88px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #ffb341;
+      box-shadow: 0 0 8px rgba(255, 126, 34, 0.9);
+    }
+    .delivery-embers span:nth-child(1) { animation-delay: -120ms; }
+    .delivery-embers span:nth-child(2) { left: 49px; animation-delay: -430ms; }
+    .delivery-embers span:nth-child(3) { left: 73px; animation-delay: -720ms; }
+    .success .delivery-embers { opacity: 1; }
+    .success .delivery-embers span { animation: ember-rise 1.15s ease-out infinite; }
     .idle .dragon-stage { animation: breathe 3.6s ease-in-out infinite; }
     .listening .dragon-stage { animation: listen 1.35s ease-in-out infinite; }
     .planning .dragon-stage { animation: plan 1.8s ease-in-out infinite; }
@@ -146,6 +274,32 @@
     .success { --signal: #35b779; }
     .error { --signal: #e45b5b; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes state-arrive {
+      from { opacity: .28; transform: translateY(5px) scale(.94); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes nest-warmth {
+      0%, 100% { opacity: .64; transform: scale(.92); }
+      50% { opacity: 1; transform: scale(1.04); }
+    }
+    @keyframes trail-pass {
+      0% { opacity: 0; transform: translateX(-24px) scaleX(.35); }
+      32% { opacity: .9; }
+      100% { opacity: 0; transform: translateX(72px) scaleX(1.08); }
+    }
+    @keyframes signal-expand {
+      0% { opacity: .72; transform: scale(.48); }
+      100% { opacity: 0; transform: scale(1.4); }
+    }
+    @keyframes orbit-node {
+      from { transform: rotate(0deg) translateX(76px) rotate(0deg); }
+      to { transform: rotate(360deg) translateX(76px) rotate(-360deg); }
+    }
+    @keyframes ember-rise {
+      0% { opacity: 0; transform: translate3d(0, 8px, 0) scale(.5); }
+      28% { opacity: 1; }
+      100% { opacity: 0; transform: translate3d(-16px, -52px, 0) scale(1.25); }
+    }
     @keyframes breathe {
       0%, 100% { transform: translateY(2px) scale(0.985); }
       50% { transform: translateY(-2px) scale(1.015); }
@@ -193,10 +347,20 @@
       .task-bubble { border-color: rgba(255, 255, 255, 0.12); }
     }
     @media (prefers-reduced-motion: reduce) {
-      .dragon-stage, .pulse { animation: none !important; }
+      .dragon-stage, .dragon, .pulse,
+      .nest-light, .motion-trails span, .signal-rings::before,
+      .signal-rings::after, .coordination-orbit::before,
+      .coordination-orbit::after, .delivery-embers span { animation: none !important; }
       .task-bubble { transition: none; }
     }
-    .reduced-motion .dragon-stage, .reduced-motion .pulse { animation: none !important; }
+    .reduced-motion .dragon-stage, .reduced-motion .dragon,
+    .reduced-motion .pulse, .reduced-motion .nest-light,
+    .reduced-motion .motion-trails span,
+    .reduced-motion .signal-rings::before,
+    .reduced-motion .signal-rings::after,
+    .reduced-motion .coordination-orbit::before,
+    .reduced-motion .coordination-orbit::after,
+    .reduced-motion .delivery-embers span { animation: none !important; }
     .reduced-motion .task-bubble { transition: none; }
   </style>
 </head>
@@ -209,6 +373,11 @@
       <span class="pulse" aria-hidden="true"></span>
     </section>
     <section class="dragon-stage interactive" data-dragon-stage aria-label="Founder Dragon">
+      <span class="nest-light" aria-hidden="true"></span>
+      <span class="motion-trails" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span class="signal-rings" aria-hidden="true"></span>
+      <span class="coordination-orbit" aria-hidden="true"></span>
+      <span class="delivery-embers" aria-hidden="true"><span></span><span></span><span></span></span>
       <img class="dragon" data-dragon alt="" src="dragon-idle.png">
     </section>
   </main>
@@ -278,7 +447,13 @@
     api?.onState((snapshot) => {
       const state = images[snapshot?.state] ? snapshot.state : 'idle';
       root.className = `companion ${state}${snapshot?.reducedMotion ? ' reduced-motion' : ''}`;
-      dragon.src = images[state];
+      const nextImage = images[state];
+      if (dragon.getAttribute('src') !== nextImage) {
+        dragon.src = nextImage;
+        dragon.classList.remove('arriving');
+        void dragon.offsetWidth;
+        if (!snapshot?.reducedMotion) dragon.classList.add('arriving');
+      }
       title.textContent = snapshot?.title || 'Founder is ready';
       detail.textContent = snapshot?.detail || 'Watching this workspace.';
       stateLabel.textContent = labels[state] || 'Ready';

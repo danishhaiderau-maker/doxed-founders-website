@@ -29,6 +29,18 @@ describe('Founder desktop companion', () => {
     assert.match(html, /dragon-working\.png/);
     assert.match(html, /dragon-success-v3\.png/);
     assert.match(html, /@keyframes fly/);
+    assert.match(html, /@keyframes state-arrive/);
+    assert.match(html, /@keyframes trail-pass/);
+    assert.match(html, /@keyframes signal-expand/);
+    assert.match(html, /@keyframes orbit-node/);
+    assert.match(html, /@keyframes ember-rise/);
+    assert.match(html, /class="nest-light"/);
+    assert.match(html, /class="motion-trails"/);
+    assert.match(html, /class="signal-rings"/);
+    assert.match(html, /class="coordination-orbit"/);
+    assert.match(html, /class="delivery-embers"/);
+    assert.match(html, /\.idle \.dragon,[\s\S]*clip-path: inset\(10% 10% 0 0\)/);
+    assert.match(html, /classList\.add\('arriving'\)/);
     assert.match(html, /task-bubble/);
     assert.doesNotMatch(html, /\.mp4/);
     assert.match(windowSource, /screen\.getCursorScreenPoint\(\)/);
