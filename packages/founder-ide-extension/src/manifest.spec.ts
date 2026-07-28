@@ -181,7 +181,7 @@ describe('Founder IDE extension manifest', () => {
     );
     assert.match(
       hubSource,
-      /case 'openRemote':[\s\S]*?founderOs\.openRemoteControl/,
+      /case 'openRemote':[\s\S]*?founderOs\.openRemoteView/,
     );
     assert.match(
       hubSource,

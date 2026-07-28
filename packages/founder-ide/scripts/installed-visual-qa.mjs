@@ -235,12 +235,17 @@ await send('Input.dispatchKeyEvent', {
 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
 await wait(250);
-await send('Input.dispatchKeyEvent', {
-  type: 'rawKeyDown', key: 'w', code: 'KeyW', modifiers: 2,
-  windowsVirtualKeyCode: 87, nativeVirtualKeyCode: 87,
-});
-await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW', modifiers: 2 });
-await wait(500);
+const settingsEditorOpen = await evaluate(
+  `/^Founder Settings\\b/i.test(document.title || '')`,
+);
+if (settingsEditorOpen) {
+  await send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown', key: 'w', code: 'KeyW', modifiers: 2,
+    windowsVirtualKeyCode: 87, nativeVirtualKeyCode: 87,
+  });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW', modifiers: 2 });
+  await wait(500);
+}
 await runCommandPalette('Founder: Open control center');
 await waitForCondition(
   'Founder control center',
