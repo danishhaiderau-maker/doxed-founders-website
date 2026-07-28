@@ -57,6 +57,7 @@ const verified_solution_memory_1 = require("./verified-solution-memory");
 const personal_ai_profiles_1 = require("./personal-ai-profiles");
 const completion_evidence_1 = require("./completion-evidence");
 const founder_agent_mode_2 = require("./founder-agent-mode");
+const founder_goal_context_1 = require("./founder-goal-context");
 const MAX_TOOL_TURNS = 8;
 function availableFounderTools(mode) {
     const tools = vscode.lm.tools;
@@ -165,6 +166,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     const priorSolutions = workspaceId
         ? deps.solutionMemory?.contextFor(workspaceId, prompt, deps.projectContext?.allFileHashes() ?? []) ?? ''
         : '';
+    const goalContext = (0, founder_goal_context_1.renderFounderGoalContext)(deps.goalControl?.snapshot() ?? null);
     const identity = [
         'You are Founder OS, the founder\'s AI pair-programmer. Inspect the workspace before changing it. Use the available tools to make requested code changes and verify them; do not merely describe work that can be completed locally. Be concise and direct.',
         (0, completion_evidence_1.founderWorkModeInstruction)(workMode),
@@ -174,7 +176,9 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
         identity,
         memory: memoryText,
         projectContext: projectContextText,
-        additionalStableContext: priorSolutions,
+        additionalStableContext: [goalContext, priorSolutions]
+            .filter(Boolean)
+            .join('\n\n'),
         coordination: coordinationText,
     });
     const gatewayMessages = [

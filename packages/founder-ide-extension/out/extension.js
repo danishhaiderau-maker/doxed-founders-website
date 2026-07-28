@@ -59,6 +59,8 @@ const read_workspace_1 = require("./tools/read-workspace");
 const profile_manager_1 = require("./profile-manager");
 const cost_tracker_1 = require("./cost-tracker");
 const gateway_metadata_ui_1 = require("./gateway-metadata-ui");
+const workspace_housekeeping_audit_1 = require("./workspace-housekeeping-audit");
+const workspace_housekeeping_executor_1 = require("./workspace-housekeeping-executor");
 const chat_participant_1 = require("./chat-participant");
 const debug_squasher_status_1 = require("./debug-squasher-status");
 // Phase 2 — device-code sign-in + pairing-state status bar + IPC server.
@@ -106,6 +108,15 @@ let founderProjectActivity;
 let personalAiProfiles;
 let dailyQualityReviewDisposable;
 let founderProjectHistory;
+function formatHousekeepingBytes(value) {
+    if (value < 1_024)
+        return `${value} B`;
+    if (value < 1_024 ** 2)
+        return `${(value / 1_024).toFixed(1)} KB`;
+    if (value < 1_024 ** 3)
+        return `${(value / 1_024 ** 2).toFixed(1)} MB`;
+    return `${(value / 1_024 ** 3).toFixed(1)} GB`;
+}
 function activate(context) {
     startEmbeddedRelay();
     // One canonical status control for pairing, requests and route health.
@@ -161,9 +172,10 @@ function activate(context) {
     founderAuthenticationProvider = new founder_authentication_1.FounderAuthenticationProvider({
         onDidSignIn: async () => {
             await (0, credentials_1.syncVaultIntoSettings)();
-            await (0, server_1.startIpcServer)();
+            await startWorkspaceIpcServer();
             registerOrNotify(context);
             pairingStatusBar?.setGatewayResult('ok');
+            await founderHub?.syncGoalControl();
             founderHub?.refresh();
             founderSettings?.refresh();
             founderShortcuts?.refresh();
@@ -301,7 +313,99 @@ function activate(context) {
         catch {
             await vscode.commands.executeCommand('workbench.action.chat.open');
         }
-    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', (tab) => founderSettings?.show((0, founder_settings_1.normalizeFounderSettingsTab)(tab))), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.getWorkMode', () => (0, founder_agent_mode_1.readFounderWorkMode)()), vscode.commands.registerCommand('founderOs.setWorkMode', async (value) => {
+    }), vscode.commands.registerCommand('founderOs.openConnections', () => vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/settings/builder'))), vscode.commands.registerCommand('founderOs.openSettings', (tab) => founderSettings?.show((0, founder_settings_1.normalizeFounderSettingsTab)(tab))), vscode.commands.registerCommand('founderOs.toggleInterfaceMode', async () => {
+        const founder = vscode.workspace.getConfiguration('founderOs');
+        const current = (0, founder_interface_mode_1.normalizeFounderInterfaceMode)(founder.get('interfaceMode'));
+        await founder.update('interfaceMode', current === 'founder' ? 'developer' : 'founder', vscode.ConfigurationTarget.Global);
+    }), vscode.commands.registerCommand('founderOs.refreshHub', () => founderHub?.refresh()), vscode.commands.registerCommand('founderOs.queueDecision', async (decision) => {
+        await founderHub?.queueDecision(decision);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${founder_hub_1.FounderHubProvider.viewId}.focus`);
+    }), vscode.commands.registerCommand('founderOs.queueHousekeepingReview', async (candidates) => {
+        if (!Array.isArray(candidates)) {
+            throw new Error('Housekeeping candidates must be an array.');
+        }
+        await founderHub?.queueHousekeepingReview(candidates);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${founder_hub_1.FounderHubProvider.viewId}.focus`);
+    }), vscode.commands.registerCommand('founderOs.auditHousekeeping', async () => {
+        const roots = vscode.workspace.workspaceFolders ?? [];
+        if (roots.length === 0) {
+            void vscode.window.showInformationMessage('Open a project before running housekeeping.');
+            return;
+        }
+        const candidates = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Founder is reviewing workspace housekeeping',
+            cancellable: false,
+        }, async () => {
+            const results = await Promise.all(roots.map((folder) => (0, workspace_housekeeping_audit_1.auditWorkspaceHousekeeping)(folder.uri.fsPath)));
+            return results.flatMap((result, rootIndex) => result.candidates.map((candidate) => ({
+                ...candidate,
+                id: `${roots[rootIndex].name}:${candidate.id}`,
+                workspaceFolder: roots[rootIndex].name,
+                path: candidate.path,
+                evidence: [
+                    ...candidate.evidence,
+                    ...(result.truncated
+                        ? ['The workspace audit reached a safety bound.']
+                        : []),
+                ],
+            })));
+        });
+        const deletions = candidates.filter((candidate) => candidate.recommendedAction === 'delete');
+        if (deletions.length === 0) {
+            void vscode.window.showInformationMessage(candidates.length > 0
+                ? 'Founder found generated outputs to review, but no path is safe enough to recommend deleting.'
+                : 'Founder found no bounded housekeeping candidates.');
+            return;
+        }
+        await founderHub?.queueHousekeepingReview(candidates);
+        await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+        await vscode.commands.executeCommand(`${founder_hub_1.FounderHubProvider.viewId}.focus`);
+    }), vscode.commands.registerCommand('founderOs.applyApprovedHousekeeping', async (decisionId) => {
+        const state = founderHub?.goalSnapshot();
+        const approved = state?.decisions
+            .filter((decision) => decision.kind === 'housekeeping'
+            && decision.status === 'resolved'
+            && decision.selectedOptionId === 'approve_selected'
+            && (typeof decisionId !== 'string' || decision.id === decisionId))
+            .sort((left, right) => (right.resolvedAt ?? '').localeCompare(left.resolvedAt ?? ''))[0];
+        if (!approved) {
+            void vscode.window.showInformationMessage('No approved housekeeping goal is ready to apply.');
+            return;
+        }
+        if (context.workspaceState.get(`founder.housekeeping.executed.${approved.id}`)) {
+            void vscode.window.showInformationMessage('This housekeeping approval was already applied.');
+            return;
+        }
+        const selected = (approved.housekeepingCandidates ?? []).filter((candidate) => approved.selectedCandidateIds?.includes(candidate.id));
+        const totalBytes = selected.reduce((total, candidate) => total + candidate.sizeBytes, 0);
+        const confirmation = await vscode.window.showWarningMessage(`Delete ${selected.length} approved generated path`
+            + `${selected.length === 1 ? '' : 's'} `
+            + `(${formatHousekeepingBytes(totalBytes)})? Founder will re-audit every path first.`, { modal: true }, 'Delete approved generated files');
+        if (confirmation !== 'Delete approved generated files')
+            return;
+        try {
+            const receipt = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Founder is applying approved housekeeping',
+                cancellable: false,
+            }, () => (0, workspace_housekeeping_executor_1.applyApprovedHousekeeping)({
+                decision: approved,
+                workspaces: (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
+                    name: folder.name,
+                    path: folder.uri.fsPath,
+                })),
+                checkpointDirectory: path.join(context.globalStorageUri.fsPath, 'housekeeping-checkpoints'),
+            }));
+            await context.workspaceState.update(`founder.housekeeping.executed.${approved.id}`, true);
+            void vscode.window.showInformationMessage(`Housekeeping complete. Reclaimed ${formatHousekeepingBytes(receipt.reclaimedBytes)} from ${receipt.deletedPaths.length} approved path${receipt.deletedPaths.length === 1 ? '' : 's'}.`);
+        }
+        catch (error) {
+            void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        }
+    }), vscode.commands.registerCommand('founderOs.appendDecisionResearch', async (input) => founderHub?.appendDecisionResearch(input)), vscode.commands.registerCommand('founderOs.getGoalState', () => founderHub?.goalSnapshot()), vscode.commands.registerCommand('founderOs.refreshShortcuts', () => founderShortcuts?.refresh()), vscode.commands.registerCommand('founderOs.getWorkMode', () => (0, founder_agent_mode_1.readFounderWorkMode)()), vscode.commands.registerCommand('founderOs.setWorkMode', async (value) => {
         const workMode = (0, founder_agent_mode_1.normalizeFounderWorkMode)(value);
         (0, founder_agent_mode_1.writeFounderWorkMode)(workMode);
         await vscode.workspace
@@ -340,14 +444,14 @@ function activate(context) {
         // first and both converge on the same authenticated endpoint.
         (0, device_code_sign_in_1.ensureInstallIdentity)();
     }
-    (0, server_1.startIpcServer)().catch((err) => {
+    startWorkspaceIpcServer().catch((err) => {
         console.warn('Founder OS IPC server failed to start:', err);
     });
     // Auto-load ~/FounderVault/node-config.json into founderOs.* settings so
     // pairing isn't manual every session. Fire-and-forget; re-registers after.
     void (0, credentials_1.syncVaultIntoSettings)().then((synced) => {
         if (synced) {
-            void (0, server_1.startIpcServer)();
+            void startWorkspaceIpcServer();
             registerOrNotify(context);
         }
         founderAuthenticationProvider?.refresh();
@@ -356,7 +460,9 @@ function activate(context) {
         founderShortcuts?.refresh();
     });
     // Re-resolve when relevant settings change.
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        void startWorkspaceIpcServer();
+    }), vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('founderOs')) {
             if (e.affectsConfiguration('founderOs.interfaceMode')) {
                 void applyFounderInterfaceMode(false);
@@ -373,7 +479,7 @@ function activate(context) {
     watchVaultFile(context, () => {
         void (0, credentials_1.syncVaultIntoSettings)().then((synced) => {
             if (synced) {
-                void (0, server_1.startIpcServer)();
+                void startWorkspaceIpcServer();
                 registerOrNotify(context);
             }
             founderAuthenticationProvider?.refresh();
@@ -396,6 +502,18 @@ async function applyFounderInterfaceMode(revealFounderHome) {
     const windowConfig = vscode.workspace.getConfiguration('window');
     if (windowConfig.get('menuBarVisibility') !== definition.menuBarVisibility) {
         await windowConfig.update('menuBarVisibility', definition.menuBarVisibility, vscode.ConfigurationTarget.Global);
+    }
+    if (windowConfig.get('commandCenter') !== definition.commandCenter) {
+        await windowConfig.update('commandCenter', definition.commandCenter, vscode.ConfigurationTarget.Global);
+    }
+    if (workbench.get('layoutControl.enabled') !== definition.layoutControl) {
+        await workbench.update('layoutControl.enabled', definition.layoutControl, vscode.ConfigurationTarget.Global);
+    }
+    if (workbench.get('statusBar.visible') !== definition.statusBarVisible) {
+        await workbench.update('statusBar.visible', definition.statusBarVisible, vscode.ConfigurationTarget.Global);
+    }
+    if (workbench.get('editor.showTabs') !== definition.editorTabs) {
+        await workbench.update('editor.showTabs', definition.editorTabs, vscode.ConfigurationTarget.Global);
     }
     if (founder.get('advancedIdeTools') !== definition.advancedIdeTools) {
         await founder.update('advancedIdeTools', definition.advancedIdeTools, vscode.ConfigurationTarget.Global);
@@ -452,6 +570,13 @@ function deactivate() {
     // Phase 3 — stop the named-pipe IPC server so we release the pipe name.
     (0, server_1.stopIpcServer)();
 }
+function startWorkspaceIpcServer() {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    return (0, server_1.startIpcServer)({
+        workspacePath: workspace?.uri.fsPath ?? null,
+        workspaceName: workspace?.name ?? null,
+    });
+}
 /** Register the chat participant if we have creds; otherwise show "not paired". */
 function registerOrNotify(context) {
     const creds = (0, credentials_1.resolveCredentials)();
@@ -478,6 +603,9 @@ function registerOrNotify(context) {
         resultCache: founderSafeResultCache,
         solutionMemory: founderVerifiedSolutionMemory,
         projectActivity: founderProjectActivity,
+        goalControl: {
+            snapshot: () => founderHub?.goalSnapshot() ?? null,
+        },
         onRequestStart: (modelId) => {
             pairingStatusBar?.setRequestInFlight(modelId);
             founderCompanion?.setPlanning('Planning the route', modelId);
@@ -550,7 +678,7 @@ async function signInWithFounderId(context) {
             return;
         // Reload from the vault file so the chat provider picks up the new creds.
         await (0, credentials_1.syncVaultIntoSettings)();
-        await (0, server_1.startIpcServer)();
+        await startWorkspaceIpcServer();
         registerOrNotify(context);
         pairingStatusBar.setGatewayResult('ok');
         founderHub?.refresh();
