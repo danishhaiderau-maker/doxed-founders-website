@@ -133,7 +133,7 @@ export default function FounderIdAuthorizeClient() {
                   <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
                     <dt className="text-zinc-500">System</dt>
                     <dd className="text-right text-zinc-300">
-                      {[preview.platform, preview.appVersion].filter(Boolean).join(' · ') || 'Not reported'}
+                      {[preview.platform, preview.appVersion].filter(Boolean).join(' / ') || 'Not reported'}
                     </dd>
                     <dt className="text-zinc-500">Install fingerprint</dt>
                     <dd className="text-right font-mono text-zinc-300">
