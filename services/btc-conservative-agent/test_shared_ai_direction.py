@@ -305,7 +305,8 @@ def run():
         "active trading uses only a bounded dashboard execution overlay",
         "if manual_admin_pause_active()" in dashboard_refresher_source
         and "ACTIVE_EXECUTION_OVERLAY" in dashboard_refresher_source
-        and "_build_relay_execution_state_snapshot()" in dashboard_refresher_source,
+        and "_build_relay_execution_state_snapshot()" in dashboard_refresher_source
+        and '"manual_admin_pause"' in dashboard_refresher_source,
     )
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(
