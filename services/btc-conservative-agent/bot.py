@@ -21205,6 +21205,15 @@ _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS = frozenset({
     "order_book",
     "ai_history",
 })
+# Raw research ledgers are append-heavy and can grow into multi-megabyte JSONL
+# files. Re-reading them in the bot's dashboard refresher monopolizes the
+# CPython GIL, which also stalls the independent money-path endpoint. The
+# analyzer owns those aggregates; the bot API serves cached values unless an
+# operator explicitly opts back into the legacy inline scans.
+_API_STATE_INLINE_RESEARCH_AGGREGATES = (
+    os.getenv("API_STATE_INLINE_RESEARCH_AGGREGATES", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 _api_state_cache_lock = threading.Lock()
 _api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
 csv_lock = threading.RLock()
@@ -23052,9 +23061,16 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     return out
 
 
-def get_pathway_lane_specs_cached() -> dict:
+def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
     """Pathway Lab tiles — static lane defs from code; merge session stats from JSON."""
     global _cached_pathway_lane_specs
+    if for_api and not _API_STATE_INLINE_RESEARCH_AGGREGATES:
+        if (_cached_pathway_lane_specs or {}).get("lanes"):
+            return _cached_pathway_lane_specs
+        payload = build_static_pathway_lane_specs()
+        payload["session_stats_deferred"] = True
+        payload["session_stats_source"] = "analyzer"
+        return payload
     static_payload = build_static_pathway_lane_specs()
     path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
     file_payload = {}
@@ -27452,11 +27468,27 @@ def _build_api_state_snapshot():
         # tile can render the full Section 2 spec without re-deriving from
         # raw opportunity events each poll.
         snapshot["tile2_counters"] = tile2_dashboard_metrics()
-        snapshot["paused_shadow_stats"] = paused_shadow_dashboard_stats()
+        if _API_STATE_INLINE_RESEARCH_AGGREGATES:
+            snapshot["paused_shadow_stats"] = paused_shadow_dashboard_stats()
+        else:
+            with _paused_shadow_stats_lock:
+                snapshot["paused_shadow_stats"] = copy.deepcopy(
+                    _paused_shadow_stats_cache.get("payload") or {}
+                )
+            snapshot["paused_shadow_stats"].setdefault("deferred", True)
+            snapshot["paused_shadow_stats"].setdefault("source", "analyzer")
         # Pt 7b: TYPE_B_HUNTER_V1 cross-source trade-count reconciliation.
         # Surfaces paper/shadow/live count mismatches so the dashboard never
         # silently reports inconsistent totals across the three sources.
-        snapshot["type_b_trade_reconciliation"] = _reconcile_type_b_trade_count()
+        snapshot["type_b_trade_reconciliation"] = (
+            _reconcile_type_b_trade_count()
+            if _API_STATE_INLINE_RESEARCH_AGGREGATES
+            else {
+                "lane": RESEARCH_LANE_TYPE_B_HUNTER_V1,
+                "deferred": True,
+                "source": "analyzer",
+            }
+        )
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
@@ -27472,7 +27504,11 @@ def _build_api_state_snapshot():
         snapshot["lane_pnl_ledger"] = get_lane_pnl_ledger()
         snapshot["lane_lab_pnl_ledger"] = get_lane_lab_pnl_ledger()
         snapshot["lab_open_shadows"] = count_open_lab_shadows()
-        snapshot["retired_lane_archive"] = get_retired_lane_archive_rows()
+        snapshot["retired_lane_archive"] = (
+            get_retired_lane_archive_rows()
+            if _API_STATE_INLINE_RESEARCH_AGGREGATES
+            else []
+        )
         snapshot["lane_position_counts"] = lane_position_counts
         snapshot["research_execution_mode"] = (
             "INDEPENDENT_LANES" if is_research_data_collection() else "LIVE"
@@ -27631,7 +27667,7 @@ def _build_api_state_snapshot():
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
-        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached()
+        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached(for_api=True)
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()

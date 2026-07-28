@@ -393,6 +393,31 @@ def run():
         "state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)" in dashboard_snapshot_source
         and "trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)" in dashboard_snapshot_source,
     )
+    check(
+        "dashboard snapshot defers raw research ledger aggregation",
+        "if _API_STATE_INLINE_RESEARCH_AGGREGATES" in dashboard_snapshot_source
+        and "get_pathway_lane_specs_cached(for_api=True)" in dashboard_snapshot_source
+        and '"source": "analyzer"' in dashboard_snapshot_source,
+    )
+    original_lane_specs = bot._cached_pathway_lane_specs
+    original_merge_specs = bot._merge_pathway_specs_with_session_stats
+    try:
+        bot._cached_pathway_lane_specs = {}
+
+        def _must_not_scan_research_ledgers(*_args, **_kwargs):
+            raise AssertionError("API lane specs scanned raw research ledgers")
+
+        bot._merge_pathway_specs_with_session_stats = _must_not_scan_research_ledgers
+        api_lane_specs = bot.get_pathway_lane_specs_cached(for_api=True)
+        check(
+            "API lane specs use static analyzer-owned fallback",
+            api_lane_specs.get("session_stats_deferred") is True
+            and api_lane_specs.get("session_stats_source") == "analyzer"
+            and bool(api_lane_specs.get("lanes")),
+        )
+    finally:
+        bot._cached_pathway_lane_specs = original_lane_specs
+        bot._merge_pathway_specs_with_session_stats = original_merge_specs
     execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
     check(
         "relay active-signal rendering runs after releasing trade_lock",
