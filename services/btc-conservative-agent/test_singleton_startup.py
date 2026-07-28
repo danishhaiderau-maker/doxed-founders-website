@@ -14,7 +14,7 @@ os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
-from process_singleton import acquire_process_singleton
+from process_singleton import ProcessSingleton, acquire_process_singleton
 
 
 def run():
@@ -48,6 +48,14 @@ def run():
         )
         check("second process is refused by OS lock", child.returncode == 73)
         owner.release()
+
+    acquire_source = inspect.getsource(ProcessSingleton.acquire)
+    check(
+        "dead-owner Windows lock file has guarded stale recovery",
+        "except PermissionError" in acquire_source
+        and "self._pid_alive(owner_pid)" in acquire_source
+        and "self.path.unlink(missing_ok=True)" in acquire_source,
+    )
 
     main_source = inspect.getsource(bot.main)
     check(

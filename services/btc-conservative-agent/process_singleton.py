@@ -28,7 +28,27 @@ class ProcessSingleton:
 
     def acquire(self) -> "ProcessSingleton":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        try:
+            handle = self.path.open("a+b")
+        except PermissionError:
+            # On Windows an abruptly terminated owner can briefly leave the
+            # lock file non-openable. Recover only when its recorded owner PID
+            # is conclusively gone; a live/unknown owner remains fail-closed.
+            owner = self._read_owner_data()
+            owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+            if not isinstance(owner_pid, int) or self._pid_alive(owner_pid):
+                detail = f" (pid={owner_pid})" if owner_pid else ""
+                raise ProcessSingletonError(
+                    f"another bot process may own {self.path}{detail}"
+                )
+            try:
+                self.path.unlink(missing_ok=True)
+                handle = self.path.open("a+b")
+            except OSError as exc:
+                raise ProcessSingletonError(
+                    f"stale singleton file could not be recovered: {self.path} "
+                    f"(dead pid={owner_pid})"
+                ) from exc
         try:
             handle.seek(0)
             if os.name == "nt":
@@ -59,14 +79,36 @@ class ProcessSingleton:
         return self
 
     def _read_owner(self) -> str:
+        data = self._read_owner_data()
+        if not data:
+            return ""
+        return f"pid={data.get('pid')} acquired_at={data.get('acquired_at')}"
+
+    def _read_owner_data(self) -> dict:
         try:
             raw = self.path.read_text(encoding="utf-8").strip()
             if not raw:
-                return ""
+                return {}
             data = json.loads(raw)
-            return f"pid={data.get('pid')} acquired_at={data.get('acquired_at')}"
+            return data if isinstance(data, dict) else {}
         except Exception:
-            return ""
+            return {}
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # A process that exists but belongs to another security context is
+            # still an owner candidate and must never be treated as stale.
+            return True
+        except OSError:
+            return False
 
     def _write_owner(self) -> None:
         if not self._handle:
