@@ -480,6 +480,52 @@ def run():
         and "with state_lock:" not in close_position_source.split("trade_row = {", 1)[0]
         and "with trade_lock:" not in close_position_source.split("trade_row = {", 1)[0],
     )
+    pending_orders_source = inspect.getsource(bot.process_pending_orders)
+    pending_touch_source = inspect.getsource(bot._pending_limit_touched)
+    check(
+        "pending fill snapshots BBO before taking trade_lock",
+        pending_orders_source.find("with state_lock:")
+        < pending_orders_source.find("with trade_lock:")
+        and "bid=fill_bid" in pending_orders_source
+        and "ask=fill_ask" in pending_orders_source,
+    )
+    check(
+        "pending touch accepts a pre-captured BBO without nested state locking",
+        "bid: float | None = None" in pending_touch_source
+        and "ask: float | None = None" in pending_touch_source,
+    )
+
+    state_held = threading.Event()
+    release_state = threading.Event()
+    def _hold_state_for_fill_race():
+        with bot.state_lock:
+            state_held.set()
+            release_state.wait(timeout=5)
+
+    state_holder = threading.Thread(target=_hold_state_for_fill_race, daemon=True)
+    state_holder.start()
+    try:
+        check("fill-race state-lock fixture started", state_held.wait(timeout=1))
+        started = time.perf_counter()
+        with bot.trade_lock:
+            touched = bot._pending_limit_touched(
+                {
+                    "side": "buy",
+                    "limit_price": 65000.0,
+                    "min_price_since_order": 64999.0,
+                    "max_price_since_order": 65001.0,
+                },
+                65000.0,
+                bid=64999.0,
+                ask=65000.0,
+            )
+        check(
+            "fill touch never waits for state_lock while trade_lock is held",
+            touched and (time.perf_counter() - started) < 0.25,
+        )
+    finally:
+        release_state.set()
+        state_holder.join(timeout=1)
 
     original_refresh_bbo = bot.refresh_bbo_state
     original_refresh_book = bot.refresh_order_book_state

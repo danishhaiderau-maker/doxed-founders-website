@@ -17797,13 +17797,28 @@ def _update_pending_order_price_extremes(price: float):
             except Exception:
                 pass
 
-def _pending_limit_touched(order: dict, price: float) -> bool:
+def _pending_limit_touched(
+    order: dict,
+    price: float,
+    *,
+    bid: float | None = None,
+    ask: float | None = None,
+) -> bool:
     limit = float(order["limit_price"])
     max_p = float(order.get("max_price_since_order", price) or price)
     min_p = float(order.get("min_price_since_order", price) or price)
-    with state_lock:
-        bid = float(state.get("bid") or 0)
-        ask = float(state.get("ask") or 0)
+    # process_pending_orders evaluates touches while holding trade_lock.  Never
+    # acquire state_lock from inside that section: dashboard/relay snapshots
+    # also need both locks and the inverted acquisition can starve the canonical
+    # money-path endpoint during the exact fill window.  Callers on the fill
+    # path pass one state snapshot captured before taking trade_lock.
+    if bid is None or ask is None:
+        with state_lock:
+            bid = float(state.get("bid") or 0)
+            ask = float(state.get("ask") or 0)
+    else:
+        bid = float(bid or 0)
+        ask = float(ask or 0)
     if order["side"] == "buy":
         if ask > 0 and ask <= limit:
             return True
@@ -17832,13 +17847,24 @@ def process_pending_orders():
     process_limit_chase(price)
     process_virtual_chase_chase6_market_conversions(price)
     fills = []
+    # Preserve the global state->trade lock order.  The previous implementation
+    # called _pending_limit_touched under trade_lock and acquired state_lock
+    # there, producing intermittent relay snapshot timeouts at a natural fill.
+    with state_lock:
+        fill_bid = float(state.get("bid") or 0)
+        fill_ask = float(state.get("ask") or 0)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
                 continue
             if not lane_orders_allowed(order.get("research_lane")):
                 continue
-            if not _pending_limit_touched(order, price):
+            if not _pending_limit_touched(
+                order,
+                price,
+                bid=fill_bid,
+                ask=fill_ask,
+            ):
                 continue
             if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
                 logger.debug(
