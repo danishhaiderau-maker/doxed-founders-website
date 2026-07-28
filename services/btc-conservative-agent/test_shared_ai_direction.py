@@ -1,6 +1,8 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
 import inspect
+import json
+import tempfile
 import threading
 import time
 
@@ -401,23 +403,46 @@ def run():
     )
     original_lane_specs = bot._cached_pathway_lane_specs
     original_merge_specs = bot._merge_pathway_specs_with_session_stats
+    original_getcwd = bot.os.getcwd
     try:
-        bot._cached_pathway_lane_specs = {}
+        with tempfile.TemporaryDirectory() as td:
+            analyzer_specs = {
+                "generated_at": "2026-07-28T12:44:26Z",
+                "lanes": [{
+                    "lane": bot.RESEARCH_LANE_CONTINUOUS,
+                    "session_stats": {
+                        "approves": 531,
+                        "real_fills": 85,
+                        "net_pnl_real": 9.98,
+                    },
+                }],
+            }
+            with open(os.path.join(td, bot.PATHWAY_LANE_SPECS_FILE), "w", encoding="utf-8") as f:
+                json.dump(analyzer_specs, f)
+            bot._cached_pathway_lane_specs = {}
+            bot.os.getcwd = lambda: td
 
-        def _must_not_scan_research_ledgers(*_args, **_kwargs):
-            raise AssertionError("API lane specs scanned raw research ledgers")
+            def _must_not_scan_research_ledgers(*_args, **_kwargs):
+                raise AssertionError("API lane specs scanned raw research ledgers")
 
-        bot._merge_pathway_specs_with_session_stats = _must_not_scan_research_ledgers
-        api_lane_specs = bot.get_pathway_lane_specs_cached(for_api=True)
-        check(
-            "API lane specs use static analyzer-owned fallback",
-            api_lane_specs.get("session_stats_deferred") is True
-            and api_lane_specs.get("session_stats_source") == "analyzer"
-            and bool(api_lane_specs.get("lanes")),
-        )
+            bot._merge_pathway_specs_with_session_stats = _must_not_scan_research_ledgers
+            api_lane_specs = bot.get_pathway_lane_specs_cached(for_api=True)
+            continuous_stats = next(
+                row.get("session_stats")
+                for row in api_lane_specs.get("lanes") or []
+                if row.get("lane") == bot.RESEARCH_LANE_CONTINUOUS
+            )
+            check(
+                "API lane specs load lightweight analyzer-owned statistics",
+                api_lane_specs.get("session_stats_source") == "analyzer"
+                and api_lane_specs.get("session_stats_generated_at") == analyzer_specs["generated_at"]
+                and continuous_stats.get("real_fills") == 85
+                and continuous_stats.get("net_pnl_real") == 9.98,
+            )
     finally:
         bot._cached_pathway_lane_specs = original_lane_specs
         bot._merge_pathway_specs_with_session_stats = original_merge_specs
+        bot.os.getcwd = original_getcwd
     execution_source = inspect.getsource(bot._build_relay_execution_state_snapshot)
     check(
         "relay active-signal rendering runs after releasing trade_lock",
