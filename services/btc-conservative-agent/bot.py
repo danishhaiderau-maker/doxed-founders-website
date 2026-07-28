@@ -20321,6 +20321,17 @@ def position_manager():
         logger.exception(f"Position manager crash: {e}")
         set_execution_paused("THREAD_CRASH")
 
+_FEE_FILTERABLE_PROFIT_EXITS = frozenset({"TAKE_PROFIT", "TP_HIT"})
+
+
+def should_skip_unprofitable_profit_exit(exit_reason: str, net_pnl: float) -> bool:
+    """Only defer optional fixed-profit exits; never veto a protective exit."""
+    return (
+        float(net_pnl) <= 0
+        and str(exit_reason or "").upper() in _FEE_FILTERABLE_PROFIT_EXITS
+    )
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     if not validate_state():
@@ -20378,7 +20389,7 @@ def close_position(pos: dict, exit_reason: str):
         total_fees = trading_fees
         net_pnl = gross_pnl - trading_fees - funding_total
 
-        if net_pnl <= 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
+        if should_skip_unprofitable_profit_exit(exit_reason, net_pnl):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
             # CRITICAL: clear the in-progress flag so this position is not frozen
             # OPEN forever (stop-loss/ladder exits must still be able to run on it).

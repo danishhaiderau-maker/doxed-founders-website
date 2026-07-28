@@ -480,6 +480,28 @@ def run():
         and "with state_lock:" not in close_position_source.split("trade_row = {", 1)[0]
         and "with trade_lock:" not in close_position_source.split("trade_row = {", 1)[0],
     )
+    check(
+        "fee filter never vetoes a protective profit-lock exit",
+        not bot.should_skip_unprofitable_profit_exit("PROFIT_LOCK_LADDER", -0.01),
+    )
+    check(
+        "fee filter may still defer an optional fixed take-profit below fees",
+        bot.should_skip_unprofitable_profit_exit("TAKE_PROFIT", -0.01),
+    )
+    check(
+        "fee filter never vetoes stop, thesis, or time exits",
+        all(
+            not bot.should_skip_unprofitable_profit_exit(reason, -1.0)
+            for reason in (
+                "STOP_LOSS",
+                "THESIS_INVALIDATED",
+                "THESIS_FAST_CUT",
+                "EARLY_FAIL",
+                "TIME_EXIT",
+                "EMERGENCY_MAX_HOLD",
+            )
+        ),
+    )
     pending_orders_source = inspect.getsource(bot.process_pending_orders)
     pending_touch_source = inspect.getsource(bot._pending_limit_touched)
     check(
