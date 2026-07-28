@@ -2332,6 +2332,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <main>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
+    <div class="empty-state" id="collection-status">
+      <b>Collection ON:</b> raw signal, feature, order, fill, lifecycle,
+      MFE/MAE, shadow and Type-B evidence continues independently of analysis.
+      Dashboard reports are cached and deterministic. AI egress is reserved for
+      the trading-direction pipeline only.
+    </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
     <pre id="exec-text"></pre>
@@ -2526,6 +2532,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-download">
     <h2>Download Center</h2>
+    <div class="empty-state" id="collection-contract">
+      <b>Collection boundary:</b> raw trading, order, fill, lifecycle, MFE/MAE,
+      shadow and Type-B evidence is collected continuously. This dashboard and
+      analyzer are deterministic and out-of-process; they never call an AI
+      provider. DeepSeek is reserved for the bot's trading-direction decision.
+    </div>
     <p><b>Past Analysis</b> — the latest preserved pre-wipe conclusions, all derived reports, integrity manifest, and source fingerprints. Bulky raw data is excluded.</p>
     <a class="btn" href="/download/past-analysis" id="dl-past-analysis">&#11015; Download Past Analysis</a>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
@@ -2534,11 +2546,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p style="margin-top:16px"><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
     <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
     <a class="btn secondary" href="/download/genome" id="dl-genome">⬇ Genome + DNA Fingerprints ZIP</a>
-    <p style="margin-top:16px"><b>Complete history</b> — cached bundle serves instantly; add <code>?rebuild=1</code> to regenerate.</p>
+    <p style="margin-top:16px"><b>External-AI full raw bundle</b> — complete cached history for upload to Cursor, DeepSeek, or another offline analysis workspace. Rebuilding is analyzer-owned and never runs in the trading process.</p>
     <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP</a>
-    <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ Complete Bundle (cached)</a>
-    <p style="margin-top:16px"><b>ChatGPT upload</b> — small verified ZIP with trade counts manifest (use this instead of the 38MB archive).</p>
-    <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ ChatGPT Research Bundle</a>
+    <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ External AI Full Raw Bundle (cached)</a>
+    <p style="margin-top:16px"><b>External-AI compact upload</b> — small verified ZIP with trade-count manifest when the full archive is too large.</p>
+    <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ External AI Compact Bundle</a>
     <p style="margin-top:16px"><b>Week collection DB</b> — auto-updated every analyzer run (~30 min), v9.83+ trades only.</p>
     <a class="btn secondary" href="/download/accumulator" id="dl-accumulator">⬇ Accumulator DB + CSV</a>
     <a class="btn secondary" href="/api/accumulator" target="_blank">View accumulator status JSON</a>

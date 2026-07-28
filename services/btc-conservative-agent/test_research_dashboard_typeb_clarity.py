@@ -29,6 +29,11 @@ def main() -> None:
     assert "ADX 18–<30" in source
     assert "s.delta_abs ?? s.abs_delta" in source
     assert 'id="typeb-rules-body"' in source
+    assert 'id="collection-contract"' in source
+    assert 'id="collection-status"' in source
+    assert "they never call an AI" in source
+    assert "External AI Full Raw Bundle" in source
+    assert "External AI Compact Bundle" in source
 
     research_dir = ROOT / "research"
     sys.path.insert(0, str(research_dir))

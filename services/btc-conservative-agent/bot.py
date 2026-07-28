@@ -6245,6 +6245,14 @@ DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
 DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
 DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
+# Hard production boundary: DeepSeek is an execution input, never a dashboard or
+# research-report engine. Deterministic collectors/analyzers may consume the
+# resulting trade receipts, but they must not create additional model traffic.
+TRADING_AI_ONLY = True
+TRADING_AI_ALLOWED_PURPOSES = frozenset({
+    "trading_direction",
+    "trading_confirmation",
+})
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
@@ -10460,7 +10468,11 @@ def double_confirm_ai(original_ai, ctx):
         confirm_prompt = f"""Original decision: Direction={original_ai.get('direction')} WinProb={original_ai.get('win_prob')} Decision={original_ai.get('decision')}
 Context: {json.dumps(ctx, indent=2)}
 Verify if still correct. Return same format."""
-        text, _latency = call_deepseek_api([{"role": "user", "content": confirm_prompt}], temperature=0.3)
+        text, _latency = call_deepseek_api(
+            [{"role": "user", "content": confirm_prompt}],
+            temperature=0.3,
+            purpose="trading_confirmation",
+        )
         dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
         direction = dir_match.group(1).upper() if dir_match else original_ai.get("direction")
         match = re.search(r"Win probability:\s*(\d+)", text)
@@ -12306,8 +12318,10 @@ def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
 
 _last_pipeline_event_log = {"key": None, "ts": 0.0}
 
-def call_deepseek_api(messages, temperature=0.4):
+def call_deepseek_api(messages, temperature=0.4, *, purpose: str):
     """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    if TRADING_AI_ONLY and purpose not in TRADING_AI_ALLOWED_PURPOSES:
+        raise RuntimeError(f"AI_PURPOSE_BLOCKED:{purpose or 'missing'}")
     api_key = _deepseek_api_key()
     if not api_key:
         raise RuntimeError("MISSING_API_KEY")
@@ -14009,6 +14023,8 @@ def _v2_benchmark_safety_ok(context: str, trade_id: str = None) -> bool:
 
 
 def _v2_research_collection_active() -> bool:
+    if TRADING_AI_ONLY:
+        return False
     """V2 AI + checker + shadow sim — runs regardless of tile ON/OFF (tile gates orders only)."""
     if not v2_research_ai_enabled_env():
         return False
@@ -14077,7 +14093,9 @@ def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, sourc
         prompt = build_v2_prompt(ctx)
         temperature = research_ai_temperature()
         text, latency_ms = call_deepseek_api(
-            [{"role": "user", "content": prompt}], temperature=temperature,
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            purpose="research_v2",
         )
         # Legacy parser for Direction/Win/Decision lines — do not modify parse_ai_response_fields.
         parsed = parse_ai_response_fields(text)
@@ -15326,10 +15344,18 @@ def evaluate_signal_with_ai(
                 latency_ms = 5
                 log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
             else:
-                text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+                text, latency_ms = call_deepseek_api(
+                    [{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    purpose="trading_direction",
+                )
                 log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         else:
-            text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+            text, latency_ms = call_deepseek_api(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature,
+                purpose="trading_direction",
+            )
             log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         parsed = parse_ai_response_fields(text)
