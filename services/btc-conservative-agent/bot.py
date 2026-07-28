@@ -27870,7 +27870,44 @@ def _start_api_state_cache_refresher():
 def _api_state_cache_refresher_loop():
     while not shutdown_event.is_set():
         try:
-            snap = _build_api_state_snapshot()
+            if manual_admin_pause_active():
+                snap = _build_api_state_snapshot()
+            else:
+                # Full presentation snapshots perform analytics, scorecard,
+                # history, and formatting work. On the home runtime those
+                # rebuilds reached 25-68s under active paper load and starved
+                # the canonical relay endpoint. While trading is enabled,
+                # retain the paused-built presentation payload and overlay
+                # only bounded money-path state. Heavy presentation work
+                # resumes automatically when the operator pauses.
+                with _api_state_cache_lock:
+                    base = _api_state_cache.get("payload")
+                relay = _build_relay_execution_state_snapshot()
+                snap = dict(base or {})
+                for key in (
+                    "price",
+                    "execution_paused",
+                    "execution_reason",
+                    "live_armed",
+                    "orders",
+                    "positions",
+                    "trades",
+                    "expired_orders",
+                    "signal_info",
+                    "trades_map",
+                    "state_integrity",
+                    "server_ts",
+                    "bot_version",
+                    "source_git_rev",
+                    "dashboard_pid",
+                    "dashboard_port",
+                    "dashboard_owner",
+                    "bot_instance_id",
+                ):
+                    if key in relay:
+                        snap[key] = relay[key]
+                snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
+                snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             with _api_state_cache_lock:
                 _api_state_cache["payload"] = snap
                 _api_state_cache["built_at"] = time.time()

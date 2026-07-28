@@ -300,6 +300,13 @@ def run():
         "api_relay_state" not in inspect.getsource(bot._api_state_cache_refresher_loop)
         and "_build_api_state_snapshot" not in inspect.getsource(bot._relay_state_cache_refresher_loop),
     )
+    dashboard_refresher_source = inspect.getsource(bot._api_state_cache_refresher_loop)
+    check(
+        "active trading uses only a bounded dashboard execution overlay",
+        "if manual_admin_pause_active()" in dashboard_refresher_source
+        and "ACTIVE_EXECUTION_OVERLAY" in dashboard_refresher_source
+        and "_build_relay_execution_state_snapshot()" in dashboard_refresher_source,
+    )
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(
         "dashboard snapshot excludes unbounded state collections before deepcopy",
