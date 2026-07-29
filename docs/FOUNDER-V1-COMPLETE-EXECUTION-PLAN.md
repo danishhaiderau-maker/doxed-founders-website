@@ -274,11 +274,14 @@ admin and user usage screenshots.
 - [x] Bridge Founder Settings into the native chat picker and direct-provider
   runtime so the settings gear has one Founder-owned destination and changing
   a route is not a cosmetic selection.
-- [ ] Complete the existing screenshot attachment path end to end. Paste,
+- [x] Complete the existing screenshot attachment path end to end. Paste,
   browse, and drag/drop must work in Ask, Plan, Build, Debug, and Team; each
   image receives one bounded vision/OCR pass and the text-only working model
   receives a structured, explicitly untrusted description of layout, visible
   text, annotations, and likely intent rather than raw image bytes.
+  Native installed-app proof covers all three entry paths, preview/removal,
+  the shared five-mode composer, and zero console/page errors. Evidence:
+  `docs/FOUNDER-SCREENSHOT-ATTACHMENT-QA-EVIDENCE-2026-07-29.md`.
 - [x] Implement the authenticated `/api/v1/images/descriptions` boundary used
   by the installed composer, enforce the existing type/count/byte limits, cap
   each structured description at 2,000 tokens, preserve attachments and typed
@@ -291,6 +294,9 @@ admin and user usage screenshots.
 - [ ] Prove annotation-aware evidence with screenshots containing circles,
   arrows, and labels. The vision result must identify the marked region and
   OCR text without treating model inference as verified source truth.
+  The bounded annotation contract and handoff into untrusted chat context are
+  proven by automated tests. Live semantic proof remains open because this
+  machine has no permitted managed vision key or local multimodal Ollama model.
 - [x] Permit HTTP only for localhost and private-network endpoints; remote
   Personal AI requires HTTPS, protected headers cannot be overridden, and
   keys are redacted from logs and visible route receipts.

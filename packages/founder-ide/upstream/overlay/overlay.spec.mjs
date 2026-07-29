@@ -393,4 +393,20 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(gateway, /nativeSkillReceipt/);
     assert.match(gateway, /metadata:\s*\{\s*founder_skill:/);
   });
+
+  it('keeps one annotation-aware screenshot composer across every Founder mode', () => {
+    const source = read(
+      'src/vs/workbench/contrib/void/browser/react/src/sidebar-tsx/SidebarChat.tsx',
+    );
+    assert.match(source, /type='file'/);
+    assert.match(source, /accept='image\/png,image\/jpeg,image\/webp'/);
+    assert.match(source, /onPaste=\{onVisualPaste\}/);
+    assert.match(source, /onDrop=\{onVisualDrop\}/);
+    assert.match(source, /aria-label='Attached screenshots'/);
+    assert.match(source, /founderOs\.describeVisualAttachments/);
+    assert.match(source, /FOUNDER_VISUAL_CONTEXT_V1/);
+    assert.match(source, /annotated screenshots as visual evidence/);
+    assert.match(source, /untrusted user-provided content/);
+    assert.doesNotMatch(source, /workMode === .*visualAttachments/);
+  });
 });

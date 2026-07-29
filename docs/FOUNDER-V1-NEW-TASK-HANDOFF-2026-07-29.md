@@ -94,10 +94,11 @@ Primary evidence:
 
 - `docs/FOUNDER-V1-CLEAN-INTEGRATION-EVIDENCE-2026-07-28.md`
 - `docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`
+- `docs/FOUNDER-SCREENSHOT-ATTACHMENT-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`
-- `C:\Users\user\Desktop\Final Bots\artifacts\installed-attachment-qa-20260729-final\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-attachment-qa-20260729-complete\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-chat-qa-20260729-fast\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-terminal-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-visual-qa-20260729-packaged-052\`
@@ -112,6 +113,16 @@ Primary evidence:
 - Web: production build, 58 pages
 - Overlay/installer and focused Founder contracts: passed
 - Protected-path audit: zero trading/analyzer/exchange/gate paths
+
+Latest narrow screenshot QA:
+
+- Installed browse, paste, and drag/drop preview/removal: PASS
+- Shared Ask/Plan/Build/Debug/Team screenshot composer: PASS
+- Managed visual API/controller: 7/7
+- Overlay: 22/22
+- Console errors/page exceptions: 0/0
+- Live circle/arrow OCR: still requires a permitted vision route; do not
+  report deterministic provider-contract tests as live semantic vision.
 
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:

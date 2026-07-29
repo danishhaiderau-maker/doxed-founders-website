@@ -64,6 +64,45 @@ async function evaluate(expression) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+async function waitForPreview(expectedName) {
+  let preview = null;
+  const deadline = Date.now() + 15_000;
+  while (!preview && Date.now() < deadline) {
+    await wait(300);
+    preview = await evaluate(`(() => {
+      const region = document.querySelector('[aria-label="Attached screenshots"]');
+      const image = region?.querySelector('img');
+      const remove = region?.querySelector('button[aria-label^="Remove "]');
+      if (!region || !image || !remove) return null;
+      return {
+        imageAlt: image.getAttribute('alt'),
+        imageSource: image.getAttribute('src')?.slice(0, 32),
+        removeLabel: remove.getAttribute('aria-label'),
+        rect: region.getBoundingClientRect().toJSON(),
+      };
+    })()`);
+  }
+  if (!preview || preview.imageAlt !== expectedName) {
+    throw new Error(`Founder did not preview ${expectedName}.`);
+  }
+  return preview;
+}
+
+async function removePreview() {
+  const removed = await evaluate(`(() => {
+    const remove = document.querySelector(
+      '[aria-label="Attached screenshots"] button[aria-label^="Remove "]',
+    );
+    remove?.click();
+    return Boolean(remove);
+  })()`);
+  await wait(300);
+  const cleared = await evaluate(
+    `!document.querySelector('[aria-label="Attached screenshots"]')`,
+  );
+  return { removed, cleared };
+}
+
 await send('Runtime.enable');
 await send('Page.enable');
 await send('DOM.enable');
@@ -79,23 +118,8 @@ await send('DOM.setFileInputFiles', {
   files: [imagePath],
 });
 
-let preview = null;
-const deadline = Date.now() + 15_000;
-while (!preview && Date.now() < deadline) {
-  await wait(300);
-  preview = await evaluate(`(() => {
-    const region = document.querySelector('[aria-label="Attached screenshots"]');
-    const image = region?.querySelector('img');
-    const remove = region?.querySelector('button[aria-label^="Remove "]');
-    if (!region || !image || !remove) return null;
-    return {
-      imageAlt: image.getAttribute('alt'),
-      imageSource: image.getAttribute('src')?.slice(0, 32),
-      removeLabel: remove.getAttribute('aria-label'),
-      rect: region.getBoundingClientRect().toJSON(),
-    };
-  })()`);
-}
+const browsePreview = await waitForPreview(path.basename(imagePath));
+const browseRemoval = await removePreview();
 
 const screenshot = await send('Page.captureScreenshot', {
   format: 'png',
@@ -105,17 +129,35 @@ const screenshot = await send('Page.captureScreenshot', {
 const screenshotPath = path.join(outputDir, 'installed-attachment-final.png');
 fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
-const removed = await evaluate(`(() => {
-  const remove = document.querySelector(
-    '[aria-label="Attached screenshots"] button[aria-label^="Remove "]',
-  );
-  remove?.click();
-  return Boolean(remove);
+const tinyPngBase64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const dispatchAttachment = async (kind, name) => evaluate(`(() => {
+  const bytes = Uint8Array.from(atob(${JSON.stringify(tinyPngBase64)}), char => char.charCodeAt(0));
+  const file = new File([bytes], ${JSON.stringify(name)}, { type: 'image/png' });
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  const composer = document.querySelector('[aria-label="Founder Second brain"]')?.parentElement;
+  if (!composer) return false;
+  const event = new Event(${JSON.stringify(kind)}, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, ${JSON.stringify(kind === 'paste' ? 'clipboardData' : 'dataTransfer')}, {
+    configurable: true,
+    value: transfer,
+  });
+  return composer.dispatchEvent(event);
 })()`);
-await wait(300);
-const cleared = await evaluate(
-  `!document.querySelector('[aria-label="Attached screenshots"]')`,
-);
+
+await dispatchAttachment('paste', 'founder-pasted-annotation.png');
+const pastePreview = await waitForPreview('founder-pasted-annotation.png');
+const pasteRemoval = await removePreview();
+
+await dispatchAttachment('drop', 'founder-dropped-annotation.png');
+const dropPreview = await waitForPreview('founder-dropped-annotation.png');
+const dropRemoval = await removePreview();
+
+const workModes = await evaluate(`(() => {
+  const source = document.body.innerText;
+  return ['Ask', 'Plan', 'Build', 'Debug', 'Team'].filter(mode => source.includes(mode));
+})()`);
 
 const ignoredConsoleErrors = consoleErrors.filter((message) =>
   /Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
@@ -125,9 +167,13 @@ const criticalConsoleErrors = consoleErrors.filter((message) =>
 );
 const evidence = {
   imagePath,
-  preview,
-  removed,
-  cleared,
+  browsePreview,
+  browseRemoval,
+  pastePreview,
+  pasteRemoval,
+  dropPreview,
+  dropRemoval,
+  workModes,
   screenshotPath,
   ignoredConsoleErrors,
   criticalConsoleErrors,
@@ -139,11 +185,16 @@ process.stdout.write(`${JSON.stringify({ ...evidence, evidencePath }, null, 2)}\
 socket.close();
 
 if (
-  !preview
-  || preview.imageAlt !== path.basename(imagePath)
-  || !preview.imageSource?.startsWith('data:image/')
-  || !removed
-  || !cleared
+  !browsePreview.imageSource?.startsWith('data:image/')
+  || !browseRemoval.removed
+  || !browseRemoval.cleared
+  || !pastePreview.imageSource?.startsWith('data:image/')
+  || !pasteRemoval.removed
+  || !pasteRemoval.cleared
+  || !dropPreview.imageSource?.startsWith('data:image/')
+  || !dropRemoval.removed
+  || !dropRemoval.cleared
+  || workModes.length !== 5
   || criticalConsoleErrors.length > 0
   || pageErrors.length > 0
 ) process.exitCode = 1;
