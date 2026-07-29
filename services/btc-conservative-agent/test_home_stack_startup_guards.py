@@ -77,6 +77,13 @@ def main() -> None:
         and "Another bot startup is already in progress" in START,
     )
     check(
+        "stale elevated starter lock cannot leave port 7002 offline forever",
+        "Recovering from stale bot-start lock owner PID" in START
+        and "$starterAgeSec -lt 600 -or $listenerPresent" in START
+        and "[System.Net.Sockets.TcpClient]::new()" in START
+        and "process singleton remains the final duplicate" in START,
+    )
+    check(
         "hung detection includes bound-but-unconnectable listeners",
         "Test-PortBound $BotPort" in BOT_HUNG
         and 'Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20' in BOT_HUNG,
