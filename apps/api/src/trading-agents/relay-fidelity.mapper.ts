@@ -361,11 +361,14 @@ export function buildRelayFidelitySnapshot(input: {
       continue;
     }
 
+    // Every lifecycle participant proves the relay saw this showcase trade.
+    // ORDER->EXPIRED and other no-fill outcomes are intentionally absent from
+    // price-fidelity rows, but must still prevent a false "showcase without
+    // relay" orphan.
+    relayTradeIds.push(p.cycle.tradeId);
     const filled = p.events.find((e) => e.eventType === 'FILLED');
     const exit = p.events.find((e) => e.eventType === 'EXIT');
     if (!filled && !exit) continue;
-
-    relayTradeIds.push(p.cycle.tradeId);
 
     const fillPayload =
       filled?.payload && typeof filled.payload === 'object'

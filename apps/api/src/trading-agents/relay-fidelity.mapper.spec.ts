@@ -18,6 +18,14 @@ test('compact fidelity history reconciles trades beyond the dashboard display ca
         fill_ts: '2026-07-20T01:00:00.000Z',
         closed_ts: '2026-07-20T02:00:00.000Z',
         exit_reason: 'TP',
+      }, {
+        trade_id: 'cont-expired-002',
+        dir: 'SHORT',
+        entry: 64_700,
+        exit: 64_600,
+        fill_ts: '2026-07-20T03:00:00.000Z',
+        closed_ts: '2026-07-20T04:00:00.000Z',
+        exit_reason: 'TTL',
       }],
     },
     participants: [{
@@ -44,6 +52,23 @@ test('compact fidelity history reconciles trades beyond the dashboard display ca
           createdAt: exitedAt,
         },
       ],
+    }, {
+      id: 'participant-2',
+      fillPrice: null,
+      exitPrice: null,
+      createdAt: new Date('2026-07-20T03:00:00.000Z'),
+      updatedAt: new Date('2026-07-20T03:10:00.000Z'),
+      cycle: {
+        id: 'cycle-2',
+        tradeId: 'cont-expired-002',
+        showcaseExitReason: null,
+        closedAt: new Date('2026-07-20T03:10:00.000Z'),
+      },
+      events: [{
+        eventType: 'EXPIRED',
+        payload: { reason: 'TTL' },
+        createdAt: new Date('2026-07-20T03:10:00.000Z'),
+      }],
     }],
     sessionStartedAt: startedAt,
   });

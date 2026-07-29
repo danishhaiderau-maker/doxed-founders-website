@@ -1382,7 +1382,10 @@ export class TradingAgentsService implements OnModuleInit {
             events: { orderBy: { createdAt: 'asc' } },
           },
           orderBy: { updatedAt: 'desc' },
-          take: 80,
+          // Fidelity compares against the bot's compact 512-trade ledger.
+          // Keep enough participant IDs to classify older normal
+          // ORDER->EXPIRED lifecycles instead of mislabeling them as missing.
+          take: 512,
         });
         const simSessionStart =
           copyRelaySim?.active && copyRelaySim.startedAt
@@ -1407,14 +1410,11 @@ export class TradingAgentsService implements OnModuleInit {
           ((await this.botBridge.isEnabledAsync())
             ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
             : null);
-        const fidelityParticipants = lifecycleParticipants.filter((p) =>
-          p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
-        );
         relayFidelity =
-          copyRelaySim.active || fidelityParticipants.length > 0
+          copyRelaySim.active || lifecycleParticipants.length > 0
             ? buildRelayFidelitySnapshot({
                 bot: botRaw,
-                participants: fidelityParticipants,
+                participants: lifecycleParticipants,
                 limit: 50,
                 sessionStartedAt: simSessionStart,
               })
