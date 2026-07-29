@@ -596,6 +596,16 @@ remote edit and command demonstration remain open.
 
 - [ ] Audit every Founder account and admin route; retain only controls backed
   by production behavior.
+- [x] Inventory and classify the primary Founder account, workspace, settings,
+  usage, downloads, remote, authorization, and admin routes without deleting
+  wider-platform routes owned by other workstreams.
+- [x] Align active source language with one Founder IDE, embedded Founder Node,
+  one default Founder AI, optional Personal AI/Ollama, internal-beta release
+  truth, and named cost references. Evidence:
+  `FOUNDER-WEBSITE-V1-TRUTH-AUDIT-2026-07-29.md`.
+- [ ] Visually prove the changed signed-in routes and their loading, empty,
+  error, offline, reduced-motion, and success states against production-shaped
+  data.
 - [ ] Align plans, quota, provider settings, connected services, device status,
   projects, chats, agents, graph, and receipts with the IDE.
 - [ ] Add proactive founder intelligence: decision archaeology, competitor

@@ -26,10 +26,10 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `5b760b69`
+- Tested product source commit: `bf7c34d8`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
-- Relationship at the tested product commit: 97 ahead, 0 behind
-- Changed paths in the Founder delta: 361
+- Relationship at the tested product commit: 99 ahead, 0 behind
+- Changed paths in the Founder delta: 387
 - Protected trading/analyzer/exchange/gate paths in the Founder delta: 0
 - Backup ref: `backup/founder-v1-pre-rebase-20260729`
 
@@ -98,6 +98,7 @@ Primary evidence:
 - `docs/FOUNDER-PERSONAL-AI-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-VOICE-CANCEL-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-REMOTE-CONTROL-SECURITY-QA-EVIDENCE-2026-07-29.md`
+- `docs/FOUNDER-WEBSITE-V1-TRUTH-AUDIT-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`
@@ -116,7 +117,8 @@ Primary evidence:
 - Founder extension: 214/214 plus TypeScript
 - Founder Node: 62/62 plus no-output TypeScript
 - Shared utilities: 99/99
-- Web: production build, 58 pages
+- Web: production build baseline, 58 pages; latest source pass includes full
+  no-output TypeScript plus 9 focused shell/remote tests
 - Overlay/installer and focused Founder contracts: passed
 - Protected-path audit: zero trading/analyzer/exchange/gate paths
 
@@ -162,6 +164,20 @@ Latest Founder Node and remote security QA:
 - The production website-to-installed-device action, receipt, revoke, and
   reconnect demonstration is not yet run and remains a launch blocker.
 
+Latest website truth QA:
+
+- Active source now uses one `Founder IDE`, embedded `Founder Node`, one default
+  `Founder AI`, and optional `Personal AI`.
+- Legacy standalone Founder Node downloads are collapsed compatibility links,
+  not the primary desktop product.
+- macOS/Linux Founder IDE packages are no longer falsely presented as available;
+  the Windows candidate is labelled unsigned internal beta.
+- `Cursor Pro saved` is replaced by a named retail reference that explicitly
+  disclaims guaranteed savings.
+- Web no-output TypeScript: PASS; focused shell/remote tests: 9/9; stale product
+  names in `apps/web/src`: 0.
+- Signed-in responsive visual QA and production connector proofs remain open.
+
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:
 
@@ -199,9 +215,10 @@ ordinary UI or extension edits:
    website, exercise an authenticated proposed action, verify approval and
    audit receipt, then revoke/reconnect without exposing a reusable secret.
 7. **Finish website truth alignment.**
-   Audit Founder account/admin routes against shipped capacity, remove stale
-   claims, align plans/usage/providers/devices, and visually verify responsive
-   states.
+   The source inventory and one-app terminology pass are complete. Visually
+   verify signed-in responsive states, then prove plans, usage, providers,
+   devices, and least-privilege connector health/revoke behavior against the
+   approved production candidate.
 8. **Close release gates.**
    Trusted Windows signing, clean-VM install/uninstall/update/rollback, and soak
    evidence remain external/manual gates. Keep the build labelled internal beta
