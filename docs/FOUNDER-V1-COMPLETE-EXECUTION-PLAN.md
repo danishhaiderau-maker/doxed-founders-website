@@ -606,6 +606,12 @@ remote edit and command demonstration remain open.
 - [ ] Visually prove the changed signed-in routes and their loading, empty,
   error, offline, reduced-motion, and success states against production-shaped
   data.
+  - [x] Prove the production-shaped Founder workspace at 1440x900, 1024x768,
+    and 390x844, plus downloads at 1440x900 and 390x844. The downloads sweep
+    found and fixed an OS-detection hydration mismatch. Evidence:
+    `FOUNDER-WEBSITE-VISUAL-QA-EVIDENCE-2026-07-29.md`.
+  - [ ] Complete account, settings, usage, phone, authorization, and admin
+    state coverage before closing the parent visual gate.
 - [ ] Align plans, quota, provider settings, connected services, device status,
   projects, chats, agents, graph, and receipts with the IDE.
 - [ ] Add proactive founder intelligence: decision archaeology, competitor

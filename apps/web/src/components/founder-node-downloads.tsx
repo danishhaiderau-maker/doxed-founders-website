@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
@@ -96,8 +96,11 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
   const [linuxUrl, setLinuxUrl] = useState<string | null>(null);
   const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [os, setOs] = useState<'windows' | 'mac' | 'linux' | 'unknown'>('unknown');
 
-  const os = useMemo(() => detectOs(), []);
+  useEffect(() => {
+    setOs(detectOs());
+  }, []);
 
   useEffect(() => {
     fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`)

@@ -176,7 +176,14 @@ Latest website truth QA:
   disclaims guaranteed savings.
 - Web no-output TypeScript: PASS; focused shell/remote tests: 9/9; stale product
   names in `apps/web/src`: 0.
-- Signed-in responsive visual QA and production connector proofs remain open.
+- Founder workspace responsive visual QA: 3 screens, 0 failures.
+- Downloads responsive visual QA: 2 screens, 0 failures. The sweep found and
+  fixed an OS-detection hydration mismatch; its stability regression passes.
+- Evidence:
+  `docs/FOUNDER-WEBSITE-VISUAL-QA-EVIDENCE-2026-07-29.md` and
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-website-v1-visual-qa-20260729\`.
+- Account, settings, usage, phone, authorization, admin state coverage and
+  production connector proofs remain open.
 
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:

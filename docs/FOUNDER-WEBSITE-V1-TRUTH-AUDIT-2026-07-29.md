@@ -74,6 +74,9 @@ production-gate behavior changed in this slice.
 - Full web no-output TypeScript check with incremental writes disabled: passed.
 - Founder shell visual-QA predicate tests: 6 passed, 0 failed.
 - Founder remote provider-label tests: 3 passed, 0 failed.
+- Founder workspace responsive visual harness: 3 screens, 0 failures.
+- Downloads responsive visual harness: 2 screens, 0 failures.
+- Downloads hydration stability regression: 1 passed, 0 failed.
 - Whitespace check: passed.
 - Source search for `Founder Stack`, `Founder Copilot`, and
   `Cursor Pro saved`: zero matches in `apps/web/src`.
@@ -106,8 +109,10 @@ approval.
 
 ## Still open
 
-1. Run deterministic responsive visual QA on the changed signed-in routes,
-   including loading, empty, error, offline, reduced-motion, and success states.
+1. Extend the passing Founder workspace and downloads visual proof to account,
+   settings, usage, phone, authorization, and admin, including loading, empty,
+   error, offline, reduced-motion, and success states. Current evidence:
+   `FOUNDER-WEBSITE-VISUAL-QA-EVIDENCE-2026-07-29.md`.
 2. Verify plan, quota, managed AI, Personal AI, and device status against the
    production APIs after an approved deployment.
 3. Prove GitHub, Vercel, Railway, and Neon connect, health, reconnect, and
