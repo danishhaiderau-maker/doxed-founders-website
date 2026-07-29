@@ -1630,7 +1630,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Default: 3-lane research stack (CONTINUOUS + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC) -- toggle Show all lanes for historical"
+            else "Default: active research stack (CONTINUOUS + TYPE_B_HUNTER_V1) — toggle Show all lanes for retired historical studies"
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })

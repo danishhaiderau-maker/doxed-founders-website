@@ -1,4 +1,4 @@
-"""Focused contract for active Type B and Tile 2 analyzer metadata."""
+"""Focused contract for active Type B and retired Tile 2 audit metadata."""
 
 import contextlib
 import io
@@ -30,9 +30,9 @@ def main() -> int:
     assert "one short" in tile_2_conditions
     assert "30m" in tile_2_execution
     assert "no chase" in tile_2_execution
-    assert analyzer._lane_depends_on_ai("SR_MICRO_TILE_V2_STATIC", tile_2) is False
-    assert analyzer._lane_depends_on_chase("SR_MICRO_TILE_V2_STATIC", tile_2) is False
-    assert analyzer._lane_depends_on_edge("SR_MICRO_TILE_V2_STATIC", tile_2) is False
+    # The retired definition remains decodable for historical reports, but it
+    # is deliberately outside the active analyzer dependency classifier.
+    assert tile_2["entry"]["policy_version"]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         old_report = analyzer.LANE_DEFINITION_REPORT_FILE
@@ -47,14 +47,13 @@ def main() -> int:
             analyzer.LANE_DEFINITION_REPORT_FILE = old_report
 
     rows = {row["lane"]: row for row in report["lanes"]}
-    for lane in ("TYPE_B_HUNTER_V1", "SR_MICRO_TILE_V2_STATIC"):
-        assert lane in rows
-        assert rows[lane]["role"]
-        assert rows[lane]["research_question"]
-        assert rows[lane]["entry_conditions"]
+    assert "TYPE_B_HUNTER_V1" in rows
+    assert rows["TYPE_B_HUNTER_V1"]["role"]
+    assert rows["TYPE_B_HUNTER_V1"]["research_question"]
+    assert rows["TYPE_B_HUNTER_V1"]["entry_conditions"]
     assert rows["TYPE_B_HUNTER_V1"]["depends_on_ai"] is True
-    assert rows["SR_MICRO_TILE_V2_STATIC"]["depends_on_ai"] is False
-    assert rows["SR_MICRO_TILE_V2_STATIC"]["depends_on_chase"] is False
+    assert "SR_MICRO_TILE_V2_STATIC" not in rows
+    assert "SR_MICRO_TILE_V2_STATIC" in report["retired_lanes"]
 
     print("lane definition metadata tests: PASS")
     return 0

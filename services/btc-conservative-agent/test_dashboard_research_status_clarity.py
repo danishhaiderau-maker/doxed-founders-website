@@ -12,14 +12,22 @@ def main() -> None:
 
     assert "Verdicts are research evaluations, not orders" in source
     assert "executable orders appear only in Pending Orders above" in source
-    assert 'title="No research verdict was recorded. This is not a pending order."' in source
-    assert ">not evaluated</span>" in source
+    assert "restored call — verdict not recorded" in source
+    assert "AI call failed — no verdict" in source
+    assert "evaluation not reached" in source
+    assert "RESTORED_PRE_RESTART_NO_LANE_METADATA" in source
+    assert ">not evaluated</span>" not in source
     assert ">pending</span>" not in source
 
     assert "Shadow PnL (not account)" in source
     assert "statRow('Shadow trades'" in source
     assert "statRow('Shadow PnL'" in source
     assert "statRow('Shadow EV/close'" in source
+    assert "Counterfactual PnL (not account)" in source
+    assert "spec.lane !== 'CONTINUOUS'" in source
+
+    assert "'calculating…'" in source
+    assert 'unrealUsd < 0 ? \'-$\' : \'$\'' in source
 
     print("Dashboard research-status clarity tests passed")
 

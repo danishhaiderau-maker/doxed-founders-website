@@ -50,6 +50,9 @@ bot_crash_monitor = (
 analyzer_engine = (
     Path(__file__).parent / "analyzer_research_engine_v62.py"
 ).read_text(encoding="utf-8")
+lane_roster = (
+    Path(__file__).parent / "pathway_lane_roster.py"
+).read_text(encoding="utf-8")
 
 checks = {
     "status exposes live analyzer identity": '"runtime_analyzer_sync_id"' in source,
@@ -98,7 +101,10 @@ checks = {
         'pathway_status in ("RETIRED", "DATA_RETIRED")' in source
         and 'pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK")' not in source
     ),
-    "active tile 2 roster label is current": "SR_MICRO_TILE_V2_STATIC" in source,
+    "retired tile 2 is excluded from the primary analyzer roster": (
+        "RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,  # retired 2026-07-30" in lane_roster
+        and "SR_MICRO_TILE_V2_STATIC) -- toggle Show all lanes" not in source
+    ),
     "dashboard refreshes only the active tab": (
         "const SECTION_LOADERS" in source
         and "refreshActiveSection" in source

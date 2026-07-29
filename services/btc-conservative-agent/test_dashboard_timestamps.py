@@ -48,9 +48,9 @@ checks = [
         'oc["created_ts_melbourne"]' in SOURCE,
     ),
     (
-        "paused shadow separates shared AI-call and lane-recorded times",
+        "AI history uses the actual shared-call time",
         "<th>AI Call Time (Melbourne)</th>" in SOURCE
-        and "<th>Lane Recorded (Melbourne)</th>" in SOURCE,
+        and "<th>Lane Recorded (Melbourne)</th>" not in SOURCE,
     ),
     (
         "paused shadow exposes the shared paid-call identity",
@@ -58,14 +58,13 @@ checks = [
         and "shared_ai_call_id" in SOURCE,
     ),
     (
-        "AI history explains that Tile 2 is deterministic",
-        "Tile 2 uses no AI; its independent deterministic gate is shown below." in SOURCE,
+        "AI history explains restored pre-restart verdict gaps",
+        "Restored pre-restart calls may lack the newer per-lane verdict metadata." in SOURCE,
     ),
     (
-        "Tile 2 latest gate reason and check time are visible",
-        'id="tile2DecisionSummary"' in SOURCE
-        and "t2Eval.block_reason" in SOURCE
-        and "t2Eval.observed_ts" in SOURCE,
+        "retired Tile 2 is absent from active dashboard summaries",
+        'id="tile2DecisionSummary"' not in SOURCE
+        and '<strong>Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel:</strong>' not in SOURCE,
     ),
 ]
 

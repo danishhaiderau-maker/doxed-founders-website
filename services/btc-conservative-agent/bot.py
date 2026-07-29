@@ -250,7 +250,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "PROBATION",
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: "DATA_RETIRED",
@@ -304,7 +304,6 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 })
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
@@ -12229,6 +12228,7 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model") or research_lane_label(row.get("research_lane")),
         "lane_verdicts": {},
+        "verdict_provenance": "RESTORED_PRE_RESTART_NO_LANE_METADATA",
     }
 
 def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
@@ -14951,6 +14951,8 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
     Paper-only until its reconciled filled-sample gate is met.
     """
     lane = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    if is_research_lane_retired(lane):
+        return
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
@@ -21315,6 +21317,21 @@ _API_STATE_INLINE_RESEARCH_AGGREGATES = (
 )
 _api_state_cache_lock = threading.Lock()
 _api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
+
+
+def _patch_api_state_cache_fields(**updates) -> None:
+    """Make successful control POSTs visible on the very next dashboard read."""
+    with _api_state_cache_lock:
+        payload = _api_state_cache.get("payload")
+        if not isinstance(payload, dict):
+            return
+        patched = dict(payload)
+        for key, value in updates.items():
+            patched[key] = copy.deepcopy(value)
+        _api_state_cache["payload"] = patched
+        _api_state_cache["built_at"] = time.time()
+
+
 csv_lock = threading.RLock()
 replay_lock = threading.RLock()
 ws_lock = threading.RLock()
@@ -21915,6 +21932,10 @@ def build_static_pathway_lane_specs() -> dict:
     )
     lanes = []
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
+        # Retired studies keep their implementation and ledgers for auditability
+        # but are absent from the active dashboard and cannot run new work.
+        if is_research_lane_retired(lane_id):
+            continue
         spec = COMBO_LANE_SPECS[lane_id]
         shadow_only = bool(spec.get("is_shadow_only")) or is_shadow_only_lane(lane_id)
         independent_ai = is_independent_ai_lane(lane_id)
@@ -22482,7 +22503,9 @@ def build_static_pathway_lane_specs() -> dict:
         "is_benchmark": True,
         "is_primary_production": False,
         "badge": "BENCHMARK",
-        "tile_number": len(COMBO_TILE_DISPLAY_ORDER) + 1,
+        # Preserve the historical card number after retiring Tile 2 so users
+        # can still recognize the Continuous benchmark as the former Tile 3.
+        "tile_number": 3,
         "entry_mode_label": "Continuous",
         "filter_chips": [
             f"One AI call ~{shared['ai_scan_cadence_sec']}s",
@@ -22611,7 +22634,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "v12 roster — Continuous + Type B share one direction AI call but keep separate policies/books; static S/R remains paper probation",
+        "architecture_freeze_note": "v15 roster — Continuous + Type B share one direction AI call but keep separate policies/books; retired S/R history remains archived",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -23900,7 +23923,7 @@ HTML = """<!DOCTYPE html>
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane paper-research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC (no full-chase S/R)</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">2-lane paper-research stack — CONTINUOUS benchmark + TYPE_B_HUNTER_V1 candidate. Retired studies remain in the archive only.</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
@@ -24061,7 +24084,6 @@ HTML = """<!DOCTYPE html>
     <p><strong>Pipeline Funnel (session):</strong> <span id="pipelineFunnel">-</span></p>
     <p><strong>Research Isolation:</strong> <span id="researchIsolation">-</span></p>
     <p><strong>Lane Opportunity (session):</strong> <span id="laneOpportunity">-</span></p>
-    <p><strong>Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel:</strong> <span id="tile2Metrics">-</span></p>
     <p><strong>Last AI Call:</strong> <span id="lastAICall">-</span></p>
     <p><strong>AI Score:</strong> <span id="aiScore">-</span></p>
     <p><strong>Signal Cooldown:</strong> <span id="signalCooldown">-</span></p>
@@ -24111,8 +24133,7 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Tile 2 uses no AI; its independent deterministic gate is shown below.</p>
-<div id="tile2DecisionSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;">Tile 2 deterministic gate · collecting…</div>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Restored pre-restart calls may lack the newer per-lane verdict metadata.</p>
 <table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -24757,8 +24778,12 @@ DASHBOARD_JS = """(function () {
           // LAB (OFF-combo): primary Trades/PnL/EV show LAB ledger / open shadows.
           // Independent AI V1 tiles (TYPE_B / SR_MICRO) use combo LAB shadow when OFF — same as other combo tiles.
           // V2 keeps its own checker/shadow metrics UI (not LAB ledger).
-          const labEligible = !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && spec.status !== 'RETIRED' && !spec.planned;
+          // The benchmark's real paper ledger is the stable yardstick. Turning
+          // its order switch OFF must not replace that P&L with a different
+          // counterfactual ledger and make a profit look like a sudden loss.
+          const labEligible = spec.lane !== 'CONTINUOUS' && !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && spec.status !== 'RETIRED' && !spec.planned;
           const labOn = labEligible && (stats.lab_mode || (stats.lab_closes > 0) || (stats.lab_open_shadows > 0));
+          const benchmarkShadow = spec.lane === 'CONTINUOUS' && ((stats.lab_closes || 0) > 0 || (stats.lab_open_shadows || 0) > 0);
           const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
           const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
           const v2ChkPnl = stats.checker_pass_pnl != null ? stats.checker_pass_pnl : (stats.net_pnl_real != null ? stats.net_pnl_real : 0);
@@ -24812,9 +24837,15 @@ DASHBOARD_JS = """(function () {
               + statRow('Rej PnL', '$' + Number(v2RejectPnl).toFixed(2), v2RejectPnlCol)
               + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
               + '</div>') : '')
-            + activeGrid
-            + pausedGrid
-            + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
+             + activeGrid
+             + pausedGrid
+             + (benchmarkShadow ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
+               + statRow('Counterfactual closes', labCloses, '#58a6ff')
+               + statRow('Counterfactual PnL (not account)', '$' + Number(labPnl).toFixed(2), labPnlCol)
+               + statRow('Counterfactual win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
+               + statRow('Counterfactual EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
+               + '</div>') : '')
+             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
               + statRow('Shadow PnL (not account)', '$' + Number(labPnl).toFixed(2), labPnlCol)
               + statRow('Shadow win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
@@ -25591,21 +25622,28 @@ DASHBOARD_JS = """(function () {
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
           </tr>`;
         }).join(''));
-        safeHTML('positionsTable', (d.positions||[]).map(l => `
-          <tr>
-            <td>${l.entry_ts_melbourne || formatMelbourneDateTime(l.entry_ts || l.fill_ts || l.open_ts)}</td>
-            <td>${l.leg || '-'}</td>
-            <td>${laneBadge(l.research_lane, l.research_model)}</td>
-            <td>${l.side || '-'}</td>
-            <td>${l.qty || '-'}</td>
-            <td>${l.entry != null ? l.entry.toFixed(2) : '-'}</td>
-            <td>${l.current_price != null ? l.current_price.toFixed(2) : '-'}</td>
-            <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
-            <td>${l.tp || '-'}</td>
-            <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
-            <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
-          </tr>
-        `).join(''));
+        safeHTML('positionsTable', (d.positions||[]).map(l => {
+          const marginPct = Number(l.pnl_pct_margin);
+          const unrealUsd = Number(l.unreal_usd);
+          const pnlText = Number.isFinite(marginPct) && Number.isFinite(unrealUsd)
+            ? `${marginPct.toFixed(2)}% · ${unrealUsd < 0 ? '-$' : '$'}${Math.abs(unrealUsd).toFixed(2)}`
+            : 'calculating…';
+          return `
+            <tr>
+              <td>${l.entry_ts_melbourne || formatMelbourneDateTime(l.entry_ts || l.fill_ts || l.open_ts)}</td>
+              <td>${l.leg || '-'}</td>
+              <td>${laneBadge(l.research_lane, l.research_model)}</td>
+              <td>${l.side || '-'}</td>
+              <td>${l.qty || '-'}</td>
+              <td>${l.entry != null ? l.entry.toFixed(2) : '-'}</td>
+              <td>${l.current_price != null ? l.current_price.toFixed(2) : '-'}</td>
+              <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
+              <td>${l.tp || '-'}</td>
+              <td>${pnlText}</td>
+              <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
+            </tr>
+          `;
+        }).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
             <td>${e.time_melbourne || formatMelbourneDateTime(e.time || e.expired_ts || e.created_ts)}</td>
@@ -25699,10 +25737,19 @@ DASHBOARD_JS = """(function () {
             ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
-            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.';
+            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above. '
+            + 'A restored call may say "verdict not recorded" because the older CSV did not contain per-lane metadata.';
         }
-        const formatLaneVerdict = (v) => {
-          if (!v) return '<span style="color:#8b949e" title="No research verdict was recorded. This is not a pending order.">not evaluated</span>';
+        const formatLaneVerdict = (v, row) => {
+          if (!v) {
+            if (row && row.ai_error) {
+              return '<span style="color:#f85149" title="The shared AI request failed before either lane could evaluate it.">AI call failed — no verdict</span>';
+            }
+            if (row && row.verdict_provenance === 'RESTORED_PRE_RESTART_NO_LANE_METADATA') {
+              return '<span style="color:#8b949e" title="This call was restored from the older CSV format, which did not store per-lane verdicts.">restored call — verdict not recorded</span>';
+            }
+            return '<span style="color:#8b949e" title="The lane-specific evaluator did not stamp a result for this call. This is not a pending order.">evaluation not reached</span>';
+          }
           const accepted = v.accepted === true || v.ok === true;
           const label = accepted ? 'ACCEPT' : (v.reason || v.block_reason || 'REJECT');
           const score = v.score != null ? ` · score ${v.score}` : '';
@@ -25724,8 +25771,8 @@ DASHBOARD_JS = """(function () {
             <td>${a.long_score != null ? a.long_score : '-'}</td>
             <td>${a.short_score != null ? a.short_score : '-'}</td>
             <td>${a.score_gap != null ? a.score_gap : '-'}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict)}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict)}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict, a)}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict, a)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
         }).join('') : '<tr><td colspan="10" style="color:#8b949e">No AI calls yet this session</td></tr>');
@@ -27204,7 +27251,7 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
     """Open position truth required by flatness, mirror, and exit checks."""
     if not isinstance(row, dict):
         return {}
-    return {
+    out = {
         "trade_id": row.get("trade_id"),
         "status": row.get("status"),
         "dir": row.get("dir") or row.get("side"),
@@ -27224,6 +27271,28 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model"),
     }
+    # The active dashboard overlays this bounded relay row while paper execution
+    # is running. Keep the presentation P&L fields in the overlay too; otherwise
+    # a real open paper position renders as "-% $-" even though its mark is fresh.
+    try:
+        entry = float(row.get("entry") or 0)
+        mark = float(tick_px or 0)
+        leverage = float(row.get("leverage") or DEFAULT_RESEARCH_LEVERAGE)
+        if entry > 0 and mark > 0 and leverage > 0:
+            direction = str(row.get("dir") or row.get("side") or "LONG").upper()
+            dir_factor = -1.0 if direction == "SHORT" else 1.0
+            move_pct = ((mark - entry) / entry) * 100.0 * dir_factor
+            gross_usd = (move_pct / 100.0) * FIXED_MARGIN_USDT * leverage
+            funding_acc = float(row.get("funding_fees") or 0.0)
+            out["pnl_pct_margin"] = move_pct * leverage
+            out["unreal_usd_gross"] = gross_usd
+            out["funding_fees_accrued"] = funding_acc
+            out["unreal_usd"] = round(gross_usd - funding_acc, 4)
+    except (TypeError, ValueError, OverflowError):
+        # Position identity/flatness remains authoritative even if a malformed
+        # optional presentation value cannot be calculated.
+        pass
+    return out
 
 
 def _build_relay_execution_state_snapshot() -> dict:
@@ -27260,6 +27329,10 @@ def _build_relay_execution_state_snapshot() -> dict:
             "execution_paused": bool(state.get("execution_paused", False)),
             "execution_reason": state.get("execution_reason"),
             "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+            "continuous_ai_research_enabled": bool(
+                state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
+            ),
+            "research_lane_enabled": copy.deepcopy(state.get("research_lane_enabled") or {}),
             "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
             "strategy_mode": state.get("strategy_mode"),
             "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
@@ -28034,6 +28107,8 @@ def _api_state_cache_refresher_loop():
                     "execution_paused",
                     "execution_reason",
                     "manual_admin_pause",
+                    "continuous_ai_research_enabled",
+                    "research_lane_enabled",
                     "live_armed",
                     "max_active_signals",
                     "strategy_mode",
@@ -28437,6 +28512,9 @@ def toggle_continuous_ai_research():
     suspend_result = None
     if not state["continuous_ai_research_enabled"]:
         suspend_result = suspend_lane_trading(RESEARCH_LANE_CONTINUOUS, reason="CONTINUOUS_AI_OFF")
+    _patch_api_state_cache_fields(
+        continuous_ai_research_enabled=state["continuous_ai_research_enabled"]
+    )
     return jsonify({
         "continuous_ai_research_enabled": state["continuous_ai_research_enabled"],
         "suspend": suspend_result,
@@ -28461,6 +28539,7 @@ def toggle_research_lane():
     suspend_result = None
     if not enabled[lane]:
         suspend_result = suspend_lane_trading(lane, reason="LANE_TOGGLE_OFF")
+    _patch_api_state_cache_fields(research_lane_enabled=enabled)
     logger.info(
         f"[RESEARCH_LANE] {lane} set {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
     )

@@ -236,7 +236,7 @@ export class SignalCyclesService implements OnModuleInit {
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
     // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only the
-    // Continuous (`cont-`), Type B (`tbhv1-`), and static Tile 2 (`srmv2s-`)
+    // Continuous (`cont-`) and Type B (`tbhv1-`)
     // may create live-copy intents. All
     // research lanes (vc603-, szdc1-, slav1-, a160v2-, scan-, etc.) are skipped
     // — they have no real Bitfinex counterpart and would put real money on a

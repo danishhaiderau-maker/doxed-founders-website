@@ -7894,7 +7894,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   /**
     * Part B (intent-mirror) — Place a hire's copy order directly from an
-   * approved `cont-`, `tbhv1-`, or `srmv2s-` INTENT cycle. Entry is fail-closed until
+   * approved `cont-` or `tbhv1-` INTENT cycle. Entry is fail-closed until
    * canonical showcase state contains the exact matching resting limit.
    * The intent wakes the relay; the :7002 order book supplies the authoritative
    * price and lifecycle so a user account cannot get ahead of the showcase.

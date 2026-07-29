@@ -5,8 +5,11 @@ Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)
   - TYPE_B_HUNTER_V1 (research candidate, shared 3-minute direction AI)
     shared AI direction; ADX-flipped, volume-inverted, regime-aware fixed policy.
-  - SR_MICRO_TILE_V2_STATIC (dual $20 resting limits, one per direction)
   + AI_SCAN (internal scanner, no orders)
+
+Retired 2026-07-30:
+  SR_MICRO_TILE_V2_STATIC -- negative shadow expectancy; historical evidence and
+  implementation retained for audit only, with all evaluation/order/relay gates off.
 
 Retired 2026-07-16 (v12 overhaul):
   SR_MICRO_TILE_V1 -- failed experiment (47% WR, negative PnL).
@@ -29,7 +32,6 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 DASHBOARD_PRIMARY_LANES = (
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 LIVE_PATHWAY_TILE_ORDER = DASHBOARD_PRIMARY_LANES
@@ -40,6 +42,7 @@ DASHBOARD_PATHWAY_LANES = DASHBOARD_PRIMARY_LANES
 # execution / dashboard gate rejects them.
 RETIRED_PATHWAY_LANES = frozenset((
     RESEARCH_LANE_SR_MICRO_TILE_V1,  # retired 2026-07-16 v12 overhaul (47% WR, negative PnL)
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,  # retired 2026-07-30; negative shadow expectancy
 ))
 
 DATA_RETIRED_PATHWAY_LANES = frozenset((
@@ -48,17 +51,16 @@ DATA_RETIRED_PATHWAY_LANES = frozenset((
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v13-tile2-dual-leg"
+ROSTER_PHASE = "v15-continuous-typeb-only"
 ROSTER_NOTES = (
-    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (fixed policy) + "
-    "SR_MICRO_TILE_V2_STATIC dual-leg. SR_MICRO_TILE_V1 retired 2026-07-16 (47% WR, "
-    "negative PnL); code preserved. Full-chase S/R V2 historical-only."
+    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (fixed policy). "
+    "SR_MICRO_TILE_V2_STATIC retired 2026-07-30 for negative shadow expectancy; "
+    "history/code preserved. SR_MICRO_TILE_V1 and full-chase S/R V2 are historical-only."
 )
 
 ANALYZER_COMPARE_LANES = (
     COMPARISON_BENCHMARK_LANE,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     RESEARCH_LANE_AI_SCAN,
 )
 

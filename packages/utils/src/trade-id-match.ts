@@ -5,7 +5,7 @@ export type TradeIdMatchKind = 'exact' | 'prefix' | 'normalized' | 'contains' | 
 /**
  * F5 (2026-07-07 incident hardening) — Extract the lane prefix from a trade_id.
  * Trade IDs are `<lane-prefix>-<12-hex>` per services/btc-conservative-agent/bot.py
- * allocate_lane_trade_id. Known prefixes include cont-, tbhv1-, scan-, srmv2s-.
+ * allocate_lane_trade_id. Active mirror prefixes are cont- and tbhv1-.
  * Returns the lowercase prefix (including trailing `-`) or '' when no prefix.
  */
 function extractLanePrefix(tradeId: string): string {
@@ -86,9 +86,9 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
 
 /**
  * F7 (2026-07-08 real-money hotfix) — Lane prefixes explicitly approved for
- * live-copy mirroring. Continuous, Type B, and the static S/R Tile 2 are
- * separate showcase lanes explicitly approved here. Tile 2 remains a local
- * paper source; the platform relay is its only path to live money.
+ * live-copy mirroring. Continuous and Type B are the only approved showcase
+ * lanes. Retired studies remain fail-closed even when old trade IDs survive
+ * in historical data.
  *
  * Fail-closed: any prefix not in this set is treated as research/paper and
  * never mirrored to real money. This inverts the legacy {@link isPaperLaneTradeId}
@@ -96,11 +96,11 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  * remembered to add it to the deny list (the exact bug that caused the
  * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
  */
-const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'tbhv1', 'srmv2s']);
+const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'tbhv1']);
 
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly
- * allow-listed production mirror lane (`cont-`, `tbhv1-`, or `srmv2s-`). Everything
+ * allow-listed production mirror lane (`cont-` or `tbhv1-`). Everything
  * else (research lanes like vc603-/szdc1-/slav1-, paper lanes a160v2-,
  * bare-uuids, unknown prefixes) returns false.
  *

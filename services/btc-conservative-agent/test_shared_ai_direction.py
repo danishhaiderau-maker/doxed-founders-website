@@ -1,5 +1,6 @@
 """Contract tests for one AI call feeding two independent strategy tiles."""
 import os
+import copy
 import inspect
 import json
 import tempfile
@@ -309,8 +310,34 @@ def run():
         and "not base.get(\"bot_start_time\")" in dashboard_refresher_source
         and 'base_source in ("", "booting")' in dashboard_refresher_source
         and dashboard_refresher_source.count("_build_api_state_snapshot()") == 2
-        and '"manual_admin_pause"' in dashboard_refresher_source,
+        and '"manual_admin_pause"' in dashboard_refresher_source
+        and '"continuous_ai_research_enabled"' in dashboard_refresher_source
+        and '"research_lane_enabled"' in dashboard_refresher_source,
     )
+    original_api_cache = copy.deepcopy(bot._api_state_cache)
+    try:
+        with bot._api_state_cache_lock:
+            bot._api_state_cache["payload"] = {
+                "continuous_ai_research_enabled": False,
+                "research_lane_enabled": {},
+            }
+        bot._patch_api_state_cache_fields(
+            continuous_ai_research_enabled=True,
+            research_lane_enabled={RESEARCH_LANE_TYPE_B_HUNTER_V1: True},
+        )
+        with bot._api_state_cache_lock:
+            patched_cache = copy.deepcopy(bot._api_state_cache["payload"])
+        check(
+            "control POST cache patch makes toggle state immediately observable",
+            patched_cache.get("continuous_ai_research_enabled") is True
+            and patched_cache.get("research_lane_enabled", {}).get(
+                RESEARCH_LANE_TYPE_B_HUNTER_V1
+            ) is True,
+        )
+    finally:
+        with bot._api_state_cache_lock:
+            bot._api_state_cache.clear()
+            bot._api_state_cache.update(original_api_cache)
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(
         "dashboard snapshot excludes unbounded state collections before deepcopy",
@@ -390,8 +417,9 @@ def run():
             raise AssertionError("/api/state invoked the heavy snapshot builder")
 
         bot._build_api_state_snapshot = _must_not_build_on_request
+        client = bot.app.test_client()
         started = time.monotonic()
-        response = bot.app.test_client().get("/api/state")
+        response = client.get("/api/state")
         elapsed = time.monotonic() - started
         check("cold /api/state fails fast", response.status_code == 503 and elapsed < 2.0)
     finally:
@@ -704,6 +732,8 @@ def run():
             "order_created_ts": 1_774_608_492.003,
             "entry_ts": 1_774_609_094.056,
             "signal_age_sec": 603.741,
+            "leverage": 100,
+            "funding_fees": 0.05,
         },
         65010.0,
     )
@@ -712,6 +742,11 @@ def run():
         relay_position.get("created_ts") == 1_774_608_490.315
         and relay_position.get("signal_created_ts") == 1_774_608_490.315
         and relay_position.get("order_created_ts") == 1_774_608_492.003,
+    )
+    check(
+        "relay position overlay preserves dashboard unrealized PnL",
+        abs(float(relay_position.get("pnl_pct_margin") or 0.0) - 1.538461538) < 0.000001
+        and abs(float(relay_position.get("unreal_usd") or 0.0) - 0.2577) < 0.0001,
     )
     check(
         "open position builder persists source birth lineage",

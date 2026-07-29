@@ -22,7 +22,6 @@ test('live relay consent advertises every authoritative dashboard lane', () => {
   assert.deepEqual(CONSERVATIVE_BTC_LIVE_RELAY_LANES, [
     'CONTINUOUS',
     'TYPE_B_HUNTER_V1',
-    'SR_MICRO_TILE_V2_STATIC',
   ]);
 });
 

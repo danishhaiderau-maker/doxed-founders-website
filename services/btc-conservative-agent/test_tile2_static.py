@@ -134,6 +134,25 @@ print("=" * 78)
 print("Section 10: Tile 2 (SR_MICRO_TILE_V2_STATIC) static-integrity tests")
 print("=" * 78)
 
+if bot.is_research_lane_retired(LANE):
+    print("\n[RETIRED] Fail-closed production contract")
+    set_lane(True)
+    check("retired Tile 2 cannot be enabled", bot.is_research_lane_enabled(LANE) is False)
+    check("retired Tile 2 cannot place new entries", lane_can_place_new_entry(LANE) is False)
+    check("retired Tile 2 is not relay eligible", bot.relay_publishes_approve_outcome(LANE) is False)
+    check(
+        "retired Tile 2 is absent from active dashboard specs",
+        all(row.get("lane") != LANE for row in bot.build_static_pathway_lane_specs()["lanes"]),
+    )
+    check(
+        "retired Tile 2 evaluator exits before collection",
+        "if is_research_lane_retired(lane):" in inspect.getsource(
+            bot.maybe_tick_sr_micro_tile_v2_static_bracket
+        ),
+    )
+    print(f"\nRESULT: {passed} passed, {failed} failed")
+    raise SystemExit(0 if failed == 0 else 1)
+
 
 # ---------------------------------------------------------------------------
 # Group A: policy identifier sanity (Section 1/8 ground truth)

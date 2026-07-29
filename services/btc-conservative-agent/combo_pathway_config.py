@@ -4,7 +4,9 @@ Trading Genome Architecture v1 — frozen execution tiles.
 CONTINUOUS: permanent benchmark / scientific control group.
 TYPE_B_HUNTER_V1: research candidate — shared direction AI + independent fixed gate.
   v12 policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
-SR_MICRO_TILE_V2_STATIC: resting-limit paper study (no chase/reprice, shadow).
+
+Retired 2026-07-30:
+  SR_MICRO_TILE_V2_STATIC — negative shadow expectancy; code/spec/history retained.
 
 Retired 2026-07-16 (v12 overhaul):
   SR_MICRO_TILE_V1 — failed experiment (47% WR, negative PnL). Code preserved for reference.
@@ -22,7 +24,7 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 """
 from __future__ import annotations
 
-# [CLEAN 2026-07-11] Housekeeping — only CONTINUOUS + 2 new research candidates remain.
+# [CLEAN 2026-07-30] Only CONTINUOUS + Type B remain executable.
 from scenario_c_config import (
     SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
     SCENARIO_C_LEGACY_10_6_PROFILE_ID,
@@ -51,17 +53,15 @@ RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
 COMBO_LANE_SPECS = {
     # =====================================================================
-    # v11.8 paper-research stack: TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC.
+    # Active paper-research candidate: TYPE_B_HUNTER_V1.
     # Other entries below are retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
@@ -151,10 +151,9 @@ COMBO_LANE_SPECS = {
         ),
     },
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: {
-        "label": "S/R Micro Tile V2 Static -- resting limit (no chase)",
+        "label": "S/R Micro Tile V2 Static (retired)",
         "subtitle": (
-            "PROBATION - OPERATIONAL WHEN ON - one $20 LONG@support and "
-            "one $20 SHORT@resistance; never chase/reprice/slide"
+            "RETIRED 2026-07-30 — negative shadow expectancy; historical audit only"
         ),
         "combo_key": "SR_MICRO_TILE++STATIC_LIMIT_BRACKET_V2",
         "ai_min": 0,
@@ -215,11 +214,9 @@ RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 RESEARCH_STACK_VERSION = "v15-typeb-opportunity-v2"
 RESEARCH_STACK_FEATURES = (
     "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
-    "SR_MICRO_TILE_V2_STATIC "
-    "(three-lane paper-research roster); V1 and full-chase S/R are archived data only; "
-    "fixed-policy Type B walk-forward collection + static S/R bracket ticks; "
-    "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY) + Tile 2 dual-leg policy "
-    "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720; "
+    "two-lane paper-research roster; all S/R tiles are archived data only; "
+    "fixed-policy Type B walk-forward collection; "
+    "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY); "
     "paused-shadow outcome ledger/dashboard; non-monotonic ADX shared prompt; "
     "Type B ADX-v3 shadow challenger; fail-closed relay executor watchdog"
 )
@@ -240,7 +237,7 @@ COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
 COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — shared direction / fixed policy"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
-COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static"
+COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static (retired)"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
 # Research candidates start OFF (shadow collecting)
