@@ -32,8 +32,40 @@ try {
     [System.IO.FileShare]::None
   )
 } catch {
-  Write-Host "Another bot startup is already in progress - leaving it as the sole starter." -ForegroundColor Yellow
-  exit 0
+  # A killed or elevated starter can remain alive indefinitely while holding
+  # this advisory lock, leaving :7002 offline forever. Recover only when the
+  # recorded owner is at least 10 minutes old AND there is no bot listener.
+  # btc_conservative_agent.py's process singleton remains the final duplicate
+  # guard if the stale starter later resumes.
+  $recordedStarterPid = 0
+  if (Test-Path $starterPidFile) {
+    $rawStarterPid = (Get-Content $starterPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ("$rawStarterPid" -match '^\d+$') { $recordedStarterPid = [int]$rawStarterPid }
+  }
+  $starterAgeSec = 0
+  if ($recordedStarterPid -gt 0) {
+    $starterProcess = Get-Process -Id $recordedStarterPid -ErrorAction SilentlyContinue
+    if ($starterProcess -and $starterProcess.StartTime) {
+      $starterAgeSec = [Math]::Max(0, ((Get-Date) - $starterProcess.StartTime).TotalSeconds)
+    }
+  }
+  $probePort = if ($Port -gt 0) { $Port } else { 7002 }
+  $listenerPresent = $false
+  try {
+    $probe = [System.Net.Sockets.TcpClient]::new()
+    $pendingConnect = $probe.BeginConnect("127.0.0.1", $probePort, $null, $null)
+    $listenerPresent = $pendingConnect.AsyncWaitHandle.WaitOne(500) -and $probe.Connected
+    $probe.Close()
+  } catch { $listenerPresent = $false }
+  if ($starterAgeSec -lt 600 -or $listenerPresent) {
+    Write-Host "Another bot startup is already in progress - leaving it as the sole starter." -ForegroundColor Yellow
+    exit 0
+  }
+  Write-Warning (
+    "Recovering from stale bot-start lock owner PID $recordedStarterPid " +
+    "($([Math]::Round($starterAgeSec))s old); port $probePort has no listener."
+  )
+  $script:StartLockHandle = $null
 }
 Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
 
