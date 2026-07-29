@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): reconcile complete fidelity lifecycle window
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
