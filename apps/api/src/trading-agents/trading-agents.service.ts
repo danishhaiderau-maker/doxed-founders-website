@@ -49,6 +49,7 @@ import {
 import {
   participantTouchesSession,
   readInstanceScope,
+  readRelayFidelitySessionStart,
   scopeActivityToUserSession,
   statsFromScopedActivity,
   type UserInstanceScope,
@@ -1387,14 +1388,15 @@ export class TradingAgentsService implements OnModuleInit {
           // ORDER->EXPIRED lifecycles instead of mislabeling them as missing.
           take: 512,
         });
-        const simSessionStart =
-          copyRelaySim?.active && copyRelaySim.startedAt
-            ? new Date(copyRelaySim.startedAt)
-            : overlayMeta?.userSessionStartedAt
-              ? new Date(overlayMeta.userSessionStartedAt)
-              : null;
-        const lifecycleParticipants = simSessionStart
-          ? recentParticipants.filter((p) => participantTouchesSession(p, simSessionStart))
+        const instanceMode = readInstanceScope(inst).instanceMode;
+        const fidelitySessionStart = readRelayFidelitySessionStart({
+          instanceMode,
+          dashboardState: instDash,
+          copyRelaySim,
+          userSessionStartedAt: overlayMeta?.userSessionStartedAt,
+        });
+        const lifecycleParticipants = fidelitySessionStart
+          ? recentParticipants.filter((p) => participantTouchesSession(p, fidelitySessionStart))
           : [];
         tradeLifecycleIntegrity =
           lifecycleParticipants.length > 0
@@ -1411,12 +1413,12 @@ export class TradingAgentsService implements OnModuleInit {
             ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
             : null);
         relayFidelity =
-          copyRelaySim.active || lifecycleParticipants.length > 0
+          fidelitySessionStart && (copyRelaySim.active || lifecycleParticipants.length > 0)
             ? buildRelayFidelitySnapshot({
                 bot: botRaw,
                 participants: lifecycleParticipants,
                 limit: 50,
-                sessionStartedAt: simSessionStart,
+                sessionStartedAt: fidelitySessionStart,
               })
             : null;
 

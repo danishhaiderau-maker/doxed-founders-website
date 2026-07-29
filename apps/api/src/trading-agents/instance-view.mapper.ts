@@ -62,6 +62,37 @@ export function readInstanceScope(instance: {
   };
 }
 
+/** Fidelity must use the same epoch as execution.
+ *
+ * A live instance does not inherit historical relay-sim misses. Live execution
+ * is NEXT_FRESH_ONLY and writes relayArmedAt on every explicit Start, so there
+ * is no live fidelity session before that timestamp exists.
+ */
+export function readRelayFidelitySessionStart(input: {
+  instanceMode: 'copy' | 'live';
+  dashboardState: unknown;
+  copyRelaySim?: { active?: boolean; startedAt?: string | null } | null;
+  userSessionStartedAt?: string | null;
+}): Date | null {
+  const dash = (input.dashboardState ?? {}) as Record<string, unknown>;
+  if (input.instanceMode === 'live') {
+    for (const raw of [dash.relayArmedAt, dash.realTradingConfirmedAt]) {
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const parsed = new Date(raw);
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+    return null;
+  }
+
+  const raw =
+    input.copyRelaySim?.active && input.copyRelaySim.startedAt
+      ? input.copyRelaySim.startedAt
+      : input.userSessionStartedAt;
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
 function parseActivityTime(iso: string): number {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : 0;
