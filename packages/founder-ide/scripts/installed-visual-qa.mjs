@@ -255,7 +255,11 @@ await waitForCondition(
       && /Projects/i.test(text)
       && /Chats/i.test(text)
       && /Agents/i.test(text)
-      && /Graph/i.test(text);
+      && /Browser/i.test(text)
+      && /Changes/i.test(text)
+      && /Deploy/i.test(text)
+      && /Remote/i.test(text)
+      && /Connect/i.test(text);
   },
 );
 await resetVisibleScroll();
@@ -328,7 +332,11 @@ const evidence = {
     projectsVisible: /Projects/i.test(visibleProductText),
     chatsVisible: /Chats/i.test(visibleProductText),
     agentsVisible: /Agents/i.test(visibleProductText),
-    graphVisible: /Graph/i.test(visibleProductText),
+    browserVisible: /Browser/i.test(visibleProductText),
+    changesVisible: /Changes/i.test(visibleProductText),
+    deployVisible: /Deploy/i.test(visibleProductText),
+    remoteVisible: /Remote/i.test(visibleProductText),
+    connectVisible: /Connect/i.test(visibleProductText),
   },
   consoleErrors,
   ignoredConsoleErrors,

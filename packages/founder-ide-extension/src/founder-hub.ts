@@ -950,10 +950,8 @@ export class FounderHubProvider
       border-top: 1px solid var(--border);
     }
     .goal-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      display: grid;
+      gap: 5px;
     }
     .goal-label {
       color: var(--muted);
@@ -981,7 +979,8 @@ export class FounderHubProvider
     .goal-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
+      flex-wrap: wrap;
+      gap: 4px 12px;
     }
     .decision-panel {
       display: grid;

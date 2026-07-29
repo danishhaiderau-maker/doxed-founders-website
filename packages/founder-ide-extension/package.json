@@ -2,7 +2,7 @@
   "name": "founder-ide-extension",
   "displayName": "Founder",
   "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
