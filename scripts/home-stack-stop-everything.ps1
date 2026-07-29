@@ -107,11 +107,31 @@ foreach ($port in $BotPort,$BridgePort,$AnalyzerPort) {
 
 # 6) Clear locks + pid files so the next start is clean.
 Set-HomeStackUserStopped
-Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.pid") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $repoRoot ".home-relay-pusher.lock") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $repoRoot ".home-bot.pid") -Force -ErrorAction SilentlyContinue
+$stoppedRuntimeMarkers = @(
+  ".home-bot.pid",
+  ".home-bot-starter.pid",
+  ".home-bot-crash-monitor.pid",
+  ".home-bot-auto-restart.lock",
+  ".home-bot-auto-restart.heartbeat",
+  ".home-analyzer.pid",
+  ".home-analyzer-starter.pid",
+  ".home-analyzer-dashboard.pid",
+  ".home-analyzer-crash-monitor.pid",
+  ".home-analyzer-start.lock",
+  ".home-analyzer-auto-restart.lock",
+  ".home-analyzer-auto-restart.heartbeat",
+  ".home-stack-supervisor.pid",
+  ".home-stack-supervisor.lock",
+  ".home-stack-supervisor.heartbeat",
+  ".home-relay-pusher.pid",
+  ".home-relay-pusher.lock",
+  ".home-relay-pusher.heartbeat",
+  ".home-relay-pusher.success",
+  ".home-cloudflared.pid"
+)
+foreach ($marker in $stoppedRuntimeMarkers) {
+  Remove-Item -LiteralPath (Join-Path $repoRoot $marker) -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "Processes killed: $($killed.Count)"
 Write-Host ("  " + ($killed -join ' '))

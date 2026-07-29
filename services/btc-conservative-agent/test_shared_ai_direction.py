@@ -302,10 +302,13 @@ def run():
     )
     dashboard_refresher_source = inspect.getsource(bot._api_state_cache_refresher_loop)
     check(
-        "active trading uses only a bounded dashboard execution overlay",
+        "active trading bootstraps presentation once then uses bounded execution overlays",
         "if manual_admin_pause_active()" in dashboard_refresher_source
         and "ACTIVE_EXECUTION_OVERLAY" in dashboard_refresher_source
-        and "_build_relay_execution_state_snapshot()" in dashboard_refresher_source
+        and "_cached_relay_execution_snapshot()" in dashboard_refresher_source
+        and "not base.get(\"bot_start_time\")" in dashboard_refresher_source
+        and 'base_source in ("", "booting")' in dashboard_refresher_source
+        and dashboard_refresher_source.count("_build_api_state_snapshot()") == 2
         and '"manual_admin_pause"' in dashboard_refresher_source,
     )
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
@@ -745,8 +748,8 @@ def run():
             execution_response = client.get("/api/relay-execution-state")
             check("execution relay endpoint returns canonical JSON", execution_response.status_code == 200)
             check(
-                "execution relay endpoint proves direct bounded source",
-                execution_response.headers.get("X-Relay-State-Cache") == "EXECUTION_DIRECT"
+                "execution relay endpoint proves cached bounded source",
+                execution_response.headers.get("X-Relay-State-Cache") == "EXECUTION_BACKGROUND"
                 and execution_response.get_json().get("relay_cache", {}).get("mode") == "EXECUTION_DIRECT",
             )
     finally:

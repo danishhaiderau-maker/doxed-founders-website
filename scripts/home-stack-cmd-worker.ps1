@@ -45,6 +45,14 @@ $isLocal = $StackMode -eq "local-collection"
 $botTitle = if ($isLocal) { "Local Collection Bot :$BotPort" } else { "Doxed Bot :$BotPort" }
 $analyzerTitle = if ($isLocal) { "Local Collection Analyzer :$AnalyzerPort" } else { "Doxed Analyzer" }
 
+function Restore-BridgeAfterGlobalStop {
+  # A legacy "Start Everything" console can own the bridge as a child. Closing
+  # that console may therefore remove :7810 despite the -KeepBridge filter.
+  # Prove the command path after cleanup and recreate only the bridge if needed.
+  if (Test-BridgeHealthy) { return }
+  Start-HiddenPs1 (Join-Path $scriptDir "ensure-home-bridge.ps1") @("-Quiet")
+}
+
 switch ($Action) {
   "start-bot" {
     Clear-HomeStackUserStopped
@@ -111,9 +119,11 @@ switch ($Action) {
   }
   "stop-all" {
     Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
+    Restore-BridgeAfterGlobalStop
   }
   "stop-all-global" {
     Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
+    Restore-BridgeAfterGlobalStop
   }
   "stop-all-local" {
     Stop-LocalLabFast | Out-Null

@@ -26,6 +26,9 @@ REGISTER_SUPERVISOR_WATCHDOG = (
 REGISTER_BRIDGE_WATCHDOG = (
     ROOT / "scripts" / "register-bridge-watchdog.ps1"
 ).read_text(encoding="utf-8")
+BRIDGE_LAUNCHER = (
+    ROOT / "scripts" / "home-stack-launcher.ps1"
+).read_text(encoding="utf-8")
 BOT = (
     ROOT / "services" / "btc-conservative-agent" / "bot.py"
 ).read_text(encoding="utf-8")
@@ -260,6 +263,18 @@ def main() -> None:
         'if ("HomeStackNativeProcess" -as [type]) { return }' in COMMON
         and "Test-ProcessIdAliveFast $botPid" not in SUPERVISOR
         and "Test-ProcessIdAliveFast $analyzerPid" not in HEALTH,
+    )
+    check(
+        "hidden bridge startup does not require console RawUI",
+        'if ($Host -and $Host.UI -and $Host.UI.RawUI)' in BRIDGE_LAUNCHER
+        and '$Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port"'
+        in BRIDGE_LAUNCHER,
+    )
+    check(
+        "bridge start buttons queue work outside the request thread",
+        '"start-bot" {\n      # Starting/repairing a process' in BRIDGE_LAUNCHER
+        and 'Invoke-HomeCommandBackground "start-bot"' in BRIDGE_LAUNCHER
+        and 'Invoke-HomeCommandBackground "start-analyzer"' in BRIDGE_LAUNCHER,
     )
     check(
         "supervisor detection and recovery avoid blocking maintenance scans",

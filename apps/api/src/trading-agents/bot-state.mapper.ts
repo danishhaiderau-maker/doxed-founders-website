@@ -144,6 +144,18 @@ export type BotApiState = {
     ai_band?: string;
     exit_reason?: string;
   }>;
+  /** Compact canonical history retained for relay-fidelity audits beyond the five-row UI cap. */
+  fidelity_trades?: Array<{
+    trade_id?: string;
+    dir?: string;
+    entry?: number;
+    exit?: number;
+    entry_ts?: number | string;
+    fill_ts?: number | string;
+    ts?: number | string;
+    closed_ts?: number | string;
+    exit_reason?: string;
+  }>;
   ai_history?: Array<{
     time?: string;
     trade_id?: string;

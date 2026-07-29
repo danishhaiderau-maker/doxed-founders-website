@@ -326,15 +326,16 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-bot" {
-      Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
+      # Starting/repairing a process may inspect listeners and stale owners.
+      # Never hold the bridge's single request thread across that work.
+      Invoke-HomeCommandBackground "start-bot"
       return @{
         ok = $true
-        message = "Bot console opened on :$BotPort - keep the window open."
+        message = "Bot start queued on :$BotPort - refresh status in 15-30 seconds."
       }
     }
     "start-analyzer" {
-      Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-      Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -Title "Doxed Analyzer :$AnalyzerPort"
+      Invoke-HomeCommandBackground "start-analyzer"
       return @{
         ok = $true
         message = "Analyzer start queued on :$AnalyzerPort - refresh status in 15-30 seconds."
@@ -501,7 +502,16 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
   }
 }
 
-$Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port"
+# Scheduled-task/watchdog recovery runs under a hidden noninteractive host.
+# That host legitimately has no RawUI; attempting to set WindowTitle there
+# aborts the bridge before HttpListener binds. The title is diagnostic only.
+try {
+  if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+    $Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port"
+  }
+} catch {
+  # Keep the command bridge available even when the host has no console UI.
+}
 Write-Host ""
 Write-Host "=== Doxed home command bridge (:$Port) ===" -ForegroundColor Cyan
 Write-Host "Repo: $repoRoot"

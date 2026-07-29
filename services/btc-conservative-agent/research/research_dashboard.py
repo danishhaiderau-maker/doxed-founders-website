@@ -1147,6 +1147,7 @@ def _typeb_research_v2_payload():
         "net_pnl_usd": float(rep.get("net_pnl_usd") or 0.0),
         "modes_observed": rep.get("modes_observed") or {},
         "feature_coverage": rep.get("feature_coverage") or {},
+        "entry_probability_table": rep.get("entry_probability_table") or [],
         "rolling_holdout": rep.get("rolling_holdout") or {},
         "readiness": rep.get("readiness") or "COLLECTING",
         "execution_policy": rep.get("execution_policy") or "ADVISORY_ONLY_NEVER_AUTO_APPLY",
@@ -2355,7 +2356,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="typeb-v2-health" class="empty-state" style="display:none"></div>
     <table><thead><tr><th>Collection</th><th>Independent</th><th>Completed</th><th>Filled</th><th>Outcome Type B</th><th>Valid features</th><th>Benchmark outcome P&amp;L</th><th>Modes observed</th><th>Readiness</th></tr></thead><tbody id="lane-body"></tbody></table>
     <h3>Recent independent opportunities</h3>
-    <table><thead><tr><th>Created</th><th>Opportunity</th><th>Dir</th><th>Exact ADX</th><th>ADX bucket</th><th>+DI / -DI</th><th>Volume percentile</th><th>Volume ratio</th><th>Modes</th><th>Lane evidence</th><th>Status</th><th>Outcome</th></tr></thead><tbody id="opportunity-body"></tbody></table>
+    <table><thead><tr><th>Created</th><th>Opportunity</th><th>Dir</th><th>LONG / SHORT</th><th>Raw AI gap</th><th>Gap bucket</th><th>Exact ADX</th><th>ADX bucket</th><th>+DI / -DI</th><th>Volume percentile</th><th>Volume ratio</th><th>Modes</th><th>Lane evidence</th><th>Status</th><th>Outcome</th></tr></thead><tbody id="opportunity-body"></tbody></table>
+    <h3>Score-gap performance by evidence mode</h3>
+    <p class="note">The normalized gap is the raw LONG-vs-SHORT score difference divided by 10. Example: LONG 30 / SHORT 70 = raw gap 40 = GAP_4. Paper, lab and paused-shadow remain separate evidence modes.</p>
+    <table><thead><tr><th>Evidence mode</th><th>Gap bucket</th><th>N</th><th>Outcome Type B</th><th>P(Type B)%</th><th>WR%</th><th>Net P&amp;L</th><th>EV/opportunity</th></tr></thead><tbody id="opportunity-gap-body"></tbody></table>
+    <h3>Score-gap combinations in chronological holdouts</h3>
+    <p class="note" id="opportunity-gap-holdout-note">Gap combinations are selected on older opportunities and checked only on later windows. They remain research-only.</p>
+    <table><thead><tr><th>Window</th><th>Gap combination</th><th>Train N</th><th>Holdout N</th><th>Holdout P(Type B)%</th><th>Holdout lift</th><th>Result</th></tr></thead><tbody id="opportunity-gap-holdout-body"></tbody></table>
     <p class="note">Raw lane verdicts and execution-mode events remain available in the V2 JSON report and JSONL audit stream; they are intentionally not shown as separate performance tiles.</p>
   </section>
     <section id="sec-lanes-retire">
@@ -2782,7 +2789,9 @@ async function loadLanes() {
     ['Independent opportunities', d.independent_opportunities || 0],
     ['Completed', d.completed_opportunities || 0],
     ['Type-B outcomes', d.type_b_outcomes || 0],
+    ['Eligible outcomes', holdout.eligible_outcomes || 0],
     ['Rolling windows', holdout.windows_completed || 0],
+    ['Repeated rules', (holdout.validated_rules || []).length],
     ['Readiness', d.readiness || 'COLLECTING'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const modeText = Object.entries(d.modes_observed || {}).map(([mode,n]) => `${mode}: ${n}`).join(' \u00b7 ') || '\u2014';
@@ -2804,13 +2813,60 @@ async function loadLanes() {
     const minusDi = f.minus_di == null ? '\u2014' : Number(f.minus_di).toFixed(2);
     const volp = f.volume_percentile == null ? '\u2014' : Number(f.volume_percentile).toFixed(1) + '%';
     const volr = f.volume_ratio == null ? '\u2014' : Number(f.volume_ratio).toFixed(2);
+    const longScore = f.long_score == null ? '\u2014' : Number(f.long_score).toFixed(0);
+    const shortScore = f.short_score == null ? '\u2014' : Number(f.short_score).toFixed(0);
+    const rawGap = f.long_score == null || f.short_score == null
+      ? '\u2014'
+      : Math.abs(Number(f.long_score) - Number(f.short_score)).toFixed(0);
     const pnl = out.net_pnl_usd == null ? '' : ` \u00b7 $${fmtUsd(out.net_pnl_usd)}`;
     return `<tr><td>${created}</td><td>${row.opportunity_id || ''}</td><td>${row.direction || ''}</td>`
+      + `<td>${longScore} / ${shortScore}</td><td>${rawGap}</td><td>${fp.score_gap || 'MISSING'}</td>`
       + `<td>${adx}</td><td>${fp.adx_5 || f.adx_bucket_5 || 'ADX_MISSING'}</td>`
       + `<td>${plusDi} / ${minusDi}</td><td>${volp}</td><td>${volr}</td>`
       + `<td>${(row.modes || []).join(', ') || '\u2014'}</td><td>${lanes}</td>`
       + `<td>${row.status || 'COLLECTING'}</td><td>${row.outcome_label || '\u2014'}${pnl}</td></tr>`;
-  }).join('') || '<tr><td colspan="12">New V2 collection is empty. It starts after the clean reset and bot restart.</td></tr>';
+  }).join('') || '<tr><td colspan="15">New V2 collection is empty. It starts after the clean reset and bot restart.</td></tr>';
+
+  const gapOrder = {GAP_0_1: 0, GAP_2: 1, GAP_3: 2, GAP_4: 3, GAP_5P: 4};
+  const gapRows = (d.entry_probability_table || [])
+    .filter(row => row.feature === 'score_gap')
+    .sort((a, b) => String(a.evidence_mode).localeCompare(String(b.evidence_mode))
+      || (gapOrder[a.bucket] ?? 99) - (gapOrder[b.bucket] ?? 99));
+  document.getElementById('opportunity-gap-body').innerHTML = gapRows.map(row =>
+    `<tr><td>${row.evidence_mode || '\u2014'}</td><td>${row.bucket || '\u2014'}</td>`
+      + `<td>${row.n || 0}</td><td>${row.type_b || 0}</td>`
+      + `<td>${row.type_b_rate_pct ?? 'n/a'}%</td><td>${row.win_rate_pct ?? 'n/a'}%</td>`
+      + `<td>$${fmtUsd(row.net_pnl_usd || 0)}</td><td>$${fmtUsd(row.ev_usd || 0)}</td></tr>`
+  ).join('') || '<tr><td colspan="8">No completed score-gap outcomes yet.</td></tr>';
+
+  const gapChecks = [];
+  (holdout.windows || []).forEach((window, index) => {
+    (window.rules || []).forEach(rule => {
+      if (!(rule.conditions || []).some(condition => condition.feature === 'score_gap')) return;
+      gapChecks.push({...rule, window_number: index + 1});
+    });
+  });
+  gapChecks.sort((a, b) => (b.window_number - a.window_number)
+    || ((b.holdout_n || 0) - (a.holdout_n || 0))
+    || String(a.rule_key || '').localeCompare(String(b.rule_key || '')));
+  document.getElementById('opportunity-gap-holdout-body').innerHTML = gapChecks.slice(0, 30).map(rule => {
+    const result = rule.positive
+      ? 'POSITIVE'
+      : (rule.holdout_n || 0) < 8 ? 'INSUFFICIENT' : 'NOT CONFIRMED';
+    const cls = rule.positive ? 'green' : (result === 'NOT CONFIRMED' ? 'red' : 'amber');
+    return `<tr><td>${rule.window_number}</td><td>${rule.rule_key || '\u2014'}</td>`
+      + `<td>${rule.n || 0}</td><td>${rule.holdout_n || 0}</td>`
+      + `<td>${rule.holdout_type_b_rate_pct ?? 'n/a'}%</td>`
+      + `<td>${rule.holdout_lift ?? 'n/a'}x</td><td class="${cls}">${result}</td></tr>`;
+  }).join('') || '<tr><td colspan="7">No score-gap combination has reached a chronological holdout yet.</td></tr>';
+  const gapHoldoutNote = document.getElementById('opportunity-gap-holdout-note');
+  if (gapHoldoutNote) {
+    const repeated = (holdout.validated_rules || []).filter(rule =>
+      (rule.conditions || []).some(condition => condition.feature === 'score_gap')).length;
+    gapHoldoutNote.textContent = `${holdout.eligible_outcomes || 0} eligible outcomes across `
+      + `${holdout.windows_completed || 0} chronological windows. ${repeated} score-gap rule(s) `
+      + `are repeated across all required windows. Research-only; no execution gate changes.`;
+  }
 }
 async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());

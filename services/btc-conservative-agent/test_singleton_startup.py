@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
@@ -108,6 +109,62 @@ def run():
         and "self._dispatch_thread_cap.acquire(blocking=False)" in server_source
         and "self._request_cap(request)" in server_source,
     )
+
+    canonical_route_source = inspect.getsource(bot.api_relay_execution_state)
+    canonical_builder_source = inspect.getsource(bot._publish_relay_execution_snapshot)
+    canonical_refresher_source = inspect.getsource(
+        bot._relay_execution_cache_refresher_loop
+    )
+    check(
+        "canonical HTTP workers never rebuild money authority",
+        "_build_relay_execution_state_snapshot" not in canonical_route_source
+        and "_cached_relay_execution_snapshot" in canonical_route_source
+        and "app.response_class(body" in canonical_route_source,
+    )
+    check(
+        "canonical authority has one nonblocking background builder",
+        "_RELAY_EXECUTION_REFRESH_LOCK.acquire(blocking=False)"
+        in canonical_builder_source
+        and "_publish_relay_execution_snapshot()" in canonical_refresher_source
+        and "shutdown_event.wait(_RELAY_EXECUTION_REFRESH_INTERVAL_SEC)"
+        in canonical_refresher_source,
+    )
+
+    old_payload = bot._RELAY_EXECUTION_CACHE_PAYLOAD
+    old_body = bot._RELAY_EXECUTION_CACHE_BODY
+    old_at = bot._RELAY_EXECUTION_CACHE_AT
+    try:
+        with bot._RELAY_EXECUTION_CACHE_LOCK:
+            bot._RELAY_EXECUTION_CACHE_PAYLOAD = {"ok": True}
+            bot._RELAY_EXECUTION_CACHE_BODY = b'{"ok":true}'
+            bot._RELAY_EXECUTION_CACHE_AT = time.monotonic()
+        with bot.app.test_request_context("/api/relay-execution-state"):
+            response = bot.api_relay_execution_state()
+        check(
+            "fresh canonical cache is returned as immutable pre-serialized JSON",
+            response.status_code == 200
+            and response.get_data() == b'{"ok":true}'
+            and response.headers.get("X-Relay-State-Cache")
+            == "EXECUTION_BACKGROUND",
+        )
+
+        with bot._RELAY_EXECUTION_CACHE_LOCK:
+            bot._RELAY_EXECUTION_CACHE_AT = (
+                time.monotonic() - bot._RELAY_EXECUTION_MAX_STALE_SEC - 1
+            )
+        with bot.app.test_request_context("/api/relay-execution-state"):
+            response = bot.api_relay_execution_state()
+        check(
+            "stale canonical cache fails closed without rebuilding",
+            response.status_code == 503
+            and response.get_json().get("api_state_error")
+            == "canonical execution snapshot unavailable or stale",
+        )
+    finally:
+        with bot._RELAY_EXECUTION_CACHE_LOCK:
+            bot._RELAY_EXECUTION_CACHE_PAYLOAD = old_payload
+            bot._RELAY_EXECUTION_CACHE_BODY = old_body
+            bot._RELAY_EXECUTION_CACHE_AT = old_at
 
     snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
     check(

@@ -199,6 +199,17 @@ export function resolveShowcaseTradeDetails(
     });
   }
 
+  for (const t of bot.fidelity_trades ?? []) {
+    if (!t.trade_id) continue;
+    consider(t.trade_id, {
+      entry: t.entry ?? undefined,
+      exit: t.exit ?? undefined,
+      exitReason: t.exit_reason ?? undefined,
+      entryAt: tsFromUnknown(t.entry_ts) ?? tsFromUnknown(t.fill_ts),
+      exitAt: tsFromUnknown(t.closed_ts) ?? tsFromUnknown(t.ts),
+    });
+  }
+
   for (const t of normalizeBotSessionTrades(bot)) {
     if (!t.trade_id) continue;
     consider(t.trade_id, {
@@ -293,6 +304,12 @@ function collectShowcaseSessionTradeIds(
     out.push({ tradeId: id, closedAtMs });
   };
   for (const t of normalizeBotSessionTrades(bot)) {
+    if (!t.trade_id) continue;
+    const closedMs = showcaseTradeClosedAtMs(t as Record<string, unknown>);
+    if (!includeForRelayAudit(closedMs)) continue;
+    push(String(t.trade_id), closedMs);
+  }
+  for (const t of bot.fidelity_trades ?? []) {
     if (!t.trade_id) continue;
     const closedMs = showcaseTradeClosedAtMs(t as Record<string, unknown>);
     if (!includeForRelayAudit(closedMs)) continue;

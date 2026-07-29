@@ -17,6 +17,12 @@ def main() -> None:
     assert "Type-B Opportunity Collection" in source
     assert "One shared direction call is one independent opportunity" in source
     assert 'id="opportunity-body"' in source
+    assert 'id="opportunity-gap-body"' in source
+    assert 'id="opportunity-gap-holdout-body"' in source
+    assert "The normalized gap is the raw LONG-vs-SHORT score difference divided by 10" in source
+    assert "row.feature === 'score_gap'" in source
+    assert "condition.feature === 'score_gap'" in source
+    assert "Research-only; no execution gate changes." in source
     assert "Paper, live and shadow are recorded as child audit evidence" in source
     assert "Benchmark outcome P&amp;L" in source
     assert 'id="typeb-v2-health"' in source
@@ -83,6 +89,12 @@ def main() -> None:
                     "type_b_outcomes": 3,
                     "net_pnl_usd": 4.2,
                     "modes_observed": {"PAPER": 6, "PAUSED_SHADOW": 6},
+                    "entry_probability_table": [{
+                        "feature": "score_gap",
+                        "bucket": "GAP_4",
+                        "evidence_mode": "PAPER",
+                        "n": 4,
+                    }],
                     "readiness": "COLLECTING",
                     "recent_opportunities": [{"opportunity_id": "scan-v2"}],
                 }),
@@ -102,6 +114,7 @@ def main() -> None:
             assert v2_payload["independent_opportunities"] == 12
             assert v2_payload["completed_opportunities"] == 8
             assert v2_payload["modes_observed"]["PAUSED_SHADOW"] == 6
+            assert v2_payload["entry_probability_table"][0]["bucket"] == "GAP_4"
             assert v2_payload["recent_opportunities"][0]["opportunity_id"] == "scan-v2"
     finally:
         research_dashboard._API_RESPONSE_CACHE.clear()

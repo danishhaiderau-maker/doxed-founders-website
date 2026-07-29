@@ -21296,6 +21296,10 @@ _RELAY_TRADES_MAP_MAX = max(
     64,
     int(os.getenv("RELAY_TRADES_MAP_MAX", "512")),
 )
+_RELAY_FIDELITY_TRADES_MAX = max(
+    64,
+    int(os.getenv("RELAY_FIDELITY_TRADES_MAX", "512")),
+)
 _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS = frozenset({
     "order_book",
     "ai_history",
@@ -26793,6 +26797,67 @@ _RELAY_STATE_MAX_STALE_SEC = max(
     _RELAY_STATE_CACHE_TTL_SEC,
     float(os.getenv("RELAY_STATE_MAX_STALE_SEC", "10.0")),
 )
+_RELAY_EXECUTION_CACHE_LOCK = threading.Lock()
+_RELAY_EXECUTION_REFRESH_LOCK = threading.Lock()
+_RELAY_EXECUTION_CACHE_PAYLOAD = None
+_RELAY_EXECUTION_CACHE_BODY = None
+_RELAY_EXECUTION_CACHE_AT = 0.0
+_RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
+    0.05,
+    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "0.20")),
+)
+_RELAY_EXECUTION_MAX_STALE_SEC = max(
+    _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
+    float(os.getenv("RELAY_EXECUTION_MAX_STALE_SEC", "2.0")),
+)
+
+
+def _publish_relay_execution_snapshot() -> dict:
+    """Build canonical authority once and publish one immutable JSON response.
+
+    Cloudflare, the production relay, Agent Hub and local health probes can all
+    poll simultaneously.  Rebuilding in every request multiplied lock pressure
+    and left request workers pinned after a tunnel client disconnected.  A
+    single builder keeps authority current while HTTP workers only copy two
+    object references.
+    """
+    global _RELAY_EXECUTION_CACHE_PAYLOAD
+    global _RELAY_EXECUTION_CACHE_BODY
+    global _RELAY_EXECUTION_CACHE_AT
+    if not _RELAY_EXECUTION_REFRESH_LOCK.acquire(blocking=False):
+        return None
+    try:
+        started = time.perf_counter()
+        payload = _build_relay_execution_state_snapshot()
+        payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        payload["snapshot_age_sec"] = 0
+        integrity = payload.get("state_integrity")
+        if isinstance(integrity, dict):
+            integrity["snapshot_age_sec"] = 0
+        body = json.dumps(
+            payload,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        with _RELAY_EXECUTION_CACHE_LOCK:
+            _RELAY_EXECUTION_CACHE_PAYLOAD = payload
+            _RELAY_EXECUTION_CACHE_BODY = body
+            _RELAY_EXECUTION_CACHE_AT = time.monotonic()
+        return payload
+    finally:
+        _RELAY_EXECUTION_REFRESH_LOCK.release()
+
+
+def _cached_relay_execution_snapshot():
+    """Return immutable cached authority references and their monotonic age."""
+    with _RELAY_EXECUTION_CACHE_LOCK:
+        payload = _RELAY_EXECUTION_CACHE_PAYLOAD
+        body = _RELAY_EXECUTION_CACHE_BODY
+        cached_at = _RELAY_EXECUTION_CACHE_AT
+    if not isinstance(payload, dict) or not isinstance(body, bytes):
+        return None, None, None
+    return payload, body, max(0.0, time.monotonic() - cached_at)
 
 
 def _cached_relay_state_response(cache_mode: str):
@@ -27088,6 +27153,23 @@ def _relay_trade_row_lite(row: dict) -> dict:
     }
 
 
+def _relay_fidelity_trade_row(row: dict) -> dict:
+    """Compact, non-strategy history used only for copy-fidelity reconciliation."""
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "trade_id": row.get("trade_id"),
+        "dir": row.get("dir") or row.get("final_direction"),
+        "entry": row.get("entry"),
+        "exit": row.get("exit"),
+        "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
+        "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
+        "ts": row.get("ts") or row.get("close_ts") or row.get("closed_ts"),
+        "closed_ts": row.get("closed_ts") or row.get("ts") or row.get("close_ts"),
+        "exit_reason": row.get("exit_reason"),
+    }
+
+
 def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
     """Exact resting-limit state needed for copy, chase, and abandon checks."""
     if not isinstance(row, dict):
@@ -27191,6 +27273,11 @@ def _build_relay_execution_state_snapshot() -> dict:
         positions_copy = copy.deepcopy(open_positions)
         recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
         relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+        fidelity_trades = [
+            _relay_fidelity_trade_row(row)
+            for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
+            if isinstance(row, dict)
+        ]
         recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
@@ -27224,6 +27311,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_trades
         if isinstance(row, dict)
     ]
+    snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = [
         _expired_order_api_row(row)
         for row in recent_expired
@@ -27254,21 +27342,32 @@ def _build_relay_execution_state_snapshot() -> dict:
 
 @app.route('/api/relay-execution-state')
 def api_relay_execution_state():
-    """Canonical execution-only state; bounded and independent of dashboard history."""
-    started = time.perf_counter()
-    try:
-        payload = _build_relay_execution_state_snapshot()
-        payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        response.headers["X-Relay-State-Cache"] = "EXECUTION_DIRECT"
-        return response
-    except Exception as exc:
-        logger.error(f"/api/relay-execution-state error: {exc}")
-        return jsonify({
-            "api_state_error": str(exc)[:500],
+    """Canonical execution authority served without money-state lock access."""
+    payload, body, age = _cached_relay_execution_snapshot()
+    if body is None:
+        # Cold bootstrap gets one bounded synchronous attempt. Concurrent cold
+        # callers fail closed rather than becoming duplicate snapshot builders.
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as exc:
+            logger.error(f"/api/relay-execution-state cold build error: {exc}")
+        payload, body, age = _cached_relay_execution_snapshot()
+    if body is None or age is None or age > _RELAY_EXECUTION_MAX_STALE_SEC:
+        stale_age = round(age, 3) if isinstance(age, (int, float)) else None
+        response = jsonify({
+            "api_state_error": "canonical execution snapshot unavailable or stale",
+            "snapshot_age_sec": stale_age,
             "bot_version": EXECUTION_FIX_VERSION,
-        }), 503
+        })
+        response.status_code = 503
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["X-Relay-State-Cache"] = "EXECUTION_STALE"
+        return response
+    response = app.response_class(body, status=200, mimetype="application/json")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["X-Relay-State-Cache"] = "EXECUTION_BACKGROUND"
+    response.headers["X-Relay-State-Age"] = f"{age:.3f}"
+    return response
 
 
 @app.route('/api/relay-state')
@@ -27326,6 +27425,11 @@ def api_relay_state(force_rebuild: bool = False):
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
             relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+            fidelity_trades = [
+                _relay_fidelity_trade_row(row)
+                for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
+                if isinstance(row, dict)
+            ]
             trades_for_relay = [
                 _relay_trade_row_lite(copy.deepcopy(row))
                 for row in _snapshot_trades_for_api(session_start)
@@ -27354,6 +27458,7 @@ def api_relay_state(force_rebuild: bool = False):
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
         snapshot["trades"] = trades_for_relay
+        snapshot["fidelity_trades"] = fidelity_trades
         snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
@@ -27860,11 +27965,18 @@ def _start_api_state_cache_refresher():
         if _api_state_refresher_started:
             return
         _api_state_refresher_started = True
+        # Prime canonical authority before the HTTP listener sees relay polls.
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as e:
+            logger.error(f"/api/relay-execution-state initial cache build error: {e}")
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
+        threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()
         logger.info(
-            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s) and relay "
-            f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
+            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s), relay "
+            f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s), and canonical execution "
+            f"({_RELAY_EXECUTION_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
         )
 
 
@@ -27883,7 +27995,23 @@ def _api_state_cache_refresher_loop():
                 # resumes automatically when the operator pauses.
                 with _api_state_cache_lock:
                     base = _api_state_cache.get("payload")
-                relay = _build_relay_execution_state_snapshot()
+                base_source = str((base or {}).get("data_source") or "").strip().lower()
+                if (
+                    not isinstance(base, dict)
+                    or not base.get("bot_start_time")
+                    or base_source in ("", "booting")
+                ):
+                    # A clean Windows restart can launch with paper execution
+                    # already enabled. In that case there is no paused-built
+                    # presentation payload to overlay, and the local dashboard
+                    # would otherwise remain a truthful-but-empty relay view
+                    # forever. Build the heavy presentation once here, on the
+                    # dedicated background thread, then use bounded overlays
+                    # for every subsequent refresh.
+                    base = _build_api_state_snapshot()
+                relay, _, relay_age = _cached_relay_execution_snapshot()
+                if relay is None or relay_age is None or relay_age > _RELAY_EXECUTION_MAX_STALE_SEC:
+                    raise RuntimeError("canonical execution cache unavailable for dashboard overlay")
                 snap = dict(base or {})
                 for key in (
                     "price",
@@ -27891,6 +28019,15 @@ def _api_state_cache_refresher_loop():
                     "execution_reason",
                     "manual_admin_pause",
                     "live_armed",
+                    "max_active_signals",
+                    "strategy_mode",
+                    "last_approve_outcome",
+                    "last_ai",
+                    "pullback_threshold",
+                    "last_edge",
+                    "leverage",
+                    "regime",
+                    "debug_state",
                     "orders",
                     "positions",
                     "trades",
@@ -27930,6 +28067,18 @@ def _relay_state_cache_refresher_loop():
         except Exception as e:
             logger.error(f"/api/relay-state background refresher error: {e}")
         shutdown_event.wait(_RELAY_STATE_REFRESH_INTERVAL_SEC)
+
+
+def _relay_execution_cache_refresher_loop():
+    """Continuously publish canonical authority from exactly one builder."""
+    while not shutdown_event.is_set():
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as e:
+            # Keep the last immutable response. The HTTP route turns it into a
+            # truthful 503 once bounded staleness is exceeded.
+            logger.error(f"/api/relay-execution-state background refresher error: {e}")
+        shutdown_event.wait(_RELAY_EXECUTION_REFRESH_INTERVAL_SEC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

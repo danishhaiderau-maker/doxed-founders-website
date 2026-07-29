@@ -8,6 +8,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
 $supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
 $supervisorScript = Join-Path $scriptDir "home-stack-supervisor.ps1"
+$userStoppedFile = Join-Path $repoRoot ".home-stack-user-stopped"
 
 function Wd-Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -34,6 +35,13 @@ function Test-SupervisorAlive {
   } catch {
     return $false
   }
+}
+
+# A scheduled watchdog must never undo an explicit operator Stop. The normal
+# Start path clears this sentinel before launching the supervisor again.
+if (Test-Path -LiteralPath $userStoppedFile) {
+  Wd-Log "supervisor restart skipped - user stopped stack"
+  exit 0
 }
 
 if (Test-SupervisorAlive) {

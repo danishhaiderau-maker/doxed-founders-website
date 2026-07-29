@@ -1176,6 +1176,12 @@ function Stop-GlobalStackFast {
   Set-HomeStackUserStopped
   $supervisor = @(Stop-HomeStackSupervisor)
   $relayPusher = @(Stop-RelayStatePusher)
+  # Stop detached owners before stopping their children. Otherwise an old
+  # monitor can observe the child exit and resurrect it during the Stop soak.
+  $botMonitor = @(Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-crash-monitor.pid") @("powershell", "pwsh", "cmd"))
+  $botStarter = @(Stop-RecordedProcess (Join-Path $repoRoot ".home-bot-starter.pid") @("powershell", "pwsh", "cmd"))
+  $analyzerMonitor = @(Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") @("powershell", "pwsh", "cmd"))
+  $analyzerStarter = @(Stop-RecordedProcess (Join-Path $repoRoot ".home-analyzer-starter.pid") @("powershell", "pwsh", "cmd"))
   # Kill port listeners + hidden detached bot before tunnel/other cleanup (NoWait uses Hidden python).
   $botPidFile = @(Stop-BotPidFile)
   $botPort = @(Stop-ListenPortFast $GlobalBotPort)
@@ -1189,7 +1195,31 @@ function Stop-GlobalStackFast {
   $analyzerPort += @(Stop-ListenPortFast $GlobalAnalyzerPort)
   $analyzerPy += @(Stop-PythonMatching "analyzer_research_engine")
   $consoles = @(Close-ShowcaseStackConsoles -GlobalBotPort $GlobalBotPort -GlobalAnalyzerPort $GlobalAnalyzerPort -KeepBridge -ExcludeProcessIds $ExcludeProcessIds)
-  Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
+  $stoppedRuntimeMarkers = @(
+    ".home-bot.pid",
+    ".home-bot-starter.pid",
+    ".home-bot-crash-monitor.pid",
+    ".home-bot-auto-restart.lock",
+    ".home-bot-auto-restart.heartbeat",
+    ".home-analyzer.pid",
+    ".home-analyzer-starter.pid",
+    ".home-analyzer-dashboard.pid",
+    ".home-analyzer-crash-monitor.pid",
+    ".home-analyzer-start.lock",
+    ".home-analyzer-auto-restart.lock",
+    ".home-analyzer-auto-restart.heartbeat",
+    ".home-stack-supervisor.pid",
+    ".home-stack-supervisor.lock",
+    ".home-stack-supervisor.heartbeat",
+    ".home-relay-pusher.pid",
+    ".home-relay-pusher.lock",
+    ".home-relay-pusher.heartbeat",
+    ".home-relay-pusher.success",
+    ".home-cloudflared.pid"
+  )
+  foreach ($marker in $stoppedRuntimeMarkers) {
+    Remove-Item -LiteralPath (Join-Path $repoRoot $marker) -Force -ErrorAction SilentlyContinue
+  }
   Clear-TunnelUrlFile
   return @{
     botPort = @($botPort | Select-Object -Unique)
@@ -1197,6 +1227,10 @@ function Stop-GlobalStackFast {
     tunnel = $tunnel
     relayPusher = $relayPusher
     supervisor = $supervisor
+    botMonitor = $botMonitor
+    botStarter = $botStarter
+    analyzerMonitor = $analyzerMonitor
+    analyzerStarter = $analyzerStarter
     botPidFile = $botPidFile
     pythonBot = @($botPy | Select-Object -Unique)
     pythonAnalyzer = @($analyzerPy | Select-Object -Unique)
