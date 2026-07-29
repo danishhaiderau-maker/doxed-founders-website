@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(dashboard): retire losing tile and restore benchmark truth
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
