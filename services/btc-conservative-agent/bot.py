@@ -31816,6 +31816,14 @@ def main():
             state["account_balance"] = STARTING_BALANCE
         else:
             raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
+    elif (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in ("1", "true", "yes", "on"):
+        # The platform relay owns authenticated exchange activity.  A direct
+        # private balance probe from the paper-only showcase can race the
+        # relay's nonce lane when both use the same Bitfinex API key.
+        logger.info(
+            "[PAPER MODE] Bitfinex private startup probe skipped; "
+            "exchange flatness is verified by the isolated live-copy audit"
+        )
     else:
         try:
             balance = bitfinex_private.fetch_balance()
