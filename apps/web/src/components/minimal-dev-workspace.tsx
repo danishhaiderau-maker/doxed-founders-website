@@ -55,7 +55,7 @@ type ChatMsg = {
 
 import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 import { FOUNDER_NODE_GITHUB_RELEASES } from '@/components/founder-node-downloads';
-import { FOUNDER_NODE_MIN_VERSION, FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
+import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { formatMessageProviderLabel } from '@/lib/copilot-ai-stack';
@@ -1438,7 +1438,7 @@ export function MinimalDevWorkspace({
                   href={FOUNDER_NODE_DOWNLOAD_URL}
                   className='inline-flex w-full items-center justify-center rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500'
                 >
-                  Download Founder Stack — v{FOUNDER_NODE_MIN_VERSION}
+                  Download Founder IDE
                 </a>
                 <a
                   href={FOUNDER_NODE_GITHUB_RELEASES}

@@ -17,7 +17,7 @@ export default function BuilderSettingsPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Integrations</h1>
             <p className="text-sm text-zinc-500">
-              Founder Stack pairing · AI providers · Infrastructure · Security
+              Founder IDE pairing · Personal AI · Infrastructure · Security
             </p>
           </div>
           <SiteNav />
@@ -33,7 +33,7 @@ export default function BuilderSettingsPage() {
             Security →
           </Link>
           <Link href="/founder-den?tab=build" className="text-emerald-400 hover:underline">
-            ← Founder Copilot
+            ← Founder AI workspace
           </Link>
         </div>
 

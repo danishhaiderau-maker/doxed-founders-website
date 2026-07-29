@@ -186,9 +186,9 @@ export function AiProxyDashboard({ accessToken }: Props) {
             accent="amber"
           />
           <StatCard
-            label="Cursor Pro saved"
+            label="Retail reference"
             value={fmtUsd(summary.totals.estimatedCursorProCost)}
-            hint="vs $20/mo retail"
+            hint="Cursor Pro $20/mo baseline, not guaranteed savings"
             accent="emerald"
           />
         </div>
@@ -258,7 +258,7 @@ export function AiProxyDashboard({ accessToken }: Props) {
             href="/settings/builder?tab=founder-node"
             className="text-violet-300 underline hover:text-violet-200"
           >
-            Founder Stack settings
+            Founder IDE connection settings
           </a>
           .
         </p>

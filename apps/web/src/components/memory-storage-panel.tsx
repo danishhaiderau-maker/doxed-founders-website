@@ -146,7 +146,7 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
           `Cloud snapshot available (updated ${new Date(remote.updatedAt ?? '').toLocaleString()} from ${remote.deviceLabel ?? 'another device'}). Copilot will merge on load.`,
         );
       } else {
-        setMsg('No cloud snapshot yet — open Founder Copilot on mobile while online to push one.');
+        setMsg('No cloud snapshot yet — open Founder AI on mobile while online to push one.');
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Cloud sync check failed');

@@ -57,11 +57,11 @@ export function LandingSinglePage({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-lg font-bold text-white">80% community owned</p>
-            <p className="text-[10px] text-zinc-500">10% airdrop · 70% over 10 years · Ollama + Founder Stack — you own the inference bill</p>
+            <p className="text-[10px] text-zinc-500">Founder IDE · local Ollama · Personal AI — choose who runs inference</p>
           </div>
           <div className="flex flex-wrap gap-3 text-[10px] text-zinc-500">
             <Link href="/downloads#founder-node" className="font-semibold text-violet-300 hover:text-violet-200">
-              Founder Stack →
+              Founder IDE →
             </Link>
             <Link href="/downloads#mobile" className="font-semibold text-emerald-300 hover:text-emerald-200">
               Android app →

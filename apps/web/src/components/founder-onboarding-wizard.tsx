@@ -12,7 +12,6 @@ import {
   type OnboardingPathId,
 } from '@dcf/utils';
 import { FounderNodeDownloads } from '@/components/founder-node-downloads';
-import { FOUNDER_NODE_MIN_VERSION_LABEL } from '@/lib/founder-node-requirements';
 import { FounderOnboardingAiStack } from '@/components/founder-onboarding-ai-stack';
 import { FounderOnboardingComplete } from '@/components/founder-onboarding-complete';
 import { trackOnboardingStep } from '@/lib/onboarding-track';
@@ -42,7 +41,7 @@ type Props = {
 
 const WIZARD_STEPS = [
   { id: 'ide', label: 'Choose IDE' },
-  { id: 'pair', label: 'Pair Founder Stack' },
+  { id: 'pair', label: 'Pair Founder IDE' },
   { id: 'sync', label: 'Synchronize Desktop' },
   { id: 'brain', label: 'Choose Brain' },
   { id: 'community', label: 'Community' },
@@ -342,7 +341,7 @@ export function FounderOnboardingWizard({
                   <div className="mt-2 rounded-md border border-zinc-700/50 bg-black/20 px-3 py-2">
                     <p>
                       <span className="font-semibold text-violet-300">Founder IDE is recommended</span> — it ships
-                      inside the Founder Stack download with built-in AI chat, routing, and memory injection through
+                      inside Founder IDE with built-in AI chat, routing, and memory injection through
                       the Founder OS AI Gateway. Cursor is also fully tested and battle-ready (use it if you have a
                       paid Cursor subscription). OpenHands and Claude Code are available too. Windsurf and VS Code are
                       in the pipeline — being tested now. You can start with Founder IDE today and switch later
@@ -383,12 +382,12 @@ export function FounderOnboardingWizard({
           </section>
         )}
 
-        {/* STEP 2 — Pair Founder Stack */}
+        {/* STEP 2 — Pair Founder IDE */}
         {currentStepId === 'pair' && (
           <section>
-            <h3 className="font-semibold text-white">Step 2 — Pair Founder Stack</h3>
+            <h3 className="font-semibold text-white">Step 2 — Pair Founder IDE</h3>
             <p className="mt-1 text-sm text-zinc-500">
-              Founder Stack securely pairs your desktop with Founder OS. No Remote Desktop. No VPN.
+              Founder IDE securely pairs your desktop with Founder OS. No Remote Desktop. No VPN.
               Just secure synchronization.
             </p>
 
@@ -397,7 +396,7 @@ export function FounderOnboardingWizard({
             </div>
 
             <ol className="mt-4 list-inside list-decimal space-y-1 text-xs text-zinc-400">
-              <li>Install Founder Stack (or Founder Node standalone) {FOUNDER_NODE_MIN_VERSION_LABEL}</li>
+              <li>Install Founder IDE. Founder Node is included as a background capability.</li>
               <li>Generate a pairing code below</li>
               <li>Paste it in the Founder Node tray menu on your desktop</li>
               <li>Done — your desktop is paired</li>

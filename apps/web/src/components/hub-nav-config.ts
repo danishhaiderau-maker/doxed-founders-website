@@ -144,7 +144,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     items: [
       { href: '/founder-os', label: 'Founder OS', icon: '⚡', auth: true },
       { href: '/founder-den', label: 'Founder Den', icon: '🛠', auth: true },
-      { href: '/settings/builder?tab=downloads', label: 'Founder Stack', icon: '🖥', auth: true },
+      { href: '/settings/builder?tab=downloads', label: 'Founder IDE', icon: '🖥', auth: true },
       { href: '/settings/builder?tab=downloads', label: 'Pair Node', icon: '🔗', auth: true },
       { href: '/phone', label: 'Phone Remote', icon: '📱', auth: true },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },

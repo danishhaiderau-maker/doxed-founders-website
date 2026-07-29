@@ -20,7 +20,7 @@ type Props = {
  * Each row is a paired desktop that can be the "active" IDE the phone is
  * controlling. Online nodes are selectable; offline nodes are greyed out (you
  * can't switch to an IDE that isn't running). Per the user's vision, if no
- * other IDE is connected we prompt to connect one in Founder Stack on desktop.
+ * other IDE is connected we prompt to connect one from Founder IDE on desktop.
  */
 export function ConnectedIdes({
   accessToken,
@@ -80,7 +80,7 @@ export function ConnectedIdes({
       <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-xs text-amber-100">
         <p className="font-semibold">No connected IDEs yet</p>
         <p className="mt-1 text-amber-200/80">
-          Install Founder Stack on your desktop to connect Cursor, Founder IDE, or another editor. Then it will appear
+          Install Founder IDE on your desktop to connect its workspace or another supported editor. Then it will appear
           here and you can switch to it from your phone.
         </p>
       </div>

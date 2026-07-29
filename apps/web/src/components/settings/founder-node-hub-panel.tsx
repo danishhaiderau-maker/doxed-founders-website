@@ -76,9 +76,9 @@ export function FounderNodeHubPanel({
       {/* Hero + status */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">Founder Stack</h2>
+          <h2 className="text-xl font-semibold text-white">Founder IDE</h2>
           <p className="mt-1 max-w-2xl text-sm text-zinc-400">
-            Download, pair once, connect your AI brain — vault stays on your machine.
+            One app with Founder Node embedded. Pair once; your vault and local approvals stay on your machine.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[10px] font-semibold">
@@ -98,10 +98,10 @@ export function FounderNodeHubPanel({
 
       {showDownloads ? (
         <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
-          <p className="text-sm font-semibold text-emerald-100">Download Founder Stack</p>
+          <p className="text-sm font-semibold text-emerald-100">Download Founder IDE</p>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Prefer Founder Stack (IDE + Node). Standalone Node ({FOUNDER_NODE_MIN_VERSION_LABEL}) still works for vault
-            pairing. After pair, Founder IDE loads{' '}
+            Founder Node is included and starts as a background capability. Existing standalone Node
+            installations remain compatible during migration. After pairing, Founder IDE loads{' '}
             <code className="text-zinc-400">~/FounderVault/node-config.json</code> — chat uses the AI Gateway with the
             Node token (no IDE OAuth).{' '}
             <a href="/downloads#founder-node" className="text-cyan-400 underline hover:text-cyan-300">
@@ -124,7 +124,7 @@ export function FounderNodeHubPanel({
             href="/downloads#founder-node"
             className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 px-4 py-3 text-sm font-semibold text-cyan-100 hover:border-cyan-400/50"
           >
-            Founder Node desktop →
+            Founder IDE downloads →
           </a>
         </div>
       )}
@@ -181,7 +181,7 @@ export function FounderNodeHubPanel({
         <HelpSection title="🤖 Code agent (Cursor)" hint="Remote IDE control">
           <p className="text-xs text-zinc-400">
             <strong className="text-zinc-200">Cursor</strong> or <strong className="text-zinc-200">OpenHands</strong>{' '}
-            is separate from the brain — it edits your GitHub repo. In Copilot use{' '}
+            is separate from the brain — it edits your GitHub repo. In Founder AI use{' '}
             <strong className="text-zinc-200">Run in Cursor</strong>; output streams in Development Workspace.
           </p>
         </HelpSection>

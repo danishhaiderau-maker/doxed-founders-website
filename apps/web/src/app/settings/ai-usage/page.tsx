@@ -16,7 +16,7 @@ export default function AiUsagePage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">AI Usage</h1>
             <p className="text-sm text-zinc-500">
-              Founder OS proxy spend · DDollar burn · Cursor Pro saved
+              Founder AI requests · weighted usage · named cost baselines
             </p>
           </div>
           <SiteNav />
@@ -29,7 +29,7 @@ export default function AiUsagePage() {
             ← AI providers
           </Link>
           <Link href="/settings/builder?tab=founder-node" className="text-zinc-500 hover:text-white">
-            Founder Stack →
+            Founder IDE connection →
           </Link>
         </div>
 
@@ -38,7 +38,7 @@ export default function AiUsagePage() {
             <Link href="/login?callbackUrl=/settings/ai-usage" className="font-semibold underline">
               Sign in
             </Link>{' '}
-            to view your AI proxy usage.
+            to view your Founder AI usage.
           </div>
         ) : (
           <AiProxyDashboard accessToken={session.accessToken} />

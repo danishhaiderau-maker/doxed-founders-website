@@ -5692,7 +5692,7 @@ export type CopilotStreamHandlers = {
 };
 
 /**
- * Streams a Founder Copilot response over SSE. Parses `event: <name>\ndata: <json>`
+ * Streams a Founder AI response over SSE. Parses `event: <name>\ndata: <json>`
  * frames and dispatches to the matching handler. Falls back to non-streaming
  * `copilotAsk` if `fetch` returns a non-streamable body or a non-2xx status so
  * the chat still works on older proxies.

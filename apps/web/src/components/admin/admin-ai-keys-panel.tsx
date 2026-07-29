@@ -69,7 +69,7 @@ const KEY_META: Record<
     label: 'Platform Brain — DeepSeek fallback',
     placeholder: 'sk-… (DeepSeek)',
     whereUsed: [
-      'BuilderService.tryPlatformDeepseekFallback — serves Founder Copilot chat when a user has no BYOK key and the promo path is unavailable.',
+      'BuilderService.tryPlatformDeepseekFallback — serves Founder AI chat when a user has no personal key and the managed path is unavailable.',
       'BuilderService.tryPlatformDeepseekFallbackStream — same fallback for streaming Copilot responses.',
       'Token usage logged as billingSource = "platform_brain".',
     ],

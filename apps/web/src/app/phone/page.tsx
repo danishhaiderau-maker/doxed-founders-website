@@ -161,7 +161,7 @@ export default function PhoneRemotePage() {
             <p className="mt-1 text-amber-200/80">
               Install{' '}
               <Link href="/downloads#founder-node" className="underline">
-                Founder Stack
+                Founder IDE
               </Link>{' '}
               on your desktop to connect Cursor, Founder IDE, or another editor. Then it will appear here and you can
               switch to it from your phone.

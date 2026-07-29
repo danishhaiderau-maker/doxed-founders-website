@@ -77,13 +77,13 @@ export default function AgentsPageClient() {
         {/* Copilot-first hero */}
         <section className="rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/30 to-[#0a0a0e] p-6 sm:p-8">
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">
-            Founder Copilot · Orchestrator
+            Founder AI · Orchestrator
           </p>
           <h2 className="mt-2 text-xl font-bold text-white sm:text-2xl">
             Your startup&apos;s AI workforce — one Copilot, many agents
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
-            Pick a workforce template below to open Founder Copilot with a ready-made prompt. Workers
+            Pick a workforce template below to open Founder AI with a ready-made prompt. Workers
             now execute tools when connected — GitHub issues, Cursor agents, and build queue sync.
           </p>
           <div className="mt-5 flex flex-wrap gap-3">
@@ -93,7 +93,7 @@ export default function AgentsPageClient() {
                   href="/founder-den?tab=activity"
                   className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
                 >
-                  Open Founder Copilot →
+                  Open Founder AI →
                 </Link>
                 <Link
                   href="/founder-den?tab=agents"
@@ -134,7 +134,7 @@ export default function AgentsPageClient() {
                 Workforce templates
               </h2>
               <p className="mt-1 text-xs text-zinc-600">
-                Click any agent — opens Founder Copilot with a starter prompt
+                Click any agent — opens Founder AI with a starter prompt
               </p>
             </div>
             <p className="text-[10px] text-zinc-600">

@@ -30,8 +30,8 @@ type BuilderSettingsPanelProps = {
 type SettingsTabId = 'downloads' | 'ai' | 'infra' | 'security';
 
 const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
-  { id: 'downloads', label: 'Founder Stack' },
-  { id: 'ai', label: 'AI Providers' },
+  { id: 'downloads', label: 'Founder IDE' },
+  { id: 'ai', label: 'Personal AI' },
   { id: 'infra', label: 'Infrastructure' },
   { id: 'security', label: 'Security' },
 ];
@@ -357,7 +357,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           <section className="rounded-2xl border border-emerald-500/25 bg-emerald-950/10 p-6">
             <h2 className="text-lg font-semibold text-white">Install apps</h2>
             <p className="mt-1 max-w-2xl text-sm text-zinc-500">
-              APK, iOS, and Founder Stack installers live on the public downloads hub — not mixed with API keys or
+              Mobile and Founder IDE installers live on the downloads hub — not mixed with API keys or
               deploy tokens.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
@@ -377,7 +377,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                 href="/downloads#founder-node"
                 className="rounded-lg border border-cyan-500/30 px-4 py-2 text-sm text-cyan-200 hover:border-cyan-400/50"
               >
-                Founder Stack section
+                Founder IDE section
               </Link>
             </div>
           </section>
@@ -398,10 +398,10 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       {activeSettingsTab === 'ai' && (
         <div className="space-y-8">
           <section className="rounded-2xl border border-violet-500/25 bg-violet-950/10 p-6">
-            <h2 className="text-lg font-semibold text-white">AI Providers</h2>
+            <h2 className="text-lg font-semibold text-white">Personal AI</h2>
             <p className="mt-1 max-w-2xl text-sm text-zinc-500">
-              Connect Copilot brains — DeepSeek, OpenRouter, GLM, Jatevo, Ollama, Phala TEE, OpenAI, Anthropic, and
-              more. Install apps on the{' '}
+              Founder-managed DeepSeek is the default. Connect named Personal AI or local Ollama profiles when you
+              want another model. Install apps on the{' '}
               <Link href="/downloads" className="text-violet-300 underline">
                 Downloads
               </Link>{' '}

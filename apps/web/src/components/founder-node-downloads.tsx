@@ -7,12 +7,12 @@ const REPO = 'danishhaiderau-maker/doxed-founders-website';
 export const FOUNDER_NODE_GITHUB_RELEASES = `https://github.com/${REPO}/releases/latest`;
 
 /**
- * Founder Stack installer download — bundles Founder IDE (a VS Code-based
+ * Founder IDE installer download — bundles Founder IDE (a VS Code-based
  * editor with built-in AI chat, routing, and memory injection through the
  * Founder OS AI Gateway) + Founder Node tray app in one download from GitHub
  * Releases.
  */
-export const FOUNDER_STACK_RELEASES_URL = `https://github.com/${REPO}/releases`;
+export const FOUNDER_IDE_RELEASES_URL = `https://github.com/${REPO}/releases`;
 
 type ReleaseAsset = {
   name: string;
@@ -122,116 +122,103 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
   }, []);
 
   const versionLabel = releaseVersion ?? FOUNDER_NODE_MIN_VERSION;
-  const primary =
-    os === 'windows'
-      ? { label: 'Download Founder Stack — Windows', href: winUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
-      : os === 'mac'
-        ? { label: 'Download Founder Stack — macOS', href: macUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
-        : os === 'linux'
-          ? { label: 'Download Founder Stack — Linux', href: linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES, highlight: true }
-          : null;
+  const primaryLabel = os === 'unknown' ? null : 'Founder IDE — Windows beta';
 
   return (
     <div id={sectionId} className="scroll-mt-24 space-y-4">
-      {/* Founder Stack — the bundled installer (Founder IDE + Founder Node). */}
+      {/* Founder IDE — one application with embedded Founder Node. */}
       <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-emerald-100">Founder Stack</p>
+            <p className="text-sm font-semibold text-emerald-100">Founder IDE</p>
             <p className="mt-0.5 text-xs text-zinc-400">
-              Founder IDE + Founder Node in one install — the full desktop kit for building with Founder OS AI.
+              One Windows application with Founder Node embedded for pairing, vault, local tools, and remote approval.
             </p>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Founder Stack bundles Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) + Founder Node tray app — one download, one install.
+              The current desktop candidate is an unsigned internal beta. macOS and Linux Founder IDE packages are not yet release-proven.
             </p>
           </div>
           <a
-            href={FOUNDER_STACK_RELEASES_URL}
+            href={FOUNDER_IDE_RELEASES_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400"
           >
-            Download Founder Stack
+            View Founder IDE beta
           </a>
         </div>
       </div>
 
-      {/* Founder Stack primary (auto-detected OS) — from GitHub releases. */}
-      {primary && (
+      {/* Founder IDE beta — one application with embedded Founder Node. */}
+      {primaryLabel && (
         <a
-          href={FOUNDER_STACK_RELEASES_URL}
+          href={FOUNDER_IDE_RELEASES_URL}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-cyan-600 px-5 py-3 text-sm font-semibold text-white hover:bg-cyan-500 sm:w-auto"
         >
-          {primary.label} — v{versionLabel}
+          {primaryLabel}
         </a>
       )}
 
       <p className="text-[11px] font-medium text-zinc-500">
-        Founder Stack bundles the new Founder IDE (a VS Code-based editor with built-in AI chat, routing, and memory injection through the Founder OS AI Gateway) together with the Founder Node tray app — one download, one install.
+        Founder Node is an embedded background capability, not a second founder-facing application.
       </p>
 
-      <div className="pt-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
-          Also available: Founder Node standalone
+      <details className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+        <summary className="cursor-pointer text-xs font-semibold text-zinc-400">
+          Legacy standalone Founder Node downloads
+        </summary>
+        <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+          Kept only for existing vault-only installations. New desktop founders should install Founder IDE.
         </p>
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <a
-          href={winUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium ${
-            os === 'windows' && primary
-              ? 'border border-cyan-500/30 text-cyan-200/80'
-              : 'bg-cyan-600 text-white hover:bg-cyan-500'
-          }`}
-        >
-          Windows (.exe)
-        </a>
-        <a
-          href={macUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={`inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium ${
-            os === 'mac'
-              ? 'border-cyan-400/60 bg-cyan-950/40 text-cyan-50'
-              : 'border-cyan-500/40 bg-cyan-950/30 text-cyan-100 hover:border-cyan-400/60'
-          }`}
-        >
-          macOS (.dmg)
-        </a>
-        <a
-          href={linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={`inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium ${
-            os === 'linux'
-              ? 'border-cyan-400/60 bg-cyan-950/40 text-cyan-50'
-              : 'border-cyan-500/40 bg-cyan-950/30 text-cyan-100 hover:border-cyan-400/60'
-          }`}
-        >
-          Linux / Ubuntu (.AppImage)
-        </a>
-      </div>
+        <div className="mt-3 flex flex-wrap gap-3">
+          <a
+            href={winUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium ${
+              os === 'windows' && primaryLabel
+                ? 'border border-cyan-500/30 text-cyan-200/80'
+                : 'bg-cyan-600 text-white hover:bg-cyan-500'
+            }`}
+          >
+            Windows (.exe)
+          </a>
+          <a
+            href={macUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium ${
+              os === 'mac'
+                ? 'border-cyan-400/60 bg-cyan-950/40 text-cyan-50'
+                : 'border-cyan-500/40 bg-cyan-950/30 text-cyan-100 hover:border-cyan-400/60'
+            }`}
+          >
+            macOS (.dmg)
+          </a>
+          <a
+            href={linuxUrl ?? FOUNDER_NODE_GITHUB_RELEASES}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium ${
+              os === 'linux'
+                ? 'border-cyan-400/60 bg-cyan-950/40 text-cyan-50'
+                : 'border-cyan-500/40 bg-cyan-950/30 text-cyan-100 hover:border-cyan-400/60'
+            }`}
+          >
+            Linux / Ubuntu (.AppImage)
+          </a>
+        </div>
 
-      <p className="text-xs text-zinc-500">
-        {loading
-          ? 'Checking latest release…'
-          : winUrl || macUrl || linuxUrl
-            ? `v${versionLabel} — tray app auto-checks for updates hourly. Windows ${FOUNDER_NODE_MIN_VERSION_LABEL} recommended.`
-            : `Installers on GitHub — ${FOUNDER_NODE_GITHUB_RELEASES}`}
-      </p>
-
-      <a
-        href={FOUNDER_NODE_GITHUB_RELEASES}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-block text-xs text-cyan-400/80 underline hover:text-cyan-300"
-      >
-        Or download directly from GitHub releases
-      </a>
+        <p className="mt-3 text-xs text-zinc-500">
+          {loading
+            ? 'Checking legacy release...'
+            : winUrl || macUrl || linuxUrl
+              ? `Legacy Node v${versionLabel}. Windows ${FOUNDER_NODE_MIN_VERSION_LABEL} or newer recommended.`
+              : `Legacy installers on GitHub — ${FOUNDER_NODE_GITHUB_RELEASES}`}
+        </p>
+      </details>
 
       {showInstallGuide && (
         <div className="rounded-lg border border-cyan-500/25 bg-cyan-950/15 p-4">
