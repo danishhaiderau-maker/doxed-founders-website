@@ -655,14 +655,22 @@ gates.
 - [ ] Complete the installed loading, empty, error, offline, focus, reduced
   motion, and success-state matrix after the final source freeze.
 - [x] Build and locally verify one Founder IDE installer containing Founder
-  Node. The verified `64178879` candidate is prior-candidate evidence because
-  later owned Stage 11 changes require one final refresh.
+  Node. The refreshed unsigned internal-QA artifact is
+  `Founder-IDE-Setup-0.9.4-internal-qa.exe`, 323,910,538 bytes, SHA-256
+  `4AA6CFA39445E144BB60A66CDD51616686F743DD3DB4E3AFCE04710E5D063BF9`.
+  Its installer log records inner exit code 0, navigation/workbench corrections,
+  shortcut creation, release identity 0.9.4, and normal completion.
 - [ ] Rebuild the installer after the final owned changes, then regenerate and
   validate the canonical release receipt against that exact artifact.
   The receipt must include the preservation preflight, actual files and
   architecture nodes changed, public APIs or components removed, rewrite-budget
   variance, behavior-preservation checks, and the reason for every core
   workbench change that could not be delivered extension-first.
+  - [x] The internal-QA refresh contains extension 0.5.1 and the final
+    product-bearing Founder navigation changes. Installed Deploy, Remote,
+    Connect, attachment, settings, managed Fast chat, and terminal execution
+    passed. Signing, clean-VM lifecycle, and the canonical production receipt
+    remain open.
 - [x] Add an explicit fast-compression installer-QA profile so install,
   shortcut, upgrade, and uninstall checks do not pay release-compression cost.
   Keep `lzma2/ultra64` and deterministic release settings unchanged for the
