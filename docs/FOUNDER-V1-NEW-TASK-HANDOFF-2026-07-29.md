@@ -26,9 +26,9 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `be9f06f87e034efc593b35bc244a036d8d5efed0`
+- Tested product source commit: `ea45964d`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
-- Relationship at the tested product commit: 86 ahead, 0 behind
+- Relationship at the tested product commit: 88 ahead, 0 behind
 - Changed paths in the Founder delta: 354
 - Protected trading/analyzer/exchange/gate paths in the Founder delta: 0
 - Backup ref: `backup/founder-v1-pre-rebase-20260729`
@@ -46,13 +46,32 @@ and carry only the reviewed Founder delta when production clearance exists.
 - SHA-256:
   `6CCAFEED6211544E43DFABE95CA18901EEA18F7DB72AE94153AB0FD8678AE48F`
 - Installed release: 0.9.4
-- Installed Founder extension: 0.5.2
+- Installer-embedded Founder extension: 0.5.2
+- Locally installed extension update under QA: 0.5.3
 - Channel: unsigned internal QA, not production
 
 The installed application proves Founder navigation, Projects/Chats, coherent
 settings, the 200K weekly Free allowance, Personal AI/BYOK surfaces, image
 preview/remove, managed Fast chat through DeepSeek V4 Flash, Remote and
 Connections surfaces, and a real terminal command.
+
+The extension-only checkpoint at `ea45964d` replaces the abstract cube and raw
+path empty-workspace screen with a lightweight Founder Home. Its center keeps
+the pursuing Goal, agent/conflict state, New chat, Project, Preview, Changes,
+Deploy, and Remote visible. The one-click Developer mode exposes the full
+legacy IDE escape hatch and switching back restores Founder mode. This was
+implemented without a workbench compile or installer rebuild.
+
+- VSIX:
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-ide-extension-0.5.3-final.vsix`
+- VSIX size: 2,457,488 bytes
+- VSIX SHA-256:
+  `3CC3AF49830F02CD8B9EAAC25BE0573CDD160D0E2DE1A73B66764766A3821D2C`
+- Visual evidence:
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-home-0.5.3-founder-mode.png`
+- Real Electron checks: Founder Home default PASS; high-DPI 2x2 actions PASS;
+  Developer mode toggle PASS; return to Founder mode PASS; visible error
+  notifications 0.
 
 Primary evidence:
 
@@ -69,7 +88,7 @@ Primary evidence:
 ## Verified automated baseline
 
 - API: 309/309
-- Founder extension: 213/213 plus TypeScript
+- Founder extension: 214/214 plus TypeScript
 - Founder Node: 62/62 plus build
 - Shared utilities: 99/99
 - Web: production build, 58 pages

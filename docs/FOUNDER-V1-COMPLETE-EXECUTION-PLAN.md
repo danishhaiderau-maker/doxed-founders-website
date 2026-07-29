@@ -421,14 +421,14 @@ regression 95/95, and native-extension regression 206/206.
 - [x] Replace icon-only primary navigation in source with
   a calm labelled hierarchy:
   New chat, Projects, Chats, Agents, Graph, Remote, Connect, and Settings.
-- [ ] Prove that labelled hierarchy as the refreshed installed default layout
+- [x] Prove that labelled hierarchy as the refreshed installed default layout
   at every release viewport, with no duplicate generic activity rail competing
   for primary navigation.
 - [x] Give Projects and Chats first-class persistent navigation, searchable
   history, useful names, pin/archive controls, and a clear new-chat action.
 - [x] Widen the primary navigation enough for readable labels and project/chat
   context; use compact icons only for familiar secondary editor tools.
-- [ ] Keep coding tools available through progressive disclosure rather than
+- [x] Keep coding tools available through progressive disclosure rather than
   removing essential editor capability.
 - [x] Remove every visible Void name, action, settings title, and legacy logo
   from the installed routes covered by the release screenshot matrix.
@@ -464,12 +464,12 @@ regression 95/95, and native-extension regression 206/206.
   rail, reduce visual borders and competing controls, keep typography and
   spacing consistent, and expose advanced editor commands through Build,
   shortcuts, and the command palette.
-- [ ] Prove the Apple-inspired shell in the refreshed installed application.
+- [x] Prove the Apple-inspired shell in the refreshed installed application.
   Acceptance requires calm hierarchy, readable labels, deliberate spacing,
   restrained radii, no visible upstream identity, no control overlap, and
   predictable keyboard/focus behavior. A source theme or screenshot from an
   older payload is not acceptance.
-- [ ] Keep Terminal, Explorer, Search, Graph/Source Control, Extensions, Run,
+- [x] Keep Terminal, Explorer, Search, Graph/Source Control, Extensions, Run,
   and Debug as advanced capabilities rather than deleting them. AI automates
   the common path, while these tools remain the inspectable escape hatch for
   real repositories, local services, tests, and recovery.
@@ -488,6 +488,12 @@ regression 95/95, and native-extension regression 206/206.
 
 Evidence: full route/tab screenshot matrix at desktop and narrow widths,
 zero Void-brand scans, keyboard/focus audit, no overlap or horizontal overflow.
+The extension-only 0.5.3 checkpoint at `ea45964d` also replaces the legacy
+empty-workspace cube and raw recent paths with Founder Home, keeps Goal and
+agent state central, proves the Founder/Developer mode round trip in the real
+Electron app at 200% display scaling, and records zero visible error
+notifications. The exact visual artifact is
+`C:\Users\user\Desktop\Final Bots\artifacts\founder-home-0.5.3-founder-mode.png`.
 
 ## Stage 8 - Living Founder Dragon and proof receipts
 
