@@ -318,12 +318,17 @@ admin and user usage screenshots.
 - [ ] Make model identity truthful in the native answer and receipt: managed
   responses disclose the resolved DeepSeek route; personal/local routes show
   their configured profile without exposing a key.
-- [ ] Make the composer model picker switch instantly among Founder Auto, Fast,
-  Reasoning, Code, Ollama, and every named personal profile.
-- [ ] Support OpenAI-compatible profiles through name, base URL, key, model,
+- [x] Prove instant installed-app switching among Founder Auto, Fast,
+  Reasoning, Code, and a named Personal AI profile, including restoration of
+  the founder's original selection.
+- [ ] Prove the installed local Ollama picker and completion path. Source and
+  unit contracts exist, but this machine has no Ollama service or model on
+  port `11434`.
+- [x] Support OpenAI-compatible profiles through name, base URL, key, model,
   optional headers, connectivity test, edit, disable, and delete controls in
-  the installed IDE; source and unit coverage are complete, installed visual
-  and live-provider proof remain.
+  the installed IDE. Source/unit coverage, installed visual proof, route
+  switching, and a real `GLM-5.2` completion with an outside-managed-quota
+  receipt are complete.
 - [ ] Replace the unreliable browser speech dependency with a supported
   Founder voice boundary: capture audio locally, show recording/permission and
   input-device states, transcribe through an explicitly configured local or

@@ -128,6 +128,108 @@ const aiScreenshot = await workbench.send('Page.captureScreenshot', {
   captureBeyondViewport: false,
 });
 fs.writeFileSync(path.join(outputDir, 'installed-founder-settings-ai-final.png'), Buffer.from(aiScreenshot.data, 'base64'));
+
+const initialComposerRoute = await workbench.evaluate(`(() => {
+  const workModes = new Set(['Ask', 'Plan', 'Build', 'Debug', 'Team']);
+  return [...document.querySelectorAll('button')]
+    .map(button => button.innerText.trim())
+    .find(label =>
+      label
+      && !workModes.has(label)
+      && buttonLikeRouteLabel(label)
+    ) || null;
+
+  function buttonLikeRouteLabel(label) {
+    if (label.startsWith('founder-os-')) return true;
+    const matchingButton = [...document.querySelectorAll('button')]
+      .find(button => button.innerText.trim() === label);
+    return Boolean(
+      matchingButton
+      && String(matchingButton.className).includes('void-whitespace-nowrap')
+      && String(matchingButton.className).includes('void-w-full')
+    );
+  }
+})()`);
+if (!initialComposerRoute) throw new Error('Founder composer route picker was not found.');
+
+const pickerOpened = await workbench.evaluate(`(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find(candidate => candidate.innerText.trim() === ${JSON.stringify(initialComposerRoute)});
+  button?.click();
+  return Boolean(button);
+})()`);
+await new Promise((resolve) => setTimeout(resolve, 400));
+const pickerRoutes = await workbench.evaluate(`(() => {
+  const rows = [...document.querySelectorAll('div')]
+    .filter(element => String(element.className).includes('void-cursor-pointer'));
+  return [...new Set(rows.map(row => row.innerText.trim().split('\\n')[0]).filter(Boolean))];
+})()`);
+const openPickerScreenshot = await workbench.send('Page.captureScreenshot', {
+  format: 'png',
+  fromSurface: true,
+  captureBeyondViewport: false,
+});
+fs.writeFileSync(
+  path.join(outputDir, 'installed-founder-route-picker-final.png'),
+  Buffer.from(openPickerScreenshot.data, 'base64'),
+);
+const temporaryRoute =
+  initialComposerRoute === 'founder-os-auto' ? 'founder-os-fast' : 'founder-os-auto';
+const temporarySelected = await workbench.evaluate(`(() => {
+  const row = [...document.querySelectorAll('div')]
+    .find(element =>
+      String(element.className).includes('void-cursor-pointer')
+      && element.innerText.trim().split('\\n')[0] === ${JSON.stringify(temporaryRoute)}
+    );
+  row?.click();
+  return Boolean(row);
+})()`);
+await new Promise((resolve) => setTimeout(resolve, 700));
+const routeAfterSwitch = await workbench.evaluate(`(() => {
+  const workModes = new Set(['Ask', 'Plan', 'Build', 'Debug', 'Team']);
+  return [...document.querySelectorAll('button')]
+    .map(button => button.innerText.trim())
+    .find(label => label && !workModes.has(label) && (
+      label.startsWith('founder-os-')
+      || [...document.querySelectorAll('button')].some(button =>
+        button.innerText.trim() === label
+        && String(button.className).includes('void-whitespace-nowrap')
+        && String(button.className).includes('void-w-full')
+      )
+    )) || null;
+})()`);
+
+const restorePickerOpened = await workbench.evaluate(`(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find(candidate => candidate.innerText.trim() === ${JSON.stringify(routeAfterSwitch)});
+  button?.click();
+  return Boolean(button);
+})()`);
+await new Promise((resolve) => setTimeout(resolve, 300));
+const initialRouteRestored = await workbench.evaluate(`(() => {
+  const row = [...document.querySelectorAll('div')]
+    .find(element =>
+      String(element.className).includes('void-cursor-pointer')
+      && element.innerText.trim().split('\\n')[0] === ${JSON.stringify(initialComposerRoute)}
+    );
+  row?.click();
+  return Boolean(row);
+})()`);
+await new Promise((resolve) => setTimeout(resolve, 700));
+const finalComposerRoute = await workbench.evaluate(`(() => {
+  const workModes = new Set(['Ask', 'Plan', 'Build', 'Debug', 'Team']);
+  return [...document.querySelectorAll('button')]
+    .map(button => button.innerText.trim())
+    .find(label => label && !workModes.has(label) && (
+      label.startsWith('founder-os-')
+      || [...document.querySelectorAll('button')].some(button =>
+        button.innerText.trim() === label
+        && String(button.className).includes('void-whitespace-nowrap')
+        && String(button.className).includes('void-w-full')
+      )
+    )) || null;
+})()`);
+
 settingsClient.socket.close();
 workbench.socket.close();
 
@@ -139,6 +241,26 @@ const evidence = {
     planUsage: /Plan and usage/i.test(settingsText),
     byok: /Bring your own key/i.test(aiText),
     account: /Identity and Node/i.test(settingsText),
+    pickerOpened,
+    pickerHasManagedRoutes: [
+      'founder-os-auto',
+      'founder-os-fast',
+      'founder-os-reasoning',
+      'founder-os-code',
+    ].every(route => pickerRoutes.includes(route)),
+    pickerHasInitialRoute: pickerRoutes.includes(initialComposerRoute),
+    temporarySelected,
+    temporaryRouteApplied: routeAfterSwitch === temporaryRoute,
+    restorePickerOpened,
+    initialRouteRestored,
+    initialRoutePreserved: finalComposerRoute === initialComposerRoute,
+  },
+  routePicker: {
+    initialComposerRoute,
+    pickerRoutes,
+    temporaryRoute,
+    routeAfterSwitch,
+    finalComposerRoute,
   },
   settingsText,
   aiText,

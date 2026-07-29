@@ -10,6 +10,11 @@ const requestedTitle = process.env.FOUNDER_IDE_QA_TITLE?.trim().toLowerCase() ||
 const trustWorkspace = process.env.FOUNDER_IDE_QA_TRUST_WORKSPACE === '1';
 const startNewChat = process.env.FOUNDER_IDE_QA_NEW_CHAT === '1';
 const expectedModel = process.env.FOUNDER_IDE_QA_EXPECT_MODEL?.trim().toLowerCase() || '';
+const expectedRouteKind = process.env.FOUNDER_IDE_QA_ROUTE_KIND?.trim().toLowerCase()
+  || (requestedRoute ? 'managed' : 'any');
+if (!['any', 'managed', 'personal', 'local'].includes(expectedRouteKind)) {
+  throw new Error(`Unsupported FOUNDER_IDE_QA_ROUTE_KIND: ${expectedRouteKind}`);
+}
 const evidenceId = nonce.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 96);
 fs.mkdirSync(outputDir, { recursive: true });
 
@@ -414,7 +419,7 @@ while (Date.now() - startedAt < 90_000) {
   latestResponseTail = responseCount >= 2
     ? chatText.slice(chatText.lastIndexOf(expectedResponse))
     : '';
-  routeReceiptVisible = /Founder route[^\r\n]*(?:fast|reasoning|code|auto|chat)[^\r\n]*deepseek\/deepseek-v4-(?:pro|flash)/i.test(latestResponseTail);
+  routeReceiptVisible = /Founder route[^\r\n]+/i.test(latestResponseTail);
   if (responseCount >= 2 && routeReceiptVisible) break;
 }
 const latencyMs = Date.now() - startedAt;
@@ -428,7 +433,23 @@ fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 
 const routeLine = latestResponseTail.match(/Founder route[^\r\n]+/i)?.[0] || '';
 const route = routeLine.replace(/\s+/g, ' ').trim() || null;
-const resolvedModel = routeLine.match(/deepseek\/(deepseek-v4-(?:pro|flash))/i)?.[1]?.toLowerCase() || null;
+const managedModel = routeLine.match(/deepseek\/(deepseek-v4-(?:pro|flash))/i)?.[1]?.toLowerCase() || null;
+const personalModel = routeLine.match(
+  /Founder route\s*\|\s*Personal AI\s*\|\s*[^|\r\n]+\|\s*([^|\r\n]+)/i,
+)?.[1]?.trim().toLowerCase() || null;
+const localModel = routeLine.match(
+  /Founder route\s*\|\s*(?:Local AI|Ollama)\s*\|\s*(?:[^|\r\n]+\|\s*)?([^|\r\n]+)/i,
+)?.[1]?.trim().toLowerCase() || null;
+const routeKind = managedModel
+  ? 'managed'
+  : /\|\s*Personal AI\s*\|/i.test(routeLine)
+    ? 'personal'
+    : /\|\s*(?:Local AI|Ollama)\s*\|/i.test(routeLine)
+      ? 'local'
+      : null;
+const resolvedModel = managedModel || personalModel || localModel;
+const routeKindMatches = expectedRouteKind === 'any' || routeKind === expectedRouteKind;
+const outsideManagedQuota = /outside managed quota/i.test(routeLine);
 const ignoredConsoleErrors = consoleErrors.filter((message) =>
   /Timed out getting tasks from\s+(?:typescript|npm)/i.test(message),
 );
@@ -439,11 +460,15 @@ const evidence = {
   nonce,
   latencyMs,
   route,
+  routeKind,
+  resolvedModel,
   checks: {
     submitted,
     responseVisible: responseCount >= 2,
     founderRoute: routeReceiptVisible,
-    deepSeekV4: Boolean(resolvedModel),
+    expectedRouteKind: routeKindMatches,
+    deepSeekV4: expectedRouteKind !== 'managed' || Boolean(managedModel),
+    outsideManagedQuota: !['personal', 'local'].includes(expectedRouteKind) || outsideManagedQuota,
     expectedModel: !expectedModel || resolvedModel === expectedModel,
     errorVisible: /Founder OS gateway returned|Authentication Fails|Bad gateway|invalid_request_error|Founder could not (?:send|reach)|Founder AI is temporarily unavailable|Founder session needs to be renewed/i.test(latestResponseTail),
   },
@@ -460,7 +485,9 @@ socket.close();
 if (
   !evidence.checks.responseVisible
   || !evidence.checks.founderRoute
+  || !evidence.checks.expectedRouteKind
   || !evidence.checks.deepSeekV4
+  || !evidence.checks.outsideManagedQuota
   || !evidence.checks.expectedModel
   || evidence.checks.errorVisible
   || criticalConsoleErrors.length > 0
