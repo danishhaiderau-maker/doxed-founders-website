@@ -26,7 +26,7 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `ea45964d`
+- Tested product source commit: `391a7b33`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
 - Relationship at the tested product commit: 88 ahead, 0 behind
 - Changed paths in the Founder delta: 354
@@ -95,10 +95,13 @@ Primary evidence:
 - `docs/FOUNDER-V1-CLEAN-INTEGRATION-EVIDENCE-2026-07-28.md`
 - `docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-SCREENSHOT-ATTACHMENT-QA-EVIDENCE-2026-07-29.md`
+- `docs/FOUNDER-PERSONAL-AI-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-attachment-qa-20260729-complete\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final-route-proof\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-personal-ai-qa-20260729-harness-fixed\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-chat-qa-20260729-fast\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-terminal-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-visual-qa-20260729-packaged-052\`
@@ -124,6 +127,16 @@ Latest narrow screenshot QA:
 - Live circle/arrow OCR: still requires a permitted vision route; do not
   report deterministic provider-contract tests as live semantic vision.
 
+Latest installed Personal AI QA:
+
+- Picker contains Auto, Fast, Reasoning, Code, and the saved `GLM` profile.
+- Native switch `GLM -> founder-os-auto -> GLM`: PASS; original route preserved.
+- Real `GLM-5.2` Personal AI completion: PASS in 3,285 ms.
+- Receipt: `Personal AI | GLM | GLM-5.2 | direct | outside managed quota`.
+- Console errors/page exceptions: 0/0; credentials exposed: 0.
+- Local Ollama remains unproven because no service or model is installed on
+  port `11434`.
+
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:
 
@@ -147,9 +160,10 @@ ordinary UI or extension edits:
    Prove Auto, Fast, Reasoning, Code, Ask, Plan, Build, Debug, Team, streaming
    content, terminal completion, cancellation, and quota errors. Require the
    exact route receipt for the new response, not an old line from chat history.
-4. **Complete real Personal AI and local paths.**
-   Prove one configured BYOK completion. Prove Ollama only if Ollama and a model
-   are actually installed; the current machine has no service on port 11434.
+4. **Complete the real local Ollama path.**
+   The configured Personal AI/BYOK completion is now proven. Prove Ollama only
+   if Ollama and a model are deliberately installed; the current machine has no
+   service on port 11434.
 5. **Complete human-interaction gates.**
    A person must speak the expected phrase for microphone transcription. Do not
    manufacture speech proof while the founder is away.
@@ -175,6 +189,10 @@ ordinary UI or extension edits:
 - Installed Plan selection: visible, but its managed request fails against the
   current deployed API. Do not mark all five modes complete yet.
 - Installed terminal: PASS with a real marker file.
+- Installed Personal AI: PASS with saved `GLM-5.2`, native picker round trip,
+  real completion, and outside-managed-quota receipt.
+- Installed Ollama: source/unit contracts only; no local service or model is
+  present, so live completion is not claimed.
 - Installed microphone button and managed transport contracts: present.
   Live spoken transcription: not yet human-proven.
 - Installed attachment picker/preview/remove: PASS.
