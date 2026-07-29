@@ -26,10 +26,10 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `af79fda5`
+- Tested product source commit: `5b760b69`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
-- Relationship at the tested product commit: 88 ahead, 0 behind
-- Changed paths in the Founder delta: 354
+- Relationship at the tested product commit: 97 ahead, 0 behind
+- Changed paths in the Founder delta: 361
 - Protected trading/analyzer/exchange/gate paths in the Founder delta: 0
 - Backup ref: `backup/founder-v1-pre-rebase-20260729`
 
@@ -97,6 +97,7 @@ Primary evidence:
 - `docs/FOUNDER-SCREENSHOT-ATTACHMENT-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-PERSONAL-AI-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-VOICE-CANCEL-QA-EVIDENCE-2026-07-29.md`
+- `docs/FOUNDER-REMOTE-CONTROL-SECURITY-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`
@@ -111,9 +112,9 @@ Primary evidence:
 
 ## Verified automated baseline
 
-- API: 309/309
+- API: 311/311
 - Founder extension: 214/214 plus TypeScript
-- Founder Node: 62/62 plus build
+- Founder Node: 62/62 plus no-output TypeScript
 - Shared utilities: 99/99
 - Web: production build, 58 pages
 - Overlay/installer and focused Founder contracts: passed
@@ -147,6 +148,19 @@ Latest voice interaction QA:
 - Synthetic audio tracks stopped: PASS.
 - Physical microphone and speech provider were not accessed.
 - Human spoken transcription remains a deliberate manual gate.
+
+Latest Founder Node and remote security QA:
+
+- Preferred user-approved device-code flow remains single-use, expiring,
+  account/install bound, revocable, and routed to the exact paired Node and IDE
+  session.
+- Legacy pairing now refuses cross-founder node-ID takeover, atomically claims
+  an unused unexpired code, validates the optional 32-byte IPC secret, and
+  bounds device metadata.
+- Focused remote API contracts: 55/55; Founder Node: 62/62; full API:
+  311/311; API and Founder Node no-output TypeScript checks: PASS.
+- The production website-to-installed-device action, receipt, revoke, and
+  reconnect demonstration is not yet run and remains a launch blocker.
 
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:

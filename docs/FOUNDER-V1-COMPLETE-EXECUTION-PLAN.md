@@ -576,17 +576,21 @@ zero console or page errors. See
 - [x] Keep one installer, one application identity, one tray/taskbar identity,
   one updater, and one uninstall entry; Founder Node runs as an embedded
   background capability with no second founder-facing app.
-- [ ] Show device online/offline, current workspace, pending approval, last
-  activity, revoke, rename, and reconnect states consistently in IDE and web.
+- [x] Implement and locally test device online/offline, current workspace,
+  pending approval, last activity, revoke, rename, and reconnect contracts.
+- [ ] Visually prove those states consistently in the production website and
+  refreshed installed IDE.
 - [ ] Add connected-service flows for GitHub, Vercel, Railway, Neon, email, and
   Telegram with least-privilege scopes, health, reconnect, and revoke controls.
 - [x] Keep remote edits proposed until locally or remotely approved according
   to policy; high-risk commands always require explicit approval.
 
-Evidence: 81 API relay/device-code tests, 41 Founder Node tests including the
-chat/read/edit/command protocol boundary, extension IPC tests, paired-device
-screenshots, replay/rejection tests, audit receipts, and a production remote
-edit and command demonstration.
+Evidence: 55 focused API manifest/device-code/legacy-pairing/token-lifecycle
+tests, 62 Founder Node tests, the full 311-test API suite, no-output TypeScript
+checks, extension IPC tests, replay/rejection contracts, and
+`FOUNDER-REMOTE-CONTROL-SECURITY-QA-EVIDENCE-2026-07-29.md`. Paired-device
+screenshots, audit receipts from a real production action, and the production
+remote edit and command demonstration remain open.
 
 ## Stage 10 - Website and founder business workflows
 
