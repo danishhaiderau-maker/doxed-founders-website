@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(ops): restore lifecycle probes on Node 24
 
 ## Last Activity
 
