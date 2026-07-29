@@ -3543,12 +3543,15 @@ export const SidebarChat = () => {
 		setInstructionsAreEmpty(!newStr)
 	}, [setInstructionsAreEmpty])
 	const onKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
-		if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+		if (e.key === 'Escape' && voicePhase === 'listening') {
+			e.preventDefault()
+			void stopVoiceInput(false)
+		} else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
 			onSubmit()
 		} else if (e.key === 'Escape' && isRunning) {
 			onAbort()
 		}
-	}, [onSubmit, onAbort, isRunning])
+	}, [onSubmit, onAbort, isRunning, stopVoiceInput, voicePhase])
 
 	const inputChatArea = <div
 		className='flex min-w-0 flex-col gap-1.5'
@@ -3712,6 +3715,18 @@ export const SidebarChat = () => {
 			>
 				{voicePhase === 'listening' ? <MicOff size={16} strokeWidth={1.9} /> : <Mic size={16} strokeWidth={1.9} />}
 			</button>
+			{voicePhase === 'listening' && <button
+				type='button'
+				className='h-[24px] w-[24px] flex items-center justify-center rounded text-void-fg-3 hover:text-void-fg-1 hover:bg-void-bg-2'
+				title='Cancel voice input'
+				aria-label='Cancel voice input and keep typed text'
+				onClick={(event) => {
+					event.stopPropagation()
+					void stopVoiceInput(false)
+				}}
+			>
+				<X size={16} strokeWidth={1.9} />
+			</button>}
 		</>}
 		statusMessage={visualError
 			? <div role='alert' className='px-1 pb-1 text-[11px] text-amber-400'>{visualError}</div>

@@ -226,6 +226,10 @@ admin and user usage screenshots.
   explicitly selected speech provider. For V1, an enabled Personal AI GLM
   profile may use the official `glm-asr-2512` transcription boundary; typed
   composer text must survive every recording or provider failure.
+- [x] Add explicit voice cancellation and Escape-to-cancel, stop every audio
+  track, preserve existing typed text, and prove those interactions with a
+  synthetic in-process audio stream that does not access the physical
+  microphone or call a provider.
 - [x] Put every platform-managed legacy website copilot call behind the same
   reservation ledger and enforce DeepSeek-only plus Free Flash policy at the
   final streaming and non-streaming provider boundaries.
@@ -329,11 +333,12 @@ admin and user usage screenshots.
   the installed IDE. Source/unit coverage, installed visual proof, route
   switching, and a real `GLM-5.2` completion with an outside-managed-quota
   receipt are complete.
-- [ ] Replace the unreliable browser speech dependency with a supported
-  Founder voice boundary: capture audio locally, show recording/permission and
-  input-device states, transcribe through an explicitly configured local or
-  managed service, preserve typed text on failure, preview before send, allow
-  cancel, and support keyboard-only operation.
+- [ ] Complete the human speech gate in the refreshed installed release:
+  capture a known spoken phrase from the selected input device, transcribe it
+  through the explicitly selected permitted service, confirm the text is
+  previewed before send, and preserve typed text on provider failure. Source,
+  synthetic recording, explicit cancel, Escape, and track-cleanup evidence are
+  complete; semantic spoken transcription is not yet human-proven.
 
 Evidence: provider/model/intent/latency receipts, streaming tests, settings
 screenshots, quota tests, native final-response screenshots.

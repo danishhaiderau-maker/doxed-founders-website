@@ -164,6 +164,9 @@ describe('Founder IDE upstream overlay', () => {
     assert.match(source, /founderOs\.openSettings/);
     assert.match(source, /founderOs\.companionState/);
     assert.match(source, /Voice text is ready/);
+    assert.match(source, /Cancel voice input and keep typed text/);
+    assert.match(source, /void stopVoiceInput\(false\)/);
+    assert.match(source, /e\.key === 'Escape' && voicePhase === 'listening'/);
     const bridge = read(
       'src/vs/workbench/contrib/void/browser/founderPersonalAiActions.ts',
     );
