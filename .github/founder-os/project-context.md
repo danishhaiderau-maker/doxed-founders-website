@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(bot): restore clean stack and fidelity audit
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
