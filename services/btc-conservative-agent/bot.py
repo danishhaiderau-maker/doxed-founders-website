@@ -31148,10 +31148,13 @@ def _create_dashboard_server():
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
         _general_thread_cap = threading.BoundedSemaphore(8)
-        _priority_thread_cap = threading.BoundedSemaphore(4)
-        _priority_paths = (
+        _authority_thread_cap = threading.BoundedSemaphore(8)
+        _control_thread_cap = threading.BoundedSemaphore(2)
+        _authority_paths = (
             b"/api/relay-execution-state",
             b"/api/relay-state",
+        )
+        _control_paths = (
             b"/api/ping",
             b"/api/pause",
             b"/api/resume",
@@ -31160,15 +31163,17 @@ def _create_dashboard_server():
             b"/status",
         )
         _client_io_timeout_sec = 15.0
+        _priority_client_io_timeout_sec = 2.0
         _overload_io_timeout_sec = 0.1
 
         def _request_cap(self, request):
-            """Reserve four workers for money-path/control traffic.
+            """Reserve independent workers for authority and controls.
 
             Cloudflare, Agent Hub, the relay pusher, and local diagnostics can
             synchronize after a restart. Presentation polls may consume all
-            eight general workers, but they must never crowd out canonical
-            authority, health, or the operator's safety controls.
+            eight general workers and slow tunnel clients may consume relay
+            authority workers, but neither may crowd out the operator's safety
+            controls.
             """
             try:
                 import socket
@@ -31176,8 +31181,10 @@ def _create_dashboard_server():
                 request.settimeout(0.05)
                 head = request.recv(1024, socket.MSG_PEEK)
                 first_line = head.split(b"\r\n", 1)[0]
-                if any(b" " + path + b" " in first_line for path in self._priority_paths):
-                    return self._priority_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._control_paths):
+                    return self._control_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._authority_paths):
+                    return self._authority_thread_cap
             except (OSError, TimeoutError):
                 pass
             return self._general_thread_cap
@@ -31213,7 +31220,12 @@ def _create_dashboard_server():
                 # Bound socket reads/writes for normal workers as well. App
                 # computation can take longer, but a dead tunnel client cannot
                 # retain one of the eight worker slots indefinitely.
-                request.settimeout(self._client_io_timeout_sec)
+                is_priority = request_cap is not self._general_thread_cap
+                request.settimeout(
+                    self._priority_client_io_timeout_sec
+                    if is_priority
+                    else self._client_io_timeout_sec
+                )
                 t = threading.Thread(
                     target=self._release_and_process,
                     args=(request, client_address, request_cap),
@@ -31244,7 +31256,8 @@ def _create_dashboard_server():
 def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
-        f"(bounded werkzeug server, general_threads=8, priority_threads=4, backlog=64) "
+        f"(bounded werkzeug server, general_threads=8, authority_threads=8, "
+        f"control_threads=2, backlog=64) "
         "[PIPELINE ENFORCEMENT]"
     )
     try:
