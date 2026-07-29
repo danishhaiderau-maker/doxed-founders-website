@@ -16,8 +16,8 @@ clean-machine, signing, remote-production, or soak gates are complete.
   present
 - Founder commits after the production base: 84
 - Current local `origin/master`: `c7f655da0709407b6f378a5c00617d3c170adb6a`
-- Current relationship to local `origin/master`: 84 ahead, 0 behind
-- Changed files in the Founder delta: 353
+- Relationship at tested product commit: 86 ahead, 0 behind
+- Changed files in the Founder delta: 354
 - Protected trading/analyzer/workflow paths in the Founder delta: 0
 - Worktree status at evidence capture: clean
 - Conflict markers: none
@@ -121,16 +121,17 @@ The internal QA installer built from the current Founder product source is:
 
 - Path:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration\packages\founder-ide\installer\dist\Founder-IDE-Setup-0.9.4-internal-qa.exe`
-- Size: 323,910,538 bytes
+- Size: 323,910,432 bytes
 - SHA-256:
-  `4AA6CFA39445E144BB60A66CDD51616686F743DD3DB4E3AFCE04710E5D063BF9`
+  `6CCAFEED6211544E43DFABE95CA18901EEA18F7DB72AE94153AB0FD8678AE48F`
 - Signature: unsigned, correctly labelled internal QA rather than production
-- Installer log: `%TEMP%\Founder-IDE-0.9.4-final-install.log`
+- Installer log:
+  `%TEMP%\Founder-IDE-0.9.4-0.5.2-final-install.log`
 
 The installer log records inner installer exit code 0, workbench/style/
 integrity/navigation corrections, shortcut creation, release identity 0.9.4,
 and normal completion without a Windows restart. The installed extension is
-0.5.1 and `founder-release.json` reports 0.9.4.
+0.5.2 and `founder-release.json` reports 0.9.4.
 
 The installed app was launched with an isolated debugging port and audited
 through its native Electron surfaces. The final run proved:
@@ -139,6 +140,9 @@ through its native Electron surfaces. The final run proved:
 - Founder branding was visible and `Void's Settings` was absent
 - New chat, Projects, Chats, Agents, Browser, Changes, Deploy, Remote, and
   Connect were visible
+- the narrow Goal panel kept `Housekeeping` and `Edit` readable and clickable;
+  direct geometry evidence proved both buttons stayed inside the 128-pixel
+  action row without overlap
 - the native composer exposed Founder Auto, Second Brain, screenshot
   attachment, model controls, and the microphone control
 - a real PNG produced a local preview, could be removed, and left no critical
@@ -198,6 +202,8 @@ Local installed evidence:
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-chat-qa-20260729-final4\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-terminal-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-modes-qa-20260729\plan\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-visual-qa-20260729-packaged-052\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-navigation-qa-20260729-packaged-052\`
 
 ## Proven source capabilities
 

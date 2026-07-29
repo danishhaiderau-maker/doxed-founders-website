@@ -656,8 +656,8 @@ gates.
   motion, and success-state matrix after the final source freeze.
 - [x] Build and locally verify one Founder IDE installer containing Founder
   Node. The refreshed unsigned internal-QA artifact is
-  `Founder-IDE-Setup-0.9.4-internal-qa.exe`, 323,910,538 bytes, SHA-256
-  `4AA6CFA39445E144BB60A66CDD51616686F743DD3DB4E3AFCE04710E5D063BF9`.
+  `Founder-IDE-Setup-0.9.4-internal-qa.exe`, 323,910,432 bytes, SHA-256
+  `6CCAFEED6211544E43DFABE95CA18901EEA18F7DB72AE94153AB0FD8678AE48F`.
   Its installer log records inner exit code 0, navigation/workbench corrections,
   shortcut creation, release identity 0.9.4, and normal completion.
 - [ ] Rebuild the installer after the final owned changes, then regenerate and
@@ -666,7 +666,7 @@ gates.
   architecture nodes changed, public APIs or components removed, rewrite-budget
   variance, behavior-preservation checks, and the reason for every core
   workbench change that could not be delivered extension-first.
-  - [x] The internal-QA refresh contains extension 0.5.1 and the final
+  - [x] The internal-QA refresh contains extension 0.5.2 and the final
     product-bearing Founder navigation changes. Installed Deploy, Remote,
     Connect, attachment, settings, managed Fast chat, and terminal execution
     passed. Signing, clean-VM lifecycle, and the canonical production receipt

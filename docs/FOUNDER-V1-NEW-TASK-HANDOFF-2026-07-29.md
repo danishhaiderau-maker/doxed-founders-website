@@ -26,10 +26,10 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `55ac43f8`
+- Tested product source commit: `be9f06f87e034efc593b35bc244a036d8d5efed0`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
-- Relationship before this documentation commit: 84 ahead, 0 behind
-- Changed paths in the Founder delta: 353
+- Relationship at the tested product commit: 86 ahead, 0 behind
+- Changed paths in the Founder delta: 354
 - Protected trading/analyzer/exchange/gate paths in the Founder delta: 0
 - Backup ref: `backup/founder-v1-pre-rebase-20260729`
 
@@ -42,11 +42,11 @@ and carry only the reviewed Founder delta when production clearance exists.
 
 - Installer:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration\packages\founder-ide\installer\dist\Founder-IDE-Setup-0.9.4-internal-qa.exe`
-- Size: 323,910,538 bytes
+- Size: 323,910,432 bytes
 - SHA-256:
-  `4AA6CFA39445E144BB60A66CDD51616686F743DD3DB4E3AFCE04710E5D063BF9`
+  `6CCAFEED6211544E43DFABE95CA18901EEA18F7DB72AE94153AB0FD8678AE48F`
 - Installed release: 0.9.4
-- Installed Founder extension: 0.5.1
+- Installed Founder extension: 0.5.2
 - Channel: unsigned internal QA, not production
 
 The installed application proves Founder navigation, Projects/Chats, coherent
@@ -63,6 +63,8 @@ Primary evidence:
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-attachment-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-chat-qa-20260729-fast\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-terminal-qa-20260729-final\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-visual-qa-20260729-packaged-052\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\installed-navigation-qa-20260729-packaged-052\`
 
 ## Verified automated baseline
 
