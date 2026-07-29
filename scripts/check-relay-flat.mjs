@@ -175,6 +175,7 @@ async function main() {
       ?? dashboard.copyRelaySim?.reconcile
       ?? null;
     rows.push({
+      instanceId: instance.id,
       user:
         instance.user.platformHandle
         || instance.user.name

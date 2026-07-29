@@ -5,7 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PrismaClient } from '@prisma/client';
+import prismaPackage from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
@@ -18,6 +18,7 @@ const LOCAL_BOT = (
 const FALLBACK_BOT = resolveHomeBotPublicUrl(undefined, REPO);
 const INSTANCE_ID = process.env.LIVE_COPY_INSTANCE_ID || 'cmq6cfwv4001jli0dqx5r31ve';
 const OPEN_PART = ['INTENT', 'PENDING_ENTRY', 'OPEN'];
+const { PrismaClient } = prismaPackage;
 
 function loadDbUrl() {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
