@@ -80,11 +80,21 @@ async function clickFounderNavigation(label) {
           && rect.width > 0 && rect.height > 0;
       };
       const label = ${JSON.stringify(label)};
-      const directAction = label === 'Remote' ? 'openRemote'
-        : label === 'Connect' ? 'openConnections'
+      const directAction = label === 'Deploy' ? 'openDeploy'
+        : label === 'Remote' ? 'openRemote'
+          : label === 'Connect' ? 'openConnections'
           : '';
       const actions = [...root.querySelectorAll('button, a, [role="button"], [data-action]')]
         .filter(visible);
+      const isFounderHome = Boolean(root.querySelector('[data-action="newChat"]'));
+      if (directAction && !isFounderHome) {
+        return {
+          clicked: false,
+          actions: actions
+            .map((candidate) => (candidate.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 120))
+            .filter(Boolean),
+        };
+      }
       const element = actions
         .find((candidate) => candidate.getAttribute('data-action') === directAction)
         || actions.find((candidate) => {
@@ -132,9 +142,20 @@ async function captureWorkbench(name) {
 
 const evidence = {
   endpoint,
+  deploy: { clicked: false, rendered: false },
   remote: { clicked: false, rendered: false },
   connect: { clicked: false, rendered: false },
 };
+
+const deployClick = await clickFounderNavigation('Deploy');
+evidence.deploy.clicked = deployClick.clicked;
+evidence.deploy.availableActions = deployClick.availableActions;
+await wait(3_000);
+const deployText = await collectVisibleText();
+evidence.deploy.rendered = /GitHub|Vercel|Railway|Neon|Services and infrastructure/i.test(
+  deployText,
+);
+await captureWorkbench('installed-founder-deploy');
 
 const remoteClick = await clickFounderNavigation('Remote');
 evidence.remote.clicked = remoteClick.clicked;
@@ -161,7 +182,9 @@ fs.writeFileSync(
 process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`);
 
 if (
-  !evidence.remote.clicked
+  !evidence.deploy.clicked
+  || !evidence.deploy.rendered
+  || !evidence.remote.clicked
   || !evidence.remote.rendered
   || !evidence.connect.clicked
   || !evidence.connect.rendered

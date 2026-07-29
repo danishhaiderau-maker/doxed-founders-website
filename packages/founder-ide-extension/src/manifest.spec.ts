@@ -13,7 +13,13 @@ interface ExtensionManifest {
     viewsContainers?: {
       activitybar?: Array<{ id?: string; title?: string; icon?: string }>;
     };
-    views?: Record<string, Array<{ id?: string; name?: string; type?: string; visibility?: string }>>;
+    views?: Record<string, Array<{
+      id?: string;
+      name?: string;
+      type?: string;
+      visibility?: string;
+      when?: string;
+    }>>;
     menus?: Record<string, Array<{ command?: string; when?: string }>>;
   };
 }
@@ -122,6 +128,16 @@ describe('Founder IDE extension manifest', () => {
     assert.equal(containers.length, 1, 'Founder navigation should use one labelled home');
     for (const view of manifest.contributes?.views?.founderOs?.slice(1) ?? []) {
       assert.equal(view.visibility, 'collapsed', `${view.id} should use progressive disclosure`);
+    }
+    for (const essentialViewId of ['founderOs.connections', 'founderOs.remote']) {
+      const view = manifest.contributes?.views?.founderOs?.find(
+        (candidate) => candidate.id === essentialViewId,
+      );
+      assert.equal(
+        view?.when,
+        undefined,
+        `${essentialViewId} must remain reachable in Founder mode`,
+      );
     }
 
     for (const item of manifest.contributes?.menus?.['view/title'] ?? []) {

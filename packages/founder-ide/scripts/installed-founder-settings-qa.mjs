@@ -87,7 +87,10 @@ while (!settingsClient && Date.now() < settingsDeadline) {
     candidate.type === 'iframe' && candidate.parentId === initialWorkbenchTarget.id,
   )) {
     const candidate = await inspectWebview(target);
-    if (candidate.isFounderSettings) {
+    if (
+      candidate.isFounderSettings
+      && /Plan and usage|Identity and Node|Founder Free/i.test(candidate.text)
+    ) {
       settingsText = candidate.text;
       settingsClient = candidate;
       break;
