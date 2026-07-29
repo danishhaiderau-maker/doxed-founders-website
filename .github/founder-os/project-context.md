@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ops): restore lifecycle probes on Node 24
+fix(relay): isolate live fidelity at arm epoch
 
 ## Last Activity
 
