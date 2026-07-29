@@ -163,12 +163,25 @@ export class FounderNodeService {
     ipcSecret?: string;
   }) {
     const normalizedCode = input.code.trim().toUpperCase();
+    const nodeId = input.nodeId.trim();
+    const label = this.boundedDeviceMetadata(input.label, 80) ?? 'Founder Node';
+    const platform = this.boundedDeviceMetadata(input.platform, 40);
+    const appVersion = this.boundedDeviceMetadata(input.appVersion, 40);
+    const installId = this.boundedDeviceMetadata(input.installId, 128);
     const row = await this.prisma.founderNodePairingCode.findUnique({
       where: { code: normalizedCode },
     });
 
     if (!row || row.usedAt || row.expiresAt < new Date()) {
       throw new UnauthorizedException('Invalid or expired pairing code');
+    }
+
+    const existingNode = await this.prisma.founderNode.findUnique({
+      where: { nodeId },
+      select: { userId: true },
+    });
+    if (existingNode && existingNode.userId !== row.userId) {
+      throw new BadRequestException('Node identity is not available');
     }
 
     const nodeToken = `fn_${randomBytes(32).toString('hex')}`;
@@ -183,54 +196,73 @@ export class FounderNodeService {
       ? await bcrypt.hash(input.ipcSecret, 10)
       : null;
 
-    const node = await this.prisma.founderNode.upsert({
-      where: { nodeId: input.nodeId },
-      create: {
-        userId: row.userId,
-        nodeId: input.nodeId,
-        label: input.label.trim() || 'Founder Node',
-        secretHash,
-        status: 'online',
-        lastSeenAt: new Date(),
-        platform: input.platform ?? null,
-        appVersion: input.appVersion ?? null,
-        vaultHealthy: true,
-        // Phase 2 — record founderId (= userId today) + token lifecycle.
-        founderId: row.userId,
-        tokenExpiresAt,
-        tokenRotatedAt: new Date(),
-        // Phase 3 — record per-install IPC identity.
-        installId: input.installId ?? null,
-        ipcSecretHash,
-      },
-      update: {
-        userId: row.userId,
-        label: input.label.trim() || 'Founder Node',
-        secretHash,
-        status: 'online',
-        lastSeenAt: new Date(),
-        platform: input.platform ?? null,
-        appVersion: input.appVersion ?? null,
-        vaultHealthy: true,
-        // Phase 2 — refresh founderId + token lifecycle on re-pair.
-        founderId: row.userId,
-        tokenExpiresAt,
-        tokenRotatedAt: new Date(),
-        // Phase 3 — refresh installId + ipcSecret on re-pair.
-        installId: input.installId ?? null,
-        ipcSecretHash,
-      },
-    });
+    const node = await this.prisma.$transaction(async (tx) => {
+      const currentNode = await tx.founderNode.findUnique({
+        where: { nodeId },
+        select: { userId: true },
+      });
+      if (currentNode && currentNode.userId !== row.userId) {
+        throw new BadRequestException('Node identity is not available');
+      }
 
-    await this.prisma.founderNodePairingCode.update({
-      where: { id: row.id },
-      data: { usedAt: new Date() },
-    });
+      const consumedAt = new Date();
+      const claimed = await tx.founderNodePairingCode.updateMany({
+        where: {
+          id: row.id,
+          usedAt: null,
+          expiresAt: { gt: consumedAt },
+        },
+        data: { usedAt: consumedAt },
+      });
+      if (claimed.count !== 1) {
+        throw new UnauthorizedException('Invalid or expired pairing code');
+      }
 
-    await this.prisma.founderBuilderSettings.upsert({
-      where: { userId: row.userId },
-      create: { userId: row.userId, memoryStorageMode: 'FOUNDER_NODE' },
-      update: { memoryStorageMode: 'FOUNDER_NODE' },
+      const pairedNode = await tx.founderNode.upsert({
+        where: { nodeId },
+        create: {
+          userId: row.userId,
+          nodeId,
+          label,
+          secretHash,
+          status: 'online',
+          lastSeenAt: new Date(),
+          platform,
+          appVersion,
+          vaultHealthy: true,
+          // Phase 2 — record founderId (= userId today) + token lifecycle.
+          founderId: row.userId,
+          tokenExpiresAt,
+          tokenRotatedAt: new Date(),
+          // Phase 3 — record per-install IPC identity.
+          installId,
+          ipcSecretHash,
+        },
+        update: {
+          userId: row.userId,
+          label,
+          secretHash,
+          status: 'online',
+          lastSeenAt: new Date(),
+          platform,
+          appVersion,
+          vaultHealthy: true,
+          // Phase 2 — refresh founderId + token lifecycle on re-pair.
+          founderId: row.userId,
+          tokenExpiresAt,
+          tokenRotatedAt: new Date(),
+          // Phase 3 — refresh installId + ipcSecret on re-pair.
+          installId,
+          ipcSecretHash,
+        },
+      });
+
+      await tx.founderBuilderSettings.upsert({
+        where: { userId: row.userId },
+        create: { userId: row.userId, memoryStorageMode: 'FOUNDER_NODE' },
+        update: { memoryStorageMode: 'FOUNDER_NODE' },
+      });
+      return pairedNode;
     });
 
     return {
@@ -239,7 +271,7 @@ export class FounderNodeService {
       userId: row.userId,
       founderId: row.userId,
       tokenExpiresAt: tokenExpiresAt.toISOString(),
-      installId: input.installId,
+      installId: installId ?? undefined,
     };
   }
 

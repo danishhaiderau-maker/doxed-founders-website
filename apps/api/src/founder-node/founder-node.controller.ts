@@ -252,7 +252,17 @@ export class FounderNodeController {
     if (!body.code?.trim() || !body.nodeId?.trim()) {
       throw new BadRequestException('code and nodeId required');
     }
-    return this.nodes.pair(body);
+    if (!/^[A-HJ-NP-Z2-9]{8}$/i.test(body.code.trim())) {
+      throw new BadRequestException('pairing code format is invalid');
+    }
+    if (!/^[A-Za-z0-9_-]{3,128}$/.test(body.nodeId.trim())) {
+      throw new BadRequestException('nodeId format is invalid');
+    }
+    const ipcSecret = body.ipcSecret?.trim();
+    if (ipcSecret && !/^[0-9a-f]{64}$/i.test(ipcSecret)) {
+      throw new BadRequestException('ipcSecret must be a 32-byte hex value');
+    }
+    return this.nodes.pair({ ...body, ipcSecret });
   }
 
   // ─── Phase 2 — device-code (RFC 8628) first-run flow ──────────────────────
