@@ -58,7 +58,30 @@ function Test-BotRevisionMatches([object]$Ping) {
   if (-not $expected) { return $true }
   $actual = [string]$Ping.source_git_rev
   if (-not $actual -or $actual -eq "unknown") { return $false }
-  return $expected.StartsWith($actual, [System.StringComparison]::OrdinalIgnoreCase)
+  if ($expected.StartsWith($actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $true
+  }
+
+  # HEAD may advance for tests, docs, runtime ledgers, or Founder OS memory
+  # while the executable bot source is unchanged. Restarting a healthy bot for
+  # those commits caused a repeating :7002 outage. Only request a replacement
+  # when files that actually define the bot runtime differ.
+  $runtimePaths = @(
+    "services/btc-conservative-agent/bot.py",
+    "services/btc-conservative-agent/btc_conservative_agent.py",
+    "services/btc-conservative-agent/process_singleton.py",
+    "services/btc-conservative-agent/combo_pathway_config.py",
+    "services/btc-signal-engine/engine.py",
+    "services/btc-signal-engine/manifest.json"
+  )
+  try {
+    & git -C $repoRoot cat-file -e "$actual^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    & git -C $repoRoot diff --quiet "$actual..$expected" -- @runtimePaths 2>$null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
 }
 
 function Get-BotRuntimeStatus {

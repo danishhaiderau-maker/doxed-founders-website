@@ -84,6 +84,13 @@ def main() -> None:
         and "process singleton remains the final duplicate" in START,
     )
     check(
+        "test-only commits cannot make the supervisor kill a healthy bot",
+        "Only request a replacement" in HEALTH
+        and "services/btc-conservative-agent/bot.py" in HEALTH
+        and 'git -C $repoRoot diff --quiet "$actual..$expected" -- @runtimePaths'
+        in HEALTH,
+    )
+    check(
         "hung detection includes bound-but-unconnectable listeners",
         "Test-PortBound $BotPort" in BOT_HUNG
         and 'Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20' in BOT_HUNG,
