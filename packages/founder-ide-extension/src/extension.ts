@@ -80,6 +80,7 @@ import {
 } from './managed-visual';
 import { describePersonalVisuals } from './personal-visual-request';
 import { FounderProjectHistory } from './project-history';
+import { FounderHomePanel } from './founder-home';
 
 let registeredParticipant: vscode.Disposable | undefined;
 let profileManager: ProfileManager | undefined;
@@ -102,6 +103,7 @@ let founderProjectActivity: FounderProjectActivityStore | undefined;
 let personalAiProfiles: PersonalAiProfileStore | undefined;
 let dailyQualityReviewDisposable: vscode.Disposable | undefined;
 let founderProjectHistory: FounderProjectHistory | undefined;
+let founderHome: FounderHomePanel | undefined;
 
 function formatHousekeepingBytes(value: number): string {
   if (value < 1_024) return `${value} B`;
@@ -146,11 +148,21 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
   founderAgentAwareness = new FounderAgentAwareness();
+  founderHome = new FounderHomePanel({
+    goal: () => founderHub?.goalSnapshot() ?? null,
+    awareness: () => founderAgentAwareness?.summary() ?? {
+      activeCount: 0,
+      conflictCount: 0,
+      tasks: [],
+    },
+  });
+  context.subscriptions.push(founderHome);
   founderHub.setAgentAwareness(founderAgentAwareness.summary());
   context.subscriptions.push(
     founderAgentAwareness,
     founderAgentAwareness.onDidChange((summary) => {
       founderHub?.setAgentAwareness(summary);
+      founderHome?.refresh();
       if (summary.conflictCount > 0) {
         founderCompanion?.setCoordinating(
           'Agents are coordinating',
@@ -319,6 +331,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('founderOs.openHub', () =>
       vscode.commands.executeCommand('workbench.view.extension.founderOs'),
+    ),
+    vscode.commands.registerCommand('founderOs.openHome', () =>
+      founderHome?.show(),
     ),
     vscode.commands.registerCommand('founderOs.openProjects', () =>
       founderProjectHistory?.show(),
@@ -761,6 +776,7 @@ async function applyFounderInterfaceMode(revealFounderHome: boolean): Promise<vo
   }
   if (mode === 'founder' && revealFounderHome) {
     await vscode.commands.executeCommand('workbench.view.extension.founderOs');
+    founderHome?.showWhenWorkspaceIsIdle();
   }
 }
 

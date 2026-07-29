@@ -82,6 +82,7 @@ describe('Founder IDE extension manifest', () => {
     assert.ok(commands.has('founderOs.signOut'));
     assert.ok(commands.has('founderOs.openConnections'));
     assert.ok(commands.has('founderOs.openSettings'));
+    assert.ok(commands.has('founderOs.openHome'));
     assert.ok(commands.has('founderOs.toggleInterfaceMode'));
     assert.ok(commands.has('founderOs.openProjects'));
     assert.ok(commands.has('founderOs.transcribeVoice'));
@@ -90,6 +91,28 @@ describe('Founder IDE extension manifest', () => {
     assert.ok(
       preferences.some((item: { command?: string }) => item.command === 'founderOs.openSettings'),
       'Founder Settings must be available from the global settings menu',
+    );
+  });
+
+  it('replaces the empty-workspace legacy start screen with Founder Home', () => {
+    const homeSource = readFileSync(join(__dirname, 'founder-home.ts'), 'utf8');
+    const extensionSource = readFileSync(join(__dirname, 'extension.ts'), 'utf8');
+
+    assert.match(homeSource, /createWebviewPanel\(/);
+    assert.match(homeSource, /Pursuing goal/);
+    assert.match(homeSource, /New chat/);
+    assert.match(homeSource, /Open project/);
+    assert.match(homeSource, /Preview/);
+    assert.match(homeSource, /Changes/);
+    assert.match(homeSource, /Deploy/);
+    assert.match(homeSource, /Remote/);
+    assert.match(homeSource, /Switch to Developer mode/);
+    assert.doesNotMatch(homeSource, /Void's Settings/i);
+    assert.doesNotMatch(homeSource, />\s*Void(?: IDE)?\s*</i);
+    assert.doesNotMatch(homeSource, /raw path/i);
+    assert.match(
+      extensionSource,
+      /mode === 'founder' && revealFounderHome[\s\S]*?showWhenWorkspaceIsIdle\(\)/,
     );
   });
 

@@ -2,7 +2,7 @@
   "name": "founder-ide-extension",
   "displayName": "Founder",
   "description": "The Founder control surface for identity, local infrastructure, AI routing, and remote development.",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "publisher": "doxxedcrypto",
   "license": "MIT",
   "repository": {
@@ -249,6 +249,10 @@
       {
         "command": "founderOs.openHub",
         "title": "Founder: Open control center"
+      },
+      {
+        "command": "founderOs.openHome",
+        "title": "Founder: Open Home"
       },
       {
         "command": "founderOs.openProjects",
