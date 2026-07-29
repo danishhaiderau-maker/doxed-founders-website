@@ -31149,10 +31149,13 @@ def _create_dashboard_server():
         request_queue_size = 64
         _dispatch_thread_cap = threading.BoundedSemaphore(32)
         _general_thread_cap = threading.BoundedSemaphore(8)
-        _authority_thread_cap = threading.BoundedSemaphore(8)
+        _canonical_thread_cap = threading.BoundedSemaphore(8)
+        _relay_state_thread_cap = threading.BoundedSemaphore(4)
         _control_thread_cap = threading.BoundedSemaphore(2)
-        _authority_paths = (
+        _canonical_paths = (
             b"/api/relay-execution-state",
+        )
+        _relay_state_paths = (
             b"/api/relay-state",
         )
         _control_paths = (
@@ -31184,8 +31187,10 @@ def _create_dashboard_server():
                 first_line = head.split(b"\r\n", 1)[0]
                 if any(b" " + path + b" " in first_line for path in self._control_paths):
                     return self._control_thread_cap
-                if any(b" " + path + b" " in first_line for path in self._authority_paths):
-                    return self._authority_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._canonical_paths):
+                    return self._canonical_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._relay_state_paths):
+                    return self._relay_state_thread_cap
             except (OSError, TimeoutError):
                 pass
             return self._general_thread_cap
@@ -31263,8 +31268,8 @@ def _create_dashboard_server():
 def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
-        f"(bounded werkzeug server, general_threads=8, authority_threads=8, "
-        f"control_threads=2, backlog=64) "
+        f"(bounded werkzeug server, general_threads=8, canonical_threads=8, "
+        f"relay_state_threads=4, control_threads=2, backlog=64) "
         "[PIPELINE ENFORCEMENT]"
     )
     try:

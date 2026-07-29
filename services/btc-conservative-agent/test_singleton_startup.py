@@ -92,7 +92,8 @@ def run():
     check(
         "relay authority and operator controls have reserved worker capacity",
         "_dispatch_thread_cap = threading.BoundedSemaphore(32)" in server_source
-        and "_authority_thread_cap = threading.BoundedSemaphore(8)" in server_source
+        and "_canonical_thread_cap = threading.BoundedSemaphore(8)" in server_source
+        and "_relay_state_thread_cap = threading.BoundedSemaphore(4)" in server_source
         and "_control_thread_cap = threading.BoundedSemaphore(2)" in server_source
         and 'b"/api/relay-execution-state"' in server_source
         and 'b"/api/pause"' in server_source
