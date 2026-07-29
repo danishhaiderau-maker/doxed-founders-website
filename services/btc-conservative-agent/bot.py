@@ -24111,10 +24111,10 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">One row per actual shared AI call. Continuous and Type B apply separate post-AI policies. Tile 2 uses no AI; its independent deterministic gate is shown below.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Tile 2 uses no AI; its independent deterministic gate is shown below.</p>
 <div id="tile2DecisionSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;">Tile 2 deterministic gate · collecting…</div>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous verdict</th><th>Type B verdict</th><th>Reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -24797,10 +24797,10 @@ DASHBOARD_JS = """(function () {
                 + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%')
                 + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
               : labOn
-                ? statRow('Trades', labPrimaryTrades, '#58a6ff')
-                  + statRow('PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
-                  + statRow('EV/appr', labPrimaryEv, '#58a6ff')
-                  + statRow('Win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
+                ? statRow('Shadow trades', labPrimaryTrades, '#58a6ff')
+                  + statRow('Shadow PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
+                  + statRow('Shadow EV/close', labPrimaryEv, '#58a6ff')
+                  + statRow('Shadow win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
                 : statRow('Executed', stats.real_fills != null ? stats.real_fills : 0)
                   + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
                   + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
@@ -24816,9 +24816,9 @@ DASHBOARD_JS = """(function () {
             + pausedGrid
             + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
               + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
-              + statRow('LAB PnL', '$' + Number(labPnl).toFixed(2), labPnlCol)
-              + statRow('LAB win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
-              + statRow('LAB EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
+              + statRow('Shadow PnL (not account)', '$' + Number(labPnl).toFixed(2), labPnlCol)
+              + statRow('Shadow win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
+              + statRow('Shadow EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
               + '</div>') : '');
           const chips = (spec.filter_chips || []).map(function (c) {
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
@@ -25695,12 +25695,14 @@ DASHBOARD_JS = """(function () {
         if (aiHint) {
           const shown = aiHist.length;
           const total = d.ai_history_total != null ? d.ai_history_total : shown;
-          aiHint.innerText = total > shown
-            ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls')
-            : ('Last ' + shown + ' actual shared AI calls this session');
+          const historyCount = total > shown
+            ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
+            : ('Last ' + shown + ' actual shared AI calls this session. ');
+          aiHint.innerText = historyCount
+            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.';
         }
         const formatLaneVerdict = (v) => {
-          if (!v) return '<span style="color:#d29922">pending</span>';
+          if (!v) return '<span style="color:#8b949e" title="No research verdict was recorded. This is not a pending order.">not evaluated</span>';
           const accepted = v.accepted === true || v.ok === true;
           const label = accepted ? 'ACCEPT' : (v.reason || v.block_reason || 'REJECT');
           const score = v.score != null ? ` · score ${v.score}` : '';
