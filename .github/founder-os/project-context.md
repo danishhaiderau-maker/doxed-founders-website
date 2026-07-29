@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): isolate live fidelity at arm epoch
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
