@@ -31147,6 +31147,7 @@ def _create_dashboard_server():
 
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
+        _dispatch_thread_cap = threading.BoundedSemaphore(32)
         _general_thread_cap = threading.BoundedSemaphore(8)
         _authority_thread_cap = threading.BoundedSemaphore(8)
         _control_thread_cap = threading.BoundedSemaphore(2)
@@ -31189,59 +31190,65 @@ def _create_dashboard_server():
                 pass
             return self._general_thread_cap
 
+        def _reject_overload(self, request):
+            body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
+            response = (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n"
+                + b"Retry-After: 1\r\n\r\n"
+                + body
+            )
+            try:
+                request.settimeout(self._overload_io_timeout_sec)
+                request.sendall(response)
+            except (OSError, TimeoutError):
+                pass
+            finally:
+                self.shutdown_request(request)
+
         def process_request(self, request, client_address):
-            # Never block the accept loop waiting for a worker. If slow clients
-            # hold all eight slots, blocking here fills the socket backlog and
-            # eventually makes even /api/ping connection-refused. Reject
-            # overload quickly so health probes remain truthful.
-            request_cap = self._request_cap(request)
-            if not request_cap.acquire(blocking=False):
-                body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
-                response = (
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Content-Type: application/json; charset=utf-8\r\n"
-                    + f"Content-Length: {len(body)}\r\n".encode("ascii")
-                    + b"Connection: close\r\n"
-                    + b"Retry-After: 1\r\n\r\n"
-                    + body
-                )
-                try:
-                    # The overload response runs on the accept loop itself.
-                    # A disconnected or back-pressured tunnel client must never
-                    # be allowed to block that loop and starve future probes.
-                    request.settimeout(self._overload_io_timeout_sec)
-                    request.sendall(response)
-                except (OSError, TimeoutError):
-                    pass
-                finally:
-                    self.shutdown_request(request)
+            # Never inspect client bytes or wait for a destination worker in
+            # the single accept loop. Slow tunnel clients previously consumed
+            # 50ms here apiece, so a burst delayed even local Pause/relay calls.
+            if not self._dispatch_thread_cap.acquire(blocking=False):
+                self._reject_overload(request)
                 return
             try:
-                # Bound socket reads/writes for normal workers as well. App
-                # computation can take longer, but a dead tunnel client cannot
-                # retain one of the eight worker slots indefinitely.
+                t = threading.Thread(
+                    target=self._classify_and_process,
+                    args=(request, client_address),
+                )
+                if self.daemon_threads:
+                    t.daemon = True
+                t.start()
+            except Exception:
+                self._dispatch_thread_cap.release()
+                raise
+
+        def _classify_and_process(self, request, client_address):
+            request_cap = None
+            request_cap_acquired = False
+            try:
+                request_cap = self._request_cap(request)
+                if not request_cap.acquire(blocking=False):
+                    self._reject_overload(request)
+                    return
+                request_cap_acquired = True
+                # Bound socket reads/writes. App computation can take longer,
+                # but a dead tunnel client cannot retain a worker indefinitely.
                 is_priority = request_cap is not self._general_thread_cap
                 request.settimeout(
                     self._priority_client_io_timeout_sec
                     if is_priority
                     else self._client_io_timeout_sec
                 )
-                t = threading.Thread(
-                    target=self._release_and_process,
-                    args=(request, client_address, request_cap),
-                )
-                if self.daemon_threads:
-                    t.daemon = True
-                t.start()
-            except Exception:
-                request_cap.release()
-                raise
-
-        def _release_and_process(self, request, client_address, request_cap):
-            try:
                 self.process_request_thread(request, client_address)
             finally:
-                request_cap.release()
+                if request_cap_acquired:
+                    request_cap.release()
+                self._dispatch_thread_cap.release()
 
     try:
         httpd = _BoundedThreadedWSGIServer(
