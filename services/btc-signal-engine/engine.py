@@ -27245,6 +27245,13 @@ def _build_relay_execution_state_snapshot() -> dict:
         price_ts = float(state.get("price_ts") or 0)
         snapshot = {
             "price": tick_px,
+            "price_ts": state.get("price_ts"),
+            "price_source": state.get("price_source"),
+            "data_source": state.get("data_source"),
+            "data_quality": state.get("data_quality"),
+            "ws_ready": bool(state.get("ws_ready", False)),
+            "ws_age": state.get("ws_age"),
+            "ws_last_tick": state.get("ws_last_tick"),
             "bot_version": EXECUTION_FIX_VERSION,
             **_dashboard_owner_metadata(),
             "bot_start_time": bot_start_time,
@@ -28017,6 +28024,13 @@ def _api_state_cache_refresher_loop():
                 snap = dict(base or {})
                 for key in (
                     "price",
+                    "price_ts",
+                    "price_source",
+                    "data_source",
+                    "data_quality",
+                    "ws_ready",
+                    "ws_age",
+                    "ws_last_tick",
                     "execution_paused",
                     "execution_reason",
                     "manual_admin_pause",
