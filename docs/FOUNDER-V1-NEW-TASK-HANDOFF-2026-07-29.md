@@ -73,9 +73,27 @@ implemented without a workbench compile or installer rebuild.
   Developer mode toggle PASS; return to Founder mode PASS; visible error
   notifications 0.
 
+Stage 8 native Dragon acceptance is also complete. The installed companion is
+a transparent always-on-top entity outside Founder IDE, with consistent
+nest/flight/fire/attention states. Native drag moved it from `(992, 390)` to
+`(920, 358)` and an Electron restart restored exactly `(920, 358)`. Windows
+hit-testing proved transparent-area click-through and visible-body
+interaction. The state sweep produced zero console or page errors.
+
+- Dragon verifier commit: `e049dc34`
+- Dragon evidence:
+  `docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`
+- Live desktop capture:
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-dragon-desktop-live-20260729.png`
+- Native state and drag proof:
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-dragon-native-proof-20260729\`
+- Restart-persistence proof:
+  `C:\Users\user\Desktop\Final Bots\artifacts\founder-dragon-restart-proof-20260729\`
+
 Primary evidence:
 
 - `docs/FOUNDER-V1-CLEAN-INTEGRATION-EVIDENCE-2026-07-28.md`
+- `docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`

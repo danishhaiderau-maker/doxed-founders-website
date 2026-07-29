@@ -519,22 +519,31 @@ notifications. The exact visual artifact is
   hide until next task, and recovery when a saved display is disconnected.
 - [x] Announce delivered work with a compact two-line result card and a brief
   fire state; resting returns the dragon to its nest without visual noise.
-- [ ] Replace the current placeholder/copy-like visual treatment with one
+- [x] Replace the current placeholder/copy-like visual treatment with one
   recognisable Founder Dragon designed for the desktop companion: transparent
   body-only frames, no rectangular video background, a convincing nest/rest
   pose, purposeful flight/effort, listening, verification, blocking, and
   delivery/fire reactions.
-- [ ] Make the final companion feel alive without becoming distracting:
+- [x] Make the final companion feel alive without becoming distracting:
   breathing and eye motion at rest, task-linked motion only, compact result
   cards above it, drag anywhere on any monitor, edge snap, and a quiet
   reduced-motion fallback.
-- [ ] Prove the final Dragon outside the IDE window, including drag, persistence,
+- [x] Prove the final Dragon outside the IDE window, including drag, persistence,
   click-through, focus safety, task-state transitions, one-launch identity,
   and recovery after IDE restart. The earlier embedded panel and generated
   video preview are reference material, not release evidence.
 
 Evidence: transparent pixel checks, multi-monitor drag test, restart persistence,
 state-transition recording, reduced-motion and focus tests.
+
+Native Windows evidence at `e049dc34`: Founder Node 62/62; TypeScript passed;
+transparent desktop capture proved the installed Dragon above ChatGPT while
+Founder IDE retained focus; isolated native drag moved the window from
+`(992, 390)` to `(920, 358)`; restart restored `(920, 358)`; transparent
+hit-testing passed through to the underlying window while the Dragon body
+remained interactive; rest/flight/fire/attention/error state captures produced
+zero console or page errors. See
+`docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`.
 
 ## Stage 9 - One application with embedded Founder Node
 
