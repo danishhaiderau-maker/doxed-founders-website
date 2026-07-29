@@ -26,7 +26,7 @@ Optimize for preserving the working system:
 - Worktree:
   `C:\Users\user\Desktop\Final Bots\worktrees\founder-v1-clean-integration`
 - Branch: `release/founder-v1-clean-integration`
-- Tested product source commit: `391a7b33`
+- Tested product source commit: `af79fda5`
 - Production base: `c7f655da0709407b6f378a5c00617d3c170adb6a`
 - Relationship at the tested product commit: 88 ahead, 0 behind
 - Changed paths in the Founder delta: 354
@@ -96,12 +96,14 @@ Primary evidence:
 - `docs/FOUNDER-DRAGON-NATIVE-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-SCREENSHOT-ATTACHMENT-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-PERSONAL-AI-NATIVE-QA-EVIDENCE-2026-07-29.md`
+- `docs/FOUNDER-VOICE-CANCEL-QA-EVIDENCE-2026-07-29.md`
 - `docs/FOUNDER-V1-COMPLETE-EXECUTION-PLAN.md`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-navigation-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final2\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-attachment-qa-20260729-complete\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-settings-qa-20260729-final-route-proof\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-personal-ai-qa-20260729-harness-fixed\`
+- `C:\Users\user\Desktop\Final Bots\artifacts\founder-voice-cancel-native-qa-20260729-final3\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-founder-chat-qa-20260729-fast\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-terminal-qa-20260729-final\`
 - `C:\Users\user\Desktop\Final Bots\artifacts\installed-visual-qa-20260729-packaged-052\`
@@ -137,6 +139,15 @@ Latest installed Personal AI QA:
 - Local Ollama remains unproven because no service or model is installed on
   port `11434`.
 
+Latest voice interaction QA:
+
+- Warm workbench TypeScript compile: zero errors.
+- Explicit cancel and Escape-to-cancel: PASS.
+- Typed composer text preserved across both cancellation paths: PASS.
+- Synthetic audio tracks stopped: PASS.
+- Physical microphone and speech provider were not accessed.
+- Human spoken transcription remains a deliberate manual gate.
+
 Run focused checks after a narrow change. Do not rebuild an installer for
 ordinary UI or extension edits:
 
@@ -165,8 +176,10 @@ ordinary UI or extension edits:
    if Ollama and a model are deliberately installed; the current machine has no
    service on port 11434.
 5. **Complete human-interaction gates.**
-   A person must speak the expected phrase for microphone transcription. Do not
-   manufacture speech proof while the founder is away.
+   A person must speak the expected phrase for microphone transcription.
+   Recording state, explicit cancel, Escape, track cleanup, and typed-text
+   preservation are proven; do not manufacture semantic speech proof while the
+   founder is away.
 6. **Complete remote E2E.**
    Pair or inspect a real installed device through the signed-in production
    website, exercise an authenticated proposed action, verify approval and
@@ -194,6 +207,7 @@ ordinary UI or extension edits:
 - Installed Ollama: source/unit contracts only; no local service or model is
   present, so live completion is not claimed.
 - Installed microphone button and managed transport contracts: present.
+  Explicit cancel, Escape, track cleanup, and text preservation: PASS.
   Live spoken transcription: not yet human-proven.
 - Installed attachment picker/preview/remove: PASS.
   Annotation-aware vision response: still needs an enabled permitted vision
