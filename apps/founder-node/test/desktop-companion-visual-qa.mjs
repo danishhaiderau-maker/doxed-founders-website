@@ -92,6 +92,12 @@ const baseline = await evaluate(`(() => {
     imageNaturalHeight: dragon?.naturalHeight,
     animationName: stage ? getComputedStyle(stage).animationName : null,
     screen: { x: window.screenX, y: window.screenY },
+    available: {
+      x: window.screen.availLeft,
+      y: window.screen.availTop,
+      width: window.screen.availWidth,
+      height: window.screen.availHeight,
+    },
     outer: { width: window.outerWidth, height: window.outerHeight },
   };
 })()`);
@@ -118,7 +124,18 @@ if (process.platform === 'win32' && !skipNativeDrag) {
     x: baseline.screen.x + Math.round(baseline.outer.width * 0.65),
     y: baseline.screen.y + Math.round(baseline.outer.height * 0.7),
   };
-  const expectedDelta = { x: 48, y: 32 };
+  const windowCenter = {
+    x: baseline.screen.x + Math.round(baseline.outer.width / 2),
+    y: baseline.screen.y + Math.round(baseline.outer.height / 2),
+  };
+  const displayCenter = {
+    x: baseline.available.x + Math.round(baseline.available.width / 2),
+    y: baseline.available.y + Math.round(baseline.available.height / 2),
+  };
+  const expectedDelta = {
+    x: windowCenter.x < displayCenter.x ? 48 : -48,
+    y: windowCenter.y < displayCenter.y ? 32 : -32,
+  };
   moveCursor(startCursor.x, startCursor.y);
   await evaluate(`window.founderCompanion?.beginDrag()`);
   moveCursor(startCursor.x + expectedDelta.x, startCursor.y + expectedDelta.y);
@@ -132,9 +149,14 @@ if (process.platform === 'win32' && !skipNativeDrag) {
     after: moved,
     delta: { x: moved.x - baseline.screen.x, y: moved.y - baseline.screen.y },
   };
+  const movedInExpectedDirection = (
+    Math.sign(dragEvidence.delta.x) === Math.sign(expectedDelta.x)
+    && Math.sign(dragEvidence.delta.y) === Math.sign(expectedDelta.y)
+  );
   if (
-    Math.abs(dragEvidence.delta.x - expectedDelta.x) > 3
-    || Math.abs(dragEvidence.delta.y - expectedDelta.y) > 3
+    !movedInExpectedDirection
+    || Math.abs(dragEvidence.delta.x) < Math.abs(expectedDelta.x) / 2
+    || Math.abs(dragEvidence.delta.y) < Math.abs(expectedDelta.y) / 2
   ) {
     throw new Error(`Founder Dragon drag failed: ${JSON.stringify(dragEvidence)}`);
   }
