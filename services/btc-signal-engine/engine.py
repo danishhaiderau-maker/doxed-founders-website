@@ -18,6 +18,7 @@ import json
 import uuid
 import requests
 import glob
+import itertools
 import re
 import copy
 import shutil
@@ -1005,6 +1006,13 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "qty": order.get("qty") or signal.get("qty"),
         "leverage": _state_leverage(),
         "entry_ts": fill_ts,
+        # Preserve the source entity's birth watermark after a pending order
+        # becomes a position. NEXT_FRESH_ONLY must compare the original signal
+        # creation time, not the later fill time, or a pre-arm order that fills
+        # after Start is incorrectly reported as a fresh source-only gap.
+        "created_ts": signal_ts or order_created or fill_ts,
+        "signal_created_ts": signal_ts or order.get("signal_created_ts"),
+        "order_created_ts": order_created,
         "sl": entry * (1 - sl_price_pct(_state_leverage())) if direction == "LONG" else entry * (1 + sl_price_pct(_state_leverage())),
         "tp": compute_tp(entry, direction, TP_TARGET_PCT, _state_leverage()),
         "regime_birth": signal.get("regime", "UNKNOWN"),
@@ -3882,6 +3890,7 @@ def circuit_breaker_cancel_pending(reason: str):
 
 def set_execution_paused(reason: str):
     global last_console_update
+    cancel_reason = None
     with state_lock:
         if reason == "":
             # [DEMO_PAUSE_2026-07-08] Keep SIMULATION_ONLY sticky while
@@ -3909,8 +3918,13 @@ def set_execution_paused(reason: str):
             state["execution_reason"] = reason
             state["_pause_priority"] = priority
             logger.warning(f"[EXECUTION] paused: {reason} [PIPELINE ENFORCEMENT]")
-            circuit_breaker_cancel_pending(reason)
-            return
+            cancel_reason = reason
+    # Persistence/cancellation may wait on filesystem or trade state. Never
+    # hold the global state lock across either operation: health, canonical
+    # relay snapshots, and the admin response must remain independently
+    # responsive while a control action is being finalized.
+    if cancel_reason:
+        circuit_breaker_cancel_pending(cancel_reason)
 
 
 def manual_admin_pause_active() -> bool:
@@ -6237,6 +6251,14 @@ DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
 DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
 DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
+# Hard production boundary: DeepSeek is an execution input, never a dashboard or
+# research-report engine. Deterministic collectors/analyzers may consume the
+# resulting trade receipts, but they must not create additional model traffic.
+TRADING_AI_ONLY = True
+TRADING_AI_ALLOWED_PURPOSES = frozenset({
+    "trading_direction",
+    "trading_confirmation",
+})
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
@@ -10452,7 +10474,11 @@ def double_confirm_ai(original_ai, ctx):
         confirm_prompt = f"""Original decision: Direction={original_ai.get('direction')} WinProb={original_ai.get('win_prob')} Decision={original_ai.get('decision')}
 Context: {json.dumps(ctx, indent=2)}
 Verify if still correct. Return same format."""
-        text, _latency = call_deepseek_api([{"role": "user", "content": confirm_prompt}], temperature=0.3)
+        text, _latency = call_deepseek_api(
+            [{"role": "user", "content": confirm_prompt}],
+            temperature=0.3,
+            purpose="trading_confirmation",
+        )
         dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
         direction = dir_match.group(1).upper() if dir_match else original_ai.get("direction")
         match = re.search(r"Win probability:\s*(\d+)", text)
@@ -12298,8 +12324,10 @@ def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
 
 _last_pipeline_event_log = {"key": None, "ts": 0.0}
 
-def call_deepseek_api(messages, temperature=0.4):
+def call_deepseek_api(messages, temperature=0.4, *, purpose: str):
     """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    if TRADING_AI_ONLY and purpose not in TRADING_AI_ALLOWED_PURPOSES:
+        raise RuntimeError(f"AI_PURPOSE_BLOCKED:{purpose or 'missing'}")
     api_key = _deepseek_api_key()
     if not api_key:
         raise RuntimeError("MISSING_API_KEY")
@@ -14001,6 +14029,8 @@ def _v2_benchmark_safety_ok(context: str, trade_id: str = None) -> bool:
 
 
 def _v2_research_collection_active() -> bool:
+    if TRADING_AI_ONLY:
+        return False
     """V2 AI + checker + shadow sim — runs regardless of tile ON/OFF (tile gates orders only)."""
     if not v2_research_ai_enabled_env():
         return False
@@ -14069,7 +14099,9 @@ def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, sourc
         prompt = build_v2_prompt(ctx)
         temperature = research_ai_temperature()
         text, latency_ms = call_deepseek_api(
-            [{"role": "user", "content": prompt}], temperature=temperature,
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            purpose="research_v2",
         )
         # Legacy parser for Direction/Win/Decision lines — do not modify parse_ai_response_fields.
         parsed = parse_ai_response_fields(text)
@@ -15318,10 +15350,18 @@ def evaluate_signal_with_ai(
                 latency_ms = 5
                 log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
             else:
-                text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+                text, latency_ms = call_deepseek_api(
+                    [{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    purpose="trading_direction",
+                )
                 log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         else:
-            text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
+            text, latency_ms = call_deepseek_api(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature,
+                purpose="trading_direction",
+            )
             log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         parsed = parse_ai_response_fields(text)
@@ -17763,13 +17803,28 @@ def _update_pending_order_price_extremes(price: float):
             except Exception:
                 pass
 
-def _pending_limit_touched(order: dict, price: float) -> bool:
+def _pending_limit_touched(
+    order: dict,
+    price: float,
+    *,
+    bid: float | None = None,
+    ask: float | None = None,
+) -> bool:
     limit = float(order["limit_price"])
     max_p = float(order.get("max_price_since_order", price) or price)
     min_p = float(order.get("min_price_since_order", price) or price)
-    with state_lock:
-        bid = float(state.get("bid") or 0)
-        ask = float(state.get("ask") or 0)
+    # process_pending_orders evaluates touches while holding trade_lock.  Never
+    # acquire state_lock from inside that section: dashboard/relay snapshots
+    # also need both locks and the inverted acquisition can starve the canonical
+    # money-path endpoint during the exact fill window.  Callers on the fill
+    # path pass one state snapshot captured before taking trade_lock.
+    if bid is None or ask is None:
+        with state_lock:
+            bid = float(state.get("bid") or 0)
+            ask = float(state.get("ask") or 0)
+    else:
+        bid = float(bid or 0)
+        ask = float(ask or 0)
     if order["side"] == "buy":
         if ask > 0 and ask <= limit:
             return True
@@ -17798,13 +17853,24 @@ def process_pending_orders():
     process_limit_chase(price)
     process_virtual_chase_chase6_market_conversions(price)
     fills = []
+    # Preserve the global state->trade lock order.  The previous implementation
+    # called _pending_limit_touched under trade_lock and acquired state_lock
+    # there, producing intermittent relay snapshot timeouts at a natural fill.
+    with state_lock:
+        fill_bid = float(state.get("bid") or 0)
+        fill_ask = float(state.get("ask") or 0)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
                 continue
             if not lane_orders_allowed(order.get("research_lane")):
                 continue
-            if not _pending_limit_touched(order, price):
+            if not _pending_limit_touched(
+                order,
+                price,
+                bid=fill_bid,
+                ask=fill_ask,
+            ):
                 continue
             if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
                 logger.debug(
@@ -17943,19 +18009,33 @@ def fill_order(order):
     pipeline_state_sync()
 
 def process_positions():
-    refresh_bbo_state()
-    refresh_order_book_state()
-    price = state.get("price")
-    if price is None or price <= 0:
+    # heartbeat_loop and position_manager both provide lifecycle redundancy.
+    # Let only one of them evaluate positions at a time so depth simulation,
+    # EXIT_TRIGGERED telemetry and slow close work cannot run twice. This lock
+    # is deliberately independent of state_lock/trade_lock and non-blocking:
+    # redundant workers skip a busy cycle instead of starving API snapshots.
+    if not position_evaluation_lock.acquire(blocking=False):
         return
-    now = time.time()
-    process_funding_accrual()
-    with trade_lock:
-        for pos in list(open_positions):
-            if not isinstance(pos, dict) or pos.get("status") != "OPEN":
-                continue
+    try:
+        refresh_bbo_state()
+        refresh_order_book_state()
+        price = state.get("price")
+        if price is None or price <= 0:
+            return
+        now = time.time()
+        process_funding_accrual()
+        with trade_lock:
+            positions = [
+                pos for pos in open_positions
+                if isinstance(pos, dict) and pos.get("status") == "OPEN"
+            ]
+        # Exit evaluation can close a position, persist research artifacts, and
+        # publish relay events. Never hold the global snapshot lock across it.
+        for pos in positions:
             mark = get_executable_mark_price(pos, fallback=price)
             _apply_position_exits(pos, mark, now)
+    finally:
+        position_evaluation_lock.release()
 
 def place_postonly_tp(pos, target_pct):
     entry = pos.get("entry", 0)
@@ -20192,29 +20272,36 @@ def cleanup_expired_orders():
     now = time.time()
     expired_n = 0
     with trade_lock:
-        for order in list(pending_orders):
-            created = order.get("created_ts")
-            if not created or created <= 0:
-                _agent_dbg("H2", "cleanup_expired_orders", "bad_created_ts", {"trade_id": order.get("trade_id"), "created_ts": created})
+        candidates = list(pending_orders)
+    for order in candidates:
+        created = order.get("created_ts")
+        if not created or created <= 0:
+            _agent_dbg("H2", "cleanup_expired_orders", "bad_created_ts", {"trade_id": order.get("trade_id"), "created_ts": created})
+            continue
+        age = now - created
+        entry_deadline = float(
+            order.get("entry_expires_ts")
+            or (float(created) + LIMIT_ORDER_MAX_AGE_SEC)
+        )
+        if now < entry_deadline:
+            continue
+        # Claim removal atomically. Persistence/funnel/logging then run without
+        # starving /api/relay-execution-state.
+        with trade_lock:
+            if order not in pending_orders or order.get("status") != "PENDING":
                 continue
-            age = now - created
-            entry_deadline = float(
-                order.get("entry_expires_ts")
-                or (float(created) + LIMIT_ORDER_MAX_AGE_SEC)
-            )
-            if now >= entry_deadline:
-                if order in pending_orders:
-                    lane_unregister_pending_order(order)
-                _record_expired_order(order, "TTL_EXPIRED")
-                sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
-                try:
-                    from execution_funnel import funnel_on_expire
-                    funnel_on_expire(order, "TTL_EXPIRED")
-                except Exception:
-                    pass
-                expired_n += 1
-                _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": len(pending_orders)})
-                logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
+            lane_unregister_pending_order(order)
+            pending_left = len(pending_orders)
+        _record_expired_order(order, "TTL_EXPIRED")
+        sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
+        try:
+            from execution_funnel import funnel_on_expire
+            funnel_on_expire(order, "TTL_EXPIRED")
+        except Exception:
+            pass
+        expired_n += 1
+        _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": pending_left})
+        logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
     if expired_n:
         pipeline_state_sync()
 
@@ -20250,8 +20337,19 @@ def position_manager():
         logger.exception(f"Position manager crash: {e}")
         set_execution_paused("THREAD_CRASH")
 
+_FEE_FILTERABLE_PROFIT_EXITS = frozenset({"TAKE_PROFIT", "TP_HIT"})
+
+
+def should_skip_unprofitable_profit_exit(exit_reason: str, net_pnl: float) -> bool:
+    """Only defer optional fixed-profit exits; never veto a protective exit."""
+    return (
+        float(net_pnl) <= 0
+        and str(exit_reason or "").upper() in _FEE_FILTERABLE_PROFIT_EXITS
+    )
+
+
 def close_position(pos: dict, exit_reason: str):
-    """Close sim position — never hold state_lock while acquiring trade_lock (WS tick deadlock)."""
+    """Close sim position without starving global API snapshot locks."""
     if not validate_state():
         return
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -20264,7 +20362,10 @@ def close_position(pos: dict, exit_reason: str):
     price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
         pos["exit_fill_sim"] = exit_sim
-    with state_lock:
+    # Closing performs persistence, research logging, relay publication and
+    # optional exchange work. Serialize close claims on a dedicated lock rather
+    # than holding state_lock/trade_lock across that slow work.
+    with position_close_lock:
         if pos not in open_positions:
             return
         if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -20304,7 +20405,7 @@ def close_position(pos: dict, exit_reason: str):
         total_fees = trading_fees
         net_pnl = gross_pnl - trading_fees - funding_total
 
-        if net_pnl <= 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
+        if should_skip_unprofitable_profit_exit(exit_reason, net_pnl):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
             # CRITICAL: clear the in-progress flag so this position is not frozen
             # OPEN forever (stop-loss/ladder exits must still be able to run on it).
@@ -21173,6 +21274,8 @@ def _emergency_api_guard():
 
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
+position_close_lock = threading.RLock()
+position_evaluation_lock = threading.Lock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(
@@ -21189,6 +21292,27 @@ _RELAY_EXECUTION_LOCK_TIMEOUT_SEC = max(
 )
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
+_RELAY_TRADES_MAP_MAX = max(
+    64,
+    int(os.getenv("RELAY_TRADES_MAP_MAX", "512")),
+)
+_RELAY_FIDELITY_TRADES_MAX = max(
+    64,
+    int(os.getenv("RELAY_FIDELITY_TRADES_MAX", "512")),
+)
+_DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS = frozenset({
+    "order_book",
+    "ai_history",
+})
+# Raw research ledgers are append-heavy and can grow into multi-megabyte JSONL
+# files. Re-reading them in the bot's dashboard refresher monopolizes the
+# CPython GIL, which also stalls the independent money-path endpoint. The
+# analyzer owns those aggregates; the bot API serves cached values unless an
+# operator explicitly opts back into the legacy inline scans.
+_API_STATE_INLINE_RESEARCH_AGGREGATES = (
+    os.getenv("API_STATE_INLINE_RESEARCH_AGGREGATES", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 _api_state_cache_lock = threading.Lock()
 _api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
 csv_lock = threading.RLock()
@@ -23036,9 +23160,58 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
     return out
 
 
-def get_pathway_lane_specs_cached() -> dict:
+def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
     """Pathway Lab tiles — static lane defs from code; merge session stats from JSON."""
     global _cached_pathway_lane_specs
+    if for_api and not _API_STATE_INLINE_RESEARCH_AGGREGATES:
+        # The analyzer owns the expensive aggregation. The API snapshot may
+        # read its small materialized JSON, but must never rescan raw ledgers.
+        # This also primes tile statistics after a source-only restart.
+        static_payload = build_static_pathway_lane_specs()
+        path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
+        analyzer_mtime = None
+        try:
+            analyzer_mtime = os.path.getmtime(path)
+        except OSError:
+            pass
+        cached = _cached_pathway_lane_specs or {}
+        if (
+            cached.get("lanes")
+            and cached.get("_cached_analyzer_mtime") == analyzer_mtime
+            and cached.get("_cached_static_version") == EXECUTION_FIX_VERSION
+        ):
+            return cached
+        if analyzer_mtime is not None:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    analyzer_payload = json.load(f)
+                analyzer_by_lane = {
+                    str(row.get("lane") or ""): row
+                    for row in (analyzer_payload.get("lanes") or [])
+                    if row.get("lane")
+                }
+                merged_lanes = []
+                for spec in static_payload.get("lanes") or []:
+                    row = copy.deepcopy(spec)
+                    analyzer_row = analyzer_by_lane.get(str(spec.get("lane") or "")) or {}
+                    for key in ("session_stats", "delta_vs_benchmark"):
+                        if analyzer_row.get(key) is not None:
+                            row[key] = copy.deepcopy(analyzer_row[key])
+                    merged_lanes.append(row)
+                payload = copy.deepcopy(static_payload)
+                payload["lanes"] = merged_lanes
+                payload["session_stats_source"] = "analyzer"
+                payload["session_stats_generated_at"] = analyzer_payload.get("generated_at")
+                payload["_cached_analyzer_mtime"] = analyzer_mtime
+                payload["_cached_static_version"] = EXECUTION_FIX_VERSION
+                _cached_pathway_lane_specs = payload
+                return payload
+            except Exception as e:
+                logger.debug(f"[PATHWAY_LANE_SPECS] analyzer cache load failed: {e}")
+        payload = static_payload
+        payload["session_stats_deferred"] = True
+        payload["session_stats_source"] = "analyzer"
+        return payload
     static_payload = build_static_pathway_lane_specs()
     path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
     file_payload = {}
@@ -26371,7 +26544,65 @@ def _relay_signal_ref_lite(sig: dict) -> dict:
     }
 
 
-def _relay_trades_map_lite() -> dict:
+_DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
+    "trade_id", "research_lane", "research_model", "final_direction", "dir",
+    "ai_win_prob", "regime", "strategy", "strategy_birth", "created_ts",
+    "created_ts_ts", "closed_ts", "closed_ts_ts", "timing", "expires_ts",
+    "status", "outcome", "fill_price", "fill_ts", "exit_price",
+    "net_pnl_usd", "exit_reason", "trigger", "signal_price", "limit_price",
+    "planned_limit_price", "original_limit_price", "limit_chase_count",
+    "entry_mode", "dashboard_virtual_chase_count",
+    "chase_3plus_virtual_chase_count", "chase_3plus_activation_reason",
+    "entry_path", "order_placed", "pull_req", "max_pull", "regime_birth",
+})
+
+
+def _dashboard_signal_ref_lite(sig: dict) -> dict:
+    """Copy only fields required by active-signal and relay rendering."""
+    if not isinstance(sig, dict):
+        return {}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in sig.items()
+        if key in _DASHBOARD_ACTIVE_SIGNAL_KEYS
+    }
+
+
+def _snapshot_bounded_trades_map_locked(
+    pending_orders_list,
+    positions_list,
+    max_entries: int = _RELAY_TRADES_MAP_MAX,
+) -> dict:
+    """Bound work under ``trade_lock`` while always retaining active trade IDs."""
+    selected = {}
+    active_ids = {
+        str(row.get("trade_id"))
+        for row in list(pending_orders_list or []) + list(positions_list or [])
+        if isinstance(row, dict) and row.get("trade_id")
+    }
+
+    def _add(tid, entry):
+        if not tid or not isinstance(entry, dict):
+            return
+        sig = entry.get("signal_ref")
+        if not isinstance(sig, dict):
+            return
+        selected[str(tid)] = {"signal_ref": _dashboard_signal_ref_lite(sig)}
+
+    for tid in active_ids:
+        _add(tid, trades_map.get(tid))
+
+    remaining = max(0, int(max_entries) - len(selected))
+    if remaining:
+        for tid, entry in itertools.islice(reversed(trades_map.items()), remaining):
+            _add(tid, entry)
+    return selected
+
+
+def _relay_trades_map_lite(
+    trades_map_src: dict = None,
+    trades_src: list = None,
+) -> dict:
     """Slim trades_map for NestJS relay closure sync — includes recently closed (~24h)."""
     lite = {}
     cutoff = time.time() - RELAY_TRADES_MAP_RETENTION_SEC
@@ -26385,31 +26616,37 @@ def _relay_trades_map_lite() -> dict:
             return
         lite[key] = {"signal_ref": _relay_signal_ref_lite(sig)}
 
-    with trade_lock:
-        for tid, entry in trades_map.items():
-            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
-            if isinstance(sig, dict):
-                _merge(str(sig.get("trade_id") or tid), sig)
-        for t in reversed(trades):
-            tid = t.get("trade_id")
-            if not tid or str(tid) in lite:
-                continue
-            exit_ts = t.get("ts") or t.get("exit_ts") or t.get("closed_ts")
-            parsed_ts = parse_ts(exit_ts) if isinstance(exit_ts, str) else (exit_ts or 0)
-            if parsed_ts and parsed_ts < cutoff:
-                continue
-            lite[str(tid)] = {
-                "signal_ref": {
-                    "trade_id": tid,
-                    "status": "CLOSED",
-                    "exit_reason": t.get("exit_reason"),
-                    "exit_price": t.get("exit"),
-                    "fill_price": t.get("entry"),
-                    "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net"),
-                    "closed_ts": exit_ts if isinstance(exit_ts, str) else None,
-                    "research_lane": t.get("research_lane"),
-                }
+    if trades_map_src is None or trades_src is None:
+        with trade_lock:
+            if trades_map_src is None:
+                trades_map_src = _snapshot_bounded_trades_map_locked([], [])
+            if trades_src is None:
+                trades_src = list(trades[-_RELAY_TRADES_MAP_MAX:])
+
+    for tid, entry in (trades_map_src or {}).items():
+        sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+        if isinstance(sig, dict):
+            _merge(str(sig.get("trade_id") or tid), sig)
+    for t in reversed(trades_src or []):
+        tid = t.get("trade_id")
+        if not tid or str(tid) in lite:
+            continue
+        exit_ts = t.get("ts") or t.get("exit_ts") or t.get("closed_ts")
+        parsed_ts = parse_ts(exit_ts) if isinstance(exit_ts, str) else (exit_ts or 0)
+        if parsed_ts and parsed_ts < cutoff:
+            continue
+        lite[str(tid)] = {
+            "signal_ref": {
+                "trade_id": tid,
+                "status": "CLOSED",
+                "exit_reason": t.get("exit_reason"),
+                "exit_price": t.get("exit"),
+                "fill_price": t.get("entry"),
+                "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net"),
+                "closed_ts": exit_ts if isinstance(exit_ts, str) else None,
+                "research_lane": t.get("research_lane"),
             }
+        }
     return lite
 
 
@@ -26560,6 +26797,67 @@ _RELAY_STATE_MAX_STALE_SEC = max(
     _RELAY_STATE_CACHE_TTL_SEC,
     float(os.getenv("RELAY_STATE_MAX_STALE_SEC", "10.0")),
 )
+_RELAY_EXECUTION_CACHE_LOCK = threading.Lock()
+_RELAY_EXECUTION_REFRESH_LOCK = threading.Lock()
+_RELAY_EXECUTION_CACHE_PAYLOAD = None
+_RELAY_EXECUTION_CACHE_BODY = None
+_RELAY_EXECUTION_CACHE_AT = 0.0
+_RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
+    0.05,
+    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "0.20")),
+)
+_RELAY_EXECUTION_MAX_STALE_SEC = max(
+    _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
+    float(os.getenv("RELAY_EXECUTION_MAX_STALE_SEC", "2.0")),
+)
+
+
+def _publish_relay_execution_snapshot() -> dict:
+    """Build canonical authority once and publish one immutable JSON response.
+
+    Cloudflare, the production relay, Agent Hub and local health probes can all
+    poll simultaneously.  Rebuilding in every request multiplied lock pressure
+    and left request workers pinned after a tunnel client disconnected.  A
+    single builder keeps authority current while HTTP workers only copy two
+    object references.
+    """
+    global _RELAY_EXECUTION_CACHE_PAYLOAD
+    global _RELAY_EXECUTION_CACHE_BODY
+    global _RELAY_EXECUTION_CACHE_AT
+    if not _RELAY_EXECUTION_REFRESH_LOCK.acquire(blocking=False):
+        return None
+    try:
+        started = time.perf_counter()
+        payload = _build_relay_execution_state_snapshot()
+        payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        payload["snapshot_age_sec"] = 0
+        integrity = payload.get("state_integrity")
+        if isinstance(integrity, dict):
+            integrity["snapshot_age_sec"] = 0
+        body = json.dumps(
+            payload,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        with _RELAY_EXECUTION_CACHE_LOCK:
+            _RELAY_EXECUTION_CACHE_PAYLOAD = payload
+            _RELAY_EXECUTION_CACHE_BODY = body
+            _RELAY_EXECUTION_CACHE_AT = time.monotonic()
+        return payload
+    finally:
+        _RELAY_EXECUTION_REFRESH_LOCK.release()
+
+
+def _cached_relay_execution_snapshot():
+    """Return immutable cached authority references and their monotonic age."""
+    with _RELAY_EXECUTION_CACHE_LOCK:
+        payload = _RELAY_EXECUTION_CACHE_PAYLOAD
+        body = _RELAY_EXECUTION_CACHE_BODY
+        cached_at = _RELAY_EXECUTION_CACHE_AT
+    if not isinstance(payload, dict) or not isinstance(body, bytes):
+        return None, None, None
+    return payload, body, max(0.0, time.monotonic() - cached_at)
 
 
 def _cached_relay_state_response(cache_mode: str):
@@ -26855,6 +27153,23 @@ def _relay_trade_row_lite(row: dict) -> dict:
     }
 
 
+def _relay_fidelity_trade_row(row: dict) -> dict:
+    """Compact, non-strategy history used only for copy-fidelity reconciliation."""
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "trade_id": row.get("trade_id"),
+        "dir": row.get("dir") or row.get("final_direction"),
+        "entry": row.get("entry"),
+        "exit": row.get("exit"),
+        "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
+        "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
+        "ts": row.get("ts") or row.get("close_ts") or row.get("closed_ts"),
+        "closed_ts": row.get("closed_ts") or row.get("ts") or row.get("close_ts"),
+        "exit_reason": row.get("exit_reason"),
+    }
+
+
 def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
     """Exact resting-limit state needed for copy, chase, and abandon checks."""
     if not isinstance(row, dict):
@@ -26898,6 +27213,9 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "tp": row.get("tp"),
         "leverage": row.get("leverage"),
         "funding_fees": row.get("funding_fees"),
+        "created_ts": row.get("created_ts") or row.get("signal_created_ts"),
+        "signal_created_ts": row.get("signal_created_ts") or row.get("created_ts"),
+        "order_created_ts": row.get("order_created_ts"),
         "entry_ts": row.get("entry_ts") or row.get("fill_ts"),
         "fill_ts": row.get("fill_ts") or row.get("entry_ts"),
         "current_price": tick_px,
@@ -26932,6 +27250,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
             "execution_paused": bool(state.get("execution_paused", False)),
             "execution_reason": state.get("execution_reason"),
+            "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
             "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
             "strategy_mode": state.get("strategy_mode"),
             "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
@@ -26953,19 +27272,30 @@ def _build_relay_execution_state_snapshot() -> dict:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
         recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
+        relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+        fidelity_trades = [
+            _relay_fidelity_trade_row(row)
+            for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
+            if isinstance(row, dict)
+        ]
         recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
-        active_list, _ = _collect_dashboard_active_signals(
+        bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
             positions_copy,
-            trades_map,
-            default_strategy=snapshot.get("strategy_mode", "-"),
-            default_regime=snapshot.get("regime", "-"),
         )
-        # trade_lock is an RLock, so the slim mapper can safely reuse the same
-        # coherent acquisition without opening a second unbounded wait.
-        trades_map_lite = _relay_trades_map_lite()
     finally:
         trade_lock.release()
+    active_list, _ = _collect_dashboard_active_signals(
+        pending_copy,
+        positions_copy,
+        bounded_trades_map,
+        default_strategy=snapshot.get("strategy_mode", "-"),
+        default_regime=snapshot.get("regime", "-"),
+    )
+    trades_map_lite = _relay_trades_map_lite(
+        bounded_trades_map,
+        relay_trades_copy,
+    )
     snapshot["orders"] = [
         _relay_order_row_lite(row, now_ts, tick_px)
         for row in pending_copy
@@ -26981,6 +27311,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_trades
         if isinstance(row, dict)
     ]
+    snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = [
         _expired_order_api_row(row)
         for row in recent_expired
@@ -27011,21 +27342,32 @@ def _build_relay_execution_state_snapshot() -> dict:
 
 @app.route('/api/relay-execution-state')
 def api_relay_execution_state():
-    """Canonical execution-only state; bounded and independent of dashboard history."""
-    started = time.perf_counter()
-    try:
-        payload = _build_relay_execution_state_snapshot()
-        payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        response.headers["X-Relay-State-Cache"] = "EXECUTION_DIRECT"
-        return response
-    except Exception as exc:
-        logger.error(f"/api/relay-execution-state error: {exc}")
-        return jsonify({
-            "api_state_error": str(exc)[:500],
+    """Canonical execution authority served without money-state lock access."""
+    payload, body, age = _cached_relay_execution_snapshot()
+    if body is None:
+        # Cold bootstrap gets one bounded synchronous attempt. Concurrent cold
+        # callers fail closed rather than becoming duplicate snapshot builders.
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as exc:
+            logger.error(f"/api/relay-execution-state cold build error: {exc}")
+        payload, body, age = _cached_relay_execution_snapshot()
+    if body is None or age is None or age > _RELAY_EXECUTION_MAX_STALE_SEC:
+        stale_age = round(age, 3) if isinstance(age, (int, float)) else None
+        response = jsonify({
+            "api_state_error": "canonical execution snapshot unavailable or stale",
+            "snapshot_age_sec": stale_age,
             "bot_version": EXECUTION_FIX_VERSION,
-        }), 503
+        })
+        response.status_code = 503
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["X-Relay-State-Cache"] = "EXECUTION_STALE"
+        return response
+    response = app.response_class(body, status=200, mimetype="application/json")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["X-Relay-State-Cache"] = "EXECUTION_BACKGROUND"
+    response.headers["X-Relay-State-Age"] = f"{age:.3f}"
+    return response
 
 
 @app.route('/api/relay-state')
@@ -27082,17 +27424,20 @@ def api_relay_state(force_rebuild: bool = False):
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
+            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+            fidelity_trades = [
+                _relay_fidelity_trade_row(row)
+                for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
+                if isinstance(row, dict)
+            ]
             trades_for_relay = [
                 _relay_trade_row_lite(copy.deepcopy(row))
                 for row in _snapshot_trades_for_api(session_start)
                 if isinstance(row, dict)
             ]
-            active_list, _exposure = _collect_dashboard_active_signals(
+            bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
-                trades_map,
-                default_strategy=snapshot.get("strategy", "-"),
-                default_regime=state.get("regime", "-"),
             )
             orders = []
             tick_px = snapshot.get("price")
@@ -27103,9 +27448,17 @@ def api_relay_state(force_rebuild: bool = False):
                     oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
                 orders.append(oc)
             expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
+        active_list, _exposure = _collect_dashboard_active_signals(
+            pending_orders_copy,
+            positions_copy,
+            bounded_trades_map,
+            default_strategy=snapshot.get("strategy", "-"),
+            default_regime=snapshot.get("regime", "-"),
+        )
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
         snapshot["trades"] = trades_for_relay
+        snapshot["fidelity_trades"] = fidelity_trades
         snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
@@ -27117,7 +27470,10 @@ def api_relay_state(force_rebuild: bool = False):
         snapshot["ai_execution_bands"] = get_ai_execution_bands()
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         _enrich_orders_for_relay(snapshot)
-        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["trades_map"] = _relay_trades_map_lite(
+            bounded_trades_map,
+            relay_trades_copy,
+        )
         snapshot["paper_book"] = build_paper_order_book(_DASHBOARD_TRADES_MAX)
         snapshot["server_ts"] = utc_iso()
         bridge = get_genome_bridge()
@@ -27281,9 +27637,11 @@ def _build_api_state_snapshot():
             # The raw order book is large and fast-moving. Deep-copying it only
             # to discard it afterwards held state_lock for up to 38 seconds,
             # starving the dashboard, webhook reads, and /api/ping.
-            snapshot = copy.deepcopy(
-                {key: value for key, value in state.items() if key != "order_book"}
-            )
+            snapshot = copy.deepcopy({
+                key: value
+                for key, value in state.items()
+                if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
+            })
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
@@ -27305,19 +27663,11 @@ def _build_api_state_snapshot():
                     accrue_position_funding(pos, now_ts, refresh=False)
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
-            active_list, exposure_count = _collect_dashboard_active_signals(
+            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+            bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
-                trades_map,
-                default_strategy=snapshot.get("strategy", "-"),
-                default_regime=snapshot.get("regime", "-"),
             )
-            pending_by_tid = {o.get("trade_id"): o for o in pending_orders_copy if o.get("trade_id")}
-            for sig in active_list:
-                tid = sig.get("trade_id")
-                if tid and not sig.get("fill_price"):
-                    po = pending_by_tid.get(tid) or {}
-                    sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
             lane_position_counts = {
                 ln: {
                     "open": len(lane_open_positions.get(ln, [])),
@@ -27327,6 +27677,19 @@ def _build_api_state_snapshot():
             }
         finally:
             trade_lock.release()
+        active_list, exposure_count = _collect_dashboard_active_signals(
+            pending_orders_copy,
+            positions_copy,
+            bounded_trades_map,
+            default_strategy=snapshot.get("strategy", "-"),
+            default_regime=snapshot.get("regime", "-"),
+        )
+        pending_by_tid = {o.get("trade_id"): o for o in pending_orders_copy if o.get("trade_id")}
+        for sig in active_list:
+            tid = sig.get("trade_id")
+            if tid and not sig.get("fill_price"):
+                po = pending_by_tid.get(tid) or {}
+                sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
@@ -27348,11 +27711,27 @@ def _build_api_state_snapshot():
         # tile can render the full Section 2 spec without re-deriving from
         # raw opportunity events each poll.
         snapshot["tile2_counters"] = tile2_dashboard_metrics()
-        snapshot["paused_shadow_stats"] = paused_shadow_dashboard_stats()
+        if _API_STATE_INLINE_RESEARCH_AGGREGATES:
+            snapshot["paused_shadow_stats"] = paused_shadow_dashboard_stats()
+        else:
+            with _paused_shadow_stats_lock:
+                snapshot["paused_shadow_stats"] = copy.deepcopy(
+                    _paused_shadow_stats_cache.get("payload") or {}
+                )
+            snapshot["paused_shadow_stats"].setdefault("deferred", True)
+            snapshot["paused_shadow_stats"].setdefault("source", "analyzer")
         # Pt 7b: TYPE_B_HUNTER_V1 cross-source trade-count reconciliation.
         # Surfaces paper/shadow/live count mismatches so the dashboard never
         # silently reports inconsistent totals across the three sources.
-        snapshot["type_b_trade_reconciliation"] = _reconcile_type_b_trade_count()
+        snapshot["type_b_trade_reconciliation"] = (
+            _reconcile_type_b_trade_count()
+            if _API_STATE_INLINE_RESEARCH_AGGREGATES
+            else {
+                "lane": RESEARCH_LANE_TYPE_B_HUNTER_V1,
+                "deferred": True,
+                "source": "analyzer",
+            }
+        )
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
@@ -27368,7 +27747,11 @@ def _build_api_state_snapshot():
         snapshot["lane_pnl_ledger"] = get_lane_pnl_ledger()
         snapshot["lane_lab_pnl_ledger"] = get_lane_lab_pnl_ledger()
         snapshot["lab_open_shadows"] = count_open_lab_shadows()
-        snapshot["retired_lane_archive"] = get_retired_lane_archive_rows()
+        snapshot["retired_lane_archive"] = (
+            get_retired_lane_archive_rows()
+            if _API_STATE_INLINE_RESEARCH_AGGREGATES
+            else []
+        )
         snapshot["lane_position_counts"] = lane_position_counts
         snapshot["research_execution_mode"] = (
             "INDEPENDENT_LANES" if is_research_data_collection() else "LIVE"
@@ -27486,7 +27869,10 @@ def _build_api_state_snapshot():
             "signals": active_list,
         }
         _enrich_orders_for_relay(snapshot)
-        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["trades_map"] = _relay_trades_map_lite(
+            bounded_trades_map,
+            relay_trades_copy,
+        )
         snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
@@ -27524,7 +27910,7 @@ def _build_api_state_snapshot():
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
-        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached()
+        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached(for_api=True)
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()
@@ -27579,18 +27965,88 @@ def _start_api_state_cache_refresher():
         if _api_state_refresher_started:
             return
         _api_state_refresher_started = True
+        # Prime canonical authority before the HTTP listener sees relay polls.
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as e:
+            logger.error(f"/api/relay-execution-state initial cache build error: {e}")
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
+        threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()
         logger.info(
-            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s) and relay "
-            f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
+            f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s), relay "
+            f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s), and canonical execution "
+            f"({_RELAY_EXECUTION_REFRESH_INTERVAL_SEC:.2f}s) cache refreshers started"
         )
 
 
 def _api_state_cache_refresher_loop():
     while not shutdown_event.is_set():
         try:
-            snap = _build_api_state_snapshot()
+            if manual_admin_pause_active():
+                snap = _build_api_state_snapshot()
+            else:
+                # Full presentation snapshots perform analytics, scorecard,
+                # history, and formatting work. On the home runtime those
+                # rebuilds reached 25-68s under active paper load and starved
+                # the canonical relay endpoint. While trading is enabled,
+                # retain the paused-built presentation payload and overlay
+                # only bounded money-path state. Heavy presentation work
+                # resumes automatically when the operator pauses.
+                with _api_state_cache_lock:
+                    base = _api_state_cache.get("payload")
+                base_source = str((base or {}).get("data_source") or "").strip().lower()
+                if (
+                    not isinstance(base, dict)
+                    or not base.get("bot_start_time")
+                    or base_source in ("", "booting")
+                ):
+                    # A clean Windows restart can launch with paper execution
+                    # already enabled. In that case there is no paused-built
+                    # presentation payload to overlay, and the local dashboard
+                    # would otherwise remain a truthful-but-empty relay view
+                    # forever. Build the heavy presentation once here, on the
+                    # dedicated background thread, then use bounded overlays
+                    # for every subsequent refresh.
+                    base = _build_api_state_snapshot()
+                relay, _, relay_age = _cached_relay_execution_snapshot()
+                if relay is None or relay_age is None or relay_age > _RELAY_EXECUTION_MAX_STALE_SEC:
+                    raise RuntimeError("canonical execution cache unavailable for dashboard overlay")
+                snap = dict(base or {})
+                for key in (
+                    "price",
+                    "execution_paused",
+                    "execution_reason",
+                    "manual_admin_pause",
+                    "live_armed",
+                    "max_active_signals",
+                    "strategy_mode",
+                    "last_approve_outcome",
+                    "last_ai",
+                    "pullback_threshold",
+                    "last_edge",
+                    "leverage",
+                    "regime",
+                    "debug_state",
+                    "orders",
+                    "positions",
+                    "trades",
+                    "expired_orders",
+                    "signal_info",
+                    "trades_map",
+                    "state_integrity",
+                    "server_ts",
+                    "bot_version",
+                    "source_git_rev",
+                    "dashboard_pid",
+                    "dashboard_port",
+                    "dashboard_owner",
+                    "bot_instance_id",
+                ):
+                    if key in relay:
+                        snap[key] = relay[key]
+                snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
+                snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             with _api_state_cache_lock:
                 _api_state_cache["payload"] = snap
                 _api_state_cache["built_at"] = time.time()
@@ -27611,6 +28067,18 @@ def _relay_state_cache_refresher_loop():
         except Exception as e:
             logger.error(f"/api/relay-state background refresher error: {e}")
         shutdown_event.wait(_RELAY_STATE_REFRESH_INTERVAL_SEC)
+
+
+def _relay_execution_cache_refresher_loop():
+    """Continuously publish canonical authority from exactly one builder."""
+    while not shutdown_event.is_set():
+        try:
+            _publish_relay_execution_snapshot()
+        except Exception as e:
+            # Keep the last immutable response. The HTTP route turns it into a
+            # truthful 503 once bounded staleness is exceeded.
+            logger.error(f"/api/relay-execution-state background refresher error: {e}")
+        shutdown_event.wait(_RELAY_EXECUTION_REFRESH_INTERVAL_SEC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -27801,7 +28269,7 @@ def api_pause():
     with state_lock:
         state["manual_admin_pause"] = True
         state["live_armed"] = False
-        save_persistent_config()
+    save_persistent_config()
     set_execution_paused("ADMIN_MANUAL")
     logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
@@ -27810,7 +28278,7 @@ def api_pause():
 def api_resume():
     with state_lock:
         state["manual_admin_pause"] = False
-        save_persistent_config()
+    save_persistent_config()
     set_execution_paused("")
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})
@@ -28786,11 +29254,47 @@ def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label:
     return False
 
 def load_positions():
-    if state.get("strategy_mode") != "RESEARCH" and os.path.exists(POSITIONS_FILE):
-        with positions_file_lock:
-            with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
-                with state_lock:
-                    open_positions.extend(json.load(f))
+    if not os.path.exists(POSITIONS_FILE):
+        return
+    with positions_file_lock:
+        with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
+            persisted = json.load(f)
+    if isinstance(persisted, dict):
+        persisted = persisted.get("positions") or []
+    if not isinstance(persisted, list):
+        logger.warning("[POSITIONS] ignored malformed startup snapshot")
+        return
+    # A process restart must not silently erase an in-flight paper lifecycle.
+    # Fresh-data resets explicitly clear this file, so restoring valid OPEN
+    # rows in RESEARCH mode is both crash-safe and consistent with an operator
+    # requested wipe.  Preserve identity and never duplicate a row if startup
+    # recovery is invoked more than once.
+    restored = 0
+    with trade_lock:
+        known = {
+            str(pos.get("trade_id"))
+            for pos in open_positions
+            if isinstance(pos, dict) and pos.get("trade_id")
+        }
+        for pos in persisted:
+            if (
+                not isinstance(pos, dict)
+                or pos.get("status") != "OPEN"
+                or not pos.get("trade_id")
+                or float(pos.get("entry") or 0) <= 0
+            ):
+                continue
+            trade_id = str(pos.get("trade_id"))
+            if trade_id in known:
+                continue
+            lane_register_open_position(pos)
+            known.add(trade_id)
+            restored += 1
+    if restored:
+        logger.warning(
+            f"[POSITIONS] restored {restored} open lifecycle(s) after restart "
+            f"mode={state.get('strategy_mode')} [PIPELINE ENFORCEMENT]"
+        )
 
 def save_positions():
     with state_lock:
@@ -30792,57 +31296,113 @@ def _create_dashboard_server():
 
     class _BoundedThreadedWSGIServer(ThreadedWSGIServer):
         request_queue_size = 64
-        _thread_cap = threading.BoundedSemaphore(8)
+        _dispatch_thread_cap = threading.BoundedSemaphore(32)
+        _general_thread_cap = threading.BoundedSemaphore(8)
+        _canonical_thread_cap = threading.BoundedSemaphore(8)
+        _relay_state_thread_cap = threading.BoundedSemaphore(4)
+        _control_thread_cap = threading.BoundedSemaphore(2)
+        _canonical_paths = (
+            b"/api/relay-execution-state",
+        )
+        _relay_state_paths = (
+            b"/api/relay-state",
+        )
+        _control_paths = (
+            b"/api/ping",
+            b"/api/pause",
+            b"/api/resume",
+            b"/health",
+            b"/api/status",
+            b"/status",
+        )
         _client_io_timeout_sec = 15.0
+        _priority_client_io_timeout_sec = 2.0
         _overload_io_timeout_sec = 0.1
 
+        def _request_cap(self, request):
+            """Reserve independent workers for authority and controls.
+
+            Cloudflare, Agent Hub, the relay pusher, and local diagnostics can
+            synchronize after a restart. Presentation polls may consume all
+            eight general workers and slow tunnel clients may consume relay
+            authority workers, but neither may crowd out the operator's safety
+            controls.
+            """
+            try:
+                import socket
+
+                request.settimeout(0.05)
+                head = request.recv(1024, socket.MSG_PEEK)
+                first_line = head.split(b"\r\n", 1)[0]
+                if any(b" " + path + b" " in first_line for path in self._control_paths):
+                    return self._control_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._canonical_paths):
+                    return self._canonical_thread_cap
+                if any(b" " + path + b" " in first_line for path in self._relay_state_paths):
+                    return self._relay_state_thread_cap
+            except (OSError, TimeoutError):
+                pass
+            return self._general_thread_cap
+
+        def _reject_overload(self, request):
+            body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
+            response = (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n"
+                + b"Retry-After: 1\r\n\r\n"
+                + body
+            )
+            try:
+                request.settimeout(self._overload_io_timeout_sec)
+                request.sendall(response)
+            except (OSError, TimeoutError):
+                pass
+            finally:
+                self.shutdown_request(request)
+
         def process_request(self, request, client_address):
-            # Never block the accept loop waiting for a worker. If slow clients
-            # hold all eight slots, blocking here fills the socket backlog and
-            # eventually makes even /api/ping connection-refused. Reject
-            # overload quickly so health probes remain truthful.
-            if not self._thread_cap.acquire(blocking=False):
-                body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
-                response = (
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Content-Type: application/json; charset=utf-8\r\n"
-                    + f"Content-Length: {len(body)}\r\n".encode("ascii")
-                    + b"Connection: close\r\n"
-                    + b"Retry-After: 1\r\n\r\n"
-                    + body
-                )
-                try:
-                    # The overload response runs on the accept loop itself.
-                    # A disconnected or back-pressured tunnel client must never
-                    # be allowed to block that loop and starve future probes.
-                    request.settimeout(self._overload_io_timeout_sec)
-                    request.sendall(response)
-                except (OSError, TimeoutError):
-                    pass
-                finally:
-                    self.shutdown_request(request)
+            # Never inspect client bytes or wait for a destination worker in
+            # the single accept loop. Slow tunnel clients previously consumed
+            # 50ms here apiece, so a burst delayed even local Pause/relay calls.
+            if not self._dispatch_thread_cap.acquire(blocking=False):
+                self._reject_overload(request)
                 return
             try:
-                # Bound socket reads/writes for normal workers as well. App
-                # computation can take longer, but a dead tunnel client cannot
-                # retain one of the eight worker slots indefinitely.
-                request.settimeout(self._client_io_timeout_sec)
                 t = threading.Thread(
-                    target=self._release_and_process,
+                    target=self._classify_and_process,
                     args=(request, client_address),
                 )
                 if self.daemon_threads:
                     t.daemon = True
                 t.start()
             except Exception:
-                self._thread_cap.release()
+                self._dispatch_thread_cap.release()
                 raise
 
-        def _release_and_process(self, request, client_address):
+        def _classify_and_process(self, request, client_address):
+            request_cap = None
+            request_cap_acquired = False
             try:
+                request_cap = self._request_cap(request)
+                if not request_cap.acquire(blocking=False):
+                    self._reject_overload(request)
+                    return
+                request_cap_acquired = True
+                # Bound socket reads/writes. App computation can take longer,
+                # but a dead tunnel client cannot retain a worker indefinitely.
+                is_priority = request_cap is not self._general_thread_cap
+                request.settimeout(
+                    self._priority_client_io_timeout_sec
+                    if is_priority
+                    else self._client_io_timeout_sec
+                )
                 self.process_request_thread(request, client_address)
             finally:
-                self._thread_cap.release()
+                if request_cap_acquired:
+                    request_cap.release()
+                self._dispatch_thread_cap.release()
 
     try:
         httpd = _BoundedThreadedWSGIServer(
@@ -30857,7 +31417,9 @@ def _create_dashboard_server():
 def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
-        f"(bounded werkzeug server, max_threads=8, backlog=64) [PIPELINE ENFORCEMENT]"
+        f"(bounded werkzeug server, general_threads=8, canonical_threads=8, "
+        f"relay_state_threads=4, control_threads=2, backlog=64) "
+        "[PIPELINE ENFORCEMENT]"
     )
     try:
         httpd.serve_forever()
