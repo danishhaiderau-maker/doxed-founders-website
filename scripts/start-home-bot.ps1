@@ -42,7 +42,9 @@ try {
     $rawStarterPid = (Get-Content $starterPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
     if ("$rawStarterPid" -match '^\d+$') { $recordedStarterPid = [int]$rawStarterPid }
   }
-  $starterAgeSec = 0
+  # A missing recorded owner is stale immediately. Only a live process gets
+  # an age-based grace window.
+  $starterAgeSec = [double]::PositiveInfinity
   if ($recordedStarterPid -gt 0) {
     $starterProcess = Get-Process -Id $recordedStarterPid -ErrorAction SilentlyContinue
     if ($starterProcess -and $starterProcess.StartTime) {

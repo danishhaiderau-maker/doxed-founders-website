@@ -80,6 +80,7 @@ def main() -> None:
         "stale elevated starter lock cannot leave port 7002 offline forever",
         "Recovering from stale bot-start lock owner PID" in START
         and "$starterAgeSec -lt 600 -or $listenerPresent" in START
+        and "$starterAgeSec = [double]::PositiveInfinity" in START
         and "[System.Net.Sockets.TcpClient]::new()" in START
         and "process singleton remains the final duplicate" in START,
     )
