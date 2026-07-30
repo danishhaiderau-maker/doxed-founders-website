@@ -6,6 +6,8 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
+$analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
@@ -50,9 +52,17 @@ try {
           ForEach-Object { [string]$_.path }
       )
       $excluded = @($manifest.files | Where-Object { [int64]$_.size -gt 50MB })
-      $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") `
-        -SourceUrl $SourceUrl `
-        -IncludePath $selected
+      $syncArgs = @{
+        SourceUrl = $SourceUrl
+        IncludePath = $selected
+      }
+      # Publish the latest deterministic analyzer HTML back to Fly so admins
+      # have an anywhere-access /analysis route. The local :9001 dashboard
+      # remains the full interactive report explorer while the PC is online.
+      if (Test-Path -LiteralPath $analyzerReport) {
+        $syncArgs.PublishAnalyzerReport = $analyzerReport
+      }
+      $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $heartbeat = [ordered]@{
         ok = $true
         syncedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -60,6 +70,7 @@ try {
         files = $result.Files
         bytes = $result.Bytes
         sourceRevision = $result.SourceRevision
+        analyzerPublished = $result.AnalyzerPublished
         excludedArchiveFiles = $excluded.Count
         excludedArchiveBytes = [int64](($excluded | Measure-Object size -Sum).Sum)
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
