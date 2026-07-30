@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): disclose relay sim real-order behavior
+fix: make Fly the sole BTC AI owner
 
 ## Last Activity
 
