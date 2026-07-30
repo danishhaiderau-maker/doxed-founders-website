@@ -10,6 +10,7 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 FLY_CONFIG = (ROOT / "fly.toml").read_text(encoding="utf-8")
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
+PUSHER = (ROOT / "fly_relay_state_pusher.py").read_text(encoding="utf-8")
 
 
 def test_container_revision_does_not_require_git_checkout_depth():
@@ -50,10 +51,20 @@ def test_fly_has_strict_readiness_and_restart_contract():
     assert 'policy = "always"' in FLY_CONFIG
 
 
+def test_fly_publishes_one_authenticated_canonical_snapshot():
+    assert "python /app/fly_relay_state_pusher.py" in ENTRYPOINT
+    assert "BOT_CONTROL_SECRET" in ENTRYPOINT
+    assert "/api/relay-state" in PUSHER
+    assert "/api/internal/showcase-snapshot" in PUSHER
+    assert '"X-Bot-Control-Secret": CONTROL_SECRET' in PUSHER
+    assert '"snapshot_seq": seq' in PUSHER
+
+
 if __name__ == "__main__":
     test_container_revision_does_not_require_git_checkout_depth()
     test_restart_loop_declares_the_shell_features_it_uses()
     test_fly_standby_has_no_implicit_production_relay()
     test_fly_image_does_not_bake_laptop_runtime_json()
     test_fly_has_strict_readiness_and_restart_contract()
+    test_fly_publishes_one_authenticated_canonical_snapshot()
     print("Fly startup contract checks passed")

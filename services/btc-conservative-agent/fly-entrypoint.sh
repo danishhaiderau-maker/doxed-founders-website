@@ -40,6 +40,17 @@ else
   echo "[fly-entrypoint] ANALYZER_ENABLED!=true -> trading-only mode (no analyzer)."
 fi
 
+# Publish the bounded canonical relay state directly from Fly. This replaces
+# the Windows-only PowerShell pusher and keeps Agent Hub/relay execution on the
+# same bot identity even when the research PC is off.
+if [ -n "${BOT_CONTROL_SECRET:-}" ]; then
+  SNAPSHOT_LOG="$DATA_DIR/relay-state-pusher.log"
+  echo "[fly-entrypoint] starting authenticated relay-state publisher..."
+  python /app/fly_relay_state_pusher.py >> "$SNAPSHOT_LOG" 2>&1 &
+else
+  echo "[fly-entrypoint] BOT_CONTROL_SECRET missing -> relay-state publisher disabled."
+fi
+
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
 export PYTHONUNBUFFERED=1
 BOT_LOG="$DATA_DIR/bot.log"
