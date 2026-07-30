@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(fly): make standby startup safe and portable
 
 ## Last Activity
 
