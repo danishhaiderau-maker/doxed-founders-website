@@ -26,6 +26,10 @@ $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
 New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
 $statePath = Join-Path $targetRoot ".fly-sync-state.json"
 $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
+Add-Type -AssemblyName System.Net.Http
+$downloadClient = [System.Net.Http.HttpClient]::new()
+$downloadClient.Timeout = [TimeSpan]::FromSeconds(45)
+$downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
 
 $syncState = @{}
 if (Test-Path -LiteralPath $statePath) {
@@ -113,15 +117,20 @@ foreach ($row in $selectedFiles) {
       $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
       try {
         $encoded = [uri]::EscapeDataString($rel)
-        $response = Invoke-WebRequest `
-          -UseBasicParsing `
-          -Uri "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" `
-          -Headers $headers `
-          -OutFile $tmp `
-          -PassThru `
-          -TimeoutSec 180
+        $response = $downloadClient.GetAsync(
+          "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
+        ).GetAwaiter().GetResult()
+        $response.EnsureSuccessStatusCode() | Out-Null
+        try {
+          $payload = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+          [System.IO.File]::WriteAllBytes($tmp, $payload)
+          $expectedHash = [string](
+            $response.Headers.GetValues("X-Chunk-Sha256") | Select-Object -First 1
+          )
+        } finally {
+          $response.Dispose()
+        }
         $actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
-        $expectedHash = [string]$response.Headers["X-Chunk-Sha256"]
         if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
           throw "Chunk checksum mismatch for $rel at offset $offset."
         }
@@ -169,6 +178,7 @@ foreach ($row in $selectedFiles) {
 }
 
 Save-SyncState
+$downloadClient.Dispose()
 
 $ackBody = @{ files = @($ackRows) } | ConvertTo-Json -Depth 5
 $ack = Invoke-RestMethod `
@@ -184,7 +194,6 @@ if ($PublishAnalyzerReport) {
   if (-not (Test-Path -LiteralPath $reportPath)) {
     throw "Analyzer report does not exist: $reportPath"
   }
-  Add-Type -AssemblyName System.Net.Http
   $client = [System.Net.Http.HttpClient]::new()
   try {
     $client.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
