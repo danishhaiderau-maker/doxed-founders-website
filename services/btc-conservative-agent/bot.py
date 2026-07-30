@@ -16077,6 +16077,39 @@ def _settings_period_breakdown() -> dict:
     return output
 
 
+def _reconcile_settings_periods_to_headline(stats: dict, periods: list) -> list:
+    """Keep the settings table on the same approval cohort as the analyzer headline."""
+    rows = copy.deepcopy(periods or [])
+    if not rows:
+        return rows
+    try:
+        target = max(0, int((stats or {}).get("approves") or 0))
+    except (TypeError, ValueError):
+        return rows
+    legacy = [row for row in rows if not row.get("settings_recorded")]
+    if not legacy:
+        return rows
+    recorded = sum(
+        max(0, int(row.get("approvals") or 0))
+        for row in rows
+        if row.get("settings_recorded")
+    )
+    # Analyzer stats exclude synthetic/duplicate research events. Assign the
+    # remaining authoritative approvals to the single pre-tracking baseline
+    # instead of exposing a contradictory raw-event count.
+    legacy_target = max(0, target - recorded)
+    for row in legacy[:-1]:
+        row["approvals"] = 0
+        row["ev_per_approval"] = None
+    row = legacy[-1]
+    row["approvals"] = legacy_target
+    pnl = float(row.get("pnl_usd") or 0)
+    row["ev_per_approval"] = (
+        round(pnl / legacy_target, 2) if legacy_target else None
+    )
+    return rows
+
+
 def spread_gate_allows(spread) -> bool:
     bucket = _spread_gate_bucket(spread)
     gate = get_spread_gate()
@@ -23550,8 +23583,9 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         if dm:
             row["session_stats"] = _session_stats_from_lane_metrics(dm)
         row.setdefault("session_stats", {})
-        row["session_stats"]["settings_periods"] = copy.deepcopy(
-            settings_breakdown.get(lane) or []
+        row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
+            row["session_stats"],
+            settings_breakdown.get(lane) or [],
         )
         merged.append(row)
     out = copy.deepcopy(static_payload)
@@ -23609,8 +23643,9 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                         if analyzer_row.get(key) is not None:
                             row[key] = copy.deepcopy(analyzer_row[key])
                     row.setdefault("session_stats", {})
-                    row["session_stats"]["settings_periods"] = copy.deepcopy(
-                        settings_breakdown.get(str(spec.get("lane") or "")) or []
+                    row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
+                        row["session_stats"],
+                        settings_breakdown.get(str(spec.get("lane") or "")) or [],
                     )
                     merged_lanes.append(row)
                 payload = copy.deepcopy(static_payload)
@@ -28665,15 +28700,34 @@ def health():
         manual = bool(state.get("manual_admin_pause", False))
         bot_version = state.get("bot_version") or EXECUTION_FIX_VERSION
         analyzer_sync_id = state.get("analyzer_sync_id") or ANALYZER_SYNC_ID
+        ws_ready = bool(state.get("ws_ready", False))
+        ws_tick = state.get("ws_last_tick")
+        system_ready = bool(state.get("system_ready", False))
+        live_armed = bool(state.get("live_armed", False))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled", False))
+    now = time.time()
+    heartbeat_age = max(0.0, now - float(hb or 0))
+    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
+    force_paper_mode = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
         **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
-        "time_since_heartbeat": time.time() - hb,
+        "time_since_heartbeat": heartbeat_age,
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
+        "system_ready": system_ready,
+        "ws_ready": ws_ready,
+        "ws_age": ws_age,
+        "live_armed": live_armed,
+        "bitfinex_live_enabled": bitfinex_live_enabled,
+        "force_paper_mode": force_paper_mode,
+        "relay_configured": relay_configured,
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
@@ -28681,6 +28735,40 @@ def health():
         "git_rev": _runtime_git_rev(),
         "tile2_policy": tile2_policy_descriptor(),
     })
+
+
+@app.route('/ready')
+@app.route('/api/ready')
+def ready():
+    """Strict Fly/deploy readiness probe; unlike /health it fails on stale market data."""
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
+        ws_tick = state.get("ws_last_tick")
+        ws_ready = bool(state.get("ws_ready", False))
+        system_ready = bool(state.get("system_ready", False))
+    now = time.time()
+    heartbeat_age = max(0.0, now - float(hb or 0))
+    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
+    dashboard_owner = is_active_dashboard_owner()
+    ok = bool(
+        dashboard_owner
+        and system_ready
+        and ws_ready
+        and heartbeat_age <= 15.0
+        and ws_age is not None
+        and ws_age < STALE_HARD_SEC
+    )
+    return jsonify({
+        "ok": ok,
+        "status": "ready" if ok else "not_ready",
+        **_dashboard_owner_metadata(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "heartbeat_age": heartbeat_age,
+        "ws_age": ws_age,
+        "system_ready": system_ready,
+        "ws_ready": ws_ready,
+    }), (200 if ok else 503)
+
 
 @app.route('/debug_state')
 def get_debug_state():

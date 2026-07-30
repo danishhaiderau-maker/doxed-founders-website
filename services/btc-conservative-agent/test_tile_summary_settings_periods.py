@@ -36,7 +36,8 @@ def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
     assert '_record_execution_settings_epoch("GAP_CHANGED")' in SOURCE
     assert '_record_execution_settings_epoch("TRACKING_STARTED")' in SOURCE
     assert '_record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)' in SOURCE
-    assert SOURCE.count('["settings_periods"] = copy.deepcopy(') == 2
+    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 2
+    assert "def _reconcile_settings_periods_to_headline" in SOURCE
     chunk = _render_chunk()
     assert "Settings-period breakdown" in chunk
     assert "Legacy baseline" in chunk
@@ -53,9 +54,36 @@ def test_server_is_authoritative_for_execution_gate_controls():
     assert "_patch_api_state_cache_fields(\n        spread_gate=out" in SOURCE
 
 
+def test_settings_period_approvals_reconcile_to_analyzer_headline():
+    namespace = {}
+    start = SOURCE.index("def _reconcile_settings_periods_to_headline")
+    end = SOURCE.index("\ndef spread_gate_allows", start)
+    exec("import copy\n" + SOURCE[start:end], namespace)
+    reconcile = namespace["_reconcile_settings_periods_to_headline"]
+    rows = reconcile(
+        {"approves": 1375},
+        [
+            {
+                "settings_recorded": False,
+                "approvals": 1377,
+                "pnl_usd": 30.39,
+            },
+            {
+                "settings_recorded": True,
+                "approvals": 0,
+                "pnl_usd": 0,
+            },
+        ],
+    )
+    assert sum(row["approvals"] for row in rows) == 1375
+    assert rows[0]["approvals"] == 1375
+    assert rows[0]["ev_per_approval"] == 0.02
+
+
 if __name__ == "__main__":
     test_tile_headlines_use_one_identical_four_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
+    test_settings_period_approvals_reconcile_to_analyzer_headline()
     print("tile summary/settings-period regression checks passed")

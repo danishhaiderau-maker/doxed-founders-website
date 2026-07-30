@@ -17,10 +17,11 @@
 !requirements.txt
 !fly-entrypoint.sh
 
-# 5. Re-include root config/manifest JSON + text files.
+# 5. Re-include version-controlled manifests + text configuration only.
 #    (Small — some are source config the bot reads at startup, e.g. pathway_lane_specs.json,
 #     roster_policy.json. Runtime state .json files here are tiny and harmless to ship.)
-!*.json
+!manifest.json
+!genome_cluster_library.json
 !*.txt
 !*.toml
 !*.yaml

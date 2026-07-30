@@ -1,0 +1,38 @@
+name: Monitor Fly BTC bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify Fly is ready and running current master
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/ready", timeout=12) as response:
+              payload = json.load(response)
+          if response.status != 200 or payload.get("ok") is not True:
+              raise SystemExit(f"Fly not ready: {payload}")
+          actual = str(payload.get("source_git_rev") or "")
+          if not actual.startswith(expected):
+              raise SystemExit(f"Fly revision drift: expected {expected}, got {actual}")
+          print(f"Fly healthy and current: {actual}")
+          PY

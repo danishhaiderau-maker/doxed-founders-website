@@ -13,6 +13,17 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   auto_start_machines = false
   min_machines = 1
 
+[[http_service.checks]]
+  grace_period = "60s"
+  interval = "15s"
+  method = "GET"
+  timeout = "5s"
+  path = "/ready"
+
+[[restart]]
+  policy = "always"
+  processes = ["app"]
+
 [[vm]]
   size = "shared-cpu-1x"
   memory = 1024       # Trading-only (no analyzer on Fly) but the bot still imports

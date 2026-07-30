@@ -1,0 +1,74 @@
+name: Deploy Fly BTC bot
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "services/btc-conservative-agent/**"
+      - ".github/workflows/fly-bot-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fly-btc-production
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: services/btc-conservative-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify Fly and dashboard safety contracts
+        run: |
+          python -m py_compile bot.py btc_conservative_agent.py
+          python test_fly_startup_contract.py
+          python test_tile_summary_settings_periods.py
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy the exact source revision
+        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Prove strict readiness and exact revision
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          url = "https://doxed-btc-bot.fly.dev/ready"
+          last = ""
+          for _ in range(60):
+              try:
+                  with urllib.request.urlopen(url, timeout=8) as response:
+                      payload = json.load(response)
+                  last = json.dumps(payload, sort_keys=True)
+                  if (
+                      response.status == 200
+                      and payload.get("ok") is True
+                      and str(payload.get("source_git_rev") or "").startswith(expected)
+                  ):
+                      print(f"Fly ready on exact revision {expected}")
+                      raise SystemExit(0)
+              except Exception as exc:
+                  last = str(exc)
+              time.sleep(3)
+          raise SystemExit(f"Fly failed exact-revision readiness proof: {last}")
+          PY
