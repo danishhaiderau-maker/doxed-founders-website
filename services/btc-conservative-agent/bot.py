@@ -7382,7 +7382,6 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
         if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
             _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
         emit_signal_webhook("ORDER_PLACED", signal, ai)
-        _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
     """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
@@ -17440,6 +17439,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     if not registered:
         pipeline_state_sync()
         return True
+    _account_registered_order_submission(signal, ai)
     logger.info(
         f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
         f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
@@ -17704,6 +17704,47 @@ def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = Fals
         pipeline_state_sync()
         return True
     return _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
+
+
+def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
+    """Publish ORDER_SUBMITTED/ORDER_PLACED exactly once, after a local order exists."""
+    if not isinstance(signal, dict):
+        return False
+    tid = str(signal.get("trade_id") or "")
+    if not tid:
+        return False
+    with trade_lock:
+        exists = any(
+            isinstance(order, dict)
+            and str(order.get("trade_id") or "") == tid
+            and str(order.get("status") or "").upper() == "PENDING"
+            for order in pending_orders
+        )
+        if not exists or signal.get("_order_submission_accounted"):
+            return False
+        signal["_order_submission_accounted"] = True
+    lane = signal.get("research_lane")
+    edge = signal.get("edge_score_at_entry")
+    increment_pipeline_funnel("ORDER_SUBMITTED")
+    log_lane_opportunity_event(
+        lane,
+        "ORDER_SUBMITTED",
+        tid,
+        signal.get("final_direction"),
+        (ai or {}).get("win_prob"),
+        edge,
+    )
+    if relay_publishes_approve_outcome(lane):
+        record_approve_outcome(
+            "EXECUTED",
+            "ORDER_PLACED",
+            signal.get("effective_threshold_at_entry"),
+            tid,
+            edge,
+            ai or signal.get("ai") or {},
+            signal,
+        )
+    return True
 
 
 def process_awaiting_min_age_entries():
@@ -19590,11 +19631,7 @@ def process_signal(event: dict):
             logger.info("[PIPELINE] -> EXECUTION STAGE -> ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
             if success:
-                increment_pipeline_funnel("ORDER_SUBMITTED")
-                log_lane_opportunity_event(
-                    research_lane, "ORDER_SUBMITTED", trade_id, final_direction,
-                    ai.get("win_prob"), edge_score,
-                )
+                _account_registered_order_submission(signal, ai)
             if signal.get("status") in ("FILLED", "OPEN"):
                 increment_pipeline_funnel("FILLED")
                 log_lane_opportunity_event(
@@ -19626,8 +19663,19 @@ def process_signal(event: dict):
                 exit_pipeline(signal, ai, "ORDER_FAILED")
                 state["last_pipeline_stage"] = "IDLE"
                 return
-            if relay_publishes_approve_outcome(research_lane):
-                record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai, signal)
+            if (
+                relay_publishes_approve_outcome(research_lane)
+                and signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES
+            ):
+                record_approve_outcome(
+                    "PENDING",
+                    "CHASE_BUCKET_WAIT",
+                    pipeline_eff_thr,
+                    trade_id,
+                    edge_score,
+                    ai,
+                    signal,
+                )
             if signal.get("status") in ("FILLED", "OPEN"):
                 final_status = signal.get("status")
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_5M:

@@ -80,6 +80,51 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
+def test_waiting_chase_is_not_reported_as_an_order():
+    assert "def _account_registered_order_submission(signal: dict, ai: dict = None)" in BOT_SOURCE
+    assert 'signal["_order_submission_accounted"] = True' in BOT_SOURCE
+    assert '"CHASE_BUCKET_WAIT",' in BOT_SOURCE
+    assert "_account_registered_order_submission(signal, ai)" in BOT_SOURCE
+    assert '_emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id' not in BOT_SOURCE
+
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_account_registered_order_submission"
+    )
+    events = []
+    namespace = {
+        "pending_orders": [],
+        "trade_lock": threading.RLock(),
+        "increment_pipeline_funnel": lambda stage: events.append(("funnel", stage)),
+        "log_lane_opportunity_event": lambda *args, **_kwargs: events.append(("lane", args[1])),
+        "relay_publishes_approve_outcome": lambda _lane: True,
+        "record_approve_outcome": lambda *args, **_kwargs: events.append(("relay", args[1])),
+    }
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<submission-test>", "exec"), namespace)
+    account = namespace["_account_registered_order_submission"]
+    signal = {
+        "trade_id": "cont-wait",
+        "research_lane": "CONTINUOUS",
+        "final_direction": "LONG",
+    }
+    assert account(signal, {"win_prob": None}) is False
+    assert events == []
+    namespace["pending_orders"].append(
+        {"trade_id": "cont-wait", "status": "PENDING"}
+    )
+    assert account(signal, {"win_prob": None}) is True
+    assert events == [
+        ("funnel", "ORDER_SUBMITTED"),
+        ("lane", "ORDER_SUBMITTED"),
+        ("relay", "ORDER_PLACED"),
+    ]
+    assert account(signal, {"win_prob": None}) is False
+    assert len(events) == 3
+
+
 def test_obsolete_confidence_controls_are_not_rendered():
     assert '<div id="aiBandControls"' not in BOT_SOURCE
     assert "<strong>AI execution bands:</strong>" not in BOT_SOURCE
