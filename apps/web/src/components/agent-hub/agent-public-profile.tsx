@@ -249,8 +249,8 @@ function HireSidebar({
         <div className="rounded-2xl border border-sky-500/30 bg-sky-950/15 p-5">
           <p className="text-xs font-bold uppercase text-sky-400">Relay simulation</p>
           <p className="mt-2 text-xs text-zinc-400">
-            Paper book only — no rental, no real USDT. Connect API once to validate sync with the
-            showcase bot before going live.
+            Live-API dress rehearsal — no rental, but it can place one capped real Bitfinex order.
+            Use it only to validate sync with the showcase bot before going live.
           </p>
           <p className="mt-3 rounded-lg border border-zinc-800 bg-black/25 px-3 py-2 text-xs text-zinc-300">
             API:{' '}

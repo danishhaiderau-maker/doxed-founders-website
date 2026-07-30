@@ -322,7 +322,7 @@ export function CopyTradeHub({
             <div className="shrink-0 text-right">
               <p className="text-[10px] uppercase tracking-widest text-sky-400">API</p>
               <p className="mt-0.5 text-sm font-bold text-white">Connected</p>
-              <p className="text-[10px] text-zinc-500">no rental · paper only</p>
+              <p className="text-[10px] text-zinc-500">no rental · capped live-API test</p>
             </div>
           ) : activeDesk === 'showcase' ? (
             <div className="shrink-0 text-right">
