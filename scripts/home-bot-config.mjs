@@ -5,7 +5,10 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getVaultDir } from './secrets-vault-path.mjs';
 
-export const DEFAULT_HOME_BOT_PUBLIC_URL = 'https://bot.doxxedcrypto.digital';
+// Fly is the authoritative 24/7 showcase. The custom hostname may be repointed
+// later, but operational tools must not silently fall back to the retired
+// home/Cloudflare route.
+export const DEFAULT_HOME_BOT_PUBLIC_URL = 'https://doxed-btc-bot.fly.dev';
 export const DEFAULT_HOME_BOT_LOCAL_PORT = 7002;
 export const RAILWAY_BOT_SERVICE = 'btc-conservative-agent';
 export const RAILWAY_API_SERVICE = 'doxed-founders-website';

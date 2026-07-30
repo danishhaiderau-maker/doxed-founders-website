@@ -40,9 +40,11 @@ const adminToken =
   || '';
 const botUrls = [
   process.env.SHOWCASE_OWNER_URL?.trim(),
-  'http://10.0.0.102:7002',
   process.env.TRADING_AGENT_BOT_URL?.trim(),
   resolveHomeBotPublicUrl(),
+  // Local is diagnostic-only after the Fly cutover. Keep it as the final
+  // fallback so a healthy laptop process cannot mask a broken cloud owner.
+  'http://10.0.0.102:7002',
 ].filter(Boolean);
 
 export function hasFullOwnerOrderState(bot) {

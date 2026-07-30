@@ -70,7 +70,7 @@ export class BotBridgeService {
     ),
   );
   private dbUrlCache: { url: string | null; at: number } | null = null;
-  /** Execution-path cache — canonical showcase bot ONLY (never populated from the Fly race). */
+  /** Execution-path cache — one canonical showcase bot only; no source race. */
   private execCached: BotApiState | null = null;
   private execFetchAt = 0;
   /**
@@ -99,8 +99,8 @@ export class BotBridgeService {
     private readonly showcaseSnapshot: ShowcaseSnapshotService,
   ) {}
 
-  /** Default canonical showcase bot URL (Cloudflare tunnel — has been flaky with HTTP 530). */
-  private readonly DEFAULT_CF_URL = 'https://bot.doxxedcrypto.digital';
+  /** Default canonical showcase bot URL — Fly is the authoritative 24/7 owner. */
+  private readonly DEFAULT_CANONICAL_URL = 'https://doxed-btc-bot.fly.dev';
 
   getBotUrl(): string | null {
     const url = (
@@ -130,16 +130,16 @@ export class BotBridgeService {
     const envUrl = this.getBotUrl();
     if (envUrl && /127\.0\.0\.1|:7002\b|localhost/i.test(envUrl)) {
       this.logger.warn(
-        `Ignoring local env bot URL (${envUrl}) — wire showcase to ${this.DEFAULT_CF_URL}`,
+        `Ignoring local env bot URL (${envUrl}) — wire showcase to ${this.DEFAULT_CANONICAL_URL}`,
       );
       return null;
     }
     return envUrl;
   }
 
-  /** Canonical showcase URL — home bot :7002 via Cloudflare tunnel ONLY. */
+  /** Canonical showcase URL — exactly one configured owner, Fly by default. */
   async resolveShowcaseUrl(): Promise<string> {
-    return (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    return (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
   }
 
   async isEnabledAsync(): Promise<boolean> {
@@ -278,13 +278,11 @@ export class BotBridgeService {
     }
   }
 
-  /** Execution + relay sim — the CANONICAL showcase bot ONLY; never Railway cache, never Fly.
-   *  The Fly instance (doxed-btc-bot.fly.dev) is a SEPARATE, stale bot with its own book.
-   *  Racing it here (the old fetchState path) let the execution path — entry anchors, chase,
-   *  abandon checks, dedupe, capacity, mirror diff — act on a foreign book (split-brain).
-   *  Fail-closed: when the canonical showcase bot is unreachable this returns null and the
-   *  executor HOLDS; it must never trade on the Fly bot's state. Health/admin/public dashboard
-   *  reads keep the Fly race via fetchState / fetchStateForAdmin / fetchHealth. */
+  /** Execution + relay sim — the single configured canonical showcase only.
+   *  Fly now owns that role. There is deliberately no Fly/home race: entry anchors,
+   *  chase, abandon checks, dedupe and mirror diff must all come from one identity.
+   *  Fail-closed: when the configured owner is unreachable this returns null and the
+   *  executor HOLDS. */
   private isCanonicalPushedSnapshot(state: BotApiState, maxAgeMs: number): boolean {
     const instanceId = state.bot_instance_id?.trim();
     const sourceRevision = state.source_git_rev?.trim();
@@ -336,16 +334,16 @@ export class BotBridgeService {
     if (data) {
       this.logger.warn('Canonical bot did not prove dashboard ownership; execution held');
     }
-    // Canonical unreachable — execution must hold (no Fly fallback for money decisions).
+    // Canonical unreachable — execution must hold; never race another bot instance.
     this.execCached = null;
     this.execFetchAt = 0;
     return null;
   }
 
-  /** Canonical showcase bot state for session-epoch tracking — DOES NOT race Fly.
-   *  Always reads from the single canonical showcase URL (PlatformSettings.showcaseBotPublicUrl,
-   *  fallback to the Cloudflare home tunnel) so the epoch key stays stable across polls.
-   *  Racing Fly + CF returns different bot_start_time values (they are distinct bot instances)
+  /** Canonical showcase bot state for session-epoch tracking — never races owners.
+   *  Always reads from PlatformSettings.showcaseBotPublicUrl, falling back to the
+   *  authoritative Fly URL, so the epoch key stays stable across polls.
+   *  Racing Fly + home returns different bot_start_time values (they are distinct bot instances)
    *  and flips the epoch on every poll where the race winner changes — which wipes every user's
    *  armed relay sim via resetAllUserCopySessions. Only the canonical showcase bot (the one the
    *  relay mirrors via :7002) is authoritative for session-epoch detection. */
@@ -361,7 +359,7 @@ export class BotBridgeService {
       this.lastLiveFetchAt = now;
       return pushed;
     }
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
     try {
       const res = await fetch(`${cf}/api/state`, {
         signal: AbortSignal.timeout(20_000),
@@ -681,7 +679,7 @@ export class BotBridgeService {
    *  Try the Cloudflare tunnel for analyzer paths; fall back to Fly for non-analyzer state. */
   private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 20_000): Promise<T | null> {
     // Analyzer proxy is only on the home showcase bot (Cloudflare tunnel :7002) — Fly does NOT run :9001.
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetch(`${cf}${path}`, {
