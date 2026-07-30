@@ -52,6 +52,8 @@ def test_gap_analytics_matches_analyzer_matrix_schema():
     assert '"""Compatibility wrapper over the one canonical dashboard gap gate."""' in BOT_SOURCE
     assert "return not spread_gate_allows(spread), bucket" in BOT_SOURCE
     assert "updates the same config-7002.json gate as the dashboard" in BOT_SOURCE
+    assert 'for key in ("directional_spread", "conviction_spread"):' in BOT_SOURCE
+    assert 'signal["directional_spread"] = spread' in BOT_SOURCE
 
 
 def test_market_bid_ask_spread_is_collected_separately():

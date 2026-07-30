@@ -16119,6 +16119,16 @@ def spread_gate_allows(spread) -> bool:
 
 def _signal_directional_spread(signal: dict, ai: dict) -> int:
     """Normalized directional score gap on the legacy 0–10 scale."""
+    # The signal's frozen entry value is authoritative. The trades-map AI
+    # payload can be intentionally compact and omit LONG/SHORT scores; blindly
+    # recomputing from it turns a real gap into bucket 0.
+    for key in ("directional_spread", "conviction_spread"):
+        explicit = (signal or {}).get(key)
+        if explicit is not None:
+            try:
+                return int(explicit)
+            except (TypeError, ValueError):
+                pass
     direction = str(
         (signal or {}).get("final_direction") or _signal_direction(signal) or "LONG"
     ).upper()
@@ -19406,6 +19416,7 @@ def process_signal(event: dict):
                     )
             spread = compute_directional_spread(final_direction, ai)
             signal["margin_usdt"] = margin_usdt
+            signal["directional_spread"] = spread
             signal["conviction_spread"] = spread
             signal["spread_penalty_mult"] = spread_penalty_margin_mult(spread)
             health = signal.get("trend_health_at_entry") or compute_trend_health(final_direction)
