@@ -7,6 +7,7 @@ if _PARENT_ not in _sys.path:
 
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -1298,6 +1299,8 @@ def _exit_reason_leak_payload():
         "overall_left_usd": rep.get("overall_left_usd"),
         "overall_booked_usd": rep.get("overall_booked_usd"),
         "overall_peak_usd": rep.get("overall_peak_usd"),
+        "metric_label": rep.get("metric_label"),
+        "metric_warning": rep.get("metric_warning"),
         "reasons": rep.get("reasons") or [],
         "recommendations": rep.get("recommendations") or [],
     }
@@ -1309,6 +1312,9 @@ def _ladder_sim_payload():
         "generated_at": rep.get("generated_at"),
         "actual_realized_usd": rep.get("actual_realized_usd"),
         "actual_trades": rep.get("actual_trades"),
+        "matched_actual_realized_usd": rep.get("matched_actual_realized_usd"),
+        "matched_actual_trades": rep.get("matched_actual_trades"),
+        "comparison_scope": rep.get("comparison_scope"),
         "replays_available": rep.get("replays_available"),
         "replays_matched_executed": rep.get("replays_matched_executed"),
         "disclaimer": rep.get("disclaimer"),
@@ -1970,6 +1976,90 @@ def download_reports():
     )
 
 
+@app.route("/download/everything")
+def download_everything():
+    """One verified ZIP containing raw research data, reports, sessions, genome,
+    accumulator exports, audit source bundle, and any preserved analysis."""
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    candidates = []
+
+    def add_tree(base: Path, prefix: str, patterns=("*",)):
+        if not base.is_dir():
+            return
+        seen = set()
+        for pattern in patterns:
+            for path in sorted(base.rglob(pattern)):
+                if not path.is_file() or path in seen:
+                    continue
+                seen.add(path)
+                candidates.append((path, f"{prefix}/{path.relative_to(base).as_posix()}"))
+
+    # Current raw ledgers and deterministic analyzer outputs.
+    for pattern in ("*.csv", "*.jsonl", "*.db"):
+        for path in sorted(agent_root.glob(pattern)):
+            candidates.append((path, f"raw/{path.name}"))
+    add_tree(ROOT / REPORTS_DIR, "reports")
+    for name in _RESEARCH_ARTIFACT_NAMES:
+        path = ROOT / name
+        if path.is_file():
+            candidates.append((path, f"reports/{name}"))
+    add_tree(ROOT / ARCHIVE_DIR, "sessions")
+    add_tree(agent_root / "research" / "genome", "genome")
+    research_db = agent_root / "research.db"
+    if research_db.is_file():
+        candidates.append((research_db, "genome/research.db"))
+    add_tree(ROOT / "research_accumulator", "accumulator")
+    add_tree(ROOT / PAST_ANALYSIS_DIR, "past_analysis")
+
+    # Include the cached full-stack source audit as a named component, without
+    # recursively embedding prior all-in-one bundles.
+    audit_zip = agent_root / "research" / "downloads" / "gpt_audit_bundle.zip"
+    if audit_zip.is_file():
+        candidates.append((audit_zip, "audit/gpt_audit_bundle.zip"))
+
+    unique = {}
+    for path, arcname in candidates:
+        unique.setdefault(arcname, path)
+    manifest = {
+        "schema": "doxxed_everything_bundle_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "files": [],
+        "notes": {
+            "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
+            and any((ROOT / PAST_ANALYSIS_DIR).iterdir()),
+            "live_trading_data": False,
+            "purpose": "research audit and offline analysis",
+        },
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for arcname, path in sorted(unique.items()):
+            data = path.read_bytes()
+            manifest["files"].append(
+                {
+                    "path": arcname,
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+            zf.writestr(arcname, data)
+        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
+        zf.writestr(
+            "README.txt",
+            "Doxxed Crypto all-in-one research bundle.\n"
+            "MANIFEST.json lists every included file, size, and SHA-256 checksum.\n"
+            "Past Analysis is included only after a preserved analysis exists.\n",
+        )
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"doxxed_research_everything_{stamp}.zip",
+    )
+
+
 @app.route("/download/archive/<session_id>")
 def download_archive(session_id):
     safe = os.path.basename(session_id)
@@ -2085,11 +2175,21 @@ def download_complete_cached():
 def download_chatgpt_bundle():
     """ChatGPT-safe bundle: CSV + key reports + manifest (atomic ZIP, verified)."""
     agent_root = ROOT.parent if (ROOT.parent / "trades_3factor.csv").is_file() else ROOT
-    if str(agent_root) not in sys.path:
-        sys.path.insert(0, str(agent_root))
     try:
-        from build_chatgpt_research_bundle import build, OUT_DIR, ZIP_NAME
-    except ImportError as exc:
+        # Load the canonical agent-root builder explicitly.  A retired copy in
+        # research/ has an incompatible build() signature and previously made
+        # this dashboard button return HTTP 500.
+        import importlib.util
+        builder_path = agent_root / "build_chatgpt_research_bundle.py"
+        spec = importlib.util.spec_from_file_location(
+            "_canonical_chatgpt_research_bundle", builder_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {builder_path}")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        build, OUT_DIR, ZIP_NAME = builder.build, builder.OUT_DIR, builder.ZIP_NAME
+    except (ImportError, OSError) as exc:
         abort(503, description=f"build_chatgpt_research_bundle.py not found: {exc}")
     for base in (RESEARCH_ROOT if (RESEARCH_ROOT := agent_root / "research").is_dir() else ROOT, ROOT, agent_root):
         candidate = base / "downloads" / ZIP_NAME
@@ -2220,8 +2320,28 @@ def download_genome_bundle():
     )
 
 
-@app.route("/download/accumulator")
 @app.route("/api/accumulator")
+def api_accumulator():
+    """Return accumulator status as JSON; never masquerade as a ZIP."""
+    try:
+        from research_trade_accumulator import (
+            ACCUMULATOR_DIR,
+            STATUS_FILE,
+            sync_accumulator,
+        )
+    except ImportError:
+        abort(503)
+    status = sync_accumulator(root=ROOT)
+    status_path = ROOT / ACCUMULATOR_DIR / STATUS_FILE
+    if status_path.is_file():
+        try:
+            return jsonify(json.loads(status_path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return jsonify(status)
+
+
+@app.route("/download/accumulator")
 def download_accumulator():
     """Week-collection DB export: SQLite + accumulated CSV + status JSON."""
     try:
@@ -2459,21 +2579,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Left on table</th><th>Avg left</th><th>EV</th></tr></thead><tbody id="exit-leak-body"></tbody></table>
   </section>
   <section id="sec-exit-reason-leak">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
-    <h2>Leakage by Exit Reason</h2>
-    <p class="note" id="exit-reason-note">Which exit path destroys the most value — sorted by total left on table.</p>
+    <h2>Exit Peak-to-Close Gap (Combined Lanes)</h2>
+    <p class="note" id="exit-reason-note">Hindsight MFE minus realized close. This is not directly capturable profit and cannot prescribe an exit change without tick replay validation.</p>
     <div class="kpis" id="exit-reason-kpis"></div>
-    <table><thead><tr><th>Exit reason</th><th>N</th><th>Left $</th><th>Avg left $</th><th>Avg MFE%</th><th>Realized%</th><th>Leak%</th><th>Capture%</th></tr></thead><tbody id="exit-reason-body"></tbody></table>
-    <h3>Recommended actions</h3>
+    <table><thead><tr><th>Exit reason</th><th>N</th><th>Hindsight gap $</th><th>Avg gap $</th><th>Avg MFE%</th><th>Realized%</th><th>Peak-close gap%</th><th>Peak capture%</th></tr></thead><tbody id="exit-reason-body"></tbody></table>
+    <h3>Validation required</h3>
     <ul id="exit-reason-recs"></ul>
   </section>
   <section id="sec-ladder-sim">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
-    <h2>Optimal Ladder Simulator</h2>
-    <p class="note" id="ladder-sim-note">Counterfactual tick replay on executed trades — compare alternate ladder rungs vs current live vs actual booked PnL.</p>
+    <h2>Ladder Replay Simulator (Combined Lanes)</h2>
+    <p class="note" id="ladder-sim-note">Counterfactual replay on the subset with tick data. Each profile is compared only with the booked PnL of those same trades.</p>
     <p class="note amber" id="ladder-sim-disclaimer"></p>
     <div class="kpis" id="ladder-sim-kpis"></div>
-    <table><thead><tr><th>Profile</th><th>Ladder rungs</th><th>N sim</th><th>Sum PnL</th><th>Avg PnL</th><th>WR%</th><th>Ladder exit%</th><th>Δ vs actual</th></tr></thead><tbody id="ladder-sim-body"></tbody></table>
+    <table><thead><tr><th>Profile</th><th>Ladder rungs</th><th>N sim</th><th>Sim PnL</th><th>Avg PnL</th><th>WR%</th><th>Ladder exit%</th><th>Delta vs matched actual</th></tr></thead><tbody id="ladder-sim-body"></tbody></table>
   </section>
   <section id="sec-exits">
     <h2>Exit Leakage Report</h2>
@@ -2547,6 +2665,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <p><b>Past Analysis</b> — the latest preserved pre-wipe conclusions, all derived reports, integrity manifest, and source fingerprints. Bulky raw data is excluded.</p>
     <a class="btn" href="/download/past-analysis" id="dl-past-analysis">&#11015; Download Past Analysis</a>
+    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Everything (one verified ZIP)</a>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
     <p><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
     <a class="btn" href="/download/research-pack" id="dl-research-pack" style="background:#2a6e2a">⬇ Research Pack (one file, all 6 merged)</a>
@@ -3028,11 +3147,11 @@ async function loadExitReasonLeak() {
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
   document.getElementById('exit-reason-kpis').innerHTML = [
-    ['Total left', '$' + fmtUsd(d.overall_left_usd)],
+    ['Hindsight gap', '$' + fmtUsd(d.overall_left_usd)],
     ['Booked', '$' + fmtUsd(d.overall_booked_usd)],
     ['Peak', '$' + fmtUsd(d.overall_peak_usd)],
     ['Exit reasons', (d.reasons||[]).length],
-    ['Actions', (d.recommendations||[]).length],
+    ['Replay reviews', (d.recommendations||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('exit-reason-body').innerHTML = (d.reasons||[]).map(r =>
     `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.avg_left_usd)}</td><td>${r.avg_mfe_margin_pct??'n/a'}%</td><td>${r.avg_realized_margin_pct??'n/a'}%</td><td class="red">${r.avg_leakage_margin_pct??'n/a'}%</td><td>${r.capture_ratio_pct??'n/a'}%</td></tr>`
@@ -3040,7 +3159,7 @@ async function loadExitReasonLeak() {
   const recEl = document.getElementById('exit-reason-recs');
   if (recEl) {
     recEl.innerHTML = (d.recommendations||[]).map(rec =>
-      `<li><b>${rec.exit_reason}</b> (${rec.priority})<br/><em>Finding:</em> ${rec.finding||rec.action}<br/><em>Recommendation:</em> ${rec.recommendation||rec.action}<br/><em>Expected gain:</em> ${rec.expected_gain||'TBD'} <code>${rec.script_hint||''}</code></li>`
+      `<li><b>${rec.exit_reason}</b> (${rec.priority})<br/><em>Observation:</em> ${rec.finding||rec.action}<br/><em>QA rule:</em> ${rec.recommendation||rec.action}</li>`
     ).join('') || '<li>Run analyzer to generate action items.</li>';
   }
 }
@@ -3056,8 +3175,9 @@ async function loadLadderSim() {
     disc.style.display = (overlapZero || d.disclaimer) ? '' : 'none';
   }
   document.getElementById('ladder-sim-kpis').innerHTML = [
-    ['Actual PnL', '$' + fmtUsd(d.actual_realized_usd)],
-    ['Executed trades', d.actual_trades ?? 0],
+    ['Full-session actual', '$' + fmtUsd(d.actual_realized_usd)],
+    ['Full-session trades', d.actual_trades ?? 0],
+    ['Matched-cohort actual', '$' + fmtUsd(d.matched_actual_realized_usd)],
     ['Matched replays', d.replays_matched_executed ?? 0],
     ['Replays on disk', d.replays_available ?? 0],
     ['Best profile', d.best_profile_id || 'n/a'],
@@ -3068,7 +3188,7 @@ async function loadLadderSim() {
     return;
   }
   document.getElementById('ladder-sim-body').innerHTML = (d.profiles||[]).map(p => {
-    const delta = p.delta_vs_actual_usd;
+    const delta = p.delta_vs_matched_actual_usd ?? p.delta_vs_actual_usd;
     const cls = p.unrealistic_vs_actual ? 'red' : (delta != null && delta > 50 ? 'amber' : '');
     const unreal = p.unrealistic_vs_actual ? ' UNREALISTIC' : '';
     return `<tr class="${cls}"><td>${p.profile_id||''}${unreal}</td><td>${(p.ladder||[]).map(r=>r.join('\u2192')).join(' · ')||p.label||''}</td><td>${p.trades_simulated||0}</td><td>$${fmtUsd(p.sum_pnl_usd)}</td><td>$${fmtUsd(p.avg_pnl_usd)}</td><td>${p.wr_pct??'n/a'}%</td><td>${p.ladder_exit_pct??'n/a'}%</td><td>${delta!=null?'$'+fmtUsd(delta):'n/a'}</td></tr>`;
@@ -3350,6 +3470,15 @@ async function loadArchives() {
     const perf = a.performance || {};
     return `<tr><td>${id}</td><td>${(a.created_at||'').slice(0,19)}</td><td>${perf.trades??'n/a'}</td><td>$${fmtUsd(perf.net_pnl_usd)}</td><td><a href="/download/past-analysis/${encodeURIComponent(id)}">ZIP</a></td></tr>`;
   }).join('') || '<tr><td colspan="5">No preserved analysis yet. Fresh Collection creates one only after a completed analyzer run.</td></tr>';
+  const pastButton = document.getElementById('dl-past-analysis');
+  if (pastButton && !(past.analyses||[]).length) {
+    pastButton.removeAttribute('href');
+    pastButton.setAttribute('aria-disabled', 'true');
+    pastButton.title = 'No preserved Past Analysis is available yet';
+    pastButton.style.opacity = '0.45';
+    pastButton.style.pointerEvents = 'none';
+    pastButton.textContent = 'Past Analysis — not available yet';
+  }
 }
 
 async function loadStatus() {
@@ -3385,7 +3514,7 @@ const SECTION_LOADERS = {
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
-  download: [loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+  download: [loadArchives, loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };
 const SECTION_REFRESHES = new Map();
 

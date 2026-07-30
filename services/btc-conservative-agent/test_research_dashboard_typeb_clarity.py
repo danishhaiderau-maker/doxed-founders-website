@@ -40,6 +40,12 @@ def main() -> None:
     assert "they never call an AI" in source
     assert "External AI Full Raw Bundle" in source
     assert "External AI Compact Bundle" in source
+    assert 'href="/download/everything"' in source
+    assert "Download Everything (one verified ZIP)" in source
+    assert "Past Analysis — not available yet" in source
+    assert '@app.route("/api/accumulator")' in source
+    assert '@app.route("/download/accumulator")' in source
+    assert "_canonical_chatgpt_research_bundle" in source
 
     research_dir = ROOT / "research"
     sys.path.insert(0, str(research_dir))

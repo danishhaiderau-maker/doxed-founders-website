@@ -66,7 +66,8 @@ checks = {
     "health rejects wrong runtime identity": "$s.runtime_sync_match -ne $true" in health,
     "health validates the canonical report root": (
         '$s.report_root' in health
-        and 'services\\btc-conservative-agent\\research' in health
+        and "$expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir)" in health
+        and "$actualReportRoot.Equals($expectedReportRoot" in health
     ),
     "restart monitor probes cheap health with a cold-start grace": (
         '[int]$BootGraceSec = 180' in restart_analyzer
@@ -181,7 +182,8 @@ checks = {
         and '"Doxed Wire to Site",\n    "Doxed Auto-Wire"' in stack_common
     ),
     "lifecycle cleanup has restricted-session listener fallback": (
-        "netstat.exe -ano -p TCP" in stack_common
+        "function Get-ListenPortOwners" in stack_common
+        and "[HomeStackNativeProcess]::GetTcpListenerOwners" in stack_common
         and "function Stop-RecordedProcess" in stack_common
         and '.home-bot-crash-monitor.pid' in stack_common
         and '.home-analyzer-crash-monitor.pid' in (

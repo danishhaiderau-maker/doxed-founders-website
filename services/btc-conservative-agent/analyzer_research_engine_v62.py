@@ -14377,7 +14377,7 @@ EXIT_LEAK_ACTION_MAP = {
 
 
 def _exit_leak_recommendations(reasons: list) -> list:
-    """Finding → Recommendation → Expected gain per exit leak source."""
+    """Flag hindsight peak gaps for replay review; never prescribe from MFE alone."""
     recs = []
     for row in reasons or []:
         reason = str(row.get("exit_reason") or "")
@@ -14389,12 +14389,13 @@ def _exit_leak_recommendations(reasons: list) -> list:
         avg_left = float(row.get("avg_left_usd") or 0)
         capture = float(row.get("capture_ratio_pct") or 0)
         finding = (
-            f"{reason} on {n} trades left ${left:.0f} on table "
-            f"(avg ${avg_left:.2f}/trade, {capture:.0f}% capture)."
+            f"{reason} on {n} trades has a ${left:.0f} hindsight peak-to-close gap "
+            f"(avg ${avg_left:.2f}/trade, {capture:.0f}% mean peak capture)."
         )
-        expected_gain = (
-            f"Recover ~10–25% of leaked value (${left * 0.1:.0f}–${left * 0.25:.0f}) "
-            f"if {reason} exits tighten by one ladder rung or delayed trigger."
+        recommendation = (
+            "REPLAY REQUIRED — do not change live settings from MFE hindsight alone. "
+            "Accept a change only when same-trade tick replay beats the current policy "
+            "after fees/slippage with adequate coverage."
         )
         recs.append({
             "exit_reason": reason,
@@ -14402,9 +14403,9 @@ def _exit_leak_recommendations(reasons: list) -> list:
             "left_on_table_usd": left,
             "priority": template["priority"],
             "finding": finding,
-            "recommendation": template["action"],
-            "expected_gain": expected_gain,
-            "action": template["action"],
+            "recommendation": recommendation,
+            "expected_gain": None,
+            "action": recommendation,
             "script_hint": template["script_hint"],
         })
     order = {"high": 0, "medium": 1, "low": 2}
@@ -14413,7 +14414,7 @@ def _exit_leak_recommendations(reasons: list) -> list:
 
 
 def exit_leakage_by_reason_report(trades=None, session=None):
-    """Aggregate money left on table by exit reason — which exit path leaks most."""
+    """Aggregate hindsight MFE-to-close gaps by exit reason."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
@@ -14480,7 +14481,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         )
 
     payload = {
-        "schema": "exit_leakage_by_reason_v2",
+        "schema": "exit_leakage_by_reason_v3",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -14488,6 +14489,11 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         "overall_left_usd": overall_left,
         "overall_booked_usd": round(float(booked_usd.sum()), 2),
         "overall_peak_usd": round(float(peak_usd.sum()), 2),
+        "metric_label": "hindsight_peak_to_close_gap",
+        "metric_warning": (
+            "Peak MFE minus realized close is a hindsight excursion gap, not directly "
+            "capturable profit and not evidence that a ladder change will improve PnL."
+        ),
         "reasons": reasons,
         "recommendations": _exit_leak_recommendations(reasons),
     }
@@ -14560,16 +14566,26 @@ def exit_ladder_simulator_report(trades=None, session=None):
         if executed_ids
         else 0
     )
-    matched_replay_keys = set()
-    if executed_ids:
-        for tid in executed_ids:
-            for key in _replay_keys_for_trade_id(tid):
-                if key in replays:
-                    matched_replay_keys.add(key)
+    matched_executed_ids = sorted(
+        tid for tid in executed_ids if _trade_has_replay(tid, replays)
+    )
+    matched_actual_sum = 0.0
+    if matched_executed_ids and trades is not None and not trades.empty and "trade_id" in trades.columns:
+        matched_rows = trades[trades["trade_id"].astype(str).isin(matched_executed_ids)]
+        matched_pnl_col = (
+            "net_pnl_usd" if "net_pnl_usd" in matched_rows.columns else "outcome_net_pnl_usd"
+        )
+        matched_actual_sum = round(
+            float(pd.to_numeric(matched_rows[matched_pnl_col], errors="coerce").fillna(0).sum()),
+            2,
+        )
 
-    if replays and matched_replay_keys:
-        for tid in matched_replay_keys:
-            replay = replays.get(tid)
+    if replays and matched_executed_ids:
+        for trade_id in matched_executed_ids:
+            replay = next(
+                (replays.get(key) for key in _replay_keys_for_trade_id(trade_id) if replays.get(key)),
+                None,
+            )
             if not replay:
                 continue
             entry = _replay_entry_price(replay)
@@ -14613,8 +14629,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
         cell = profile_stats[pid]
         n = cell["n"]
         sum_pnl = round(cell["sum_pnl_usd"], 2)
-        delta = round(sum_pnl - actual_sum, 2) if actual_n and n else None
-        unrealistic = bool(actual_sum > 0 and sum_pnl > actual_sum * 2)
+        delta = round(sum_pnl - matched_actual_sum, 2) if matched_executed_ids and n else None
+        unrealistic = bool(matched_actual_sum > 0 and sum_pnl > matched_actual_sum * 2)
         profiles_out.append({
             "profile_id": pid,
             "label": prof["label"],
@@ -14626,6 +14642,7 @@ def exit_ladder_simulator_report(trades=None, session=None):
             "ladder_exit_pct": round(100.0 * cell["ladder_exits"] / n, 1) if n else 0.0,
             "thesis_cut_pct": round(100.0 * cell["thesis_cuts"] / n, 1) if n else 0.0,
             "delta_vs_actual_usd": delta,
+            "delta_vs_matched_actual_usd": delta,
             "unrealistic_vs_actual": unrealistic,
         })
     profiles_out.sort(key=lambda x: (-x["sum_pnl_usd"], -x["trades_simulated"]))
@@ -14633,7 +14650,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
     disclaimer = (
         "HINDSIGHT COUNTERFACTUAL: tick replay on executed trade paths only (not perfect live fills). "
         "Perfect ladder fills at historical tick marks — optimistic vs live slippage/fees. "
-        "Δ vs actual compares simulated cohort to session booked PnL; not a live deployment forecast."
+        "Delta compares each profile only with booked PnL for the exact same executed-trade "
+        "replay cohort; it is not a live deployment forecast."
     )
     if actual_n and replays_matched == 0:
         data_status = "NO_EXECUTED_REPLAY_OVERLAP"
@@ -14665,13 +14683,14 @@ def exit_ladder_simulator_report(trades=None, session=None):
         flag = " UNREALISTIC (>2× actual)" if best.get("unrealistic_vs_actual") else ""
         print(
             f"  Best profile: {best['profile_id']} sum=${best['sum_pnl_usd']:.2f} "
-            f"(actual=${actual_sum:.2f}, Δ=${best.get('delta_vs_actual_usd')}){flag} {PIPELINE_ENFORCEMENT_TAG}"
+            f"(matched actual=${matched_actual_sum:.2f}, "
+            f"delta=${best.get('delta_vs_matched_actual_usd')}){flag} {PIPELINE_ENFORCEMENT_TAG}"
         )
     elif not replays:
         print(f"  No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays. {PIPELINE_ENFORCEMENT_TAG}")
 
     payload = {
-        "schema": "exit_ladder_simulator_v2",
+        "schema": "exit_ladder_simulator_v3",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -14680,6 +14699,9 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "thesis_exit_above_pct": THESIS_EXIT_ABOVE_DEFAULT,
         "actual_realized_usd": actual_sum,
         "actual_trades": actual_n,
+        "matched_actual_realized_usd": matched_actual_sum,
+        "matched_actual_trades": len(matched_executed_ids),
+        "comparison_scope": "matched_executed_trade_replay_cohort",
         "replays_available": replays_considered,
         "replays_considered": replays_considered,
         "replays_matched_executed": replays_matched,
