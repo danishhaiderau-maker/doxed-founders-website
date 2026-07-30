@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(fly): make standby startup safe and portable
+feat(btc-bot): persist Fly runtime and isolate live relay
 
 ## Last Activity
 
