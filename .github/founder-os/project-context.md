@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): make Fly the sole canonical bot source
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
