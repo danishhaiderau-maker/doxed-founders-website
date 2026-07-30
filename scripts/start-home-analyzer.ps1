@@ -158,6 +158,7 @@ if ($NoWait) {
   # monitor never starts.
   if ($analyzerProc -and $analyzerProc.Id -gt 0 -and -not $Once) {
     $monitorPidFile = Join-Path $repoRoot ".home-analyzer-crash-monitor.pid"
+    $monitorLockFile = Join-Path $repoRoot ".home-analyzer-auto-restart.lock"
     if (Test-Path -LiteralPath $monitorPidFile) {
       try {
         $oldMonitorPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
@@ -166,6 +167,19 @@ if ($NoWait) {
         }
       } catch { }
       Remove-Item -LiteralPath $monitorPidFile -Force -ErrorAction SilentlyContinue
+    }
+    # A prior launcher could overwrite the pid file before its replacement
+    # monitor acquired the lock, leaving the real old monitor alive and the new
+    # monitor exiting immediately. Reclaim the lock holder explicitly so the
+    # pid file and single running monitor cannot diverge.
+    if (Test-Path -LiteralPath $monitorLockFile) {
+      try {
+        $lockHolderPid = [int](Get-Content -LiteralPath $monitorLockFile -Raw)
+        if ($lockHolderPid -gt 0) {
+          Stop-Process -Id $lockHolderPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+      Remove-Item -LiteralPath $monitorLockFile -Force -ErrorAction SilentlyContinue
     }
     Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") -Value "$($analyzerProc.Id)" -NoNewline -Encoding UTF8
     $monitorScript = Join-Path $scriptDir "analyzer-auto-restart.ps1"

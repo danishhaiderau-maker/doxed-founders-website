@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   computeShowcaseSyncScore,
   formatShowcaseSyncPct,
@@ -8,15 +8,29 @@ import {
   type ShowcaseSyncScoreInput,
 } from '@dcf/utils';
 
-const STORAGE_KEY = 'relay-sim-auto-stop-threshold';
+// Versioned so the tolerant 60% simulation default is not overridden by a
+// previously saved 98% value. Real-money live copy uses its separate key.
+const STORAGE_KEY = 'relay-sim-auto-stop-threshold-v2';
 const LIVE_STORAGE_KEY = 'live-copy-auto-stop-threshold';
 const LIVE_FLATTEN_KEY = 'live-copy-flatten-on-breach';
+const SIM_DEFAULT_STOP_THRESHOLD_PCT = 60;
+const LIVE_MIN_STOP_THRESHOLD_PCT = 98;
+const BREACH_CHECKS_REQUIRED = 3;
+const BREACH_MIN_DURATION_MS = 90_000;
 
-function readThreshold(storageKey = STORAGE_KEY): number {
-  if (typeof window === 'undefined') return getDefaultShowcaseSyncStopThreshold();
+function defaultThreshold(mode: 'sim' | 'live'): number {
+  return mode === 'live'
+    ? getDefaultShowcaseSyncStopThreshold()
+    : SIM_DEFAULT_STOP_THRESHOLD_PCT;
+}
+
+function readThreshold(storageKey: string, mode: 'sim' | 'live'): number {
+  const fallback = defaultThreshold(mode);
+  if (typeof window === 'undefined') return fallback;
   const raw = localStorage.getItem(storageKey);
   const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 90 && n <= 100 ? n : getDefaultShowcaseSyncStopThreshold();
+  const minimum = mode === 'live' ? LIVE_MIN_STOP_THRESHOLD_PCT : SIM_DEFAULT_STOP_THRESHOLD_PCT;
+  return Number.isFinite(n) && n >= minimum && n <= 100 ? n : fallback;
 }
 
 function syncRingColor(pct: number): string {
@@ -53,11 +67,14 @@ export function ShowcaseSyncPanel({
   const storageKey = mode === 'live' ? LIVE_STORAGE_KEY : STORAGE_KEY;
   const [autoStopEnabled, setAutoStopEnabled] = useState(false);
   const [flattenOnBreach, setFlattenOnBreach] = useState(false);
-  const [threshold, setThreshold] = useState(getDefaultShowcaseSyncStopThreshold);
+  const [threshold, setThreshold] = useState(() => defaultThreshold(mode));
   const [autoStopped, setAutoStopped] = useState(false);
+  const [breachChecks, setBreachChecks] = useState(0);
+  const breachChecksRef = useRef(0);
+  const breachStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
-    setThreshold(readThreshold(storageKey));
+    setThreshold(readThreshold(storageKey, mode));
     if (mode === 'live' && typeof window !== 'undefined') {
       setFlattenOnBreach(localStorage.getItem(LIVE_FLATTEN_KEY) === '1');
     }
@@ -65,7 +82,15 @@ export function ShowcaseSyncPanel({
 
   useEffect(() => {
     const active = mode === 'sim' ? simActive : liveActive;
-    if (!active || !autoStopEnabled || !onAutoStop) return;
+    const resetBreach = () => {
+      breachChecksRef.current = 0;
+      breachStartedAtRef.current = null;
+      setBreachChecks(0);
+    };
+    if (!active || !autoStopEnabled || !onAutoStop) {
+      resetBreach();
+      return;
+    }
     // Don't auto-stop while we have no showcase comparison data yet. The sim
     // legitimately waits many minutes for the first :7002 signal, and an empty
     // (low) sync score in that window is not a divergence — tripping the stop
@@ -73,8 +98,23 @@ export function ShowcaseSyncPanel({
     const hasComparisonData = Boolean(
       input.reconcile ?? input.fidelity ?? input.lifecycle,
     );
-    if (!hasComparisonData) return;
-    if (score.pct < threshold && !autoStopped && !autoStopBusy) {
+    if (!hasComparisonData || score.pct >= threshold) {
+      resetBreach();
+      return;
+    }
+
+    const now = Date.now();
+    if (breachStartedAtRef.current == null) breachStartedAtRef.current = now;
+    breachChecksRef.current += 1;
+    setBreachChecks(breachChecksRef.current);
+    const breachDurationMs = now - breachStartedAtRef.current;
+
+    if (
+      breachChecksRef.current >= BREACH_CHECKS_REQUIRED &&
+      breachDurationMs >= BREACH_MIN_DURATION_MS &&
+      !autoStopped &&
+      !autoStopBusy
+    ) {
       setAutoStopped(true);
       onAutoStop({ flatten: mode === 'live' && flattenOnBreach });
     }
@@ -95,8 +135,12 @@ export function ShowcaseSyncPanel({
   ]);
 
   useEffect(() => {
-    if (mode === 'sim' && simActive) setAutoStopped(false);
-    if (mode === 'live' && liveActive) setAutoStopped(false);
+    if ((mode === 'sim' && simActive) || (mode === 'live' && liveActive)) {
+      setAutoStopped(false);
+      breachChecksRef.current = 0;
+      breachStartedAtRef.current = null;
+      setBreachChecks(0);
+    }
   }, [mode, simActive, liveActive]);
 
   const persistThreshold = (v: number) => {
@@ -191,7 +235,7 @@ export function ShowcaseSyncPanel({
                 className="mx-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-xs"
                 onClick={(e) => e.stopPropagation()}
               >
-                {[99, 98, 97, 95, 90].map((v) => (
+                {(mode === 'live' ? [100, 99, 98] : [98, 90, 80, 70, 60]).map((v) => (
                   <option key={v} value={v}>
                     {v}%
                   </option>
@@ -202,6 +246,15 @@ export function ShowcaseSyncPanel({
                 : '— protects you before going live with real money.'}
             </span>
           </label>
+          {autoStopEnabled && !autoStopped ? (
+            <p className="mt-2 text-[11px] text-zinc-500">
+              Brief fluctuations are ignored. Stop requires {BREACH_CHECKS_REQUIRED} consecutive
+              low checks spanning at least {BREACH_MIN_DURATION_MS / 1000}s
+              {breachChecks > 0
+                ? ` (currently ${Math.min(breachChecks, BREACH_CHECKS_REQUIRED)}/${BREACH_CHECKS_REQUIRED}).`
+                : '.'}
+            </p>
+          ) : null}
           {mode === 'live' ? (
             <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
               <input
