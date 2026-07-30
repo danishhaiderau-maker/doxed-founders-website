@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: make Fly the sole BTC AI owner
+fix: debounce relay sync guard
 
 ## Last Activity
 
