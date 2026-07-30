@@ -4306,7 +4306,7 @@ export type AnalyzerGenome = {
 
 export function fetchAnalyzerSessionSummary(slug: string, token?: string) {
   return apiFetch<AnalyzerSessionSummary>(
-    `/trading-agents/${slug}/analyzer-summary`,
+    `/trading-agents/${slug}/session-summary`,
     {},
     token,
   );

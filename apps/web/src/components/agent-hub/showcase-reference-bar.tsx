@@ -11,7 +11,7 @@ import {
 /**
  * Compact global showcase bot strip — shown above live copy / relay sim desks.
  *
- * Source of truth: the analyzer-summary endpoint (:9001 via bot proxy) which
+ * Source of truth: the browser-safe session-summary endpoint (:9001 via bot proxy) which
  * reports the FULL session since the last Fresh Collection wipeout — the same
  * numbers rendered by AgentAnalyzerPanel below. This keeps the reference bar
  * consistent with the full-session panel (e.g. 18 trades, +$10.20, $510, 2.0%)

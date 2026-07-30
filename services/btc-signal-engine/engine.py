@@ -23168,6 +23168,14 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
         # read its small materialized JSON, but must never rescan raw ledgers.
         # This also primes tile statistics after a source-only restart.
         static_payload = build_static_pathway_lane_specs()
+        exec_mode_sig = tuple(
+            (
+                str(row.get("lane") or ""),
+                str(row.get("exec_mode") or ""),
+                str(row.get("exec_block_reason") or ""),
+            )
+            for row in (static_payload.get("lanes") or [])
+        )
         path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
         analyzer_mtime = None
         try:
@@ -23179,6 +23187,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
             cached.get("lanes")
             and cached.get("_cached_analyzer_mtime") == analyzer_mtime
             and cached.get("_cached_static_version") == EXECUTION_FIX_VERSION
+            and cached.get("_cached_exec_mode_sig") == exec_mode_sig
         ):
             return cached
         if analyzer_mtime is not None:
@@ -23204,6 +23213,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                 payload["session_stats_generated_at"] = analyzer_payload.get("generated_at")
                 payload["_cached_analyzer_mtime"] = analyzer_mtime
                 payload["_cached_static_version"] = EXECUTION_FIX_VERSION
+                payload["_cached_exec_mode_sig"] = exec_mode_sig
                 _cached_pathway_lane_specs = payload
                 return payload
             except Exception as e:
@@ -23211,8 +23221,17 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
         payload = static_payload
         payload["session_stats_deferred"] = True
         payload["session_stats_source"] = "analyzer"
+        payload["_cached_exec_mode_sig"] = exec_mode_sig
         return payload
     static_payload = build_static_pathway_lane_specs()
+    exec_mode_sig = tuple(
+        (
+            str(row.get("lane") or ""),
+            str(row.get("exec_mode") or ""),
+            str(row.get("exec_block_reason") or ""),
+        )
+        for row in (static_payload.get("lanes") or [])
+    )
     path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
     file_payload = {}
     mtime = None
@@ -23260,6 +23279,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
             cached_v2 = (_cached_pathway_lane_specs or {}).get("_cached_v2_mtime")
             cached_outcome = (_cached_pathway_lane_specs or {}).get("_cached_outcome_mtime")
             cached_open_lab = (_cached_pathway_lane_specs or {}).get("_cached_open_lab_sig")
+            cached_exec_mode_sig = (_cached_pathway_lane_specs or {}).get("_cached_exec_mode_sig")
             if (
                 cached_at == mtime
                 and cached_ver == EXECUTION_FIX_VERSION
@@ -23268,6 +23288,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                 and cached_v2 == v2_mtime
                 and cached_outcome == outcome_mtime
                 and cached_open_lab == open_lab_sig
+                and cached_exec_mode_sig == exec_mode_sig
                 and _cached_pathway_lane_specs.get("lanes")
             ):
                 return _cached_pathway_lane_specs
@@ -23284,6 +23305,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
     merged["_cached_v2_mtime"] = v2_mtime
     merged["_cached_outcome_mtime"] = outcome_mtime
     merged["_cached_open_lab_sig"] = open_lab_sig
+    merged["_cached_exec_mode_sig"] = exec_mode_sig
     _cached_pathway_lane_specs = merged
     return merged
 

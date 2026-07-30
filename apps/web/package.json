@@ -7,7 +7,7 @@
     "build": "npx prisma generate --schema ../../prisma/schema.prisma && next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx --test src/components/agent-hub/agent-live-execution-view.spec.ts src/components/agent-hub/agent-public-profile.live.spec.tsx"
+    "test": "tsx --test src/components/agent-hub/agent-live-execution-view.spec.ts src/components/agent-hub/agent-public-profile.live.spec.tsx src/lib/api.session-summary.spec.ts"
   },
   "dependencies": {
     "@dcf/config": "*",

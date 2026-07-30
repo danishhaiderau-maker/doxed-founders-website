@@ -71,6 +71,12 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @Get(':slug/session-summary')
+  sessionSummary(@Param('slug') slug: string) {
+    return this.tradingAgents.getAnalyzerSummary(slug);
+  }
+
+  @Public()
   @Get(':slug/analyzer-summary')
   analyzerSummary(@Param('slug') slug: string) {
     return this.tradingAgents.getAnalyzerSummary(slug);
