@@ -49,6 +49,7 @@ def test_fly_has_strict_readiness_and_restart_contract():
     assert '"relay_configured": relay_configured' in BOT
     assert 'path = "/ready"' in FLY_CONFIG
     assert 'policy = "always"' in FLY_CONFIG
+    assert "k: state.get(k)" in BOT
 
 
 def test_fly_publishes_one_authenticated_canonical_snapshot():

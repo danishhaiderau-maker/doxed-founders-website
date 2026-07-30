@@ -32072,7 +32072,13 @@ def load_persistent_config():
 
 def save_persistent_config():
     config_path = get_config_file()
-    config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
+    # A fresh persistent volume can receive an admin settings request before
+    # every optional state key has been initialized. Persist the complete
+    # schema without crashing the control endpoint on an absent optional key.
+    config = {
+        k: state.get(k)
+        for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]
+    }
     if _atomic_file_replace(
         config_path,
         lambda f: json.dump(config, f),

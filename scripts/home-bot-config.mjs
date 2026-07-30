@@ -36,17 +36,22 @@ export function readDotEnv(path) {
 export function resolveHomeBotPublicUrl(argvUrl, repoRoot) {
   const fromArg = argvUrl?.trim();
   if (fromArg) return fromArg.replace(/\/$/, '');
-  const root = repoRoot ?? process.cwd();
-  const tunnelFile = join(root, '.home-tunnel-url');
-  if (existsSync(tunnelFile)) {
-    const fromTunnel = readFileSync(tunnelFile, 'utf8').trim();
-    if (fromTunnel.startsWith('https://')) return fromTunnel.replace(/\/$/, '');
-  }
-  const fromEnv = process.env.HOME_BOT_PUBLIC_URL?.trim();
+  const fromEnv = process.env.HOME_BOT_PUBLIC_URL?.trim()
+    || process.env.TRADING_AGENT_BOT_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, '');
-  const vaultFile = join(getVaultDir(), '.env.home-bot');
-  const fromVault = readDotEnv(vaultFile).HOME_BOT_PUBLIC_URL?.trim();
-  if (fromVault) return fromVault.replace(/\/$/, '');
+  const root = repoRoot ?? process.cwd();
+  // The retired laptop tunnel is diagnostic-only. It must be explicitly
+  // requested so an old .home-tunnel-url cannot silently override Fly.
+  if (process.env.ALLOW_HOME_TUNNEL_FALLBACK === 'YES') {
+    const tunnelFile = join(root, '.home-tunnel-url');
+    if (existsSync(tunnelFile)) {
+      const fromTunnel = readFileSync(tunnelFile, 'utf8').trim();
+      if (fromTunnel.startsWith('https://')) return fromTunnel.replace(/\/$/, '');
+    }
+    const vaultFile = join(getVaultDir(), '.env.home-bot');
+    const fromVault = readDotEnv(vaultFile).HOME_BOT_PUBLIC_URL?.trim();
+    if (fromVault) return fromVault.replace(/\/$/, '');
+  }
   return DEFAULT_HOME_BOT_PUBLIC_URL;
 }
 
