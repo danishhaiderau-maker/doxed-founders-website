@@ -54,6 +54,14 @@ def test_server_is_authoritative_for_execution_gate_controls():
     assert "_patch_api_state_cache_fields(\n        spread_gate=out" in SOURCE
 
 
+def test_virtual_chase_candidates_are_separate_from_pending_orders():
+    assert '<tbody id="virtualChaseTable"></tbody>' in SOURCE
+    assert "VIRTUAL ONLY · no order/exposure" in SOURCE
+    assert "These are <strong>not pending orders</strong>" in SOURCE
+    assert "next_enabled_chase" in SOURCE
+    assert "No live virtual-chase candidate right now" in SOURCE
+
+
 def test_settings_period_approvals_reconcile_to_analyzer_headline():
     namespace = {}
     start = SOURCE.index("def _reconcile_settings_periods_to_headline")
@@ -85,5 +93,6 @@ if __name__ == "__main__":
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
+    test_virtual_chase_candidates_are_separate_from_pending_orders()
     test_settings_period_approvals_reconcile_to_analyzer_headline()
     print("tile summary/settings-period regression checks passed")

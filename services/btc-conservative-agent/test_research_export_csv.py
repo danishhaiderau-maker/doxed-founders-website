@@ -32,6 +32,9 @@ def main():
             for name in required:
                 with open(name, "w", encoding="utf-8") as f:
                     f.write("{}\n")
+            # Unit-test the completed Flask application, not the deliberate
+            # early-boot 503 gate used while production state is restoring.
+            bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
             response = bot.app.test_client().get("/api/export_csv")
             if response.status_code != 200:
                 print(f"[FAIL] export returned HTTP {response.status_code}")

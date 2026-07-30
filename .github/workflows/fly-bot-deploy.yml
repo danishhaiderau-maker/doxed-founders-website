@@ -33,6 +33,8 @@ jobs:
         run: |
           python -m py_compile bot.py btc_conservative_agent.py
           python test_fly_startup_contract.py
+          python test_fly_data_sync_contract.py
+          python test_chase_exact_bucket_controls.py
           python test_tile_summary_settings_periods.py
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
@@ -65,8 +67,18 @@ jobs:
                       and payload.get("ok") is True
                       and str(payload.get("source_git_rev") or "").startswith(expected)
                   ):
-                      print(f"Fly ready on exact revision {expected}")
-                      raise SystemExit(0)
+                      with urllib.request.urlopen(
+                          "https://doxed-btc-bot.fly.dev/health", timeout=8
+                      ) as health_response:
+                          health = json.load(health_response)
+                      if (
+                          health.get("force_paper_mode") is True
+                          and health.get("live_armed") is False
+                          and health.get("bitfinex_live_enabled") is False
+                      ):
+                          print(f"Fly ready, paper-safe, on exact revision {expected}")
+                          raise SystemExit(0)
+                      last = f"unsafe Fly execution flags: {health}"
               except Exception as exc:
                   last = str(exc)
               time.sleep(3)

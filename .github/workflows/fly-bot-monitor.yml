@@ -34,5 +34,13 @@ jobs:
           actual = str(payload.get("source_git_rev") or "")
           if not actual.startswith(expected):
               raise SystemExit(f"Fly revision drift: expected {expected}, got {actual}")
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
+              health = json.load(response)
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("live_armed") is False
+              and health.get("bitfinex_live_enabled") is False
+          ):
+              raise SystemExit(f"Fly bot execution safety drift: {health}")
           print(f"Fly healthy and current: {actual}")
           PY

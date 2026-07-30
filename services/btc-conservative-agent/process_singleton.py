@@ -41,14 +41,26 @@ class ProcessSingleton:
                 raise ProcessSingletonError(
                     f"another bot process may own {self.path}{detail}"
                 )
-            try:
-                self.path.unlink(missing_ok=True)
-                handle = self.path.open("a+b")
-            except OSError as exc:
+            recovery_error = None
+            handle = None
+            # Windows can retain a terminated process's file handle for a
+            # short period while teardown completes. A single unlink attempt
+            # turned that normal delay into an endless restart loop. Retry
+            # only after the recorded PID is conclusively dead.
+            for _ in range(20):
+                try:
+                    self.path.unlink(missing_ok=True)
+                    handle = self.path.open("a+b")
+                    recovery_error = None
+                    break
+                except OSError as exc:
+                    recovery_error = exc
+                    time.sleep(0.1)
+            if handle is None:
                 raise ProcessSingletonError(
                     f"stale singleton file could not be recovered: {self.path} "
                     f"(dead pid={owner_pid})"
-                ) from exc
+                ) from recovery_error
         try:
             handle.seek(0)
             if os.name == "nt":

@@ -26,6 +26,7 @@ import sys
 import subprocess
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file, make_response
@@ -24528,7 +24529,19 @@ HTML = """<!DOCTYPE html>
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
-<h2 id="activityTables">Active Signals</h2>
+<h2 id="activityTables">Virtual Chase Candidates</h2>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
+  Approved signals waiting for a selected chase count. These are <strong>not pending orders</strong>
+  and have no exchange exposure. They move to Pending Orders only when an enabled chase is reached.
+  Historical approvals on the tiles may already be executed, rejected later, or expired, so they are
+  not the same as the live queue below.
+</p>
+<table>
+    <thead><tr><th>Signal Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Direction</th><th>Raw gap</th><th>Gap bucket</th><th>Virtual limit</th><th>Current virtual chase</th><th>Next enabled chase</th><th>Expires in</th><th>State</th></tr></thead>
+    <tbody id="virtualChaseTable"></tbody>
+</table>
+
+<h2>Active Signals</h2>
 <table>
     <thead><tr><th>Signal Time (Melbourne)</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
@@ -25912,7 +25925,39 @@ DASHBOARD_JS = """(function () {
           capWarn.style.display = msgs.length ? 'block' : 'none';
           capWarn.innerText = msgs.join(' ');
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE")).map(s => `
+        const allLiveSignals = d.signal_info?.signals || [];
+        const virtualSignals = allLiveSignals.filter(s => !s.terminal && (s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE"));
+        const virtualRows = virtualSignals.map(s => {
+          const virtualN = s.dashboard_virtual_chase_count != null
+            ? s.dashboard_virtual_chase_count
+            : (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0);
+          const spread = Number(s.directional_spread);
+          const rawGap = s.score_gap != null
+            ? Number(s.score_gap)
+            : (Number.isFinite(spread) ? Math.round(spread * 10) : null);
+          const gapBucket = Number.isFinite(spread)
+            ? (spread >= 5 ? '5+' : String(Math.max(0, Math.floor(spread))))
+            : '-';
+          return `
+          <tr>
+            <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts)}</td>
+            <td>${s.age_min != null ? s.age_min.toFixed(1) : '-'}</td>
+            <td>${laneBadge(s.research_lane, s.research_model)}</td>
+            <td>${s.final_direction || s.dir || '-'}</td>
+            <td>${Number.isFinite(rawGap) ? rawGap.toFixed(0) : '-'}</td>
+            <td>${gapBucket}</td>
+            <td>${s.limit_price != null ? s.limit_price.toFixed(2) : '-'}</td>
+            <td>${virtualN}</td>
+            <td>${s.next_enabled_chase != null ? s.next_enabled_chase : 'none'}</td>
+            <td>${s.ttl_remaining != null ? Math.max(0, s.ttl_remaining / 60).toFixed(1) + 'm' : '-'}</td>
+            <td>VIRTUAL ONLY · no order/exposure</td>
+          </tr>`;
+        }).join('');
+        safeHTML(
+          'virtualChaseTable',
+          virtualRows || '<tr><td colspan="11" style="color:#8b949e;">No live virtual-chase candidate right now. Tile approval totals are historical for the current collection/settings period, not a count of orders waiting at this moment.</td></tr>'
+        );
+        safeHTML('signalsTable', allLiveSignals.filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
             <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts || s.time)}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -26938,6 +26983,7 @@ _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
     "entry_mode", "dashboard_virtual_chase_count",
     "chase_3plus_virtual_chase_count", "chase_3plus_activation_reason",
     "entry_path", "order_placed", "pull_req", "max_pull", "regime_birth",
+    "directional_spread", "score_gap",
 })
 
 
@@ -27146,6 +27192,15 @@ def _collect_dashboard_active_signals(
             "awaiting_dashboard_chase": s.get("status") == SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
             "dashboard_virtual_chase_count": s.get("dashboard_virtual_chase_count") or s.get("chase_3plus_virtual_chase_count"),
             "chase_3plus_virtual_chase_count": s.get("chase_3plus_virtual_chase_count"),
+            "next_enabled_chase": _next_enabled_chase_after(
+                int(
+                    s.get("dashboard_virtual_chase_count")
+                    or s.get("chase_3plus_virtual_chase_count")
+                    or 0
+                )
+            ),
+            "directional_spread": s.get("directional_spread"),
+            "score_gap": s.get("score_gap"),
             "chase_3plus_activation_reason": s.get("chase_3plus_activation_reason"),
             "entry_path": s.get("entry_path"),
         })
@@ -29329,6 +29384,304 @@ def download_debug_config():
     with state_lock:
         config = {k: v for k, v in state.items() if not k.startswith("_")}
     return jsonify(config), 200, {'Content-Disposition': 'attachment; filename=debug_config.json'}
+
+
+# Fly is the sole 24/7 raw-data owner after cutover; the home analyzer pulls an
+# authenticated incremental mirror when the PC is online. These endpoints are
+# intentionally absent from _READ_ONLY_GET_PATHS, so the global API guard
+# requires BOT_ADMIN_TOKEN even for downloads.
+_DATA_SYNC_EXTENSIONS = frozenset({
+    ".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt",
+})
+_DATA_SYNC_EXCLUDED_NAMES = frozenset({
+    "manifest.json", "genome_cluster_library.json",
+})
+_DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
+
+
+def _data_sync_runtime_root() -> Path:
+    return Path.cwd().resolve()
+
+
+def _data_sync_volume_root() -> Path:
+    raw = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return _data_sync_runtime_root()
+
+
+def _data_sync_allowed_roots() -> list:
+    runtime = _data_sync_runtime_root()
+    roots = [runtime]
+    for name in ("research", "research_accumulator", "research_archive"):
+        candidate = runtime / name
+        if candidate.exists():
+            roots.append(candidate)
+    return roots
+
+
+def _data_sync_relpath(path: Path) -> str:
+    runtime = _data_sync_runtime_root()
+    try:
+        return path.resolve().relative_to(runtime).as_posix()
+    except ValueError:
+        # Volume-backed research directories can be symlinked beside runtime.
+        for name in ("research", "research_accumulator", "research_archive"):
+            link = runtime / name
+            try:
+                return f"{name}/{path.resolve().relative_to(link.resolve()).as_posix()}"
+            except (ValueError, OSError):
+                continue
+    raise ValueError("path is outside runtime data roots")
+
+
+def _data_sync_path_allowed(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+        volume = _data_sync_volume_root()
+        resolved.relative_to(volume)
+    except (OSError, ValueError):
+        return False
+    name_lower = resolved.name.lower()
+    if resolved.name in _DATA_SYNC_EXCLUDED_NAMES:
+        return False
+    if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
+        return False
+    return resolved.is_file() and resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+
+
+def _data_sync_resolve_relpath(raw_rel: str) -> Path:
+    rel = str(raw_rel or "").replace("\\", "/").strip("/")
+    if not rel or rel.startswith(".") or ".." in rel.split("/"):
+        raise ValueError("invalid relative path")
+    runtime = _data_sync_runtime_root()
+    candidate = runtime.joinpath(*rel.split("/"))
+    if not _data_sync_path_allowed(candidate):
+        raise ValueError("path is not an allowed runtime data file")
+    return candidate.resolve()
+
+
+def _data_sync_inventory() -> list:
+    runtime = _data_sync_runtime_root()
+    seen = set()
+    rows = []
+    for root in _data_sync_allowed_roots():
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    resolved = path.resolve(strict=True)
+                    if resolved in seen or not _data_sync_path_allowed(path):
+                        continue
+                    seen.add(resolved)
+                    stat = resolved.stat()
+                    rows.append({
+                        "path": _data_sync_relpath(path),
+                        "size": int(stat.st_size),
+                        "mtime_ns": int(stat.st_mtime_ns),
+                        "inode": int(getattr(stat, "st_ino", 0) or 0),
+                    })
+                except (OSError, ValueError):
+                    continue
+                if len(rows) >= 5000:
+                    break
+            if len(rows) >= 5000:
+                break
+        if len(rows) >= 5000:
+            break
+    rows.sort(key=lambda row: row["path"])
+    return rows
+
+
+def _data_sync_ack_path() -> Path:
+    return _data_sync_volume_root() / "sync_ack.json"
+
+
+def _read_data_sync_ack() -> dict:
+    try:
+        raw = json.loads(_data_sync_ack_path().read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_data_sync_ack(payload: dict) -> None:
+    target = _data_sync_ack_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def _prune_acknowledged_rotations(acks: dict) -> list:
+    """Delete only fully acknowledged, old .3+ rotation files.
+
+    Active files and the two newest rotations are never touched. Unacknowledged
+    evidence is never deleted, even under disk pressure.
+    """
+    removed = []
+    cutoff = time.time() - (24 * 3600)
+    for rel, ack in list((acks or {}).items()):
+        match = re.search(r"\.(\d+)$", rel)
+        if not match or int(match.group(1)) < 3 or not isinstance(ack, dict):
+            continue
+        try:
+            path = _data_sync_resolve_relpath(rel)
+            stat = path.stat()
+            if (
+                stat.st_mtime <= cutoff
+                and int(ack.get("size") or -1) == int(stat.st_size)
+                and int(ack.get("mtime_ns") or -1) == int(stat.st_mtime_ns)
+            ):
+                path.unlink()
+                removed.append(rel)
+        except (OSError, ValueError):
+            continue
+    return removed
+
+
+@app.route('/api/data-sync/manifest')
+def api_data_sync_manifest():
+    files = _data_sync_inventory()
+    usage = shutil.disk_usage(_data_sync_volume_root())
+    ack = _read_data_sync_ack()
+    return jsonify({
+        "schema": "fly_runtime_incremental_sync_v1",
+        "generated_at": utc_iso(),
+        "source_git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "files": files,
+        "file_count": len(files),
+        "total_bytes": sum(row["size"] for row in files),
+        "acknowledged_files": len(ack),
+        "volume": {
+            "total": int(usage.total),
+            "used": int(usage.used),
+            "free": int(usage.free),
+            "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
+        },
+    })
+
+
+@app.route('/api/data-sync/file')
+def api_data_sync_file():
+    try:
+        path = _data_sync_resolve_relpath(request.args.get("path"))
+        offset = max(0, int(request.args.get("offset") or 0))
+        limit = min(
+            _DATA_SYNC_CHUNK_MAX,
+            max(1, int(request.args.get("limit") or _DATA_SYNC_CHUNK_MAX)),
+        )
+        before = path.stat()
+        if offset > before.st_size:
+            return jsonify({"error": "offset beyond current file size", "size": before.st_size}), 416
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            payload = handle.read(limit)
+        after = path.stat()
+        response = make_response(payload)
+        response.headers["Content-Type"] = "application/octet-stream"
+        response.headers["X-Data-Path"] = _data_sync_relpath(path)
+        response.headers["X-Data-Offset"] = str(offset)
+        response.headers["X-Data-Size"] = str(after.st_size)
+        response.headers["X-Data-Mtime-Ns"] = str(after.st_mtime_ns)
+        response.headers["X-Data-Inode"] = str(int(getattr(after, "st_ino", 0) or 0))
+        response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
+        response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= after.st_size else "0"
+        return response
+    except (OSError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route('/api/data-sync/ack', methods=['POST'])
+def api_data_sync_ack():
+    body = request.get_json(silent=True) or {}
+    received = body.get("files") or []
+    acks = _read_data_sync_ack()
+    accepted = 0
+    for row in received[:5000]:
+        if not isinstance(row, dict):
+            continue
+        rel = str(row.get("path") or "")
+        try:
+            path = _data_sync_resolve_relpath(rel)
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        if (
+            int(row.get("size") or -1) == int(stat.st_size)
+            and int(row.get("mtime_ns") or -1) == int(stat.st_mtime_ns)
+        ):
+            acks[rel] = {
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "acknowledged_at": utc_iso(),
+            }
+            accepted += 1
+    _write_data_sync_ack(acks)
+    removed = _prune_acknowledged_rotations(acks)
+    return jsonify({
+        "ok": True,
+        "accepted": accepted,
+        "removed_acknowledged_rotations": removed,
+        "policy": "only acknowledged .3+ rotations older than 24h; active/unacked files retained",
+    })
+
+
+def _analyzer_mirror_dir() -> Path:
+    return _data_sync_volume_root() / "analyzer_mirror"
+
+
+@app.route('/api/data-sync/analyzer-report', methods=['POST'])
+def api_data_sync_analyzer_report():
+    upload = request.files.get("report")
+    if upload is None:
+        return jsonify({"error": "multipart field 'report' is required"}), 400
+    payload = upload.read(25 * 1024 * 1024 + 1)
+    if len(payload) > 25 * 1024 * 1024:
+        return jsonify({"error": "report exceeds 25 MB"}), 413
+    mirror = _analyzer_mirror_dir()
+    mirror.mkdir(parents=True, exist_ok=True)
+    target = mirror / "analysis_dashboard.html"
+    tmp = mirror / "analysis_dashboard.html.tmp"
+    tmp.write_bytes(payload)
+    os.replace(tmp, target)
+    meta = {
+        "uploaded_at": utc_iso(),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "source_git_rev": request.form.get("source_git_rev"),
+        "analyzer_generated_at": request.form.get("analyzer_generated_at"),
+    }
+    meta_tmp = mirror / "status.tmp"
+    meta_tmp.write_text(json.dumps(meta, separators=(",", ":")), encoding="utf-8")
+    os.replace(meta_tmp, mirror / "status.json")
+    return jsonify({"ok": True, **meta})
+
+
+@app.route('/api/analyzer-mirror/status')
+def api_analyzer_mirror_status():
+    try:
+        payload = json.loads(
+            (_analyzer_mirror_dir() / "status.json").read_text(encoding="utf-8")
+        )
+        return jsonify({"available": True, **payload})
+    except (OSError, ValueError, TypeError):
+        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
+
+
+@app.route('/analysis')
+def analyzer_mirror_dashboard():
+    if not _admin_authed_strict():
+        return jsonify({"error": "admin token required"}), 401
+    report = _analyzer_mirror_dir() / "analysis_dashboard.html"
+    if not report.is_file():
+        return jsonify({
+            "error": "no analyzer mirror is available yet",
+            "next": "run the local sync/analyzer publisher while the PC is online",
+        }), 404
+    return send_file(report, mimetype="text/html")
+
 
 def _read_log_tail(path, max_lines=400):
     if not path or not os.path.exists(path):

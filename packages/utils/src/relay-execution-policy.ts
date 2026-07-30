@@ -1,8 +1,7 @@
 /** User-controlled live relay policy for the Conservative BTC agent. */
-export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_typeb_only_v4';
+export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_only_v5';
 export const CONSERVATIVE_BTC_LIVE_RELAY_LANES = [
   'CONTINUOUS',
-  'TYPE_B_HUNTER_V1',
 ] as const;
 
 export function hasActiveLiveRelayConsent(dashboardState: unknown): boolean {

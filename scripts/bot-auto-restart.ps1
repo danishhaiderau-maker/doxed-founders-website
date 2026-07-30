@@ -259,7 +259,7 @@ try {
           $lastLivenessCheck = $livenessNow
           if (Test-BotPingQuick) {
             $consecutiveLivenessFailures = 0
-          } elseif (($livenessNow - $p.StartTime).TotalSeconds -ge 900) {
+          } elseif (($livenessNow - ($p.StartTime)).TotalSeconds -ge 900) {
             $consecutiveLivenessFailures++
             Write-RestartLog "liveness_failed	pid=$currentPid	count=$consecutiveLivenessFailures"
             if ($consecutiveLivenessFailures -ge 18) {
@@ -300,7 +300,7 @@ try {
       # Rate cap: prune restart timestamps older than 1 hour, then check the cap.
       $now = Get-Date
       for ($i = $restartTimes.Count - 1; $i -ge 0; $i--) {
-        if (($now - $restartTimes[$i]).TotalHours -ge 1.0) { $restartTimes.RemoveAt($i) }
+        if (($now - ($restartTimes[$i])).TotalHours -ge 1.0) { $restartTimes.RemoveAt($i) }
       }
       if ($restartTimes.Count -ge $MaxRestartsPerHour) {
         Write-RestartLog "rate_capped	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code	stopping_monitor"

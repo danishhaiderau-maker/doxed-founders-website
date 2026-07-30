@@ -26,6 +26,7 @@ import sys
 import subprocess
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file, make_response
@@ -97,10 +98,13 @@ from normalized_market_indicators import (
 )
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
+    EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
     SCHEMA_VERSION as TYPE_B_RESEARCH_V2_SCHEMA,
     append_event as append_type_b_research_v2_event,
     child_event as type_b_research_v2_child_event,
+    load_events as load_type_b_research_v2_events,
     opportunity_event as type_b_research_v2_opportunity_event,
+    summarize_lane_verdicts,
 )
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
@@ -250,7 +254,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "PROBATION",
+    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: "DATA_RETIRED",
@@ -304,7 +308,6 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 })
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
@@ -983,6 +986,19 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     order_age_sec = max(0.0, fill_ts - float(order_created)) if order_created else 0.0
     entry_delay_sec = signal_age_sec
     features, context = _feature_bundle(signal, signal)
+    with state_lock:
+        entry_bid = float(state.get("bid") or 0)
+        entry_ask = float(state.get("ask") or 0)
+    entry_market_spread_usd = (
+        max(0.0, entry_ask - entry_bid)
+        if entry_bid > 0 and entry_ask > 0
+        else None
+    )
+    entry_market_spread_bps = (
+        (entry_market_spread_usd / ((entry_ask + entry_bid) / 2.0)) * 10000.0
+        if entry_market_spread_usd is not None and (entry_ask + entry_bid) > 0
+        else None
+    )
     lineage_sources = (order, signal, ai)
     lineage = {}
     for key in (
@@ -1061,6 +1077,18 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_sr_state": context.get("sr_state", "UNKNOWN"),
         "entry_dist_to_resistance": context.get("dist_to_resistance", 0.0),
         "entry_dist_to_support": context.get("dist_to_support", 0.0),
+        "entry_bid": round(entry_bid, 2) if entry_bid > 0 else None,
+        "entry_ask": round(entry_ask, 2) if entry_ask > 0 else None,
+        "market_bid_ask_spread_usd_at_entry": (
+            round(entry_market_spread_usd, 4)
+            if entry_market_spread_usd is not None
+            else None
+        ),
+        "market_bid_ask_spread_bps_at_entry": (
+            round(entry_market_spread_bps, 4)
+            if entry_market_spread_bps is not None
+            else None
+        ),
         "last_funding_accrual_ts": fill_ts,
         "funding_rate_at_entry": (state.get("funding") or {}).get("rate"),
         "funding_rate_pct_8h_at_entry": (state.get("funding") or {}).get("rate_pct_per_8h"),
@@ -5998,10 +6026,17 @@ AI_EXECUTION_BAND_DEFS = (
     ("60-66", 60, 67),
     ("65+", 65, 101),
 )
-CHASE_EXECUTION_BUCKET_ORDER = ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases")
+CHASE_EXECUTION_BUCKET_ORDER = (
+    "0_chases",
+    "1_chase",
+    "2_chases",
+    "3_chases",
+    "4_chases",
+    "5+_chases",
+)
 CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
 CHASE_EFFICIENCY_MATRIX_FILE = "chase_efficiency_matrix_report.json"
-SPREAD_BUCKET_ORDER = ("1", "2", "3", "4", "5+")
+SPREAD_BUCKET_ORDER = ("0-1", "2", "3", "4", "5+")
 
 
 # --- Spread gate (hard order-placement block) ---------------------------------
@@ -6079,17 +6114,20 @@ def _disabled_spread_buckets_snapshot() -> set:
 
 
 def _spread_gate_blocks_signal(signal: dict):
-    """Return (blocked_bool, bucket_int) for a signal's directional/conviction spread."""
+    """Compatibility wrapper over the one canonical dashboard gap gate."""
     spread = signal.get("directional_spread")
     if spread is None:
         spread = signal.get("conviction_spread")
-    bucket = _spread_gate_clamp(spread)
-    return bucket in _disabled_spread_buckets_snapshot(), bucket
+    bucket = _spread_gate_bucket(spread)
+    return not spread_gate_allows(spread), bucket
 
 
 # Load persisted gate state at module init (defaults to empty set if no file).
 _load_spread_gate_config()
 SPREAD_GATE_BUCKET_ORDER = ("0", "1", "2", "3", "4", "5+")
+EXECUTION_SETTINGS_HISTORY_FILE = "execution_settings_history.jsonl"
+_execution_settings_history_lock = threading.Lock()
+_settings_breakdown_cache = {"key": None, "value": {}}
 
 
 def _resolve_analytics_report_path(filename: str) -> str:
@@ -7940,6 +7978,41 @@ def _tick_dashboard_virtual_chase(signal: dict, market_price: float, now: float)
     return count
 
 
+def _virtual_limit_would_fill(signal: dict, market_price: float) -> bool:
+    """Whether the unplaced virtual limit would have filled at its current count."""
+    direction = _signal_direction(signal)
+    virtual_limit = float(
+        signal.get("chase_3plus_virtual_limit")
+        or signal.get("dashboard_virtual_limit")
+        or signal.get("limit_price")
+        or 0
+    )
+    if virtual_limit <= 0 or market_price <= 0:
+        return False
+    if direction == "LONG":
+        return float(market_price) <= virtual_limit
+    if direction == "SHORT":
+        return float(market_price) >= virtual_limit
+    return False
+
+
+def _expire_skipped_virtual_fill(signal: dict) -> None:
+    """Close a virtual-only path when an unchecked chase count would have filled."""
+    chase_n = _signal_virtual_chase_count(signal)
+    reason = f"VIRTUAL_FILL_SKIPPED_CHASE_{chase_n}"
+    signal["status"] = "EXPIRED"
+    signal["outcome"] = reason
+    signal["exit_reason"] = reason
+    signal["order_placed"] = False
+    _record_expired_order(signal, reason)
+    _funnel_signal_expired(signal, reason)
+    logger.info(
+        f"[DASHBOARD GATE] skipped virtual fill trade_id={signal.get('trade_id')} "
+        f"chase_count={chase_n} limit={fmt(signal.get('limit_price'))} "
+        f"reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+
+
 def process_awaiting_dashboard_virtual_chase_entries():
     """Global virtual defer — submit limit only when dashboard chase bucket allows."""
     price = state.get("price")
@@ -7986,6 +8059,12 @@ def process_awaiting_dashboard_virtual_chase_entries():
                 f"[DASHBOARD GATE] virtual defer expired trade_id={tid} "
                 f"virtual_chase={_signal_virtual_chase_count(signal)} [PIPELINE ENFORCEMENT]"
             )
+            continue
+        # Faithful cohort isolation: if the unplaced limit would have filled at
+        # an unchecked count, this signal belongs to that skipped bucket. It
+        # must not survive and later masquerade as a chase-3/4/5 entry.
+        if _virtual_limit_would_fill(signal, market):
+            _expire_skipped_virtual_fill(signal)
             continue
         _tick_dashboard_virtual_chase(signal, market, now)
         vcount = _signal_virtual_chase_count(signal)
@@ -12229,6 +12308,7 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model") or research_lane_label(row.get("research_lane")),
         "lane_verdicts": {},
+        "verdict_provenance": "RESTORED_PRE_RESTART_NO_LANE_METADATA",
     }
 
 def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
@@ -12284,6 +12364,54 @@ def _restore_session_ai_history_from_csv(limit: int = 50) -> list:
         f"[PIPELINE ENFORCEMENT]"
     )
     return restored
+
+
+def _restore_shared_ai_lane_verdicts_from_journal() -> dict:
+    """Reattach crash-safe lane verdicts and rebuild their restart-safe funnel."""
+    try:
+        events = load_type_b_research_v2_events(os.getcwd())
+        summary = summarize_lane_verdicts(events, since_epoch=bot_start_time)
+    except Exception as exc:
+        logger.warning(f"[AI HISTORY] lane-verdict journal restore failed: {exc}")
+        return {"restored_rows": 0, "unique_verdicts": 0, "lanes": {}}
+
+    by_opportunity = summary.get("by_opportunity") or {}
+    lane_counters = summary.get("lanes") or {}
+    restored_rows = 0
+    with state_lock:
+        for row in state.get("ai_history") or []:
+            call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
+            verdicts = by_opportunity.get(call_id) or {}
+            if not verdicts:
+                continue
+            row["lane_verdicts"] = copy.deepcopy(verdicts)
+            row["continuous_verdict"] = copy.deepcopy(
+                verdicts.get(RESEARCH_LANE_CONTINUOUS)
+            )
+            row["type_b_verdict"] = copy.deepcopy(
+                verdicts.get(RESEARCH_LANE_TYPE_B_HUNTER_V1)
+            )
+            row["verdict_provenance"] = "RESTORED_FROM_RESEARCH_JOURNAL"
+            restored_rows += 1
+        counters = state.setdefault("shared_ai_lane_counters", {})
+        for lane in (
+            RESEARCH_LANE_CONTINUOUS,
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        ):
+            if lane in lane_counters:
+                counters[lane] = copy.deepcopy(lane_counters[lane])
+        if restored_rows:
+            state["ai_history_updated"] = time.time()
+    logger.info(
+        f"[AI HISTORY] journal verdicts restored_rows={restored_rows} "
+        f"unique_verdicts={int(summary.get('unique_verdicts') or 0)} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "restored_rows": restored_rows,
+        "unique_verdicts": int(summary.get("unique_verdicts") or 0),
+        "lanes": copy.deepcopy(lane_counters),
+    }
 
 
 def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
@@ -14951,6 +15079,8 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
     Paper-only until its reconciled filled-sample gate is met.
     """
     lane = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    if is_research_lane_retired(lane):
+        return
     if not is_research_data_collection():
         return
     if not is_combo_execution_lane(lane):
@@ -15579,6 +15709,24 @@ def _default_chase_execution_buckets() -> dict:
     return {k: False for k in CHASE_EXECUTION_BUCKET_ORDER}
 
 
+def _normalize_chase_execution_buckets(raw) -> dict:
+    """Normalize current exact buckets and migrate the earlier grouped schema."""
+    out = _default_chase_execution_buckets()
+    if not isinstance(raw, dict):
+        return out
+    if "3-5_chases" in raw:
+        grouped_3_5 = bool(raw["3-5_chases"])
+        out["3_chases"] = grouped_3_5
+        out["4_chases"] = grouped_3_5
+        out["5+_chases"] = grouped_3_5
+    if "6+_chases" in raw:
+        out["5+_chases"] = bool(raw["6+_chases"])
+    for key in out:
+        if key in raw:
+            out[key] = bool(raw[key])
+    return out
+
+
 def _default_ai_execution_bands() -> dict:
     """All OFF until admin ticks AI bands on the dashboard."""
     return {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
@@ -15662,34 +15810,31 @@ def chase_count_bucket(chase_count) -> str:
         return "1_chase"
     if n == 2:
         return "2_chases"
-    if n <= 5:
-        return "3-5_chases"
-    return "6+_chases"
+    if n == 3:
+        return "3_chases"
+    if n == 4:
+        return "4_chases"
+    return "5+_chases"
 
 
 def get_chase_execution_buckets() -> dict:
     with state_lock:
         raw = state.get("chase_execution_buckets")
-    if not isinstance(raw, dict):
-        return _default_chase_execution_buckets()
-    out = _default_chase_execution_buckets()
-    for k in out:
-        if k in raw:
-            out[k] = bool(raw[k])
-    return out
+    return _normalize_chase_execution_buckets(raw)
 
 
 def set_chase_execution_buckets(buckets: dict):
-    out = _default_chase_execution_buckets()
-    if isinstance(buckets, dict):
-        for k in out:
-            if k in buckets:
-                out[k] = bool(buckets[k])
+    out = _normalize_chase_execution_buckets(buckets)
     with state_lock:
         state["chase_execution_buckets"] = out
         save_persistent_config()
     enabled = [k for k, v in out.items() if v]
     logger.info(f"[SET] Chase execution buckets={enabled} [PIPELINE ENFORCEMENT]")
+    _record_execution_settings_epoch("CHASE_CHANGED")
+    _patch_api_state_cache_fields(
+        chase_execution_buckets=out,
+        dashboard_execution_gates=get_dashboard_execution_status(),
+    )
     enforce_dashboard_chase_gates_on_pending()
     pipeline_state_sync()
 
@@ -15742,6 +15887,228 @@ def set_spread_gate(gate: dict):
         save_persistent_config()
     enabled = [k for k, v in out.items() if v]
     logger.info(f"[SET] Spread gate allowed buckets={enabled} [PIPELINE ENFORCEMENT]")
+    _record_execution_settings_epoch("GAP_CHANGED")
+    _patch_api_state_cache_fields(
+        spread_gate=out,
+        dashboard_execution_gates=get_dashboard_execution_status(),
+    )
+
+
+def _enabled_execution_settings() -> dict:
+    chase = get_chase_execution_buckets()
+    gap = get_spread_gate()
+    return {
+        "gap_buckets": [key for key in SPREAD_GATE_BUCKET_ORDER if gap.get(key)],
+        "chase_buckets": [
+            key.replace("_chases", "").replace("_chase", "")
+            for key in CHASE_EXECUTION_BUCKET_ORDER
+            if chase.get(key)
+        ],
+    }
+
+
+def _execution_settings_signature(settings: dict) -> str:
+    return "gap=" + ",".join(settings.get("gap_buckets") or []) + "|chase=" + ",".join(
+        settings.get("chase_buckets") or []
+    )
+
+
+def _record_execution_settings_epoch(reason: str, force: bool = False) -> None:
+    """Append one durable epoch only when the canonical gap/chase selection changes."""
+    global _cached_pathway_lane_specs
+    settings = _enabled_execution_settings()
+    signature = _execution_settings_signature(settings)
+    row = {
+        "ts": utc_iso(),
+        "epoch": time.time(),
+        "reason": str(reason or "SETTINGS_CHANGED"),
+        "signature": signature,
+        **settings,
+    }
+    with _execution_settings_history_lock:
+        last = None
+        try:
+            with open(EXECUTION_SETTINGS_HISTORY_FILE, encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        candidate = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(candidate, dict):
+                        last = candidate
+        except FileNotFoundError:
+            pass
+        if not force and last and last.get("signature") == signature:
+            return
+        with open(EXECUTION_SETTINGS_HISTORY_FILE, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    _settings_breakdown_cache["key"] = None
+    _cached_pathway_lane_specs = {}
+
+
+def _fresh_collection_start_epoch() -> float:
+    try:
+        with open(RESEARCH_SESSION_FILE, encoding="utf-8") as handle:
+            session = json.load(handle) or {}
+        return float(
+            session.get("fresh_collection_start_time")
+            or session.get("bot_start_time")
+            or bot_start_time
+            or 0
+        )
+    except Exception:
+        return float(bot_start_time or 0)
+
+
+def _row_epoch(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _settings_period_breakdown() -> dict:
+    """Exact fresh-collection PnL by recorded settings epoch; legacy settings stay unknown."""
+    files = (EXECUTION_SETTINGS_HISTORY_FILE, CSV_TRADES, TYPE_B_RESEARCH_V2_EVENT_FILE)
+    key = tuple(
+        (path, os.path.getmtime(path), os.path.getsize(path))
+        for path in files
+        if os.path.isfile(path)
+    )
+    if _settings_breakdown_cache.get("key") == key:
+        return copy.deepcopy(_settings_breakdown_cache.get("value") or {})
+
+    start = _fresh_collection_start_epoch()
+    now = time.time()
+    epochs = []
+    try:
+        with open(EXECUTION_SETTINGS_HISTORY_FILE, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                ts = float(row.get("epoch") or _row_epoch(row.get("ts")))
+                if ts >= start:
+                    epochs.append({**row, "epoch": ts})
+    except FileNotFoundError:
+        pass
+    epochs.sort(key=lambda row: row["epoch"])
+    compact = []
+    for row in epochs:
+        if compact and compact[-1].get("signature") == row.get("signature"):
+            continue
+        compact.append(row)
+    periods = []
+    if not compact or compact[0]["epoch"] > start + 1:
+        periods.append({
+            "start": start,
+            "end": compact[0]["epoch"] if compact else now,
+            "signature": "legacy-unrecorded",
+            "gap_buckets": [],
+            "chase_buckets": [],
+            "settings_recorded": False,
+        })
+    for index, row in enumerate(compact):
+        periods.append({
+            "start": row["epoch"],
+            "end": compact[index + 1]["epoch"] if index + 1 < len(compact) else now,
+            "signature": row.get("signature"),
+            "gap_buckets": row.get("gap_buckets") or [],
+            "chase_buckets": row.get("chase_buckets") or [],
+            "settings_recorded": True,
+        })
+
+    lanes = (RESEARCH_LANE_TYPE_B_HUNTER_V1, RESEARCH_LANE_CONTINUOUS)
+    output = {lane: [] for lane in lanes}
+    trades = []
+    try:
+        with open(CSV_TRADES, encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                lane = str(row.get("research_lane") or "").upper()
+                ts = _row_epoch(row.get("ts") or row.get("close_ts"))
+                if lane in output and ts >= start:
+                    trades.append((lane, ts, float(row.get("net_pnl_usd") or 0)))
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+    approvals = []
+    try:
+        for event in load_type_b_research_v2_events(os.getcwd()):
+            if event.get("event") != "LANE_VERDICT":
+                continue
+            lane = str(event.get("lane") or "").upper()
+            opportunity_id = str(event.get("opportunity_id") or "")
+            if lane not in output or opportunity_id in ("scan-history-1", "scan-continuous-off"):
+                continue
+            payload = event.get("payload") or {}
+            if not bool(payload.get("accepted") or payload.get("ok")):
+                continue
+            ts = float(payload.get("stamped_at") or _row_epoch(event.get("ts")))
+            if ts >= start:
+                approvals.append((lane, ts, opportunity_id))
+    except Exception:
+        pass
+
+    for lane in lanes:
+        for index, period in enumerate(periods):
+            lane_trades = [
+                pnl for trade_lane, ts, pnl in trades
+                if trade_lane == lane and period["start"] <= ts < period["end"]
+            ]
+            approved_ids = {
+                opportunity_id for approval_lane, ts, opportunity_id in approvals
+                if approval_lane == lane and period["start"] <= ts < period["end"]
+            }
+            pnl = round(sum(lane_trades), 2)
+            approved = len(approved_ids)
+            output[lane].append({
+                **period,
+                "period_number": index + 1,
+                "current": index == len(periods) - 1,
+                "approvals": approved,
+                "executed": len(lane_trades),
+                "pnl_usd": pnl,
+                "ev_per_approval": round(pnl / approved, 2) if approved else None,
+            })
+    _settings_breakdown_cache["key"] = key
+    _settings_breakdown_cache["value"] = copy.deepcopy(output)
+    return output
+
+
+def _reconcile_settings_periods_to_headline(stats: dict, periods: list) -> list:
+    """Keep the settings table on the same approval cohort as the analyzer headline."""
+    rows = copy.deepcopy(periods or [])
+    if not rows:
+        return rows
+    try:
+        target = max(0, int((stats or {}).get("approves") or 0))
+    except (TypeError, ValueError):
+        return rows
+    legacy = [row for row in rows if not row.get("settings_recorded")]
+    if not legacy:
+        return rows
+    recorded = sum(
+        max(0, int(row.get("approvals") or 0))
+        for row in rows
+        if row.get("settings_recorded")
+    )
+    # Analyzer stats exclude synthetic/duplicate research events. Assign the
+    # remaining authoritative approvals to the single pre-tracking baseline
+    # instead of exposing a contradictory raw-event count.
+    legacy_target = max(0, target - recorded)
+    for row in legacy[:-1]:
+        row["approvals"] = 0
+        row["ev_per_approval"] = None
+    row = legacy[-1]
+    row["approvals"] = legacy_target
+    pnl = float(row.get("pnl_usd") or 0)
+    row["ev_per_approval"] = (
+        round(pnl / legacy_target, 2) if legacy_target else None
+    )
+    return rows
 
 
 def spread_gate_allows(spread) -> bool:
@@ -15751,11 +16118,20 @@ def spread_gate_allows(spread) -> bool:
 
 
 def _signal_directional_spread(signal: dict, ai: dict) -> int:
-    direction = str((signal or {}).get("final_direction") or _signal_direction(signal) or "LONG").upper()
-    ai = ai or {}
-    bull = int(ai.get("bull_score") or signal.get("bull_score_at_entry") or 0)
-    bear = int(ai.get("bear_score") or signal.get("bear_score_at_entry") or 0)
-    return bull - bear if direction == "LONG" else bear - bull
+    """Normalized directional score gap on the legacy 0–10 scale."""
+    direction = str(
+        (signal or {}).get("final_direction") or _signal_direction(signal) or "LONG"
+    ).upper()
+    merged_ai = dict(ai or {})
+    if not merged_ai.get("long_score"):
+        merged_ai["long_score"] = signal.get("long_score_at_entry")
+    if not merged_ai.get("short_score"):
+        merged_ai["short_score"] = signal.get("short_score_at_entry")
+    if not merged_ai.get("bull_score"):
+        merged_ai["bull_score"] = signal.get("bull_score_at_entry")
+    if not merged_ai.get("bear_score"):
+        merged_ai["bear_score"] = signal.get("bear_score_at_entry")
+    return compute_directional_spread(direction, merged_ai)
 
 
 def _signal_spread_gate_blocked(signal: dict, ai: dict) -> tuple:
@@ -16016,8 +16392,16 @@ def _load_chase_analytics_snapshot() -> dict:
             generated_at = data.get("generated_at")
         except Exception:
             pass
+    report_key_by_control = {
+        "0_chases": "0",
+        "1_chase": "1",
+        "2_chases": "2",
+        "3_chases": "3",
+        "4_chases": "4",
+        "5+_chases": "5+",
+    }
     for key in CHASE_EXECUTION_BUCKET_ORDER:
-        b = raw.get(key) if isinstance(raw, dict) else None
+        b = raw.get(report_key_by_control[key]) if isinstance(raw, dict) else None
         if isinstance(b, dict):
             buckets.append({
                 "bucket": key,
@@ -16052,7 +16436,7 @@ def _load_chase_analytics_snapshot() -> dict:
 
 
 def _load_spread_analytics_snapshot() -> dict:
-    """Directional spread buckets from analyzer matrix (0-chase slice — no double count)."""
+    """Directional gap buckets aggregated once across exact chase-count cells."""
     buckets = []
     generated_at = None
     path = _resolve_analytics_report_path(CHASE_EFFICIENCY_MATRIX_FILE)
@@ -16069,25 +16453,43 @@ def _load_spread_analytics_snapshot() -> dict:
                 parts = str(key).split("|")
                 if len(parts) != 2 or not parts[1].startswith("spread="):
                     continue
-                if parts[0] != "0_chases":
+                # Exact base cells are "0|spread=3", "1|spread=4", etc.
+                # Longer keys include lane/AI dimensions and would double count.
+                if parts[0] not in ("0", "1", "2", "3", "4", "5+"):
                     continue
                 spread_key = parts[1].replace("spread=", "")
-                raw_by_spread[spread_key] = stats
+                display_key = "0-1" if spread_key in ("0", "1", "0-1") else spread_key
+                cell = raw_by_spread.setdefault(display_key, {
+                    "trades": 0,
+                    "wins": 0,
+                    "sum_pnl_usd": 0.0,
+                })
+                cell["trades"] += int(stats.get("trades") or 0)
+                cell["wins"] += int(stats.get("wins") or 0)
+                cell["sum_pnl_usd"] += float(stats.get("sum_pnl_usd") or 0)
         except Exception:
             pass
     for spread_key in SPREAD_BUCKET_ORDER:
         b = raw_by_spread.get(spread_key)
         if isinstance(b, dict):
+            trades = int(b.get("trades") or 0)
+            wins = int(b.get("wins") or 0)
+            pnl = float(b.get("sum_pnl_usd") or 0)
             buckets.append({
                 "spread": spread_key,
-                "trades": b.get("trades", 0),
-                "win_rate_pct": b.get("wr_pct", b.get("win_rate_pct", 0)),
-                "sum_pnl_usd": b.get("sum_pnl_usd", 0),
-                "ev_usd": b.get("ev_usd", 0),
+                "trades": trades,
+                "win_rate_pct": round((wins / trades * 100.0), 1) if trades else 0,
+                "sum_pnl_usd": round(pnl, 2),
+                "ev_usd": round((pnl / trades), 2) if trades else 0,
             })
         else:
             buckets.append({"spread": spread_key, "trades": 0, "win_rate_pct": 0, "sum_pnl_usd": 0, "ev_usd": 0})
-    return {"buckets": buckets, "generated_at": generated_at, "source": "0_chases|spread=*"}
+    return {
+        "buckets": buckets,
+        "generated_at": generated_at,
+        "source": "chase_efficiency_matrix exact chase|spread cells",
+        "definition": "normalized directional score gap = abs(LONG score - SHORT score) // 10",
+    }
 
 def set_edge_threshold(value):
     value = round(float(value), 1)
@@ -17579,6 +17981,17 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
     step_pct, tier, use_marketable = _urgent_chase_step_for_order(order, signal)
+    next_chase_count = int(order.get("limit_chase_count") or 0) + 1
+    if not chase_bucket_allowed(next_chase_count):
+        logger.info(
+            f"[CHASE GATE] blocked bucket={chase_count_bucket(next_chase_count)} "
+            f"trade_id={order.get('trade_id')} chase_count={next_chase_count} "
+            f"— cancelling pending [PIPELINE ENFORCEMENT]"
+        )
+        _cancel_pending_for_chase_gate(
+            order, f"CHASE_BUCKET_{chase_count_bucket(next_chase_count)}"
+        )
+        return False
     if use_marketable:
         return _apply_urgent_marketable_chase(order, signal, price, now, tier=tier or "extreme")
     new_limit, reason = _compute_limit_chase_target(
@@ -17588,14 +18001,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         return False
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
-    chase_count = int(order.get("limit_chase_count") or 0) + 1
-    if not chase_bucket_allowed(chase_count):
-        logger.info(
-            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
-        )
-        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
-        return False
+    chase_count = next_chase_count
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
     order["last_chase_ts"] = now
@@ -19762,8 +20168,7 @@ def state_monitor_loop():
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
             # Type B consumes the same three-minute AI_SCAN result as Continuous.
-            # Tile 2 remains a no-AI deterministic bracket collector.
-            maybe_tick_sr_micro_tile_v2_static_bracket()
+            # The retired S/R study remains archived and is not ticked here.
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -19805,10 +20210,12 @@ def execute_order(signal, ai=None):
         )
         full_pipeline_trace("[EXECUTION]", "MODE_BLOCKED", signal.get("trade_id"))
         return False
-    # Pt 2 (toggle contract): TYPE_B_HUNTER_V1 must NEVER fall into the
-    # shared market-entry route. Force limit-only regardless of global
-    # pullback / compression settings.
+    # Both visible research policies promise bounded limit execution. Keep
+    # them off the shared market-entry route even if a dashboard control
+    # temporarily sets the global pullback to zero.
     is_type_b = str(lane or "").upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    is_continuous = str(lane or "").upper() == RESEARCH_LANE_CONTINUOUS
+    force_policy_limit = is_type_b or is_continuous
     if is_type_b and mode == EXEC_MODE_LIVE and not _private_api_keys_ok():
         logger.warning(
             f"[EXECUTION BLOCK] TYPE_B_LIVE keys missing trade_id={signal.get('trade_id')} "
@@ -19825,9 +20232,8 @@ def execute_order(signal, ai=None):
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
         pullback_pct = float(state.get("pullback_threshold", 0.001))
-        # Pt 2: TYPE_B_HUNTER_V1 ignores the global pullback/compression toggle.
-        # It always creates a limit order in both PAPER and LIVE modes.
-        use_instant = (not is_type_b) and (pullback_pct <= 0.0)
+        # Type B and Continuous always create policy limits in PAPER/LIVE mode.
+        use_instant = (not force_policy_limit) and (pullback_pct <= 0.0)
         if use_instant or not state.get("allow_compression", True):
             # Pt 2: even when global compression is off, TYPE_B still uses limits.
             if is_type_b:
@@ -20462,6 +20868,8 @@ def close_position(pos: dict, exit_reason: str):
             "pnl": round(net_pnl / margin_usdt * 100, 2),
             "margin_usdt": margin_usdt,
             "conviction_spread": pos.get("conviction_spread"),
+            "market_bid_ask_spread_usd_at_entry": pos.get("market_bid_ask_spread_usd_at_entry"),
+            "market_bid_ask_spread_bps_at_entry": pos.get("market_bid_ask_spread_bps_at_entry"),
             "net_pnl_usd": round(net_pnl, 2),
             "gross_pnl_usd": round(gross_pnl, 2),
             "trading_fees_usd": round(trading_fees, 2),
@@ -21315,6 +21723,21 @@ _API_STATE_INLINE_RESEARCH_AGGREGATES = (
 )
 _api_state_cache_lock = threading.Lock()
 _api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
+
+
+def _patch_api_state_cache_fields(**updates) -> None:
+    """Make successful control POSTs visible on the very next dashboard read."""
+    with _api_state_cache_lock:
+        payload = _api_state_cache.get("payload")
+        if not isinstance(payload, dict):
+            return
+        patched = dict(payload)
+        for key, value in updates.items():
+            patched[key] = copy.deepcopy(value)
+        _api_state_cache["payload"] = patched
+        _api_state_cache["built_at"] = time.time()
+
+
 csv_lock = threading.RLock()
 replay_lock = threading.RLock()
 ws_lock = threading.RLock()
@@ -21680,6 +22103,7 @@ def _perform_fresh_collection_reset_locked() -> dict:
     with state_lock:
         state["fresh_collection_mode"] = True
     _write_research_session(bot_start_time, fresh_collection_reset=True)
+    _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)
     load_session_trades_from_csv()
     archive_compaction = {
         "past_analysis_id": past_analysis_id,
@@ -21915,6 +22339,10 @@ def build_static_pathway_lane_specs() -> dict:
     )
     lanes = []
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
+        # Retired studies keep their implementation and ledgers for auditability
+        # but are absent from the active dashboard and cannot run new work.
+        if is_research_lane_retired(lane_id):
+            continue
         spec = COMBO_LANE_SPECS[lane_id]
         shadow_only = bool(spec.get("is_shadow_only")) or is_shadow_only_lane(lane_id)
         independent_ai = is_independent_ai_lane(lane_id)
@@ -22482,7 +22910,9 @@ def build_static_pathway_lane_specs() -> dict:
         "is_benchmark": True,
         "is_primary_production": False,
         "badge": "BENCHMARK",
-        "tile_number": len(COMBO_TILE_DISPLAY_ORDER) + 1,
+        # The retired S/R study is no longer displayed. Continuous is the
+        # second visible and active research tile.
+        "tile_number": 2,
         "entry_mode_label": "Continuous",
         "filter_chips": [
             f"One AI call ~{shared['ai_scan_cadence_sec']}s",
@@ -22611,7 +23041,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "v12 roster — Continuous + Type B share one direction AI call but keep separate policies/books; static S/R remains paper probation",
+        "architecture_freeze_note": "v15 roster — Continuous + Type B share one direction AI call but keep separate policies/books; retired S/R history remains archived",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -23141,6 +23571,7 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
                 "lab_net_pnl": 0.0,
                 "lab_open_shadows": 0,
             }
+    settings_breakdown = _settings_period_breakdown()
     merged = []
     for spec in static_payload.get("lanes") or []:
         lane = spec.get("lane")
@@ -23152,6 +23583,11 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         dm = disk_metrics.get(lane)
         if dm:
             row["session_stats"] = _session_stats_from_lane_metrics(dm)
+        row.setdefault("session_stats", {})
+        row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
+            row["session_stats"],
+            settings_breakdown.get(lane) or [],
+        )
         merged.append(row)
     out = copy.deepcopy(static_payload)
     out["lanes"] = merged
@@ -23199,6 +23635,7 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                     for row in (analyzer_payload.get("lanes") or [])
                     if row.get("lane")
                 }
+                settings_breakdown = _settings_period_breakdown()
                 merged_lanes = []
                 for spec in static_payload.get("lanes") or []:
                     row = copy.deepcopy(spec)
@@ -23206,6 +23643,11 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                     for key in ("session_stats", "delta_vs_benchmark"):
                         if analyzer_row.get(key) is not None:
                             row[key] = copy.deepcopy(analyzer_row[key])
+                    row.setdefault("session_stats", {})
+                    row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
+                        row["session_stats"],
+                        settings_breakdown.get(str(spec.get("lane") or "")) or [],
+                    )
                     merged_lanes.append(row)
                 payload = copy.deepcopy(static_payload)
                 payload["lanes"] = merged_lanes
@@ -23922,7 +24364,7 @@ HTML = """<!DOCTYPE html>
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">3-lane paper-research stack -- CONTINUOUS (benchmark) + TYPE_B_HUNTER_V1 + SR_MICRO_TILE_V2_STATIC (no full-chase S/R)</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">2-lane paper-research stack — CONTINUOUS benchmark + TYPE_B_HUNTER_V1 candidate. Retired studies remain in the archive only.</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
@@ -23930,11 +24372,11 @@ HTML = """<!DOCTYPE html>
   </details>
 </div>
 
-<details id="tradingParamsPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <summary>Advanced research &amp; execution controls</summary>
+<details id="tradingParamsPanel" open style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, edge gates, AI bands, and chase buckets — saved per port to config-PORT.json + browser backup</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
 <label>Pullback %:</label>
 <select id="pullbackThresh">
@@ -23952,29 +24394,18 @@ HTML = """<!DOCTYPE html>
 <h3>Ultimate execution control</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
-<label>Legacy AI confidence bands (audit-only in v12):</label>
-<div id="aiBandControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;">
-  <label><input type="checkbox" class="ai-band-cb" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
-  <label><input type="checkbox" class="ai-band-cb" data-band="45-50" onchange="updateAiBands()"> 45–50</label>
-  <label><input type="checkbox" class="ai-band-cb" data-band="50-55" onchange="updateAiBands()"> 50–55</label>
-  <label><input type="checkbox" class="ai-band-cb" data-band="55-60" onchange="updateAiBands()"> 55–60</label>
-  <label><input type="checkbox" class="ai-band-cb" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
-  <label><input type="checkbox" class="ai-band-cb" data-band="65+" onchange="updateAiBands()"> 65+</label>
-</div>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Direction-only v12 does not request a win percentage, so these historical bands are display/audit preferences only and never block an order. Directional score separation plus the lane, spread, chase, capacity, and safety gates control execution.</p>
-<input id="aiThreshold" type="hidden" value="50">
-<p id="aiBandGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
-<h3>Chase Analytics — execution buckets</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard is the only chase control — checked = ON for that chase count, unchecked = wait or cancel. No hidden defaults: the initial limit requires the 0-chases box; subsequent replacements require their matching chase bucket.</p>
+<h3>Directional gap analytics</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">The AI returns scores on a 0–100 scale. The checkbox uses the normalized bucket: <strong>raw LONG/SHORT difference ÷10, rounded down</strong>. Example: LONG 65 / SHORT 35 → raw gap 30 → execution bucket 3. These are analyzer results across exact chase-count cells.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;"><strong>Terminology:</strong> the older “conviction spread” is this same normalized AI gap—not a third independent signal. Exchange bid–ask spread is different; it remains visible in Market Data and is now recorded in USD and basis points at every new fill for future analysis. It is not an entry gate until enough outcomes accumulate.</p>
+<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Gap</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spreadBucketStats"></tbody></table>
+<h3>Chase entry selector — exact virtual counts</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may exist at that exact chase count. Before the first checked count the bot counts virtually without placing a limit. If a later count is unchecked, it removes the pending limit and waits for the next checked count; if none remains, the signal expires. Example: select 3 and 4 only → virtual 0–2, submit at 3, chase at 4, cancel before 5.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
-<h3>Spread Analytics — directional spread (0-chase fills)</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">From analyzer chase matrix — spread 4/5+ often strongest. Updates each analyzer run (~30 min).</p>
-<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Spread</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spreadBucketStats"></tbody></table>
-<h3>Spread hard-gate — block limit orders per spread bucket</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global per-spread-bucket allowlist. <strong>Checked</strong> = signals with that directional spread MAY place a limit order. <strong>Unchecked</strong> = hard block — no limit order, no chase (signal still logged for analytics). Default: 0,1,2,3 unchecked. Persists across restarts.</p>
+<h3>Directional gap hard-gate</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global normalized-gap allowlist. <strong>Checked</strong> = signals in that raw-score range MAY enter the chase workflow. <strong>Unchecked</strong> = hard block before any limit or virtual chase; the signal is still logged. Example: raw gap 30 uses bucket 3 (30–39). Persists across restarts.</p>
 <p id="spreadGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="spreadGateControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
@@ -24052,7 +24483,6 @@ HTML = """<!DOCTYPE html>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
-<p><strong>AI execution bands:</strong> <span id="aiThresholdDisplay">-</span></p>
 <p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">DEPRECATED — analytics only</span></p>
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
@@ -24083,7 +24513,6 @@ HTML = """<!DOCTYPE html>
     <p><strong>Pipeline Funnel (session):</strong> <span id="pipelineFunnel">-</span></p>
     <p><strong>Research Isolation:</strong> <span id="researchIsolation">-</span></p>
     <p><strong>Lane Opportunity (session):</strong> <span id="laneOpportunity">-</span></p>
-    <p><strong>Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel:</strong> <span id="tile2Metrics">-</span></p>
     <p><strong>Last AI Call:</strong> <span id="lastAICall">-</span></p>
     <p><strong>AI Score:</strong> <span id="aiScore">-</span></p>
     <p><strong>Signal Cooldown:</strong> <span id="signalCooldown">-</span></p>
@@ -24100,7 +24529,19 @@ HTML = """<!DOCTYPE html>
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
-<h2 id="activityTables">Active Signals</h2>
+<h2 id="activityTables">Virtual Chase Candidates</h2>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
+  Approved signals waiting for a selected chase count. These are <strong>not pending orders</strong>
+  and have no exchange exposure. They move to Pending Orders only when an enabled chase is reached.
+  Historical approvals on the tiles may already be executed, rejected later, or expired, so they are
+  not the same as the live queue below.
+</p>
+<table>
+    <thead><tr><th>Signal Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Direction</th><th>Raw gap</th><th>Gap bucket</th><th>Virtual limit</th><th>Current virtual chase</th><th>Next enabled chase</th><th>Expires in</th><th>State</th></tr></thead>
+    <tbody id="virtualChaseTable"></tbody>
+</table>
+
+<h2>Active Signals</h2>
 <table>
     <thead><tr><th>Signal Time (Melbourne)</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
@@ -24133,10 +24574,9 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Tile 2 uses no AI; its independent deterministic gate is shown below.</p>
-<div id="tile2DecisionSummary" style="margin:8px 0;padding:10px 12px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;">Tile 2 deterministic gate · collecting…</div>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Restored pre-restart calls may lack the newer per-lane verdict metadata.</p>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Gap</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -24220,21 +24660,8 @@ DASHBOARD_JS = """(function () {
       return p;
     }
     function restoreExecutionGatePrefsFromBrowser() {
-      const prefs = loadDashPrefs();
-      if (prefs.chase_execution_buckets) {
-        ensureChaseBucketControls();
-        syncChaseBucketControls(prefs.chase_execution_buckets);
-        renderChaseBucketGateStatus(prefs.chase_execution_buckets);
-      }
-      if (prefs.spread_gate) {
-        ensureSpreadGateControls();
-        syncSpreadGateControls(prefs.spread_gate);
-        renderSpreadGateStatus(prefs.spread_gate);
-      }
-      if (prefs.ai_execution_bands) {
-        syncAiBandControls(prefs.ai_execution_bands);
-        renderAiBandGateStatus(prefs.ai_execution_bands);
-      }
+      // Execution settings are server-owned. Browser storage is only a UI
+      // mirror and must never become the source of truth after a restart.
     }
     function persistExecutionGatePrefs(chase, bands) {
       const patch = { execution_gates_saved_at: Date.now() };
@@ -24252,54 +24679,11 @@ DASHBOARD_JS = """(function () {
       try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; }
     }
     async function reconcileRecentExecutionGatesFromBrowser() {
-      const prefs = loadDashPrefs();
-      const savedAt = prefs.execution_gates_saved_at;
-      if (!savedAt || (Date.now() - savedAt) > 30000) return;
-      markExecutionControlsBusy(12000);
-      executionControlSaveCount += 1;
-      try {
-        if (prefs.ai_execution_bands) {
-          await post('/api/set_ai_bands', {bands: prefs.ai_execution_bands});
-        }
-        if (prefs.chase_execution_buckets) {
-          await post('/api/set_chase_buckets', {buckets: prefs.chase_execution_buckets});
-        }
-        if (prefs.spread_gate) {
-          await post('/api/set_spread_gate', {gate: prefs.spread_gate});
-        }
-      } finally {
-        executionControlSaveCount -= 1;
-      }
+      // Deliberately no-op: refresh() hydrates controls from the durable bot
+      // configuration. A stale browser tab cannot rewrite execution gates.
     }
     function flushExecutionGatesOnUnload() {
-      const prefs = loadDashPrefs();
-      const headers = {'Content-Type': 'application/json'};
-      try {
-        if (prefs.ai_execution_bands) {
-          const body = JSON.stringify({bands: prefs.ai_execution_bands});
-          if (navigator.sendBeacon) {
-            navigator.sendBeacon('/api/set_ai_bands', new Blob([body], {type: 'application/json'}));
-          } else {
-            fetch('/api/set_ai_bands', {method: 'POST', headers, body, keepalive: true});
-          }
-        }
-        if (prefs.chase_execution_buckets) {
-          const body = JSON.stringify({buckets: prefs.chase_execution_buckets});
-          if (navigator.sendBeacon) {
-            navigator.sendBeacon('/api/set_chase_buckets', new Blob([body], {type: 'application/json'}));
-          } else {
-            fetch('/api/set_chase_buckets', {method: 'POST', headers, body, keepalive: true});
-          }
-        }
-        if (prefs.spread_gate) {
-          const body = JSON.stringify({gate: prefs.spread_gate});
-          if (navigator.sendBeacon) {
-            navigator.sendBeacon('/api/set_spread_gate', new Blob([body], {type: 'application/json'}));
-          } else {
-            fetch('/api/set_spread_gate', {method: 'POST', headers, body, keepalive: true});
-          }
-        }
-      } catch (e) {}
+      // Deliberately no-op. Explicit checkbox POSTs are the only write path.
     }
     let laneToggleInFlight = false;
     let freshCollectionInFlight = false;
@@ -24340,7 +24724,6 @@ DASHBOARD_JS = """(function () {
       const chase = (gates.chase_buckets_enabled || []).join(', ') || 'none';
       el.innerHTML =
         '<div><strong>AI reviewer:</strong> ' + (gates.ai_reviewer_enabled ? 'ON' : 'OFF') + '</div>' +
-        '<div><strong>Legacy confidence bands (audit-only):</strong> ' + bands + '</div>' +
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
         '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>';
@@ -24432,8 +24815,8 @@ DASHBOARD_JS = """(function () {
     function ensureChaseBucketControls() {
       const host = document.getElementById('chaseBucketControls');
       if (!host || host.dataset.ready === '1') return;
-      const order = ['0_chases','1_chase','2_chases','3-5_chases','6+_chases'];
-      const labels = {'0_chases':'0 chases','1_chase':'1 chase','2_chases':'2 chases','3-5_chases':'3–5 chases','6+_chases':'6+ chases'};
+      const order = ['0_chases','1_chase','2_chases','3_chases','4_chases','5+_chases'];
+      const labels = {'0_chases':'0 (immediate)','1_chase':'1','2_chases':'2','3_chases':'3','4_chases':'4','5+_chases':'5+'};
       host.innerHTML = order.map(k =>
         `<label><input type="checkbox" class="chase-bucket-cb" data-bucket="${k}" onchange="updateChaseBuckets()"> ${labels[k] || k}</label>`
       ).join('');
@@ -24478,7 +24861,14 @@ DASHBOARD_JS = """(function () {
       const host = document.getElementById('spreadGateControls');
       if (!host || host.dataset.ready === '1') return;
       const order = ['0','1','2','3','4','5+'];
-      const labels = {'0':'spread 0','1':'spread 1','2':'spread 2','3':'spread 3','4':'spread 4','5+':'spread 5+'};
+      const labels = {
+        '0':'bucket 0 (raw gap 0 to 9)',
+        '1':'bucket 1 (raw gap 10 to 19)',
+        '2':'bucket 2 (raw gap 20 to 29)',
+        '3':'bucket 3 (raw gap 30 to 39)',
+        '4':'bucket 4 (raw gap 40 to 49)',
+        '5+':'bucket 5+ (raw gap 50 to 100)'
+      };
       host.innerHTML = order.map(k =>
         `<label><input type="checkbox" class="spread-gate-cb" data-bucket="${k}" onchange="updateSpreadGate()"> ${labels[k] || k}</label>`
       ).join('');
@@ -24498,8 +24888,8 @@ DASHBOARD_JS = """(function () {
       const allowed = Object.keys(gate).filter(k => gate[k]);
       const blocked = Object.keys(gate).filter(k => !gate[k]);
       el.innerHTML = blocked.length
-        ? `<strong>Blocked spread buckets:</strong> ${blocked.join(', ')} · <strong>Allowed:</strong> ${allowed.join(', ')} · unchecked = no limit order for that spread`
-        : '<strong style="color:#3fb950">All spread buckets ALLOWED — spread gate is open</strong>';
+        ? `<strong>Blocked execution-gap buckets:</strong> ${blocked.join(', ')} · <strong>Allowed:</strong> ${allowed.join(', ')} · unchecked = no limit order for that raw-score range`
+        : '<strong style="color:#3fb950">All execution-gap buckets ALLOWED — gap gate is open</strong>';
     }
     async function updateSpreadGate() {
       const gate = readSpreadGateSelections();
@@ -24769,79 +25159,63 @@ DASHBOARD_JS = """(function () {
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
           const pausedAll = d.paused_shadow_stats || {};
-          const sourcePaused = pausedAll.manual_pause_active === true;
+          const sourcePaused = d.manual_admin_pause === true
+            || (d.execution_paused === true && d.execution_reason === 'ADMIN_MANUAL')
+            || pausedAll.manual_pause_active === true;
           const statRow = function (lbl, val, col) {
             return '<div style="text-align:center;"><div style="color:#6e7681;font-size:0.72em;">' + lbl + '</div>'
               + '<div style="color:' + (col || '#c9d1d9') + ';font-weight:600;font-size:0.9em;">' + val + '</div></div>';
           };
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
           const pnlCol = pnl >= 0 ? '#3fb950' : '#f85149';
-          // LAB (OFF-combo): primary Trades/PnL/EV show LAB ledger / open shadows.
-          // Independent AI V1 tiles (TYPE_B / SR_MICRO) use combo LAB shadow when OFF — same as other combo tiles.
-          // V2 keeps its own checker/shadow metrics UI (not LAB ledger).
-          const labEligible = !on && !(spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') && spec.status !== 'RETIRED' && !spec.planned;
-          const labOn = labEligible && (stats.lab_mode || (stats.lab_closes > 0) || (stats.lab_open_shadows > 0));
-          const v2Shadow = spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2' && !on;
-          const v2ChkPass = stats.checker_pass_sims != null ? stats.checker_pass_sims : (stats.real_fills != null ? stats.real_fills : 0);
-          const v2ChkPnl = stats.checker_pass_pnl != null ? stats.checker_pass_pnl : (stats.net_pnl_real != null ? stats.net_pnl_real : 0);
-          const v2ChkPnlCol = v2ChkPnl >= 0 ? '#3fb950' : '#f85149';
-          const v2RejectSims = stats.reject_counterfactual_sims != null ? stats.reject_counterfactual_sims : 0;
-          const v2RejectPnl = stats.reject_counterfactual_pnl != null ? stats.reject_counterfactual_pnl : 0;
-          const v2RejectPnlCol = v2RejectPnl >= 0 ? '#3fb950' : '#f85149';
-          const v2PaperFills = stats.paper_fills != null ? stats.paper_fills : 0;
-          const labPnl = stats.lab_net_pnl != null ? stats.lab_net_pnl : 0;
-          const labPnlCol = labPnl >= 0 ? '#3fb950' : '#f85149';
-          const labCloses = stats.lab_closes != null ? stats.lab_closes : 0;
-          const labOpen = stats.lab_open_shadows != null ? stats.lab_open_shadows : 0;
-          const labEv = stats.lab_per_close_ev != null ? stats.lab_per_close_ev : 0;
-          const labPrimaryTrades = labCloses > 0 ? labCloses : (labOpen > 0 ? ('⏳' + labOpen) : 0);
-          const labPrimaryPnl = labCloses > 0 ? ('$' + Number(labPnl).toFixed(2)) : (labOpen > 0 ? 'collecting' : '$0.00');
-          const labPrimaryEv = labCloses > 0 ? ('$' + Number(labEv).toFixed(2)) : (labOpen > 0 ? '—' : '$0.00');
-          const activeCounts = ((d.lane_position_counts || {})[spec.lane]) || {};
-          const activePending = Number(activeCounts.pending || 0);
-          const activeOpen = Number(activeCounts.open || 0);
-          const activeGrid = (on || activePending > 0 || activeOpen > 0)
-            ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#101820;border:1px solid #30363d;border-radius:8px;">'
-              + statRow('Pending', activePending, activePending > 0 ? '#f0c14b' : '#8b949e')
-              + statRow('Open', activeOpen, activeOpen > 0 ? '#3fb950' : '#8b949e')
-              + statRow('Local book', sourcePaused ? 'PAUSED SHADOW' : (on ? 'ACTIVE' : 'EXIT ONLY'), sourcePaused ? '#a371f7' : (on ? '#3fb950' : '#f0c14b'))
-              + statRow('Live copy', spec.platform_relay_eligible ? 'RELAY-GATED' : 'BLOCKED', spec.platform_relay_eligible ? '#58a6ff' : '#f85149')
-              + '</div>')
-            : '';
-          // Shadow evidence remains in the V2 audit stream and unified
-          // research dashboard; do not duplicate it on every operational tile.
-          const pausedGrid = '';
+          const settingPeriods = Array.isArray(stats.settings_periods) ? stats.settings_periods : [];
+          const formatPeriodTime = function (epoch) {
+            if (!epoch) return '—';
+            try {
+              return new Date(Number(epoch) * 1000).toLocaleString('en-AU', {
+                timeZone: 'Australia/Melbourne',
+                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+              });
+            } catch (_) {
+              return '—';
+            }
+          };
+          const settingsRows = settingPeriods.map(function (period) {
+            const legacy = period.settings_recorded === false;
+            const gap = legacy ? 'Not recorded' : ((period.gap_buckets || []).join(', ') || 'None');
+            const chase = legacy ? 'Not recorded' : ((period.chase_buckets || []).join(', ') || 'None');
+            const periodLabel = legacy
+              ? 'Legacy baseline'
+              : (formatPeriodTime(period.start) + (period.current ? ' · CURRENT' : ''));
+            const periodPnl = Number(period.pnl_usd || 0);
+            const periodEv = period.ev_per_approval;
+            return '<tr>'
+              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + periodLabel + '</td>'
+              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + gap + '</td>'
+              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + chase + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.approvals || 0) + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.executed || 0) + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;color:' + (periodPnl >= 0 ? '#3fb950' : '#f85149') + ';">$' + periodPnl.toFixed(2) + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
+              + '</tr>';
+          }).join('');
+          const settingsBreakdown = '<div style="margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:auto;">'
+            + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the complete Fresh Collection total</div>'
+            + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
+            + '<thead><tr style="color:#8b949e;background:#101820;">'
+            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Chase</th>'
+            + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Executed</th>'
+            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
+            + '</tr></thead><tbody>'
+            + (settingsRows || '<tr><td colspan="7" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
+            + '</tbody></table></div>';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
-            + (v2Shadow
-              ? statRow('Chk pass', v2ChkPass)
-                + statRow('Chk PnL', '$' + Number(v2ChkPnl).toFixed(2), v2ChkPnlCol)
-                + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%')
-                + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
-              : labOn
-                ? statRow('Shadow trades', labPrimaryTrades, '#58a6ff')
-                  + statRow('Shadow PnL', labPrimaryPnl, labCloses > 0 ? labPnlCol : '#58a6ff')
-                  + statRow('Shadow EV/close', labPrimaryEv, '#58a6ff')
-                  + statRow('Shadow win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
-                : statRow('Executed', stats.real_fills != null ? stats.real_fills : 0)
-                  + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-                  + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
-                  + statRow('Win%', Number(stats.win_rate_pct || 0).toFixed(0) + '%'))
+            + statRow('Executed', stats.real_fills != null ? stats.real_fills : 0)
+            + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
+            + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
             + '</div>'
-            + (v2Shadow ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
-              + statRow('Paper fills', v2PaperFills, '#58a6ff')
-              + statRow('Reject sim', v2RejectSims, '#58a6ff')
-              + statRow('Rej PnL', '$' + Number(v2RejectPnl).toFixed(2), v2RejectPnlCol)
-              + statRow('Approves', stats.approves != null ? stats.approves : 0, '#58a6ff')
-              + '</div>') : '')
-            + activeGrid
-            + pausedGrid
-            + (labOn ? ('<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;padding:8px;background:#0d1f33;border:1px solid #1f6feb;border-radius:8px;">'
-              + statRow(stats.lab_pnl_source === 'reconciled_shadow_outcomes' ? 'Reconciled' : 'LAB sim', 'LAB ' + labCloses + (labOpen ? ('; ' + labOpen + ' open') : ''), '#58a6ff')
-              + statRow('Shadow PnL (not account)', '$' + Number(labPnl).toFixed(2), labPnlCol)
-              + statRow('Shadow win%', Number(stats.lab_win_rate || 0).toFixed(0) + '%', '#58a6ff')
-              + statRow('Shadow EV/close', '$' + Number(labEv).toFixed(2), '#58a6ff')
-              + '</div>') : '');
+            + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
           }).join('');
@@ -24946,7 +25320,6 @@ DASHBOARD_JS = """(function () {
               return html + '</div>';
             })()
             + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
-            + (labOn && stats.lab_summary_line ? ('<div style="margin-top:4px;font-size:0.76em;color:#58a6ff;">' + stats.lab_summary_line + '</div>') : '')
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -25503,46 +25876,23 @@ DASHBOARD_JS = """(function () {
         }
         renderUltimateGatePanel(d.dashboard_execution_gates || {});
         if (!executionControlsBusy()) {
-          const prefs = loadDashPrefs();
-          const recentLocal = prefs.execution_gates_saved_at && (Date.now() - prefs.execution_gates_saved_at) < 30000;
           if (d.ai_execution_bands) {
-            const useServerBands = !recentLocal || !prefs.ai_execution_bands
-              || executionGatePrefsEqual(prefs.ai_execution_bands, d.ai_execution_bands);
-            if (useServerBands) {
-              syncAiBandControls(d.ai_execution_bands);
-              renderAiBandGateStatus(d.ai_execution_bands);
-              persistExecutionGatePrefs(null, d.ai_execution_bands);
-            } else {
-              syncAiBandControls(prefs.ai_execution_bands);
-              renderAiBandGateStatus(prefs.ai_execution_bands);
-            }
+            syncAiBandControls(d.ai_execution_bands);
+            renderAiBandGateStatus(d.ai_execution_bands);
+            persistExecutionGatePrefs(null, d.ai_execution_bands);
           } else if (d.ai_threshold != null && d.ai_threshold !== '') {
             const aiThresh = document.getElementById('aiThreshold');
             if (aiThresh) aiThresh.value = d.ai_threshold;
           }
           if (d.chase_execution_buckets) {
-            const useServerChase = !recentLocal || !prefs.chase_execution_buckets
-              || executionGatePrefsEqual(prefs.chase_execution_buckets, d.chase_execution_buckets);
-            if (useServerChase) {
-              syncChaseBucketControls(d.chase_execution_buckets);
-              renderChaseBucketGateStatus(d.chase_execution_buckets);
-              persistExecutionGatePrefs(d.chase_execution_buckets, null);
-            } else {
-              syncChaseBucketControls(prefs.chase_execution_buckets);
-              renderChaseBucketGateStatus(prefs.chase_execution_buckets);
-            }
+            syncChaseBucketControls(d.chase_execution_buckets);
+            renderChaseBucketGateStatus(d.chase_execution_buckets);
+            persistExecutionGatePrefs(d.chase_execution_buckets, null);
           }
           if (d.spread_gate) {
-            const useServerSg = !recentLocal || !prefs.spread_gate
-              || executionGatePrefsEqual(prefs.spread_gate, d.spread_gate);
-            if (useServerSg) {
-              syncSpreadGateControls(d.spread_gate);
-              renderSpreadGateStatus(d.spread_gate);
-              persistSpreadGatePrefs(d.spread_gate);
-            } else {
-              syncSpreadGateControls(prefs.spread_gate);
-              renderSpreadGateStatus(prefs.spread_gate);
-            }
+            syncSpreadGateControls(d.spread_gate);
+            renderSpreadGateStatus(d.spread_gate);
+            persistSpreadGatePrefs(d.spread_gate);
           }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
@@ -25575,7 +25925,39 @@ DASHBOARD_JS = """(function () {
           capWarn.style.display = msgs.length ? 'block' : 'none';
           capWarn.innerText = msgs.join(' ');
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE")).map(s => `
+        const allLiveSignals = d.signal_info?.signals || [];
+        const virtualSignals = allLiveSignals.filter(s => !s.terminal && (s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE"));
+        const virtualRows = virtualSignals.map(s => {
+          const virtualN = s.dashboard_virtual_chase_count != null
+            ? s.dashboard_virtual_chase_count
+            : (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0);
+          const spread = Number(s.directional_spread);
+          const rawGap = s.score_gap != null
+            ? Number(s.score_gap)
+            : (Number.isFinite(spread) ? Math.round(spread * 10) : null);
+          const gapBucket = Number.isFinite(spread)
+            ? (spread >= 5 ? '5+' : String(Math.max(0, Math.floor(spread))))
+            : '-';
+          return `
+          <tr>
+            <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts)}</td>
+            <td>${s.age_min != null ? s.age_min.toFixed(1) : '-'}</td>
+            <td>${laneBadge(s.research_lane, s.research_model)}</td>
+            <td>${s.final_direction || s.dir || '-'}</td>
+            <td>${Number.isFinite(rawGap) ? rawGap.toFixed(0) : '-'}</td>
+            <td>${gapBucket}</td>
+            <td>${s.limit_price != null ? s.limit_price.toFixed(2) : '-'}</td>
+            <td>${virtualN}</td>
+            <td>${s.next_enabled_chase != null ? s.next_enabled_chase : 'none'}</td>
+            <td>${s.ttl_remaining != null ? Math.max(0, s.ttl_remaining / 60).toFixed(1) + 'm' : '-'}</td>
+            <td>VIRTUAL ONLY · no order/exposure</td>
+          </tr>`;
+        }).join('');
+        safeHTML(
+          'virtualChaseTable',
+          virtualRows || '<tr><td colspan="11" style="color:#8b949e;">No live virtual-chase candidate right now. Tile approval totals are historical for the current collection/settings period, not a count of orders waiting at this moment.</td></tr>'
+        );
+        safeHTML('signalsTable', allLiveSignals.filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
             <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts || s.time)}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -25613,21 +25995,28 @@ DASHBOARD_JS = """(function () {
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
           </tr>`;
         }).join(''));
-        safeHTML('positionsTable', (d.positions||[]).map(l => `
-          <tr>
-            <td>${l.entry_ts_melbourne || formatMelbourneDateTime(l.entry_ts || l.fill_ts || l.open_ts)}</td>
-            <td>${l.leg || '-'}</td>
-            <td>${laneBadge(l.research_lane, l.research_model)}</td>
-            <td>${l.side || '-'}</td>
-            <td>${l.qty || '-'}</td>
-            <td>${l.entry != null ? l.entry.toFixed(2) : '-'}</td>
-            <td>${l.current_price != null ? l.current_price.toFixed(2) : '-'}</td>
-            <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
-            <td>${l.tp || '-'}</td>
-            <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
-            <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
-          </tr>
-        `).join(''));
+        safeHTML('positionsTable', (d.positions||[]).map(l => {
+          const marginPct = Number(l.pnl_pct_margin);
+          const unrealUsd = Number(l.unreal_usd);
+          const pnlText = Number.isFinite(marginPct) && Number.isFinite(unrealUsd)
+            ? `${marginPct.toFixed(2)}% · ${unrealUsd < 0 ? '-$' : '$'}${Math.abs(unrealUsd).toFixed(2)}`
+            : 'calculating…';
+          return `
+            <tr>
+              <td>${l.entry_ts_melbourne || formatMelbourneDateTime(l.entry_ts || l.fill_ts || l.open_ts)}</td>
+              <td>${l.leg || '-'}</td>
+              <td>${laneBadge(l.research_lane, l.research_model)}</td>
+              <td>${l.side || '-'}</td>
+              <td>${l.qty || '-'}</td>
+              <td>${l.entry != null ? l.entry.toFixed(2) : '-'}</td>
+              <td>${l.current_price != null ? l.current_price.toFixed(2) : '-'}</td>
+              <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
+              <td>${l.tp || '-'}</td>
+              <td>${pnlText}</td>
+              <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
+            </tr>
+          `;
+        }).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
             <td>${e.time_melbourne || formatMelbourneDateTime(e.time || e.expired_ts || e.created_ts)}</td>
@@ -25721,10 +26110,19 @@ DASHBOARD_JS = """(function () {
             ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
-            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.';
+            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above. '
+            + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
-        const formatLaneVerdict = (v) => {
-          if (!v) return '<span style="color:#8b949e" title="No research verdict was recorded. This is not a pending order.">not evaluated</span>';
+        const formatLaneVerdict = (v, row) => {
+          if (!v) {
+            if (row && row.ai_error) {
+              return '<span style="color:#f85149" title="The shared AI request failed before either lane could evaluate it.">AI call failed — no verdict</span>';
+            }
+            if (row && row.verdict_provenance === 'RESTORED_PRE_RESTART_NO_LANE_METADATA') {
+              return '<span style="color:#8b949e" title="This call predates journal-backed per-lane verdict storage.">legacy call — lane metadata unavailable</span>';
+            }
+            return '<span style="color:#8b949e" title="The lane-specific evaluator did not stamp a result for this call. This is not a pending order.">evaluation not reached</span>';
+          }
           const accepted = v.accepted === true || v.ok === true;
           const label = accepted ? 'ACCEPT' : (v.reason || v.block_reason || 'REJECT');
           const score = v.score != null ? ` · score ${v.score}` : '';
@@ -25737,6 +26135,14 @@ DASHBOARD_JS = """(function () {
           const verdicts = a.lane_verdicts || {};
           const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
           const typeBVerdict = a.type_b_verdict || verdicts.TYPE_B_HUNTER_V1;
+          const rawGap = a.score_gap != null
+            ? Number(a.score_gap)
+            : (a.long_score != null && a.short_score != null
+              ? Math.abs(Number(a.long_score) - Number(a.short_score))
+              : null);
+          const gapBucket = rawGap == null || Number.isNaN(rawGap)
+            ? '-'
+            : (Math.floor(rawGap / 10) >= 5 ? '5+' : String(Math.floor(rawGap / 10)));
           return `
           <tr>
             <td>${a.melbourne_time || formatMelbourneDateTime(a.time || a.ts)}</td>
@@ -25745,12 +26151,13 @@ DASHBOARD_JS = """(function () {
             <td>${a.candidate_direction || a.final_direction || '-'}</td>
             <td>${a.long_score != null ? a.long_score : '-'}</td>
             <td>${a.short_score != null ? a.short_score : '-'}</td>
-            <td>${a.score_gap != null ? a.score_gap : '-'}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict)}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict)}</td>
+            <td>${rawGap != null && !Number.isNaN(rawGap) ? rawGap : '-'}</td>
+            <td>${gapBucket}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict, a)}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict, a)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="10" style="color:#8b949e">No AI calls yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="11" style="color:#8b949e">No AI calls yet this session</td></tr>');
         safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
           <tr>
             <td>${k}%</td>
@@ -25965,8 +26372,6 @@ DASHBOARD_JS = """(function () {
       }
       const dashPrefs = loadDashPrefs();
       restoreExecutionGatePrefsFromBrowser();
-      window.addEventListener('beforeunload', flushExecutionGatesOnUnload);
-      window.addEventListener('pagehide', flushExecutionGatesOnUnload);
       const autoToggle = document.getElementById('autoRefreshToggle');
       if (autoToggle) {
         autoToggle.checked = dashPrefs.autoRefresh === true;
@@ -26578,6 +26983,7 @@ _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
     "entry_mode", "dashboard_virtual_chase_count",
     "chase_3plus_virtual_chase_count", "chase_3plus_activation_reason",
     "entry_path", "order_placed", "pull_req", "max_pull", "regime_birth",
+    "directional_spread", "score_gap",
 })
 
 
@@ -26786,6 +27192,15 @@ def _collect_dashboard_active_signals(
             "awaiting_dashboard_chase": s.get("status") == SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
             "dashboard_virtual_chase_count": s.get("dashboard_virtual_chase_count") or s.get("chase_3plus_virtual_chase_count"),
             "chase_3plus_virtual_chase_count": s.get("chase_3plus_virtual_chase_count"),
+            "next_enabled_chase": _next_enabled_chase_after(
+                int(
+                    s.get("dashboard_virtual_chase_count")
+                    or s.get("chase_3plus_virtual_chase_count")
+                    or 0
+                )
+            ),
+            "directional_spread": s.get("directional_spread"),
+            "score_gap": s.get("score_gap"),
             "chase_3plus_activation_reason": s.get("chase_3plus_activation_reason"),
             "entry_path": s.get("entry_path"),
         })
@@ -27226,7 +27641,7 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
     """Open position truth required by flatness, mirror, and exit checks."""
     if not isinstance(row, dict):
         return {}
-    return {
+    out = {
         "trade_id": row.get("trade_id"),
         "status": row.get("status"),
         "dir": row.get("dir") or row.get("side"),
@@ -27246,6 +27661,28 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model"),
     }
+    # The active dashboard overlays this bounded relay row while paper execution
+    # is running. Keep the presentation P&L fields in the overlay too; otherwise
+    # a real open paper position renders as "-% $-" even though its mark is fresh.
+    try:
+        entry = float(row.get("entry") or 0)
+        mark = float(tick_px or 0)
+        leverage = float(row.get("leverage") or DEFAULT_RESEARCH_LEVERAGE)
+        if entry > 0 and mark > 0 and leverage > 0:
+            direction = str(row.get("dir") or row.get("side") or "LONG").upper()
+            dir_factor = -1.0 if direction == "SHORT" else 1.0
+            move_pct = ((mark - entry) / entry) * 100.0 * dir_factor
+            gross_usd = (move_pct / 100.0) * FIXED_MARGIN_USDT * leverage
+            funding_acc = float(row.get("funding_fees") or 0.0)
+            out["pnl_pct_margin"] = move_pct * leverage
+            out["unreal_usd_gross"] = gross_usd
+            out["funding_fees_accrued"] = funding_acc
+            out["unreal_usd"] = round(gross_usd - funding_acc, 4)
+    except (TypeError, ValueError, OverflowError):
+        # Position identity/flatness remains authoritative even if a malformed
+        # optional presentation value cannot be calculated.
+        pass
+    return out
 
 
 def _build_relay_execution_state_snapshot() -> dict:
@@ -27282,6 +27719,10 @@ def _build_relay_execution_state_snapshot() -> dict:
             "execution_paused": bool(state.get("execution_paused", False)),
             "execution_reason": state.get("execution_reason"),
             "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+            "continuous_ai_research_enabled": bool(
+                state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
+            ),
+            "research_lane_enabled": copy.deepcopy(state.get("research_lane_enabled") or {}),
             "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
             "strategy_mode": state.get("strategy_mode"),
             "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
@@ -27309,6 +27750,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
             if isinstance(row, dict)
         ]
+        expired_orders_total = len(expired_orders)
         recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
@@ -27348,6 +27790,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_expired
         if isinstance(row, dict)
     ]
+    snapshot["expired_orders_total"] = expired_orders_total
     snapshot["signal_info"] = {
         "active": bool(active_list),
         "count": len(active_list),
@@ -27699,13 +28142,28 @@ def _build_api_state_snapshot():
                 pending_orders_copy,
                 positions_copy,
             )
-            lane_position_counts = {
-                ln: {
-                    "open": len(lane_open_positions.get(ln, [])),
-                    "pending": len(lane_pending_orders.get(ln, [])),
+            # Derive dashboard counts from the same immutable snapshots that
+            # are returned below.  The auxiliary per-lane registries can lag
+            # after a restored paper position, which previously made a real
+            # row appear under Positions while its tile incorrectly said
+            # "Open 0".
+            lane_position_counts = {}
+            for ln in dict.fromkeys(
+                PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS,)
+            ):
+                lane_position_counts[ln] = {
+                    "open": sum(
+                        1
+                        for pos in positions_copy
+                        if pos.get("status") == "OPEN"
+                        and _normalize_lane_key(pos) == ln
+                    ),
+                    "pending": sum(
+                        1
+                        for order in pending_orders_copy
+                        if _normalize_lane_key(order) == ln
+                    ),
                 }
-                for ln in PATHWAY_LAB_LANES
-            }
         finally:
             trade_lock.release()
         active_list, exposure_count = _collect_dashboard_active_signals(
@@ -28056,6 +28514,8 @@ def _api_state_cache_refresher_loop():
                     "execution_paused",
                     "execution_reason",
                     "manual_admin_pause",
+                    "continuous_ai_research_enabled",
+                    "research_lane_enabled",
                     "live_armed",
                     "max_active_signals",
                     "strategy_mode",
@@ -28083,6 +28543,31 @@ def _api_state_cache_refresher_loop():
                 ):
                     if key in relay:
                         snap[key] = relay[key]
+                relay_expired = relay.get("expired_orders") or []
+                snap["expired_orders"] = copy.deepcopy(
+                    relay_expired[-_DASHBOARD_HISTORY_MAX:]
+                )
+                snap["expired_orders_total"] = int(
+                    relay.get("expired_orders_total")
+                    if relay.get("expired_orders_total") is not None
+                    else len(relay_expired)
+                )
+                with state_lock:
+                    ai_history_all = _session_ai_history(
+                        list(state.get("ai_history") or []),
+                        50,
+                    )
+                    snap["ai_history"] = copy.deepcopy(
+                        ai_history_all[-_DASHBOARD_HISTORY_MAX:]
+                    )
+                    snap["ai_history_total"] = len(ai_history_all)
+                    snap["ai_history_updated"] = state.get("ai_history_updated", 0.0)
+                    snap["shared_ai_lane_counters"] = copy.deepcopy(
+                        state.get("shared_ai_lane_counters") or {}
+                    )
+                snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
+                    for_api=True
+                )
                 snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
                 snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             with _api_state_cache_lock:
@@ -28270,15 +28755,34 @@ def health():
         manual = bool(state.get("manual_admin_pause", False))
         bot_version = state.get("bot_version") or EXECUTION_FIX_VERSION
         analyzer_sync_id = state.get("analyzer_sync_id") or ANALYZER_SYNC_ID
+        ws_ready = bool(state.get("ws_ready", False))
+        ws_tick = state.get("ws_last_tick")
+        system_ready = bool(state.get("system_ready", False))
+        live_armed = bool(state.get("live_armed", False))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled", False))
+    now = time.time()
+    heartbeat_age = max(0.0, now - float(hb or 0))
+    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
+    force_paper_mode = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
         **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
-        "time_since_heartbeat": time.time() - hb,
+        "time_since_heartbeat": heartbeat_age,
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
+        "system_ready": system_ready,
+        "ws_ready": ws_ready,
+        "ws_age": ws_age,
+        "live_armed": live_armed,
+        "bitfinex_live_enabled": bitfinex_live_enabled,
+        "force_paper_mode": force_paper_mode,
+        "relay_configured": relay_configured,
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
@@ -28286,6 +28790,40 @@ def health():
         "git_rev": _runtime_git_rev(),
         "tile2_policy": tile2_policy_descriptor(),
     })
+
+
+@app.route('/ready')
+@app.route('/api/ready')
+def ready():
+    """Strict Fly/deploy readiness probe; unlike /health it fails on stale market data."""
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
+        ws_tick = state.get("ws_last_tick")
+        ws_ready = bool(state.get("ws_ready", False))
+        system_ready = bool(state.get("system_ready", False))
+    now = time.time()
+    heartbeat_age = max(0.0, now - float(hb or 0))
+    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
+    dashboard_owner = is_active_dashboard_owner()
+    ok = bool(
+        dashboard_owner
+        and system_ready
+        and ws_ready
+        and heartbeat_age <= 15.0
+        and ws_age is not None
+        and ws_age < STALE_HARD_SEC
+    )
+    return jsonify({
+        "ok": ok,
+        "status": "ready" if ok else "not_ready",
+        **_dashboard_owner_metadata(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "heartbeat_age": heartbeat_age,
+        "ws_age": ws_age,
+        "system_ready": system_ready,
+        "ws_ready": ws_ready,
+    }), (200 if ok else 503)
+
 
 @app.route('/debug_state')
 def get_debug_state():
@@ -28459,6 +28997,9 @@ def toggle_continuous_ai_research():
     suspend_result = None
     if not state["continuous_ai_research_enabled"]:
         suspend_result = suspend_lane_trading(RESEARCH_LANE_CONTINUOUS, reason="CONTINUOUS_AI_OFF")
+    _patch_api_state_cache_fields(
+        continuous_ai_research_enabled=state["continuous_ai_research_enabled"]
+    )
     return jsonify({
         "continuous_ai_research_enabled": state["continuous_ai_research_enabled"],
         "suspend": suspend_result,
@@ -28483,6 +29024,7 @@ def toggle_research_lane():
     suspend_result = None
     if not enabled[lane]:
         suspend_result = suspend_lane_trading(lane, reason="LANE_TOGGLE_OFF")
+    _patch_api_state_cache_fields(research_lane_enabled=enabled)
     logger.info(
         f"[RESEARCH_LANE] {lane} set {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
     )
@@ -28728,10 +29270,10 @@ def set_chase_buckets():
 
 @app.route('/api/spread-gate', methods=['GET', 'POST', 'OPTIONS'])
 def api_spread_gate():
-    """Hard spread-bucket gate — per-spread-bucket allow/deny for limit order placement.
+    """Compatibility API backed by the canonical dashboard gap gate.
 
     GET  -> {disabled_buckets:[int], known_buckets:[int]}
-    POST {disabled_buckets:[int]} -> persists spread-gate.json + updates in-memory set.
+    POST {disabled_buckets:[int]} -> updates the same config-7002.json gate as the dashboard.
     Ticked (allowed) = NOT in disabled_buckets; unticked (disabled) = in disabled_buckets.
     Cross-origin enabled so the apps/web founder dashboard can toggle it directly.
     """
@@ -28743,7 +29285,11 @@ def api_spread_gate():
         return resp
 
     if request.method == 'GET':
-        disabled = _disabled_spread_buckets_snapshot()
+        gate = get_spread_gate()
+        disabled = [
+            bucket for bucket in SPREAD_GATE_KNOWN_BUCKETS
+            if not gate.get("5+" if bucket >= 5 else str(bucket), False)
+        ]
         resp = jsonify({
             "disabled_buckets": sorted(disabled),
             "known_buckets": list(SPREAD_GATE_KNOWN_BUCKETS),
@@ -28758,7 +29304,20 @@ def api_spread_gate():
         resp.status_code = 400
         resp.headers['Access-Control-Allow-Origin'] = '*'
         return resp
-    new_disabled = _set_disabled_spread_buckets(buckets)
+    disabled = {_spread_gate_clamp(bucket) for bucket in buckets}
+    canonical_gate = {
+        "0": 0 not in disabled,
+        "1": 1 not in disabled,
+        "2": 2 not in disabled,
+        "3": 3 not in disabled,
+        "4": 4 not in disabled,
+        "5+": not any(bucket in disabled for bucket in (5, 6, 7)),
+    }
+    set_spread_gate(canonical_gate)
+    new_disabled = [
+        bucket for bucket in SPREAD_GATE_KNOWN_BUCKETS
+        if not canonical_gate.get("5+" if bucket >= 5 else str(bucket), False)
+    ]
     logger.info(
         f"[SPREAD GATE] updated disabled_buckets={new_disabled} [PIPELINE ENFORCEMENT]"
     )
@@ -28825,6 +29384,304 @@ def download_debug_config():
     with state_lock:
         config = {k: v for k, v in state.items() if not k.startswith("_")}
     return jsonify(config), 200, {'Content-Disposition': 'attachment; filename=debug_config.json'}
+
+
+# Fly is the sole 24/7 raw-data owner after cutover; the home analyzer pulls an
+# authenticated incremental mirror when the PC is online. These endpoints are
+# intentionally absent from _READ_ONLY_GET_PATHS, so the global API guard
+# requires BOT_ADMIN_TOKEN even for downloads.
+_DATA_SYNC_EXTENSIONS = frozenset({
+    ".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt",
+})
+_DATA_SYNC_EXCLUDED_NAMES = frozenset({
+    "manifest.json", "genome_cluster_library.json",
+})
+_DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
+
+
+def _data_sync_runtime_root() -> Path:
+    return Path.cwd().resolve()
+
+
+def _data_sync_volume_root() -> Path:
+    raw = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return _data_sync_runtime_root()
+
+
+def _data_sync_allowed_roots() -> list:
+    runtime = _data_sync_runtime_root()
+    roots = [runtime]
+    for name in ("research", "research_accumulator", "research_archive"):
+        candidate = runtime / name
+        if candidate.exists():
+            roots.append(candidate)
+    return roots
+
+
+def _data_sync_relpath(path: Path) -> str:
+    runtime = _data_sync_runtime_root()
+    try:
+        return path.resolve().relative_to(runtime).as_posix()
+    except ValueError:
+        # Volume-backed research directories can be symlinked beside runtime.
+        for name in ("research", "research_accumulator", "research_archive"):
+            link = runtime / name
+            try:
+                return f"{name}/{path.resolve().relative_to(link.resolve()).as_posix()}"
+            except (ValueError, OSError):
+                continue
+    raise ValueError("path is outside runtime data roots")
+
+
+def _data_sync_path_allowed(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+        volume = _data_sync_volume_root()
+        resolved.relative_to(volume)
+    except (OSError, ValueError):
+        return False
+    name_lower = resolved.name.lower()
+    if resolved.name in _DATA_SYNC_EXCLUDED_NAMES:
+        return False
+    if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
+        return False
+    return resolved.is_file() and resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+
+
+def _data_sync_resolve_relpath(raw_rel: str) -> Path:
+    rel = str(raw_rel or "").replace("\\", "/").strip("/")
+    if not rel or rel.startswith(".") or ".." in rel.split("/"):
+        raise ValueError("invalid relative path")
+    runtime = _data_sync_runtime_root()
+    candidate = runtime.joinpath(*rel.split("/"))
+    if not _data_sync_path_allowed(candidate):
+        raise ValueError("path is not an allowed runtime data file")
+    return candidate.resolve()
+
+
+def _data_sync_inventory() -> list:
+    runtime = _data_sync_runtime_root()
+    seen = set()
+    rows = []
+    for root in _data_sync_allowed_roots():
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    resolved = path.resolve(strict=True)
+                    if resolved in seen or not _data_sync_path_allowed(path):
+                        continue
+                    seen.add(resolved)
+                    stat = resolved.stat()
+                    rows.append({
+                        "path": _data_sync_relpath(path),
+                        "size": int(stat.st_size),
+                        "mtime_ns": int(stat.st_mtime_ns),
+                        "inode": int(getattr(stat, "st_ino", 0) or 0),
+                    })
+                except (OSError, ValueError):
+                    continue
+                if len(rows) >= 5000:
+                    break
+            if len(rows) >= 5000:
+                break
+        if len(rows) >= 5000:
+            break
+    rows.sort(key=lambda row: row["path"])
+    return rows
+
+
+def _data_sync_ack_path() -> Path:
+    return _data_sync_volume_root() / "sync_ack.json"
+
+
+def _read_data_sync_ack() -> dict:
+    try:
+        raw = json.loads(_data_sync_ack_path().read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_data_sync_ack(payload: dict) -> None:
+    target = _data_sync_ack_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def _prune_acknowledged_rotations(acks: dict) -> list:
+    """Delete only fully acknowledged, old .3+ rotation files.
+
+    Active files and the two newest rotations are never touched. Unacknowledged
+    evidence is never deleted, even under disk pressure.
+    """
+    removed = []
+    cutoff = time.time() - (24 * 3600)
+    for rel, ack in list((acks or {}).items()):
+        match = re.search(r"\.(\d+)$", rel)
+        if not match or int(match.group(1)) < 3 or not isinstance(ack, dict):
+            continue
+        try:
+            path = _data_sync_resolve_relpath(rel)
+            stat = path.stat()
+            if (
+                stat.st_mtime <= cutoff
+                and int(ack.get("size") or -1) == int(stat.st_size)
+                and int(ack.get("mtime_ns") or -1) == int(stat.st_mtime_ns)
+            ):
+                path.unlink()
+                removed.append(rel)
+        except (OSError, ValueError):
+            continue
+    return removed
+
+
+@app.route('/api/data-sync/manifest')
+def api_data_sync_manifest():
+    files = _data_sync_inventory()
+    usage = shutil.disk_usage(_data_sync_volume_root())
+    ack = _read_data_sync_ack()
+    return jsonify({
+        "schema": "fly_runtime_incremental_sync_v1",
+        "generated_at": utc_iso(),
+        "source_git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "files": files,
+        "file_count": len(files),
+        "total_bytes": sum(row["size"] for row in files),
+        "acknowledged_files": len(ack),
+        "volume": {
+            "total": int(usage.total),
+            "used": int(usage.used),
+            "free": int(usage.free),
+            "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
+        },
+    })
+
+
+@app.route('/api/data-sync/file')
+def api_data_sync_file():
+    try:
+        path = _data_sync_resolve_relpath(request.args.get("path"))
+        offset = max(0, int(request.args.get("offset") or 0))
+        limit = min(
+            _DATA_SYNC_CHUNK_MAX,
+            max(1, int(request.args.get("limit") or _DATA_SYNC_CHUNK_MAX)),
+        )
+        before = path.stat()
+        if offset > before.st_size:
+            return jsonify({"error": "offset beyond current file size", "size": before.st_size}), 416
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            payload = handle.read(limit)
+        after = path.stat()
+        response = make_response(payload)
+        response.headers["Content-Type"] = "application/octet-stream"
+        response.headers["X-Data-Path"] = _data_sync_relpath(path)
+        response.headers["X-Data-Offset"] = str(offset)
+        response.headers["X-Data-Size"] = str(after.st_size)
+        response.headers["X-Data-Mtime-Ns"] = str(after.st_mtime_ns)
+        response.headers["X-Data-Inode"] = str(int(getattr(after, "st_ino", 0) or 0))
+        response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
+        response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= after.st_size else "0"
+        return response
+    except (OSError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route('/api/data-sync/ack', methods=['POST'])
+def api_data_sync_ack():
+    body = request.get_json(silent=True) or {}
+    received = body.get("files") or []
+    acks = _read_data_sync_ack()
+    accepted = 0
+    for row in received[:5000]:
+        if not isinstance(row, dict):
+            continue
+        rel = str(row.get("path") or "")
+        try:
+            path = _data_sync_resolve_relpath(rel)
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        if (
+            int(row.get("size") or -1) == int(stat.st_size)
+            and int(row.get("mtime_ns") or -1) == int(stat.st_mtime_ns)
+        ):
+            acks[rel] = {
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "acknowledged_at": utc_iso(),
+            }
+            accepted += 1
+    _write_data_sync_ack(acks)
+    removed = _prune_acknowledged_rotations(acks)
+    return jsonify({
+        "ok": True,
+        "accepted": accepted,
+        "removed_acknowledged_rotations": removed,
+        "policy": "only acknowledged .3+ rotations older than 24h; active/unacked files retained",
+    })
+
+
+def _analyzer_mirror_dir() -> Path:
+    return _data_sync_volume_root() / "analyzer_mirror"
+
+
+@app.route('/api/data-sync/analyzer-report', methods=['POST'])
+def api_data_sync_analyzer_report():
+    upload = request.files.get("report")
+    if upload is None:
+        return jsonify({"error": "multipart field 'report' is required"}), 400
+    payload = upload.read(25 * 1024 * 1024 + 1)
+    if len(payload) > 25 * 1024 * 1024:
+        return jsonify({"error": "report exceeds 25 MB"}), 413
+    mirror = _analyzer_mirror_dir()
+    mirror.mkdir(parents=True, exist_ok=True)
+    target = mirror / "analysis_dashboard.html"
+    tmp = mirror / "analysis_dashboard.html.tmp"
+    tmp.write_bytes(payload)
+    os.replace(tmp, target)
+    meta = {
+        "uploaded_at": utc_iso(),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "source_git_rev": request.form.get("source_git_rev"),
+        "analyzer_generated_at": request.form.get("analyzer_generated_at"),
+    }
+    meta_tmp = mirror / "status.tmp"
+    meta_tmp.write_text(json.dumps(meta, separators=(",", ":")), encoding="utf-8")
+    os.replace(meta_tmp, mirror / "status.json")
+    return jsonify({"ok": True, **meta})
+
+
+@app.route('/api/analyzer-mirror/status')
+def api_analyzer_mirror_status():
+    try:
+        payload = json.loads(
+            (_analyzer_mirror_dir() / "status.json").read_text(encoding="utf-8")
+        )
+        return jsonify({"available": True, **payload})
+    except (OSError, ValueError, TypeError):
+        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
+
+
+@app.route('/analysis')
+def analyzer_mirror_dashboard():
+    if not _admin_authed_strict():
+        return jsonify({"error": "admin token required"}), 401
+    report = _analyzer_mirror_dir() / "analysis_dashboard.html"
+    if not report.is_file():
+        return jsonify({
+            "error": "no analyzer mirror is available yet",
+            "next": "run the local sync/analyzer publisher while the PC is online",
+        }), 404
+    return send_file(report, mimetype="text/html")
+
 
 def _read_log_tail(path, max_lines=400):
     if not path or not os.path.exists(path):
@@ -31196,13 +32053,9 @@ def load_persistent_config():
             if state.get("chase_execution_buckets") is None:
                 state["chase_execution_buckets"] = _default_chase_execution_buckets()
             else:
-                raw_chase = state.get("chase_execution_buckets")
-                out = _default_chase_execution_buckets()
-                if isinstance(raw_chase, dict):
-                    for k in out:
-                        if k in raw_chase:
-                            out[k] = bool(raw_chase[k])
-                state["chase_execution_buckets"] = out
+                state["chase_execution_buckets"] = _normalize_chase_execution_buckets(
+                    state.get("chase_execution_buckets")
+                )
             if state.get("spread_gate") is None:
                 state["spread_gate"] = _default_spread_gate()
             else:
@@ -31797,6 +32650,7 @@ def main():
         state["ai_history"] = []
         state["bot_start_time"] = bot_start_time
     _restore_session_ai_history_from_csv(50)
+    _restore_shared_ai_lane_verdicts_from_journal()
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
@@ -31817,6 +32671,7 @@ def main():
     last_heartbeat = time.time()
     last_edge_compute = 0.0
     _write_research_session(bot_start_time)
+    _record_execution_settings_epoch("TRACKING_STARTED")
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
     try:

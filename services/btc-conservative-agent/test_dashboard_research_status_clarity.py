@@ -20,12 +20,15 @@ def main() -> None:
     assert ">not evaluated</span>" not in source
     assert ">pending</span>" not in source
 
-    assert "Shadow PnL (not account)" in source
-    assert "statRow('Shadow trades'" in source
-    assert "statRow('Shadow PnL'" in source
-    assert "statRow('Shadow EV/close'" in source
-    assert "Counterfactual PnL (not account)" in source
-    assert "spec.lane !== 'CONTINUOUS'" in source
+    # Tile headlines deliberately show one comparable fresh-collection
+    # accounting row only. Shadow/counterfactual results stay in analyzer
+    # reports and must never be mixed into account-like tile PnL.
+    assert "statRow('Executed'" in source
+    assert "statRow('PnL'" in source
+    assert "statRow('EV/appr'" in source
+    assert "statRow('Shadow trades'" not in source
+    assert "statRow('Shadow PnL'" not in source
+    assert "Counterfactual PnL (not account)" not in source
 
     assert "'calculating…'" in source
     assert 'unrealUsd < 0 ? \'-$\' : \'$\'' in source

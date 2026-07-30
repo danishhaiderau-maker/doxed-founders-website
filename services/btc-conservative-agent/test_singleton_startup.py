@@ -55,7 +55,8 @@ def run():
         "dead-owner Windows lock file has guarded stale recovery",
         "except PermissionError" in acquire_source
         and "self._pid_alive(owner_pid)" in acquire_source
-        and "self.path.unlink(missing_ok=True)" in acquire_source,
+        and "self.path.unlink(missing_ok=True)" in acquire_source
+        and "for _ in range(20)" in acquire_source,
     )
 
     main_source = inspect.getsource(bot.main)
