@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(relay): approve Fly canonical policy lock
 
 ## Last Activity
 
