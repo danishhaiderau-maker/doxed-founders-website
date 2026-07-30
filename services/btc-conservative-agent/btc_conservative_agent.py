@@ -48,8 +48,16 @@ def _read_boot_revision() -> str:
     temporary boot server must therefore identify the same checkout as the
     full Flask app or a correct, still-loading bot is mistaken for a stale one.
     """
+    env_revision = (os.getenv("SOURCE_GIT_REV") or "").strip()
+    if env_revision:
+        return env_revision[:12]
     try:
-        git_dir = Path(_SERVICE_DIR).parents[1] / ".git"
+        service_dir = Path(_SERVICE_DIR).resolve()
+        git_dir = next(
+            (candidate / ".git" for candidate in (service_dir, *service_dir.parents)
+             if (candidate / ".git").exists()),
+            service_dir / ".git",
+        )
         if git_dir.is_file():
             raw_git_dir = git_dir.read_text(encoding="utf-8").strip()
             if raw_git_dir.lower().startswith("gitdir:"):
@@ -69,7 +77,7 @@ def _read_boot_revision() -> str:
                 sha, _, name = line.partition(" ")
                 if name == ref_name:
                     return sha.strip()[:12]
-    except OSError:
+    except (OSError, IndexError):
         pass
     return "unknown"
 
@@ -77,14 +85,15 @@ def _read_boot_revision() -> str:
 os.environ.setdefault("SHOWCASE_AGENT", "1")
 os.environ.setdefault("HOME_BOT_LOCAL", "1")
 os.environ.setdefault("HOME_RESEARCH_FULL", "1")
-os.environ.setdefault(
-    "SHOWCASE_RELAY_WEBHOOK_URL",
-    "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
-)
-os.environ.setdefault(
-    "SHOWCASE_INFERENCE_USAGE_URL",
-    "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
-)
+if not os.getenv("FLY_APP_NAME"):
+    os.environ.setdefault(
+        "SHOWCASE_RELAY_WEBHOOK_URL",
+        "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
+    )
+    os.environ.setdefault(
+        "SHOWCASE_INFERENCE_USAGE_URL",
+        "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
+    )
 
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVICE_DIR not in sys.path:

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Fly.io entrypoint for the showcase BTC bot.
 # 1. Point writable research/runtime dirs at the persistent volume (bot_data -> /app/data).
 # 2. Start the analyzer research engine (:9001) in the background.
