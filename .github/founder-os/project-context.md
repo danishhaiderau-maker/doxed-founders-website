@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix dashboard toggle and analyzer visibility
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
