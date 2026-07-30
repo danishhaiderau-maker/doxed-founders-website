@@ -35,6 +35,12 @@ $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 $agentDir  = Join-Path $repoRoot "services\btc-conservative-agent"
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+$analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Join-Path $agentDir "fly-data-mirror"
+} else {
+  $agentDir
+}
 $logsDir   = Join-Path $repoRoot "logs"
 $pidFile   = Join-Path $repoRoot ".home-analyzer.pid"
 $lockFile  = Join-Path $repoRoot ".home-analyzer-auto-restart.lock"
@@ -102,7 +108,7 @@ try {
   $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
   $env:RESEARCH_DASHBOARD_PORT = "$Port"
   $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$Port/"
-  $env:BTC_AGENT_DATA_DIR = $agentDir
+  $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
   # A long-lived bridge/console can carry the legacy research/ path. Keep the
   # dashboard and analyzer on the same canonical report root after recovery.
   $env:BTC_AGENT_REPORT_DIR = $agentDir

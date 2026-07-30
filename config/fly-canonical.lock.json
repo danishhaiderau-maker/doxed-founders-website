@@ -1,0 +1,10 @@
+{
+  "schema": "fly_canonical_runtime_v1",
+  "frozen": true,
+  "sourceUrl": "https://doxed-btc-bot.fly.dev",
+  "desktopBotEnabled": false,
+  "desktopDashboardProxyPort": 7002,
+  "desktopAnalyzerPort": 9001,
+  "desktopDataMirror": "services/btc-conservative-agent/fly-data-mirror",
+  "reason": "One AI call and one strategy owner: Fly.io. Desktop is mirror/analyzer only."
+}

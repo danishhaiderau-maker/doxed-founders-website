@@ -151,6 +151,10 @@ scripts/_test.py
 scripts/_*.mjs
 scripts/_*.ps1
 services/btc-conservative-agent/local-collection-data/
+services/btc-conservative-agent/fly-data-mirror/
+.fly-dashboard-proxy.pid
+.fly-data-sync-loop.lock
+.fly-data-sync-loop.heartbeat.json
 services/btc-conservative-agent/research.db
 services/btc-conservative-agent/research.db-journal
 services/btc-conservative-agent/research/genome/*.jsonl

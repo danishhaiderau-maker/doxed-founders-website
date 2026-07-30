@@ -39,6 +39,12 @@ if (Test-Path -LiteralPath $statePath) {
   }
 }
 
+function Save-SyncState {
+  $stateTmp = "$statePath.tmp"
+  $syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+  Move-Item -LiteralPath $stateTmp -Destination $statePath -Force
+}
+
 $base = $SourceUrl.TrimEnd("/")
 $manifest = Invoke-RestMethod -Uri "$base/api/data-sync/manifest" -Headers $headers -TimeoutSec 30
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
@@ -46,7 +52,7 @@ if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
 }
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
-$chunkLimit = 4MB
+$chunkLimit = 1MB
 $selectedFiles = @($manifest.files)
 if ($IncludePath.Count -gt 0) {
   $selectedFiles = @(
@@ -102,35 +108,42 @@ foreach ($row in $selectedFiles) {
   $offset = $localSize
   while ($offset -lt $remoteSize) {
     $limit = [Math]::Min($chunkLimit, $remoteSize - $offset)
-    $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
-    try {
-      $encoded = [uri]::EscapeDataString($rel)
-      $response = Invoke-WebRequest `
-        -UseBasicParsing `
-        -Uri "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" `
-        -Headers $headers `
-        -OutFile $tmp `
-        -PassThru `
-        -TimeoutSec 60
-      $actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
-      $expectedHash = [string]$response.Headers["X-Chunk-Sha256"]
-      if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
-        throw "Chunk checksum mismatch for $rel at offset $offset."
-      }
-      $input = [System.IO.File]::OpenRead($tmp)
+    $chunkComplete = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
+      $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
       try {
-        $output = [System.IO.File]::Open(
-          $local,
-          [System.IO.FileMode]::Append,
-          [System.IO.FileAccess]::Write,
-          [System.IO.FileShare]::Read
-        )
-        try { $input.CopyTo($output) } finally { $output.Dispose() }
-      } finally { $input.Dispose() }
-      $offset = [int64](Get-Item -LiteralPath $local).Length
-    } finally {
-      if (Test-Path -LiteralPath $tmp) {
-        Remove-Item -LiteralPath $tmp -Force
+        $encoded = [uri]::EscapeDataString($rel)
+        $response = Invoke-WebRequest `
+          -UseBasicParsing `
+          -Uri "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" `
+          -Headers $headers `
+          -OutFile $tmp `
+          -PassThru `
+          -TimeoutSec 180
+        $actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedHash = [string]$response.Headers["X-Chunk-Sha256"]
+        if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
+          throw "Chunk checksum mismatch for $rel at offset $offset."
+        }
+        $input = [System.IO.File]::OpenRead($tmp)
+        try {
+          $output = [System.IO.File]::Open(
+            $local,
+            [System.IO.FileMode]::Append,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read
+          )
+          try { $input.CopyTo($output) } finally { $output.Dispose() }
+        } finally { $input.Dispose() }
+        $offset = [int64](Get-Item -LiteralPath $local).Length
+        $chunkComplete = $true
+      } catch {
+        if ($attempt -ge 3) { throw }
+        Start-Sleep -Seconds (2 * $attempt)
+      } finally {
+        if (Test-Path -LiteralPath $tmp) {
+          Remove-Item -LiteralPath $tmp -Force
+        }
       }
     }
   }
@@ -147,6 +160,7 @@ foreach ($row in $selectedFiles) {
     mtime_ns = [int64]$row.mtime_ns
     synced_at = (Get-Date).ToUniversalTime().ToString("o")
   }
+  Save-SyncState
   $ackRows.Add([ordered]@{
     path = $rel
     size = $remoteSize
@@ -154,9 +168,7 @@ foreach ($row in $selectedFiles) {
   })
 }
 
-$stateTmp = "$statePath.tmp"
-$syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
-Move-Item -LiteralPath $stateTmp -Destination $statePath -Force
+Save-SyncState
 
 $ackBody = @{ files = @($ackRows) } | ConvertTo-Json -Depth 5
 $ack = Invoke-RestMethod `

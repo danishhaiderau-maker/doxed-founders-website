@@ -25,6 +25,9 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  exit 0
+}
 $agentDir  = Join-Path $repoRoot "services\btc-conservative-agent"
 $logsDir   = Join-Path $repoRoot "logs"
 $pidFile   = Join-Path $repoRoot ".home-bot.pid"

@@ -9,6 +9,11 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  # Fly publishes the authoritative relay state directly. A desktop pusher
+  # would create a second, contradictory state stream.
+  exit 0
+}
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }

@@ -1,13 +1,30 @@
 {
-  "version": 1,
-  "effectiveFrom": "2026-06-23",
+  "version": 2,
+  "effectiveFrom": "2026-07-31",
   "allowBluntSync": false,
-  "summary": "Global showcase bot and local lab / external research bot are different architectures. Edit the monorepo in place; do not blunt-sync overwrites.",
+  "summary": "Fly.io is the sole 24/7 AI and trading owner. The desktop is a dashboard proxy, data mirror, and analyzer only; it must never run a second production AI loop.",
   "canonicalSource": {
     "directory": "services/btc-conservative-agent/",
     "entrypoint": "bot.py",
-    "runtime": "home PC showcase on :7002",
-    "publicUrl": "https://bot.doxxedcrypto.digital"
+    "runtime": "Fly.io app doxed-btc-bot",
+    "publicUrl": "https://doxed-btc-bot.fly.dev"
+  },
+  "runtimeRoles": {
+    "fly": {
+      "aiOwner": true,
+      "strategyOwner": true,
+      "paperExecutionOwner": true,
+      "relaySignalOwner": true
+    },
+    "desktop": {
+      "aiOwner": false,
+      "strategyOwner": false,
+      "paperExecutionOwner": false,
+      "relaySignalOwner": false,
+      "dashboardProxyPort": 7002,
+      "analyzerPort": 9001,
+      "dataSource": "Fly incremental mirror"
+    }
   },
   "deprecatedBluntSyncSources": [
     {
@@ -39,5 +56,5 @@
     "cliFlag": "--force",
     "note": "Human-only escape hatch. Agents must ask the user before using this."
   },
-  "agentInstruction": "STOP before any blunt bot sync. The local lab and the global showcase (:7002 / services/btc-conservative-agent/) follow different architectures. Do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
+  "agentInstruction": "STOP before any blunt bot sync. Fly.io is the only production AI/trading runtime. Desktop :7002 must remain a proxy to Fly and desktop :9001 must analyze the Fly data mirror. Do NOT start bot.py on the desktop and do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
 }

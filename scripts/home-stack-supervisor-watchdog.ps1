@@ -5,6 +5,10 @@ param([switch]$Quiet)
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+  exit 0
+}
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
 $supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"
 $supervisorScript = Join-Path $scriptDir "home-stack-supervisor.ps1"

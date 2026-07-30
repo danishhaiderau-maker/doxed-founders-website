@@ -12,6 +12,10 @@ REM  crash clusters). The supervisor stays in charge.
 REM ====================================================================
 setlocal
 cd /d "%~dp0.."
+if exist "%~dp0..\config\fly-canonical.lock.json" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-fly-desktop-mirror.ps1" -NoWait
+  goto :skipped
+)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-showcase-bot-guard.ps1"
 if %ERRORLEVEL% EQU 99 goto :skipped
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0home-stack-start-everything.ps1" -NoWait

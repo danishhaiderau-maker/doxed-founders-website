@@ -8,6 +8,11 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  Write-Host "Fly.io is the sole AI/trading owner; starting the desktop mirror instead." -ForegroundColor Yellow
+  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+  exit 0
+}
 $logsDir = Join-Path $repoRoot "logs"
 $startupStdoutLog = Join-Path $logsDir "bot-startup.stdout.log"
 $startupStderrLog = Join-Path $logsDir "bot-startup.stderr.log"

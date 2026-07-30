@@ -15,6 +15,12 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+$analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Join-Path $agentDir "fly-data-mirror"
+} else {
+  $agentDir
+}
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".home-analyzer-start.lock"
 $starterPidFile = Join-Path $repoRoot ".home-analyzer-starter.pid"
@@ -80,7 +86,7 @@ Get-Content $vaultEnv | ForEach-Object {
 $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
 $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
-$env:BTC_AGENT_DATA_DIR = $agentDir
+$env:BTC_AGENT_DATA_DIR = $analyzerDataDir
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory
 # into a freshly restarted dashboard.
@@ -127,7 +133,7 @@ if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
 }
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
-Write-Host "  $agentDir"
+Write-Host "  $analyzerDataDir"
 Write-Host "Research dashboard (Flask): http://127.0.0.1:$AnalyzerPort/  LAN: http://10.0.0.102:$AnalyzerPort/"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"

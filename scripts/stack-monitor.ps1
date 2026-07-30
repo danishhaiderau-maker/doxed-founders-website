@@ -6,6 +6,11 @@ param([switch]$Quiet)
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  # The former monitor treated an intentionally absent local bot as an outage.
+  # Fly has its own runtime health checks; desktop health is the mirror/analyzer.
+  exit 0
+}
 $logsDir = Join-Path $repoRoot "logs"
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 $logFile = Join-Path $repoRoot ".stack-monitor.log"

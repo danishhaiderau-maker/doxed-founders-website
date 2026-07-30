@@ -47,6 +47,10 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+  exit 0
+}
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort $BridgePort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
