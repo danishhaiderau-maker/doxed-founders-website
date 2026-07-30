@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(bitfinex): approve retired tile relay policy
+fix(bot): restore research dashboard fidelity
 
 ## Last Activity
 
