@@ -19660,7 +19660,13 @@ def process_signal(event: dict):
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
                     return
-                exit_pipeline(signal, ai, "ORDER_FAILED")
+                failure_reason = (
+                    signal.get("exit_reason")
+                    or signal.get("outcome")
+                    or signal.get("block_reason")
+                    or "ORDER_FAILED"
+                )
+                exit_pipeline(signal, ai, failure_reason)
                 state["last_pipeline_stage"] = "IDLE"
                 return
             if (

@@ -125,6 +125,14 @@ def test_waiting_chase_is_not_reported_as_an_order():
     assert len(events) == 3
 
 
+def test_specific_gate_failure_is_not_overwritten_by_order_failed():
+    assert 'failure_reason = (' in BOT_SOURCE
+    assert 'signal.get("exit_reason")' in BOT_SOURCE
+    assert 'or signal.get("outcome")' in BOT_SOURCE
+    assert 'or signal.get("block_reason")' in BOT_SOURCE
+    assert 'exit_pipeline(signal, ai, failure_reason)' in BOT_SOURCE
+
+
 def test_obsolete_confidence_controls_are_not_rendered():
     assert '<div id="aiBandControls"' not in BOT_SOURCE
     assert "<strong>AI execution bands:</strong>" not in BOT_SOURCE
