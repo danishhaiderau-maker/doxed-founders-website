@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(relay): approve Fly canonical policy lock
+fix(fly): persist execution controls on fresh volumes
 
 ## Last Activity
 
