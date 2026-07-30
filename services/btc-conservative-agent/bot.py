@@ -3079,13 +3079,39 @@ def reconcile_lane_position_registry():
 
 
 def lane_register_pending_order(order: dict):
-    """Dual-write: global pending_orders + lane-owned bucket."""
+    """Dual-write once: global pending_orders + lane-owned bucket.
+
+    Parallel promotion loops can reach this registry for the same signal. The
+    trade ID is the idempotency key; object equality is not sufficient because
+    each path constructs a fresh order dict with slightly different timestamps.
+    """
     if not order:
-        return
+        return False
     ln = _ensure_lane_bucket(order)
+    tid = str(order.get("trade_id") or "")
     with trade_lock:
-        if order not in pending_orders:
-            pending_orders.append(order)
+        existing = next(
+            (
+                row
+                for row in pending_orders
+                if isinstance(row, dict)
+                and tid
+                and str(row.get("trade_id") or "") == tid
+                and str(row.get("status") or "").upper() == "PENDING"
+            ),
+            None,
+        )
+        if existing is not None:
+            existing_lane = _ensure_lane_bucket(existing)
+            existing_bucket = lane_pending_orders[existing_lane]
+            if existing not in existing_bucket:
+                existing_bucket.append(existing)
+            logger.warning(
+                f"[ORDER IDEMPOTENCY] duplicate pending registration suppressed "
+                f"trade_id={tid} lane={ln} [PIPELINE ENFORCEMENT]"
+            )
+            return False
+        pending_orders.append(order)
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
@@ -3095,6 +3121,7 @@ def lane_register_pending_order(order: dict):
         "direction": order.get("dir") or order.get("direction"),
         "research_lane": order.get("research_lane"),
     })
+    return True
 
 
 def lane_unregister_pending_order(order: dict):
@@ -17409,7 +17436,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     signal.pop("awaiting_5m_since", None)
     signal.pop("awaiting_min_age_since", None)
     with trade_lock:
-        lane_register_pending_order(order)
+        registered = lane_register_pending_order(order)
+    if not registered:
+        pipeline_state_sync()
+        return True
     logger.info(
         f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
         f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "

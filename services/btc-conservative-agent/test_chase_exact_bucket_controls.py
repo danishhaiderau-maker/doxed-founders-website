@@ -1,3 +1,5 @@
+import ast
+import threading
 from pathlib import Path
 
 
@@ -34,6 +36,48 @@ def test_virtual_wait_and_cancel_paths_remain_wired():
     assert "if not chase_bucket_allowed(next_chase_count):" in BOT_SOURCE
     assert "def _virtual_limit_would_fill(signal: dict, market_price: float)" in BOT_SOURCE
     assert "VIRTUAL_FILL_SKIPPED_CHASE_" in BOT_SOURCE
+
+
+def test_pending_order_registration_is_trade_id_idempotent():
+    assert "def lane_register_pending_order(order: dict):" in BOT_SOURCE
+    assert 'tid = str(order.get("trade_id") or "")' in BOT_SOURCE
+    assert '"[ORDER IDEMPOTENCY] duplicate pending registration suppressed "' in BOT_SOURCE
+    assert "registered = lane_register_pending_order(order)" in BOT_SOURCE
+    assert "if not registered:" in BOT_SOURCE
+
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "lane_register_pending_order"
+    )
+
+    class QuietLogger:
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    namespace = {
+        "pending_orders": [],
+        "lane_pending_orders": {"CONTINUOUS": []},
+        "trade_lock": threading.RLock(),
+        "_ensure_lane_bucket": lambda order: order.get("research_lane") or "CONTINUOUS",
+        "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<lane-register-test>", "exec"), namespace)
+    register = namespace["lane_register_pending_order"]
+    first = {"trade_id": "cont-same", "status": "PENDING", "research_lane": "CONTINUOUS"}
+    second = {
+        "trade_id": "cont-same",
+        "status": "PENDING",
+        "research_lane": "CONTINUOUS",
+        "created_ts": 2,
+    }
+    assert register(first) is True
+    assert register(second) is False
+    assert namespace["pending_orders"] == [first]
+    assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
 def test_obsolete_confidence_controls_are_not_rendered():
