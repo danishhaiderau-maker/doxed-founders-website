@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(btc-bot): persist Fly runtime and isolate live relay
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
