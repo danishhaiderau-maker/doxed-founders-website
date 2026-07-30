@@ -1300,7 +1300,14 @@ export class TradingAgentsService implements OnModuleInit {
       const executedOnly = filterActivityToExecutedTrades(
         mapBotStateToExecutedTradesActivity(sharedBot, agent.name),
       );
-      showcaseActivity = mergeActivityFeeds(executedOnly, showcaseActivity);
+      // The public profile renders a dedicated "Last 5 AI decisions" panel.
+      // Keep only the bounded AI verdict rows from the canonical bot history in
+      // that feed; the previous executed-only merge made the panel claim that
+      // no decisions existed while the same snapshot showed an active signal.
+      const aiDecisions = mapBotStateToActivity(sharedBot, agent.name)
+        .filter((row) => row.type === 'AI_APPROVED' || row.type === 'AI_REJECTED')
+        .slice(0, 5);
+      showcaseActivity = mergeActivityFeeds(aiDecisions, executedOnly, showcaseActivity);
     } else {
       const listActivityRows = await this.listActivity(slug, 50, true, undefined);
       showcaseActivity = mergeActivityFeeds(listActivityRows, showcaseActivity);

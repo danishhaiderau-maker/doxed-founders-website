@@ -361,6 +361,82 @@ def load_events(path: Any) -> list[dict]:
     return rows
 
 
+def summarize_lane_verdicts(
+    events: Iterable[Mapping[str, Any]],
+    since_epoch: float = 0.0,
+) -> dict:
+    """Deduplicate lane verdicts by opportunity and expose one shared counter truth.
+
+    The append-only journal can contain a repeated verdict after process recovery.
+    Dashboard and analyzer consumers must therefore count the latest verdict for
+    each ``(opportunity_id, lane)`` pair, never raw JSONL rows.
+    """
+    latest: dict[tuple[str, str], tuple[float, int, dict]] = {}
+    if since_epoch and hasattr(since_epoch, "timestamp"):
+        threshold = float(since_epoch.timestamp())
+    else:
+        threshold = float(since_epoch or 0.0)
+    for index, source in enumerate(events or []):
+        row = dict(source or {})
+        if str(row.get("event") or "").upper() != "LANE_VERDICT":
+            continue
+        opportunity_id = str(row.get("opportunity_id") or "").strip()
+        lane = str(row.get("lane") or "").strip().upper()
+        if not opportunity_id or not lane:
+            continue
+        raw_ts = row.get("ts")
+        try:
+            if isinstance(raw_ts, (int, float)):
+                event_epoch = float(raw_ts)
+            else:
+                stamp = str(raw_ts or "").strip().replace("Z", "+00:00")
+                parsed = datetime.fromisoformat(stamp)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                event_epoch = parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            event_epoch = 0.0
+        if threshold and event_epoch < threshold - 1.0:
+            continue
+        payload = dict(row.get("payload") or {})
+        payload["accepted"] = bool(payload.get("accepted", payload.get("ok", False)))
+        payload["ok"] = payload["accepted"]
+        if not payload.get("reason"):
+            payload["reason"] = "ACCEPT" if payload["accepted"] else "REJECT"
+        key = (opportunity_id, lane)
+        previous = latest.get(key)
+        order_key = (event_epoch, index)
+        if previous is None or order_key >= previous[:2]:
+            latest[key] = (event_epoch, index, payload)
+
+    by_opportunity: dict[str, dict[str, dict]] = {}
+    lane_rows: dict[str, list[tuple[float, str, dict]]] = defaultdict(list)
+    for (opportunity_id, lane), (event_epoch, _index, payload) in latest.items():
+        by_opportunity.setdefault(opportunity_id, {})[lane] = dict(payload)
+        lane_rows[lane].append((event_epoch, opportunity_id, payload))
+
+    lanes = {}
+    for lane, rows in lane_rows.items():
+        rows.sort(key=lambda item: (item[0], item[1]))
+        accepted = sum(1 for _ts, _oid, payload in rows if payload["accepted"])
+        reasons: dict[str, int] = {}
+        for _ts, _oid, payload in rows:
+            reason = str(payload.get("reason") or "REJECT")
+            reasons[reason] = reasons.get(reason, 0) + 1
+        lanes[lane] = {
+            "evaluated": len(rows),
+            "accepted": accepted,
+            "rejected": len(rows) - accepted,
+            "reasons": reasons,
+            "_counted_call_ids": [opportunity_id for _ts, opportunity_id, _payload in rows[-500:]],
+        }
+    return {
+        "by_opportunity": by_opportunity,
+        "lanes": lanes,
+        "unique_verdicts": len(latest),
+    }
+
+
 def materialize(events: Iterable[Mapping[str, Any]]) -> list[dict]:
     grouped: dict[str, dict] = {}
     for source in events:

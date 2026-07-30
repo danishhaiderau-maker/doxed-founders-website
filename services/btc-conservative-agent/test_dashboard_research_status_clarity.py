@@ -12,7 +12,8 @@ def main() -> None:
 
     assert "Verdicts are research evaluations, not orders" in source
     assert "executable orders appear only in Pending Orders above" in source
-    assert "restored call — verdict not recorded" in source
+    assert "legacy call — lane metadata unavailable" in source
+    assert "verdict not recorded" not in source
     assert "AI call failed — no verdict" in source
     assert "evaluation not reached" in source
     assert "RESTORED_PRE_RESTART_NO_LANE_METADATA" in source

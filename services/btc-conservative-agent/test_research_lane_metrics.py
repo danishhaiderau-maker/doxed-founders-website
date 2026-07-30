@@ -2,6 +2,9 @@
 
 import os
 import sys
+import inspect
+import json
+import tempfile
 
 import pandas as pd
 
@@ -91,6 +94,50 @@ def main() -> int:
             "ai_win_prob": 62, "confidence_requested": True, "net_pnl_usd": 1.0,
         },
     ]))
+    original_specs_file = analyzer.PATHWAY_LANE_SPECS_FILE
+    materialized_stats = {}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            analyzer.PATHWAY_LANE_SPECS_FILE = os.path.join(
+                td, "pathway_lane_specs.json"
+            )
+            analyzer.pathway_lane_specs_report(
+                trades=pd.DataFrame(),
+                session={},
+                benchmark_report={
+                    "lanes": {
+                        "CONTINUOUS": {
+                            "approves": 10,
+                            "real_fills": 4,
+                            "approve_to_fill_pct": 40.0,
+                            "net_pnl_real": 2.0,
+                            "per_approve_ev": 0.2,
+                            "wins": 3,
+                            "losses": 1,
+                            "win_rate_pct": 75.0,
+                            "lab_mode": True,
+                            "lab_closes": 6,
+                            "lab_net_pnl": -1.5,
+                            "lab_wins": 2,
+                            "lab_losses": 4,
+                            "lab_win_rate": 33.3,
+                            "lab_per_close_ev": -0.25,
+                            "lab_pnl_source": "lane_lab_pnl_ledger",
+                        },
+                        "TYPE_B_HUNTER_V1": {},
+                    }
+                },
+                shadow_report={},
+            )
+            with open(analyzer.PATHWAY_LANE_SPECS_FILE, encoding="utf-8") as f:
+                materialized = json.load(f)
+            materialized_stats = next(
+                row["session_stats"]
+                for row in materialized["lanes"]
+                if row["lane"] == "CONTINUOUS"
+            )
+    finally:
+        analyzer.PATHWAY_LANE_SPECS_FILE = original_specs_file
 
     checks = {
         "Type B accepted LAB close": type_b["lab_closes"] == 1,
@@ -109,6 +156,30 @@ def main() -> int:
         "Actual chase path is retained": direction_only["entry_mode_bucket"] == "CHASE_1_2",
         "Probability-era rows are excluded from direction-only combinations": (
             mixed_confidence["trade_id"].tolist() == ["direction-only"]
+        ),
+        "Benchmark approvals use crash-safe lane verdict truth": (
+            "shared_verdict_metrics.get(\"accepted\")"
+            in inspect.getsource(analyzer.benchmark_vs_lanes_report)
+            and "type_b_research_v2_lane_verdict"
+            in inspect.getsource(analyzer.benchmark_vs_lanes_report)
+        ),
+        "Real EV excludes counterfactual PnL": (
+            "per_approve_ev = round(net_pnl_real / approves_n"
+            in inspect.getsource(analyzer.benchmark_vs_lanes_report)
+            and "counterfactual_ev_per_approve"
+            in inspect.getsource(analyzer.benchmark_vs_lanes_report)
+        ),
+        "Compact lane report keeps real win rate": (
+            materialized_stats.get("win_rate_pct") == 75.0
+            and materialized_stats.get("wins") == 3
+            and materialized_stats.get("losses") == 1
+        ),
+        "Compact lane report keeps separate counterfactual ledger": (
+            materialized_stats.get("lab_closes") == 6
+            and materialized_stats.get("lab_net_pnl") == -1.5
+            and materialized_stats.get("lab_per_close_ev") == -0.25
+            and materialized_stats.get("lab_pnl_source")
+            == "lane_lab_pnl_ledger"
         ),
     }
     failed = [name for name, ok in checks.items() if not ok]

@@ -100,7 +100,9 @@ from research_opportunity_v2 import (
     SCHEMA_VERSION as TYPE_B_RESEARCH_V2_SCHEMA,
     append_event as append_type_b_research_v2_event,
     child_event as type_b_research_v2_child_event,
+    load_events as load_type_b_research_v2_events,
     opportunity_event as type_b_research_v2_opportunity_event,
+    summarize_lane_verdicts,
 )
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
@@ -12286,6 +12288,54 @@ def _restore_session_ai_history_from_csv(limit: int = 50) -> list:
     return restored
 
 
+def _restore_shared_ai_lane_verdicts_from_journal() -> dict:
+    """Reattach crash-safe lane verdicts and rebuild their restart-safe funnel."""
+    try:
+        events = load_type_b_research_v2_events(os.getcwd())
+        summary = summarize_lane_verdicts(events, since_epoch=bot_start_time)
+    except Exception as exc:
+        logger.warning(f"[AI HISTORY] lane-verdict journal restore failed: {exc}")
+        return {"restored_rows": 0, "unique_verdicts": 0, "lanes": {}}
+
+    by_opportunity = summary.get("by_opportunity") or {}
+    lane_counters = summary.get("lanes") or {}
+    restored_rows = 0
+    with state_lock:
+        for row in state.get("ai_history") or []:
+            call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
+            verdicts = by_opportunity.get(call_id) or {}
+            if not verdicts:
+                continue
+            row["lane_verdicts"] = copy.deepcopy(verdicts)
+            row["continuous_verdict"] = copy.deepcopy(
+                verdicts.get(RESEARCH_LANE_CONTINUOUS)
+            )
+            row["type_b_verdict"] = copy.deepcopy(
+                verdicts.get(RESEARCH_LANE_TYPE_B_HUNTER_V1)
+            )
+            row["verdict_provenance"] = "RESTORED_FROM_RESEARCH_JOURNAL"
+            restored_rows += 1
+        counters = state.setdefault("shared_ai_lane_counters", {})
+        for lane in (
+            RESEARCH_LANE_CONTINUOUS,
+            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        ):
+            if lane in lane_counters:
+                counters[lane] = copy.deepcopy(lane_counters[lane])
+        if restored_rows:
+            state["ai_history_updated"] = time.time()
+    logger.info(
+        f"[AI HISTORY] journal verdicts restored_rows={restored_rows} "
+        f"unique_verdicts={int(summary.get('unique_verdicts') or 0)} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "restored_rows": restored_rows,
+        "unique_verdicts": int(summary.get("unique_verdicts") or 0),
+        "lanes": copy.deepcopy(lane_counters),
+    }
+
+
 def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
     if RESEARCH_AI_SOLE_AUTHORITY or is_research_data_collection():
         return _session_ai_history(in_memory, limit)
@@ -19764,8 +19814,7 @@ def state_monitor_loop():
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
             # Type B consumes the same three-minute AI_SCAN result as Continuous.
-            # Tile 2 remains a no-AI deterministic bracket collector.
-            maybe_tick_sr_micro_tile_v2_static_bracket()
+            # The retired S/R study remains archived and is not ticked here.
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -19807,10 +19856,12 @@ def execute_order(signal, ai=None):
         )
         full_pipeline_trace("[EXECUTION]", "MODE_BLOCKED", signal.get("trade_id"))
         return False
-    # Pt 2 (toggle contract): TYPE_B_HUNTER_V1 must NEVER fall into the
-    # shared market-entry route. Force limit-only regardless of global
-    # pullback / compression settings.
+    # Both visible research policies promise bounded limit execution. Keep
+    # them off the shared market-entry route even if a dashboard control
+    # temporarily sets the global pullback to zero.
     is_type_b = str(lane or "").upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+    is_continuous = str(lane or "").upper() == RESEARCH_LANE_CONTINUOUS
+    force_policy_limit = is_type_b or is_continuous
     if is_type_b and mode == EXEC_MODE_LIVE and not _private_api_keys_ok():
         logger.warning(
             f"[EXECUTION BLOCK] TYPE_B_LIVE keys missing trade_id={signal.get('trade_id')} "
@@ -19827,9 +19878,8 @@ def execute_order(signal, ai=None):
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
         pullback_pct = float(state.get("pullback_threshold", 0.001))
-        # Pt 2: TYPE_B_HUNTER_V1 ignores the global pullback/compression toggle.
-        # It always creates a limit order in both PAPER and LIVE modes.
-        use_instant = (not is_type_b) and (pullback_pct <= 0.0)
+        # Type B and Continuous always create policy limits in PAPER/LIVE mode.
+        use_instant = (not force_policy_limit) and (pullback_pct <= 0.0)
         if use_instant or not state.get("allow_compression", True):
             # Pt 2: even when global compression is off, TYPE_B still uses limits.
             if is_type_b:
@@ -22503,9 +22553,9 @@ def build_static_pathway_lane_specs() -> dict:
         "is_benchmark": True,
         "is_primary_production": False,
         "badge": "BENCHMARK",
-        # Preserve the historical card number after retiring Tile 2 so users
-        # can still recognize the Continuous benchmark as the former Tile 3.
-        "tile_number": 3,
+        # The retired S/R study is no longer displayed. Continuous is the
+        # second visible and active research tile.
+        "tile_number": 2,
         "entry_mode_label": "Continuous",
         "filter_chips": [
             f"One AI call ~{shared['ai_scan_cadence_sec']}s",
@@ -24768,7 +24818,9 @@ DASHBOARD_JS = """(function () {
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
           const pausedAll = d.paused_shadow_stats || {};
-          const sourcePaused = pausedAll.manual_pause_active === true;
+          const sourcePaused = d.manual_admin_pause === true
+            || (d.execution_paused === true && d.execution_reason === 'ADMIN_MANUAL')
+            || pausedAll.manual_pause_active === true;
           const statRow = function (lbl, val, col) {
             return '<div style="text-align:center;"><div style="color:#6e7681;font-size:0.72em;">' + lbl + '</div>'
               + '<div style="color:' + (col || '#c9d1d9') + ';font-weight:600;font-size:0.9em;">' + val + '</div></div>';
@@ -25738,7 +25790,7 @@ DASHBOARD_JS = """(function () {
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
             + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above. '
-            + 'A restored call may say "verdict not recorded" because the older CSV did not contain per-lane metadata.';
+            + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
         const formatLaneVerdict = (v, row) => {
           if (!v) {
@@ -25746,7 +25798,7 @@ DASHBOARD_JS = """(function () {
               return '<span style="color:#f85149" title="The shared AI request failed before either lane could evaluate it.">AI call failed — no verdict</span>';
             }
             if (row && row.verdict_provenance === 'RESTORED_PRE_RESTART_NO_LANE_METADATA') {
-              return '<span style="color:#8b949e" title="This call was restored from the older CSV format, which did not store per-lane verdicts.">restored call — verdict not recorded</span>';
+              return '<span style="color:#8b949e" title="This call predates journal-backed per-lane verdict storage.">legacy call — lane metadata unavailable</span>';
             }
             return '<span style="color:#8b949e" title="The lane-specific evaluator did not stamp a result for this call. This is not a pending order.">evaluation not reached</span>';
           }
@@ -27360,6 +27412,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
             if isinstance(row, dict)
         ]
+        expired_orders_total = len(expired_orders)
         recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
@@ -27399,6 +27452,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_expired
         if isinstance(row, dict)
     ]
+    snapshot["expired_orders_total"] = expired_orders_total
     snapshot["signal_info"] = {
         "active": bool(active_list),
         "count": len(active_list),
@@ -27755,7 +27809,9 @@ def _build_api_state_snapshot():
                     "open": len(lane_open_positions.get(ln, [])),
                     "pending": len(lane_pending_orders.get(ln, [])),
                 }
-                for ln in PATHWAY_LAB_LANES
+                for ln in dict.fromkeys(
+                    PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS,)
+                )
             }
         finally:
             trade_lock.release()
@@ -28136,6 +28192,31 @@ def _api_state_cache_refresher_loop():
                 ):
                     if key in relay:
                         snap[key] = relay[key]
+                relay_expired = relay.get("expired_orders") or []
+                snap["expired_orders"] = copy.deepcopy(
+                    relay_expired[-_DASHBOARD_HISTORY_MAX:]
+                )
+                snap["expired_orders_total"] = int(
+                    relay.get("expired_orders_total")
+                    if relay.get("expired_orders_total") is not None
+                    else len(relay_expired)
+                )
+                with state_lock:
+                    ai_history_all = _session_ai_history(
+                        list(state.get("ai_history") or []),
+                        50,
+                    )
+                    snap["ai_history"] = copy.deepcopy(
+                        ai_history_all[-_DASHBOARD_HISTORY_MAX:]
+                    )
+                    snap["ai_history_total"] = len(ai_history_all)
+                    snap["ai_history_updated"] = state.get("ai_history_updated", 0.0)
+                    snap["shared_ai_lane_counters"] = copy.deepcopy(
+                        state.get("shared_ai_lane_counters") or {}
+                    )
+                snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
+                    for_api=True
+                )
                 snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
                 snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             with _api_state_cache_lock:
@@ -31854,6 +31935,7 @@ def main():
         state["ai_history"] = []
         state["bot_start_time"] = bot_start_time
     _restore_session_ai_history_from_csv(50)
+    _restore_shared_ai_lane_verdicts_from_journal()
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0

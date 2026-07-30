@@ -1,4 +1,5 @@
 import tempfile
+from datetime import datetime, timezone
 
 import research_opportunity_v2 as opportunity_module
 from research_opportunity_v2 import (
@@ -11,6 +12,7 @@ from research_opportunity_v2 import (
     precise_adx_bucket,
     rolling_holdout_analysis,
     summarize,
+    summarize_lane_verdicts,
 )
 
 
@@ -84,6 +86,45 @@ def run():
     assert "adx" in invalid_quality["critical_missing"]
     assert "is_weekend" in invalid_quality["missing"]
     assert invalid_quality["valid_for_holdout"] is False
+
+    verdicts = summarize_lane_verdicts([
+        child_event(
+            event="LANE_VERDICT",
+            opportunity_id="scan-verdict-1",
+            ts="2026-07-26T00:00:01Z",
+            lane="CONTINUOUS",
+            payload={"accepted": True, "reason": "APPROVE"},
+        ),
+        child_event(
+            event="LANE_VERDICT",
+            opportunity_id="scan-verdict-1",
+            ts="2026-07-26T00:00:02Z",
+            lane="CONTINUOUS",
+            payload={"accepted": True, "reason": "APPROVE"},
+        ),
+        child_event(
+            event="LANE_VERDICT",
+            opportunity_id="scan-verdict-1",
+            ts="2026-07-26T00:00:03Z",
+            lane="TYPE_B_HUNTER_V1",
+            payload={"accepted": False, "reason": "ADX_FLOOR"},
+        ),
+        child_event(
+            event="LANE_VERDICT",
+            opportunity_id="scan-before-session",
+            ts="2026-07-25T00:00:00Z",
+            lane="CONTINUOUS",
+            payload={"accepted": True, "reason": "APPROVE"},
+        ),
+    ], since_epoch=datetime(2026, 7, 26, tzinfo=timezone.utc))
+    assert verdicts["unique_verdicts"] == 2
+    assert verdicts["lanes"]["CONTINUOUS"]["evaluated"] == 1
+    assert verdicts["lanes"]["CONTINUOUS"]["accepted"] == 1
+    assert verdicts["lanes"]["TYPE_B_HUNTER_V1"]["rejected"] == 1
+    assert (
+        verdicts["by_opportunity"]["scan-verdict-1"]["TYPE_B_HUNTER_V1"]["reason"]
+        == "ADX_FLOOR"
+    )
 
     mixed_mode_events = []
     for mode, runner_count in (("PAPER", 5), ("PAUSED_SHADOW", 1)):

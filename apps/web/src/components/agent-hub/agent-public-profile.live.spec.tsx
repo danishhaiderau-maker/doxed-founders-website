@@ -231,3 +231,140 @@ test('signed-in live desk shows each Bitfinex entity once and no showcase panels
   assert.match(adminShowcaseHtml, /Admin showcase \(observe only\)/);
   assert.equal(adminShowcaseHtml.includes('Legacy DDollar paper'), false);
 });
+
+test('showcase reports a healthy REST fallback and renders canonical AI decisions', async () => {
+  const { AgentPublicProfile } = await import('./agent-public-profile');
+  const liveBook = {
+    activeSignals: [],
+    positions: [],
+    pendingOrders: [],
+    expiredOrders: [],
+    trades: [],
+  };
+  const dashboard = {
+    currentAction: 'WAITING',
+    currentPrice: 64_200,
+    regime: 'BULL',
+    support: 64_000,
+    resistance: 64_500,
+    distanceToResistancePct: 0.47,
+    distanceToSupportPct: 0.31,
+    currentPosition: 'NONE',
+    aiDecision: 'APPROVE',
+    aiWinProbability: 0,
+    currentEdge: 3.4,
+    requiredEdge: 3,
+    noTradeReason: '',
+    currentThinking: {
+      market: 'BULL',
+      support: 64_000,
+      resistance: 64_500,
+      distanceToResistancePct: 0.47,
+      distanceToSupportPct: 0.31,
+      conclusion: 'LONG',
+    },
+    transparency: {
+      currentEdge: 3.4,
+      requiredEdge: 3,
+      currentState: 'READY',
+      reason: '',
+    },
+    openTrades: [],
+    pendingOrders: [],
+    recentTrades: [],
+    marketStructure: 'BULL_ALIGNED',
+    aiReasoning: 'Shared direction approved LONG.',
+    riskStatus: 'NORMAL',
+    fundingStatus: '',
+    dataSource: 'bitfinex_rest',
+    wsHealth: 'REST_FALLBACK',
+    dataQuality: '100%',
+    pnl: { daily: 0, total: 0 },
+    leverage: 100,
+    liveBook,
+    stateIntegrity: {
+      snapshot_seq: 177,
+      snapshot_ts: '2026-07-30T03:36:23.000Z',
+      snapshot_age_sec: 2,
+      bot_version: 'v15-typeb-opportunity-v2',
+      exchange: 'bitfinex',
+      symbol: 'tBTCF0:USTF0',
+      ws_connected: false,
+      ws_status: 'REST_FALLBACK',
+      ws_connected_sec_ago: null,
+      rest_healthy: true,
+      price_age_sec: 3,
+      book_age_sec: null,
+      orders_synced: true,
+      positions_synced: true,
+      trades_synced: true,
+      last_fill_sec_ago: null,
+      execution_paused: false,
+      live_armed: false,
+      bitfinex_live_enabled: false,
+      genome_recorder: 'ACTIVE',
+      research_db: true,
+    },
+    dataWindowHours: 82.1,
+    botUptimeHours: 12.3,
+    snapshotSource: 'railway_cache',
+  };
+  const agent = {
+    id: 'agent-1',
+    slug: 'conservative-btc',
+    name: 'Conservative BTC Agent',
+    status: 'ACTIVE',
+    balanceUsd: 500,
+    equityUsd: 500,
+    sessionPnlUsd: 0,
+    unrealizedPnlUsd: 0,
+    dailyPnlUsd: 0,
+    netReturnPct: 0,
+    tradeCount: 0,
+    winRatePct: 0,
+    costDdollarWeek: 2_000,
+  };
+  const aiDecision = {
+    id: 'ai-scan-1',
+    type: 'AI_APPROVED',
+    title: 'AI Approved',
+    reason: 'Shared direction approved LONG.',
+    outcome: 'LONG',
+    profitPct: null,
+    edgeScore: 3.4,
+    edgeRequired: 3,
+    marketRegime: 'BULL',
+    shareText: null,
+    createdAt: '2026-07-30T03:35:00.000Z',
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(AgentPublicProfile, {
+      slug: 'conservative-btc',
+      agent,
+      dashboard,
+      activity: [aiDecision],
+      allAgents: [],
+      following: true,
+      hired: false,
+      signedIn: true,
+      isAdmin: true,
+      botConnected: true,
+      executionPaused: false,
+      publicStatus: 'online',
+      viewScope: 'showcase',
+      showcaseAgent: agent,
+      showcaseLiveBook: liveBook,
+      exchangeLiveBook: null,
+      relaySimLiveBook: null,
+      copyRelaySim: null,
+      showcaseActivity: [aiDecision],
+      userActivity: [],
+    } as never),
+  );
+
+  assert.match(html, /Bot online · REST price fallback/);
+  assert.match(html, /AI Approved/);
+  assert.match(html, /Shared direction approved LONG/);
+  assert.equal(html.includes('No AI decisions yet this session.'), false);
+});

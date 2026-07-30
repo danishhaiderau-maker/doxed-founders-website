@@ -449,7 +449,7 @@ function StateIntegrityHeader({ dashboard }: { dashboard: TradingAgentDashboardS
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span className="flex items-center gap-1.5 font-semibold text-zinc-100">
           <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
-          {wsOk ? 'Live bot connected' : restUp ? 'Bot up · REST stale' : 'Bot offline'}
+          {wsOk ? 'Live bot connected' : restUp ? 'Bot online · REST price fallback' : 'Bot offline'}
         </span>
         <span>Data from last {windowH > 0 ? `${windowH.toFixed(1)}h` : '—'}</span>
         <span>Running for {uptimeH > 0 ? `${uptimeH.toFixed(1)}h` : '—'}</span>

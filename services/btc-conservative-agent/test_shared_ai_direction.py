@@ -282,6 +282,20 @@ def run():
         "Continuous tile exposes the no-confidence contract",
         "AI confidence not requested" in continuous_tile.get("filter_chips", []),
     )
+    check(
+        "Continuous is the second visible tile after retired S/R removal",
+        continuous_tile.get("tile_number") == 2,
+    )
+    check(
+        "Continuous card uses the configured 12-to-10 Scenario C ladder",
+        str(continuous_tile.get("exit", {}).get("ladder", "")).startswith("12"),
+    )
+    execute_source = inspect.getsource(bot.execute_order)
+    check(
+        "Continuous and Type B are both fail-safe limit-only policies",
+        "force_policy_limit = is_type_b or is_continuous" in execute_source
+        and "use_instant = (not force_policy_limit)" in execute_source,
+    )
     relay_source = inspect.getsource(bot.api_relay_state)
     check("relay-state uses a single in-flight snapshot refresh", "_RELAY_STATE_REFRESH_LOCK.acquire" in relay_source)
     check("relay-state request path is cache-only", "if not force_rebuild" in relay_source)
@@ -312,7 +326,11 @@ def run():
         and dashboard_refresher_source.count("_build_api_state_snapshot()") == 2
         and '"manual_admin_pause"' in dashboard_refresher_source
         and '"continuous_ai_research_enabled"' in dashboard_refresher_source
-        and '"research_lane_enabled"' in dashboard_refresher_source,
+        and '"research_lane_enabled"' in dashboard_refresher_source
+        and "relay_expired[-_DASHBOARD_HISTORY_MAX:]" in dashboard_refresher_source
+        and '"expired_orders_total"' in dashboard_refresher_source
+        and '"ai_history"' in dashboard_refresher_source
+        and '"pathway_lane_specs"' in dashboard_refresher_source,
     )
     original_api_cache = copy.deepcopy(bot._api_state_cache)
     try:
@@ -339,6 +357,7 @@ def run():
             bot._api_state_cache.clear()
             bot._api_state_cache.update(original_api_cache)
     dashboard_snapshot_source = inspect.getsource(bot._build_api_state_snapshot)
+    dashboard_html_source = bot.DASHBOARD_JS
     check(
         "dashboard snapshot excludes unbounded state collections before deepcopy",
         "if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS" in dashboard_snapshot_source
@@ -439,6 +458,16 @@ def run():
         "if _API_STATE_INLINE_RESEARCH_AGGREGATES" in dashboard_snapshot_source
         and "get_pathway_lane_specs_cached(for_api=True)" in dashboard_snapshot_source
         and '"source": "analyzer"' in dashboard_snapshot_source,
+    )
+    check(
+        "dashboard card active counts include the Continuous benchmark",
+        "PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS,)"
+        in dashboard_snapshot_source,
+    )
+    check(
+        "dashboard cards honor the direct manual-pause state",
+        "d.manual_admin_pause === true" in dashboard_html_source
+        and "d.execution_reason === 'ADMIN_MANUAL'" in dashboard_html_source,
     )
     original_lane_specs = bot._cached_pathway_lane_specs
     original_merge_specs = bot._merge_pathway_specs_with_session_stats

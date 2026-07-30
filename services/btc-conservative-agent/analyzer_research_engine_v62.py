@@ -64,6 +64,7 @@ from research_opportunity_v2 import (
     load_events as load_type_b_research_v2_events,
     materialize as materialize_type_b_research_v2,
     summarize as summarize_type_b_research_v2,
+    summarize_lane_verdicts,
 )
 
 ADX_RESEARCH_LOW_MAX = 18.0
@@ -5331,7 +5332,10 @@ def _aggregate_lane_metric_blocks(blocks: list) -> dict:
     good_saved = round(sum(float(b.get("good_blocks_saved_usd") or 0) for b in blocks), 2)
     approve_to_fill_pct = round(100.0 * real_fills / approves, 1) if approves else 0.0
     shadow_fill_pct = round(100.0 * shadow_filled / approves, 1) if approves else 0.0
-    per_approve_ev = round((net_pnl_real + net_pnl_shadow_blocked) / approves, 2) if approves else 0.0
+    per_approve_ev = round(net_pnl_real / approves, 2) if approves else 0.0
+    counterfactual_ev_per_approve = (
+        round(net_pnl_shadow_blocked / approves, 2) if approves else 0.0
+    )
     return {
         "approves": approves,
         "real_fills": real_fills,
@@ -5341,6 +5345,7 @@ def _aggregate_lane_metric_blocks(blocks: list) -> dict:
         "net_pnl_real": net_pnl_real,
         "net_pnl_shadow_blocked": net_pnl_shadow_blocked,
         "per_approve_ev": per_approve_ev,
+        "counterfactual_ev_per_approve": counterfactual_ev_per_approve,
         "costly_blocks_usd": costly,
         "good_blocks_saved_usd": good_saved,
     }
@@ -8398,7 +8403,12 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
     snapshots_all = _load_signal_snapshots()
     snapshots = _filter_snapshots_by_session(snapshots_all, session)
-    if not snapshots:
+    shared_verdict_summary = summarize_lane_verdicts(
+        load_type_b_research_v2_events(TYPE_B_RESEARCH_V2_EVENT_FILE),
+        since_epoch=_session_start_ts(session) or 0.0,
+    )
+    shared_verdict_lanes = shared_verdict_summary.get("lanes") or {}
+    if not snapshots and not shared_verdict_lanes:
         print(f"  No APPROVE snapshots for {scope.lower()} scope. {PIPELINE_ENFORCEMENT_TAG}")
         return None
 
@@ -8408,8 +8418,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         if lane == "EXEC_5M":
             continue
         approve_rows.append({"trade_id": str(tid), "research_lane": lane})
-    approve_df = pd.DataFrame(approve_rows)
-    if approve_df.empty:
+    approve_df = pd.DataFrame(
+        approve_rows,
+        columns=["trade_id", "research_lane"],
+    )
+    if approve_df.empty and not shared_verdict_lanes:
         print(f"  No lane-tagged APPROVE snapshots. {PIPELINE_ENFORCEMENT_TAG}")
         return None
 
@@ -8464,6 +8477,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         lanes_with_approves_seed.add(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
     else:
         lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+    lanes_with_approves_seed.update(shared_verdict_lanes.keys())
 
     lane_metrics = {}
     lanes_with_approves = lanes_with_approves_seed
@@ -8476,6 +8490,10 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         lane_approves = approve_df[approve_df["research_lane"] == lane]
         approve_ids = set(lane_approves["trade_id"])
         approves_n = len(lane_approves)
+        shared_verdict_metrics = shared_verdict_lanes.get(lane) or {}
+        has_shared_verdict_truth = bool(shared_verdict_metrics)
+        if has_shared_verdict_truth:
+            approves_n = int(shared_verdict_metrics.get("accepted") or 0)
 
         if not trade_df.empty and "research_lane" in trade_df.columns:
             lane_trades = trade_df[trade_df["research_lane"].astype(str) == lane]
@@ -8484,7 +8502,17 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         else:
             lane_trades = pd.DataFrame()
         real_fills = len(lane_trades)
-        net_pnl_real = round(float(pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").sum()), 2) if not lane_trades.empty else 0.0
+        lane_real_pnl = (
+            pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").fillna(0)
+            if not lane_trades.empty else pd.Series(dtype=float)
+        )
+        net_pnl_real = round(float(lane_real_pnl.sum()), 2) if not lane_real_pnl.empty else 0.0
+        real_wins = int((lane_real_pnl > 0).sum()) if not lane_real_pnl.empty else 0
+        real_losses = int((lane_real_pnl < 0).sum()) if not lane_real_pnl.empty else 0
+        real_win_rate_pct = (
+            round(100.0 * real_wins / real_fills, 1)
+            if real_fills else 0.0
+        )
         lane_research_metrics = _policy_filtered_research_lane_metrics(
             shadow_lane_df, lane
         )
@@ -8532,49 +8560,54 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                     )
                     approves_n = max(approves_n, sim_n)
 
-        # LAB / OFF-tile breadcrumbs: opportunity capture + lab PnL ledger when no closed fills.
+        # LAB / OFF-tile breadcrumbs: opportunity capture when no closed fills.
         if approves_n == 0 or real_fills == 0:
             opp_rows = _load_jsonl_rows(LANE_OPPORTUNITY_CAPTURE_FILE)
             lane_opp = [
                 r for r in opp_rows
                 if str(r.get("lane") or r.get("research_lane") or "").upper() == str(lane).upper()
             ]
-            if lane_opp:
+            if lane_opp and not has_shared_verdict_truth:
                 opp_appr = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "APPROVE")
                 opp_orders = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "ORDER_SUBMITTED")
                 opp_spawn = sum(1 for r in lane_opp if str(r.get("event") or "").upper() == "SPAWN_LAB")
                 approves_n = max(approves_n, opp_appr, opp_orders, opp_spawn)
-            lab_path = _agent_data_path("lane_lab_pnl_ledger.json")
-            if not int(lane_research_metrics.get("lab_closes") or 0) and os.path.isfile(lab_path):
-                try:
-                    with open(lab_path, encoding="utf-8") as _lf:
-                        _lab = (json.load(_lf) or {}).get("lanes") or {}
-                    _lab_row = _lab.get(lane) or {}
-                    _lab_closes = int(_lab_row.get("closes") or 0)
-                    if _lab_closes:
-                        _lab_wins = int(_lab_row.get("wins") or 0)
-                        _lab_losses = int(_lab_row.get("losses") or 0)
-                        _lab_pnl = round(float(_lab_row.get("net_pnl_usd") or 0), 4)
-                        lane_research_metrics.update({
-                            "lab_mode": True,
-                            "lab_rows": _lab_closes,
-                            "lab_closes": _lab_closes,
-                            "lab_net_pnl": _lab_pnl,
-                            "lab_wins": _lab_wins,
-                            "lab_losses": _lab_losses,
-                            "lab_breakevens": max(
-                                0, _lab_closes - _lab_wins - _lab_losses
-                            ),
-                            "lab_win_rate": round(
-                                100.0 * _lab_wins / _lab_closes, 1
-                            ),
-                            "lab_per_close_ev": round(
-                                _lab_pnl / _lab_closes, 4
-                            ),
-                            "lab_pnl_source": "lane_lab_pnl_ledger",
-                        })
-                except Exception:
-                    pass
+
+        # The benchmark keeps its real paper results and its counterfactual
+        # ledger side-by-side.  Load the latter even when the lane also has
+        # real fills; otherwise the compact analyzer JSON makes the dashboard
+        # lose the counterfactual block after a restart.
+        lab_path = _agent_data_path("lane_lab_pnl_ledger.json")
+        if not int(lane_research_metrics.get("lab_closes") or 0) and os.path.isfile(lab_path):
+            try:
+                with open(lab_path, encoding="utf-8") as _lf:
+                    _lab = (json.load(_lf) or {}).get("lanes") or {}
+                _lab_row = _lab.get(lane) or {}
+                _lab_closes = int(_lab_row.get("closes") or 0)
+                if _lab_closes:
+                    _lab_wins = int(_lab_row.get("wins") or 0)
+                    _lab_losses = int(_lab_row.get("losses") or 0)
+                    _lab_pnl = round(float(_lab_row.get("net_pnl_usd") or 0), 4)
+                    lane_research_metrics.update({
+                        "lab_mode": True,
+                        "lab_rows": _lab_closes,
+                        "lab_closes": _lab_closes,
+                        "lab_net_pnl": _lab_pnl,
+                        "lab_wins": _lab_wins,
+                        "lab_losses": _lab_losses,
+                        "lab_breakevens": max(
+                            0, _lab_closes - _lab_wins - _lab_losses
+                        ),
+                        "lab_win_rate": round(
+                            100.0 * _lab_wins / _lab_closes, 1
+                        ),
+                        "lab_per_close_ev": round(
+                            _lab_pnl / _lab_closes, 4
+                        ),
+                        "lab_pnl_source": "lane_lab_pnl_ledger",
+                    })
+            except Exception:
+                pass
 
         shadow_filled = 0
         net_pnl_shadow_blocked = 0.0
@@ -8606,7 +8639,13 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
         approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else 0.0
         shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else 0.0
-        per_approve_ev = round((net_pnl_real + net_pnl_shadow_blocked) / approves_n, 2) if approves_n else 0.0
+        # The tile labels this as real EV/approve and displays counterfactual
+        # P&L separately. Never blend shadow outcomes into the real figure.
+        per_approve_ev = round(net_pnl_real / approves_n, 2) if approves_n else 0.0
+        counterfactual_ev_per_approve = (
+            round(net_pnl_shadow_blocked / approves_n, 2)
+            if approves_n else 0.0
+        )
 
         lane_metrics[lane] = {
             "approves": approves_n,
@@ -8615,10 +8654,21 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "shadow_filled": shadow_filled,
             "shadow_fill_pct": shadow_fill_pct,
             "net_pnl_real": net_pnl_real,
+            "wins": real_wins,
+            "losses": real_losses,
+            "win_rate_pct": real_win_rate_pct,
             "net_pnl_shadow_blocked": net_pnl_shadow_blocked,
             "per_approve_ev": per_approve_ev,
+            "counterfactual_ev_per_approve": counterfactual_ev_per_approve,
             "costly_blocks_usd": costly_blocks_usd,
             "good_blocks_saved_usd": good_blocks_saved_usd,
+            "lane_gate_evaluated": int(shared_verdict_metrics.get("evaluated") or 0),
+            "lane_gate_rejected": int(shared_verdict_metrics.get("rejected") or 0),
+            "approval_source": (
+                "type_b_research_v2_lane_verdict"
+                if has_shared_verdict_truth
+                else "signal_snapshot"
+            ),
             **lane_research_metrics,
             **v2_lane_extra,
         }
@@ -16470,6 +16520,20 @@ def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, 
             "shadow_fill_pct": metrics.get("shadow_fill_pct", 0),
             "net_pnl_real": metrics.get("net_pnl_real", 0),
             "per_approve_ev": metrics.get("per_approve_ev", 0),
+            "wins": metrics.get("wins", 0),
+            "losses": metrics.get("losses", 0),
+            "win_rate_pct": metrics.get("win_rate_pct", 0),
+            "lab_mode": metrics.get("lab_mode", False),
+            "lab_closes": metrics.get("lab_closes", 0),
+            "lab_net_pnl": metrics.get("lab_net_pnl", 0),
+            "lab_wins": metrics.get("lab_wins", 0),
+            "lab_losses": metrics.get("lab_losses", 0),
+            "lab_win_rate": metrics.get("lab_win_rate", 0),
+            "lab_per_close_ev": metrics.get("lab_per_close_ev", 0),
+            "lab_pnl_source": metrics.get("lab_pnl_source"),
+            "approval_source": metrics.get("approval_source"),
+            "lane_gate_evaluated": metrics.get("lane_gate_evaluated", 0),
+            "lane_gate_rejected": metrics.get("lane_gate_rejected", 0),
             "verdict": metrics.get("verdict"),
             "summary_line": session_line,
         }
