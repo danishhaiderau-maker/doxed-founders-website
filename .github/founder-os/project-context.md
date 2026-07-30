@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: debounce relay sync guard
+fix: bound Fly mirror transfers
 
 ## Last Activity
 
