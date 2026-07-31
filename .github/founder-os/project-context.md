@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+﻿fix(auth): make guards.spec rejects-compatible with sync canActivate
 
 ## Last Activity
 
