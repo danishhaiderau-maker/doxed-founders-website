@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+ci(btc): install python requirements before Fly safety contracts
 
 ## Last Activity
 
