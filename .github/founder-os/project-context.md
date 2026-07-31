@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): disambiguate stale Fly state from true offline
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
