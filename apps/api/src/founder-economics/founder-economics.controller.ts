@@ -6,6 +6,7 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import {
@@ -17,6 +18,7 @@ import {
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
+import { DdollarGateTokenGuard } from './ddollar-gate-token.guard';
 import { DdollarEngineService } from './ddollar-engine.service';
 import { EpochSettlementService } from './epoch-settlement.service';
 import { FounderGdpService } from './founder-gdp.service';
@@ -83,7 +85,18 @@ export class FounderEconomicsController {
    * stable. Auth is the standard @CurrentUser session — no separate token,
    * no bypass. The value is the same rawDdollar source the founder-economics
    * snapshot exposes, rounded to 2 decimals for display stability.
+   *
+   * Two auth paths reach this handler:
+   *   1. Browser session via the global JwtAuthGuard → @CurrentUser.
+   *   2. Bot service call with `Authorization: Bearer ${DDOLLAR_GATE_TOKEN}`
+   *      → DdollarGateTokenGuard materializes request.user from the
+   *      configured DDOLLAR_GATE_OPERATOR_USER_ID before this handler runs,
+   *      so @CurrentUser resolves to the operator.
+   *
+   * The DdollarGateTokenGuard is registered per-route; the global guard
+   * still applies for the session path.
    */
+  @UseGuards(DdollarGateTokenGuard)
   @Get('ddollar/gate-balance')
   ddollarGateBalance(@CurrentUser() user: AuthUser) {
     return this.ddollarEngine.exportSnapshot(0).then((snap) => {
