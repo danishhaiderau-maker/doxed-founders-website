@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-ci(btc): install python requirements before Fly safety contracts
+fix(agent-hub): disambiguate stale Fly state from true offline
 
 ## Last Activity
 
