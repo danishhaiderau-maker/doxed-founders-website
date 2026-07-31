@@ -72,7 +72,7 @@ test('JwtAuthGuard: bearer header NOT equal to DDOLLAR_GATE_TOKEN does not take 
   // getResponse(). That proves the skip branch was NOT taken — if it had
   // been, the guard would have returned true without touching super.
   await assert.rejects(
-    () => guard.canActivate(fakeContext(req) as never),
+    async () => Promise.resolve(guard.canActivate(fakeContext(req) as never)),
     // Any error confirms super.canActivate was reached.
   );
 });
@@ -89,7 +89,7 @@ test('JwtAuthGuard: unset DDOLLAR_GATE_TOKEN means bearer does not take the skip
   // because the fake context lacks getResponse(). This proves the skip
   // branch was inert when DDOLLAR_GATE_TOKEN is unset.
   await assert.rejects(
-    () => guard.canActivate(fakeContext(req) as never),
+    async () => Promise.resolve(guard.canActivate(fakeContext(req) as never)),
   );
 });
 
