@@ -30,6 +30,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Python runtime requirements
+        # fly_relay_state_pusher.py imports `requests` at module load, and several
+        # safety-contract tests exercise it. Mirror the Dockerfile by installing
+        # requirements.txt so the contract checks run against the real runtime.
+        run: pip install --no-cache-dir -r requirements.txt
+
       - name: Verify Fly and dashboard safety contracts
         run: |
           python -m py_compile bot.py btc_conservative_agent.py fly_relay_state_pusher.py
