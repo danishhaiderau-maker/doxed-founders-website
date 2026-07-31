@@ -326,9 +326,21 @@ export class BotBridgeService {
     // BOT_CONTROL_SECRET. The instance-id format `dashboard-7002-pid-*`
     // alone is not sufficient because both Fly and the legacy desktop
     // owner use the same format string in bot.py.
-    if (FLY_CANONICAL_LOCK_ENFORCED && !isFlyDeclaredDashboardUrl(state.dashboard_url)) {
+    //
+    // The check is enforced when `dashboard_url` is present in the
+    // payload (always the case for /api/state). /api/relay-state does
+    // not currently surface this field, so when it's absent we fall
+    // back to the existing owner checks above; the X-Desktop-Mirror
+    // header guard in fetchShowcaseStateOnce still rejects proxied
+    // responses regardless of which endpoint served them.
+    if (
+      FLY_CANONICAL_LOCK_ENFORCED
+      && typeof state.dashboard_url === 'string'
+      && state.dashboard_url.trim() !== ''
+      && !isFlyDeclaredDashboardUrl(state.dashboard_url)
+    ) {
       this.logger.warn(
-        `Rejecting direct owner proof: dashboard_url='${state.dashboard_url ?? ''}' is not canonical Fly`,
+        `Rejecting direct owner proof: dashboard_url='${state.dashboard_url}' is not canonical Fly`,
       );
       return false;
     }

@@ -105,14 +105,19 @@ export class ShowcaseSnapshotService {
       throw new BadRequestException('snapshot did not prove a fresh canonical :7002 owner');
     }
     // FIX 2 — pushed-snapshot Fly-origin proof. When the source-controlled
-    // lock is enforced, the publisher's snapshot must declare its public
-    // dashboard URL as the canonical Fly URL. The lock files the desktop
-    // launchers and prevents a desktop process from claiming ownership,
-    // but this is the API-side belt-and-suspenders guard: even if a
-    // desktop publisher somehow held BOT_CONTROL_SECRET, its snapshot
-    // would carry a loopback/LAN dashboard_url and be rejected here.
+    // lock is enforced and the publisher's snapshot declares a
+    // `dashboard_url`, that URL must be the canonical Fly URL. Snapshots
+    // built from /api/relay-state currently omit this field, so absent
+    // is acceptable (the X-Desktop-Mirror header guard plus existing
+    // owner checks remain authoritative); present-and-non-Fly is
+    // rejected outright since a desktop process reports a loopback/LAN
+    // URL in its own /api/state and would otherwise pass the existing
+    // `dashboard_owner=true + port=7002` gate by sharing the relay
+    // BOT_CONTROL_SECRET.
     if (
       FLY_CANONICAL_LOCK_ENFORCED
+      && typeof identity.dashboard_url === 'string'
+      && identity.dashboard_url.trim() !== ''
       && !isFlyDeclaredDashboardUrl(identity.dashboard_url)
     ) {
       throw new BadRequestException(
