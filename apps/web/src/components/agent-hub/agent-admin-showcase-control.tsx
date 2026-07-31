@@ -157,15 +157,87 @@ const ADVANCED_COMMANDS: HomeCmd[] = [
   },
 ];
 
+export type FlyStatus = 'online' | 'stale' | 'unreachable';
+
+/**
+ * Resolve the Fly strategy/trading owner status without the cross-region
+ * flap that affected the old single-probe path.
+ *
+ * `flyReachable` is the authoritative flag already computed on the dashboard
+ * endpoint (trading-agents.service.ts getPublicDashboard) from the canonical
+ * snapshot AND the lightweight `/api/ping`+`/health` probe via
+ * BotBridgeService.isFlyHealthReachable(). It does NOT flap with the heavy
+ * `/api/state` cross-region fetch.
+ *
+ * `directProbe` is the optional result of the parallel `/bot-health` poll.
+ * Because that endpoint probes `/ready` + `/api/ping` (and the live Fly host
+ * has been observed timing out on those exact paths while `/health` stays
+ * green), `directProbe === false` alone MUST NOT flip the chip to
+ * "unreachable" — that is precisely the flap Danish reported. Only when both
+ * the authoritative flag AND the direct probe agree Fly is down do we treat
+ * it as a true outage.
+ */
+export function resolveFlyStatus(
+  flyReachable?: boolean,
+  directProbe?: boolean | null,
+): FlyStatus {
+  // Either the authoritative dashboard flag OR a successful direct probe is
+  // sufficient proof that Fly is up — both are independent connectivity
+  // signals that do not depend on the flap-prone heavy /api/state fetch.
+  if (flyReachable) return 'online';
+  if (directProbe === true) return 'online';
+
+  // Authoritative dashboard flag explicitly says down. This is the same
+  // de-flapped signal the public view's relay-sync alert relies on
+  // (agent-relay-sync-alerts.ts), so we mirror its semantics: a definitive
+  // false is treated as a real outage, never as a transient "stale".
+  if (flyReachable === false) return 'unreachable';
+
+  // flyReachable is undefined (dashboard poll hasn't returned yet, e.g. on
+  // first render). A lone direct-probe miss here MUST NOT flip the chip to
+  // "unreachable" — the live Fly host has been observed timing out /ready +
+  // /api/ping while /health stays 200, exactly the flap Danish reported.
+  // Surface "stale" until the authoritative flag arrives.
+  if (directProbe === false) return 'stale';
+
+  // No data of any kind yet.
+  return 'unreachable';
+}
+
+/**
+ * Resolve the Agent Hub signed-feed status. `botConnected` proves the
+ * platform relay holds a canonical snapshot; `flyReachable` proves Fly
+ * itself responds to lightweight probes even when that snapshot is briefly
+ * stale. Three-state keeps the chip from flapping to "offline" during a
+ * transient /api/state fetch miss (the same root cause the public view's
+ * relay-sync alert already handles).
+ */
+export function resolveFeedStatus(
+  botConnected?: boolean,
+  serverUplinkOnline?: boolean | null,
+  flyReachable?: boolean,
+): FlyStatus {
+  const uplink = serverUplinkOnline ?? botConnected;
+  if (uplink) return 'online';
+  if (flyReachable) return 'stale';
+  return 'unreachable';
+}
+
 export function AgentAdminShowcaseControl({
   token,
   executionPaused,
   botConnected,
+  flyReachable,
   onUpdated,
 }: {
   token: string;
   executionPaused?: boolean;
   botConnected?: boolean;
+  /** Authoritative Fly reachability flag from the dashboard endpoint
+   *  (snapshot + lightweight probe). Prevents the admin chip from flapping
+   *  with the heavy /api/state cross-region fetch that the parallel
+   *  /bot-health probe still rides. */
+  flyReachable?: boolean;
   onUpdated?: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -176,7 +248,10 @@ export function AgentAdminShowcaseControl({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
   const [serverUplinkOnline, setServerUplinkOnline] = useState<boolean | null>(null);
-  const [flyOnline, setFlyOnline] = useState<boolean | null>(null);
+  const [flyDirectProbe, setFlyDirectProbe] = useState<boolean | null>(null);
+
+  const flyStatus = resolveFlyStatus(flyReachable, flyDirectProbe);
+  const feedStatus = resolveFeedStatus(botConnected, serverUplinkOnline, flyReachable);
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
@@ -223,7 +298,13 @@ export function AgentAdminShowcaseControl({
         const json = await fetchServerBotHealth('conservative-btc');
         if (!cancelled) {
           setServerUplinkOnline(Boolean(json.botConnected || json.ok));
-          setFlyOnline(json.fly === true ? true : json.fly === false ? false : null);
+          // The /bot-health direct probe is a SECONDARY input. Its `fly`
+          // field probes /ready + /api/ping, both of which have been
+          // observed timing out on the live Fly host while /health (the
+          // authoritative flag's path) stays 200. Storing it here lets
+          // resolveFlyStatus() treat a lone false as "stale" rather than
+          // "unreachable" — the exact flap Danish reported.
+          setFlyDirectProbe(json.fly === true ? true : json.fly === false ? false : null);
         }
       } catch {
         // leave as-is; client-side probe remains a secondary fallback
@@ -376,17 +457,8 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        <StatusChip
-          label="Fly strategy/trading owner"
-          ok={flyOnline === true}
-          sub={FLY_BOT_URL}
-          inactiveLabel={flyOnline === false ? 'unreachable' : 'not directly verified'}
-        />
-        <StatusChip
-          label="Agent Hub signed feed"
-          ok={Boolean(serverUplinkOnline ?? botConnected)}
-          sub="Fly → platform API"
-        />
+        <FlyStatusChip label="Fly strategy/trading owner" status={flyStatus} sub={FLY_BOT_URL} />
+        <FlyStatusChip label="Agent Hub signed feed" status={feedStatus} sub="Fly → platform API" />
         <StatusChip
           label={`Desktop Fly proxy :${botPort}`}
           ok={Boolean(status?.bot?.online)}
@@ -544,6 +616,56 @@ function StatusChip({
         />
         <span>
           {label}: <strong>{ok ? 'online' : (inactiveLabel ?? 'offline')}</strong>
+        </span>
+      </div>
+      {sub && <span className="truncate pl-4 text-[9px] text-zinc-600">{sub}</span>}
+    </div>
+  );
+}
+
+/**
+ * Three-state status chip for Fly-backed signals. Mirrors the public view's
+ * distinction (commit 7a2ce1cf) between:
+ *   - online      : fresh proof (snapshot + lightweight probe agree)
+ *   - stale (warn): snapshot briefly lagging or direct probe lost a packet,
+ *                   but Fly itself is still responding — never flips to the
+ *                   scary red "offline" label on a transient miss
+ *   - unreachable : true outage — authoritative flag AND direct probe both
+ *                   failed
+ */
+function FlyStatusChip({
+  label,
+  status,
+  sub,
+}: {
+  label: string;
+  status: FlyStatus;
+  sub?: string;
+}) {
+  const tone =
+    status === 'online'
+      ? 'border-emerald-500/40 text-emerald-300'
+      : status === 'stale'
+        ? 'border-amber-500/40 text-amber-300'
+        : 'border-red-500/50 text-red-300';
+  const dotClass =
+    status === 'online'
+      ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
+      : status === 'stale'
+        ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.7)]'
+        : 'bg-red-500';
+  const labelText =
+    status === 'online' ? 'online' : status === 'stale' ? 'feed stale' : 'unreachable';
+  return (
+    <div className={`flex flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-[11px] ${tone}`}>
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${dotClass}`}
+          title={labelText}
+          aria-hidden
+        />
+        <span>
+          {label}: <strong>{labelText}</strong>
         </span>
       </div>
       {sub && <span className="truncate pl-4 text-[9px] text-zinc-600">{sub}</span>}

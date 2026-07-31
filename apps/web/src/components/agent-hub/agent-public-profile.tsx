@@ -911,6 +911,7 @@ export function AgentPublicProfile({
                   token={adminToken}
                   executionPaused={executionPaused}
                   botConnected={botConnected}
+                  flyReachable={flyReachable}
                   onUpdated={onAdminRefresh}
                 />
               </div>

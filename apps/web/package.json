@@ -7,7 +7,7 @@
     "build": "npx prisma generate --schema ../../prisma/schema.prisma && next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx --test src/components/agent-hub/agent-architecture-copy.spec.ts src/components/agent-hub/agent-decision-pipeline-status.spec.tsx src/components/agent-hub/agent-direction-gap.spec.ts src/components/agent-hub/agent-live-execution-view.spec.ts src/components/agent-hub/agent-public-profile.live.spec.tsx src/components/agent-hub/agent-transparency-tables.spec.tsx src/components/agent-hub/showcase-sync-panel.spec.tsx src/lib/api.session-summary.spec.ts"
+    "test": "tsx --test src/components/agent-hub/agent-architecture-copy.spec.ts src/components/agent-hub/agent-admin-showcase-control.spec.ts src/components/agent-hub/agent-decision-pipeline-status.spec.tsx src/components/agent-hub/agent-direction-gap.spec.ts src/components/agent-hub/agent-live-execution-view.spec.ts src/components/agent-hub/agent-public-profile.live.spec.tsx src/components/agent-hub/agent-relay-sync-alerts.spec.ts src/components/agent-hub/agent-transparency-tables.spec.tsx src/components/agent-hub/showcase-sync-panel.spec.tsx src/lib/api.session-summary.spec.ts"
   },
   "dependencies": {
     "@dcf/config": "*",
