@@ -287,8 +287,13 @@ def main() -> None:
     )
     check(
         "bridge start buttons queue work outside the request thread",
-        '"start-bot" {\n      # Starting/repairing a process' in BRIDGE_LAUNCHER
-        and 'Invoke-HomeCommandBackground "start-bot"' in BRIDGE_LAUNCHER
+        '"start-bot" {' in BRIDGE_LAUNCHER
+        and BRIDGE_LAUNCHER.index('"start-bot" {')
+        < BRIDGE_LAUNCHER.index('# Starting/repairing a process')
+        and '# Starting/repairing a process'
+        in BRIDGE_LAUNCHER.split('"start-bot" {', 1)[1].split('"start-analyzer" {', 1)[0]
+        and 'Invoke-HomeCommandBackground "start-bot"'
+        in BRIDGE_LAUNCHER.split('"start-bot" {', 1)[1].split('"start-analyzer" {', 1)[0]
         and 'Invoke-HomeCommandBackground "start-analyzer"' in BRIDGE_LAUNCHER,
     )
     check(
