@@ -68,6 +68,7 @@ export function AgentDeskView({
   relaySimParticipantStats,
   relayFidelity,
   botConnected,
+  flyReachable,
   instanceLastError,
   userActivity,
   showcaseActivity,
@@ -98,6 +99,9 @@ export function AgentDeskView({
   relaySimParticipantStats?: RelaySimParticipantStats | null;
   relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
   botConnected?: boolean;
+  /** True when the canonical Fly bot responds to lightweight health probes
+   *  even if botConnected is false because /api/state is stale. */
+  flyReachable?: boolean;
   /** TradingAgentInstance.lastError for the user's hire. Used by relay-sync
    *  alerts to detect F3 circuit-breaker outage during stale-display window. */
   instanceLastError?: string | null;
@@ -129,6 +133,7 @@ export function AgentDeskView({
         tradeLifecycleIntegrity={tradeLifecycleIntegrity}
         relaySimParticipantStats={relaySimParticipantStats}
         botConnected={botConnected}
+        flyReachable={flyReachable}
         instanceLastError={instanceLastError}
         onStart={onStartRelaySim}
         onStop={onStopRelaySim}

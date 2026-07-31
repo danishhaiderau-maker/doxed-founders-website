@@ -69,6 +69,7 @@ export function AgentRelaySimPanel({
   tradeLifecycleIntegrity,
   relaySimParticipantStats,
   botConnected,
+  flyReachable,
   instanceLastError,
   onStart,
   onStop,
@@ -92,6 +93,9 @@ export function AgentRelaySimPanel({
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
   relaySimParticipantStats?: RelaySimParticipantStats | null;
   botConnected?: boolean;
+  /** True when the canonical Fly bot responds to lightweight health probes
+   *  even if botConnected is false because /api/state is stale. */
+  flyReachable?: boolean;
   /** TradingAgentInstance.lastError for the user's hire. */
   instanceLastError?: string | null;
   onStart?: () => void;
@@ -125,6 +129,7 @@ export function AgentRelaySimPanel({
   const syncAlerts = buildRelaySyncAlerts({
     mode: 'sim',
     botConnected,
+    flyReachable,
     instanceLastError,
     copyRelaySim: sim,
     copyRelayReconcile: reconcile,

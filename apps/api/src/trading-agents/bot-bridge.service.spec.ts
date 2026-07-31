@@ -268,3 +268,50 @@ test('canonical control posts require and send the dedicated bot admin token', a
     globalThis.fetch = originalFetch;
   }
 });
+
+test('isFlyHealthReachable succeeds on lightweight probe without falling through to /api/state', async () => {
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    urls.push(url);
+    // Lightweight /api/ping succeeds — mirrors the case where Fly is healthy
+    // enough to answer health probes but the dashboard's heavy /api/state
+    // fetch could still time out under intermittent cross-region latency.
+    if (url.endsWith('/api/ping') || url.endsWith('/health')) {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  try {
+    const bridge = makeBridge();
+    const reachable = await bridge.isFlyHealthReachable();
+    assert.equal(reachable, true);
+    // Critical: the lightweight probe must NEVER trigger a heavy /api/state
+    // fetch — that was the original cause of the dashboard-vs-bot-health
+    // contradiction (slow state fetch flapped while fast probe stayed green).
+    assert.ok(
+      urls.every((u) => !u.includes('/api/state') && !u.includes('/api/relay')),
+      `unexpected heavy fetch: ${urls.join(', ')}`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('isFlyHealthReachable returns false when both /api/ping and /health fail', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('gateway timeout', { status: 504 });
+
+  try {
+    const bridge = makeBridge();
+    const reachable = await bridge.isFlyHealthReachable();
+    assert.equal(reachable, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

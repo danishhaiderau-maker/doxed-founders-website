@@ -555,6 +555,22 @@ export class BotBridgeService {
   async isReachable(force = false): Promise<boolean> {
     const pushed = await this.fetchCachedRelaySnapshot(15_000);
     if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
+    if (await this.isFlyHealthReachable()) return true;
+    if (!force) return false;
+    const state = await this.fetchPublicShowcaseState(true);
+    return Boolean(state);
+  }
+
+  /**
+   * Lightweight canonical-Fly reachability probe that never falls through to
+   * a heavy /api/state fetch. Used to disambiguate "Fly truly offline" from
+   * "Fly online but state stale" without coupling dashboard liveness to the
+   * slow state endpoint. Mirrors probePublicBotHealth but kept private so the
+   * bridge stays the single owner of canonical-URL resolution.
+   */
+  async isFlyHealthReachable(): Promise<boolean> {
+    const pushed = await this.fetchCachedRelaySnapshot(15_000);
+    if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
     const base = await this.resolveShowcaseUrl();
     const probes: Promise<boolean>[] = [];
     for (const path of ['/api/ping', '/health'] as const) {
@@ -573,11 +589,8 @@ export class BotBridgeService {
       await Promise.any(probes);
       return true;
     } catch {
-      // all probes rejected — fall through to state probe
+      return false;
     }
-    if (!force) return false;
-    const state = await this.fetchPublicShowcaseState(true);
-    return Boolean(state);
   }
 
   async getLiveDashboard(agentName: string, force = false) {

@@ -510,6 +510,7 @@ export function AgentPublicProfile({
   adminToken,
   accessToken,
   botConnected,
+  flyReachable,
   executionPaused,
   publicStatus,
   instanceStatus,
@@ -563,6 +564,9 @@ export function AgentPublicProfile({
   adminToken?: string;
   accessToken?: string;
   botConnected?: boolean;
+  /** True when the canonical Fly bot responds to lightweight health probes
+   *  even if botConnected is false because /api/state is stale. */
+  flyReachable?: boolean;
   executionPaused?: boolean;
   publicStatus: PublicAgentStatus;
   instanceStatus?: string | null;
@@ -805,6 +809,7 @@ export function AgentPublicProfile({
     relaySimParticipantStats,
     relayFidelity,
     botConnected,
+    flyReachable,
     instanceLastError,
     userActivity: resolvedDesk === 'relay-sim' ? simAct : userAct,
     showcaseActivity: showcaseAct,
@@ -985,6 +990,7 @@ export function AgentPublicProfile({
                 instanceStatus={instanceStatus}
                 instanceLastError={instanceLastError}
                 botConnected={botConnected}
+                flyReachable={flyReachable}
                 liveBook={exchangeLiveBook}
               />
             ) : null}

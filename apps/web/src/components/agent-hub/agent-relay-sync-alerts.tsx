@@ -15,6 +15,16 @@ export function buildRelaySyncAlerts(input: {
   mode: 'live' | 'sim';
   botConnected?: boolean;
   /**
+   * True when the canonical Fly bot is reachable for lightweight health probes
+   * (/api/ping or /health) even if the heavier /api/state fetch that drives
+   * botConnected has momentarily failed. When flyReachable=true and
+   * botConnected=false, the relay cannot mirror in this instant but Fly is not
+   * actually offline — surface a degraded-stale alert instead of the scarier
+   * "Showcase bot offline" error so users do not see a contradictory dashboard
+   * (e.g. /bot-health green while this alert says offline).
+   */
+  flyReachable?: boolean;
+  /**
    * F3 circuit-breaker error from the TradingAgentInstance, written within ~60s
    * of a real outage. Used to detect the stale-display-cache window where
    * botConnected still shows true via cached snapshot but the execution path is
@@ -49,12 +59,27 @@ export function buildRelaySyncAlerts(input: {
     const needsShowcase =
       input.mode === 'live' || (input.mode === 'sim' && Boolean(input.copyRelaySim?.active));
     if (needsShowcase) {
-      alerts.push({
-        level: 'error',
-        title: 'Showcase bot offline',
-        detail:
-          'The canonical Fly bot is not reachable from the platform API, so the relay cannot mirror new signals. Desktop :7002 and the optional Cloudflare tunnel are not the production source.',
-      });
+      // When Fly itself is still responding to lightweight health probes, the
+      // relay is degraded (state is stale) rather than permanently offline.
+      // The /bot-health endpoint will already report fly:true in this window,
+      // so calling this state "Showcase bot offline" creates a contradictory
+      // dashboard. Downgrade to a warn-level stale alert; the existing
+      // circuit-breaker (instanceLastError) still escalates a true outage.
+      if (input.flyReachable && !f3Outage) {
+        alerts.push({
+          level: 'warn',
+          title: 'Fly feed stale',
+          detail:
+            'The canonical Fly bot is reachable for health but the platform API could not fetch a fresh state snapshot on this poll. The relay is paused until the next snapshot arrives. Wait briefly and refresh; if this persists beyond ~5 minutes the bot may be overloaded.',
+        });
+      } else {
+        alerts.push({
+          level: 'error',
+          title: 'Showcase bot offline',
+          detail:
+            'The canonical Fly bot is not reachable from the platform API, so the relay cannot mirror new signals. Desktop :7002 and the optional Cloudflare tunnel are not the production source.',
+        });
+      }
     }
   }
 

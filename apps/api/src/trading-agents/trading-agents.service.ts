@@ -1106,6 +1106,7 @@ export class TradingAgentsService implements OnModuleInit {
 
     let sharedBot: BotApiState | null = null;
     let showcaseSource: 'LIVE' | 'CACHED' | null = null;
+    let flyReachableViaLightweightProbe = false;
     if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       sharedBot = await this.botBridge.fetchPublicShowcaseState(true);
       if (sharedBot) {
@@ -1128,6 +1129,20 @@ export class TradingAgentsService implements OnModuleInit {
         if (lastLiveAt > 0 && Date.now() - lastLiveAt < 5 * 60_000) {
           sharedBot = await this.botBridge.fetchStateForAdmin(false);
           showcaseSource = sharedBot ? 'CACHED' : null;
+        }
+        // If we still have no state but the lightweight Fly health probe
+        // succeeds, Fly is reachable for health even though state is stale.
+        // Surfacing this on the response lets the frontend distinguish the
+        // true offline alert ("Showcase bot offline — relay cannot mirror")
+        // from the more accurate degraded state ("Fly feed stale — showing
+        // last verified state"). Without this, the dashboard's botConnected
+        // flag flaps with the heavy /api/state fetch while the parallel
+        // /bot-health endpoint (lightweight probe) stays green — the exact
+        // contradiction observed when Fly is intermittently reachable.
+        if (!sharedBot) {
+          flyReachableViaLightweightProbe = await this.botBridge
+            .isFlyHealthReachable()
+            .catch(() => false);
         }
       }
     }
@@ -1415,6 +1430,17 @@ export class TradingAgentsService implements OnModuleInit {
 
     return {
       ...rest,
+      // When state is stale but Fly itself responds to the lightweight health
+      // probe, expose that fact so the frontend's relay-sync alert can
+      // distinguish "Fly truly offline" from "Fly online but state stale".
+      // Without this flag, the dashboard would surface the legacy hard
+      // "Showcase bot offline — relay cannot mirror" alert even when the
+      // parallel /bot-health endpoint confirms Fly is reachable, producing
+      // the contradictory dashboard state users have reported.
+      flyReachable:
+        flyReachableViaLightweightProbe ||
+        showcaseSource === 'LIVE' ||
+        showcaseSource === 'CACHED',
       agent,
       kind: 'public' as const,
       viewScope,

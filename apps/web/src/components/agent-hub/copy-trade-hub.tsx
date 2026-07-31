@@ -29,6 +29,7 @@ export function CopyTradeDetailsStrip({
   instanceStatus,
   instanceLastError,
   botConnected,
+  flyReachable,
   liveBook,
 }: {
   agent: TradingAgentSummary;
@@ -40,6 +41,9 @@ export function CopyTradeDetailsStrip({
   /** TradingAgentInstance.lastError for the user's hire. */
   instanceLastError?: string | null;
   botConnected?: boolean;
+  /** True when the canonical Fly bot responds to lightweight health probes
+   *  even if botConnected is false because /api/state is stale. */
+  flyReachable?: boolean;
   liveBook?: TradingAgentDashboardState['liveBook'] | null;
 }) {
   const reconcile = copyRelayReconcile ?? null;
@@ -67,6 +71,7 @@ export function CopyTradeDetailsStrip({
   const syncAlerts = buildRelaySyncAlerts({
     mode: 'live',
     botConnected,
+    flyReachable,
     instanceLastError,
     copyRelayReconcile: reconcile,
     copyRelayLimitChain: limitChain,

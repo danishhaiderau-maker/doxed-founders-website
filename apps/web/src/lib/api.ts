@@ -4188,7 +4188,16 @@ export interface TradingAgentDashboard {
   dashboard: import('@dcf/utils').TradingAgentDashboardState;
   updatedAt: string;
   botConnected?: boolean;
-  botSource?: 'LIVE' | 'FALLBACK';
+  botSource?: 'LIVE' | 'CACHED' | 'FALLBACK';
+  /**
+   * True when the canonical Fly bot is reachable for lightweight health probes
+   * (/api/ping or /health) even if botConnected is false because the heavier
+   * /api/state fetch that drives the dashboard snapshot has momentarily failed.
+   * Used by the relay-sync alert to distinguish "Fly truly offline" from
+   * "Fly online but state stale" so the dashboard no longer contradicts the
+   * parallel /bot-health endpoint during intermittent Fly reachability.
+   */
+  flyReachable?: boolean;
   strategyMode?: string | null;
   executionPaused?: boolean;
   executionReason?: string | null;

@@ -72,6 +72,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [allAgents, setAllAgents] = useState<TradingAgentSummary[]>([]);
   const [dashboard, setDashboard] = useState<TradingAgentDashboardState | null>(null);
   const [botConnected, setBotConnected] = useState(false);
+  const [flyReachable, setFlyReachable] = useState(false);
   const [executionPaused, setExecutionPaused] = useState(false);
   const [activity, setActivity] = useState<TradingAgentActivityEntry[]>([]);
   const [showcaseLiveBook, setShowcaseLiveBook] =
@@ -152,6 +153,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExchangeConnected(Boolean(dashR.value.agent.exchangeConnected));
         setDashboard(dashR.value.dashboard);
         setBotConnected(Boolean(dashR.value.botConnected));
+        setFlyReachable(
+          Boolean(dashR.value.flyReachable) || Boolean(dashR.value.botConnected),
+        );
         setExecutionPaused(Boolean(dashR.value.executionPaused));
         setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
         setShowcaseNote(dashR.value.showcaseNote ?? null);
@@ -475,6 +479,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           accessToken={session?.accessToken}
           adminToken={session?.accessToken}
           botConnected={botConnected}
+          flyReachable={flyReachable}
           executionPaused={executionPaused}
           publicStatus={publicStatus.status}
           instanceStatus={instanceStatus}
