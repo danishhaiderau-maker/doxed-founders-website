@@ -1,13 +1,20 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SignalCycleStatus } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  isMirrorableLaneTradeId,
+  SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
   SUBSCRIBER_TRAIL_LADDER,
-  normalizePullbackToOffsetPct,
 } from '@dcf/utils';
 import { BotBridgeService } from './bot-bridge.service';
 import { SignalCyclesService } from './signal-cycles.service';
@@ -22,6 +29,10 @@ export type ShowcaseRelayEventType =
 
 export type ShowcaseRelayEventBody = {
   event: ShowcaseRelayEventType;
+  /** Stable source identity for idempotent per-update audit history. */
+  event_id?: string | null;
+  /** Monotonic per-trade order/chase revision (ORDER_PLACED=activation bucket). */
+  event_seq?: number | null;
   trade_id?: string | null;
   ts?: string | null;
   limit_price?: number | null;
@@ -40,7 +51,9 @@ export type ShowcaseRelayEventBody = {
   edge_score?: number | null;
   effective_threshold?: number | null;
   research_lane?: string | null;
-  pullback_pct?: number | null;
+  entry_limit_policy?: string | null;
+  entry_reason?: string | null;
+  executable?: boolean | null;
   bot_version?: string | null;
   strategy_mode?: string | null;
   bot_instance_id?: string | null;
@@ -52,6 +65,45 @@ export type ShowcaseRelayEventBody = {
   platform_received_at?: string | null;
 };
 
+type RelayLifecycleEnvelope = {
+  action?: unknown;
+  context?: {
+    showcase_event?: unknown;
+    showcase_event_at?: unknown;
+    showcase_event_id?: unknown;
+    showcase_event_seq?: unknown;
+  };
+};
+
+/** Prevent a delayed webhook retry from replacing a newer canonical exact limit. */
+export function shouldApplyExactLifecycleUpdate(
+  current: RelayLifecycleEnvelope | null | undefined,
+  incoming: ShowcaseRelayEventBody,
+): boolean {
+  if (current?.action !== 'ENTER') return true;
+  if (current.context?.showcase_event === 'POSITION_CLOSED') return false;
+
+  const currentSeq = Number(current.context?.showcase_event_seq);
+  const incomingSeq = Number(incoming.event_seq);
+  const hasCurrentSeq = Number.isInteger(currentSeq) && currentSeq >= 0;
+  const hasIncomingSeq = Number.isInteger(incomingSeq) && incomingSeq >= 0;
+  if (hasCurrentSeq && hasIncomingSeq) {
+    if (incomingSeq !== currentSeq) return incomingSeq > currentSeq;
+    return false;
+  }
+  if (hasCurrentSeq && !hasIncomingSeq) return false;
+
+  const currentAt = Date.parse(String(current.context?.showcase_event_at ?? ''));
+  const incomingAt = Date.parse(String(incoming.ts ?? ''));
+  if (Number.isFinite(currentAt) && Number.isFinite(incomingAt)) {
+    return incomingAt > currentAt;
+  }
+  const currentId = String(current.context?.showcase_event_id ?? '');
+  const incomingId = String(incoming.event_id ?? '');
+  if (currentId && incomingId && currentId === incomingId) return false;
+  return true;
+}
+
 /**
  * Build an audit-only legacy envelope or an executable signed relay envelope.
  *
@@ -61,10 +113,9 @@ export type ShowcaseRelayEventBody = {
  * deliberately non-executable. Signed dcf-showcase-intent-v1 events carry the
  * fields required to construct a conformant ENSE immediately.
  *
- * N2 (intent-mirror) — when a signed v1 webhook carries `intent_source` and
- * signal context, those fields are merged into the envelope so the relay's
- * intent-mirror path can read `intent_source`, `signal_price`, and
- * `pullback_pct` to place the hire order (decision §8 #4).
+ * APPROVE_PENDING is visibility-only while virtual chase is counting. Only
+ * a signed ORDER_PLACED/LIMIT_UPDATED carrying the canonical structural
+ * policy and an exact positive limit can produce an executable ENTER envelope.
  */
 function relayIntentEnvelope(
   cycleId: string,
@@ -74,6 +125,7 @@ function relayIntentEnvelope(
   const direction = body?.direction?.toUpperCase();
   const isSignedIntent =
     body?.schema === 'dcf-showcase-intent-v1'
+    && Boolean(body?.platform_received_at)
     && (direction === 'LONG' || direction === 'SHORT');
 
   // Legacy owner events are wake-only. Keep their audit cycles deliberately
@@ -88,31 +140,55 @@ function relayIntentEnvelope(
   }
 
   const dir = direction as 'LONG' | 'SHORT';
-  const sigPrice =
-    typeof body?.signal_price === 'number' && Number.isFinite(body.signal_price)
-      ? body.signal_price
-      : null;
-  const pullbackPct =
-    typeof body?.pullback_pct === 'number' && Number.isFinite(body.pullback_pct)
-      ? body.pullback_pct
-      : null;
   const exactLimitPrice =
     (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
+    && body?.executable === true
+    && body?.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
     && typeof body?.limit_price === 'number'
     && Number.isFinite(body.limit_price)
     && body.limit_price > 0
       ? body.limit_price
       : null;
-  const offsetPct = normalizePullbackToOffsetPct(dir, {
-    botPullbackThreshold: pullbackPct,
-    signalPullback: pullbackPct,
-  });
+  const lifecycleContext = {
+    signed_showcase_event: Boolean(body?.platform_received_at),
+    ...(body?.event ? { showcase_event: body.event } : {}),
+    ...(body?.ts ? { showcase_event_at: body.ts } : {}),
+    ...(body?.event_id ? { showcase_event_id: body.event_id } : {}),
+    ...(Number.isInteger(body?.event_seq)
+      ? { showcase_event_seq: body.event_seq }
+      : {}),
+    ...(body?.platform_received_at
+      ? { platform_received_at: body.platform_received_at }
+      : {}),
+    ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
+    ...(body?.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      ? { entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION }
+      : {}),
+    ...(body?.event === 'POSITION_CLOSED'
+      && typeof body.exit_price === 'number'
+      && Number.isFinite(body.exit_price)
+      && body.exit_price > 0
+      ? { showcase_exit_price: body.exit_price }
+      : {}),
+    ...(body?.event === 'POSITION_CLOSED' && body.exit_reason
+      ? { showcase_exit_reason: body.exit_reason }
+      : {}),
+  };
+  if (exactLimitPrice == null) {
+    return {
+      cycle_id: cycleId,
+      trade_id: tradeId,
+      source: 'showcase_signed_visibility',
+      schema: 'showcase_relay_audit_v2',
+      direction: dir,
+      version: body?.bot_version ?? 'showcase-relay-v2',
+      context: lifecycleContext,
+    };
+  }
   const envelope: SignalIntentEnvelope & {
     intent_source?: 'paper' | 'live';
     trade_id: string;
     entry: SignalIntentEnvelope['entry'] & {
-      signal_price?: number;
-      pullback_pct?: number;
       exact_limit_price?: number;
     };
     context: SignalIntentEnvelope['context'] & {
@@ -138,13 +214,11 @@ function relayIntentEnvelope(
     direction: dir,
     entry: {
       type: 'LIMIT',
-      mode: 'PULLBACK_PCT',
-      offset_pct: offsetPct,
-      reference: 'SUBSCRIBER_MARK_AT_RECEIPT',
+      mode: 'EXACT_LIMIT',
+      offset_pct: 0,
+      exact_limit_price: exactLimitPrice,
+      reference: 'SHOWCASE_EXACT_LIMIT',
       ttl_sec: 1800,
-      ...(sigPrice != null ? { signal_price: sigPrice } : {}),
-      ...(pullbackPct != null ? { pullback_pct: pullbackPct } : {}),
-      ...(exactLimitPrice != null ? { exact_limit_price: exactLimitPrice } : {}),
     },
     risk: {
       stop_loss_margin_pct: -18,
@@ -161,26 +235,11 @@ function relayIntentEnvelope(
       regime: 'UNKNOWN',
       edge: Number(body?.edge_score ?? 0),
       ai_win_prob: Number(body?.win_prob ?? 0),
-      entry_mode_source: 'PULLBACK_PCT',
+      entry_mode_source: body?.entry_reason ?? 'SHOWCASE_EXACT_LIMIT',
       research_venue: 'bitfinex',
       disclaimer:
-        'Signed showcase intent. Subscriber execution remains subject to platform and exchange safety gates.',
-      signed_showcase_event: Boolean(body?.platform_received_at),
-      ...(body?.event ? { showcase_event: body.event } : {}),
-      ...(body?.ts ? { showcase_event_at: body.ts } : {}),
-      ...(body?.platform_received_at
-        ? { platform_received_at: body.platform_received_at }
-        : {}),
-      ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
-      ...(body?.event === 'POSITION_CLOSED'
-        && typeof body.exit_price === 'number'
-        && Number.isFinite(body.exit_price)
-        && body.exit_price > 0
-        ? { showcase_exit_price: body.exit_price }
-        : {}),
-      ...(body?.event === 'POSITION_CLOSED' && body.exit_reason
-        ? { showcase_exit_reason: body.exit_reason }
-        : {}),
+        'Signed exact showcase limit. Subscriber execution remains subject to platform and exchange safety gates.',
+      ...lifecycleContext,
     },
     ...(body?.intent_source ? { intent_source: body.intent_source } : {}),
     ...(body?.margin_usdt != null ? { margin_usdt: body.margin_usdt } : {}),
@@ -196,6 +255,12 @@ function relayIntentEnvelope(
 @Injectable()
 export class ShowcaseRelayEventsService {
   private readonly logger = new Logger(ShowcaseRelayEventsService.name);
+  /**
+   * Serialize same-trade lifecycle mutations inside one API process. The
+   * Postgres advisory transaction lock in persistRelayEvent supplies the
+   * corresponding cross-replica guarantee.
+   */
+  private readonly relayPersistenceTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly config: ConfigService,
@@ -326,9 +391,10 @@ export class ShowcaseRelayEventsService {
   }
 
   private queueCanonicalReconcile(event: ShowcaseRelayEventType): void {
+    if (event === 'APPROVE_PENDING') return;
     setImmediate(() => {
       const work =
-        event === 'APPROVE_PENDING' || event === 'ORDER_PLACED'
+        event === 'ORDER_PLACED'
           ? this.cycles.wakeFromShowcase({ intents: true, closures: false })
           : event === 'POSITION_CLOSED'
             ? this.cycles.wakeFromShowcase({ intents: false, closures: true })
@@ -388,6 +454,28 @@ export class ShowcaseRelayEventsService {
     );
     this.assertActiveDashboardOwner(body);
 
+    const tradeId = (body.trade_id ?? '').trim();
+    const researchLane = (body.research_lane ?? '').trim().toUpperCase();
+    if (
+      !isMirrorableLaneTradeId(tradeId)
+      || (researchLane && researchLane !== 'CONTINUOUS')
+    ) {
+      this.logger.warn(
+        `Rejected non-mirrorable showcase relay event=${body.event} ` +
+        `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,
+      );
+      return {
+        ok: false,
+        reason: 'non_mirrorable_lane',
+        event: body.event,
+        trade_id: tradeId || null,
+        intentCreated: false,
+        persisted: false,
+        platform_received_at: null,
+        ingest_ms: Date.now() - ingestStartedAt,
+      };
+    }
+
     this.botBridge.invalidateCache();
 
     const event = body.event;
@@ -399,16 +487,34 @@ export class ShowcaseRelayEventsService {
     // A verified v1 payload already contains authenticated direction, price,
     // owner identity and (for ORDER_PLACED/LIMIT_UPDATED) the exact resting
     // limit. Persist it directly; never make the money path wait for a
-    // 20-30s Cloudflare callback. Canonical state reconciliation still runs
+    // cross-region callback. Canonical state reconciliation still runs
     // immediately, but only as an asynchronous audit/backstop.
-    const directSignedIntent =
+    const signedLifecycleEvent =
       verifiedSignedPayload
       && body.schema === 'dcf-showcase-intent-v1'
       && (body.direction?.toUpperCase() === 'LONG'
         || body.direction?.toUpperCase() === 'SHORT');
+    const directExecutableIntent =
+      signedLifecycleEvent
+      && (event === 'ORDER_PLACED' || event === 'LIMIT_UPDATED')
+      && body.executable === true
+      && body.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      && typeof body.limit_price === 'number'
+      && Number.isFinite(body.limit_price)
+      && body.limit_price > 0;
 
-    if (!directSignedIntent) {
-      if (event === 'APPROVE_PENDING' || event === 'ORDER_PLACED') {
+    if (
+      signedLifecycleEvent
+      && (event === 'ORDER_PLACED' || event === 'LIMIT_UPDATED')
+      && !directExecutableIntent
+    ) {
+      throw new BadRequestException(
+        'Signed executable relay event requires exact structural limit policy',
+      );
+    }
+
+    if (!signedLifecycleEvent) {
+      if (event === 'ORDER_PLACED') {
         intentCreated = await this.cycles.wakeFromShowcase({
           intents: true,
           closures: false,
@@ -437,20 +543,21 @@ export class ShowcaseRelayEventsService {
       );
       // Signed fast-path execution is only safe after the durable cycle exists.
       // Let the sender receive a 5xx and retry the idempotent event.
-      if (directSignedIntent) throw err;
+      if (signedLifecycleEvent) throw err;
     }
 
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
-    this.queueExecutionWake(event);
-    if (directSignedIntent) {
+    if (event !== 'APPROVE_PENDING') {
+      this.queueExecutionWake(event);
+    }
+    if (signedLifecycleEvent) {
       this.queueCanonicalReconcile(event);
-      intentCreated =
-        persisted && (event === 'APPROVE_PENDING' || event === 'ORDER_PLACED');
+      intentCreated = persisted && directExecutableIntent;
     }
 
     this.logger.log(
-      `Showcase relay queued ${event} trade=${body.trade_id ?? '?'} signedFast=${directSignedIntent ? 'yes' : 'no'} intent=${intentCreated ? 'ready' : 'none'} persisted=${persisted}`,
+      `Showcase relay queued ${event} trade=${body.trade_id ?? '?'} signed=${signedLifecycleEvent ? 'yes' : 'no'} executable=${directExecutableIntent ? 'yes' : 'no'} intent=${intentCreated ? 'ready' : 'none'} persisted=${persisted}`,
     );
 
     return {
@@ -478,40 +585,96 @@ export class ShowcaseRelayEventsService {
   private async persistRelayEvent(slug: string, body: ShowcaseRelayEventBody): Promise<boolean> {
     const tradeId = (body.trade_id ?? '').trim();
     if (!tradeId) return false;
+    const eventId =
+      body.event_id?.trim()
+      || [
+        body.event,
+        tradeId,
+        Number.isInteger(body.event_seq) ? body.event_seq : 'na',
+        body.ts ?? 'unknown',
+      ].join(':');
+    const eventBody: ShowcaseRelayEventBody = { ...body, event_id: eventId };
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) return false;
 
-    // Idempotency: skip if this exact event already landed for this cycle.
-    const cycleId = await this.ensureCycle(agent.id, tradeId, body.direction, body);
-    if (!cycleId) return false;
-    const already = await this.prisma.signalCycleEvent.findFirst({
-      where: { cycleId, eventType: body.event },
-      select: { id: true },
-    });
-    if (already) return true; // replay protection
+    const lockKey = `${agent.id}:${tradeId}`;
+    return this.withRelayPersistenceLock(lockKey, () =>
+      this.prisma.$transaction(async (tx) => {
+        // Transaction-scoped advisory locking makes the envelope
+        // compare-and-write atomic across every Railway API replica. Without
+        // it, concurrent seq=N and seq=N+1 requests can both read N-1 and the
+        // older request can commit last.
+        await tx.$queryRaw`
+          SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))
+        `;
 
-    await this.prisma.signalCycleEvent.create({
-      data: {
-        cycleId,
-        eventType: body.event,
-        payload: body as unknown as import('@prisma/client').Prisma.InputJsonValue,
-      },
-    });
+        // Idempotency is per source event, not merely per event type: every
+        // unique LIMIT_UPDATED revision remains visible while retries of the
+        // same revision remain harmless.
+        const cycleId = await this.ensureCycle(
+          tx,
+          agent.id,
+          tradeId,
+          eventBody.direction,
+          eventBody,
+        );
+        if (!cycleId) return false;
+        const already = await tx.signalCycleEvent.findFirst({
+          where: {
+            cycleId,
+            eventType: eventBody.event,
+            payload: { path: ['event_id'], equals: eventId },
+          },
+          select: { id: true },
+        });
+        if (already) return true; // replay protection
 
-    // The showcase ORDER_PLACED event is audit evidence, not proof that this
-    // subscriber has an exchange order. Only the subscriber execution path
-    // may transition a participant/cycle to PENDING_ENTRY after Bitfinex has
-    // accepted its own order.
-    if (body.event === 'POSITION_CLOSED') {
-      const cycle = await this.prisma.signalCycle.findUnique({ where: { id: cycleId } });
-      if (!cycle || cycle.status === SignalCycleStatus.CLOSED) return true;
-      await this.prisma.signalCycle.update({
-        where: { id: cycleId },
-        data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
-      });
+        await tx.signalCycleEvent.create({
+          data: {
+            cycleId,
+            eventType: eventBody.event,
+            payload: eventBody as unknown as Prisma.InputJsonValue,
+          },
+        });
+
+        // The showcase ORDER_PLACED event is audit evidence, not proof that
+        // this subscriber has an exchange order. Only the subscriber execution
+        // path may transition a participant/cycle to PENDING_ENTRY after
+        // Bitfinex has accepted its own order.
+        if (eventBody.event === 'POSITION_CLOSED') {
+          const cycle = await tx.signalCycle.findUnique({ where: { id: cycleId } });
+          if (!cycle || cycle.status === SignalCycleStatus.CLOSED) return true;
+          await tx.signalCycle.update({
+            where: { id: cycleId },
+            data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
+          });
+        }
+
+        return true;
+      }),
+    );
+  }
+
+  private async withRelayPersistenceLock<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.relayPersistenceTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.relayPersistenceTails.set(key, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.relayPersistenceTails.get(key) === tail) {
+        this.relayPersistenceTails.delete(key);
+      }
     }
-
-    return true;
   }
 
   /**
@@ -520,14 +683,15 @@ export class ShowcaseRelayEventsService {
    * unique constraint on (agentId, tradeId).
    */
   private async ensureCycle(
+    db: Prisma.TransactionClient,
     agentId: string,
     tradeId: string,
     direction?: string | null,
     body?: ShowcaseRelayEventBody,
   ): Promise<string | null> {
-    const existing = await this.prisma.signalCycle.findUnique({
+    const existing = await db.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId, tradeId } },
-      select: { id: true, intentEnvelope: true },
+      select: { id: true, intentEnvelope: true, status: true },
     });
     if (existing) {
       const current = existing.intentEnvelope as
@@ -539,19 +703,26 @@ export class ShowcaseRelayEventsService {
         | null;
       const signedIntent =
         body?.schema === 'dcf-showcase-intent-v1'
+        && Boolean(body.platform_received_at)
         && (body.direction?.toUpperCase() === 'LONG'
           || body.direction?.toUpperCase() === 'SHORT');
       const carriesExactLimit =
         (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
+        && body.executable === true
+        && body.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
         && typeof body?.limit_price === 'number'
         && Number.isFinite(body.limit_price)
         && body.limit_price > 0;
       const carriesSignedClose =
         body?.event === 'POSITION_CLOSED'
         && Boolean(body.platform_received_at);
+      const applyExactLimit =
+        carriesExactLimit
+        && existing.status !== SignalCycleStatus.CLOSED
+        && shouldApplyExactLifecycleUpdate(current, body);
       if (
         signedIntent
-        && (current?.action !== 'ENTER' || carriesExactLimit || carriesSignedClose)
+        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose)
       ) {
         const incoming = relayIntentEnvelope(existing.id, tradeId, body) as Record<
           string,
@@ -561,7 +732,7 @@ export class ShowcaseRelayEventsService {
           context?: Record<string, unknown>;
         };
         const intentEnvelope =
-          current?.action === 'ENTER' && (carriesExactLimit || carriesSignedClose)
+          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose)
             ? {
                 ...current,
                 direction: incoming.direction,
@@ -570,7 +741,7 @@ export class ShowcaseRelayEventsService {
                 context: { ...current.context, ...incoming.context },
               }
             : incoming;
-        await this.prisma.signalCycle.update({
+        await db.signalCycle.update({
           where: { id: existing.id },
           data: {
             intentEnvelope:
@@ -588,7 +759,7 @@ export class ShowcaseRelayEventsService {
     const raw = tradeId.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(8, '0');
     const cycleId = `cyc_rel_${raw.slice(0, 22)}`.slice(0, 30);
     try {
-      await this.prisma.signalCycle.create({
+      await db.signalCycle.create({
         data: {
           id: cycleId,
           agentId,
@@ -607,7 +778,7 @@ export class ShowcaseRelayEventsService {
       return cycleId;
     } catch (err) {
       // Concurrent create race — re-fetch.
-      const retry = await this.prisma.signalCycle.findUnique({
+      const retry = await db.signalCycle.findUnique({
         where: { agentId_tradeId: { agentId, tradeId } },
         select: { id: true },
       });

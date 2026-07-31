@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - "services/btc-conservative-agent/**"
+      - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
 
@@ -31,11 +32,39 @@ jobs:
 
       - name: Verify Fly and dashboard safety contracts
         run: |
-          python -m py_compile bot.py btc_conservative_agent.py
+          python -m py_compile bot.py btc_conservative_agent.py fly_relay_state_pusher.py
           python test_fly_startup_contract.py
+          python test_fly_single_owner_contract.py
           python test_fly_data_sync_contract.py
+          python test_fly_relay_state_pusher_contract.py
+          python test_ws_live_readiness_contract.py
           python test_chase_exact_bucket_controls.py
+          python test_manual_pause_entry_gate.py
+          python test_paper_mode_private_api_isolation.py
+          python test_platform_relay_lane_isolation.py
+          python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install production boundary checker
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm ci
+          npx prisma generate
+
+      - name: Prove the current Fly owner and every relay account are flat
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          REQUIRE_BOT_ADMIN_TOKEN: "YES"
+          REQUIRE_CANONICAL_FLY_OWNER: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+        run: node scripts/check-relay-flat.mjs
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -72,11 +101,14 @@ jobs:
                       ) as health_response:
                           health = json.load(health_response)
                       if (
-                          health.get("force_paper_mode") is True
-                          and health.get("live_armed") is False
+                          health.get("live_armed") is False
                           and health.get("bitfinex_live_enabled") is False
+                          and health.get("force_paper_mode") is True
                       ):
-                          print(f"Fly ready, paper-safe, on exact revision {expected}")
+                          print(
+                              f"Fly ready, disarmed, paper-signal-only, "
+                              f"on exact revision {expected}"
+                          )
                           raise SystemExit(0)
                       last = f"unsafe Fly execution flags: {health}"
               except Exception as exc:

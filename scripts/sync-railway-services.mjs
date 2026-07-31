@@ -1,11 +1,11 @@
 /**
- * Upsert DATABASE_URL + schema push flags and redeploy Railway API only.
- * Bot runs at home — see docs/HOME_BOT_MIGRATION.md
+ * Upsert API variables and redeploy Railway API only.
+ * The Conservative BTC bot remains the separate canonical Fly.io runtime.
  */
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
+import { CANONICAL_FLY_BOT_PUBLIC_URL } from './home-bot-config.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vault = join(root, '..', 'doxedcryptofounder-secrets', 'vault');
@@ -77,7 +77,7 @@ const relayEnv = {
   BITFINEX_COPY_POLICY_VERSION: '4',
 };
 
-const homeBotUrl = resolveHomeBotPublicUrl(undefined, root);
+const homeBotUrl = CANONICAL_FLY_BOT_PUBLIC_URL;
 
 const apiVars = {
   DATABASE_URL: dbUrl,
@@ -120,7 +120,7 @@ for (const project of data.projects?.edges?.map((e) => e.node) ?? []) {
     if (!TARGET_SERVICES.has(svc.name)) continue;
 
     const variables = apiVars;
-    console.log(`Sync ${project.name} / ${svc.name} (home bot → ${homeBotUrl})…`);
+    console.log(`Sync ${project.name} / ${svc.name} (Fly bot -> ${homeBotUrl})...`);
     await gql(
       token,
       `mutation($input: VariableCollectionUpsertInput!) {

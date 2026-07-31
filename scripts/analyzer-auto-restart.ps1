@@ -10,7 +10,7 @@
 # Params:
 #   -AnalyzerPid  Initial analyzer PID to watch (the one start-home-analyzer just launched).
 #   -Port         Analyzer research dashboard port (default 9001).
-#   -VaultEnv     Path to vault home-bot.env (defaults to sibling secrets repo).
+#   -VaultEnv     Optional legacy path; only non-secret analyzer tuning keys are read.
 #   -MaxRestartsPerHour  Rate cap (default 10). After this many restarts in a rolling
 #                        60-min window, stop restarting and log a crash-loop notice.
 #   -BaseCooldownSec     Initial restart cooldown (default 5).
@@ -92,22 +92,41 @@ if (Test-LockHeldByLive) { exit 0 }
 Set-Content -Path $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 $lockHeld = $true
 try {
-  # --- Load vault env (so restarted analyzer inherits the same secrets) --------
+  # --- Least-privilege analyzer environment -----------------------------------
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
-  if (Test-Path $VaultEnv) {
-    Get-Content $VaultEnv | ForEach-Object {
+  foreach ($secretName in @(
+    "BITFINEX_API_KEY", "BITFINEX_API_SECRET", "DEEPSEEK_API_KEY",
+    "DDOLLAR_GATE_TOKEN", "BOT_ADMIN_TOKEN", "BOT_CONTROL_SECRET",
+    "FLY_API_TOKEN", "RAILWAY_TOKEN", "DATABASE_URL",
+    "CREDENTIALS_ENCRYPTION_KEY"
+  )) {
+    Remove-Item -LiteralPath ("Env:" + $secretName) -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $VaultEnv) {
+    $allowedAnalyzerVars = @(
+      "ANALYZER_INTERVAL_MINUTES",
+      "ANALYZER_GRID_SWEEP_MAX_REPLAYS",
+      "ANALYZER_SKIP_3D_SWEEP",
+      "RESEARCH_API_CACHE_TTL_SEC",
+      "RESEARCH_OPPORTUNITY_CACHE_TTL_SEC"
+    )
+    Get-Content -LiteralPath $VaultEnv | ForEach-Object {
       if ($_ -match '^\s*([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
+        $name = $matches[1].Trim()
+        if ($name -in $allowedAnalyzerVars) {
+          Set-Item -LiteralPath ("Env:" + $name) -Value $matches[2].Trim().Trim('"').Trim("'")
+        }
       }
     }
   }
 
-  # Script port wins over anything in home-bot.env (vault must not override :9001).
-  $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
+  # Script port wins over any legacy environment.
+  $env:RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"
   $env:RESEARCH_DASHBOARD_PORT = "$Port"
-  $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$Port/"
+  $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$Port/"
+  $env:ANALYZER_EMBEDDED_DASHBOARD = "0"
   $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
   # A long-lived bridge/console can carry the legacy research/ path. Keep the
   # dashboard and analyzer on the same canonical report root after recovery.

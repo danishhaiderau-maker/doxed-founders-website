@@ -551,14 +551,20 @@ def perform_showcase_fresh_start(bot_module) -> dict:
 
 
 def _should_block_research_warehouse(block_warehouse: bool | None) -> bool:
-    """Railway execution mirror blocks exports; home PC runs full research warehouse."""
+    """Keep heavy warehouse exports off the canonical Fly trading process."""
     if block_warehouse is not None:
         return block_warehouse
     if os.environ.get("HOME_RESEARCH_FULL", "").lower() in ("1", "true", "yes"):
         return False
+    if os.environ.get("BLOCK_RESEARCH_WAREHOUSE", "").lower() in ("1", "true", "yes"):
+        return True
+    # Backward-compatible read only. New production configuration uses the
+    # accurately named BLOCK_RESEARCH_WAREHOUSE variable above.
     if os.environ.get("EXECUTION_MIRROR_ONLY", "").lower() in ("1", "true", "yes"):
         return True
-    # Default: home entry (btc_conservative_agent.py) keeps full warehouse; legacy mirror blocks.
+    # Compatibility fallback for older SHOWCASE_AGENT deployments. The current
+    # Fly wrapper sets BLOCK_RESEARCH_WAREHOUSE explicitly; the desktop analyzer
+    # reads the incremental Fly data mirror instead of running a second bot.
     return os.environ.get("SHOWCASE_AGENT", "").lower() in ("1", "true", "yes") and not os.environ.get(
         "HOME_BOT_LOCAL", ""
     )

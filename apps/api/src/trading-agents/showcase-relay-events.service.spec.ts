@@ -1,7 +1,55 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
-import { ShowcaseRelayEventsService } from './showcase-relay-events.service';
+import {
+  ShowcaseRelayEventsService,
+  shouldApplyExactLifecycleUpdate,
+} from './showcase-relay-events.service';
+
+test('exact-limit lifecycle revisions are monotonic and cannot regress after close', () => {
+  const current = {
+    action: 'ENTER',
+    context: {
+      showcase_event: 'LIMIT_UPDATED',
+      showcase_event_at: '2026-07-30T01:00:04.000Z',
+      showcase_event_id: 'cont-1:LIMIT_UPDATED:4',
+      showcase_event_seq: 4,
+    },
+  };
+  assert.equal(
+    shouldApplyExactLifecycleUpdate(current, {
+      event: 'LIMIT_UPDATED',
+      trade_id: 'cont-00000001',
+      ts: '2026-07-30T01:00:03.000Z',
+      event_seq: 3,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldApplyExactLifecycleUpdate(current, {
+      event: 'LIMIT_UPDATED',
+      trade_id: 'cont-1',
+      ts: '2026-07-30T01:00:05.000Z',
+      event_seq: 5,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldApplyExactLifecycleUpdate(
+      {
+        action: 'ENTER',
+        context: { showcase_event: 'POSITION_CLOSED' },
+      },
+      {
+        event: 'LIMIT_UPDATED',
+        trade_id: 'cont-1',
+        ts: '2026-07-30T01:00:06.000Z',
+        event_seq: 6,
+      },
+    ),
+    false,
+  );
+});
 
 function createService(
   activeInstance: string | null,
@@ -34,13 +82,28 @@ function createService(
       overrides?.trace?.push('execution');
     },
   };
-  const prisma = overrides?.prisma ?? {
+  const prismaBase = overrides?.prisma ?? {
     tradingAgent: {
       findUnique: async () => {
         overrides?.trace?.push('persist');
         return null;
       },
     },
+  };
+  const transactionClient = {
+    ...prismaBase,
+    $queryRaw: async () => [],
+  };
+  const prisma = {
+    ...prismaBase,
+    $transaction:
+      (prismaBase as {
+        $transaction?: <T>(
+          operation: (tx: typeof transactionClient) => Promise<T>,
+        ) => Promise<T>;
+      }).$transaction
+      ?? (async <T>(operation: (tx: typeof transactionClient) => Promise<T>) =>
+        operation(transactionClient)),
   };
   return new ShowcaseRelayEventsService(
     config as never,
@@ -50,6 +113,139 @@ function createService(
     prisma as never,
   );
 }
+
+test('concurrent relay revisions stay monotonic across API replicas', async () => {
+  type StoredEnvelope = {
+    action: string;
+    direction: string;
+    entry: Record<string, unknown>;
+    context: Record<string, unknown>;
+  };
+  let storedEnvelope: StoredEnvelope = {
+    action: 'ENTER',
+    direction: 'LONG',
+    entry: {
+      mode: 'EXACT_LIMIT',
+      reference: 'SHOWCASE_EXACT_LIMIT',
+      exact_limit_price: 63_940,
+    },
+    context: {
+      showcase_event: 'LIMIT_UPDATED',
+      showcase_event_id: 'cont-race:LIMIT_UPDATED:4',
+      showcase_event_seq: 4,
+      showcase_event_at: '2026-07-30T01:00:04.000Z',
+    },
+  };
+  const cloneEnvelope = () =>
+    JSON.parse(JSON.stringify(storedEnvelope)) as StoredEnvelope;
+
+  // This mutex models PostgreSQL's transaction-scoped advisory lock. Each
+  // service instance has its own in-process queue, so only the DB lock can
+  // serialize these two simulated Railway replicas.
+  let dbTail = Promise.resolve();
+  let advisoryCalls = 0;
+  const advisoryKeys: unknown[] = [];
+  const prisma = {
+    tradingAgent: {
+      findUnique: async () => ({ id: 'agent-race' }),
+    },
+    signalCycle: {
+      findUnique: async () => ({
+        id: 'cycle-race',
+        status: 'INTENT',
+        intentEnvelope: cloneEnvelope(),
+      }),
+      update: async (args: {
+        data: { intentEnvelope?: StoredEnvelope };
+      }) => {
+        const incoming = args.data.intentEnvelope;
+        if (incoming) {
+          const seq = Number(incoming.context?.showcase_event_seq);
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, seq === 6 ? 5 : 30),
+          );
+          storedEnvelope = JSON.parse(JSON.stringify(incoming)) as StoredEnvelope;
+        }
+        return {};
+      },
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async () => ({}),
+    },
+    $transaction: async <T>(
+      operation: (tx: Record<string, unknown>) => Promise<T>,
+    ) => {
+      const previous = dbTail;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      dbTail = previous.then(() => gate);
+      let acquired = false;
+      const tx = {
+        ...prisma,
+        $queryRaw: async (
+          _queryParts: TemplateStringsArray,
+          ...values: unknown[]
+        ) => {
+          advisoryCalls += 1;
+          advisoryKeys.push(values[0]);
+          await previous;
+          acquired = true;
+          return [];
+        },
+      };
+      try {
+        return await operation(tx);
+      } finally {
+        if (acquired) release();
+      }
+    },
+  };
+  const replicaA = createService('dashboard-active', undefined, { prisma });
+  const replicaB = createService('dashboard-active', undefined, { prisma });
+  const persistA = replicaA as unknown as {
+    persistRelayEvent: (
+      slug: string,
+      body: Record<string, unknown>,
+    ) => Promise<boolean>;
+  };
+  const persistB = replicaB as unknown as typeof persistA;
+  const revision = (seq: number, price: number) => ({
+    schema: 'dcf-showcase-intent-v1',
+    event: 'LIMIT_UPDATED',
+    event_id: `cont-race:LIMIT_UPDATED:${seq}`,
+    event_seq: seq,
+    trade_id: 'cont-race',
+    ts: `2026-07-30T01:00:0${seq}.000Z`,
+    direction: 'LONG',
+    limit_price: price,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    entry_reason: 'LOCAL_SUPPORT_LIMIT',
+    executable: true,
+    platform_received_at: `2026-07-30T01:00:0${seq}.100Z`,
+  });
+
+  await Promise.all([
+    persistA.persistRelayEvent(
+      'conservative-btc',
+      revision(6, 63_960),
+    ),
+    persistB.persistRelayEvent(
+      'conservative-btc',
+      revision(5, 63_950),
+    ),
+  ]);
+
+  assert.equal(storedEnvelope.context.showcase_event_seq, 6);
+  assert.equal(storedEnvelope.entry.exact_limit_price, 63_960);
+  assert.equal(advisoryCalls, 2);
+  assert.deepEqual(advisoryKeys, [
+    'agent-race:cont-race',
+    'agent-race:cont-race',
+  ]);
+});
 
 test('rejects a signed relay-shaped event without an active owner identity', async () => {
   const service = createService(null);
@@ -70,7 +266,7 @@ test('rejects a stale dashboard instance', async () => {
   await assert.rejects(
     service.ingest('conservative-btc', {
       event: 'ORDER_PLACED',
-      trade_id: 'cont-2',
+      trade_id: 'cont-00000002',
       dashboard_owner: true,
       bot_instance_id: 'dashboard-stale',
       dashboard_port: 7002,
@@ -83,7 +279,7 @@ test('accepts the currently cached dashboard owner', async () => {
   const service = createService('dashboard-active');
   const result = await service.ingest('conservative-btc', {
     event: 'LIMIT_UPDATED',
-    trade_id: 'cont-3',
+    trade_id: 'cont-00000003',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
@@ -95,7 +291,7 @@ test('accepts an unsigned legacy wake from the active owner when HMAC rollout is
   const service = createService('dashboard-active', 'test-webhook-secret');
   const result = await service.ingest('conservative-btc', {
     event: 'ORDER_PLACED',
-    trade_id: 'cont-legacy',
+    trade_id: 'cont-1e9ac000',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
@@ -108,7 +304,7 @@ test('rejects an unsigned intent-bearing payload when HMAC rollout is enabled', 
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'APPROVE_PENDING' as const,
-    trade_id: 'cont-intent',
+    trade_id: 'cont-1a7e1700',
     signal_price: 64_000,
     margin_usdt: 20,
     dashboard_owner: true,
@@ -127,7 +323,7 @@ test('rejects an unsigned legacy-shaped payload with an unknown future field', a
   const service = createService('dashboard-active', 'test-webhook-secret');
   const body = {
     event: 'LIMIT_UPDATED' as const,
-    trade_id: 'cont-unknown',
+    trade_id: 'cont-a0c0de00',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
@@ -147,8 +343,13 @@ test('accepts a correctly signed intent-bearing payload', async () => {
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'APPROVE_PENDING' as const,
-    trade_id: 'cont-signed',
+    trade_id: 'cont-51a0ed00',
+    direction: 'LONG',
     signal_price: 64_000,
+    limit_price: 63_915,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    entry_reason: 'LOCAL_SUPPORT_LIMIT',
+    executable: false,
     margin_usdt: 20,
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
@@ -161,6 +362,108 @@ test('accepts a correctly signed intent-bearing payload', async () => {
     signatureHeader: signature,
   });
   assert.equal(result.ok, true);
+  assert.equal(result.intentCreated, false);
+});
+
+test('rejects a signed Type B lifecycle before persistence or execution wake', async () => {
+  const secret = 'test-webhook-secret';
+  const trace: string[] = [];
+  const service = createService('dashboard-active', secret, { trace });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_PLACED' as const,
+    trade_id: 'tbhv1-paper-only',
+    research_lane: 'TYPE_B_HUNTER_V1',
+    direction: 'SHORT',
+    limit_price: 64_100,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    entry_reason: 'LOCAL_RESISTANCE_LIMIT',
+    executable: true,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'non_mirrorable_lane');
+  assert.equal(result.persisted, false);
+  assert.equal(result.intentCreated, false);
+  assert.deepEqual(trace, []);
+});
+
+test('rejects signed Type B chase and close events before persistence or execution wake', async () => {
+  const secret = 'test-webhook-secret';
+  for (const lifecycle of [
+    {
+      event: 'LIMIT_UPDATED' as const,
+      event_seq: 3,
+      limit_price: 64_075,
+      entry_limit_policy: 'micro_sr_structural_limit_v1',
+      executable: true,
+    },
+    {
+      event: 'POSITION_CLOSED' as const,
+      exit_price: 63_980,
+    },
+  ]) {
+    const trace: string[] = [];
+    const service = createService('dashboard-active', secret, { trace });
+    const body = {
+      schema: 'dcf-showcase-intent-v1',
+      trade_id: 'tbhv1-paper-lifecycle',
+      research_lane: 'TYPE_B_HUNTER_V1',
+      direction: 'SHORT',
+      dashboard_owner: true,
+      bot_instance_id: 'dashboard-active',
+      dashboard_port: 7002,
+      ...lifecycle,
+    };
+    const rawBody = Buffer.from(JSON.stringify(body));
+    const signature =
+      `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+    const result = await service.ingest('conservative-btc', body, {
+      rawBody,
+      signatureHeader: signature,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'non_mirrorable_lane');
+    assert.equal(result.persisted, false);
+    assert.equal(result.intentCreated, false);
+    assert.deepEqual(trace, []);
+  }
+});
+
+test('rejects signed ORDER_PLACED without executable structural exact-limit contract', async () => {
+  const secret = 'test-webhook-secret';
+  const service = createService('dashboard-active', secret);
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_PLACED' as const,
+    trade_id: 'cont-1aeac700',
+    direction: 'LONG',
+    limit_price: 63_915,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  await assert.rejects(
+    service.ingest('conservative-btc', body, {
+      rawBody,
+      signatureHeader: signature,
+    }),
+    /requires exact structural limit policy/,
+  );
 });
 
 test('persists and enriches before waking subscriber execution', async () => {
@@ -168,7 +471,7 @@ test('persists and enriches before waking subscriber execution', async () => {
   const service = createService('dashboard-active', undefined, { trace });
   await service.ingest('conservative-btc', {
     event: 'LIMIT_UPDATED',
-    trade_id: 'cont-ordering',
+    trade_id: 'cont-0ade7100',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
@@ -204,7 +507,7 @@ test('showcase ORDER_PLACED remains an audit event and does not pre-claim the su
   const service = createService('dashboard-active', undefined, { prisma });
   const result = await service.ingest('conservative-btc', {
     event: 'ORDER_PLACED',
-    trade_id: 'cont-no-preclaim',
+    trade_id: 'cont-0a0c1a1a',
     direction: 'LONG',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
@@ -214,7 +517,7 @@ test('showcase ORDER_PLACED remains an audit event and does not pre-claim the su
   assert.equal(updates.length, 0);
 });
 
-test('signed intent enriches a legacy audit cycle before subscriber execution wakes', async () => {
+test('signed APPROVE_PENDING stays visibility-only and does not wake subscriber execution', async () => {
   const secret = 'test-webhook-secret';
   let storedEnvelope: Record<string, unknown> = {
     schema: 'showcase_relay_audit_v1',
@@ -245,18 +548,19 @@ test('signed intent enriches a legacy audit cycle before subscriber execution wa
   const execution = {
     wakeNow: async () => {
       trace.push('execution');
-      assert.equal(storedEnvelope.action, 'ENTER');
-      assert.equal(storedEnvelope.schema, 'dcf-signal-intent/v1');
     },
   };
   const service = createService('dashboard-active', secret, { prisma, execution });
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'APPROVE_PENDING' as const,
-    trade_id: 'cont-enrich',
+    trade_id: 'cont-ea71c400',
     direction: 'LONG',
     signal_price: 64_000,
-    pullback_pct: 0.001,
+    limit_price: 63_915,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    entry_reason: 'LOCAL_SUPPORT_LIMIT',
+    executable: false,
     margin_usdt: 20,
     bot_version: 'v12-test',
     dashboard_owner: true,
@@ -270,11 +574,12 @@ test('signed intent enriches a legacy audit cycle before subscriber execution wa
     signatureHeader: signature,
   });
   assert.equal(result.ok, true);
+  assert.equal(result.intentCreated, false);
   assert.deepEqual(trace, ['enrich']);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(trace, ['enrich', 'execution']);
-  assert.equal((storedEnvelope.entry as { offset_pct: number }).offset_pct, -0.1);
-  assert.equal((storedEnvelope.risk as { leverage_hint: number }).leverage_hint, 100);
+  assert.deepEqual(trace, ['enrich']);
+  assert.equal(storedEnvelope.action, undefined);
+  assert.equal(storedEnvelope.schema, 'showcase_relay_audit_v2');
 });
 
 test('signed ORDER_PLACED persists the exact limit before non-blocking execution wake', async () => {
@@ -314,8 +619,16 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
   const execution = {
     wakeNow: async () => {
       trace.push('execution');
-      const entry = storedEnvelope.entry as { exact_limit_price?: number };
+      const entry = storedEnvelope.entry as {
+        exact_limit_price?: number;
+        mode?: string;
+        reference?: string;
+        offset_pct?: number;
+      };
       assert.equal(entry.exact_limit_price, 64_555.25);
+      assert.equal(entry.mode, 'EXACT_LIMIT');
+      assert.equal(entry.reference, 'SHOWCASE_EXACT_LIMIT');
+      assert.equal(entry.offset_pct, 0);
       const context = storedEnvelope.context as {
         signed_showcase_event?: boolean;
         platform_received_at?: string;
@@ -332,10 +645,15 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
-    trade_id: 'cont-exact-limit',
+    trade_id: 'cont-eaac7111',
     direction: 'SHORT',
     signal_price: 64_540,
     limit_price: 64_555.25,
+    event_id: 'cont-fast:ORDER_PLACED:3',
+    event_seq: 3,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    entry_reason: 'LOCAL_RESISTANCE_LIMIT',
+    executable: true,
     margin_usdt: 20,
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
@@ -415,7 +733,7 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'POSITION_CLOSED' as const,
-    trade_id: 'cont-close-fast',
+    trade_id: 'cont-c105efa5',
     direction: 'LONG',
     signal_price: 64_500,
     exit_price: 64_620.5,

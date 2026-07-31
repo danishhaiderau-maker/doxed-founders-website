@@ -247,9 +247,32 @@ type_b_signal = {
 }
 original_maybe_bitfinex_limit_entry = bot._maybe_bitfinex_limit_entry
 original_relay_mirror = bot._relay_mirror
+readiness_missing = object()
+readiness_state_keys = (
+    "ws_transport_connected",
+    "ws_ready",
+    "ws_last_tick",
+    "ohlcv_ready",
+    "ema_status",
+    "pathway_safety_block",
+    "last_ready_ts",
+    "execution_paused",
+    "manual_admin_pause",
+)
+with bot.state_lock:
+    original_readiness_state = {
+        key: bot.state.get(key, readiness_missing)
+        for key in readiness_state_keys
+    }
+original_last_ohlcv_fetch = bot.last_ohlcv_fetch
+original_latest_candles = list(bot.latest_candles)
+original_volume_buffer = list(bot.volume_buffer)
+original_price_buffer = list(bot.price_buffer)
+original_delta_buffer = list(bot.delta_buffer)
 try:
     bot._maybe_bitfinex_limit_entry = lambda *args, **kwargs: None
     bot._relay_mirror = lambda *args, **kwargs: None
+    ready_now = bot.time.time()
     with bot.state_lock:
         bot.state["strategy_mode"] = "RESEARCH"
         bot.state["live_armed"] = False
@@ -258,6 +281,33 @@ try:
         bot.state["account_balance"] = 500.0
         bot.state["pullback_threshold"] = 0.001
         bot.state["allow_compression"] = True
+        # Paper entries obey the same genuine-fresh-WS safety boundary as live
+        # entries. Seed an explicit current-session tick for this positive
+        # pending-order lifecycle fixture.
+        bot.state["ws_transport_connected"] = True
+        bot.state["ws_ready"] = True
+        bot.state["ws_last_tick"] = ready_now
+        bot.state["ohlcv_ready"] = True
+        bot.state["ema_status"] = {
+            "ema9": 64_000.0,
+            "ema21": 64_000.0,
+            "ema200": 64_000.0,
+        }
+        bot.state["pathway_safety_block"] = False
+        bot.state["last_ready_ts"] = ready_now - bot.READY_STABLE_SEC - 1.0
+        bot.state["execution_paused"] = False
+        bot.state["manual_admin_pause"] = False
+    bot.last_ohlcv_fetch = ready_now
+    bot.latest_candles[:] = [
+        [ready_now, 64_000.0, 64_010.0, 63_990.0, 64_000.0, 1.0]
+        for _ in range(bot.MIN_CANDLES)
+    ]
+    bot.volume_buffer.clear()
+    bot.volume_buffer.extend([1.0] * bot.WINDOW_SIZE)
+    bot.price_buffer.clear()
+    bot.price_buffer.extend([64_000.0] * bot.WINDOW_SIZE)
+    bot.delta_buffer.clear()
+    bot.delta_buffer.extend([0.0] * bot.WINDOW_SIZE)
     routed = bot.execute_order(
         type_b_signal,
         {"direction": "LONG", "decision": "APPROVE", "win_prob": 0},
@@ -285,6 +335,20 @@ try:
 finally:
     bot._maybe_bitfinex_limit_entry = original_maybe_bitfinex_limit_entry
     bot._relay_mirror = original_relay_mirror
+    bot.last_ohlcv_fetch = original_last_ohlcv_fetch
+    bot.latest_candles[:] = original_latest_candles
+    bot.volume_buffer.clear()
+    bot.volume_buffer.extend(original_volume_buffer)
+    bot.price_buffer.clear()
+    bot.price_buffer.extend(original_price_buffer)
+    bot.delta_buffer.clear()
+    bot.delta_buffer.extend(original_delta_buffer)
+    with bot.state_lock:
+        for key, value in original_readiness_state.items():
+            if value is readiness_missing:
+                bot.state.pop(key, None)
+            else:
+                bot.state[key] = value
     with bot.trade_lock:
         for order in list(bot.pending_orders):
             if order.get("trade_id") == type_b_trade_id:

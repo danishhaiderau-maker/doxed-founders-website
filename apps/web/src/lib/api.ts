@@ -4315,13 +4315,13 @@ export function fetchAnalyzerSessionSummary(slug: string, token?: string) {
 export type ServerBotHealth = {
   ok: boolean;
   fly: boolean;
-  cloudflare: boolean;
+  snapshotFresh: boolean;
   botConnected: boolean;
   source?: string;
   error?: string;
 };
 
-/** Server-side Fly.io + Cloudflare reachability (proxied through the API to avoid
+/** Server-side canonical Fly reachability (proxied through the API to avoid
  *  browser CORS/region false-negatives). Used by the command center's Fly chip. */
 export function fetchServerBotHealth(slug: string, token?: string) {
   return apiFetch<ServerBotHealth>(`/trading-agents/${slug}/bot-health`, {}, token);
@@ -4473,7 +4473,7 @@ export function fetchMyAgentDashboard(slug: string, token: string) {
   return apiFetch<PrivateAgentDashboard>(`/trading-agents/${slug}/my-dashboard`, undefined, token);
 }
 
-export type PublicAgentStatus = 'online' | 'offline' | 'updating';
+export type PublicAgentStatus = 'online' | 'offline' | 'updating' | 'degraded';
 
 export function fetchPublicAgentStatus() {
   return apiFetch<{ status: PublicAgentStatus; label: string }>('/admin-control/agent-status');
@@ -4602,22 +4602,6 @@ export function restartTradingAgent(token: string) {
   );
 }
 
-export function flyControlBot(token: string, action: 'start' | 'stop') {
-  return apiFetch<{ ok: boolean; status: string; machineState: string; message?: string; polled?: boolean }>(
-    '/trading-agents/conservative-btc/fly-control',
-    { method: 'POST', body: JSON.stringify({ action }) },
-    token,
-  );
-}
-
-export function flyControlBotStatus(token: string) {
-  return apiFetch<{ ok: boolean; status: string; machineState: string }>(
-    '/trading-agents/conservative-btc/fly-control',
-    undefined,
-    token,
-  );
-}
-
 export function getShowcaseHost() {
   return apiFetch<{ host: 'fly' | 'local' }>('/trading-agents/showcase-host');
 }
@@ -4628,26 +4612,19 @@ export function getShowcaseHost() {
 export type BotHealthResponse = {
   ok: boolean;
   fly?: boolean;
-  cloudflare?: boolean;
   status?: string;
 };
 
 export async function fetchBotHealth(slug: string): Promise<BotHealthResponse> {
-  const base =
-    slug === 'conservative-btc'
-      ? 'https://bot.doxxedcrypto.digital'
-      : `https://${slug}.doxxedcrypto.digital`;
+  if (slug !== 'conservative-btc') return { ok: false };
+  const base = 'https://doxed-btc-bot.fly.dev';
   try {
     const res = await fetch(`${base}/health`, { method: 'GET' });
     if (!res.ok) return { ok: false };
-    const json = (await res.json().catch(() => ({}))) as Partial<BotHealthResponse> & {
-      fly?: boolean;
-      cloudflare?: boolean;
-    };
+    const json = (await res.json().catch(() => ({}))) as Partial<BotHealthResponse>;
     return {
       ok: true,
-      fly: Boolean(json.fly),
-      cloudflare: Boolean(json.cloudflare),
+      fly: true,
       status: typeof json.status === 'string' ? json.status : 'online',
     };
   } catch {

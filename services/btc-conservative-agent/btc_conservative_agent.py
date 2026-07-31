@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Home or Railway entry — full research bot + Bitfinex relay hooks for doxxedcrypto.digital.
+Fly.io-only production entry point for the Conservative BTC bot.
 
-Prefer running bot.py at home with home-bot.env (see docs/HOME_BOT_MIGRATION.md).
+Fly.io is the only supported production runtime. Desktop processes are
+dashboard, data-mirror, and analyzer services only.
 """
 from __future__ import annotations
 
@@ -82,18 +83,69 @@ def _read_boot_revision() -> str:
     return "unknown"
 
 
+_fly_app = (os.getenv("FLY_APP_NAME") or "").strip()
+_fly_machine = (
+    os.getenv("FLY_MACHINE_ID")
+    or os.getenv("FLY_ALLOC_ID")
+    or ""
+).strip()
+_fly_region = (os.getenv("FLY_REGION") or "").strip()
+if (
+    _fly_app != "doxed-btc-bot"
+    or not _fly_machine
+    or not _fly_region
+):
+    print(
+        "REFUSED_NON_FLY_RUNTIME: Fly.io app doxed-btc-bot is the sole AI, "
+        "strategy, paper-execution, and relay-signal owner. Use the desktop "
+        "mirror launchers for dashboard/analyzer access. Exact Fly app, "
+        "machine, and region identity is required.",
+        file=sys.stderr,
+    )
+    raise SystemExit(78)
+
+_required_fly_controls = (
+    "BOT_ADMIN_TOKEN",
+    "BOT_CONTROL_SECRET",
+    "SHOWCASE_WEBHOOK_SECRET",
+    "SHOWCASE_RELAY_WEBHOOK_URL",
+)
+_missing_fly_controls = [
+    name for name in _required_fly_controls
+    if not (os.getenv(name) or "").strip()
+]
+if _missing_fly_controls:
+    print(
+        "REFUSED_MISSING_FLY_CONTROL: canonical Fly production requires "
+        + ", ".join(_missing_fly_controls),
+        file=sys.stderr,
+    )
+    raise SystemExit(78)
+
+if (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() not in (
+    "1",
+    "true",
+    "yes",
+    "on",
+):
+    print(
+        "REFUSED_DIRECT_FLY_LIVE: Fly is the paper-signal owner only; "
+        "Railway is the isolated Bitfinex live executor.",
+        file=sys.stderr,
+    )
+    raise SystemExit(78)
+
 os.environ.setdefault("SHOWCASE_AGENT", "1")
-os.environ.setdefault("HOME_BOT_LOCAL", "1")
-os.environ.setdefault("HOME_RESEARCH_FULL", "1")
-if not os.getenv("FLY_APP_NAME"):
-    os.environ.setdefault(
-        "SHOWCASE_RELAY_WEBHOOK_URL",
-        "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
-    )
-    os.environ.setdefault(
-        "SHOWCASE_INFERENCE_USAGE_URL",
-        "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
-    )
+# Fly is the canonical strategy/trading owner. It must never inherit the old
+# desktop/full-warehouse identity merely because this shared entry module was
+# historically used in multiple environments.
+os.environ["HOME_BOT_LOCAL"] = "0"
+os.environ["HOME_RESEARCH_FULL"] = "0"
+os.environ.setdefault("BLOCK_RESEARCH_WAREHOUSE", "1")
+os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"
+os.environ["RESEARCH_DASHBOARD_PUBLIC_URL"] = (
+    "https://doxed-btc-bot.fly.dev/analysis"
+)
 
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVICE_DIR not in sys.path:
@@ -126,7 +178,7 @@ start_early_ping_server(
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402
 
-register_showcase_ui(signal_engine.app, bot_module=signal_engine, block_warehouse=False)
+register_showcase_ui(signal_engine.app, bot_module=signal_engine, block_warehouse=None)
 
 
 def main() -> None:

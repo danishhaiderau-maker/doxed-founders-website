@@ -11,6 +11,9 @@ import os
 import signal
 import threading
 import time
+import hashlib
+import hmac
+import json
 
 import requests
 
@@ -27,6 +30,37 @@ STOP = threading.Event()
 
 def _stop(_signum, _frame):
     STOP.set()
+
+
+def build_signed_snapshot_payload(
+    seq: int,
+    snapshot: dict,
+    control_secret: str = CONTROL_SECRET,
+) -> dict:
+    if not control_secret:
+        raise ValueError("control secret is required")
+    snapshot_json = json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    snapshot_hmac = hmac.new(
+        control_secret.encode("utf-8"),
+        f"{seq}.{snapshot_json}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "snapshot_seq": seq,
+        # Kept during the rolling deploy so the previous API can still ingest
+        # it. The hardened API trusts only the exact signed JSON string.
+        "snapshot": snapshot,
+        "snapshot_json": snapshot_json,
+        "snapshot_hmac": snapshot_hmac,
+        "bot_version": snapshot.get("bot_version"),
+        "server_ts": snapshot.get("server_ts"),
+    }
 
 
 def main() -> int:
@@ -59,12 +93,7 @@ def main() -> int:
             seq = max(seq + 1, int(time.time() * 1000))
             pushed = session.post(
                 SNAPSHOT_URL,
-                json={
-                    "snapshot_seq": seq,
-                    "snapshot": snapshot,
-                    "bot_version": snapshot.get("bot_version"),
-                    "server_ts": snapshot.get("server_ts"),
-                },
+                json=build_signed_snapshot_payload(seq, snapshot),
                 timeout=8,
             )
             pushed.raise_for_status()

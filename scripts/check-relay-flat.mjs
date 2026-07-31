@@ -34,18 +34,24 @@ for (const envFile of [
 
 const { PrismaClient } = prismaPackage;
 const prisma = new PrismaClient();
+const dedicatedAdminToken = process.env.BOT_ADMIN_TOKEN?.trim() || '';
 const adminToken =
-  process.env.BOT_ADMIN_TOKEN?.trim()
+  dedicatedAdminToken
   || process.env.BOT_CONTROL_SECRET?.trim()
   || '';
-const botUrls = [
-  process.env.SHOWCASE_OWNER_URL?.trim(),
-  process.env.TRADING_AGENT_BOT_URL?.trim(),
-  resolveHomeBotPublicUrl(),
-  // Local is diagnostic-only after the Fly cutover. Keep it as the final
-  // fallback so a healthy laptop process cannot mask a broken cloud owner.
-  'http://10.0.0.102:7002',
-].filter(Boolean);
+const CANONICAL_FLY_OWNER_URL = 'https://doxed-btc-bot.fly.dev';
+const requireCanonicalFlyOwner =
+  process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
+const botUrls = requireCanonicalFlyOwner
+  ? [CANONICAL_FLY_OWNER_URL]
+  : [
+      process.env.SHOWCASE_OWNER_URL?.trim(),
+      process.env.TRADING_AGENT_BOT_URL?.trim(),
+      resolveHomeBotPublicUrl(),
+      // Local is diagnostic-only. It is never considered by production
+      // pre-deploy checks, which set REQUIRE_CANONICAL_FLY_OWNER=YES.
+      'http://10.0.0.102:7002',
+    ].filter(Boolean);
 
 export function hasFullOwnerOrderState(bot) {
   return (
@@ -59,7 +65,10 @@ export function hasFullOwnerOrderState(bot) {
 }
 
 async function fetchOwnerState() {
-  if (process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES' && !adminToken) {
+  if (
+    process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES'
+    && !dedicatedAdminToken
+  ) {
     throw new Error('BOT_ADMIN_TOKEN is required for an authenticated owner-state flat proof');
   }
   let lastError = null;
@@ -75,6 +84,12 @@ async function fetchOwnerState() {
         return response.json();
       });
       if (bot?.dashboard_owner === true) {
+        if (
+          requireCanonicalFlyOwner
+          && baseUrl.replace(/\/$/, '') !== CANONICAL_FLY_OWNER_URL
+        ) {
+          throw new Error(`non-canonical owner refused: ${baseUrl}`);
+        }
         if (
           process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES'
           && !hasFullOwnerOrderState(bot)

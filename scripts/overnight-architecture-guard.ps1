@@ -11,6 +11,15 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Write-Error (
+    "REFUSED_LEGACY_OVERNIGHT_GUARD: Fly.io is the sole BTC owner. " +
+    "This retired guard can start Cloudflare/home runtimes and mutate Railway. " +
+    "Use the Fly monitor plus the loopback desktop mirror instead."
+  )
+  exit 78
+}
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $mode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $mode.BotPort }

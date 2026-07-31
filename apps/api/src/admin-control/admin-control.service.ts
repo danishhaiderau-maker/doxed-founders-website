@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ShowcaseRuntimeService } from './showcase-runtime.service';
 import {
   EXCHANGE_PROVIDER_LABELS,
@@ -11,7 +11,7 @@ import { BotBridgeService } from '../trading-agents/bot-bridge.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
 
-export type PublicAgentStatus = 'online' | 'offline' | 'updating';
+export type PublicAgentStatus = 'online' | 'offline' | 'updating' | 'degraded';
 
 @Injectable()
 export class AdminControlService {
@@ -61,21 +61,24 @@ export class AdminControlService {
       return { status: 'online', label: 'Agent online' };
     }
 
-    // Tunnel AND 10-min relay cache both missed. Before declaring offline,
+    // Direct Fly state AND the fresh relay cache both missed. Before declaring offline,
     // check the in-memory last-successful-fetch timestamp on the same
     // BotBridge instance the dashboard polls every few seconds. If the
     // dashboard (or any other caller in this NestJS process) pulled live
     // state from the bot within the last 5 minutes, the bot is by
     // definition alive and pushing data — the only thing failing right now
-    // is THIS specific tunnel probe, which flaps because Railway's network
-    // to the home Cloudflare tunnel is intermittent (~50% packet loss at
-    // peak). Cutoff: 5 minutes — generous enough to absorb tunnel blips,
+    // is THIS specific cross-region probe. Cutoff: 5 minutes absorbs brief
+    // network blips,
     // strict enough that a genuinely dead bot still goes red quickly.
     const lastLiveAt = this.botBridge.getLastLiveFetchAt();
     if (lastLiveAt > 0 && Date.now() - lastLiveAt < 5 * 60_000) {
-      return { status: 'online', label: 'Agent online' };
+      const ageSec = Math.max(1, Math.round((Date.now() - lastLiveAt) / 1_000));
+      return {
+        status: 'degraded',
+        label: `Fly feed degraded — last verified ${ageSec}s ago`,
+      };
     }
-    return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
+    return { status: 'offline', label: 'Canonical Fly bot is unreachable' };
   }
 
   async getAgentControlOverview() {
@@ -88,7 +91,7 @@ export class AdminControlService {
     const botState = bridge.botState ?? null;
 
     const deepSeekConnected = Boolean(bridge.connected && bridge.deepSeekConnected);
-    const exchangeProvider = (settings?.showcaseExchangeProvider ?? 'bybit') as ExchangeProvider;
+    const exchangeProvider = 'bitfinex' as ExchangeProvider;
     const aiProvider = (settings?.showcaseAiProvider ?? 'deepseek') as TradingAgentAiProvider;
 
     const openPos = botState?.positions?.[0];
@@ -173,120 +176,74 @@ export class AdminControlService {
           : credentials.aiConfigured
             ? 'key saved'
             : 'unknown',
-        railwayPushReady:
-          credentials.exchangeConfigured &&
-          credentials.aiConfigured &&
-          Boolean(credentials.botPublicUrl),
+        railwayPushReady: false,
+        canonicalRuntime: 'fly.io',
       },
     };
   }
 
-  private async isHomeHostedShowcase(): Promise<boolean> {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    const url = row?.showcaseBotPublicUrl?.trim() ?? this.botBridge.getBotUrl() ?? '';
-    if (!url) return false;
-    return (
-      url.includes('trycloudflare.com') ||
-      url.includes('bot.doxxedcrypto.digital') ||
-      url.includes('127.0.0.1') ||
-      url.includes('10.0.0.102')
-    );
-  }
-
   async pauseAgentTrading() {
-    // Save bot state before kill (best-effort — may fail if already stopping)
-    await this.botBridge.proxyBotPost('/api/pause', {}).catch(() => undefined);
-
-    if (await this.isHomeHostedShowcase()) {
-      const res = await this.botBridge.proxyBotPost('/api/pause', {});
-      const data = (res.data ?? {}) as Record<string, unknown>;
-      const paused =
-        data.execution_paused === true ||
-        data.status === 'paused' ||
-        data.execution_reason === 'ADMIN_MANUAL';
-      this.botBridge.invalidateCache();
-      return {
-        ...res,
-        ok: paused,
-        paused,
-        killed: false,
-        message: paused
-          ? 'Home bot paused — execution stopped until you resume.'
-          : 'Pause failed — is the global showcase bot running on :7002?',
-      };
-    }
-
-    const rail = await this.showcaseRuntime.stopShowcaseDeployment();
-    this.botBridge.invalidateCache();
-    if (rail.ok) {
-      return {
-        ok: true,
-        paused: true,
-        killed: true,
-        message: rail.message,
-        deploymentId: rail.deploymentId,
-      };
-    }
-
+    // Pause new entries inside the canonical Fly process. The process itself
+    // remains alive so exposure reconciliation, exits, and state publishing
+    // continue while trading is disarmed.
     const res = await this.botBridge.proxyBotPost('/api/pause', {});
     const data = (res.data ?? {}) as Record<string, unknown>;
     const paused =
       data.execution_paused === true ||
       data.status === 'paused' ||
       data.execution_reason === 'ADMIN_MANUAL';
+    this.botBridge.invalidateCache();
     return {
       ...res,
       ok: paused,
       paused,
       killed: false,
-      message: rail.message || (paused ? 'Trading paused (Railway still running)' : 'Stop failed'),
+      runtime: 'fly.io',
+      message: paused
+        ? 'Fly trading entries paused; monitoring and risk management remain online.'
+        : 'Pause failed because the canonical Fly bot did not confirm ADMIN_MANUAL.',
     };
   }
 
   async resumeAgentTrading() {
-    if (await this.isHomeHostedShowcase()) {
-      const health = await this.botBridge.fetchHealth();
-      if (!health) {
-        return {
-          ok: false,
-          error:
-            'Home bot offline. On this PC run START-LAUNCHER.cmd once, then click Start home stack on this PC (or START-HOME.cmd).',
-          resumed: false,
-        };
-      }
-      const res = await this.botBridge.proxyBotPost('/api/resume', {});
-      const data = (res.data ?? {}) as Record<string, unknown>;
-      const resumed = data.execution_paused === false || data.status === 'resumed' || res.ok;
+    const health = await this.botBridge.fetchHealth();
+    if (!health) {
       return {
-        ...res,
-        ok: resumed,
-        resumed,
-        message: resumed
-          ? 'Home bot execution resumed.'
-          : 'Resume failed — check showcase bot dashboard on :7002.',
+        ok: false,
+        error: 'Canonical Fly bot is unreachable; trading remains paused.',
+        resumed: false,
+        runtime: 'fly.io',
       };
     }
-
-    const rail = await this.showcaseRuntime.startShowcaseDeployment();
-    if (!rail.ok) {
-      return { ok: false, error: rail.message, resumed: false };
-    }
-
-    // Bot needs time to boot before /api/resume
-    await new Promise((r) => setTimeout(r, 8000));
     const res = await this.botBridge.proxyBotPost('/api/resume', {});
     const data = (res.data ?? {}) as Record<string, unknown>;
-    const resumed = data.execution_paused === false || data.status === 'resumed' || res.ok;
+    this.botBridge.invalidateCache();
+    const responseConfirmed = res.ok === true && data.execution_paused === false;
+    const confirmedState = responseConfirmed
+      ? await this.botBridge.fetchPublicShowcaseState(true).catch(() => null)
+      : null;
+    const resumed = responseConfirmed && confirmedState?.execution_paused === false;
     return {
       ...res,
-      ok: rail.ok,
+      ok: resumed,
       resumed,
-      message: rail.message,
+      runtime: 'fly.io',
+      message: resumed
+        ? 'Canonical Fly trading entry gate resumed.'
+        : responseConfirmed
+          ? 'Resume held because a fresh canonical Fly state did not confirm the unpaused gate.'
+          : 'Resume failed because the canonical Fly bot response did not explicitly confirm execution_paused=false.',
     };
   }
 
   async restartAgentRuntime() {
-    return this.botBridge.proxyBotPost('/api/resume', { restart: true });
+    return {
+      ok: false,
+      retired: true,
+      runtime: 'fly.io',
+      message:
+        'Ad-hoc runtime restart is retired. Fly releases are revision-locked and trading pause/resume is controlled separately.',
+    };
   }
 
   async resetShowcaseSimulation() {
@@ -312,11 +269,16 @@ export class AdminControlService {
       subscriberMaxMarginUsd?: number;
     },
   ) {
+    if (input.exchangeProvider && input.exchangeProvider !== 'bitfinex') {
+      throw new BadRequestException(
+        'Conservative BTC is locked to Bitfinex; another showcase exchange cannot be selected.',
+      );
+    }
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
       create: {
         id: 'default',
-        showcaseExchangeProvider: input.exchangeProvider ?? 'bybit',
+        showcaseExchangeProvider: input.exchangeProvider ?? 'bitfinex',
         showcaseAiProvider: input.aiProvider ?? 'deepseek',
         agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings ?? null,
         subscriberMaxMarginUsd:
@@ -326,7 +288,7 @@ export class AdminControlService {
         updatedByUserId: userId,
       },
       update: {
-        ...(input.exchangeProvider ? { showcaseExchangeProvider: input.exchangeProvider } : {}),
+        showcaseExchangeProvider: 'bitfinex',
         ...(input.aiProvider ? { showcaseAiProvider: input.aiProvider } : {}),
         ...(input.agentShowcaseDefaultSettings !== undefined
           ? { agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings || null }

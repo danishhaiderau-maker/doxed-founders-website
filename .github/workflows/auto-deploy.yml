@@ -59,7 +59,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           REQUIRE_BOT_ADMIN_TOKEN: YES
-          SHOWCASE_OWNER_URL: https://bot.doxxedcrypto.digital
+          REQUIRE_CANONICAL_FLY_OWNER: YES
+          SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev
         run: node scripts/check-relay-flat.mjs
 
   deploy:
@@ -114,6 +115,8 @@ jobs:
           npm test --workspace=@dcf/web
           node --test scripts/check-relay-flat.spec.mjs
           node --test scripts/relay-revision-policy.spec.mjs
+          node --test scripts/fly-bot-runtime-contract.spec.mjs
+          node --test scripts/bot-sync-guard.spec.mjs
 
       - name: Build web (catch Vercel build errors before Vercel does)
         run: npm run build --workspace=@dcf/web

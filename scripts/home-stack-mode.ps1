@@ -1,4 +1,4 @@
-# Resolves home stack ports: production showcase (7002/9001) vs legacy local collection (7002/9500).
+# Resolve the only supported desktop role: Fly dashboard/data/analyzer mirror.
 param(
   [string]$RepoRoot = ""
 )
@@ -15,53 +15,32 @@ if (-not $RepoRoot) {
 function Get-HomeStackMode {
   param([string]$Root = $RepoRoot)
 
-  $showcaseLock = Join-Path $Root "config\home-showcase.lock.json"
-  $legacyLock = Join-Path $Root "config\local-collection.lock.json"
-  $prodFlag = Join-Path $Root ".home-production-mode"
-  $localFlag = Join-Path $Root ".local-collection-mode"
-
-  if (Test-Path $showcaseLock) {
-    $lock = Get-Content $showcaseLock -Raw | ConvertFrom-Json
-    if ($lock.frozen) {
-      $isProduction = "$($lock.mode)" -eq "production" -or -not [bool]$lock.disableTunnel
-      return @{
-        Mode          = if ($isProduction) { "production" } else { "local-collection" }
-        BotPort       = [int]$lock.botPort
-        AnalyzerPort  = [int]$lock.analyzerPort
-        TunnelEnabled = -not [bool]$lock.disableTunnel
-        RelayEnabled  = -not [bool]$lock.disableRelayWebhook
-        DataDir       = Join-Path $Root ($lock.dataDirRelative -replace '/', '\')
-        Label         = if ($isProduction) {
-          "Global showcase :$($lock.botPort)/:$($lock.analyzerPort) (doxxedcrypto + tunnel)"
-        } else {
-          "Local collection (frozen :$($lock.botPort)/:$($lock.analyzerPort))"
-        }
-      }
-    }
+  $flyLockPath = Join-Path $Root "config\fly-canonical.lock.json"
+  $mirrorLockPath = Join-Path $Root "config\home-showcase.lock.json"
+  if (-not (Test-Path $flyLockPath) -or -not (Test-Path $mirrorLockPath)) {
+    throw "Canonical Fly/mirror locks are missing; refusing legacy home-stack fallback."
   }
 
-  if ((Test-Path $localFlag) -and -not (Test-Path $prodFlag) -and (Test-Path $legacyLock)) {
-    $lock = Get-Content $legacyLock -Raw | ConvertFrom-Json
-    if ($lock.frozen) {
-      return @{
-        Mode          = "local-collection"
-        BotPort       = [int]$lock.botPort
-        AnalyzerPort  = [int]$lock.analyzerPort
-        TunnelEnabled = $false
-        RelayEnabled  = $false
-        DataDir       = Join-Path $Root ($lock.dataDirRelative -replace '/', '\')
-        Label         = "Local collection only (no tunnel / no relay)"
-      }
-    }
+  $fly = Get-Content $flyLockPath -Raw | ConvertFrom-Json
+  $mirror = Get-Content $mirrorLockPath -Raw | ConvertFrom-Json
+  if (
+    -not [bool]$fly.frozen -or
+    [bool]$fly.desktopBotEnabled -or
+    "$($mirror.mode)" -ne "fly-mirror" -or
+    -not [bool]$mirror.disableLocalStrategy
+  ) {
+    throw "Canonical Fly/mirror locks are inconsistent; refusing startup."
   }
 
   return @{
-    Mode          = "production"
-    BotPort       = 7002
-    AnalyzerPort  = 9001
-    TunnelEnabled = $true
-    RelayEnabled  = $true
-    DataDir       = Join-Path $Root "services\btc-conservative-agent"
-    Label         = "Production mirror (:7002/:9001)"
+    Mode = "fly-mirror"
+    BotPort = [int]$mirror.botPort
+    AnalyzerPort = [int]$mirror.analyzerPort
+    TunnelEnabled = $false
+    RelayEnabled = $false
+    LocalStrategyEnabled = $false
+    SourceUrl = [string]$fly.sourceUrl
+    DataDir = Join-Path $Root ($mirror.dataDirRelative -replace '/', '\')
+    Label = "Fly dashboard proxy :$($mirror.botPort) + analyzer mirror :$($mirror.analyzerPort)"
   }
 }

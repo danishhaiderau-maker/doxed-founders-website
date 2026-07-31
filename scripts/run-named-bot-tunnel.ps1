@@ -15,6 +15,7 @@ param(
 
 $Host.UI.RawUI.WindowTitle = "Doxed Cloudflare Tunnel (stable)"
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"

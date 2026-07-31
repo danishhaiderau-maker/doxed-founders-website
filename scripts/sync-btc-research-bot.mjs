@@ -130,7 +130,10 @@ function updateSignalEngineManifest(engineHash, comboSrc) {
 }
 
 function applyProductionPatches() {
-  execSync('node scripts/patch-btc-bot-production.mjs', { cwd: ROOT, stdio: 'inherit' });
+  execSync('node scripts/patch-btc-bot-production.mjs --force', {
+    cwd: ROOT,
+    stdio: 'inherit',
+  });
 }
 
 async function main() {
@@ -154,7 +157,11 @@ async function main() {
     execSync('node scripts/patch-btc-bot-production.mjs', {
       cwd: ROOT,
       stdio: 'pipe',
-      env: { ...process.env, BTC_BOT_PATCH_TARGET: probePath },
+      env: {
+        ...process.env,
+        BTC_BOT_PATCH_TARGET: probePath,
+        BTC_BOT_PATCH_PROBE_ONLY: '1',
+      },
     });
     const probeHash = sha256(readFileSync(probePath, 'utf8'));
     try {

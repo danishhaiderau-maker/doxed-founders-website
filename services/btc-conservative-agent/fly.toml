@@ -33,7 +33,8 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
                       # If you enable ANALYZER_ENABLED=true, bump to 2048.
 
 # Persistent volume for research/ + runtime JSON/JSONL/CSV.
-# Created once: `fly volumes create bot_data --region syd --size 1`
+# Created once in the app's primary region:
+# `fly volumes create bot_data --region sin --size 1`
 [mounts]
   source = "bot_data"
   destination = "/app/data"

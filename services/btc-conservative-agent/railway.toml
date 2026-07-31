@@ -8,4 +8,6 @@ watchPatterns = [
 startCommand = "python btc_conservative_agent.py"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-restartPolicyType = "ON_FAILURE"
+# Retired target. The wrapper also refuses any runtime without FLY_APP_NAME.
+# NEVER prevents an accidentally retained Railway service from restart-looping.
+restartPolicyType = "NEVER"

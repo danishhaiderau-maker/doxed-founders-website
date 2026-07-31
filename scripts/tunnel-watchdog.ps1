@@ -6,6 +6,8 @@ param(
   [string]$BridgeUrl = "http://127.0.0.1:7810"
 )
 
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $logFile = Join-Path $repoRoot ".home-tunnel-watchdog.log"

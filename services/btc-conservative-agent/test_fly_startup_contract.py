@@ -26,8 +26,32 @@ def test_restart_loop_declares_the_shell_features_it_uses():
 
 
 def test_fly_standby_has_no_implicit_production_relay():
-    assert 'if not os.getenv("FLY_APP_NAME"):' in WRAPPER
-    assert "SHOWCASE_RELAY_WEBHOOK_URL" in WRAPPER
+    assert '_fly_app != "doxed-btc-bot"' in WRAPPER
+    assert 'os.getenv("FLY_MACHINE_ID")' in WRAPPER
+    assert 'os.getenv("FLY_REGION")' in WRAPPER
+    assert "REFUSED_NON_FLY_RUNTIME" in WRAPPER
+    assert 'os.environ["HOME_BOT_LOCAL"] = "0"' in WRAPPER
+    assert 'os.environ["HOME_RESEARCH_FULL"] = "0"' in WRAPPER
+    assert 'os.environ.setdefault("BLOCK_RESEARCH_WAREHOUSE", "1")' in WRAPPER
+    assert 'os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"' in WRAPPER
+    assert '"https://doxed-btc-bot.fly.dev/analysis"' in WRAPPER
+    assert "raise SystemExit(78)" in WRAPPER
+
+
+def test_fly_refuses_missing_control_secrets_or_direct_live_mode():
+    for required in (
+        "BOT_ADMIN_TOKEN",
+        "BOT_CONTROL_SECRET",
+        "SHOWCASE_WEBHOOK_SECRET",
+        "SHOWCASE_RELAY_WEBHOOK_URL",
+    ):
+        assert f'"{required}"' in WRAPPER
+    assert "REFUSED_MISSING_FLY_CONTROL" in WRAPPER
+    assert 'os.getenv("FORCE_PAPER_MODE")' in WRAPPER
+    assert "REFUSED_DIRECT_FLY_LIVE" in WRAPPER
+    assert "Railway is the isolated Bitfinex live executor" in WRAPPER
+    assert "return _is_direct_local_control(_client_ip())" in BOT
+    assert "return True  # gate disabled" not in BOT
 
 
 def test_fly_image_does_not_bake_laptop_runtime_json():
@@ -65,6 +89,7 @@ if __name__ == "__main__":
     test_container_revision_does_not_require_git_checkout_depth()
     test_restart_loop_declares_the_shell_features_it_uses()
     test_fly_standby_has_no_implicit_production_relay()
+    test_fly_refuses_missing_control_secrets_or_direct_live_mode()
     test_fly_image_does_not_bake_laptop_runtime_json()
     test_fly_has_strict_readiness_and_restart_contract()
     test_fly_publishes_one_authenticated_canonical_snapshot()

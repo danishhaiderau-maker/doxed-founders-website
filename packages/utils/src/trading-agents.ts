@@ -1,7 +1,19 @@
 export type AgentLiveSignalRow = {
+  tradeId?: string;
   time: string;
   direction: string;
+  /** Legacy probability confidence. Direction-only calls leave this at 0. */
   confidence: number;
+  /** Absolute LONG-vs-SHORT score difference on the AI's 0-100 scale. */
+  rawScoreGap?: number | null;
+  /** Execution allowlist bucket: floor(rawScoreGap / 10), capped as 5+ in the UI. */
+  gapBucket?: number | null;
+  /** Virtual chase progress before a real resting limit exists. */
+  chaseCount?: number | null;
+  selectedChaseBuckets?: number[];
+  entryLimitPrice?: number | null;
+  entryLimitPolicy?: string | null;
+  waitingReason?: string | null;
   regime: string;
   strategy: string;
   trigger: string;
@@ -116,6 +128,11 @@ export type TradingAgentDashboardState = {
   latestAiVerdict?: {
     decision: string;
     direction: string;
+    /** Direction-only score evidence. Probability confidence is not requested. */
+    longScore?: number | null;
+    shortScore?: number | null;
+    rawScoreGap?: number | null;
+    gapBucket?: number | null;
     winProbability: number;
     reason: string;
     comment: string;
@@ -125,6 +142,24 @@ export type TradingAgentDashboardState = {
     marketRegime: string;
     updatedAt: string | null;
   };
+  /**
+   * Visibility-only APPROVE state. This is not an exchange order. A real
+   * pending order appears in liveBook.pendingOrders only after an eligible
+   * virtual chase bucket creates the exact structural limit.
+   */
+  pendingApproval?: {
+    tradeId?: string | null;
+    status: string;
+    direction?: string | null;
+    reason?: string | null;
+    rawScoreGap?: number | null;
+    gapBucket?: number | null;
+    chaseCount?: number | null;
+    selectedChaseBuckets?: number[];
+    exactLimitPrice?: number | null;
+    entryLimitPolicy?: string | null;
+    updatedAt?: string | null;
+  } | null;
   riskStatus: string;
   fundingStatus: string;
   dataSource: string;

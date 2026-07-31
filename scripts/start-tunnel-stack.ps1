@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 

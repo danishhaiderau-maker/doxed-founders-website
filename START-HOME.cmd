@@ -1,5 +1,5 @@
 @echo off
-title Doxed Home Bot Stack
+title Doxed Fly Desktop Mirror
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-home-stack.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fast-recover-global.ps1"
 pause

@@ -18,7 +18,7 @@ import { ConfigService } from '@nestjs/config';
  *                     (FLY_APP_NAME is accepted as a legacy alias.)
  *   FLY_MACHINE_ID  — the bot machine id. Defaults to "48e1403c073038".
  *   FLY_BOT_URL     — optional public bot URL for /api/ping health probe
- *                     (defaults to https://bot.doxxedcrypto.digital).
+ *                     (defaults to https://doxed-btc-bot.fly.dev).
  */
 export type FlyMachineState =
   | 'created'
@@ -71,7 +71,7 @@ export class FlyControlService {
       DEFAULT_FLY_MACHINE_ID
     );
     const botUrl = (this.config.get<string>('FLY_BOT_URL')?.trim() ||
-      'https://bot.doxxedcrypto.digital').replace(/\/$/, '');
+      'https://doxed-btc-bot.fly.dev').replace(/\/$/, '');
     if (!token) {
       throw new ServiceUnavailableException(
         'Fly control not configured — set FLY_API_TOKEN on Railway.',

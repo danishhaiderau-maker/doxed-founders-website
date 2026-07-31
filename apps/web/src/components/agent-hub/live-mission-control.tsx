@@ -160,7 +160,13 @@ export function BotConnectionBanner({
       : 'offline');
   const label =
     publicLabel ??
-    (status === 'online' ? 'Agent online' : status === 'updating' ? 'Agent updating' : 'Agent offline');
+    (status === 'online'
+      ? 'Agent online'
+      : status === 'updating'
+        ? 'Agent updating'
+        : status === 'degraded'
+          ? 'Fly feed degraded'
+          : 'Agent offline');
 
   return (
     <div className="space-y-3">
@@ -241,7 +247,14 @@ export function LiveMissionControl({
         <Metric label="Current price" value={formatUsd(d.currentPrice, 0)} />
         <Metric label="Regime" value={d.regime} accent="text-violet-300" />
         <Metric label="AI decision" value={d.aiDecision} accent="text-amber-200" />
-        <Metric label="Win probability" value={`${d.aiWinProbability}%`} />
+        <Metric
+          label="Raw AI gap"
+          value={
+            d.latestAiVerdict?.rawScoreGap != null
+              ? `${d.latestAiVerdict.rawScoreGap}/100`
+              : 'Not recorded'
+          }
+        />
         <Metric label="Position" value={d.currentPosition} />
         <Metric label="Action" value={d.currentAction} accent="text-amber-200" />
         <Metric label="Daily PnL" value={formatPercent(d.pnl.daily)} accent={d.pnl.daily >= 0 ? 'text-emerald-400' : 'text-red-400'} />

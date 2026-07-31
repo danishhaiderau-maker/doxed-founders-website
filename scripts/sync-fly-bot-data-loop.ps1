@@ -6,6 +6,8 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+. (Join-Path $scriptDir "fly-canonical-lock.ps1")
+$SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
@@ -25,12 +27,16 @@ if (Test-Path -LiteralPath $lockFile) {
 }
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
-if (Test-Path -LiteralPath $vaultEnv) {
-  Get-Content -LiteralPath $vaultEnv | ForEach-Object {
-    if ($_ -match '^\s*([^#=]+)=(.*)$') {
-      Set-Item -Path ("env:" + $matches[1].Trim()) -Value $matches[2].Trim().Trim('"').Trim("'")
-    }
+if (-not $env:BOT_ADMIN_TOKEN -and (Test-Path -LiteralPath $vaultEnv)) {
+  $tokenLine = Get-Content -LiteralPath $vaultEnv | Where-Object {
+    $_ -match '^\s*BOT_ADMIN_TOKEN='
+  } | Select-Object -Last 1
+  if ($tokenLine -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
+    $env:BOT_ADMIN_TOKEN = $matches[1].Trim().Trim('"').Trim("'")
   }
+}
+if (-not $env:BOT_ADMIN_TOKEN) {
+  throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
 try {

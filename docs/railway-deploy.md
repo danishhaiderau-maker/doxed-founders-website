@@ -1,5 +1,11 @@
 # Railway deploy checklist
 
+> **Scope:** Railway hosts the website API and the isolated copy-trade relay.
+> The Conservative BTC strategy bot is not a Railway service; its only
+> production owner is Fly.io app `doxed-btc-bot`. Any older bot references
+> below describe historical incidents and must not be used to create, restart,
+> or redeploy a Railway bot.
+
 ## GitHub red ✗ on commits (not an outage or security breach)
 
 Public repo readers often see a **red X** next to commits on `master`. That is **Railway reporting a failed or cancelled deploy** to GitHub — not proof that the site was hacked, and not always proof that production is down.

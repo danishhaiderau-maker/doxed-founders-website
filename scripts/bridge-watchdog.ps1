@@ -23,6 +23,39 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+# Fly is the sole AI/strategy/trading owner. The legacy bridge/tunnel watchdog
+# could otherwise restore Cloudflare and the old home command stack from a
+# forgotten scheduled task. Default execution is mirror/analyzer-only.
+$obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$obsoleteOwnerEnabled = (
+  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  $obsoleteOwnerOptIn
+)
+if (-not $obsoleteOwnerEnabled) {
+  if (
+    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    "NO_SIDE_EFFECTS"
+  ) {
+    Write-Error "Obsolete bridge/Cloudflare watchdog is quarantined; no process was started."
+    exit 78
+  }
+
+  # The canonical DcfShowcaseBotAutostart task owns the one desktop mirror
+  # startup path. A forgotten DoxxedBridgeWatch task must be a strict no-op:
+  # it may not start a second mirror loop, bridge, connector, or bot.
+  if (-not $Quiet) {
+    Write-Warning "Obsolete bridge/Cloudflare watchdog is quarantined; no action taken."
+  }
+  exit 0
+}
+
+Write-Warning "DISASTER-RECOVERY OPT-IN ACTIVE: obsolete Windows bridge/Cloudflare watchdog is permitted."
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  Write-Error "Fly canonical lock is present; refusing to restore the obsolete bridge/Cloudflare route."
+  exit 78
+}
+
 $logFile = Join-Path $repoRoot ".home-bridge-watchdog.log"
 $lockFile = Join-Path $repoRoot ".home-bridge-watchdog.lock"
 $pidFile = Join-Path $repoRoot ".home-bridge-watchdog.pid"

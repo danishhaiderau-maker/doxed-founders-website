@@ -5,9 +5,40 @@ param([switch]$Quiet)
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+# Fly is the sole AI/strategy/trading owner. Do not let an old scheduled task
+# resurrect the obsolete home supervisor merely because a lock file moved.
+$obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$obsoleteOwnerEnabled = (
+  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  $obsoleteOwnerOptIn
+)
+if (-not $obsoleteOwnerEnabled) {
+  if (
+    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    "NO_SIDE_EFFECTS"
+  ) {
+    Write-Error "Obsolete Windows supervisor watchdog is quarantined; no process was started."
+    exit 78
+  }
+
+  $mirrorScript = Join-Path $scriptDir "start-fly-desktop-mirror.ps1"
+  if (Test-Path -LiteralPath $mirrorScript) {
+    if (-not $Quiet) {
+      Write-Warning "Obsolete supervisor watchdog is quarantined. Starting the safe Fly desktop mirror/analyzer instead."
+    }
+    & $mirrorScript -NoWait
+    exit 0
+  }
+
+  Write-Error "Obsolete supervisor watchdog is quarantined and the safe Fly desktop mirror launcher is missing."
+  exit 78
+}
+
+Write-Warning "DISASTER-RECOVERY OPT-IN ACTIVE: obsolete Windows supervisor watchdog is permitted."
 if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
-  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
-  exit 0
+  Write-Error "Fly canonical lock is present; refusing to restore a second AI/trading owner."
+  exit 78
 }
 $logFile = Join-Path $repoRoot ".home-stack-watchdog.log"
 $supervisorHeartbeatFile = Join-Path $repoRoot ".home-stack-supervisor.heartbeat"

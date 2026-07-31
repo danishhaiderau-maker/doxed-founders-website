@@ -25,8 +25,38 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
+
+# Fly is the sole AI/strategy/trading owner. This monitor must not resurrect
+# btc_conservative_agent.py when invoked by an old supervisor/scheduled task.
+$obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$obsoleteOwnerEnabled = (
+  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  $obsoleteOwnerOptIn
+)
+if (-not $obsoleteOwnerEnabled) {
+  if (
+    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    "NO_SIDE_EFFECTS"
+  ) {
+    Write-Error "Obsolete Windows bot restart monitor is quarantined; no process was started."
+    exit 78
+  }
+
+  $mirrorScript = Join-Path $scriptDir "start-fly-desktop-mirror.ps1"
+  if (Test-Path -LiteralPath $mirrorScript) {
+    Write-Warning "Obsolete bot restart monitor is quarantined. Starting the safe Fly desktop mirror/analyzer instead."
+    & $mirrorScript -NoWait
+    exit 0
+  }
+
+  Write-Error "Obsolete bot restart monitor is quarantined and the safe Fly desktop mirror launcher is missing."
+  exit 78
+}
+
+Write-Warning "DISASTER-RECOVERY OPT-IN ACTIVE: obsolete Windows bot restart monitor is permitted."
 if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
-  exit 0
+  Write-Error "Fly canonical lock is present; refusing to restart a second AI/trading owner."
+  exit 78
 }
 $agentDir  = Join-Path $repoRoot "services\btc-conservative-agent"
 $logsDir   = Join-Path $repoRoot "logs"

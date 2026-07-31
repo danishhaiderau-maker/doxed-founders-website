@@ -1,5 +1,8 @@
 import type { TradingAgentDashboardState, BotStateIntegrity } from '@dcf/utils';
-import { formatMelbourneDateTime } from '@dcf/utils';
+import {
+  formatMelbourneDateTime,
+  SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+} from '@dcf/utils';
 
 /** Shape returned by the Python bot GET /api/state (subset we use). */
 export type BotApiState = {
@@ -58,6 +61,9 @@ export type BotApiState = {
   };
   last_ai?: {
     win_prob?: number | null;
+    confidence_requested?: boolean;
+    long_score?: number | null;
+    short_score?: number | null;
     direction?: string | null;
     final_direction?: string | null;
     decision?: string | null;
@@ -106,8 +112,11 @@ export type BotApiState = {
   }>;
   orders?: Array<{
     side?: string;
+    signal_dir?: string;
     status?: string;
     limit_price?: number;
+    entry_limit_policy?: string;
+    entry_reason?: string;
     qty?: number;
     signal_price?: number;
     age_min?: number;
@@ -178,6 +187,7 @@ export type BotApiState = {
     direction?: string;
     ts?: string;
   };
+  chase_execution_buckets?: Record<string, boolean>;
   trades_map?: Record<
     string,
     {
@@ -204,6 +214,20 @@ export type BotApiState = {
       fill_price?: number | null;
       exit_reason?: string | null;
       status?: string;
+      score_gap?: number;
+      conviction_spread?: number;
+      long_score_at_entry?: number;
+      short_score_at_entry?: number;
+      limit_chase_count?: number;
+      dashboard_virtual_chase_count?: number;
+      chase_3plus_virtual_chase_count?: number;
+      limit_price?: number;
+      planned_limit_price?: number;
+      dashboard_virtual_limit?: number;
+      chase_3plus_virtual_limit?: number;
+      entry_limit_policy?: string;
+      entry_reason?: string;
+      final_direction?: string;
     }>;
   };
   research_counters?: {
@@ -251,6 +275,19 @@ export type BotApiState = {
     last_fresh_reset_ts?: number | string | null;
   };
 };
+
+/** One authoritative money-bearing showcase-order predicate for every relay path. */
+export function isExecutableStructuralShowcaseOrder(
+  order: NonNullable<BotApiState['orders']>[number] | null | undefined,
+): boolean {
+  return Boolean(
+    order?.trade_id
+      && (order.status === 'PENDING' || order.status === 'ORDERED')
+      && order.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      && Number.isFinite(Number(order.limit_price))
+      && Number(order.limit_price) > 0,
+  );
+}
 
 const STARTING_BALANCE = 500;
 const LIVE_BOOK_MAX = 5;
@@ -332,6 +369,12 @@ function formatBotTime(ts: string | number | undefined | null): string {
   return formatMelbourneDateTime(ts ?? undefined);
 }
 
+function optionalFiniteNumber(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function resolveTradeTimeInput(trade: Record<string, unknown>): string | number | undefined {
   const pre = trade.close_ts_melbourne ?? trade.ts_melbourne ?? trade.melbourne_time;
   if (isMelbourneDisplayString(pre)) return pre;
@@ -355,23 +398,57 @@ function resolveSignalTimeInput(signal: Record<string, unknown>): string | numbe
 
 function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
   const sessionStart = resolveBotSessionStart(bot);
+  const selectedChaseBuckets = Object.entries(bot.chase_execution_buckets ?? {})
+    .filter(([, enabled]) => enabled)
+    .map(([key]) => Number.parseInt(key, 10))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
   const activeSignals = takeLatest(
     (bot.signal_info?.signals ?? [])
       .filter((s) => inBotSession(s as Record<string, unknown>, sessionStart))
-      .map((s) => ({
-      time: formatBotTime(resolveSignalTimeInput(s as Record<string, unknown>)),
-      direction: String(s.dir ?? '—').toUpperCase(),
-      confidence: Math.round(Number(s.conf ?? 0)),
-      regime: String(s.regime_birth ?? s.regime ?? '—'),
-      strategy: String(s.strategy_birth ?? s.regime ?? bot.strategy_mode ?? 'SR'),
-      trigger: String(s.trigger ?? 'BASE'),
-      pullRequiredPct: Number(s.pull_req ?? s.pullback_pct ?? 0),
-      signalPrice: Number(s.signal_price ?? 0),
-      maxPullPct: Number(s.pullback_pct ?? s.pull_req ?? 0),
-      outcome: String(s.outcome ?? s.status ?? 'PENDING'),
-      fillPrice: s.fill_price != null ? Number(s.fill_price) : null,
-      exitReason: s.exit_reason ? String(s.exit_reason) : null,
-    })),
+      .map((s) => {
+        const tradeId = String(s.trade_id ?? '');
+        const entry = tradeId ? bot.trades_map?.[tradeId] : undefined;
+        const ai = entry?.ai ?? {};
+        const longScore = optionalFiniteNumber(s.long_score_at_entry ?? ai.long_score);
+        const shortScore = optionalFiniteNumber(s.short_score_at_entry ?? ai.short_score);
+        const rawScoreGap =
+          optionalFiniteNumber(s.score_gap) ??
+          (longScore != null && shortScore != null ? Math.abs(longScore - shortScore) : null);
+        const chaseCount =
+          optionalFiniteNumber(
+            s.dashboard_virtual_chase_count ??
+              s.chase_3plus_virtual_chase_count ??
+              s.limit_chase_count,
+          ) ?? 0;
+        return {
+          tradeId: tradeId || undefined,
+          time: formatBotTime(resolveSignalTimeInput(s as Record<string, unknown>)),
+          direction: String(s.final_direction ?? s.dir ?? '—').toUpperCase(),
+          confidence: Math.round(Number(s.conf ?? 0)),
+          rawScoreGap,
+          gapBucket: rawScoreGap != null ? Math.floor(rawScoreGap / 10) : null,
+          chaseCount,
+          selectedChaseBuckets,
+          entryLimitPrice: optionalFiniteNumber(
+            s.limit_price ??
+              s.planned_limit_price ??
+              s.dashboard_virtual_limit ??
+              s.chase_3plus_virtual_limit,
+          ),
+          entryLimitPolicy: s.entry_limit_policy ? String(s.entry_limit_policy) : null,
+          waitingReason: String(s.entry_reason ?? s.status ?? 'Awaiting execution stage'),
+          regime: String(s.regime_birth ?? s.regime ?? '—'),
+          strategy: String(s.strategy_birth ?? s.regime ?? bot.strategy_mode ?? 'SR'),
+          trigger: String(s.trigger ?? 'BASE'),
+          pullRequiredPct: Number(s.pull_req ?? s.pullback_pct ?? 0),
+          signalPrice: Number(s.signal_price ?? 0),
+          maxPullPct: Number(s.pullback_pct ?? s.pull_req ?? 0),
+          outcome: String(s.outcome ?? s.status ?? 'PENDING'),
+          fillPrice: s.fill_price != null ? Number(s.fill_price) : null,
+          exitReason: s.exit_reason ? String(s.exit_reason) : null,
+        };
+      }),
   );
 
   const positions = takeLatest(
@@ -561,6 +638,10 @@ function buildLatestAiVerdict(
   const direction = (ai.direction ?? ai.final_direction ?? 'NO_TRADE').toString();
   const reason = (ai.reason ?? skipReason ?? 'Monitoring').toString().trim();
   const comment = (ai.comment ?? '').toString().trim();
+  const longScore = optionalFiniteNumber(ai.long_score);
+  const shortScore = optionalFiniteNumber(ai.short_score);
+  const rawScoreGap =
+    longScore != null && shortScore != null ? Math.abs(longScore - shortScore) : null;
   const blockReason =
     bot.debug_state?.last_block_reason?.trim() ||
     bot.debug_state?.skip_reason?.trim() ||
@@ -568,6 +649,10 @@ function buildLatestAiVerdict(
   return {
     decision,
     direction,
+    longScore,
+    shortScore,
+    rawScoreGap,
+    gapBucket: rawScoreGap != null ? Math.floor(rawScoreGap / 10) : null,
     winProbability: ai.win_prob ?? 0,
     reason,
     comment,
@@ -584,7 +669,17 @@ function composeAiReasoningSummary(
 ): string {
   const parts: string[] = [];
   parts.push(`Decision: ${verdict.decision} · Direction: ${verdict.direction}`);
-  parts.push(`Win probability: ${verdict.winProbability}% · Edge ${verdict.edgeScore}/${verdict.requiredEdge}`);
+  if (verdict.rawScoreGap != null) {
+    parts.push(
+      `Raw LONG/SHORT gap: ${verdict.rawScoreGap}/100 · execution bucket ${
+        verdict.gapBucket != null && verdict.gapBucket >= 5 ? '5+' : verdict.gapBucket
+      } · Edge ${verdict.edgeScore}/${verdict.requiredEdge}`,
+    );
+  } else if (verdict.winProbability > 0) {
+    parts.push(`Win probability: ${verdict.winProbability}% · Edge ${verdict.edgeScore}/${verdict.requiredEdge}`);
+  } else {
+    parts.push(`Probability confidence not requested · Edge ${verdict.edgeScore}/${verdict.requiredEdge}`);
+  }
   if (verdict.reason) parts.push(`Reason: ${verdict.reason}`);
   if (verdict.comment) parts.push(`AI comment: ${verdict.comment}`);
   if (verdict.blockReason && verdict.blockReason !== verdict.reason) {
@@ -643,11 +738,73 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
 
   const latestAiVerdict = buildLatestAiVerdict(bot, edgeScore, requiredEdge, marketLabel, skipReason);
   const aiReasoningFull = composeAiReasoningSummary(latestAiVerdict);
+  const lastApproval = bot.last_approve_outcome;
+  const approvalTradeId = String(lastApproval?.trade_id ?? '');
+  const approvalSignal = approvalTradeId
+    ? bot.trades_map?.[approvalTradeId]?.signal_ref
+    : undefined;
+  const approvalAi = approvalTradeId ? bot.trades_map?.[approvalTradeId]?.ai : undefined;
+  const approvalLong = optionalFiniteNumber(
+    approvalSignal?.long_score_at_entry ?? approvalAi?.long_score ?? bot.last_ai?.long_score,
+  );
+  const approvalShort = optionalFiniteNumber(
+    approvalSignal?.short_score_at_entry ?? approvalAi?.short_score ?? bot.last_ai?.short_score,
+  );
+  const approvalRawGap =
+    optionalFiniteNumber(approvalSignal?.score_gap) ??
+    (approvalLong != null && approvalShort != null
+      ? Math.abs(approvalLong - approvalShort)
+      : latestAiVerdict.rawScoreGap);
+  const selectedApprovalChaseBuckets = Object.entries(bot.chase_execution_buckets ?? {})
+    .filter(([, enabled]) => enabled)
+    .map(([key]) => Number.parseInt(key, 10))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const pendingApproval = lastApproval
+    ? {
+        tradeId: approvalTradeId || null,
+        status: String(lastApproval.status ?? 'EVALUATED'),
+        direction:
+          String(
+            lastApproval.direction ??
+              approvalSignal?.final_direction ??
+              approvalSignal?.dir ??
+              latestAiVerdict.direction ??
+              '',
+          ) || null,
+        reason: String(lastApproval.reason ?? approvalSignal?.entry_reason ?? '') || null,
+        rawScoreGap: approvalRawGap,
+        gapBucket: approvalRawGap != null ? Math.floor(approvalRawGap / 10) : null,
+        chaseCount:
+          optionalFiniteNumber(
+            approvalSignal?.dashboard_virtual_chase_count ??
+              approvalSignal?.chase_3plus_virtual_chase_count ??
+              approvalSignal?.limit_chase_count,
+          ) ?? 0,
+        selectedChaseBuckets: selectedApprovalChaseBuckets,
+        exactLimitPrice: optionalFiniteNumber(
+          approvalSignal?.limit_price ??
+            approvalSignal?.planned_limit_price ??
+            approvalSignal?.dashboard_virtual_limit ??
+            approvalSignal?.chase_3plus_virtual_limit,
+        ),
+        entryLimitPolicy: approvalSignal?.entry_limit_policy
+          ? String(approvalSignal.entry_limit_policy)
+          : null,
+        updatedAt: lastApproval.ts ?? null,
+      }
+    : null;
 
   const conclusion =
     edgeScore < requiredEdge || aiDecision === 'REJECT' || aiDirection === 'NO_TRADE'
       ? `No edge detected (${edgeScore}/${requiredEdge}). Waiting.`
-      : `Signal active: ${aiDirection} @ ${bot.last_ai?.win_prob ?? 0}% win prob.`;
+      : latestAiVerdict.rawScoreGap != null
+        ? `Signal active: ${aiDirection} with raw AI gap ${latestAiVerdict.rawScoreGap}/100 (bucket ${
+            latestAiVerdict.gapBucket != null && latestAiVerdict.gapBucket >= 5
+              ? '5+'
+              : latestAiVerdict.gapBucket
+          }).`
+        : `Signal active: ${aiDirection}. Probability confidence not requested.`;
 
   const balance = researchSessionBalance(bot, STARTING_BALANCE);
   const openUnrealForEquity = (bot.positions ?? []).reduce(
@@ -720,6 +877,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
     marketStructure: `${structureNote} · MTF ${mtf}${adx != null ? ` · ADX ${adx}` : ''}`,
     aiReasoning: aiReasoningFull || aiReasoning,
     latestAiVerdict,
+    pendingApproval,
     riskStatus: bot.execution_paused ? 'PAUSED' : 'NORMAL',
     fundingStatus: bot.funding?.interpretation ?? bot.funding?.source ?? 'Bitfinex sim',
     dataSource: bot.data_source ?? bot.price_source ?? 'Bitfinex',

@@ -1,13 +1,31 @@
 # Local collection bot — frozen port 7002, separate data folder, no relay/tunnel.
 param([switch]$NoWait)
 
-. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "local-collection-config.ps1")
-
-$Port = $LocalCollection.BotPort
-$Host.UI.RawUI.WindowTitle = "Local Collection Bot :$Port"
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+$legacyOwnerOptInName = "DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"
+$legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction SilentlyContinue).Value
+if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
+  Write-Host "REFUSED: this obsolete local launcher would start a second AI/strategy owner." -ForegroundColor Red
+  Write-Host "Use scripts\start-fly-desktop-mirror.ps1 for the Fly proxy, data sync, and analyzer."
+  Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
+  exit 78
+}
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Write-Host "REFUSED: Fly canonical lock is present; local collection cannot start another owner." -ForegroundColor Red
+  Write-Host "Lock: $flyCanonicalLock" -ForegroundColor Yellow
+  exit 78
+}
+Write-Warning "DISASTER-RECOVERY OPT-IN ACCEPTED: starting the obsolete local collection bot."
+
+. (Join-Path $scriptDir "local-collection-config.ps1")
+
+$Port = $LocalCollection.BotPort
+$Host.UI.RawUI.WindowTitle = "Local Collection Bot :$Port"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 
 function Wait-ForKey {

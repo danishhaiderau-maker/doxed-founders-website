@@ -25,7 +25,7 @@ export function RelaySimLiveViewToggle({
         <span className="text-xs font-semibold text-white">Live view</span>
         <span className="mt-0.5 block text-[10px] leading-snug text-zinc-500">
           {enabled
-            ? `Refreshes this screen every ${AGENT_HUB_POLL_SIM_LIVE_VIEW_MS / 1000}s while sim runs. Copy relay on Railway is unchanged.`
+            ? `Refreshes this screen every ${AGENT_HUB_POLL_SIM_LIVE_VIEW_MS / 1000}s while sim runs. The platform copy relay is unchanged.`
             : `Off — background refresh every ${AGENT_HUB_POLL_SIM_MS / 1000}s. Saved for your login on this browser only.`}
         </span>
       </span>

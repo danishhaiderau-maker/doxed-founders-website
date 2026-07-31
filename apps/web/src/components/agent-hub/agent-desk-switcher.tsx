@@ -3,7 +3,7 @@
 export type AgentDeskId = 'showcase' | 'live' | 'relay-sim';
 
 /** Compact desk tabs — 3-tab switcher: Showcase Bot | Bitfinex relay sim | Bitfinex live copy.
- *  Showcase Bot surfaces the live :7002 admin bot snapshot (signals, orders, positions, trades).
+ *  Showcase Bot surfaces the canonical Fly snapshot. Desktop :7002 is only a compatibility mirror.
  *  The other two tabs drive the visitor's own Bitfinex copy session. */
 export function AgentDeskSwitcher({
   activeDesk,

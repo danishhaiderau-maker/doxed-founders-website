@@ -2,6 +2,10 @@
 
 import { displayMelbourneTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 import { selectLiveExecutionBook } from '@/components/agent-hub/agent-live-execution-view';
+import {
+  chaseSelectionLabel,
+  directionGap,
+} from '@/components/agent-hub/agent-direction-gap';
 
 function MiniTable({
   title,
@@ -90,20 +94,25 @@ export function AgentTransparencyTables({
   const book = executionOnly ? selectLiveExecutionBook(sourceBook) : sourceBook;
   const cap = Math.max(1, Math.min(maxRows, 20));
 
-  const signalRows = book.activeSignals.slice(0, cap).map((s) => [
-    displayMelbourneTime(s.time),
-    s.direction,
-    s.confidence > 0 ? `${s.confidence}%` : 'N/A',
-    s.regime,
-    s.strategy,
-    s.trigger,
-    `${s.pullRequiredPct.toFixed(2)}%`,
-    fmtPrice(s.signalPrice),
-    `${s.maxPullPct.toFixed(2)}%`,
-    s.outcome,
-    s.fillPrice != null ? fmtPrice(s.fillPrice) : '—',
-    s.exitReason ?? '—',
-  ]);
+  const signalRows = book.activeSignals.slice(0, cap).map((s) => {
+    const gap = directionGap(s.rawScoreGap);
+    return [
+      displayMelbourneTime(s.time),
+      s.tradeId ?? '—',
+      s.direction,
+      gap ? `${gap.raw}/100` : 'Not recorded',
+      gap?.bucketLabel ?? '—',
+      s.regime,
+      s.strategy,
+      s.trigger,
+      s.chaseCount != null ? String(s.chaseCount) : '—',
+      chaseSelectionLabel(s.selectedChaseBuckets),
+      s.entryLimitPrice != null && s.entryLimitPrice > 0 ? fmtPrice(s.entryLimitPrice) : 'Not created',
+      s.waitingReason ?? s.outcome,
+      s.fillPrice != null ? fmtPrice(s.fillPrice) : '—',
+      s.exitReason ?? '—',
+    ];
+  });
 
   const positionRows = book.positions.slice(0, cap).map((p) => [
     p.leg,
@@ -151,7 +160,6 @@ export function AgentTransparencyTables({
     fmtPrice(o.limitPrice),
     String(o.ageMin),
     o.reason,
-    `${o.confidence}%`,
     o.mode,
   ]);
 
@@ -173,7 +181,7 @@ export function AgentTransparencyTables({
       String(t.durationMin),
       pnlPctCell,
       formatUsd(t.netUsd),
-      ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd), t.aiBand]),
+      ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd)]),
     ];
   });
 
@@ -230,23 +238,25 @@ export function AgentTransparencyTables({
     <div className="space-y-4">
       <MiniTable
         title="Active signals"
-        subtitle="Latest pipeline signals — max 5 rolling entries"
+        subtitle="Approvals and virtual-chase candidates. They are not real pending orders until an exact limit appears below."
         headers={[
           'Time',
+          'Trade ID',
           'Dir (final)',
-          'Conf',
+          'Raw AI gap',
+          'Gap bucket',
           'Regime',
           'Strategy',
-          'Trigger',
-          'Pull req',
-          'Signal price',
-          'Max pull',
-          'Outcome',
+          'Stage',
+          'Chase now',
+          'Entry buckets',
+          'Exact limit',
+          'Status / waiting reason',
           'Fill price',
           'Exit reason',
         ]}
         rows={signalRows}
-        emptyMessage="No active signals right now."
+        emptyMessage="No approval or virtual-chase candidate right now."
       />
       <MiniTable
         title="Positions"
@@ -257,10 +267,10 @@ export function AgentTransparencyTables({
       />
       <MiniTable
         title="Pending orders"
-        subtitle="Limit orders waiting for fill"
+        subtitle="Executable resting limit orders only — virtual chase candidates remain in Active signals"
         headers={['Age min', 'Side', 'Status', 'Qty', 'Limit price', 'Signal price']}
         rows={pendingRows}
-        emptyMessage="No pending limit orders."
+        emptyMessage="No real resting limit order. An approved candidate may still be waiting virtually above."
       />
       <MiniTable
         title="Expired orders"
@@ -272,7 +282,6 @@ export function AgentTransparencyTables({
           'Limit price',
           'Age min',
           'Reason',
-          'Conf',
           'Mode',
         ]}
         rows={expiredRows}
@@ -293,7 +302,6 @@ export function AgentTransparencyTables({
           'Gross USD',
           'Trade fees',
           'Funding',
-          'AI band',
         ]}
         rows={tradeRows}
         emptyMessage="No completed trades in this session yet."

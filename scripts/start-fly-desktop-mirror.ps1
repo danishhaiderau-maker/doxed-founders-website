@@ -7,6 +7,8 @@ $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $python = (Get-Command python -ErrorAction Stop).Source
+. (Join-Path $scriptDir "fly-canonical-lock.ps1")
+$SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 
 # Stop only the former desktop production runtime and its relay publisher.
 # The analyzer remains independent and is restarted below against Fly data.
@@ -38,7 +40,7 @@ if (Test-Path -LiteralPath $proxyPidFile) {
 }
 if (-not $proxyAlive) {
   $proxyScript = Join-Path $scriptDir "fly-dashboard-proxy.py"
-  $proxyArguments = "`"$proxyScript`" --port 7002 --upstream `"$SourceUrl`""
+  $proxyArguments = "`"$proxyScript`" --bind 127.0.0.1 --port 7002 --upstream `"$SourceUrl`""
   $proxy = Start-Process -FilePath $python `
     -ArgumentList $proxyArguments `
     -WorkingDirectory $repoRoot `

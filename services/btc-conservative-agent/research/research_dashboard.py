@@ -133,7 +133,7 @@ elif (DATA_ROOT / "analyzer_research_engine_v62.py").is_file():
 else:
     ROOT = _MODULE_ROOT
 _parent = ROOT.parent
-BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "0.0.0.0")
+BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
 
@@ -176,7 +176,7 @@ REPORT_NAV_GROUPS = (
         ("lanes", "Laboratory", "benchmark_vs_lanes_report.json"),
         ("lanes-retire", "Retirement", "lane_retirement_report.json"),
         ("lanes-def", "Definitions", "lane_definition_report.json"),
-        ("ai", "AI Lab", "ai_calibration_report.json"),
+        ("ai", "Direction & Gap", "ai_calibration_report.json"),
         ("typeb", "MFE Outcome Cohort", "type_b_predictor_report.json"),
     )),
     ("trading-group", "Chase & Exits", (
@@ -185,7 +185,7 @@ REPORT_NAV_GROUPS = (
         ("chase-delay", "Delay", "chase_delay_report.json"),
         ("chase-iso", "Isolation", "lane_chase_isolation_report.json"),
         ("combos", "Top Combos", "top_combinations_report.json"),
-        ("spread-perf", "Spread Performance", "top_combinations_report.json"),
+        ("spread-perf", "Gap Performance", "top_combinations_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
         ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
@@ -502,6 +502,37 @@ def _read_report(name: str, default=None):
     return default
 
 
+def _best_report_path(name: str) -> Path | None:
+    """Return the same scope-aware file that ``_read_report`` would expose."""
+    session = _load_bot_session() or {}
+    fresh = bool(session.get("fresh_collection_mode"))
+    primary = None
+    primary_payload = None
+    primary_key = (-1, -1.0)
+    fallback = None
+    fallback_payload = None
+    fallback_key = (-1, -1.0)
+    for path, payload, mtime in _iter_data_payloads(name):
+        key = (_scope_priority(payload, fresh_collection=fresh), mtime)
+        is_all_data = str(path).endswith(
+            os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep)
+        )
+        if is_all_data:
+            if not _report_is_empty(name, payload) and key > fallback_key:
+                fallback_key = key
+                fallback = path
+                fallback_payload = payload
+        elif key > primary_key:
+            primary_key = key
+            primary = path
+            primary_payload = payload
+    if primary is not None and not _report_is_empty(name, primary_payload or {}):
+        return primary
+    if fallback is not None and fallback_payload is not None:
+        return fallback
+    return primary
+
+
 def _data_file_candidates(name: str) -> list[Path]:
     """Analyzer writes to agent root (DATA_ROOT); legacy copies may sit under research/."""
     bases = [DATA_ROOT, ROOT]
@@ -577,30 +608,27 @@ def _manifest_reports():
     return out
 
 
-def _bundle_paths():
-    paths = []
-    seen = set()
+def _bundle_members():
+    """Canonical report ZIP members with one unambiguous file per report."""
+    members: dict[str, Path] = {}
     for name in BUNDLE_FILES:
         p = ROOT / name
-        if p.is_file() and str(p) not in seen:
-            paths.append(p)
-            seen.add(str(p))
+        if p.is_file():
+            members.setdefault(name, p)
     manifest = _read_json(REPORT_MANIFEST_FILE)
     for entry in manifest.get("reports") or []:
         fname = entry.get("file") if isinstance(entry, dict) else entry
-        if not fname:
+        if not fname or fname in BUNDLE_FILES:
             continue
-        for candidate in (ROOT / fname, ROOT / REPORTS_DIR / fname):
-            if candidate.is_file() and str(candidate) not in seen:
-                paths.append(candidate)
-                seen.add(str(candidate))
-    reports_path = ROOT / REPORTS_DIR
-    if reports_path.is_dir():
-        for p in sorted(reports_path.glob("*.json")):
-            if str(p) not in seen:
-                paths.append(p)
-                seen.add(str(p))
-    return paths
+        candidate = _best_report_path(fname)
+        if candidate is not None:
+            members.setdefault(f"{REPORTS_DIR}/{fname}", candidate)
+    return sorted(members.items())
+
+
+def _bundle_paths():
+    """Compatibility helper retained for focused source/tests."""
+    return [path for _arcname, path in _bundle_members()]
 
 
 
@@ -1056,9 +1084,14 @@ def _combos_payload():
 
 
 def _spread_performance_payload():
-    """Aggregate Top Combos by directional spread bucket -> P&L / WR / EV per bucket.
+    """Aggregate Top Combos by normalized score-gap bucket -> P&L / WR / EV.
+
+    ``spread_bucket`` is retained as the report-schema field name for backward
+    compatibility. It is the normalized LONG-vs-SHORT score gap (raw gap / 10),
+    not the exchange bid/ask spread and not an AI-confidence band.
+
     Reuses the same top_combinations_report.json the Top Combos tab reads, grouped by
-    spread_bucket so the user can see whether higher directional conviction books more profit.
+    spread_bucket so the user can see whether wider directional separation books more profit.
     """
     rep = _read_report("top_combinations_report.json")
     rows = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
@@ -1088,7 +1121,10 @@ def _spread_performance_payload():
     return {
         "generated_at": rep.get("generated_at"),
         "total_combos": len(rows),
-        "filter_note": rep.get("filter_note") or "Aggregated by directional spread bucket (bull_score - bear_score). Higher spread = stronger one-sided conviction.",
+        "filter_note": (
+            "Normalized score gap = abs(LONG score - SHORT score) / 10. "
+            "Example: raw gap 30 is bucket 3. This is not exchange bid/ask spread."
+        ),
         "buckets": out,
     }
 
@@ -1416,13 +1452,27 @@ def _ai_payload():
     funnel = _read_json("ai_funnel_report.json")
     fp = _read_json("ai_decision_fingerprint_report.json")
     conf = _read_json("confidence_band_report.json")
+    calibration_status = str(cal.get("calibration_status") or "NO_DATA").upper()
+    probability_mode = calibration_status == "AVAILABLE"
+    gap = _spread_performance_payload()
     return {
-        "calibration_buckets": cal.get("confidence_buckets") or [],
+        "calibration_status": calibration_status,
+        "direction_only": not probability_mode,
+        "mode_note": (
+            "Direction-only AI: no confidence probability is requested or used. "
+            "Showing normalized LONG-vs-SHORT score-gap performance instead."
+            if not probability_mode
+            else "Probability calibration is available for this historical cohort."
+        ),
+        "calibration_buckets": (cal.get("confidence_buckets") or []) if probability_mode else [],
         "expected_vs_actual": cal.get("expected_vs_actual") or {},
         "feature_attribution": cal.get("feature_attribution") or {},
         "funnel": funnel,
         "fingerprints": fp.get("clusters") or fp.get("fingerprints") or fp,
-        "confidence_bands": conf.get("filled_trades_by_band") or [],
+        "confidence_bands": (conf.get("filled_trades_by_band") or []) if probability_mode else [],
+        "normalized_gap_buckets": gap.get("buckets") or [],
+        "normalized_gap_note": gap.get("filter_note"),
+        "normalized_gap_total_combos": gap.get("total_combos") or 0,
     }
 
 
@@ -1785,16 +1835,14 @@ def api_report(filename):
     safe = os.path.basename(filename)
     if Path(safe).suffix.lower() != ".json":
         abort(404)
-    # Analyzer writes reports to DATA_ROOT (agent root); legacy copies may sit
-    # under research/ (ROOT). Search both, DATA_ROOT first, mirroring _read_json.
-    for path in _data_file_candidates(safe):
-        if path.is_file():
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return jsonify(json.load(f))
-            except Exception:
-                abort(500)
-    abort(404)
+    path = _best_report_path(safe)
+    if path is None:
+        abort(404)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return jsonify(json.load(f))
+    except Exception:
+        abort(500)
 
 
 @app.route("/api/archives")
@@ -1959,8 +2007,7 @@ def download_research_pack():
 def download_reports():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in _bundle_paths():
-            arcname = path.name if path.parent == ROOT else f"{REPORTS_DIR}/{path.name}"
+        for arcname, path in _bundle_members():
             zf.write(path, arcname=arcname)
         zf.writestr(
             "README.txt",
@@ -1992,18 +2039,30 @@ def download_everything():
             for path in sorted(base.rglob(pattern)):
                 if not path.is_file() or path in seen:
                     continue
+                rel = path.relative_to(base)
+                if (
+                    "__pycache__" in rel.parts
+                    or path.suffix.lower() in (".pyc", ".pyo")
+                    or path.name == ".gitkeep"
+                ):
+                    continue
                 seen.add(path)
-                candidates.append((path, f"{prefix}/{path.relative_to(base).as_posix()}"))
+                candidates.append((path, f"{prefix}/{rel.as_posix()}"))
 
-    # Current raw ledgers and deterministic analyzer outputs.
+    # Keep the synchronized Fly data and any longer desktop research history
+    # explicitly separated. The configured data root is the current source.
     for pattern in ("*.csv", "*.jsonl", "*.db"):
-        for path in sorted(agent_root.glob(pattern)):
-            candidates.append((path, f"raw/{path.name}"))
-    add_tree(ROOT / REPORTS_DIR, "reports")
-    for name in _RESEARCH_ARTIFACT_NAMES:
-        path = ROOT / name
-        if path.is_file():
-            candidates.append((path, f"reports/{name}"))
+        for path in sorted(DATA_ROOT.glob(pattern)):
+            candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
+        if agent_root.resolve() != DATA_ROOT.resolve():
+            for path in sorted(agent_root.glob(pattern)):
+                candidates.append((path, f"raw/research_history/{path.name}"))
+
+    # Exactly one scope-aware copy of each current report. Historical/all-data
+    # reports remain available under an explicitly named directory.
+    for arcname, path in _bundle_members():
+        candidates.append((path, f"current_reports/{arcname}"))
+    add_tree(ROOT / ALL_DATA_REPORTS_DIR, "all_data_reports")
     add_tree(ROOT / ARCHIVE_DIR, "sessions")
     add_tree(agent_root / "research" / "genome", "genome")
     research_db = agent_root / "research.db"
@@ -2014,20 +2073,21 @@ def download_everything():
 
     # Include the cached full-stack source audit as a named component, without
     # recursively embedding prior all-in-one bundles.
-    audit_zip = agent_root / "research" / "downloads" / "gpt_audit_bundle.zip"
-    if audit_zip.is_file():
-        candidates.append((audit_zip, "audit/gpt_audit_bundle.zip"))
+    audit_zip = _ensure_current_gpt_audit_bundle(agent_root)
+    candidates.append((audit_zip, "audit/gpt_audit_bundle.zip"))
 
     unique = {}
     for path, arcname in candidates:
         unique.setdefault(arcname, path)
     manifest = {
-        "schema": "doxxed_everything_bundle_v1",
+        "schema": "doxxed_everything_bundle_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "files": [],
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
             and any((ROOT / PAST_ANALYSIS_DIR).iterdir()),
+            "configured_data_root_included": DATA_ROOT.is_dir(),
+            "current_report_scope": "FRESH-COLLECTION",
             "live_trading_data": False,
             "purpose": "research audit and offline analysis",
         },
@@ -2049,6 +2109,8 @@ def download_everything():
             "README.txt",
             "Doxxed Crypto all-in-one research bundle.\n"
             "MANIFEST.json lists every included file, size, and SHA-256 checksum.\n"
+            "raw/current_fly_mirror is the configured current data source; "
+            "raw/research_history is retained separately.\n"
             "Past Analysis is included only after a preserved analysis exists.\n",
         )
     buf.seek(0)
@@ -2105,35 +2167,254 @@ def download_past_analysis(archive_id=None):
     )
 
 
-@app.route("/download/all-sessions")
-def download_all_sessions():
-    """One ZIP: every session archive + live reports + CSVs. Uses cache unless ?rebuild=1."""
-    force = request.args.get("rebuild") in ("1", "true", "yes")
-    if not force:
-        try:
-            return download_complete_cached()
-        except Exception:
-            pass
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
-    if str(agent_root) not in sys.path:
-        sys.path.insert(0, str(agent_root))
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _zip_json(path: Path, member: str) -> dict | None:
     try:
-        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT
-    except ImportError:
-        abort(503, description="build_complete_session_bundle.py not found in agent root")
-    history = agent_root if (agent_root / ARCHIVE_DIR).is_dir() else (
-        HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
+        with zipfile.ZipFile(path) as zf:
+            if zf.testzip() is not None or member not in zf.namelist():
+                return None
+            return json.loads(zf.read(member))
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+        return None
+
+
+def _source_record_matches(record: dict | None, path: Path) -> bool:
+    if not record or not path.is_file():
+        return False
+    try:
+        return (
+            int(record.get("bytes") or -1) == path.stat().st_size
+            and str(record.get("sha256") or "") == _sha256_file(path)
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _current_archive_ids() -> list[str]:
+    index = _archives_index()
+    return sorted(
+        str(item.get("id") or item.get("session_id"))
+        for item in (index.get("sessions") or [])
+        if item.get("id") or item.get("session_id")
     )
-    live = agent_root if (agent_root / "trades_3factor.csv").is_file() else DATA_ROOT
+
+
+def _complete_bundle_candidates(agent_root: Path):
+    bases = (
+        agent_root / "research" / "downloads",
+        agent_root / "downloads",
+        Path(HISTORY_ROOT) / "downloads",
+        ROOT / "downloads",
+        ROOT,
+    )
+    seen = set()
+    for base in bases:
+        for name in (COMPLETE_BUNDLE_NAME,) + COMPLETE_BUNDLE_FALLBACKS:
+            candidate = Path(base) / name
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.is_file():
+                yield candidate
+
+
+def _complete_bundle_is_current(candidate: Path) -> bool:
+    meta = _zip_json(candidate, "BUNDLE_MANIFEST.json")
+    if not meta or meta.get("schema") != "trading_sessions_complete_manifest_v2":
+        return False
+    report_manifest_path = ROOT / REPORT_MANIFEST_FILE
+    if not _source_record_matches(meta.get("report_manifest"), report_manifest_path):
+        return False
+    if sorted(meta.get("session_ids") or []) != _current_archive_ids():
+        return False
+    for record in meta.get("raw_sources") or []:
+        name = os.path.basename(str(record.get("name") or ""))
+        if not name:
+            return False
+        if record.get("role") == "configured_data_root":
+            source = DATA_ROOT / name
+        else:
+            source = next(
+                (
+                    path
+                    for path in (DATA_ROOT / name, ROOT / name, Path(HISTORY_ROOT) / name)
+                    if path.is_file()
+                ),
+                DATA_ROOT / name,
+            )
+        if not _source_record_matches(record, source):
+            return False
+    return True
+
+
+def _build_complete_bundle(agent_root: Path) -> Path:
+    try:
+        import importlib.util
+
+        builder_path = agent_root / "build_complete_session_bundle.py"
+        spec = importlib.util.spec_from_file_location(
+            "_canonical_complete_session_bundle", builder_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {builder_path}")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        build_bundle = builder.build_bundle
+    except (ImportError, OSError) as exc:
+        abort(503, description=f"build_complete_session_bundle.py not found: {exc}")
     out_dir = agent_root / "research" / "downloads"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / COMPLETE_BUNDLE_NAME
     try:
-        build_bundle(history, live, out_path)
+        built = build_bundle(
+            Path(HISTORY_ROOT),
+            ROOT,
+            out_path,
+            data_root=DATA_ROOT,
+        )
     except Exception as exc:
         abort(500, description=f"Bundle build failed: {exc}")
-    if not out_path.is_file():
-        abort(500, description="Bundle file missing after build")
+    if not built.is_file() or not _complete_bundle_is_current(built):
+        abort(500, description="Complete bundle failed freshness verification")
+    return built
+
+
+def _chatgpt_bundle_is_current(candidate: Path) -> bool:
+    meta = _zip_json(candidate, "BUNDLE_MANIFEST.json")
+    if not meta:
+        return False
+    contract = meta.get("source_contract") or {}
+    if contract.get("schema") != "split_report_and_data_roots_v1":
+        return False
+    report_path = _best_report_path(REPORT_MANIFEST_FILE)
+    if report_path is None or not _source_record_matches(
+        contract.get("report_manifest"), report_path
+    ):
+        return False
+    for record in contract.get("raw_sources") or []:
+        name = os.path.basename(str(record.get("name") or ""))
+        source = (
+            DATA_ROOT / name
+            if (DATA_ROOT / name).is_file()
+            else ROOT / name
+        )
+        if not _source_record_matches(record, source):
+            return False
+    return True
+
+
+def _gpt_audit_bundle_is_current(
+    candidate: Path,
+    manifest_path: Path,
+    agent_root: Path,
+) -> bool:
+    try:
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+        with zipfile.ZipFile(candidate) as zf:
+            if zf.testzip() is not None:
+                return False
+            source_records = [
+                record
+                for record in (meta.get("file_index") or [])
+                if str(record.get("path") or "").startswith("source/")
+            ]
+            source_members = set(zf.namelist())
+            if not source_records or "source/bot.py" not in source_members:
+                return False
+            for record in source_records:
+                rel = str(record.get("path") or "")
+                if rel not in source_members:
+                    return False
+                bundled = zf.read(rel)
+                if (
+                    len(bundled) != int(record.get("bytes") or -1)
+                    or hashlib.sha256(bundled).hexdigest()[:16]
+                    != str(record.get("sha256_prefix") or "")
+                ):
+                    return False
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+        return False
+    for record in source_records:
+        rel = str(record.get("path") or "")
+        source = agent_root / rel[len("source/") :]
+        if (
+            not source.is_file()
+            or source.stat().st_size != int(record.get("bytes") or -1)
+            or _sha256_file(source)[:16] != str(record.get("sha256_prefix") or "")
+        ):
+            return False
+    report = agent_root / "research" / "genome" / "genome_analysis_report.json"
+    if report.is_file():
+        try:
+            report_generated = json.loads(
+                report.read_text(encoding="utf-8")
+            ).get("generated_at")
+            if (
+                report_generated
+                and meta.get("generated_at")
+                and report_generated > meta["generated_at"]
+            ):
+                return False
+        except (OSError, json.JSONDecodeError):
+            return False
+    return True
+
+
+def _ensure_current_gpt_audit_bundle(agent_root: Path) -> Path:
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
+    try:
+        from build_gpt_audit_bundle import build, OUT_DIR, ZIP_NAME, MANIFEST_NAME
+    except ImportError as exc:
+        abort(503, description=f"build_gpt_audit_bundle.py not found: {exc}")
+    out_dir = (
+        agent_root / "research" / "downloads"
+        if (agent_root / "research" / "downloads").is_dir()
+        else Path(OUT_DIR)
+    )
+    candidate = out_dir / ZIP_NAME
+    manifest_path = out_dir / MANIFEST_NAME
+    if (
+        candidate.is_file()
+        and candidate.stat().st_size > 50_000
+        and manifest_path.is_file()
+        and _gpt_audit_bundle_is_current(candidate, manifest_path, agent_root)
+    ):
+        return candidate
+    try:
+        out_zip, _ = build(agent_root=agent_root)
+    except Exception as exc:
+        abort(500, description=f"GPT audit bundle build failed: {exc}")
+    out_zip = Path(out_zip)
+    if not _gpt_audit_bundle_is_current(out_zip, manifest_path, agent_root):
+        abort(500, description="GPT audit bundle failed source freshness verification")
+    return out_zip
+
+
+@app.route("/download/all-sessions")
+def download_all_sessions():
+    """One ZIP: every session archive + live reports + CSVs. Uses cache unless ?rebuild=1."""
+    force = request.args.get("rebuild") in ("1", "true", "yes")
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    out_path = None
+    if not force:
+        out_path = next(
+            (
+                candidate
+                for candidate in _complete_bundle_candidates(agent_root)
+                if _complete_bundle_is_current(candidate)
+            ),
+            None,
+        )
+    if out_path is None:
+        out_path = _build_complete_bundle(agent_root)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
         out_path,
@@ -2145,30 +2426,25 @@ def download_all_sessions():
 
 @app.route("/download/complete")
 def download_complete_cached():
-    """Serve pre-built complete bundle if it exists (no rebuild)."""
+    """Serve a source-current complete bundle, rebuilding stale caches."""
     agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
-    bases = (agent_root / "research" / "downloads", agent_root / "downloads", HISTORY_ROOT, ROOT, ROOT.parent)
-    for base in bases:
-        base = Path(base)
-        for name in (COMPLETE_BUNDLE_NAME,) + COMPLETE_BUNDLE_FALLBACKS:
-            candidate = base / name if base.name == "downloads" else base / "downloads" / name
-            if not candidate.is_file():
-                candidate = base / name
-            if candidate.is_file():
-                try:
-                    with zipfile.ZipFile(candidate) as zf:
-                        if zf.testzip() is not None:
-                            continue
-                except zipfile.BadZipFile:
-                    continue
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                return send_file(
-                    candidate,
-                    mimetype="application/zip",
-                    as_attachment=True,
-                    download_name=f"trading_sessions_complete_{stamp}.zip",
-                )
-    return download_all_sessions()
+    candidate = next(
+        (
+            path
+            for path in _complete_bundle_candidates(agent_root)
+            if _complete_bundle_is_current(path)
+        ),
+        None,
+    )
+    if candidate is None:
+        candidate = _build_complete_bundle(agent_root)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        candidate,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"trading_sessions_complete_{stamp}.zip",
+    )
 
 
 @app.route("/download/chatgpt")
@@ -2193,21 +2469,24 @@ def download_chatgpt_bundle():
         abort(503, description=f"build_chatgpt_research_bundle.py not found: {exc}")
     for base in (RESEARCH_ROOT if (RESEARCH_ROOT := agent_root / "research").is_dir() else ROOT, ROOT, agent_root):
         candidate = base / "downloads" / ZIP_NAME
-        if candidate.is_file() and candidate.stat().st_size > 10_000:
-            try:
-                with zipfile.ZipFile(candidate) as zf:
-                    if zf.testzip() is None:
-                        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                        return send_file(
-                            candidate,
-                            mimetype="application/zip",
-                            as_attachment=True,
-                            download_name=f"chatgpt_research_bundle_{stamp}.zip",
-                        )
-            except zipfile.BadZipFile:
-                pass
+        if (
+            candidate.is_file()
+            and candidate.stat().st_size > 10_000
+            and _chatgpt_bundle_is_current(candidate)
+        ):
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            return send_file(
+                candidate,
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=f"chatgpt_research_bundle_{stamp}.zip",
+            )
     try:
-        out_zip, _ = build(agent_root=agent_root)
+        out_zip, _ = build(
+            agent_root=agent_root,
+            data_root=DATA_ROOT,
+            report_root=ROOT,
+        )
     except Exception as exc:
         abort(500, description=f"ChatGPT bundle build failed: {exc}")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -2223,40 +2502,7 @@ def download_chatgpt_bundle():
 def download_gpt_audit_bundle():
     """Full-stack GPT audit: bot.py + analyzers + genome modules + implementation checklist."""
     agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
-    if str(agent_root) not in sys.path:
-        sys.path.insert(0, str(agent_root))
-    try:
-        from build_gpt_audit_bundle import build, OUT_DIR, ZIP_NAME, MANIFEST_NAME
-    except ImportError as exc:
-        abort(503, description=f"build_gpt_audit_bundle.py not found: {exc}")
-    out_dir = agent_root / "research" / "downloads" if (agent_root / "research" / "downloads").is_dir() else OUT_DIR
-    candidate = out_dir / ZIP_NAME
-    manifest_path = out_dir / MANIFEST_NAME
-    stale = True
-    if candidate.is_file() and candidate.stat().st_size > 50_000:
-        try:
-            if manifest_path.is_file():
-                meta = json.loads(manifest_path.read_text(encoding="utf-8"))
-                gen = meta.get("generated_at") or ""
-                report = agent_root / "research" / "genome" / "genome_analysis_report.json"
-                if report.is_file():
-                    rep_ts = json.loads(report.read_text(encoding="utf-8")).get("generated_at") or ""
-                    stale = bool(rep_ts and gen and rep_ts > gen)
-            with zipfile.ZipFile(candidate) as zf:
-                if zf.testzip() is None and not stale:
-                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                    return send_file(
-                        candidate,
-                        mimetype="application/zip",
-                        as_attachment=True,
-                        download_name=f"gpt_audit_bundle_{stamp}.zip",
-                    )
-        except (zipfile.BadZipFile, json.JSONDecodeError, OSError):
-            pass
-    try:
-        out_zip, _ = build(agent_root=agent_root)
-    except Exception as exc:
-        abort(500, description=f"GPT audit bundle build failed: {exc}")
+    out_zip = _ensure_current_gpt_audit_bundle(agent_root)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
         out_zip,
@@ -2551,10 +2797,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>ADX</th><th>Score gap</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
   </section>
   <section id="sec-spread-perf">
-    <h2>Spread Performance</h2>
-    <p class="note" id="spread-perf-note">P&L / WR / EV by directional spread bucket (bull_score - bear_score). Higher spread = stronger one-sided conviction.</p>
+    <h2>Normalized Gap Performance</h2>
+    <p class="note" id="spread-perf-note">Normalized score gap = abs(LONG score - SHORT score) / 10. This is not exchange bid/ask spread.</p>
     <div class="kpis" id="spread-perf-kpis"></div>
-    <table><thead><tr><th>Spread bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spread-perf-body"></tbody></table>
+    <table><thead><tr><th>Gap bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spread-perf-body"></tbody></table>
   </section>
   <section id="sec-pathway-audit">
     <h2>Pathway Audit</h2>
@@ -2607,11 +2853,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-fc-body"></tbody></table>
   </section>
   <section id="sec-ai">
-    <h2>AI Laboratory</h2>
-    <h3>Confidence calibration</h3>
-    <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-cal-body"></tbody></table>
-    <h3>Executed confidence bands</h3>
-    <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
+    <h2>AI Direction &amp; Gap Laboratory</h2>
+    <p class="note" id="ai-mode-note">Loading the current AI evidence mode…</p>
+    <div id="ai-gap-view">
+      <h3>Normalized score-gap performance</h3>
+      <p class="note" id="ai-gap-note">Raw LONG-vs-SHORT score difference divided by 10. Example: raw gap 30 is bucket 3.</p>
+      <table><thead><tr><th>Gap bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="ai-gap-body"></tbody></table>
+    </div>
+    <div id="ai-confidence-view" style="display:none">
+      <h3>Historical probability calibration</h3>
+      <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-cal-body"></tbody></table>
+      <h3>Historical executed probability bands</h3>
+      <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
+    </div>
   </section>
   <section id="sec-genome">
     <h2>Trading Genome research</h2>
@@ -3426,9 +3680,32 @@ async function loadGenome() {
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
-  const row = b => `<tr><td>${b.bucket}</td><td>${b.trades}</td><td>${b.win_rate_pct}%</td><td>$${fmtUsd(b.sum_pnl_usd)}</td></tr>`;
-  document.getElementById('ai-cal-body').innerHTML = (d.calibration_buckets||[]).filter(b=>b.trades).map(row).join('');
-  document.getElementById('ai-conf-body').innerHTML = (d.confidence_bands||[]).filter(b=>b.trades).map(row).join('');
+  const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
+  const showConfidence = status === 'AVAILABLE';
+  const confidenceView = document.getElementById('ai-confidence-view');
+  const gapView = document.getElementById('ai-gap-view');
+  if (confidenceView) confidenceView.style.display = showConfidence ? '' : 'none';
+  if (gapView) gapView.style.display = showConfidence ? 'none' : '';
+  const modeNote = document.getElementById('ai-mode-note');
+  if (modeNote) modeNote.textContent = d.mode_note || `AI evidence mode: ${status}`;
+
+  if (showConfidence) {
+    const row = b => `<tr><td>${b.bucket}</td><td>${b.trades}</td><td>${b.win_rate_pct}%</td><td>$${fmtUsd(b.sum_pnl_usd)}</td></tr>`;
+    document.getElementById('ai-cal-body').innerHTML = (d.calibration_buckets||[]).filter(b=>b.trades).map(row).join('')
+      || '<tr><td colspan="4">No probability-calibration outcomes yet.</td></tr>';
+    document.getElementById('ai-conf-body').innerHTML = (d.confidence_bands||[]).filter(b=>b.trades).map(row).join('')
+      || '<tr><td colspan="4">No executed probability-band outcomes yet.</td></tr>';
+    return;
+  }
+
+  const gapNote = document.getElementById('ai-gap-note');
+  if (gapNote) gapNote.textContent = d.normalized_gap_note
+    || 'Normalized score gap = abs(LONG score - SHORT score) / 10.';
+  document.getElementById('ai-gap-body').innerHTML = (d.normalized_gap_buckets||[]).map(b => {
+    const cls = Number(b.pnl_usd || 0) >= 0 ? 'green' : 'red';
+    return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td>`
+      + `<td>${b.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(b.pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5">No normalized score-gap outcomes yet.</td></tr>';
 }
 
 async function loadExplorer() {

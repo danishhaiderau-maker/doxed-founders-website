@@ -1,10 +1,8 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   EXCHANGE_PROVIDER_LABELS,
   TRADING_AGENT_AI_PROVIDER_LABELS,
   exchangeBotRuntimeNote,
-  exchangeCredentialsToEnvVars,
   exchangeRequiresPassphrase,
   type ExchangeProvider,
   type TradingAgentAiProvider,
@@ -13,8 +11,10 @@ import { CredentialsCryptoService } from '../credentials/credentials-crypto.serv
 import { PrismaService } from '../prisma/prisma.service';
 import { ExchangeAdapterRegistry } from '../exchanges/exchange-adapter.registry';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
-
-const RAILWAY_GQL = 'https://backboard.railway.com/graphql/v2';
+import {
+  CANONICAL_SHOWCASE_BOT_URL,
+  normalizeShowcaseBotUrl,
+} from '../trading-agents/canonical-showcase-runtime';
 
 type ShowcaseExchangePayload = {
   apiKey: string;
@@ -25,18 +25,16 @@ type ShowcaseExchangePayload = {
 
 @Injectable()
 export class ShowcaseRuntimeService {
-  private readonly logger = new Logger(ShowcaseRuntimeService.name);
   private readonly registry = new ExchangeAdapterRegistry();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
-    private readonly config: ConfigService,
   ) {}
 
   async getCredentialsStatus() {
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    const exchangeProvider = (row?.showcaseExchangeProvider ?? 'bybit') as ExchangeProvider;
+    const exchangeProvider = 'bitfinex' as ExchangeProvider;
     const aiProvider = (row?.showcaseAiProvider ?? 'deepseek') as TradingAgentAiProvider;
 
     return {
@@ -46,13 +44,15 @@ export class ShowcaseRuntimeService {
       aiLabel: TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider] ?? aiProvider,
       exchangeConfigured: Boolean(row?.showcaseExchangeCredentialEnc),
       aiConfigured: Boolean(row?.showcaseAiCredentialEnc),
-      botPublicUrl: row?.showcaseBotPublicUrl ?? null,
+      botPublicUrl: CANONICAL_SHOWCASE_BOT_URL,
       credentialsUpdatedAt: row?.showcaseCredentialsUpdatedAt?.toISOString() ?? null,
       runtimePushedAt: row?.showcaseRuntimePushedAt?.toISOString() ?? null,
+      runtimeManagedBy: 'fly_deployment_secrets',
+      runtimePushRetired: true,
       botRuntimeNote: exchangeBotRuntimeNote(exchangeProvider),
       aiRuntimeNote:
         aiProvider !== 'deepseek'
-          ? 'Live bot reads DEEPSEEK_API_KEY — we also push your selected provider key when possible.'
+          ? 'The canonical bot uses the AI provider secret configured on Fly.io.'
           : null,
     };
   }
@@ -70,11 +70,25 @@ export class ShowcaseRuntimeService {
       botPublicUrl?: string;
     },
   ) {
+    if (
+      input.botPublicUrl?.trim() &&
+      normalizeShowcaseBotUrl(input.botPublicUrl) !== CANONICAL_SHOWCASE_BOT_URL
+    ) {
+      throw new BadRequestException(
+        `The Conservative BTC runtime is locked to ${CANONICAL_SHOWCASE_BOT_URL}`,
+      );
+    }
+    if (input.exchangeProvider && input.exchangeProvider !== 'bitfinex') {
+      throw new BadRequestException(
+        'Conservative BTC is locked to Bitfinex; another showcase exchange cannot be selected.',
+      );
+    }
+
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    const exchangeProvider = (input.exchangeProvider ??
-      row?.showcaseExchangeProvider ??
-      'bybit') as ExchangeProvider;
-    const aiProvider = (input.aiProvider ?? row?.showcaseAiProvider ?? 'deepseek') as TradingAgentAiProvider;
+    const exchangeProvider = 'bitfinex' as ExchangeProvider;
+    const aiProvider = (input.aiProvider ??
+      row?.showcaseAiProvider ??
+      'deepseek') as TradingAgentAiProvider;
 
     let showcaseExchangeCredentialEnc = row?.showcaseExchangeCredentialEnc ?? null;
     let showcaseAiCredentialEnc = row?.showcaseAiCredentialEnc ?? null;
@@ -118,7 +132,6 @@ export class ShowcaseRuntimeService {
       showcaseAiCredentialEnc = this.crypto.encrypt(aiKey);
     }
 
-    const botUrl = input.botPublicUrl?.trim();
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
       create: {
@@ -127,16 +140,16 @@ export class ShowcaseRuntimeService {
         showcaseAiProvider: aiProvider,
         showcaseExchangeCredentialEnc,
         showcaseAiCredentialEnc,
-        showcaseBotPublicUrl: botUrl || null,
+        showcaseBotPublicUrl: CANONICAL_SHOWCASE_BOT_URL,
         showcaseCredentialsUpdatedAt: new Date(),
         updatedByUserId: userId,
       },
       update: {
-        ...(input.exchangeProvider ? { showcaseExchangeProvider: exchangeProvider } : {}),
+        showcaseExchangeProvider: exchangeProvider,
         ...(input.aiProvider ? { showcaseAiProvider: aiProvider } : {}),
         ...(showcaseExchangeCredentialEnc ? { showcaseExchangeCredentialEnc } : {}),
         ...(showcaseAiCredentialEnc ? { showcaseAiCredentialEnc } : {}),
-        ...(botUrl !== undefined ? { showcaseBotPublicUrl: botUrl || null } : {}),
+        showcaseBotPublicUrl: CANONICAL_SHOWCASE_BOT_URL,
         showcaseCredentialsUpdatedAt: new Date(),
         updatedByUserId: userId,
       },
@@ -151,309 +164,35 @@ export class ShowcaseRuntimeService {
     if (target === 'ai' || target === 'all') data.showcaseAiCredentialEnc = null;
     await this.prisma.platformSettings.update({
       where: { id: 'default' },
-      data: { ...data, updatedByUserId: userId, showcaseCredentialsUpdatedAt: new Date() },
+      data: {
+        ...data,
+        showcaseBotPublicUrl: CANONICAL_SHOWCASE_BOT_URL,
+        updatedByUserId: userId,
+        showcaseCredentialsUpdatedAt: new Date(),
+      },
     });
     return this.getCredentialsStatus();
   }
 
-  private getRailwayToken(): string | null {
-    return (
-      this.config.get<string>('RAILWAY_TOKEN')?.trim() ||
-      process.env.RAILWAY_API_TOKEN?.trim() ||
-      null
-    );
-  }
-
-  private botServiceName(): string {
-    return this.config.get<string>('BTC_BOT_RAILWAY_SERVICE')?.trim() || 'btc-conservative-agent';
-  }
-
-  /** Stop the showcase bot Railway deployment — URL goes offline (502) until Start. */
-  async stopShowcaseDeployment(): Promise<{ ok: boolean; message: string; deploymentId?: string }> {
-    const token = this.getRailwayToken();
-    if (!token) {
-      return {
-        ok: false,
-        message: 'RAILWAY_TOKEN not set on API — cannot kill showcase deployment.',
-      };
-    }
-    try {
-      const ctx = await this.resolveRailwayService(token, this.botServiceName());
-      const deploymentId = await this.getLatestDeploymentId(token, ctx);
-      if (!deploymentId) {
-        return { ok: false, message: 'No Railway deployment found for showcase bot.' };
-      }
-      await this.railwayGql(
-        token,
-        `mutation($id: String!) { deploymentStop(id: $id) }`,
-        { id: deploymentId },
-      );
-      this.logger.warn(`Showcase deployment stopped: ${deploymentId}`);
-      return {
-        ok: true,
-        message: 'Showcase bot killed on Railway — dashboard URL offline until Start.',
-        deploymentId,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Railway deploymentStop failed: ${msg}`);
-      return { ok: false, message: msg };
-    }
-  }
-
-  /** Start showcase bot — redeploy on Railway, then trading resumes after boot. */
-  async startShowcaseDeployment(): Promise<{ ok: boolean; message: string }> {
-    const token = this.getRailwayToken();
-    if (!token) {
-      return {
-        ok: false,
-        message: 'RAILWAY_TOKEN not set on API — cannot start showcase deployment.',
-      };
-    }
-    try {
-      const ctx = await this.resolveRailwayService(token, this.botServiceName());
-      const deploymentId = await this.getLatestDeploymentId(token, ctx);
-      if (deploymentId) {
-        try {
-          await this.railwayGql(
-            token,
-            `mutation($id: String!) { deploymentRestart(id: $id) }`,
-            { id: deploymentId },
-          );
-          return {
-            ok: true,
-            message: 'Showcase bot restarted on Railway — wait ~60s for dashboard.',
-          };
-        } catch {
-          /* fall through to full redeploy */
-        }
-      }
-      await this.railwayGql(
-        token,
-        `mutation($serviceId: String!, $environmentId: String!) {
-          serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-        }`,
-        { serviceId: ctx.serviceId, environmentId: ctx.environmentId },
-      );
-      return {
-        ok: true,
-        message: 'Showcase bot redeployed on Railway — wait ~2 min for dashboard.',
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Railway showcase start failed: ${msg}`);
-      return { ok: false, message: msg };
-    }
-  }
-
-  private async resolveRailwayService(token: string, serviceName: string) {
-    const data = await this.railwayGql(
-      token,
-      `query {
-        projects { edges { node {
-          id name
-          environments { edges { node { id name } } }
-          services { edges { node { id name } } }
-        } } }
-      }`,
-    );
-
-    const projects =
-      (data.projects as { edges?: { node: Record<string, unknown> }[] })?.edges?.map((e) => e.node) ??
-      [];
-    const target = projects.find((p) =>
-      (p.services as { edges?: { node: { name: string } }[] })?.edges?.some(
-        (s) => s.node.name === serviceName,
-      ),
-    );
-    if (!target) {
-      throw new Error(
-        `Railway service "${serviceName}" not found — set BTC_BOT_RAILWAY_SERVICE or create the service`,
-      );
-    }
-
-    const env =
-      (target.environments as { edges?: { node: { id: string; name: string } }[] })?.edges?.find(
-        (e) => e.node.name === 'production',
-      )?.node ??
-      (target.environments as { edges?: { node: { id: string } }[] })?.edges?.[0]?.node;
-    const service = (
-      target.services as { edges?: { node: { id: string; name: string } }[] }
-    )?.edges?.find((e) => e.node.name === serviceName)?.node;
-
-    if (!env || !service) throw new Error('Missing Railway environment or service');
-
-    return {
-      projectId: target.id as string,
-      environmentId: env.id,
-      serviceId: service.id,
-    };
-  }
-
-  private async getLatestDeploymentId(
-    token: string,
-    ctx: { serviceId: string; environmentId: string },
-  ): Promise<string | null> {
-    const data = await this.railwayGql(
-      token,
-      `query($environmentId: String!, $serviceId: String!) {
-        serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
-          latestDeployment { id status }
-        }
-      }`,
-      { environmentId: ctx.environmentId, serviceId: ctx.serviceId },
-    );
-    const latest = (
-      data.serviceInstance as { latestDeployment?: { id: string; status: string } } | null
-    )?.latestDeployment;
-    return latest?.id ?? null;
-  }
-
-  async pushToRailwayRuntime(userId: string): Promise<{
-    ok: boolean;
+  /**
+   * The legacy API-to-Railway credential push is intentionally retired.
+   * Fly secrets are deployment credentials and must never be copied into a
+   * second runtime from a public application endpoint.
+   */
+  async pushToCanonicalRuntime(_userId: string): Promise<{
+    ok: false;
+    retired: true;
     message: string;
-    serviceName?: string;
-    variablesSet?: string[];
+    serviceName: string;
+    variablesSet: never[];
   }> {
-    const token = this.getRailwayToken();
-    if (!token) {
-      return {
-        ok: false,
-        message:
-          'RAILWAY_TOKEN not set on API service — add it in Railway (API) variables or vault, then retry.',
-      };
-    }
-
-    const settings = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    if (!settings?.showcaseExchangeCredentialEnc) {
-      throw new BadRequestException('Save showcase exchange API keys before pushing to runtime');
-    }
-
-    const botServiceName =
-      this.config.get<string>('BTC_BOT_RAILWAY_SERVICE')?.trim() || 'btc-conservative-agent';
-    const apiServiceName =
-      this.config.get<string>('API_RAILWAY_SERVICE')?.trim() || 'doxed-founders-website';
-
-    const vars = await this.buildRailwayEnvVarsPromise(settings);
-
-    try {
-      await this.railwayUpsertVars(token, botServiceName, vars);
-      if (settings.showcaseBotPublicUrl?.trim()) {
-        const apiVars: Record<string, string> = {
-          TRADING_AGENT_BOT_URL: settings.showcaseBotPublicUrl.replace(/\/$/, ''),
-          CONSERVATIVE_BTC_BOT_URL: settings.showcaseBotPublicUrl.replace(/\/$/, ''),
-        };
-        const botControlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
-        if (botControlSecret) apiVars.BOT_CONTROL_SECRET = botControlSecret;
-        const metricsSecret = this.config.get<string>('METRICS_SYNC_SECRET')?.trim();
-        if (metricsSecret) apiVars.METRICS_SYNC_SECRET = metricsSecret;
-        const githubSecret = this.config.get<string>('GITHUB_WEBHOOK_SECRET')?.trim();
-        if (githubSecret) apiVars.GITHUB_WEBHOOK_SECRET = githubSecret;
-        await this.railwayUpsertVars(token, apiServiceName, apiVars);
-      }
-      await this.prisma.platformSettings.update({
-        where: { id: 'default' },
-        data: {
-          showcaseRuntimePushedAt: new Date(),
-          updatedByUserId: userId,
-        },
-      });
-      return {
-        ok: true,
-        message: `Credentials pushed to Railway (${botServiceName}) and redeploy triggered.`,
-        serviceName: botServiceName,
-        variablesSet: Object.keys(vars),
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Railway push failed: ${msg}`);
-      return {
-        ok: false,
-        message: msg,
-      };
-    }
-  }
-
-  private async buildRailwayEnvVarsPromise(
-    settings: NonNullable<Awaited<ReturnType<typeof this.prisma.platformSettings.findUnique>>>,
-  ) {
-    const vars: Record<string, string> = {
-      PORT: '5000',
-      CREDENTIALS_FROM: 'admin_control',
+    return {
+      ok: false,
+      retired: true,
+      message:
+        'Legacy Railway runtime push is retired. The canonical Fly.io bot uses reviewed Fly deployment secrets.',
+      serviceName: 'doxed-btc-bot',
+      variablesSet: [],
     };
-
-    const botControlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
-    if (botControlSecret) {
-      vars.BOT_CONTROL_SECRET = botControlSecret;
-    }
-
-    const exchangeJson = this.crypto.decrypt(settings.showcaseExchangeCredentialEnc);
-    if (exchangeJson) {
-      const ex = JSON.parse(exchangeJson) as ShowcaseExchangePayload;
-      const provider = (settings.showcaseExchangeProvider ?? 'bybit') as ExchangeProvider;
-      Object.assign(vars, exchangeCredentialsToEnvVars(provider, ex));
-    }
-
-    const aiKey = this.crypto.decrypt(settings.showcaseAiCredentialEnc);
-    if (aiKey) {
-      const provider = settings.showcaseAiProvider ?? 'deepseek';
-      const map: Record<string, string> = {
-        deepseek: 'DEEPSEEK_API_KEY',
-        openai: 'OPENAI_API_KEY',
-        claude: 'ANTHROPIC_API_KEY',
-        gemini: 'GEMINI_API_KEY',
-        openrouter: 'OPENROUTER_API_KEY',
-      };
-      const envName = map[provider] ?? 'DEEPSEEK_API_KEY';
-      vars[envName] = aiKey;
-      if (envName !== 'DEEPSEEK_API_KEY') vars.DEEPSEEK_API_KEY = aiKey;
-    }
-
-    return vars;
-  }
-
-  private async railwayGql(token: string, query: string, variables: Record<string, unknown> = {}) {
-    const res = await fetch(RAILWAY_GQL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables }),
-    });
-    const json = (await res.json()) as { data?: unknown; errors?: { message: string }[] };
-    if (json.errors?.length) {
-      throw new Error(json.errors.map((e) => e.message).join('; '));
-    }
-    return json.data as Record<string, unknown>;
-  }
-
-  private async railwayUpsertVars(
-    token: string,
-    serviceName: string,
-    variables: Record<string, string>,
-  ) {
-    const ctx = await this.resolveRailwayService(token, serviceName);
-
-    await this.railwayGql(
-      token,
-      `mutation($input: VariableCollectionUpsertInput!) {
-        variableCollectionUpsert(input: $input)
-      }`,
-      {
-        input: {
-          projectId: ctx.projectId,
-          environmentId: ctx.environmentId,
-          serviceId: ctx.serviceId,
-          variables,
-          replace: false,
-        },
-      },
-    );
-
-    await this.railwayGql(
-      token,
-      `mutation($serviceId: String!, $environmentId: String!) {
-        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-      }`,
-      { serviceId: ctx.serviceId, environmentId: ctx.environmentId },
-    );
   }
 }

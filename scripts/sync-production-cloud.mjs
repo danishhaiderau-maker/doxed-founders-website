@@ -10,10 +10,10 @@ import { execSync, spawnSync } from 'child_process';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vault = join(dirname(root), 'doxedcryptofounder-secrets', 'vault');
 
-import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
+import { CANONICAL_FLY_BOT_PUBLIC_URL } from './home-bot-config.mjs';
 
 const RAILWAY_API = 'https://doxed-founders-website-production.up.railway.app';
-const BTC_BOT_URL = resolveHomeBotPublicUrl(undefined, root);
+const BTC_BOT_URL = CANONICAL_FLY_BOT_PUBLIC_URL;
 const SITE_URL = 'https://doxxedcrypto.digital';
 const RAILWAY_GQL = 'https://backboard.railway.com/graphql/v2';
 

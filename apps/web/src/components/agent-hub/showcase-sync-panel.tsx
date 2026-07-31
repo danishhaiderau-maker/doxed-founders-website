@@ -4,23 +4,22 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   computeShowcaseSyncScore,
   formatShowcaseSyncPct,
-  getDefaultShowcaseSyncStopThreshold,
   type ShowcaseSyncScoreInput,
 } from '@dcf/utils';
 
-// Versioned so the tolerant 60% simulation default is not overridden by a
-// previously saved 98% value. Real-money live copy uses its separate key.
+// Simulation remains an optional browser control. Live protection is enforced
+// durably by the Railway executor at a fixed 60%; the browser never owns or
+// overrides the money-path safety threshold.
 const STORAGE_KEY = 'relay-sim-auto-stop-threshold-v2';
-const LIVE_STORAGE_KEY = 'live-copy-auto-stop-threshold';
-const LIVE_FLATTEN_KEY = 'live-copy-flatten-on-breach';
-const SIM_DEFAULT_STOP_THRESHOLD_PCT = 60;
-const LIVE_MIN_STOP_THRESHOLD_PCT = 98;
-const BREACH_CHECKS_REQUIRED = 3;
-const BREACH_MIN_DURATION_MS = 90_000;
+export const SIM_DEFAULT_STOP_THRESHOLD_PCT = 60;
+export const LIVE_DEFAULT_STOP_THRESHOLD_PCT = 60;
+export const LIVE_MIN_STOP_THRESHOLD_PCT = 60;
+export const BREACH_CHECKS_REQUIRED = 3;
+export const BREACH_MIN_DURATION_MS = 90_000;
 
 function defaultThreshold(mode: 'sim' | 'live'): number {
   return mode === 'live'
-    ? getDefaultShowcaseSyncStopThreshold()
+    ? LIVE_DEFAULT_STOP_THRESHOLD_PCT
     : SIM_DEFAULT_STOP_THRESHOLD_PCT;
 }
 
@@ -64,9 +63,7 @@ export function ShowcaseSyncPanel({
   autoStopBusy?: boolean;
 }) {
   const score = useMemo(() => computeShowcaseSyncScore(input), [input]);
-  const storageKey = mode === 'live' ? LIVE_STORAGE_KEY : STORAGE_KEY;
   const [autoStopEnabled, setAutoStopEnabled] = useState(false);
-  const [flattenOnBreach, setFlattenOnBreach] = useState(false);
   const [threshold, setThreshold] = useState(() => defaultThreshold(mode));
   const [autoStopped, setAutoStopped] = useState(false);
   const [breachChecks, setBreachChecks] = useState(0);
@@ -74,14 +71,18 @@ export function ShowcaseSyncPanel({
   const breachStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
-    setThreshold(readThreshold(storageKey, mode));
-    if (mode === 'live' && typeof window !== 'undefined') {
-      setFlattenOnBreach(localStorage.getItem(LIVE_FLATTEN_KEY) === '1');
-    }
-  }, [mode, storageKey]);
+    setThreshold(
+      mode === 'live'
+        ? LIVE_DEFAULT_STOP_THRESHOLD_PCT
+        : readThreshold(STORAGE_KEY, mode),
+    );
+  }, [mode]);
 
   useEffect(() => {
-    const active = mode === 'sim' ? simActive : liveActive;
+    // Live protection is backend-owned. Running a second browser-local guard
+    // would make behavior depend on an open tab and could stop at a stale
+    // localStorage threshold.
+    const active = mode === 'sim' ? simActive : false;
     const resetBreach = () => {
       breachChecksRef.current = 0;
       breachStartedAtRef.current = null;
@@ -92,7 +93,7 @@ export function ShowcaseSyncPanel({
       return;
     }
     // Don't auto-stop while we have no showcase comparison data yet. The sim
-    // legitimately waits many minutes for the first :7002 signal, and an empty
+    // legitimately waits many minutes for the first canonical Fly signal, and an empty
     // (low) sync score in that window is not a divergence — tripping the stop
     // here was flipping the button to "Stopping…" right after Start.
     const hasComparisonData = Boolean(
@@ -116,14 +117,12 @@ export function ShowcaseSyncPanel({
       !autoStopBusy
     ) {
       setAutoStopped(true);
-      onAutoStop({ flatten: mode === 'live' && flattenOnBreach });
+      onAutoStop();
     }
   }, [
     mode,
     simActive,
-    liveActive,
     autoStopEnabled,
-    flattenOnBreach,
     score.pct,
     threshold,
     onAutoStop,
@@ -145,12 +144,7 @@ export function ShowcaseSyncPanel({
 
   const persistThreshold = (v: number) => {
     setThreshold(v);
-    localStorage.setItem(storageKey, String(v));
-  };
-
-  const persistFlatten = (v: boolean) => {
-    setFlattenOnBreach(v);
-    localStorage.setItem(LIVE_FLATTEN_KEY, v ? '1' : '0');
+    localStorage.setItem(STORAGE_KEY, String(v));
   };
 
   return (
@@ -216,7 +210,24 @@ export function ShowcaseSyncPanel({
         </ul>
       ) : null}
 
-      {mode === 'sim' || mode === 'live' ? (
+      {mode === 'live' ? (
+        <div className="mt-4 rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs text-zinc-300">
+          <strong className="text-emerald-300">
+            Automatic live safety guard: fixed at {LIVE_DEFAULT_STOP_THRESHOLD_PCT}%
+          </strong>
+          <p className="mt-1 text-[11px] text-zinc-400">
+            Railway checks fresh canonical Fly and Bitfinex reconciliation evidence.
+            It pauses live copy only after {BREACH_CHECKS_REQUIRED} low observations
+            spanning at least {BREACH_MIN_DURATION_MS / 1000}s. Confirmed unfilled
+            entries are cancelled; open positions remain under the normal risk and
+            exit manager.
+          </p>
+          <p className="mt-1 text-[11px] text-zinc-500">
+            This protection runs on the server even when this page is closed.
+            Readiness remains a separate 98% pre-activation gate.
+          </p>
+        </div>
+      ) : mode === 'sim' ? (
         <div className="mt-4 rounded-lg border border-zinc-800 bg-black/25 p-3">
           <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
             <input
@@ -227,7 +238,7 @@ export function ShowcaseSyncPanel({
             />
             <span>
               <strong className="text-white">
-                {mode === 'live' ? 'Stop live copy' : 'Stop simulation'} if sync drops below
+                Stop simulation if sync drops below
               </strong>{' '}
               <select
                 value={threshold}
@@ -235,15 +246,13 @@ export function ShowcaseSyncPanel({
                 className="mx-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-xs"
                 onClick={(e) => e.stopPropagation()}
               >
-                {(mode === 'live' ? [100, 99, 98] : [98, 90, 80, 70, 60]).map((v) => (
+                {[98, 90, 80, 70, 60].map((v) => (
                   <option key={v} value={v}>
                     {v}%
                   </option>
                 ))}
               </select>
-              {mode === 'live'
-                ? '— pauses relay and cancels pending orders.'
-                : '— protects you before going live with real money.'}
+              — protects you before going live with real money.
             </span>
           </label>
           {autoStopEnabled && !autoStopped ? (
@@ -255,23 +264,9 @@ export function ShowcaseSyncPanel({
                 : '.'}
             </p>
           ) : null}
-          {mode === 'live' ? (
-            <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
-              <input
-                type="checkbox"
-                checked={flattenOnBreach}
-                onChange={(e) => persistFlatten(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span>
-                <strong className="text-white">Also close all open positions</strong> on breach —
-                emergency flatten at market to limit damage when sync diverges.
-              </span>
-            </label>
-          ) : null}
           {autoStopped ? (
             <p className="mt-2 text-[11px] font-semibold text-amber-200">
-              {mode === 'live' ? 'Live copy' : 'Simulation'} auto-stopped — sync fell below {threshold}%.
+              Simulation auto-stopped — sync fell below {threshold}%.
             </p>
           ) : null}
         </div>

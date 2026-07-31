@@ -14,12 +14,31 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Resolve the newest commit that could have triggered a Fly deploy.
+          # The deploy workflow also runs when its own safety contract or the
+          # canonical flat-boundary checker changes, so service-only history
+          # would report a false revision drift after those releases.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify Fly is ready and running current master
+      - name: Resolve expected Fly bot revision
+        id: expected
+        shell: bash
+        run: |
+          revision="$(git log -1 --format=%H -- \
+            services/btc-conservative-agent \
+            scripts/check-relay-flat.mjs \
+            .github/workflows/fly-bot-deploy.yml)"
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to resolve latest btc-conservative-agent revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Verify Fly is ready and running current bot source
         env:
-          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
         run: |
           python - <<'PY'
           import json

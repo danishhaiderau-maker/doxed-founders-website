@@ -53,7 +53,7 @@ export function buildRelaySyncAlerts(input: {
         level: 'error',
         title: 'Showcase bot offline',
         detail:
-          'Global showcase bot (:7002 via tunnel) is not reachable from the site API — relay cannot mirror new signals. On Home Command Center: confirm tunnel is online, then click Wire to site.',
+          'The canonical Fly bot is not reachable from the platform API, so the relay cannot mirror new signals. Desktop :7002 and the optional Cloudflare tunnel are not the production source.',
       });
     }
   }
@@ -98,7 +98,7 @@ export function buildRelaySyncAlerts(input: {
       alerts.push({
         level: 'warn',
         title: 'Local bot price gaps in fidelity',
-        detail: `${missingEntry} trades missing global bot :7002 entry · ${missingExit} missing global bot exit. Usually means the home bot is offline, not wired, or trade IDs do not match — check tunnel + /api/state trades_map.`,
+        detail: `${missingEntry} trades missing canonical Fly entry · ${missingExit} missing canonical Fly exit. Check the Fly signed lifecycle feed and exact trade IDs; desktop :7002 is only a mirror.`,
       });
     }
     if (
@@ -120,7 +120,7 @@ export function buildRelaySyncAlerts(input: {
       alerts.push({
         level: 'warn',
         title: 'Most relay limits expiring before fill',
-        detail: `${stats.expired} expired vs ${stats.closed} filled this sim session (${stats.pending} pending, ${stats.open} open). Usually means showcase chase deferred entry or limits rested away from market. Confirm global bot :7002 is wired, then restart sim after a fresh showcase session if fills stay near zero.`,
+        detail: `${stats.expired} expired vs ${stats.closed} filled this sim session (${stats.pending} pending, ${stats.open} open). This can be normal when virtual chase defers entry or exact limits rest away from market. Verify the Fly signed feed before restarting a fresh sim.`,
       });
     }
 

@@ -154,20 +154,20 @@ export function AgentDeskView({
       (book.trades && book.trades.length > 0);
     return (
       <DeskPanel
-        badge="Global showcase"
+        badge="Canonical Fly showcase"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
         title="Conservative BTC Agent · doxxedcrypto.digital"
         subtitle={
           executionOnly
-            ? 'Public execution book — positions, orders, and closed trades from the :7002 showcase bot.'
-            : 'Admin view — full pipeline tables from the global showcase bot on :7002.'
+            ? 'Public execution book — positions, orders, and closed trades from the canonical Fly bot.'
+            : 'Admin view — full pipeline tables from the canonical Fly strategy owner.'
         }
       >
         {!hasLiveData ? (
           <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs text-amber-100/90">
-            Showcase bot reachable on local network only — public tunnel down. Live signals, orders,
-            and trades will appear here once the bot + tunnel are back online.
+            Canonical Fly snapshot unavailable from the platform API. Desktop :7002 is only a mirror
+            and cannot substitute for the signed production feed.
           </div>
         ) : null}
         <AgentTransparencyTables liveBook={book} maxRows={5} executionOnly={executionOnly} />
@@ -198,7 +198,7 @@ export function AgentDeskView({
         badgeClassName="text-emerald-300"
         borderClassName="border-emerald-500/45"
         title={`Connect ${exchange} to copy trades`}
-        subtitle="Your Bitfinex copy book lives here once API keys are connected. Use Global showcase bot tab to watch the admin :7002 bot — data stays separate."
+        subtitle="Your Bitfinex copy book lives here once API keys are connected. Use Canonical Fly showcase tab to observe the source bot — data stays separate."
       >
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-5 text-center">
           <p className="text-sm text-emerald-100/90">

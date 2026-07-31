@@ -222,6 +222,12 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
 WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "15"))
+# Only a genuinely fresh trade-channel tick may authorize new strategy work.
+# REST quotes remain available for display and risk-reducing exits.
+WS_ENTRY_FRESH_SEC = max(
+    1.0,
+    float(os.getenv("WS_ENTRY_FRESH_SEC", str(WATCHDOG_WS_STALE_SEC))),
+)
 MOMENTUM_ALIGN_EPS = 1e-6
 MOMENTUM_FLAT_MAX = 0.01
 FLAT_MOMENTUM_EDGE_FLOOR = 4.8
@@ -307,8 +313,13 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
 })
+# A relay event must prove both its declared lane and its trade-id namespace.
+# Keep this deliberately smaller than the research lane prefix registry: adding a
+# paper lane must never silently make it eligible for real-money mirroring.
+PLATFORM_RELAY_TRADE_PREFIX_LANES = {
+    "cont": RESEARCH_LANE_CONTINUOUS,
+}
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
@@ -869,64 +880,49 @@ def _private_api_keys_ok() -> bool:
     return bool(k and len(k) >= 10 and s and len(s) >= 10)
 
 
+def _direct_private_exchange_owner() -> bool:
+    """Source bot owns private Bitfinex calls only outside relay paper mode."""
+    return bool(_private_api_keys_ok() and not _force_paper_mode_active())
+
+
 def _apply_env_live_gating() -> None:
-    """Authoritative env-gated arming of Bitfinex live execution.
+    """Fail closed at process start, regardless of persisted or env intent.
 
-    The dashboard toggle (`/api/bitfinex_live` -> state['bitfinex_live_enabled'])
-    is persisted across restarts by `save_persistent_config`. That is convenient
-    for a dashboard operator but it makes "go live" a single button press with
-    no out-of-band confirmation. To make flipping to real funds an explicit,
-    reviewable action, the env var `BITFINEX_LIVE_ENABLED` is honored at startup:
-
-      - "true" / "1" / "yes" (case-insensitive)  -> arm live (requires keys OK)
-      - "false" / "0" / "no"                     -> disarm live, override persisted
-      - unset / empty                            -> keep persisted value (back-compat)
-
-    When env says arm but keys are missing, we log an error and stay disarmed
-    rather than crash. The persisted flag is then re-saved so the dashboard
-    reflects the env-driven state.
+    ``BITFINEX_LIVE_ENABLED`` is a deployment capability/request, not an arm
+    latch. A restarted process has not yet proven a fresh WS session, indicator
+    warm-up, exchange flatness, or the operator's current intent. Both live
+    flags therefore start OFF and can only be set by an authenticated runtime
+    arm request after ``can_open_live_entry(..., require_armed=False)`` passes.
     """
     force_paper = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in ("1", "true", "yes", "on")
-    if force_paper:
-        with state_lock:
-            state["bitfinex_live_enabled"] = False
-            state["live_armed"] = False
-            state["strategy_mode"] = "RESEARCH"
-        logger.warning("[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled")
-        try:
-            save_persistent_config()
-        except Exception as exc:
-            logger.warning(f"[PAPER MODE] persist failed: {exc}")
-        return
-
     raw = (os.getenv("BITFINEX_LIVE_ENABLED") or "").strip().lower()
-    if not raw:
-        return
-    wants_on = raw in ("true", "1", "yes", "on")
+    requested = raw in ("true", "1", "yes", "on")
     with state_lock:
-        prev = bool(state.get("bitfinex_live_enabled", False))
-        if wants_on:
-            if not _private_api_keys_ok():
-                logger.error(
-                    "[BITFINEX LIVE] BITFINEX_LIVE_ENABLED=true but BITFINEX_API_KEY/"
-                    "BITFINEX_API_SECRET missing or too short - staying disarmed "
-                    "[PIPELINE ENFORCEMENT]"
-                )
-                state["bitfinex_live_enabled"] = False
-            else:
-                state["bitfinex_live_enabled"] = True
-        else:
-            state["bitfinex_live_enabled"] = False
-        new = bool(state["bitfinex_live_enabled"])
-    if new != prev:
+        had_live_state = bool(
+            state.get("bitfinex_live_enabled")
+            or state.get("live_armed")
+        )
+        state["bitfinex_live_enabled"] = False
+        state["live_armed"] = False
+        state["live_startup_requested"] = bool(requested and not force_paper)
+        if force_paper:
+            state["strategy_mode"] = "RESEARCH"
+    if force_paper:
+        logger.warning("[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled")
+    elif requested:
         logger.warning(
-            f"[BITFINEX LIVE] env gate BITFINEX_LIVE_ENABLED={raw!r} -> "
-            f"bitfinex_live_enabled {prev} -> {new} [PIPELINE ENFORCEMENT]"
+            "[BITFINEX LIVE] startup live intent detected but not armed; "
+            "fresh authenticated runtime approval is required [PIPELINE ENFORCEMENT]"
+        )
+    elif had_live_state:
+        logger.warning(
+            "[BITFINEX LIVE] discarded persisted live arm on process start "
+            "[PIPELINE ENFORCEMENT]"
         )
     try:
         save_persistent_config()
     except Exception as exc:
-        logger.warning(f"[BITFINEX LIVE] env gate persist failed: {exc}")
+        logger.warning(f"[BITFINEX LIVE] startup disarm persist failed: {exc}")
 
 def _compute_volatility_metric(features: dict) -> float:
     return round(abs(float(features.get("candle_range") or features.get("volatility") or 0)), 6)
@@ -1017,6 +1013,20 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     return {
         **lineage,
         "trade_id": order.get("trade_id") or signal.get("trade_id"),
+        "bitfinex_order_id": (
+            order.get("bitfinex_order_id")
+            or signal.get("bitfinex_order_id")
+        ),
+        "bitfinex_position_id": (
+            order.get("bitfinex_position_id")
+            or signal.get("bitfinex_position_id")
+        ),
+        "bitfinex_live_entry": bool(
+            order.get("bitfinex_live_entry")
+            or signal.get("bitfinex_live_entry")
+            or order.get("bitfinex_order_id")
+            or signal.get("bitfinex_order_id")
+        ),
         "dir": direction,
         "entry": entry,
         "qty": order.get("qty") or signal.get("qty"),
@@ -1111,6 +1121,8 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "ema21_at_entry": signal.get("ema21_at_entry"),
         "dist_to_ema_hybrid_pct": signal.get("dist_to_ema_hybrid_pct"),
         "entry_path": signal.get("entry_path"),
+        "entry_reason": signal.get("entry_reason"),
+        "entry_limit_policy": signal.get("entry_limit_policy"),
         "fill_model": order.get("fill_model") or _resolve_fill_model(signal, order),
         "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
         "urgent_chase_tier": order.get("urgent_chase_tier") or signal.get("urgent_chase_tier"),
@@ -2376,7 +2388,11 @@ def evaluate_evidence_entry_filter(
 ) -> tuple:
     """v63 analyzer gates: momentum chop, edge dead zone (both directions)."""
     edge_score = round(float(edge_score or 0), 1)
-    if not is_research_data_collection() and not _sole_ai_research_mode():
+    if (
+        not EDGE_RESEARCH_TELEMETRY_ONLY
+        and not is_research_data_collection()
+        and not _sole_ai_research_mode()
+    ):
         if EDGE_DEAD_ZONE_LOW < edge_score <= EDGE_DEAD_ZONE_HIGH:
             return True, f"EDGE_DEAD_ZONE_{edge_score:.1f}"
 
@@ -2453,26 +2469,37 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
     # carry their Bitfinex order ids. Removing local rows first loses the only
     # deterministic cancellation handle and can orphan a live resting order.
     bx_cancelled = _cancel_bitfinex_orders_for_lane(lane, reason=reason)
-    cancelled_pending = []
+    cancelled_pending = [
+        row.get("trade_id")
+        for row in bx_cancelled.get("cancelled", [])
+        if row.get("trade_id")
+    ]
     expired_awaiting = []
+    failed_live_ids = {
+        str(row.get("trade_id") or "")
+        for row in bx_cancelled.get("failed", [])
+    }
+    confirmed_ids = {str(tid) for tid in cancelled_pending}
     now = time.time()
     with trade_lock:
-        for o in list(pending_orders):
-            if o.get("status") != "PENDING":
-                continue
-            if _normalize_lane_key(o) != lane:
-                continue
-            tid = o.get("trade_id")
-            lane_unregister_pending_order(o)
-            cancelled_pending.append(tid)
+        for tid in confirmed_ids:
             sig = (trades_map.get(tid) or {}).get("signal_ref") or {}
             if isinstance(sig, dict):
                 sig["status"] = "BLOCKED"
                 sig["outcome"] = reason
                 sig["exit_reason"] = reason
+        for tid in failed_live_ids:
+            sig = (trades_map.get(tid) or {}).get("signal_ref") or {}
+            if isinstance(sig, dict):
+                sig["status"] = "CANCEL_PENDING_LIVE"
+                sig["cancel_pending_reason"] = reason
         for entry in trades_map.values():
             sig = entry.get("signal_ref") or {}
             if not isinstance(sig, dict) or _normalize_lane_key(sig) != lane:
+                continue
+            if str(sig.get("trade_id") or "") in failed_live_ids:
+                # Do not make the signal terminal while its live exchange order
+                # is still resting or cancellation is unconfirmed.
                 continue
             if is_terminal_signal(sig):
                 continue
@@ -2513,61 +2540,51 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
 
 
 def _cancel_bitfinex_orders_for_lane(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
-    """Cancel outstanding Bitfinex entry orders for a lane (Pt 4a toggle contract).
+    """Cancel outstanding pending entries for a lane (Pt 4a toggle contract).
 
-    Returns dict with cancelled/failed/open_positions_remaining. Best-effort:
-    if Bitfinex is not armed, no keys, or no live orders exist, returns empty.
-    Exits for already-filled positions are NOT cancelled here -- those continue
-    to be managed until flat.
+    Local paper orders finalize immediately. Live exchange orders finalize only
+    after the private cancellation confirms. Exits for filled positions are not
+    cancelled here and continue to be managed until flat.
     """
     out = {"cancelled": [], "failed": [], "open_positions_remaining": 0}
-    try:
-        if not (state.get("bitfinex_live_enabled") and state.get("live_armed")):
-            return out
-        if not _private_api_keys_ok():
-            return out
-        import bitfinex_live_executor as bx
-        exchange = None
-        retry_fn = None
-        if hasattr(bx, "get_exchange"):
-            try:
-                exchange, retry_fn = bx.get_exchange(state)
-            except Exception:
-                exchange, retry_fn = None, None
-        if exchange is None or retry_fn is None:
-            return out
-        lane_u = str(lane or "").upper()
-        with trade_lock:
-            # Find PENDING orders in this lane that have a saved Bitfinex order id.
-            candidates = []
-            for o in list(pending_orders):
-                if _normalize_lane_key(o) != lane_u:
-                    continue
-                oid = o.get("bitfinex_order_id")
-                tid = o.get("trade_id")
-                if oid and tid:
-                    candidates.append((str(oid), str(tid)))
-            # Count already-filled positions in this lane (still managed to exit).
-            open_in_lane = sum(
-                1 for p in open_positions
-                if _normalize_lane_key(p) == lane_u and p.get("status") in ("FILLED", "OPEN")
-            )
-        out["open_positions_remaining"] = open_in_lane
-        sym = str(state.get("trade_symbol") or "BTC/USDT")
-        for oid, tid in candidates:
-            ok = bx.cancel_exchange_order(exchange, retry_fn, oid, sym, tid)
-            if ok:
-                out["cancelled"].append({"trade_id": tid, "exchange_order_id": oid})
-            else:
-                out["failed"].append({"trade_id": tid, "exchange_order_id": oid, "reason": "CANCEL_FAILED"})
-        if out["cancelled"] or out["failed"]:
-            logger.warning(
-                f"[BITFINEX CANCEL LANE] lane={lane_u} reason={reason} "
-                f"cancelled={len(out['cancelled'])} failed={len(out['failed'])} "
-                f"open_positions_remaining={open_in_lane} [PIPELINE ENFORCEMENT]"
-            )
-    except Exception as exc:
-        logger.warning(f"[BITFINEX CANCEL LANE] error lane={lane}: {exc}")
+    lane_u = str(lane or "").upper()
+    with trade_lock:
+        candidates = [
+            row for row in pending_orders
+            if isinstance(row, dict)
+            and _normalize_lane_key(row) == lane_u
+            and str(row.get("status") or "").upper()
+            in ("PENDING", "CANCEL_PENDING_LIVE")
+        ]
+        out["open_positions_remaining"] = sum(
+            1 for p in open_positions
+            if _normalize_lane_key(p) == lane_u
+            and p.get("status") in ("FILLED", "OPEN")
+        )
+    for order in candidates:
+        oid = str(order.get("bitfinex_order_id") or "")
+        tid = str(order.get("trade_id") or "")
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            reason,
+            record_expired=False,
+            expire_signal=False,
+        )
+        if outcome.get("finalized"):
+            out["cancelled"].append({"trade_id": tid, "exchange_order_id": oid})
+        else:
+            out["failed"].append({
+                "trade_id": tid,
+                "exchange_order_id": oid,
+                "reason": outcome.get("failure_reason") or "CANCEL_FAILED",
+            })
+    if out["cancelled"] or out["failed"]:
+        logger.warning(
+            f"[BITFINEX CANCEL LANE] lane={lane_u} reason={reason} "
+            f"cancelled={len(out['cancelled'])} failed={len(out['failed'])} "
+            f"open_positions_remaining={out['open_positions_remaining']} "
+            "[PIPELINE ENFORCEMENT]"
+        )
     return out
 
 
@@ -3714,10 +3731,9 @@ def _is_stale_ws_trade(trade: dict) -> bool:
     """Reject aged or pre-reconnect replay ticks that inflate MFE / false fills."""
     now = time.time()
     trade_ts = _ws_trade_timestamp_sec(trade)
-    age = max(0.0, now - trade_ts)
-    price = state.get("price")
-    if (not price or price <= 0) and age <= WS_BOOTSTRAP_MAX_AGE_SEC:
-        return False
+    age = now - trade_ts
+    if age < -1.0:
+        return True
     if age > WS_MAX_STALE_TRADE_SEC:
         return True
     ws_conn = float(state.get("ws_connected_ts") or 0)
@@ -3925,19 +3941,30 @@ def circuit_breaker_cancel_pending(reason: str):
     if reason not in CIRCUIT_BREAKER_CANCEL_REASONS:
         return 0
     cancelled = 0
+    failed = 0
     expire_reason = f"CIRCUIT_BREAKER_{reason}"
     with trade_lock:
-        for o in list(pending_orders):
-            if o.get("status") != "PENDING":
-                continue
-            lane_unregister_pending_order(o)
-            o["status"] = "CANCELLED"
-            _record_expired_order(o, expire_reason)
-            expire_signal_for_order(o, expire_reason)
+        candidates = [
+            o for o in list(pending_orders)
+            if isinstance(o, dict)
+            and str(o.get("status") or "").upper()
+            in ("PENDING", "CANCEL_PENDING_LIVE")
+        ]
+    for o in candidates:
+        outcome = _cancel_pending_order_confirmed(
+            o,
+            expire_reason,
+            record_expired=True,
+            expire_signal=True,
+        )
+        if outcome.get("finalized"):
             cancelled += 1
-    if cancelled:
+        else:
+            failed += 1
+    if cancelled or failed:
         logger.warning(
-            f"[CIRCUIT_BREAKER] cancelled {cancelled} pending order(s) reason={reason} "
+            f"[CIRCUIT_BREAKER] confirmed_cancelled={cancelled} "
+            f"retained_unconfirmed={failed} reason={reason} "
             f"[PIPELINE ENFORCEMENT]"
         )
     return cancelled
@@ -3982,6 +4009,34 @@ def set_execution_paused(reason: str):
         circuit_breaker_cancel_pending(cancel_reason)
 
 
+_WS_RECOVERABLE_PAUSE_REASONS = frozenset({
+    "WS_STALE",
+    "STALE_DATA_HARD_STOP",
+    "PRICE_STALE_OR_MISSING",
+})
+
+
+def _clear_execution_pause_if_reason(expected_reason: str) -> bool:
+    """Clear only the exact WS-derived pause observed by the caller."""
+    expected = str(expected_reason or "")
+    if expected not in _WS_RECOVERABLE_PAUSE_REASONS:
+        return False
+    with state_lock:
+        if state.get("manual_admin_pause"):
+            return False
+        if str(state.get("execution_reason") or "") != expected:
+            return False
+        state["execution_paused"] = False
+        state["execution_reason"] = ""
+        state["_pause_priority"] = 0
+        state["ws_stale_count"] = 0
+    logger.info(
+        f"[RECOVERY] cleared exact WS-derived pause {expected} "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return True
+
+
 def manual_admin_pause_active() -> bool:
     """Return True while the operator has explicitly stopped new execution."""
     return bool(state.get("manual_admin_pause")) or bool(
@@ -4014,7 +4069,7 @@ def get_execution_status() -> str:
         live_armed = state.get("live_armed", False)
         mode = state.get("strategy_mode", "RESEARCH")
         if mode == "RESEARCH":
-            return "RESEARCH_ALLOW" if not paused else "BLOCKED"
+            return "RESEARCH_ALLOW" if (system_ready and not paused) else "BLOCKED"
         return "ACTIVE" if (system_ready and not paused and live_armed) else "BLOCKED"
 
 def get_display_balance():
@@ -4028,7 +4083,13 @@ def get_display_balance():
 
 def _pending_trade_ids():
     with trade_lock:
-        return {o.get("trade_id") for o in pending_orders if o.get("trade_id") and o.get("status") == "PENDING"}
+        return {
+            o.get("trade_id")
+            for o in pending_orders
+            if o.get("trade_id")
+            and str(o.get("status") or "").upper()
+            in ("PENDING", "CANCEL_PENDING_LIVE")
+        }
 
 def is_terminal_signal(sig: dict) -> bool:
     if not isinstance(sig, dict):
@@ -4092,7 +4153,17 @@ def sync_cooldown_debug_state():
 def purge_dead_pending_orders():
     removed = 0
     with trade_lock:
-        dead = [o for o in pending_orders if not isinstance(o, dict) or o.get("status") != "PENDING"]
+        dead = [
+            o for o in pending_orders
+            if (
+                not isinstance(o, dict)
+                or (
+                    str(o.get("status") or "").upper()
+                    not in ("PENDING", "CANCEL_PENDING_LIVE")
+                    and not o.get("bitfinex_order_id")
+                )
+            )
+        ]
         for o in dead:
             if o in pending_orders:
                 lane_unregister_pending_order(o)
@@ -4540,12 +4611,15 @@ def refresh_bbo_state(force: bool = False):
                 state["spread_usd"] = t["spread_usd"]
                 state["spread_pct"] = t["spread_pct"]
                 state["bbo_ts"] = now
+                state["rest_last_tick"] = now
                 state["last_trade_price"] = t["last"]
+                state["rest_price"] = t["last"]
+                state["rest_price_ts"] = now
                 ws_age = now - float(state.get("ws_last_tick") or 0)
-                if not state.get("price") or ws_age > STALE_HARD_SEC:
-                    state["price"] = t["last"]
-                    state["price_ts"] = now
-                    state["price_source"] = "REST_BBO"
+                if ws_age > WS_ENTRY_FRESH_SEC:
+                    state["ws_ready"] = False
+                    state["last_ready_ts"] = 0
+                    state["system_ready"] = False
             _last_bbo_refresh_ts = now
         except Exception as e:
             logger.debug(f"[BBO] refresh failed: {e} [PIPELINE ENFORCEMENT]")
@@ -4819,7 +4893,7 @@ DASHBOARD_REST_MIN_INTERVAL_SEC = 12.0
 
 
 def refresh_dashboard_market_snapshot(force: bool = False):
-    """Ensure /api/state serves a fresh price; REST fallback when WS feed is stale."""
+    """Refresh a display/risk REST quote without mutating strategy WS truth."""
     global _last_dashboard_rest_refresh_ts
     now = time.time()
     with state_lock:
@@ -4841,11 +4915,9 @@ def refresh_dashboard_market_snapshot(force: bool = False):
         _last_dashboard_rest_refresh_ts = now
         if rest_price and rest_price > 0:
             with state_lock:
-                state["price"] = rest_price
-                state["price_ts"] = now
-                state["ws_last_tick"] = now
-                state["last_data_ts"] = now
-                state["price_source"] = "REST"
+                state["rest_price"] = rest_price
+                state["rest_price_ts"] = now
+                state["rest_last_tick"] = now
                 state["price_seq"] = int(state.get("price_seq") or 0) + 1
                 diag = state.setdefault("diag", {})
                 diag["ws_status"] = "STALE" if age >= STALE_HARD_SEC else "REST_FALLBACK"
@@ -5447,54 +5519,140 @@ def fills_first_continuous_enabled(signal: dict = None) -> bool:
     return lane in AI_DIRECT_RESEARCH_LANES
 
 
-def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -> tuple:
-    """Resolve a limit without asking the direction classifier for price planning."""
-    plan = trade_planner or {}
-    limit = None
-    try:
-        if plan.get("limit_price") is not None:
-            limit = float(plan["limit_price"])
-        elif plan.get("entry_limit") is not None:
-            limit = float(plan["entry_limit"])
-        else:
-            zlo = float(plan["entry_zone_low"])
-            zhi = float(plan["entry_zone_high"])
-            if zhi > zlo:
-                limit = zlo + (zhi - zlo) * 0.5
-    except (TypeError, ValueError, KeyError):
-        limit = None
+def resolve_local_structural_limit(
+    direction: str,
+    price: float,
+    market_structure: dict = None,
+    support_resistance: dict = None,
+) -> tuple:
+    """Return the nearest valid local support/resistance maker limit.
+
+    Direction-only AI deliberately supplies no order price. Entry location must
+    therefore come from observed market structure, never an arbitrary percentage
+    offset. A structural level outside the bounded entry distance is rejected
+    instead of silently clipping it to a synthetic price.
+    """
+    direction = str(direction or "").upper()
+    price = float(price or 0)
     if price <= 0 or direction not in ("LONG", "SHORT"):
-        return None, "INVALID_DIRECTION_OR_PRICE"
-    if limit is None:
-        pullback = max(0.0001, float(state.get("pullback_threshold", 0.001)))
-        limit = price * (1 - pullback if direction == "LONG" else 1 + pullback)
-        source = "DIRECTIONAL_PULLBACK_LIMIT"
-    else:
-        source = "LEGACY_AI_DIRECT_LIMIT"
-    max_dist = AI_DIRECT_MAX_DIST_PCT
+        return None, "INVALID_DIRECTION_OR_PRICE", {}
+
+    ms = market_structure if isinstance(market_structure, dict) else build_micro_sr_levels()
+    if support_resistance is None:
+        with state_lock:
+            support_resistance = copy.deepcopy(state.get("support_resistance") or {})
+    sr = support_resistance if isinstance(support_resistance, dict) else {}
+
     if direction == "LONG":
-        if limit >= price:
-            limit = price * (1 - float(state.get("pullback_threshold", 0.001)))
-        if (price - limit) / price > max_dist:
-            limit = price * (1 - max_dist)
+        raw_levels = (
+            ms.get("micro_support"),
+            ms.get("last_swing_low"),
+            ms.get("prior_support"),
+            sr.get("swing_low"),
+            sr.get("s1"),
+            sr.get("s2"),
+        )
+        candidates = []
+        for raw in raw_levels:
+            try:
+                level = float(raw) + MICRO_SR_ENTRY_BUFFER_USD
+            except (TypeError, ValueError):
+                continue
+            if 0 < level < price:
+                candidates.append(level)
+        if not candidates:
+            return None, "LOCAL_SUPPORT_UNAVAILABLE", ms
+        limit = max(candidates)
+        source = "LOCAL_SUPPORT_LIMIT"
+        distance = (price - limit) / price
     else:
-        if limit <= price:
-            limit = price * (1 + float(state.get("pullback_threshold", 0.001)))
-        if (limit - price) / price > max_dist:
-            limit = price * (1 + max_dist)
-    return float(limit), source
+        raw_levels = (
+            ms.get("micro_resistance"),
+            ms.get("last_swing_high"),
+            ms.get("prior_resistance"),
+            sr.get("swing_high"),
+            sr.get("r1"),
+            sr.get("r2"),
+        )
+        candidates = []
+        for raw in raw_levels:
+            try:
+                level = float(raw) - MICRO_SR_ENTRY_BUFFER_USD
+            except (TypeError, ValueError):
+                continue
+            if level > price:
+                candidates.append(level)
+        if not candidates:
+            return None, "LOCAL_RESISTANCE_UNAVAILABLE", ms
+        limit = min(candidates)
+        source = "LOCAL_RESISTANCE_LIMIT"
+        distance = (limit - price) / price
+
+    if distance > AI_DIRECT_MAX_DIST_PCT:
+        return None, f"{source}_OUT_OF_RANGE", ms
+    return round(float(limit), 2), source, ms
+
+
+def resolve_ai_direct_limit(
+    direction: str,
+    price: float,
+    trade_planner: dict,
+    market_structure: dict = None,
+    support_resistance: dict = None,
+) -> tuple:
+    """Resolve direction-only entry from local S/R; legacy AI price fields are ignored."""
+    _ = trade_planner  # retained only for old call/schema compatibility
+    limit, source, _ms = resolve_local_structural_limit(
+        direction,
+        price,
+        market_structure=market_structure,
+        support_resistance=support_resistance,
+    )
+    return limit, source
 
 
 def compute_continuous_ai_direct_entry(signal: dict) -> dict:
-    """CONTINUOUS research lane — AI limit only; skip micro confirm / awaiting_micro."""
+    """Shared direction lane — structural local S/R limit, then exact virtual chase."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     trade_planner = signal.get("trade_planner") or (signal.get("ai_output") or {}).get("trade_planner") or {}
-    limit_price, entry_reason = resolve_ai_direct_limit(direction, price, trade_planner)
+    market_structure = build_micro_sr_levels()
+    limit_price, entry_reason = resolve_ai_direct_limit(
+        direction,
+        price,
+        trade_planner,
+        market_structure=market_structure,
+    )
+    signal["entry_limit_policy"] = STRUCTURAL_ENTRY_POLICY_VERSION
+    signal["structural_entry_valid"] = limit_price is not None
+    signal["micro_support"] = market_structure.get("micro_support")
+    signal["micro_resistance"] = market_structure.get("micro_resistance")
+    signal["prior_support"] = market_structure.get("prior_support")
+    signal["prior_resistance"] = market_structure.get("prior_resistance")
+    signal["pivot_count"] = market_structure.get("pivot_count")
     if limit_price is None:
-        out = compute_micro_sr_entry(signal)
-        signal["entry_path"] = "AI_DIRECT_FALLBACK_MICRO"
-        return out
+        signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
+        signal["entry_reason"] = entry_reason
+        signal["entry_path"] = "STRUCTURAL_LIMIT_BLOCKED"
+        signal["ai_direct_limit"] = None
+        signal["micro_sr_limit"] = None
+        signal["await_micro_confirm"] = False
+        signal["micro_structure_confirmed"] = False
+        signal["order_placed"] = False
+        logger.warning(
+            f"[STRUCTURAL ENTRY] blocked trade_id={signal.get('trade_id', '?')} "
+            f"dir={direction} market={fmt(price)} reason={entry_reason} "
+            f"support={fmt(signal.get('micro_support'))} "
+            f"resistance={fmt(signal.get('micro_resistance'))} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return {
+            "entry_mode": ENTRY_MODE_AI_DIRECT,
+            "entry_reason": entry_reason,
+            "entry_path": "STRUCTURAL_LIMIT_BLOCKED",
+            "ai_direct_limit": None,
+            "await_micro_confirm": False,
+        }
     signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
     signal["entry_reason"] = entry_reason
     signal["entry_path"] = "AI_DIRECT"
@@ -5508,9 +5666,10 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
     signal["order_placed"] = False
     trade_id = signal.get("trade_id", "?")
     logger.info(
-        f"[AI DIRECT] trade_id={trade_id} dir={direction} limit={fmt(limit_price)} "
-        f"zone={fmt(signal.get('ai_entry_zone_low'))}-{fmt(signal.get('ai_entry_zone_high'))} "
-        f"market={fmt(price)} path=AI_DIRECT [PIPELINE ENFORCEMENT]"
+        f"[STRUCTURAL ENTRY] trade_id={trade_id} dir={direction} limit={fmt(limit_price)} "
+        f"support={fmt(signal.get('micro_support'))} "
+        f"resistance={fmt(signal.get('micro_resistance'))} market={fmt(price)} "
+        f"policy={STRUCTURAL_ENTRY_POLICY_VERSION} path=AI_DIRECT [PIPELINE ENFORCEMENT]"
     )
     return {
         "entry_mode": ENTRY_MODE_AI_DIRECT,
@@ -5653,6 +5812,14 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
     """Return (limit_price, entry_mode) — micro S/R level, EMA armed, or pullback %."""
     direction = str(signal.get("final_direction") or "").upper()
     signal_price = float(signal.get("signal_price") or state.get("price") or 0)
+    entry_mode = signal.get("entry_mode")
+    if entry_mode == ENTRY_MODE_AI_DIRECT:
+        if signal.get("ai_direct_limit") is not None:
+            return float(signal["ai_direct_limit"]), ENTRY_MODE_AI_DIRECT
+        # A direction-only shared lane is never allowed to fall through to the
+        # legacy percentage pullback. Zero is fail-closed and is rejected by the
+        # order path if a caller somehow bypasses the dashboard gate.
+        return 0.0, ENTRY_MODE_AI_DIRECT
     pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.001)))
     if direction == "LONG":
         pullback_limit = signal_price * (1 - pullback_pct)
@@ -5661,9 +5828,6 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
     else:
         pullback_limit = signal_price
     signal["planned_pullback_limit"] = pullback_limit
-    entry_mode = signal.get("entry_mode")
-    if entry_mode == ENTRY_MODE_AI_DIRECT and signal.get("ai_direct_limit") is not None:
-        return float(signal["ai_direct_limit"]), ENTRY_MODE_AI_DIRECT
     if entry_mode == ENTRY_MODE_5M_TRIGGER and signal.get("micro_sr_limit") is not None:
         return float(signal["micro_sr_limit"]), ENTRY_MODE_5M_TRIGGER
     if entry_mode == ENTRY_MODE_AI_PLANNER and signal.get("ai_planner_limit") is not None:
@@ -5913,6 +6077,7 @@ ENTRY_MODE_AI_PLANNER = "AI_PLANNER_LIMIT"
 ENTRY_MODE_AI_DIRECT = "AI_DIRECT_LIMIT"
 ENTRY_MODE_5M_TRIGGER = "5M_TRIGGER_LIMIT"
 AI_DIRECT_MAX_DIST_PCT = float(os.getenv("AI_DIRECT_MAX_DIST_PCT", "0.01"))
+STRUCTURAL_ENTRY_POLICY_VERSION = "micro_sr_structural_limit_v1"
 RESEARCH_QUALITY_MIN = 15.0
 PROFITABLE_REJECT_FEATURES_FILE = "profitable_reject_features.json"
 EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
@@ -5971,7 +6136,12 @@ _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_AI_60_65_ALPHA: 15.0,
 }
 _LANE_LIMIT_OFFSET_USD = {
-    RESEARCH_LANE_CONTINUOUS: 5.0,
+    # Active shared-direction lanes already include the structural $15 buffer
+    # before virtual chase begins. A second lane offset here would make the
+    # eventual resting/relay price differ from the virtual price that qualified
+    # the selected chase bucket.
+    RESEARCH_LANE_CONTINUOUS: 0.0,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 5.0,
     RESEARCH_LANE_EXTREME_EDGE: 5.0,
     RESEARCH_LANE_EDGE_PLUS_STACK: 5.0,
@@ -6641,6 +6811,16 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "bitfinex_live_enabled": False,
+    "exchange_sync_audit": {
+        "checked_ts": 0.0,
+        "authoritative": False,
+        "fresh": False,
+        "flat": False,
+        "orders_synced": False,
+        "positions_synced": False,
+        "trades_synced": False,
+        "error": "NOT_AUDITED",
+    },
     "early_fail_enabled": True,
     "ai_enabled": True,
     "invert_signal": False,
@@ -6698,6 +6878,8 @@ state = {
     "support_resistance": {"pivot": None, "s1": None, "s2": None, "r1": None, "r2": None, "swing_high": None, "swing_low": None, "ts": None, "window": "96x15m (~24h rolling)", "dist_to_resistance": 0.0, "dist_to_support": 0.0, "sr_zone_pct": SR_ZONE_PCT, "sr_state": "UNKNOWN", "sr_bias": "BOTH_ALLOWED"},
     "ema_status": {},
     "ws_last_tick": None,
+    "rest_last_tick": None,
+    "ws_transport_connected": False,
     "last_engine_error": "None",
     "drawdown_kill_until": None,
     "last_ai": {"win_prob": None, "direction": None, "trade_id": None, "comment": None, "ai_error": None, "factors": {}, "source": "NONE", "decision": None},
@@ -6722,6 +6904,8 @@ state = {
     "bid_size_btc": None,
     "ask_size_btc": None,
     "last_trade_price": None,
+    "rest_price": None,
+    "rest_price_ts": None,
     "price_ts": None,
     "price_source": "NONE",
     "execution_paused": False,
@@ -6854,6 +7038,9 @@ PAUSE_PRIORITIES = {
     "": 0,
     "CSV_FAILURE": 100,
     "PRELOAD_FAILED": 100,
+    # A reduce-only close that was not confirmed is a money-path incident.
+    # Fresh market data must never clear it implicitly.
+    "BITFINEX_CLOSE_FAILED": 190,
     "ADMIN_MANUAL": 200,
     # Sticky demo/sim pause — above soft recovery clears, below admin manual.
     "SIMULATION_ONLY": 150,
@@ -7101,6 +7288,29 @@ def _report_showcase_inference_usage(
         threading.Thread(target=_flush_inference_usage, daemon=True).start()
 
 
+def _platform_relay_lane_for_event(
+    trade_id: str = None,
+    research_lane: str = None,
+) -> str:
+    """Resolve a relay lane from an allow-listed trade prefix, failing closed.
+
+    An explicit lane may confirm the prefix-derived lane but cannot override it.
+    This prevents a paper/research trade from becoming mirrorable by carrying a
+    stale or incorrectly defaulted ``research_lane=CONTINUOUS`` field.
+    """
+    trade_key = str(trade_id or "").strip().lower()
+    prefix, separator, _ = trade_key.partition("-")
+    if not separator:
+        return ""
+    derived_lane = PLATFORM_RELAY_TRADE_PREFIX_LANES.get(prefix, "")
+    explicit_lane = str(research_lane or "").strip().upper()
+    if not derived_lane:
+        return ""
+    if explicit_lane and explicit_lane != derived_lane:
+        return ""
+    return derived_lane
+
+
 def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
     """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
     if not is_active_dashboard_owner():
@@ -7119,7 +7329,24 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    # Exact chase updates are safe to consume without a Cloudflare callback
+    if event in ("LIMIT_UPDATED", "POSITION_CLOSED"):
+        relay_lane = _platform_relay_lane_for_event(
+            trade_id,
+            payload.get("research_lane"),
+        )
+        if relay_lane not in PLATFORM_RELAY_ELIGIBLE_LANES:
+            logger.warning(
+                f"[RELAY PUSH] blocked non-relay lifecycle lane="
+                f"{payload.get('research_lane') or 'UNKNOWN'} "
+                f"event={event} trade={trade_id or 'MISSING'}"
+            )
+            return
+        payload["research_lane"] = relay_lane
+    payload["event_id"] = (
+        f"{trade_id or 'none'}:{event}:"
+        f"{payload.get('event_seq', 'na')}:{payload['ts']}"
+    )
+    # Exact chase updates are safe to consume without waiting for a platform callback
     # only when this canonical owner also HMAC-signs the payload.
     if (
         webhook_secret
@@ -7129,6 +7356,8 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             (
                 event == "LIMIT_UPDATED"
                 and isinstance(payload.get("limit_price"), (int, float))
+                and payload.get("entry_limit_policy") == STRUCTURAL_ENTRY_POLICY_VERSION
+                and payload.get("executable") is True
             )
             or (
                 event == "POSITION_CLOSED"
@@ -7200,15 +7429,13 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
 
 
 def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
-    """Intent-Mirror webhook (plan §3 Part A) — push a signed, intent-aware
-    `dcf-showcase-intent-v1` payload to the platform API so the relay can copy
-    an approved `cont-` signal to ACTIVE hires WITHOUT requiring the showcase
-    to place a real Bitfinex order first.
+    """Push a signed exact-limit lifecycle event to the platform relay.
 
-    CRITICAL (plan §6): this function does NOT gate on `live_armed`. Paper
-    approvals are explicitly copyable — that is the entire point of the
-    intent-mirror feature. `intent_source` tags the payload as "paper" when
-    the showcase is not armed so the relay's audit trail is explicit.
+    ``APPROVE_PENDING`` is visibility-only: it describes a structurally priced
+    virtual-chase candidate and is never executable. ``ORDER_PLACED`` is the
+    first executable entry event and must carry the exact canonical limit.
+    Paper provenance is retained because the platform relay deliberately copies
+    the canonical paper strategy only after its own NEXT_FRESH_ONLY arm gate.
 
     HMAC-SHA256 signs the canonical JSON with SHOWCASE_WEBHOOK_SECRET (distinct
     from BOT_CONTROL_SECRET). Fire-and-forget daemon thread — matches the
@@ -7236,7 +7463,6 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         live_armed = bool(state.get("live_armed"))
         strategy_mode = str(state.get("strategy_mode") or "RESEARCH").upper()
         leverage = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
-        pullback_threshold = float(state.get("pullback_threshold", 0.001))
 
     # N2 — paper/live provenance. Default showcase is RESEARCH + live_armed=False = paper.
     intent_source = "live" if live_armed else "paper"
@@ -7244,7 +7470,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
     if not trade_id:
         return
 
-    direction = (ai_dict.get("direction") or sig.get("final_direction") or "").upper()
+    direction = (sig.get("final_direction") or ai_dict.get("direction") or "").upper()
     signal_price = float(
         sig.get("signal_price")
         or ai_dict.get("signal_price")
@@ -7255,27 +7481,54 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
     win_prob = ai_dict.get("win_prob") if isinstance(ai_dict.get("win_prob"), (int, float)) else None
     edge_score = sig.get("edge_score_at_entry")
     eff_thr = sig.get("effective_threshold_at_entry")
-    research_lane = str(sig.get("research_lane") or "CONTINUOUS").upper()
+    research_lane = str(sig.get("research_lane") or "").upper()
+    relay_lane = _platform_relay_lane_for_event(trade_id, research_lane)
     if (
         event in ("APPROVE_PENDING", "ORDER_PLACED")
-        and research_lane not in PLATFORM_RELAY_ELIGIBLE_LANES
+        and relay_lane not in PLATFORM_RELAY_ELIGIBLE_LANES
     ):
         logger.warning(
             f"[INTENT WEBHOOK] blocked non-relay lane={research_lane} "
             f"event={event} trade={trade_id}"
         )
         return
+    if relay_lane:
+        research_lane = relay_lane
     limit_price = sig.get("limit_price") or sig.get("planned_limit_price")
     try:
         limit_price = float(limit_price) if limit_price is not None else None
     except (TypeError, ValueError):
         limit_price = None
+    entry_limit_policy = str(sig.get("entry_limit_policy") or "")
+    if event in ("APPROVE_PENDING", "ORDER_PLACED") and (
+        direction not in ("LONG", "SHORT")
+        or not limit_price
+        or limit_price <= 0
+        or entry_limit_policy != STRUCTURAL_ENTRY_POLICY_VERSION
+    ):
+        logger.warning(
+            f"[INTENT WEBHOOK] blocked inexact lifecycle event={event} "
+            f"trade={trade_id} direction={direction or 'MISSING'} "
+            f"limit={limit_price} policy={entry_limit_policy or 'MISSING'}"
+        )
+        return
 
+    try:
+        event_seq = int(
+            sig.get("limit_chase_count")
+            if sig.get("limit_chase_count") is not None
+            else (sig.get("dashboard_chase_activation_count") or 0)
+        )
+    except (TypeError, ValueError):
+        event_seq = 0
+    source_event_ts = utc_iso()
     payload = {
         "schema": "dcf-showcase-intent-v1",
         "event": event,
         "trade_id": trade_id,
-        "ts": utc_iso(),
+        "ts": source_event_ts,
+        "event_seq": max(0, event_seq),
+        "event_id": f"{trade_id}:{event}:{max(0, event_seq)}:{source_event_ts}",
         "intent_source": intent_source,
         "direction": direction or None,
         "signal_price": signal_price if signal_price > 0 else None,
@@ -7286,7 +7539,9 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "edge_score": edge_score if isinstance(edge_score, (int, float)) else None,
         "effective_threshold": eff_thr if isinstance(eff_thr, (int, float)) else None,
         "research_lane": research_lane,
-        "pullback_pct": pullback_threshold,
+        "entry_limit_policy": entry_limit_policy,
+        "entry_reason": sig.get("entry_reason"),
+        "executable": event == "ORDER_PLACED",
         "bot_version": EXECUTION_FIX_VERSION,
         "strategy_mode": strategy_mode,
         **_dashboard_owner_metadata(),
@@ -7371,16 +7626,12 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
     if status == "PENDING" and trade_id:
-        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
-            _push_showcase_relay_event("APPROVE_PENDING", trade_id)
-        # Intent-Mirror (plan §4 bot checklist item 8) — also fire the signed
-        # v1 intent webhook so the relay can copy this approved `cont-` signal
-        # to ACTIVE hires even when the showcase is paper-only. Legacy call
-        # above stays for backward compat during rollout.
+        # Visibility-only, signed exact-limit intent. It cannot authorize an
+        # exchange order; the relay waits for ORDER_PLACED.
         emit_signal_webhook("APPROVE_PENDING", signal, ai)
     elif status == "EXECUTED" and trade_id:
-        if not (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip():
-            _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        # Fail closed when signing is unavailable; never fall back to the old
+        # percentage-derived unsigned money contract.
         emit_signal_webhook("ORDER_PLACED", signal, ai)
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
@@ -7576,7 +7827,7 @@ def evaluate_profitability_entry_gates(
     """Profit gates mirror dashboard edge/AI thresholds — hard block only on PROFIT_GATES lane in research."""
     edge_score = round(float(edge_score or 0), 1)
     edge_min = round(float(get_edge_threshold()), 1)
-    if edge_score < edge_min:
+    if not EDGE_RESEARCH_TELEMETRY_ONLY and edge_score < edge_min:
         reason = f"PROFIT_GATE_EDGE_LT_{edge_min}"
         if is_research_data_collection():
             return is_profit_gates_lane(research_lane), reason
@@ -7804,6 +8055,19 @@ def _apply_smart_submit_limit(
     """Re-anchor below/above market when price crossed planned limit; enable immediate chase."""
     direction = _signal_direction(signal)
     original = float(planned_limit)
+    # Structural entries must remain anchored to the observed pivot. If market
+    # touches/crosses that virtual level before an enabled chase bucket, the
+    # cohort correctly expires as VIRTUAL_FILL_SKIPPED_CHASE_n. Re-anchoring it
+    # to a synthetic 0.1% offset would silently change both the entry thesis and
+    # the chase count being measured.
+    if signal.get("entry_limit_policy") == STRUCTURAL_ENTRY_POLICY_VERSION:
+        signal["smart_submit_reanchored"] = False
+        return original, entry_mode, {
+            "reanchored": False,
+            "immediate_chase": False,
+            "original_planned": original,
+            "structural_anchor_preserved": True,
+        }
     if not _entry_limit_would_fill_immediately(direction, market_price, original):
         signal["smart_submit_reanchored"] = False
         return original, entry_mode, {
@@ -8041,6 +8305,12 @@ def _expire_skipped_virtual_fill(signal: dict) -> None:
 
 def process_awaiting_dashboard_virtual_chase_entries():
     """Global virtual defer — submit limit only when dashboard chase bucket allows."""
+    if not can_progress_new_entry()[0]:
+        logger.debug(
+            "[WS ENTRY FREEZE] virtual chase approvals retained while genuine WS is unavailable "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return
     price = state.get("price")
     if price is None or price <= 0:
         return
@@ -8174,11 +8444,21 @@ def _sync_virtual_chase_signal_order(signal: dict, order: dict = None, **fields)
                 order[k] = v
 
 
-def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, chase_count: int, now: float) -> None:
+def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, chase_count: int, now: float) -> bool:
     tid = order.get("trade_id") or signal.get("trade_id")
-    with trade_lock:
-        if order in pending_orders:
-            lane_unregister_pending_order(order)
+    cancel_result = _cancel_pending_order_confirmed(
+        order,
+        "VIRTUAL_CHASE_HIDE",
+        record_expired=False,
+        expire_signal=False,
+    )
+    if not cancel_result.get("finalized"):
+        logger.critical(
+            f"[VIRTUAL_CHASE] unable to hide unconfirmed live order "
+            f"trade_id={tid} oid={cancel_result.get('exchange_order_id') or '-'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False
     if not signal.get("virtual_chase_since_ts"):
         signal["virtual_chase_since_ts"] = now
     signal["virtual_chase_state"] = True
@@ -8201,6 +8481,7 @@ def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, ch
         f"limit={fmt(signal['limit_price'])} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
+    return True
 
 
 def _virtual_chase_signal_eligible(signal: dict, price: float, now: float) -> bool:
@@ -8259,8 +8540,7 @@ def _virtual_chase_lane_chase_on_order(order: dict, signal: dict, price: float, 
     if next_count == 1:
         if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
             return False
-        _pull_order_to_virtual_chase(signal, order, new_limit, next_count, now)
-        return True
+        return _pull_order_to_virtual_chase(signal, order, new_limit, next_count, now)
     if next_count in (4, 5):
         return _apply_limit_chase(order, signal, price, now)
     if next_count == 6:
@@ -8821,6 +9101,15 @@ def _is_misleading_ai_skip_label(label) -> bool:
 
 def _dashboard_idle_gate_reason(debug_state: dict) -> str:
     dbg = debug_state or {}
+    if _sole_ai_research_mode():
+        reason = (
+            dbg.get("pipeline_idle_reason")
+            or dbg.get("skip_reason")
+            or dbg.get("last_block_reason")
+        )
+        if reason and not str(reason).startswith(("EDGE_", "NO_EDGE")):
+            return str(reason)
+        return "WAITING_FOR_PERIODIC_DIRECTION_SCAN"
     reason = dbg.get("edge_trigger_reason") or dbg.get("edge_reason")
     if reason and str(reason) not in ("OK", "UNKNOWN", ""):
         return str(reason)
@@ -9080,14 +9369,28 @@ def prune_signals():
 def _remove_pending_for_trade(trade_id: str, reason: str = "ORPHAN_CLEANUP"):
     if not trade_id:
         return False
-    removed = False
     with trade_lock:
-        for order in list(pending_orders):
-            if order.get("trade_id") == trade_id and order.get("status") == "PENDING":
-                lane_unregister_pending_order(order)
-                removed = True
-                logger.info(f"[ORDER CLEANUP] Removed pending order trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]")
-    return removed
+        matches = [
+            order for order in list(pending_orders)
+            if order.get("trade_id") == trade_id
+            and str(order.get("status") or "").upper()
+            in ("PENDING", "CANCEL_PENDING_LIVE")
+        ]
+    removed = 0
+    for order in matches:
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            reason,
+            record_expired=False,
+            expire_signal=False,
+        )
+        if outcome.get("finalized"):
+            removed += 1
+            logger.info(
+                f"[ORDER CLEANUP] Removed confirmed pending order "
+                f"trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+    return bool(removed)
 
 def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED") -> None:
     try:
@@ -9167,10 +9470,19 @@ def reconcile_stale_signals():
             master = trades_map.get(tid, {}).get("signal_ref", {}) or {}
             if is_terminal_signal(master) or (master.get("created_ts_ts", 0) and now - master.get("created_ts_ts", 0) > SIGNAL_TTL_SEC):
                 expire_reason = master.get("outcome") or master.get("exit_reason") or "TTL_EXPIRED"
-                _record_expired_order(order, expire_reason)
-                lane_unregister_pending_order(order)
-                orphans_removed += 1
-                logger.info(f"[ORDER CLEANUP] Dropped orphan pending trade_id={tid} signal_status={master.get('status')} outcome={master.get('outcome')} [PIPELINE ENFORCEMENT]")
+                outcome = _cancel_pending_order_confirmed(
+                    order,
+                    expire_reason,
+                    record_expired=True,
+                    expire_signal=False,
+                )
+                if outcome.get("finalized"):
+                    orphans_removed += 1
+                    logger.info(
+                        f"[ORDER CLEANUP] Dropped confirmed orphan pending "
+                        f"trade_id={tid} signal_status={master.get('status')} "
+                        f"outcome={master.get('outcome')} [PIPELINE ENFORCEMENT]"
+                    )
     if fixed or orphans_removed:
         logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] reconciled {fixed} stale signals, removed {orphans_removed} orphan pending orders")
         _agent_dbg("H1", "reconcile_stale_signals", "reconciled", {"count": fixed, "orphans_removed": orphans_removed, "pending_ids": len(_pending_trade_ids()), "open_ids": len(_open_trade_ids())})
@@ -13463,11 +13775,20 @@ def _cancel_tile2_paper_resting_limit(
     cancelled = False
     for existing in matches:
         try:
-            existing["status"] = "CANCELLED"
+            outcome = _cancel_pending_order_confirmed(
+                existing,
+                reason,
+                record_expired=False,
+                expire_signal=True,
+            )
+            if not outcome.get("finalized"):
+                logger.warning(
+                    f"[TILE2] cancel unconfirmed trade_id={existing.get('trade_id')} "
+                    f"reason={reason} [PIPELINE ENFORCEMENT]"
+                )
+                continue
             existing["exit_reason"] = reason
             existing["cancelled_ts"] = time.time()
-            lane_unregister_pending_order(existing)
-            expire_signal_for_order(existing, reason)
             log_lane_opportunity_event(
                 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
                 "CANCELLED",
@@ -13510,6 +13831,12 @@ def _submit_tile2_paper_resting_limit(
     """
     if _manual_pause_block_entry(ctx, "TILE2_PAPER_LIMIT"):
         return "REFUSED_ADMIN_PAUSE"
+    if not can_progress_new_entry()[0]:
+        logger.warning(
+            "[WS ENTRY FREEZE] Tile 2 resting limit not created until a genuine "
+            "WS tick is fresh [PIPELINE ENFORCEMENT]"
+        )
+        return "REFUSED_WS_NOT_READY"
     direction = str(side or "LONG").upper()
     if direction not in ("LONG", "SHORT"):
         return "REFUSED_BAD_SIDE"
@@ -16252,7 +16579,8 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
         "virtual_submit_ready": dashboard_virtual_chase_submit_ready(signal or {"dashboard_virtual_chase_count": vcount}),
         "max_concurrent_signals": max_sig,
         "leverage": lev,
-        "pullback_threshold": pull,
+        "pullback_threshold": pull,  # legacy schema only; direction-only lanes ignore it
+        "entry_limit_policy": STRUCTURAL_ENTRY_POLICY_VERSION,
         "bitfinex_live_enabled": bfx,
     }
 
@@ -16281,6 +16609,12 @@ def evaluate_dashboard_execution_gate(
 
     if not lane_orders_allowed(lane):
         return False, "LANE_DISABLED", False
+
+    if (
+        signal.get("structural_entry_valid") is False
+        or signal.get("entry_path") == "STRUCTURAL_LIMIT_BLOCKED"
+    ):
+        return False, str(signal.get("entry_reason") or "STRUCTURAL_LIMIT_UNAVAILABLE"), False
 
     # V2 entry gate: age ≥180s before limit submit (chase 3–5 via virtual chase).
     # Does not affect CONTINUOUS or AI60_SP3.
@@ -16347,17 +16681,28 @@ def _signal_ai_win_prob(signal: dict, ai: dict = None) -> float:
         return 0.0
 
 
-def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOCKED") -> None:
+def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOCKED") -> bool:
     """Pull limit off book when chase tick hits an unchecked bucket; remember signal for next enabled bucket."""
     tid = order.get("trade_id")
     if not tid:
-        return
+        return False
     meta = trades_map.get(tid, {})
     signal = meta.get("signal_ref") or {}
     chase_n = int(order.get("limit_chase_count") or 0)
-    with trade_lock:
-        if order in pending_orders:
-            lane_unregister_pending_order(order)
+    cancel_result = _cancel_pending_order_confirmed(
+        order,
+        reason,
+        record_expired=False,
+        expire_signal=False,
+    )
+    if not cancel_result.get("finalized"):
+        logger.critical(
+            f"[BITFINEX LIVE] chase-gate cancel unconfirmed; retained "
+            f"trade_id={tid} oid={cancel_result.get('exchange_order_id') or '-'} "
+            f"failure={cancel_result.get('failure_reason') or 'UNKNOWN'} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return False
     _emit_genome_execution_event("ORDER_CANCELLED", {
         "trade_id": tid,
         "reason": reason,
@@ -16369,7 +16714,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
             f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
             f"chase_count={chase_n} reason={reason} [PIPELINE ENFORCEMENT]"
         )
-        return
+        return True
     now = time.time()
     expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
     next_enabled = _next_enabled_chase_after(chase_n)
@@ -16391,7 +16736,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
             f"reason={reason} — virtual wait for chase>={next_enabled} [PIPELINE ENFORCEMENT]"
         )
         pipeline_state_sync()
-        return
+        return True
     signal.update({
         "status": "EXPIRED",
         "outcome": reason,
@@ -16403,6 +16748,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
         f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
         f"chase_count={chase_n} reason={reason} [PIPELINE ENFORCEMENT]"
     )
+    return True
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
@@ -16596,27 +16942,6 @@ def hash_context(ctx):
         ))
     except:
         return hash(str(ctx))
-
-def compute_ai_score(ai, ctx):
-    score = 0.0
-    score += nz(ai.get("win_prob")) * 0.5
-    score += nz(ai.get("confidence", 50)) * 0.2
-    if ctx.get("volume_ratio", 0) > 1.3:
-        score += 15
-    if abs(ctx.get("delta_change", 0)) > 0.08:
-        score += 10
-    if ctx.get("wick_ratio", 0) > 0.55:
-        score += 8
-    return max(0, min(100, score))
-
-def decision_from_score(score):
-    if score >= 80:
-        return "STRONG_TRADE"
-    elif score >= 65:
-        return "TRADE"
-    elif score >= 55:
-        return "WEAK_TRADE"
-    return "NO_TRADE"
 
 def should_call_ai(ctx, event_trigger):
     """Legacy alias — use should_invoke_ai for edge-gated AI."""
@@ -16887,18 +17212,172 @@ def validate_pipeline_completion(signal: dict):
     logger.info(f"[PIPELINE VALIDATION] COMPLETE trade_id={signal.get('trade_id')} status={signal.get('status')} [PIPELINE ENFORCEMENT]")
     return True
 
-def is_system_ready():
+def _force_paper_mode_active() -> bool:
+    return (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _genuine_ws_transport_ready(now: float = None) -> bool:
+    """True only after this process has a connected WS and a fresh trade tick."""
+    now = float(now or time.time())
     with state_lock:
-        price_ok = state.get("price") is not None and state.get("price") > 0
-        ws_ok = state.get("ws_ready", False) and (time.time() - state.get("price_ts", 0) < STALE_HARD_SEC)
-        buffer_ready = (
-            len(volume_buffer) >= WINDOW_SIZE
-            and len(price_buffer) >= WINDOW_SIZE
-            and len(delta_buffer) >= WINDOW_SIZE
+        ws_tick = float(state.get("ws_last_tick") or 0)
+        ws_age = (now - ws_tick) if ws_tick else float("inf")
+        return bool(
+            state.get("ws_transport_connected")
+            and state.get("ws_ready", False)
+            and ws_tick
+            and 0 <= ws_age <= WS_ENTRY_FRESH_SEC
         )
-        ready = price_ok and ws_ok and buffer_ready
-        state["warmup_mode"] = not ready
-        return ready
+
+
+def _runtime_readiness_components(now: float = None) -> dict:
+    """One non-mutating definition of strategy readiness."""
+    now = float(now or time.time())
+    with state_lock:
+        price_ok = bool(
+            state.get("price") is not None
+            and float(state.get("price") or 0) > 0
+        )
+        ohlcv_flag = bool(state.get("ohlcv_ready", False))
+        ema_status = dict(state.get("ema_status") or {})
+        pathway_ok = not bool(state.get("pathway_safety_block"))
+        last_ready_ts = float(state.get("last_ready_ts") or 0)
+        paused = bool(state.get("execution_paused", False))
+        manual_paused = bool(state.get("manual_admin_pause", False))
+    ws_ok = _genuine_ws_transport_ready(now)
+    ohlcv_age = (
+        now - float(last_ohlcv_fetch or 0)
+        if last_ohlcv_fetch
+        else float("inf")
+    )
+    ohlcv_fresh = bool(
+        last_ohlcv_fetch
+        and 0 <= ohlcv_age <= max(CANDLE_STALE_SEC, OHLCV_FETCH_INTERVAL * 3)
+    )
+    ohlcv_ok = bool(ohlcv_flag and ohlcv_fresh)
+    ema_ok = all(
+        ema_status.get(name) is not None
+        for name in ("ema9", "ema21", "ema200")
+    )
+    candle_ok = bool(len(latest_candles) >= MIN_CANDLES and ohlcv_fresh)
+    buffer_ready = bool(
+        len(volume_buffer) >= WINDOW_SIZE
+        and len(price_buffer) >= WINDOW_SIZE
+        and len(delta_buffer) >= WINDOW_SIZE
+    )
+    prerequisites_ready = bool(
+        price_ok
+        and ws_ok
+        and ohlcv_ok
+        and ema_ok
+        and candle_ok
+        and buffer_ready
+        and pathway_ok
+    )
+    stable_for_sec = max(0.0, now - last_ready_ts) if last_ready_ts else 0.0
+    system_ready = bool(
+        prerequisites_ready
+        and last_ready_ts
+        and stable_for_sec >= READY_STABLE_SEC
+    )
+    signal_generation_ready = bool(
+        system_ready and not paused and not manual_paused
+    )
+    reasons = []
+    if not price_ok:
+        reasons.append("NO_PRICE")
+    if not ws_ok:
+        reasons.append("WS_NOT_READY")
+    if not ohlcv_ok:
+        reasons.append("OHLCV_NOT_READY")
+    if not ema_ok:
+        reasons.append("EMA_NOT_READY")
+    if not candle_ok:
+        reasons.append("CANDLE_STALE")
+    if not buffer_ready:
+        reasons.append("BUFFERS_NOT_READY")
+    if not pathway_ok:
+        reasons.append("PATHWAY_SAFETY_BLOCK")
+    if prerequisites_ready and not system_ready:
+        reasons.append("READINESS_STABILIZING")
+    if manual_paused:
+        reasons.append("ADMIN_MANUAL_PAUSE")
+    elif paused:
+        reasons.append("EXECUTION_PAUSED")
+    return {
+        "price_ready": price_ok,
+        "ws_transport_ready": ws_ok,
+        "ohlcv_ready": ohlcv_ok,
+        "ohlcv_age_sec": ohlcv_age if math.isfinite(ohlcv_age) else None,
+        "ema_ready": ema_ok,
+        "candle_ready": candle_ok,
+        "buffers_ready": buffer_ready,
+        "pathway_ready": pathway_ok,
+        "prerequisites_ready": prerequisites_ready,
+        "stable_for_sec": stable_for_sec,
+        "system_ready": system_ready,
+        "signal_generation_ready": signal_generation_ready,
+        "readiness_reasons": reasons,
+    }
+
+
+def _recompute_system_readiness(now: float = None) -> dict:
+    """Update the single stable readiness latch from genuine market state."""
+    now = float(now or time.time())
+    components = _runtime_readiness_components(now)
+    with state_lock:
+        if components["prerequisites_ready"]:
+            if not state.get("last_ready_ts"):
+                state["last_ready_ts"] = now
+        else:
+            state["last_ready_ts"] = 0
+        # Re-read after initializing/resetting the stability epoch.
+        ready_since = float(state.get("last_ready_ts") or 0)
+        stable_for = max(0.0, now - ready_since) if ready_since else 0.0
+        system_ready = bool(
+            components["prerequisites_ready"]
+            and ready_since
+            and stable_for >= READY_STABLE_SEC
+        )
+        state["system_ready"] = system_ready
+        state["warmup_mode"] = not system_ready
+        state["allow_rest_price"] = not components["ws_transport_ready"]
+        execution_paused = bool(state.get("execution_paused", False))
+        manual_admin_pause = bool(state.get("manual_admin_pause", False))
+    components["stable_for_sec"] = stable_for
+    components["system_ready"] = system_ready
+    components["signal_generation_ready"] = bool(
+        system_ready
+        and not execution_paused
+        and not manual_admin_pause
+    )
+    components["readiness_reasons"] = [
+        reason
+        for reason in components["readiness_reasons"]
+        if reason != "READINESS_STABILIZING"
+    ]
+    if components["prerequisites_ready"] and not system_ready:
+        components["readiness_reasons"].append("READINESS_STABILIZING")
+    return components
+
+
+def can_progress_new_entry(now: float = None) -> tuple:
+    """Central gate for signal generation and every local entry transition."""
+    runtime = _recompute_system_readiness(now)
+    if not runtime["signal_generation_ready"]:
+        reason = (
+            runtime["readiness_reasons"][0]
+            if runtime["readiness_reasons"]
+            else "NEW_ENTRY_NOT_READY"
+        )
+        return False, reason, runtime
+    return True, "READY", runtime
+
+
+def is_system_ready():
+    return bool(_recompute_system_readiness()["system_ready"])
 
 def pipeline_guard(stage: str, signal: dict) -> bool:
     if not signal or not signal.get("trade_id"):
@@ -16914,18 +17393,70 @@ def update_signal_pull_metrics(price):
     return
 
 def is_data_stale():
-    return (time.time() - state.get("ws_last_tick", 0)) > STALE_HARD_SEC
+    return not _genuine_ws_transport_ready()
 
 def is_data_consistent():
     return (len(latest_candles) >= MIN_CANDLES and state.get("price") is not None and not is_data_stale())
+
+
+def can_open_live_entry(
+    *,
+    require_armed: bool = True,
+    now: float = None,
+) -> tuple:
+    """Central fail-closed gate for every direct private Bitfinex entry."""
+    if _force_paper_mode_active():
+        return False, "FORCE_PAPER_MODE", _runtime_readiness_components(now)
+    if not _private_api_keys_ok():
+        return False, "PRIVATE_API_KEYS_MISSING", _runtime_readiness_components(now)
+    audit = _exchange_exposure_audit_snapshot(now)
+    if not audit.get("authoritative") or not audit.get("fresh"):
+        return False, "EXCHANGE_AUDIT_NOT_FRESH", _runtime_readiness_components(now)
+    # Flatness is a pre-arm invariant. Once armed, managed live exposure may
+    # legitimately exist; fresh synchronization and zero foreign/orphan
+    # exposure remain mandatory for subsequent entries.
+    if not require_armed and not audit.get("flat"):
+        return False, "EXCHANGE_NOT_FLAT", _runtime_readiness_components(now)
+    if audit.get("orphan_order_ids") or audit.get("orphan_position_ids"):
+        return False, "EXCHANGE_ORPHAN_EXPOSURE", _runtime_readiness_components(now)
+    runtime = _recompute_system_readiness(now)
+    if not runtime["ws_transport_ready"]:
+        return False, "WS_NOT_READY", runtime
+    if not runtime["system_ready"]:
+        reason = (
+            runtime["readiness_reasons"][0]
+            if runtime["readiness_reasons"]
+            else "SYSTEM_NOT_READY"
+        )
+        return False, reason, runtime
+    with state_lock:
+        if state.get("manual_admin_pause"):
+            return False, "ADMIN_MANUAL_PAUSE", runtime
+        if state.get("execution_paused"):
+            return False, str(state.get("execution_reason") or "EXECUTION_PAUSED"), runtime
+        if require_armed and not (
+            state.get("live_armed")
+            and state.get("bitfinex_live_enabled")
+        ):
+            return False, "LIVE_NOT_ARMED", runtime
+    return True, "READY", runtime
+
+
+def _strict_json_boolean(data: dict, key: str):
+    if not isinstance(data, dict) or key not in data or not isinstance(data.get(key), bool):
+        return None
+    return data[key]
 
 def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
-    if state.get("manual_admin_pause") or (
-        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
-    ):
+    entry_ok, entry_reason, _runtime = can_progress_new_entry()
+    if not entry_ok:
+        logger.warning(
+            f"[SYSTEM BLOCK] New-entry pipeline not ready: {entry_reason} "
+            "[PIPELINE ENFORCEMENT]"
+        )
         return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
@@ -16935,9 +17466,6 @@ def should_run_pipeline() -> bool:
             f"[PATHWAY SAFETY BLOCK] {state.get('pathway_safety_reason', 'integrity')} "
             f"[PIPELINE ENFORCEMENT]"
         )
-        return False
-    if not is_system_ready():
-        logger.warning("[SYSTEM BLOCK] Not ready [PIPELINE ENFORCEMENT]")
         return False
     if state.get("data_quality", 0.0) < 0.6:
         logger.warning("[DATA BLOCK] Quality below threshold [PIPELINE ENFORCEMENT]")
@@ -17315,6 +17843,12 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     """Create a pending limit order after micro structure is confirmed."""
     if _manual_pause_block_entry(signal, "SIM_LIMIT_CREATE"):
         return False
+    if not can_progress_new_entry()[0]:
+        logger.warning(
+            f"[WS ENTRY FREEZE] refusing new simulated limit trade_id={signal.get('trade_id')} "
+            f"until a genuine WS tick is fresh [PIPELINE ENFORCEMENT]"
+        )
+        return False
     smart_meta = smart_meta or {}
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
     meta = trades_map.get(signal.get("trade_id"), {})
@@ -17364,6 +17898,12 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
     lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
     qty = margin_usdt * lev / price
+    order_created_ts = time.time()
+    # Every order created through this path has passed the dashboard's exact
+    # chase selector. The selected activation bucket must rest for a complete
+    # chase interval before it is allowed to advance; otherwise a chase-3
+    # activation can silently become chase 4 during the same function call.
+    dashboard_exact_chase_managed = True
     order = {
         "trade_id": signal["trade_id"],
         "research_lane": lane,
@@ -17374,9 +17914,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "planned_limit_price": limit_price,
         "entry_mode": entry_mode,
         "entry_path": signal.get("entry_path"),
+        "entry_reason": signal.get("entry_reason"),
+        "entry_limit_policy": signal.get("entry_limit_policy"),
         "qty": qty,
         "status": "PENDING",
-        "created_ts": time.time(),
+        "created_ts": order_created_ts,
         "signal_created_ts": signal.get("created_ts_ts") or (signal.get("timing") or {}).get("signal_ts"),
         "entry_type": "SIM_LIMIT",
         "signal_price": signal.get("signal_price"),
@@ -17388,7 +17930,9 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             if is_virtual_chase_entry_lane(lane)
             else _signal_virtual_chase_count(signal)
         ),
-        "last_chase_ts": None,
+        "last_chase_ts": order_created_ts,
+        "dashboard_exact_chase_managed": dashboard_exact_chase_managed,
+        "dashboard_chase_activation_count": signal.get("dashboard_chase_activation_count"),
     }
     features = signal.get("features") or {}
     order["entry_velocity"] = float(features.get("velocity") or 0)
@@ -17417,7 +17961,8 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         signal.pop("virtual_chase_state", None)
     else:
         signal["limit_chase_count"] = _signal_virtual_chase_count(signal)
-    signal["last_chase_ts"] = None
+    signal["last_chase_ts"] = order_created_ts
+    signal["dashboard_exact_chase_managed"] = dashboard_exact_chase_managed
     if smart_meta.get("immediate_chase") or fills_first_continuous_enabled(signal):
         signal["immediate_chase"] = True
         signal["chase_start_sec"] = 0
@@ -17426,7 +17971,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         signal["smart_submit_original_planned"] = smart_meta.get("original_planned")
     signal["entry_mode"] = entry_mode
     signal["qty"] = qty
-    signal["order_created_ts"] = time.time()
+    signal["order_created_ts"] = order_created_ts
     signal["status"] = "ORDERED"
     signal["order_placed"] = True
     signal["await_micro_confirm"] = False
@@ -17442,7 +17987,9 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     _account_registered_order_submission(signal, ai)
     logger.info(
         f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
-        f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
+        f"limit_price={fmt(limit_price)} entry_mode={entry_mode} "
+        f"entry_policy={signal.get('entry_limit_policy') or 'LEGACY_NON_STRUCTURAL'} "
+        f"activation_chase={order.get('limit_chase_count')} "
         f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
     )
     _relay_mirror(
@@ -17456,6 +18003,9 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             "limit_price": limit_price,
             "signal_price": signal_price,
             "entry_mode": entry_mode,
+            "entry_reason": signal.get("entry_reason"),
+            "entry_limit_policy": signal.get("entry_limit_policy"),
+            "dashboard_chase_activation_count": order.get("limit_chase_count"),
             "research_lane": signal.get("research_lane"),
             "conf": signal.get("ai_win_prob"),
             "ai_win_prob": signal.get("ai_win_prob"),
@@ -17518,6 +18068,8 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
 
 def _try_immediate_first_chase(order: dict, signal: dict) -> bool:
     """Research chase #0 — re-anchor limit once at order creation before 60s cycle."""
+    if order.get("dashboard_exact_chase_managed") or (signal or {}).get("dashboard_exact_chase_managed"):
+        return False
     if is_virtual_chase_entry_lane(order.get("research_lane") or (signal or {}).get("research_lane")):
         return False
     if not is_research_data_collection() or not limit_chase_enabled():
@@ -18052,12 +18604,30 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {"limit_price": new_limit, "direction": direction},
+        {
+            "limit_price": new_limit,
+            "direction": direction,
+            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+            "event_seq": chase_count,
+            "executable": True,
+        },
     )
     return True
 
 
 def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> bool:
+    if not can_progress_new_entry(now)[0]:
+        return False
+    if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+        # Direct-live cancel/replace parity is intentionally fail-closed.
+        # Never move only the local representation of a real resting order.
+        logger.debug(
+            f"[BITFINEX LIVE] chase frozen pending exchange replace parity "
+            f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
@@ -18118,7 +18688,15 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {"limit_price": new_limit, "direction": direction},
+        {
+            "limit_price": new_limit,
+            "direction": direction,
+            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+            "event_seq": chase_count,
+            "executable": True,
+        },
     )
     return True
 
@@ -18184,7 +18762,15 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {"limit_price": new_limit, "direction": direction},
+        {
+            "limit_price": new_limit,
+            "direction": direction,
+            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+            "event_seq": chase_count,
+            "executable": True,
+        },
     )
     return True
 
@@ -18193,6 +18779,12 @@ def process_limit_chase(price: float):
     """Gradually move unfilled sim limits toward market after patient wait."""
     if manual_admin_pause_active():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
+        return
+    if not can_progress_new_entry()[0]:
+        logger.debug(
+            "[WS ENTRY FREEZE] pending limits retained without chase progression "
+            "[PIPELINE ENFORCEMENT]"
+        )
         return
     if not limit_chase_enabled() or price is None or price <= 0:
         return
@@ -18223,9 +18815,17 @@ def process_limit_chase(price: float):
                     f"[RECONCILE-ADOPT] chase budget exhausted tid={tid} cap={cap} "
                     f"— cancelling pending [PIPELINE ENFORCEMENT]"
                 )
-                _cancel_pending_for_chase_gate(order, "RECONCILE_CHASE_BUDGET_EXHAUSTED")
-                _reconcile_adopt_audit(order.get("bitfinex_order_id"), "CANCEL_PENDING",
-                                       "RECONCILE_CHASE_BUDGET_EXHAUSTED", {"trade_id": tid})
+                cancelled_oid = order.get("bitfinex_order_id")
+                cancel_confirmed = _cancel_pending_for_chase_gate(
+                    order,
+                    "RECONCILE_CHASE_BUDGET_EXHAUSTED",
+                )
+                _reconcile_adopt_audit(
+                    cancelled_oid,
+                    "CANCELLED_CONFIRMED" if cancel_confirmed else "CANCEL_PENDING",
+                    "RECONCILE_CHASE_BUDGET_EXHAUSTED",
+                    {"trade_id": tid},
+                )
                 continue
             # Q7: write window gate. Adoption still happened (entry is in
             # pending_orders so cleanup_expired_orders + fills still flow) but
@@ -18327,6 +18927,14 @@ def process_pending_orders():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
         return
     refresh_bbo_state()
+    if not can_progress_new_entry()[0]:
+        # REST BBO is still refreshed for dashboards and existing-position
+        # exits, but it cannot virtually touch, chase, or fill a new entry.
+        logger.debug(
+            "[WS ENTRY FREEZE] pending/awaiting entries retained without progression "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return
     refresh_order_book_state()
     price = state.get("price")
     if price is None or price <= 0:
@@ -18351,6 +18959,14 @@ def process_pending_orders():
             if order.get("status") != "PENDING":
                 continue
             if not lane_orders_allowed(order.get("research_lane")):
+                continue
+            if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+                # A direct-live limit may look touched on the public feed while
+                # the private exchange order is still resting, partially
+                # filled, rejected, or already cancelled. Never fabricate a
+                # local fill from public ticks. The strict private reconcile
+                # payload is the only authority that can convert it to an
+                # EXIT_ONLY managed position.
                 continue
             if not _pending_limit_touched(
                 order,
@@ -18495,6 +19111,24 @@ def fill_order(order):
     )
     pipeline_state_sync()
 
+def _observable_exit_price() -> float:
+    """Best available mark for risk-reducing exits, never for new entries."""
+    now = time.time()
+    with state_lock:
+        ws_price = float(state.get("price") or 0)
+        rest_price = float(
+            state.get("rest_price")
+            or state.get("last_trade_price")
+            or 0
+        )
+        rest_ts = float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0)
+    if _genuine_ws_transport_ready(now) and ws_price > 0:
+        return ws_price
+    if rest_price > 0 and rest_ts and 0 <= (now - rest_ts) <= 30.0:
+        return rest_price
+    return ws_price if ws_price > 0 else 0.0
+
+
 def process_positions():
     # heartbeat_loop and position_manager both provide lifecycle redundancy.
     # Let only one of them evaluate positions at a time so depth simulation,
@@ -18506,7 +19140,7 @@ def process_positions():
     try:
         refresh_bbo_state()
         refresh_order_book_state()
-        price = state.get("price")
+        price = _observable_exit_price()
         if price is None or price <= 0:
             return
         now = time.time()
@@ -18669,6 +19303,14 @@ def process_signal(event: dict):
         # records never enter the global signal/order/position books and never
         # publish relay webhooks.
         event["paused_shadow_mode"] = True
+    else:
+        entry_ok, entry_reason, _runtime = can_progress_new_entry()
+        if not entry_ok:
+            logger.warning(
+                f"[PIPELINE] blocked before AI/new entry reason={entry_reason} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            return
     research_lane = event.get("research_lane", RESEARCH_LANE_AI_SCAN)
     skip_ai = bool(event.get("skip_ai"))
     pre_ai = event.get("pre_ai")
@@ -18731,7 +19373,7 @@ def process_signal(event: dict):
             eff_thr = get_effective_edge_threshold()
             pipeline_eff_thr = eff_thr
             sole = _sole_ai_research_mode()
-            if sole and is_research_data_collection():
+            if EDGE_RESEARCH_TELEMETRY_ONLY:
                 with state_lock:
                     state["debug_state"]["edge_telemetry_only"] = True
             elif edge_score < eff_thr:
@@ -18749,10 +19391,12 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            if sole:
-                trigger_reason = event_obj.get("edge_trigger_reason", "PERIODIC_RESEARCH_AI")
+            if EDGE_RESEARCH_TELEMETRY_ONLY:
+                trigger_reason = event_obj.get("edge_trigger_reason") or (
+                    "SHARED_DIRECTION_SPAWN" if skip_ai else "PERIODIC_DIRECTION_AI"
+                )
                 ai_rem = ai_cooldown_remaining_sec(research_lane)
-                if is_ai_scan_lane(research_lane) and ai_rem > 0:
+                if not skip_ai and is_ai_scan_lane(research_lane) and ai_rem > 0:
                     trigger_ok = False
                     trigger_reason = f"AI_COOLDOWN_{ai_rem}s"
                 else:
@@ -18921,7 +19565,11 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                if not (sole and is_research_data_collection()) and round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1):
+                if (
+                    not EDGE_RESEARCH_TELEMETRY_ONLY
+                    and not (sole and is_research_data_collection())
+                    and round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1)
+                ):
                     logger.info(
                         f"[EDGE GATE] edge={edge_score:.1f} < frozen effective={pipeline_eff_thr:.1f} "
                         f"- skip before AI [PIPELINE ENFORCEMENT]"
@@ -19105,8 +19753,6 @@ def process_signal(event: dict):
                     "BLOCKED", "ADMIN_MANUAL_PAUSED_SHADOW", pipeline_eff_thr,
                     trade_id, edge_score, ai, signal,
                 )
-            elif relay_publishes_approve_outcome(research_lane):
-                record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai, signal)
             full_pipeline_trace("[PIPELINE]", f"AI_{ai.get('decision')}", trade_id)
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "AI"
@@ -19165,9 +19811,7 @@ def process_signal(event: dict):
                 and len(delta_buffer) >= WINDOW_SIZE
             ):
                 logger.warning("[WARMUP] Partial mode - buffers not full [PIPELINE ENFORCEMENT]")
-                state["system_ready"] = False
-            else:
-                state["system_ready"] = True
+            _recompute_system_readiness()
 
             ctx["trade_id"] = trade_id
             signal["event"] = event_obj
@@ -19369,7 +20013,11 @@ def process_signal(event: dict):
 
             setup_type = signal.get("setup_type") or classify_setup(signal.get("features") or {})
             weak_min_edge = get_weak_setup_min_edge()
-            if setup_type == "WEAK_SETUP" and edge_score < weak_min_edge:
+            if (
+                not EDGE_RESEARCH_TELEMETRY_ONLY
+                and setup_type == "WEAK_SETUP"
+                and edge_score < weak_min_edge
+            ):
                 weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
                 if not is_research_data_collection() or is_profit_gates_lane(research_lane):
                     logger.info(f"[SETUP GATE] {weak_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -19630,6 +20278,18 @@ def process_signal(event: dict):
                 logger.debug(f"[FUNNEL] approve log failed: {_fe}")
             logger.info("[PIPELINE] -> EXECUTION STAGE -> ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
+            # APPROVE_PENDING is an informational, non-executable virtual-chase
+            # intent. Publish it only after execution policy has produced the
+            # exact structural limit and every preceding gate has passed.
+            # ORDER_PLACED remains the sole executable relay event.
+            if (
+                signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES
+                and relay_publishes_approve_outcome(research_lane)
+            ):
+                record_approve_outcome(
+                    "PENDING", "VIRTUAL_CHASE_WAIT", pipeline_eff_thr,
+                    trade_id, edge_score, ai, signal,
+                )
             if success:
                 _account_registered_order_submission(signal, ai)
             if signal.get("status") in ("FILLED", "OPEN"):
@@ -19760,6 +20420,11 @@ def _bitfinex_ws_trades_from_message(data) -> list:
 
 def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     global _last_ws_trade_fp, _last_ws_trade_fp_ts, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
+    # Bitfinex sends a historical snapshot immediately after subscribe.  It is
+    # useful neither as proof of a live transport nor as an execution tick;
+    # OHLCV REST already seeds the analytical buffers. Wait for a real te/tu.
+    if snapshot_seed:
+        return
     trade_fp = (trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
     if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
         _agent_dbg("H2", "safe_ws_handler", "dedupe_skip", {"fp": str(trade_fp)[:80]})
@@ -19769,10 +20434,6 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     if price <= 0:
         return
     stale = _is_stale_ws_trade(trade)
-    if snapshot_seed:
-        trade_ts = _ws_trade_timestamp_sec(trade)
-        if max(0.0, time.time() - trade_ts) <= WS_BOOTSTRAP_MAX_AGE_SEC:
-            stale = False
     if stale:
         # Normal when Bitfinex replays aged ticks after reconnect; not a crash indicator.
         trade_ts = _ws_trade_timestamp_sec(trade)
@@ -19781,13 +20442,19 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
             f"fp={str(trade_fp)[:40]} [PIPELINE ENFORCEMENT]"
         )
         return
+    tick_now = time.time()
     _last_ws_trade_fp = trade_fp
-    _last_ws_trade_fp_ts = time.time()
-    prev_price = nz(state.get("price"))
-    state["price"] = price
-    state["price_ts"] = time.time()
-    state["ws_last_tick"] = time.time()
-    state["last_data_ts"] = time.time()
+    _last_ws_trade_fp_ts = tick_now
+    with state_lock:
+        prev_price = nz(state.get("price"))
+        state["price"] = price
+        state["price_ts"] = tick_now
+        state["ws_last_tick"] = tick_now
+        state["last_data_ts"] = tick_now
+        state["price_source"] = "WS"
+        state["ws_transport_connected"] = True
+        first_ready_tick = not bool(state.get("ws_ready"))
+        state["ws_ready"] = True
     price_buffer.append(price)
     volume_buffer.append(size)
     update_orderflow(trade)
@@ -19811,10 +20478,9 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     latency = max(0, (time.time() - trade_ts) * 1000)
     with state_lock:
         state["diag"].update({"ws_latency_ms": round(latency, 1)})
-        state["price_source"] = "WS"
-    if not state.get("ws_ready"):
-        state["ws_ready"] = True
+    if first_ready_tick:
         logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
+    _recompute_system_readiness(tick_now)
     _update_pending_order_price_extremes(price)
     with trade_lock:
         has_open = any(
@@ -19857,6 +20523,8 @@ def safe_ws_handler(message):
                 return
             if ev == "error":
                 logger.error(f"[WS] Bitfinex error: {data}")
+                _mark_ws_transport_disconnected("ERROR_EVENT")
+                _close_ws_app()
                 return
             return
         trades = _bitfinex_ws_trades_from_message(data)
@@ -19882,31 +20550,62 @@ def safe_ws_handler(message):
         set_execution_paused("THREAD_CRASH")
 
 def on_message(ws, message):
+    if not _is_current_ws_app(ws):
+        return
     try:
         safe_ws_handler(message)
     except Exception as e:
         logger.error(f"[WS FATAL] on_message: {e}")
 
+def _mark_ws_transport_disconnected(status: str = "DISCONNECTED") -> None:
+    with state_lock:
+        state["ws_transport_connected"] = False
+        state["ws_ready"] = False
+        state["last_ready_ts"] = 0
+        state["system_ready"] = False
+        state["allow_rest_price"] = True
+        state.setdefault("diag", {})["ws_status"] = status
+
+
+def _is_current_ws_app(ws) -> bool:
+    with ws_lock:
+        return bool(ws is not None and ws is ws_app)
+
+
 def on_open(ws):
     global ws_alive, ws_app
+    if not _is_current_ws_app(ws):
+        return
     logger.info(f"WS: Connected - subscribing Bitfinex trades {BITFINEX_WS_SYMBOL}")
     ws.send(json.dumps({"event": "subscribe", "channel": "trades", "symbol": BITFINEX_WS_SYMBOL}))
     with state_lock:
         state["ws_connected_ts"] = time.time()
+        state["ws_transport_connected"] = True
+        # A connected socket is not trading-ready until this new session emits
+        # a fresh trade tick. Never inherit ws_ready from a prior session.
+        state["ws_ready"] = False
+        state["last_ready_ts"] = 0
+        state["system_ready"] = False
+        state.setdefault("diag", {})["ws_status"] = "CONNECTED_WAITING_TICK"
     threading.Thread(target=ping_ws, args=(ws,), daemon=True).start()
 
 def on_error(ws, error):
+    if not _is_current_ws_app(ws):
+        return
     err_str = str(error or "").lower()
     if "already closed" in err_str or "'nonetype' object has no attribute 'sock'" in err_str:
         logger.debug(f"WS error (benign): {error}")
         return
     logger.warning(f"WS error: {error}")
+    _mark_ws_transport_disconnected("ERROR")
 
 def on_close(ws, code, reason):
+    if not _is_current_ws_app(ws):
+        return
     logger.warning(f"WS closed: code={code}, reason={reason}")
-    ws_sock = None
     global ws_alive
     ws_alive = False
+    _mark_ws_transport_disconnected()
     # Log only — do not pause execution on brief disconnects (watchdog handles stale/reconnect)
 
 def _close_ws_app():
@@ -19916,6 +20615,7 @@ def _close_ws_app():
         app = ws_app
         ws_app = None
         ws_alive = False
+    _mark_ws_transport_disconnected()
     if not app:
         return
     try:
@@ -19935,21 +20635,48 @@ def start_websocket():
     ws_url = BITFINEX_WS_URL
     while not shutdown_event.is_set():
         _close_ws_app()
+        app = None
         try:
             logger.info("Starting websocket connection")
             with ws_lock:
-                ws_app = websocket.WebSocketApp(ws_url, on_message=on_message, on_open=on_open, on_error=on_error, on_close=on_close)
+                app = websocket.WebSocketApp(
+                    ws_url,
+                    on_message=on_message,
+                    on_open=on_open,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                ws_app = app
                 ws_alive = True
-            ws_app.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=20, ping_timeout=10)
+            app.run_forever(
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                ping_interval=20,
+                ping_timeout=10,
+            )
         except Exception as e:
             logger.error(f"WS failure: {e}")
-        ws_alive = False
+        finally:
+            was_current = False
+            with ws_lock:
+                if ws_app is app:
+                    ws_app = None
+                    ws_alive = False
+                    was_current = True
+            if was_current:
+                _mark_ws_transport_disconnected()
+            if app is not None:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+        if shutdown_event.is_set():
+            break
         logger.warning("Websocket restarting in 5s")
-        time.sleep(5)
+        shutdown_event.wait(5)
 
 def ping_ws(ws):
     global ws_alive
-    while ws_alive and not shutdown_event.is_set():
+    while ws_alive and _is_current_ws_app(ws) and not shutdown_event.is_set():
         sock = getattr(ws, "sock", None)
         if not sock or not sock.connected:
             break
@@ -19965,44 +20692,47 @@ def ws_watchdog():
     try:
         while not shutdown_event.is_set():
             time.sleep(3)
-            price_ts = state.get("price_ts")
-            if price_ts is None:
-                continue
-            age = time.time() - price_ts
-            if age > WATCHDOG_WS_STALE_SEC:
-                now = time.time()
+            now = time.time()
+            with state_lock:
+                ws_tick = float(state.get("ws_last_tick") or 0)
+                connected = bool(state.get("ws_transport_connected"))
+                ws_state_ready = bool(state.get("ws_ready", False))
+            ws_age = (now - ws_tick) if ws_tick else float("inf")
+            ws_fresh = bool(
+                connected
+                and ws_state_ready
+                and ws_tick
+                and ws_age <= WATCHDOG_WS_STALE_SEC
+            )
+            if not ws_fresh:
+                # REST keeps dashboards and existing-position exits observable,
+                # but it must never satisfy or suppress the WS reconnect loop.
+                refresh_dashboard_market_snapshot(force=True)
                 backoff = min(ws_retry * 2, 30)
-                # Re-nudge when still stale after backoff (ws_reconnecting alone blocked retries).
                 if not ws_reconnecting or (now - last_nudge_ts) >= backoff:
-                    refresh_dashboard_market_snapshot(force=True)
-                    price_ts = state.get("price_ts")
-                    if price_ts is not None:
-                        age = time.time() - price_ts
-                    if age <= WATCHDOG_WS_STALE_SEC:
-                        logger.info(
-                            f"[WS] REST fallback restored freshness age={fmt(age)}s - skip reconnect"
-                        )
-                        ws_reconnecting = False
-                        continue
                     ws_reconnecting = True
-                    ws_stale_count = ws_stale_count + 1
+                    ws_stale_count += 1
                     last_nudge_ts = now
-                    logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) - nudging reconnect")
+                    logger.warning(
+                        f"[WS] TRANSPORT/TICK STALE connected={connected} "
+                        f"age={fmt(ws_age) if math.isfinite(ws_age) else 'never'}s "
+                        f"(count={ws_stale_count}) - nudging reconnect"
+                    )
                     _close_ws_app()
                     ws_retry = min(ws_retry + 1, 8)
             elif ws_reconnecting:
                 ws_reconnecting = False
                 ws_retry = 1
-                if age <= WATCHDOG_WS_STALE_SEC and state.get("execution_reason") in (
-                    "WS_STALE", "STALE_DATA_HARD_STOP", "THREAD_CRASH", "PRICE_STALE_OR_MISSING"
-                ):
-                    set_execution_paused("")
+                runtime = _recompute_system_readiness(now)
+                if runtime["system_ready"] and state.get("execution_reason") in _WS_RECOVERABLE_PAUSE_REASONS:
+                    _clear_execution_pause_if_reason(state.get("execution_reason"))
                     logger.info("[WS] Reconnect complete - execution resumed [PIPELINE ENFORCEMENT]")
             else:
-                if age <= WATCHDOG_WS_STALE_SEC and state.get("execution_reason") in (
+                runtime = _recompute_system_readiness(now)
+                if runtime["system_ready"] and state.get("execution_reason") in (
                     "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"
                 ):
-                    set_execution_paused("")
+                    _clear_execution_pause_if_reason(state.get("execution_reason"))
     except Exception as e:
         logger.exception("[CRITICAL] WS watchdog crash")
         set_execution_paused("THREAD_CRASH")
@@ -20019,60 +20749,69 @@ def state_monitor_loop():
             if now - last_bbo_mon_ts >= BBO_REFRESH_SEC:
                 refresh_bbo_state()
                 last_bbo_mon_ts = now
+            runtime = _recompute_system_readiness(now)
+            recover_reason = ""
+            should_pause_ws = False
             with state_lock:
-                state["heartbeat"] = int(time.time())
-                state["last_heartbeat"] = time.time()
-                validate_market_data()
-                data_age = time.time() - state.get("last_data_ts", 0)
-                if data_age <= 5:
-                    if state.get("execution_reason") == "STALE_DATA_HARD_STOP":
-                        logger.info("[RECOVERY] DATA FLOW RESTORED - ENGINE RESUMED")
-                        with state_lock:
-                            state["execution_paused"] = False
-                            state["execution_reason"] = ""
-                if state["ws_ready"] and state["ohlcv_ready"]:
-                    if state.get("last_ready_ts", 0) == 0:
-                        state["last_ready_ts"] = time.time()
-                    elif time.time() - state["last_ready_ts"] >= READY_STABLE_SEC:
-                        if not state.get("system_ready"):
-                            logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
-                        state["system_ready"] = True
-                        if state.get("execution_reason") == "THREAD_CRASH":
-                            set_execution_paused("")
-                            logger.info("[RECOVERY][STATE_SYNC] Execution resumed after WS/OHLCV recovery")
-                elif state["ws_ready"]:
-                    state["data_source"] = "ws_ready_waiting_bitfinex"
-                elif state["ohlcv_ready"]:
-                    state["data_source"] = "ws_ready_waiting_bitfinex"
+                state["heartbeat"] = int(now)
+                state["last_heartbeat"] = now
+                ws_tick = float(state.get("ws_last_tick") or 0)
+                ws_age = (now - ws_tick) if ws_tick else float("inf")
+                rest_tick = float(state.get("rest_last_tick") or 0)
+                rest_age = (now - rest_tick) if rest_tick else None
+                ws_transport_ready = bool(runtime["ws_transport_ready"])
+                if ws_transport_ready:
+                    state["data_source"] = "ws_ready"
+                elif rest_age is not None and rest_age < 30.0:
+                    state["data_source"] = "rest_fallback_waiting_ws"
+                elif state.get("ohlcv_ready"):
+                    state["data_source"] = "waiting_bitfinex_ws"
                 else:
                     state["data_source"] = "booting_bitfinex"
-                fresh_ts = state.get("price_ts") or state.get("ws_last_tick")
-                fresh_age = (time.time() - fresh_ts) if fresh_ts else 9999.0
-                ws_tick = state.get("ws_last_tick")
-                ws_age = (time.time() - ws_tick) if ws_tick else fresh_age
                 state["diag"]["ws_status"] = (
-                    "OK" if fresh_age < STALE_HARD_SEC else ("BOOTING" if not fresh_ts else "STALE")
+                    "OK"
+                    if ws_transport_ready
+                    else (
+                        "REST_FALLBACK"
+                        if rest_age is not None and rest_age < 30.0
+                        else ("BOOTING" if not ws_tick else "STALE")
+                    )
                 )
-                engine_age = time.time() - last_ohlcv_fetch
+                engine_age = now - last_ohlcv_fetch
                 state["diag"]["engine_status"] = "OK" if engine_age < 300 else "STALE"
                 state["diag"]["ai_status"] = "OK" if state["ai_enabled"] else "OFF"
-                if fresh_age > STALE_HARD_SEC:
+                if not ws_transport_ready:
                     state["ws_stale_count"] = state.get("ws_stale_count", 0) + 1
                 else:
                     state["ws_stale_count"] = 0
-                    if state.get("execution_reason") in ("WS_STALE", "THREAD_CRASH"):
-                        set_execution_paused("")
-                        logger.info("[RECOVERY][STATE_SYNC] Price feed fresh - execution resumed")
+                    if (
+                        runtime["system_ready"]
+                        and state.get("execution_reason") in (
+                            "WS_STALE",
+                            "STALE_DATA_HARD_STOP",
+                            "PRICE_STALE_OR_MISSING",
+                        )
+                    ):
+                        recover_reason = str(state.get("execution_reason") or "")
                 if (
                     state["ws_stale_count"] >= WS_STALE_STRIKES_FOR_PAUSE
-                    and fresh_age >= WS_EXEC_PAUSE_STALE_SEC
+                    and ws_age >= WS_EXEC_PAUSE_STALE_SEC
                 ):
-                    logger.error(
-                        f"[PIPELINE] WS sustained stale age={fmt(fresh_age)}s -> WS_STALE pause "
-                        f"(watchdog reconnecting; pending orders kept) [PIPELINE ENFORCEMENT]"
-                    )
-                    set_execution_paused("WS_STALE")
                     state["ws_stale_count"] = 0
+                    should_pause_ws = True
+            if recover_reason:
+                _clear_execution_pause_if_reason(recover_reason)
+                logger.info(
+                    f"[RECOVERY][STATE_SYNC] genuine WS readiness restored; "
+                    f"cleared {recover_reason} [PIPELINE ENFORCEMENT]"
+                )
+            elif should_pause_ws:
+                logger.error(
+                    f"[PIPELINE] WS sustained stale age="
+                    f"{fmt(ws_age) if math.isfinite(ws_age) else 'never'}s -> WS_STALE pause "
+                    f"(watchdog reconnecting; pending orders kept) [PIPELINE ENFORCEMENT]"
+                )
+                set_execution_paused("WS_STALE")
             fetch_ohlcv()
             update_ema()
             trend_info()
@@ -20123,25 +20862,29 @@ def state_monitor_loop():
                     )
                 except Exception as e:
                     logger.warning(f"[RESEARCH_KPI] periodic run failed: {e}")
-            price_ts = state.get("price_ts") or 0
-            ws_tick = state.get("ws_last_tick") or 0
-            ref_ts = max(price_ts, ws_tick)
-            if not ref_ts:
+            with state_lock:
+                price_ts = float(state.get("price_ts") or 0)
+                rest_price_ts = float(
+                    state.get("rest_price_ts")
+                    or state.get("rest_last_tick")
+                    or 0
+                )
+                ws_tick = float(state.get("ws_last_tick") or 0)
+            observable_price_ts = max(price_ts, rest_price_ts)
+            if not observable_price_ts:
                 continue
-            price_age = now - ref_ts
+            price_age = now - observable_price_ts
             if price_age > 8 and (now - last_rest_snapshot_ts) >= 10:
                 refresh_dashboard_market_snapshot(force=True)
                 last_rest_snapshot_ts = now
-            stale_age = price_age
-            if stale_age > 300:
-                logger.warning(f"WS stale for {stale_age:.0f}s")
+            ws_stale_age = (now - ws_tick) if ws_tick else float("inf")
+            if ws_stale_age > 300:
+                logger.warning(
+                    "WS stale for %ss",
+                    f"{ws_stale_age:.0f}" if math.isfinite(ws_stale_age) else "never",
+                )
                 if time.time() - last_stale_time > 120:
                     last_stale_time = time.time()
-            else:
-                with state_lock:
-                    if state["execution_paused"] and state["execution_reason"] in ["WS_STALE", "PRICE_STALE_OR_MISSING"]:
-                        set_execution_paused("")
-                        logger.info("[RECOVERY][STATE_SYNC] WS no longer stale - execution resumed")
             expired_ids = []
             with replay_lock:
                 for tid, buf in list(replay_buffers.items()):
@@ -20363,6 +21106,12 @@ def execute_order(signal, ai=None):
 def execute_market_order(signal):
     if _manual_pause_block_entry(signal, "MARKET_EXECUTE"):
         return False
+    if not can_progress_new_entry()[0]:
+        logger.warning(
+            f"[WS ENTRY FREEZE] refusing market entry trade_id={signal.get('trade_id')} "
+            f"until a genuine WS tick is fresh [PIPELINE ENFORCEMENT]"
+        )
+        return False
     if not guard_retired_lane_execution(signal.get("research_lane"), "execute_market_order", signal.get("trade_id")):
         return
     logger.info(f"[ORDER] MARKET EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
@@ -20392,6 +21141,19 @@ def execute_market_order(signal):
         "fill_sim": {k: v for k, v in sim.items() if k not in ("avg_price", "filled_qty")},
         "book_slippage_usd": sim.get("slippage_usd", 0),
     }
+    if execution_mode_for_lane(signal.get("research_lane")) == EXEC_MODE_LIVE:
+        submitted_id = _maybe_bitfinex_market_entry(signal, qty)
+        if not submitted_id:
+            signal["status"] = "BLOCKED"
+            signal["outcome"] = "BITFINEX_MARKET_SUBMIT_FAILED"
+            signal["exit_reason"] = "BITFINEX_MARKET_SUBMIT_FAILED"
+            logger.error(
+                f"[BITFINEX LIVE] market submit failed; no local position opened "
+                f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
+            )
+            return False
+        order["bitfinex_order_id"] = submitted_id
+        order["bitfinex_live_entry"] = True
     with trade_lock:
         pos = _build_open_position(order, signal, signal.get("ai", {}))
         lane_register_open_position(pos)
@@ -20401,7 +21163,6 @@ def execute_market_order(signal):
         master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": fill_px,"outcome": "OPEN"})
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED {signal['final_direction']} qty={qty} [PIPELINE ENFORCEMENT]")
-    _maybe_bitfinex_market_entry(signal, qty)
     _relay_mirror(
         "FILLED",
         {
@@ -20415,9 +21176,16 @@ def execute_market_order(signal):
         source_ts=time.time(),
     )
     pipeline_state_sync()
+    return True
 
 def create_limit_order(signal):
     if _manual_pause_block_entry(signal, "LIMIT_CREATE"):
+        return None
+    if not can_progress_new_entry()[0]:
+        logger.warning(
+            f"[WS ENTRY FREEZE] refusing limit entry trade_id={signal.get('trade_id')} "
+            f"until a genuine WS tick is fresh [PIPELINE ENFORCEMENT]"
+        )
         return None
     if not guard_retired_lane_execution(signal.get("research_lane"), "create_limit_order", signal.get("trade_id")):
         return None
@@ -20462,9 +21230,21 @@ def create_limit_order(signal):
     signal["order_created_ts"] = time.time()
     signal["status"] = "ORDERED"
     signal["order_placed"] = True
+    if execution_mode_for_lane(signal.get("research_lane")) == EXEC_MODE_LIVE:
+        submitted_id = _maybe_bitfinex_limit_entry(order, signal)
+        if not submitted_id:
+            signal["status"] = "BLOCKED"
+            signal["outcome"] = "BITFINEX_LIMIT_SUBMIT_FAILED"
+            signal["exit_reason"] = "BITFINEX_LIMIT_SUBMIT_FAILED"
+            signal["order_placed"] = False
+            logger.error(
+                f"[BITFINEX LIVE] limit submit failed; no local pending order "
+                f"registered trade_id={signal.get('trade_id')} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+            return None
     with trade_lock:
         lane_register_pending_order(order)
-    _maybe_bitfinex_limit_entry(order, signal)
     _relay_mirror(
         "ORDER_PLACED",
         {
@@ -20517,7 +21297,26 @@ def _expired_already_recorded(trade_id: str) -> bool:
 
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
-    _maybe_bitfinex_cancel(source)
+    if source.get("bitfinex_order_id"):
+        # This recorder is intentionally I/O-free. Every real exchange order
+        # must first pass _cancel_pending_order_confirmed(), which performs the
+        # private cancellation outside trade_lock and clears the exchange id
+        # only after confirmation. A forgotten caller therefore fails closed
+        # instead of performing private I/O from an unknown lock context.
+        with trade_lock:
+            source["status"] = "CANCEL_PENDING_LIVE"
+            source["cancel_pending_reason"] = reason
+            if source not in pending_orders:
+                pending_orders.append(source)
+            lane_bucket = lane_pending_orders[_ensure_lane_bucket(source)]
+            if source not in lane_bucket:
+                lane_bucket.append(source)
+        logger.critical(
+            f"[BITFINEX LIVE] expiry refused before confirmed cancel; retained tracked order "
+            f"trade_id={source.get('trade_id')} reason={reason} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return None
     tid = source.get("trade_id")
     if _expired_already_recorded(tid):
         return None
@@ -20672,6 +21471,144 @@ def _record_expired_order(source: dict, reason: str):
     return row
 
 
+def _cancel_pending_order_confirmed(
+    order: dict,
+    reason: str,
+    *,
+    record_expired: bool = True,
+    expire_signal: bool = True,
+    final_status: str = "CANCELLED",
+) -> dict:
+    """Cancel one pending entry and finalize local state only after confirmation.
+
+    The private Bitfinex request is deliberately made between two short
+    trade_lock sections. Failed/unavailable cancellation keeps the original
+    exchange order id and the order in both pending registries with the
+    non-progressing ``CANCEL_PENDING_LIVE`` status. Local paper orders need no
+    exchange confirmation and finalize immediately.
+    """
+    result = {
+        "trade_id": "",
+        "exchange_order_id": "",
+        "confirmed": False,
+        "finalized": False,
+        "retained": False,
+        "failure_reason": "",
+    }
+    if not isinstance(order, dict):
+        result["failure_reason"] = "INVALID_ORDER"
+        return result
+
+    tid = str(order.get("trade_id") or "")
+    result["trade_id"] = tid
+    with trade_lock:
+        oid = str(order.get("bitfinex_order_id") or "")
+        result["exchange_order_id"] = oid
+        current_status = str(order.get("status") or "").upper()
+        if current_status in (
+            "FILLED",
+            "FILLED_ON_EXCHANGE",
+            "OPEN",
+            "CLOSED",
+            "COMPLETE",
+        ):
+            result["failure_reason"] = "ALREADY_FILLED_OR_CLOSED"
+            return result
+        if current_status in ("CANCELLED", "EXPIRED", "REJECTED") and not oid:
+            result["failure_reason"] = "ALREADY_FINALIZED"
+            return result
+        if oid:
+            # Freeze every local fill/chase path while the private cancellation
+            # is in flight, but retain the deterministic exchange handle.
+            order["status"] = "CANCEL_PENDING_LIVE"
+            order["cancel_pending_reason"] = reason
+            order["_cancel_in_progress_oid"] = oid
+            if order not in pending_orders:
+                pending_orders.append(order)
+            lane_bucket = lane_pending_orders[_ensure_lane_bucket(order)]
+            if order not in lane_bucket:
+                lane_bucket.append(order)
+
+    if oid:
+        # RLock exposes _is_owned on CPython. If a caller accidentally invokes
+        # this helper under an outer trade_lock, fail closed without making a
+        # private request; the reconcile loop can safely retry later.
+        lock_owned = getattr(trade_lock, "_is_owned", lambda: False)()
+        if lock_owned:
+            with trade_lock:
+                order.pop("_cancel_in_progress_oid", None)
+            result.update(
+                retained=True,
+                failure_reason="TRADE_LOCK_HELD",
+            )
+            logger.critical(
+                f"[BITFINEX LIVE] cancel deferred because caller holds trade_lock "
+                f"trade_id={tid} oid={oid} reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+            return result
+        if not _maybe_bitfinex_cancel(order):
+            with trade_lock:
+                order.pop("_cancel_in_progress_oid", None)
+                order["status"] = "CANCEL_PENDING_LIVE"
+                order["cancel_pending_reason"] = reason
+                if order not in pending_orders:
+                    pending_orders.append(order)
+                lane_bucket = lane_pending_orders[_ensure_lane_bucket(order)]
+                if order not in lane_bucket:
+                    lane_bucket.append(order)
+            result.update(
+                retained=True,
+                failure_reason="CANCEL_UNCONFIRMED",
+            )
+            logger.critical(
+                f"[BITFINEX LIVE] cancel not confirmed; retained tracked order "
+                f"trade_id={tid} oid={oid} reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+            return result
+
+    with trade_lock:
+        current_oid = str(order.get("bitfinex_order_id") or "")
+        current_status = str(order.get("status") or "").upper()
+        order.pop("_cancel_in_progress_oid", None)
+        if current_status in (
+            "FILLED",
+            "FILLED_ON_EXCHANGE",
+            "OPEN",
+            "CLOSED",
+            "COMPLETE",
+        ):
+            result.update(
+                retained=bool(current_oid),
+                failure_reason="EXCHANGE_FILL_RACE",
+            )
+            return result
+        if oid and current_oid not in ("", oid):
+            order["status"] = "CANCEL_PENDING_LIVE"
+            order["cancel_pending_reason"] = reason
+            result.update(
+                retained=True,
+                failure_reason="ORDER_ID_CHANGED",
+            )
+            return result
+        if order in pending_orders:
+            lane_unregister_pending_order(order)
+        if oid:
+            order["bitfinex_order_id"] = None
+        order["status"] = str(final_status or "CANCELLED").upper()
+        order["cancel_confirmed"] = True
+        order["cancel_confirmed_reason"] = reason
+        order["cancel_confirmed_ts"] = time.time()
+        order.pop("cancel_pending_reason", None)
+
+    result["confirmed"] = True
+    result["finalized"] = True
+    if record_expired:
+        result["expired_row"] = _record_expired_order(order, reason)
+    if expire_signal:
+        result["signal_expired"] = bool(expire_signal_for_order(order, reason))
+    return result
+
+
 def _log_shadow_vs_live_entry(signal: dict, live_limit_price: float, entry_mode: str):
     """Per-APPROVE audit: shadow (approve-time) price vs live resting limit."""
     tid = signal.get("trade_id")
@@ -20786,15 +21723,34 @@ def cleanup_expired_orders():
         )
         if now < entry_deadline:
             continue
-        # Claim removal atomically. Persistence/funnel/logging then run without
-        # starving /api/relay-execution-state.
         with trade_lock:
-            if order not in pending_orders or order.get("status") != "PENDING":
+            if (
+                order not in pending_orders
+                or str(order.get("status") or "").upper()
+                not in ("PENDING", "CANCEL_PENDING_LIVE")
+            ):
                 continue
-            lane_unregister_pending_order(order)
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            "TTL_EXPIRED",
+            record_expired=True,
+            expire_signal=True,
+        )
+        if not outcome.get("finalized"):
+            _agent_dbg(
+                "H2",
+                "cleanup_expired_orders",
+                "cancel_unconfirmed_retained",
+                {
+                    "trade_id": order.get("trade_id"),
+                    "age_sec": int(age),
+                    "failure_reason": outcome.get("failure_reason"),
+                },
+            )
+            continue
+        sig_ok = bool(outcome.get("signal_expired"))
+        with trade_lock:
             pending_left = len(pending_orders)
-        _record_expired_order(order, "TTL_EXPIRED")
-        sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
         try:
             from execution_funnel import funnel_on_expire
             funnel_on_expire(order, "TTL_EXPIRED")
@@ -20805,6 +21761,7 @@ def cleanup_expired_orders():
         logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
     if expired_n:
         pipeline_state_sync()
+    return expired_n
 
 def update_orders_state():
     logger.debug("[ENGINE] update_orders_state called")
@@ -20818,9 +21775,15 @@ def position_manager():
     try:
         while not shutdown_event.is_set():
             if is_engine_halted():
+                # A market-data hard stop freezes new pending/chase/fill work,
+                # but protective exits for already-open positions must continue
+                # from the observable REST fallback price.
+                refresh_bbo_state()
+                cleanup_expired_orders()
+                process_positions()
                 time.sleep(5)
                 continue
-            price = state.get("price")
+            price = _observable_exit_price()
             if not price or price <= 0:
                 time.sleep(1)
                 continue
@@ -20847,6 +21810,15 @@ def should_skip_unprofitable_profit_exit(exit_reason: str, net_pnl: float) -> bo
         float(net_pnl) <= 0
         and str(exit_reason or "").upper() in _FEE_FILTERABLE_PROFIT_EXITS
     )
+
+
+def _record_bitfinex_close_failure(trade_id: str, exit_reason: str) -> None:
+    with state_lock:
+        state["last_bitfinex_close_failure"] = {
+            "trade_id": trade_id,
+            "exit_reason": exit_reason,
+            "ts": time.time(),
+        }
 
 
 def close_position(pos: dict, exit_reason: str):
@@ -20911,6 +21883,22 @@ def close_position(pos: dict, exit_reason: str):
             # CRITICAL: clear the in-progress flag so this position is not frozen
             # OPEN forever (stop-loss/ladder exits must still be able to run on it).
             pos["_close_in_progress"] = False
+            return
+        requires_private_close = bool(
+            pos.get("bitfinex_position_id")
+            or pos.get("bitfinex_order_id")
+            or pos.get("bitfinex_live_entry")
+        )
+        if requires_private_close and not _maybe_bitfinex_close(pos, exit_reason):
+            pos["_close_in_progress"] = False
+            _record_bitfinex_close_failure(trade_id, exit_reason)
+            set_execution_paused("BITFINEX_CLOSE_FAILED")
+            _disarm_live_control("BITFINEX_CLOSE_FAILED")
+            logger.critical(
+                f"[BITFINEX LIVE] reduce-only close not confirmed; retained local "
+                f"position trade_id={trade_id} reason={exit_reason} "
+                "[PIPELINE ENFORCEMENT]"
+            )
             return
 
         entry_ts = float(pos.get("entry_ts") or 0)
@@ -21168,8 +22156,6 @@ def close_position(pos: dict, exit_reason: str):
         },
         source_ts=time.time(),
     )
-    _maybe_bitfinex_close(pos, exit_reason)
-
     with state_lock:
         a = state.setdefault("analytics", {})
         bands = a.setdefault("ai_bands", {})
@@ -21197,7 +22183,15 @@ def close_position(pos: dict, exit_reason: str):
     _push_showcase_relay_event(
         "POSITION_CLOSED",
         trade_id,
-        {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
+        {
+            "exit_reason": exit_reason,
+            "direction": pos.get("dir"),
+            "exit_price": price,
+            "research_lane": (
+                pos.get("research_lane")
+                or (master or {}).get("research_lane")
+            ),
+        },
     )
     bridge = get_genome_bridge()
     if bridge:
@@ -21547,17 +22541,18 @@ _DASHBOARD_BOOTSTRAP_COMPLETE = False
 # ============================================================================
 # EMERGENCY HARDENING — AI-key drain protection (2026-07-03)
 # ----------------------------------------------------------------------------
-# The bot is a separate Flask app on bot.doxxedcrypto.digital:7002 with its own
+# The bot is a separate Flask app on the canonical Fly :7002 runtime with its own
 # DEEPSEEK_API_KEY. It is NOT behind the apps/api rate limiter. Unauthenticated
 # POSTs to AI-influencing endpoints (toggle_continuous_ai_research, set_threshold,
 # toggle_continuous_ai_direct, ...) let an attacker crank the trading loop into
 # calling DeepSeek every cycle, draining the key. This block adds:
 #   1. Per-IP in-memory rate limiting on all /api/* requests
 #   2. Tight per-IP cap on AI-influencing POST endpoints (10/hour/IP)
-#   3. Optional admin-token gate (env BOT_ADMIN_TOKEN): if set, all state-mutating
-#      POST/PUT/DELETE /api/* endpoints require the token via cookie or
-#      X-Bot-Admin-Token header. The / route sets the cookie when visited with
-#      ?admin_token=... so the user's own dashboard keeps working.
+#   3. Fail-closed admin-token gate (env BOT_ADMIN_TOKEN): all remote
+#      state-mutating POST/PUT/DELETE /api/* endpoints require the token via
+#      cookie or X-Bot-Admin-Token header. Direct loopback remains available
+#      only for the narrow desktop recovery path. The Fly wrapper refuses to
+#      boot if the token is missing.
 # This does NOT touch trading logic — only the HTTP ingress policy.
 # ============================================================================
 from collections import defaultdict as _dd
@@ -21653,7 +22648,10 @@ def _rate_check(log: dict, key: str, window_s: int, limit: int) -> bool:
 def _admin_authed() -> bool:
     """True if the request carries the admin token (cookie or header)."""
     if not _BOT_ADMIN_TOKEN:
-        return True  # gate disabled when no token configured (backward compatible)
+        # Never turn a missing production secret into an open remote control
+        # surface. Local tests/recovery may still use a direct, unproxied
+        # loopback request; the canonical Fly wrapper requires the secret.
+        return _is_direct_local_control(_client_ip())
     if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
         return True
     if request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
@@ -21745,7 +22743,7 @@ def _emergency_api_guard():
         return None  # CORS preflight — let route handlers respond
 
     # The home bridge is a direct 127.0.0.1 caller. Allow only its narrow
-    # pause/resume path during secret rotation. Cloudflare/proxy requests carry
+    # pause/resume path during secret rotation. Remote/proxy requests carry
     # forwarding headers and therefore remain protected by BOT_ADMIN_TOKEN.
     if (
         method == "POST"
@@ -21755,7 +22753,7 @@ def _emergency_api_guard():
         return None
 
     # Everything else (POST/PUT/DELETE, or GETs not in the safe list) requires
-    # the admin token when BOT_ADMIN_TOKEN is configured.
+    # the admin token remotely and fails closed if the secret is missing.
     if not _admin_authed():
         resp = jsonify({"error": "unauthorized — admin token required"})
         resp.status_code = 401
@@ -21779,6 +22777,7 @@ state_lock = threading.RLock()
 trade_lock = threading.RLock()
 position_close_lock = threading.RLock()
 position_evaluation_lock = threading.Lock()
+_live_control_lock = threading.RLock()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(
@@ -22659,6 +23658,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Volume >{_TB_VOL_DANGER:.1f} = danger",
                 "AI confidence not requested",
                 f"Composite score >={_TB_MIN_SCORE:.1f}",
+                "Local support/resistance limit",
                 f"{_tb_policy}",
                 f"Peak >={_tb_min_peak:.0f}% -> floor {_tb_floor:.0f}%",
                 f"Ladder {lane_ladder_label}",
@@ -22976,7 +23976,7 @@ def build_static_pathway_lane_specs() -> dict:
             ),
         })
     scenario_c_continuous = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
-    _continuous_policy_id = "continuous_shared_direction_gap_v1"
+    _continuous_policy_id = "continuous_shared_direction_gap_structural_v2"
     _continuous_entry_filters = {
         "ai_probability_bucket": "not requested; not an entry gate",
         "entry_mode": "SHARED_DIRECTION_IMMEDIATE_LIMIT",
@@ -22990,7 +23990,8 @@ def build_static_pathway_lane_specs() -> dict:
             "STRONG_APPROVE": "gap >=15",
         },
         "confidence_weight": 0.0,
-        "limit_entry": "deterministic pullback limit, then bounded 25% chase",
+        "limit_entry": "nearest valid local support/resistance, then bounded 25% chase",
+        "entry_limit_policy": STRUCTURAL_ENTRY_POLICY_VERSION,
         "shared_call_consumers": [
             RESEARCH_LANE_CONTINUOUS,
             RESEARCH_LANE_TYPE_B_HUNTER_V1,
@@ -23017,7 +24018,7 @@ def build_static_pathway_lane_specs() -> dict:
             "Gap 10-14 APPROVE",
             "Gap >=15 STRONG APPROVE",
             "AI confidence not requested",
-            "Deterministic pullback limit",
+            "Local support/resistance limit",
             f"Ladder {get_lane_ladder(RESEARCH_LANE_CONTINUOUS)[1]}",
             "25% chase",
             _continuous_policy_id,
@@ -23028,7 +24029,7 @@ def build_static_pathway_lane_specs() -> dict:
         "entry": {
             "spawn": "Evaluate every shared AI_SCAN direction result; accepted gap tiers may create an order",
             "trigger": "Higher LONG/SHORT score + raw score gap >=5",
-            "entry_path": "AI_DIRECT",
+            "entry_path": "LOCAL_SR_DIRECT",
             "fill_path": "AI_DIRECT_CHASE",
             "ai_path": "One shared direction-only AI call; no separate Continuous or Type B call",
             "ai_cadence": ai_cadence,
@@ -23064,7 +24065,9 @@ def build_static_pathway_lane_specs() -> dict:
                 "  - The higher score deterministically selects LONG or SHORT; raw NO_TRADE cannot suppress evaluation",
                 "  - Reject gap<5; execute SOFT_APPROVE 5-9, APPROVE 10-14, STRONG_APPROVE >=15",
                 "  - AI confidence/win probability is not requested and has zero entry weight",
-                "  - Tile ON and capacity available: submit its own deterministic pullback limit",
+                "  - Derive the maker limit from nearest valid local support/resistance; no percentage pullback",
+                "  - If no valid structural level exists within 1%, fail closed and show the block reason",
+                "  - Tile ON and capacity available: enter exact virtual-chase counting",
                 "  - Chase the pending limit by the bounded 25% shared chase policy; manage its own exit and ledger",
                 f"Policy: {_continuous_policy_id} (introduced 2026-07-19)",
                 _shared_lane_gate_runtime_summary(RESEARCH_LANE_CONTINUOUS),
@@ -24471,18 +25474,9 @@ HTML = """<!DOCTYPE html>
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Direction-only entries are anchored to local support/resistance.</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<label>Pullback %:</label>
-<select id="pullbackThresh">
-  <option value="0.0">0.0% (instant)</option>
-  <option value="0.1" selected>0.1%</option>
-  <option value="0.2">0.2%</option>
-  <option value="0.3">0.3%</option>
-  <option value="0.4">0.4%</option>
-  <option value="0.5">0.5%</option>
-  <option value="0.6">0.6%</option>
-</select><br>
+<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry anchor:</strong> nearest valid local support for LONG / resistance for SHORT (+/− $15 maker buffer, max 1% distance). No percentage pullback control.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
@@ -24574,7 +25568,7 @@ HTML = """<!DOCTYPE html>
 <h3>AI Decision (current cycle)</h3>
 <p><strong>AI Status:</strong> <span id="aiDecision">-</span> <span id="aiStatusNote" style="color:#8b949e;font-size:0.9em;"></span></p>
 <p><strong>Research Model:</strong> <span id="aiResearchModel">-</span></p>
-<p><strong>AI Win Prob:</strong> <span id="aiProb">N/A — not requested</span></p>
+<p><strong>Directional score gap:</strong> <span id="aiGap">-</span></p>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
@@ -24664,7 +25658,7 @@ HTML = """<!DOCTYPE html>
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -24690,7 +25684,6 @@ HTML = """<!DOCTYPE html>
 </div>
 <div id="pathwayTabSession" class="pathway-tab-panel" style="display:none;">
   <p id="pathwaySessionSummary" style="color:#8b949e;margin-bottom:10px;"></p>
-  <h3>AI Bands</h3><table id="aiBandsAnalytics"></table>
   <h3>Exit Reasons</h3><table id="exitReasonsAnalytics"></table>
 </div>
 <div id="pathwayTabKpis" class="pathway-tab-panel" style="display:none;">
@@ -24821,7 +25814,8 @@ DASHBOARD_JS = """(function () {
         '<div><strong>AI reviewer:</strong> ' + (gates.ai_reviewer_enabled ? 'ON' : 'OFF') + '</div>' +
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
-        '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>';
+        '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + '</div>' +
+        '<div><strong>Entry anchor:</strong> local support/resistance · <strong>Policy:</strong> ' + (gates.entry_limit_policy || 'structural') + '</div>';
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -25752,9 +26746,16 @@ DASHBOARD_JS = """(function () {
           'TYPE_B_HUNTER': 'Type B Hunter'
         };
         safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
-        const aiProbEl = document.getElementById('aiProb');
-        if (aiProbEl) {
-          aiProbEl.innerText = 'N/A — not requested';
+        const aiGapEl = document.getElementById('aiGap');
+        if (aiGapEl) {
+          const longScore = Number(d.last_ai?.long_score ?? d.last_ai?.factors?.long_score);
+          const shortScore = Number(d.last_ai?.short_score ?? d.last_ai?.factors?.short_score);
+          if (Number.isFinite(longScore) && Number.isFinite(shortScore)) {
+            const rawGap = Math.abs(longScore - shortScore);
+            aiGapEl.innerText = `raw ${rawGap}/100 · execution bucket ${Math.floor(rawGap / 10)}`;
+          } else {
+            aiGapEl.innerText = '-';
+          }
         }
         const msym = document.getElementById('marketSymbol');
         if (msym && d.market_symbol) msym.innerText = d.market_symbol;
@@ -25795,39 +26796,27 @@ DASHBOARD_JS = """(function () {
         }
         const gate = document.getElementById('executionGateHint');
         if (gate) {
-          const prob = d.last_ai?.win_prob;
-          const bands = d.ai_execution_bands || {};
-          const enabledBands = Object.keys(bands).filter(k => bands[k]);
           const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
-          const modeLine = '<span style="color:#10b981">Independent lanes</span> — CONTINUOUS benchmark ~'
-            + (d.ai_cooldown_sec || 180) + 's AI · 7 spawn/shadow lanes on CONTINUOUS APPROVE';
-          const bandLabel = enabledBands.length
-            ? enabledBands.join(', ')
-            : (d.ai_threshold != null ? '≥ ' + d.ai_threshold + '%' : '—');
+          const longScore = Number(d.last_ai?.long_score ?? d.last_ai?.factors?.long_score);
+          const shortScore = Number(d.last_ai?.short_score ?? d.last_ai?.factors?.short_score);
+          const rawGap = Number.isFinite(longScore) && Number.isFinite(shortScore)
+            ? Math.abs(longScore - shortScore)
+            : null;
+          const gapLabel = rawGap == null ? 'gap unavailable' : `raw gap ${rawGap} · bucket ${Math.floor(rawGap / 10)}`;
+          const modeLine = '<span style="color:#10b981">Shared direction lanes</span> — ~'
+            + (d.ai_cooldown_sec || 180) + 's AI · local S/R entry · exact virtual chase';
           if (dec === 'APPROVE') {
             if (lao.status === 'EXECUTED') {
-              gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
+              gate.innerHTML = `<span class="green">Last APPROVE (${gapLabel}) → EXECUTED</span>`;
             } else if (lao.status === 'BLOCKED') {
-              gate.innerHTML = `<span class="red">Last APPROVE ${prob}% → BLOCKED: ${lao.reason || '?'} (eff=${lao.effective_threshold ?? '-'}, edge=${lao.edge_at_approve ?? '-'})</span>`;
-            } else if (prob != null) {
-              const ok = enabledBands.length
-                ? enabledBands.some(b => {
-                    const p = parseFloat(prob);
-                    if (b === '65+') return p >= 65;
-                    if (b === '60-66') return p >= 60 && p <= 66;
-                    const parts = b.split('-');
-                    if (parts.length !== 2) return false;
-                    return p >= parseFloat(parts[0]) && p < parseFloat(parts[1]);
-                  })
-                : (d.ai_threshold != null && prob >= d.ai_threshold);
-              gate.innerHTML = ok
-                ? `<span class="green">Last APPROVE: AI ${prob}% in bands [${bandLabel}] → passing execution gates…</span>`
-                : `<span class="red">Last APPROVE: AI ${prob}% not in bands [${bandLabel}] → blocked (BELOW_THRESHOLD)</span>`;
+              gate.innerHTML = `<span class="red">Last APPROVE (${gapLabel}) → BLOCKED: ${lao.reason || '?'}</span>`;
+            } else {
+              gate.innerHTML = `<span style="color:#fbbf24">Last APPROVE (${gapLabel}) → waiting for structural/chase checks</span>`;
             }
           } else if (!aiCalled) {
-            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">DeepSeek not called this cycle — ' + (dai.note || skipBlk.skip || 'waiting for edge ≥ threshold') + '</span>';
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">DeepSeek not called this cycle — ' + (dai.note || skipBlk.skip || 'waiting for periodic direction scan') + '</span>';
           } else {
-            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">AI bands: ' + bandLabel + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">Last AI: ' + (dec || '-') + ' · ' + gapLabel + '</span>';
           }
         }
         safeText('aiReason', d.last_ai?.reason || d.ai_reason || '-');
@@ -25862,7 +26851,7 @@ DASHBOARD_JS = """(function () {
         const contAiMode = document.getElementById('continuousAiModeNote');
         if (contAiMode) {
           contAiMode.innerHTML = contAiOn
-            ? '<span style="color:#10b981">INDEPENDENT LANE</span> — ~3 min AI when edge &gt; 0; AI_DIRECT + fills-first; CONTINUOUS benchmark frozen.'
+            ? '<span style="color:#10b981">SHARED DIRECTION</span> — ~3 min direction call; local S/R anchor; exact virtual-chase execution.'
             : '<span style="color:#fbbf24">OFF</span> — no periodic sole-AI calls; spawn lanes inactive until parent APPROVE.';
         }
         const contAiList = document.getElementById('continuousAiFeatureList');
@@ -26000,10 +26989,6 @@ DASHBOARD_JS = """(function () {
         }
         if (d.edge_threshold_max !== undefined) {
           syncEdgeThresholdMaxSelect(d.edge_threshold_max);
-        }
-        if (d.pullback_threshold != null && d.pullback_threshold !== '') {
-          const pb = document.getElementById('pullbackThresh');
-          if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
         const capWarn = document.getElementById('capacityWarningBanner');
         if (capWarn) {
@@ -26185,7 +27170,6 @@ DASHBOARD_JS = """(function () {
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
             <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
-            <td>${t.ai_band || '-'}</td>
           </tr>
         `).join(''));
         const tradesHint = document.getElementById('tradesTableHint');
@@ -26253,14 +27237,6 @@ DASHBOARD_JS = """(function () {
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
         }).join('') : '<tr><td colspan="11" style="color:#8b949e">No AI calls yet this session</td></tr>');
-        safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
-          <tr>
-            <td>${k}%</td>
-            <td>${v.trades}</td>
-            <td>${v.wins}</td>
-            <td>${v.pnl.toFixed(2)}</td>
-          </tr>
-        `).join(''));
         safeHTML('exitReasonsAnalytics', Object.entries(d.analytics?.exit_reasons || {}).map(([k,v])=>`
           <tr>
             <td>${k}</td>
@@ -26411,7 +27387,6 @@ DASHBOARD_JS = """(function () {
     document.addEventListener('DOMContentLoaded', () => {
       const dropdowns = {
         'leverage': '/api/set_leverage',
-        'pullbackThresh': '/api/set_pullback_threshold',
         'maxConcurrentPositions': '/api/set_max_active_signals',
         'edgeThreshold': '/api/set_edge_range',
         'edgeThresholdMax': '/api/set_edge_range',
@@ -26543,11 +27518,11 @@ def dashboard():
     resp = make_response(render_template_string(page))
     # If the owner visits /?admin_token=XXX, mint an http-only cookie so the
     # dashboard's own fetch() calls pass the _emergency_api_guard admin gate.
-    # Phone operators use https://bot.doxxedcrypto.digital/?admin_token=TOKEN once;
+    # Phone operators use the canonical Fly URL with ?admin_token=TOKEN once;
     # subsequent polls/saves ride the cookie (full /api/state + write access).
     tok = request.args.get("admin_token", "")
     if _BOT_ADMIN_TOKEN and tok == _BOT_ADMIN_TOKEN:
-        # Cloudflare tunnel terminates TLS; Flask often sees http on :7002.
+        # Fly terminates TLS before forwarding to Flask on :7002.
         forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
         secure = bool(request.is_secure or forwarded_proto == "https")
         resp.set_cookie(
@@ -26584,13 +27559,426 @@ def _bitfinex_live_active() -> bool:
         return False
 
 
-def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
+LIVE_EXPOSURE_AUDIT_MAX_AGE_SEC = max(
+    15.0,
+    float(os.getenv("LIVE_EXPOSURE_AUDIT_MAX_AGE_SEC", "75")),
+)
+
+
+def _exchange_position_size(row: dict):
+    if not isinstance(row, dict):
+        return None
+    for key in ("contracts", "amount", "size"):
+        try:
+            value = row.get(key)
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+    info = row.get("info")
+    if isinstance(info, dict):
+        for key in ("amount", "size", "contracts"):
+            try:
+                value = info.get(key)
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _exchange_exposure_audit_snapshot(now: float = None) -> dict:
+    now = float(now or time.time())
+    with state_lock:
+        audit = copy.deepcopy(state.get("exchange_sync_audit") or {})
+    checked_ts = float(audit.get("checked_ts") or 0)
+    age = (now - checked_ts) if checked_ts else None
+    audit["age_sec"] = age
+    audit["fresh"] = bool(
+        audit.get("authoritative")
+        and age is not None
+        and 0 <= age <= LIVE_EXPOSURE_AUDIT_MAX_AGE_SEC
+    )
+    return audit
+
+
+def _exchange_row_value(row, *keys, default=None):
+    """Read a unified/raw CCXT field without assuming object-style rows."""
+    if isinstance(row, dict):
+        for key in keys:
+            value = row.get(key)
+            if value not in (None, ""):
+                return value
+        info = row.get("info")
+        if isinstance(info, dict):
+            for key in keys:
+                value = info.get(key)
+                if value not in (None, ""):
+                    return value
+    else:
+        for key in keys:
+            value = getattr(row, key, None)
+            if value not in (None, ""):
+                return value
+    return default
+
+
+def _normalize_exchange_order_for_rebuild(row) -> dict:
+    cid = _exchange_row_value(
+        row,
+        "clientOrderId",
+        "client_order_id",
+        "cid",
+        default="",
+    )
+    return {
+        "id": str(_exchange_row_value(row, "id", "order_id", default="") or ""),
+        "symbol": _exchange_row_value(row, "symbol"),
+        "side": str(_exchange_row_value(row, "side", default="") or "").lower(),
+        "type": _exchange_row_value(row, "type"),
+        "amount": _exchange_row_value(row, "amount", "remaining", default=0),
+        "price": _exchange_row_value(row, "price", default=0),
+        "status": _exchange_row_value(row, "status"),
+        "filled": _exchange_row_value(row, "filled", default=0),
+        "client_order_id": str(cid or ""),
+        "cid": str(cid or ""),
+        "created_at": _exchange_row_value(
+            row,
+            "timestamp",
+            "created_at",
+            "mtsCreate",
+            default=None,
+        ),
+    }
+
+
+def _normalize_exchange_position_for_rebuild(row) -> dict:
+    amount = _exchange_position_size(row)
+    side = str(_exchange_row_value(row, "side", default="") or "").lower()
+    if not side and amount is not None:
+        side = "long" if amount > 0 else "short"
+    info = row.get("info") if isinstance(row, dict) else getattr(row, "info", {})
+    return {
+        "id": str(_exchange_row_value(row, "id", "position_id", default="") or ""),
+        "symbol": _exchange_row_value(row, "symbol"),
+        "side": side,
+        "contracts": amount,
+        "amount": amount,
+        "entry": _exchange_row_value(
+            row,
+            "entry",
+            "entryPrice",
+            "basePrice",
+            default=0,
+        ),
+        "mark": _exchange_row_value(row, "mark", "markPrice", default=0),
+        "leverage": _exchange_row_value(row, "leverage", default=None),
+        "client_order_id": str(
+            _exchange_row_value(
+                row,
+                "clientOrderId",
+                "client_order_id",
+                "cid",
+                default="",
+            )
+            or ""
+        ),
+        "info": dict(info) if isinstance(info, dict) else {},
+    }
+
+
+def _normalize_exchange_trade_for_rebuild(row) -> dict:
+    cid = _exchange_row_value(
+        row,
+        "clientOrderId",
+        "client_order_id",
+        "cid",
+        default="",
+    )
+    return {
+        "id": str(_exchange_row_value(row, "id", "trade_id", default="") or ""),
+        "order_id": str(
+            _exchange_row_value(
+                row,
+                "order",
+                "order_id",
+                "orderId",
+                "oid",
+                default="",
+            )
+            or ""
+        ),
+        "client_order_id": str(cid or ""),
+        "cid": str(cid or ""),
+        "symbol": _exchange_row_value(row, "symbol"),
+        "side": str(_exchange_row_value(row, "side", default="") or "").lower(),
+        "amount": _exchange_row_value(row, "amount", default=0),
+        "price": _exchange_row_value(row, "price", default=0),
+        "timestamp": _exchange_row_value(
+            row,
+            "timestamp",
+            "mtsCreate",
+            default=None,
+        ),
+    }
+
+
+def _managed_exchange_identity_snapshot() -> dict:
+    """Return only identities already proven to belong to this bot.
+
+    The executor sidecar survives a process restart and is the authoritative
+    fallback for an open limit submitted immediately before a crash. Arbitrary
+    exchange CIDs are never treated as ownership proof.
+    """
+    sidecar_order_ids = set()
+    try:
+        import bitfinex_live_executor as bx
+
+        sidecar = getattr(bx, "_STATE", {})
+        sidecar_order_ids = {
+            str(value)
+            for value in (sidecar.get("open_order_ids") or [])
+            if value not in (None, "")
+        }
+    except Exception:
+        sidecar_order_ids = set()
+    with trade_lock:
+        managed_rows = [
+            row
+            for row in list(pending_orders) + list(open_positions)
+            if isinstance(row, dict)
+            and (
+                row.get("bitfinex_live_entry")
+                or row.get("bitfinex_order_id")
+                or row.get("bitfinex_position_id")
+            )
+        ]
+        order_ids = {
+            str(row.get("bitfinex_order_id"))
+            for row in managed_rows
+            if row.get("bitfinex_order_id")
+        }
+        position_ids = {
+            str(row.get("bitfinex_position_id"))
+            for row in managed_rows
+            if row.get("bitfinex_position_id")
+        }
+        trade_ids = {
+            str(row.get("trade_id"))
+            for row in managed_rows
+            if row.get("trade_id")
+        }
+        pending_candidates = [
+            {
+                "row": row,
+                "order_id": str(row.get("bitfinex_order_id") or ""),
+                "trade_id": str(row.get("trade_id") or ""),
+                "direction": _normalize_order_side_to_dir(
+                    row.get("signal_dir") or row.get("dir") or row.get("side")
+                ),
+                "qty": abs(float(row.get("qty") or 0)),
+            }
+            for row in pending_orders
+            if isinstance(row, dict)
+            and row.get("bitfinex_order_id")
+            and row.get("status") in ("PENDING", "CANCEL_PENDING_LIVE")
+        ]
+    return {
+        "order_ids": order_ids | sidecar_order_ids,
+        "position_ids": position_ids,
+        "trade_ids": trade_ids,
+        "pending_candidates": pending_candidates,
+    }
+
+
+def _refresh_bitfinex_exposure_audit() -> dict:
+    """Authoritative private-read audit, independent of the live arm latch."""
+    checked_ts = time.time()
+    audit = {
+        "checked_ts": checked_ts,
+        "authoritative": False,
+        "fresh": False,
+        "flat": False,
+        "orders_synced": False,
+        "positions_synced": False,
+        "trades_synced": False,
+        "open_order_count": None,
+        "open_position_count": None,
+        "orphan_order_ids": [],
+        "orphan_position_ids": [],
+        "error": None,
+    }
+    if not _direct_private_exchange_owner() or bitfinex_private is None:
+        audit["error"] = "PRIVATE_API_UNAVAILABLE"
+        with state_lock:
+            state["exchange_sync_audit"] = audit
+        return audit
+    rebuild_payload = None
+    try:
+        exchange_orders = _exchange_call_with_retry(
+            lambda: bitfinex_private.fetch_open_orders(SYMBOL_CCXT),
+            label="BITFINEX_EXPOSURE_AUDIT_ORDERS",
+        ) or []
+        exchange_positions_raw = _exchange_call_with_retry(
+            lambda: bitfinex_private.fetch_positions([SYMBOL_CCXT]),
+            label="BITFINEX_EXPOSURE_AUDIT_POSITIONS",
+        ) or []
+        exchange_trades = []
+        trades_synced = False
+        trades_error = None
+        try:
+            exchange_trades = _exchange_call_with_retry(
+                lambda: bitfinex_private.fetch_my_trades(SYMBOL_CCXT, limit=50),
+                label="BITFINEX_EXPOSURE_AUDIT_TRADES",
+            ) or []
+            trades_synced = True
+        except Exception as exc:
+            trades_error = str(exc)[:200]
+        exchange_positions = [
+            row for row in exchange_positions_raw
+            if (
+                _exchange_position_size(row) is None
+                or abs(_exchange_position_size(row)) > 1e-9
+            )
+        ]
+        rebuild_payload = {
+            "open_orders": [
+                _normalize_exchange_order_for_rebuild(row)
+                for row in exchange_orders
+            ],
+            "positions": [
+                _normalize_exchange_position_for_rebuild(row)
+                for row in exchange_positions
+            ],
+            "recent_trades": [
+                _normalize_exchange_trade_for_rebuild(row)
+                for row in exchange_trades
+            ],
+            "rebuilt_at": checked_ts,
+            "orders_synced": True,
+            "positions_synced": True,
+            "trades_synced": trades_synced,
+        }
+        managed_identity = _managed_exchange_identity_snapshot()
+        with trade_lock:
+            live_local_positions = [
+                row for row in open_positions
+                if isinstance(row, dict)
+                and row.get("status") in ("OPEN", "FILLED")
+                and row.get("bitfinex_live_entry")
+            ]
+            # Bitfinex may aggregate several same-direction legs into one
+            # exchange position. Conservatively bind the exchange position id
+            # only when side and aggregate quantity agree.
+            if len(exchange_positions) == 1 and live_local_positions:
+                exp = exchange_positions[0]
+                exp_id = str(exp.get("id") or "") if isinstance(exp, dict) else ""
+                exp_size = _exchange_position_size(exp)
+                local_dirs = {
+                    str(row.get("dir") or "").upper()
+                    for row in live_local_positions
+                }
+                exp_side = str((exp or {}).get("side") or "").upper()
+                if not exp_side and exp_size is not None:
+                    exp_side = "LONG" if exp_size > 0 else "SHORT"
+                local_qty = sum(
+                    abs(float(row.get("qty") or 0))
+                    for row in live_local_positions
+                )
+                qty_matches = bool(
+                    exp_size is not None
+                    and local_qty > 0
+                    and abs(abs(exp_size) - local_qty)
+                    <= max(1e-8, local_qty * 0.05)
+                )
+                if (
+                    exp_id
+                    and len(local_dirs) == 1
+                    and exp_side in local_dirs
+                    and qty_matches
+                ):
+                    for row in live_local_positions:
+                        row["bitfinex_position_id"] = exp_id
+            managed_order_ids = set(managed_identity["order_ids"])
+            managed_position_ids = set(managed_identity["position_ids"])
+        exchange_order_ids = {
+            str(row.get("id"))
+            for row in exchange_orders
+            if isinstance(row, dict) and row.get("id")
+        }
+        exchange_position_ids = {
+            str(row.get("id"))
+            for row in exchange_positions
+            if isinstance(row, dict) and row.get("id")
+        }
+        unidentified_orders = [
+            f"UNIDENTIFIED_ORDER_{idx}"
+            for idx, row in enumerate(exchange_orders, 1)
+            if not isinstance(row, dict) or not row.get("id")
+        ]
+        unidentified_positions = [
+            f"UNIDENTIFIED_POSITION_{idx}"
+            for idx, row in enumerate(exchange_positions, 1)
+            if not isinstance(row, dict) or not row.get("id")
+        ]
+        audit.update({
+            "authoritative": True,
+            "fresh": True,
+            "flat": not exchange_orders and not exchange_positions,
+            "orders_synced": True,
+            "positions_synced": True,
+            "trades_synced": trades_synced,
+            "open_order_count": len(exchange_orders),
+            "open_position_count": len(exchange_positions),
+            "recent_trade_count": len(exchange_trades),
+            "trades_error": trades_error,
+            "orphan_order_ids": sorted(exchange_order_ids - managed_order_ids) + unidentified_orders,
+            "orphan_position_ids": sorted(exchange_position_ids - managed_position_ids) + unidentified_positions,
+        })
+    except Exception as exc:
+        audit["error"] = str(exc)[:300]
+    with state_lock:
+        state["exchange_sync_audit"] = audit
+        state["orphan_order_ids"] = list(audit.get("orphan_order_ids") or [])
+        state["orphan_position_ids"] = list(audit.get("orphan_position_ids") or [])
+    result = dict(audit)
+    if audit.get("authoritative") and rebuild_payload is not None:
+        # Ephemeral caller-only payload. Never store private exchange rows in
+        # state or expose them through health/dashboard JSON.
+        result["_rebuild_payload"] = rebuild_payload
+    return result
+
+
+def _mark_exchange_audit_nonflat_after_submit() -> None:
+    with state_lock:
+        audit = dict(state.get("exchange_sync_audit") or {})
+        audit.update({
+            "checked_ts": time.time(),
+            "authoritative": False,
+            "fresh": False,
+            "flat": False,
+            "error": "ENTRY_SUBMITTED_AWAITING_RECONCILE",
+        })
+        state["exchange_sync_audit"] = audit
+
+
+def _maybe_bitfinex_limit_entry(order: dict, signal: dict):
+    with _live_control_lock:
+        return _maybe_bitfinex_limit_entry_locked(order, signal)
+
+
+def _maybe_bitfinex_limit_entry_locked(order: dict, signal: dict):
     lane = _normalize_lane_key(signal or order or {})
     if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
         # These lanes are canonical local-paper sources. Their only live-money
         # route is the separately controlled platform relay.
         return
-    if not _bitfinex_live_active() or not _private_api_keys_ok():
+    entry_ok, block_reason, _runtime = can_open_live_entry(require_armed=True)
+    if not entry_ok:
+        logger.warning(
+            f"[BITFINEX LIVE] direct limit entry blocked reason={block_reason} "
+            f"trade_id={(signal or order or {}).get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
         return
     meta = trades_map.get((signal or {}).get("trade_id") or (order or {}).get("trade_id"), {})
     ai = meta.get("ai") or (signal or {}).get("ai") or {}
@@ -26616,21 +28004,36 @@ def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
         )
         if oid:
             order["bitfinex_order_id"] = oid
+            order["bitfinex_live_entry"] = True
+            _mark_exchange_audit_nonflat_after_submit()
+            return str(oid)
+        return None
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] limit hook failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
 
 
-def _maybe_bitfinex_market_entry(signal: dict, qty: float) -> None:
+def _maybe_bitfinex_market_entry(signal: dict, qty: float):
+    with _live_control_lock:
+        return _maybe_bitfinex_market_entry_locked(signal, qty)
+
+
+def _maybe_bitfinex_market_entry_locked(signal: dict, qty: float):
     lane = _normalize_lane_key(signal or {})
     if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
         # Never let the source bot race the platform relay with a second entry.
         return
-    if not _bitfinex_live_active() or not _private_api_keys_ok():
+    entry_ok, block_reason, _runtime = can_open_live_entry(require_armed=True)
+    if not entry_ok:
+        logger.warning(
+            f"[BITFINEX LIVE] direct market entry blocked reason={block_reason} "
+            f"trade_id={(signal or {}).get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
         return
     try:
         import bitfinex_live_executor as bx
 
-        bx.submit_market_entry(
+        submitted = bx.submit_market_entry(
             bitfinex_private,
             _exchange_call_with_retry,
             SYMBOL_CCXT,
@@ -26639,11 +28042,31 @@ def _maybe_bitfinex_market_entry(signal: dict, qty: float) -> None:
             int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE),
             str(signal.get("trade_id") or ""),
         )
+        if submitted:
+            raw_id = submitted.get("id") if isinstance(submitted, dict) else submitted
+            if raw_id in (None, ""):
+                logger.error(
+                    "[BITFINEX LIVE] market submit returned no exchange order id "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+                return None
+            submitted_id = str(raw_id)
+            signal["bitfinex_order_id"] = submitted_id
+            signal["bitfinex_live_entry"] = True
+            _mark_exchange_audit_nonflat_after_submit()
+            return submitted_id
+        return None
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] market entry hook failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
 
 
-def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> None:
+def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> bool:
+    with _live_control_lock:
+        return _maybe_bitfinex_close_locked(pos, exit_reason)
+
+
+def _maybe_bitfinex_close_locked(pos: dict, exit_reason: str) -> bool:
     lane = _normalize_lane_key(pos or {})
     if (
         lane in PLATFORM_RELAY_ELIGIBLE_LANES
@@ -26655,13 +28078,20 @@ def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> None:
         # A normal local-paper position is closed by its signed lifecycle on
         # the platform relay. Preserve direct close only for old/adopted source
         # positions carrying explicit exchange provenance.
-        return
-    if not _bitfinex_live_active() or not _private_api_keys_ok():
-        return
+        return False
+    exchange_provenance = bool(
+        (pos or {}).get("bitfinex_position_id")
+        or (pos or {}).get("bitfinex_order_id")
+    )
+    exit_only = bool(
+        lane and execution_mode_for_lane(lane) == EXEC_MODE_EXIT_ONLY
+    )
+    if not _direct_private_exchange_owner() or not (exchange_provenance or exit_only):
+        return False
     try:
         import bitfinex_live_executor as bx
 
-        bx.submit_market_close(
+        submitted = bx.submit_market_close(
             bitfinex_private,
             _exchange_call_with_retry,
             SYMBOL_CCXT,
@@ -26671,26 +28101,81 @@ def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> None:
             str(pos.get("trade_id") or ""),
             exit_reason=exit_reason,
         )
+        return bool(submitted)
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] close hook failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
 
 
-def _maybe_bitfinex_cancel(source: dict) -> None:
+def _maybe_bitfinex_cancel(source: dict) -> bool:
+    # Cancellation is risk-reducing and order-idempotent. Callers must route
+    # through _cancel_pending_order_confirmed(), which guarantees this private
+    # request runs without trade_lock/state_lock and finalizes local state only
+    # after confirmation.
+    if getattr(trade_lock, "_is_owned", lambda: False)():
+        logger.critical(
+            f"[BITFINEX LIVE] private cancel refused while trade_lock is held "
+            f"trade_id={source.get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
+        return False
+    return _maybe_bitfinex_cancel_locked(source)
+
+
+def _maybe_bitfinex_cancel_locked(source: dict) -> bool:
     oid = source.get("bitfinex_order_id")
-    if not oid or not _bitfinex_live_active() or not _private_api_keys_ok():
-        return
+    if not oid or not _direct_private_exchange_owner():
+        return False
     try:
         import bitfinex_live_executor as bx
 
-        bx.cancel_exchange_order(
+        return bool(bx.cancel_exchange_order(
             bitfinex_private,
             _exchange_call_with_retry,
             str(oid),
             SYMBOL_CCXT,
             str(source.get("trade_id") or ""),
-        )
+        ))
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] cancel hook failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
+
+
+def _cancel_managed_live_pending_entries(reason: str) -> dict:
+    """Cancel tracked exchange entry orders before/while the arm latch is OFF."""
+    out = {"cancelled": [], "failed": []}
+    with trade_lock:
+        candidates = [
+            row for row in pending_orders
+            if isinstance(row, dict)
+            and str(row.get("status") or "").upper()
+            not in ("CANCELLED", "CLOSED", "FILLED", "EXPIRED", "REJECTED")
+            and row.get("bitfinex_order_id")
+        ]
+    for order in candidates:
+        oid = str(order.get("bitfinex_order_id") or "")
+        tid = str(order.get("trade_id") or "")
+        expire_reason = f"LIVE_DISARM_{reason}"
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            expire_reason,
+            record_expired=True,
+            expire_signal=True,
+        )
+        if outcome.get("finalized"):
+            out["cancelled"].append({"trade_id": tid, "exchange_order_id": oid})
+        else:
+            out["failed"].append({
+                "trade_id": tid,
+                "exchange_order_id": oid,
+                "reason": outcome.get("failure_reason") or "CANCEL_FAILED",
+            })
+    if out["cancelled"] or out["failed"]:
+        logger.warning(
+            f"[BITFINEX LIVE] disarm cancellation reason={reason} "
+            f"cancelled={len(out['cancelled'])} failed={len(out['failed'])} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -26791,14 +28276,9 @@ def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
     if not isinstance(rebuilt, dict):
         return {"adopted": 0, "orphaned": 0, "skipped": 0}
     ex_orders = rebuilt.get("open_orders") or []
-    recent = rebuilt.get("recent_trades") or []
-    # Map cid -> trade_id from recent fills (second match key for attribution).
-    cid_to_tid = {}
-    for t in recent:
-        cid = (t or {}).get("client_order_id") or (t or {}).get("cid")
-        tid = (t or {}).get("id")
-        if cid and tid:
-            cid_to_tid[str(cid)] = str(tid)
+    identities = _managed_exchange_identity_snapshot()
+    owned_order_ids = set(identities.get("order_ids") or [])
+    owned_trade_ids = set(identities.get("trade_ids") or [])
 
     adopted = 0
     orphaned = 0
@@ -26824,20 +28304,21 @@ def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
                 skipped += 1
                 continue
             cid = str(exo.get("cid") or exo.get("client_order_id") or "")
-            tid = cid_to_tid.get(cid) or (cid if cid else None)
-            if not tid:
-                tid = f"reconcile-{oid}"
+            ownership_proven = bool(
+                oid in owned_order_ids
+                or (cid and cid in owned_trade_ids)
+            )
+            tid = cid or f"reconcile-{oid}"
             if tid in existing_tids:
                 # Same trade already tracked under a different exchange id — skip
                 # rather than double-counting exposure.
                 skipped += 1
                 continue
-            # Truly foreign (no cid, no recoverable trade_id beyond our generated
-            # placeholder) — surface on orphan_order_ids for the operator and
-            # NEVER adopt into the managed book (Q1 surface-only, no auto-cancel).
-            # Adopting would hand a manual/foreign order to process_limit_chase,
-            # which may reprice or cancel it.
-            if not cid and tid.startswith("reconcile-"):
+            # An arbitrary client ID is not ownership proof. Only a saved
+            # exchange OID (executor sidecar/local lifecycle) or a currently
+            # managed local trade ID may be adopted. Everything else remains
+            # foreign/orphaned and is never auto-cancelled or repriced.
+            if not ownership_proven:
                 with state_lock:
                     orphans = state.setdefault("orphan_order_ids", [])
                     if oid not in orphans:
@@ -26846,10 +28327,10 @@ def _adopt_from_rebuild(drift, rebuilt: dict) -> dict:
                             del orphans[: len(orphans) - 200]
                 orphaned += 1
                 logger.warning(
-                    f"[RECONCILE-ADOPT] surfacing foreign no-cid order oid={oid} as orphan "
+                    f"[RECONCILE-ADOPT] surfacing unowned order oid={oid} cid={cid or '-'} as orphan "
                     f"(NOT adopted — Q1 surface-only) [PIPELINE ENFORCEMENT]"
                 )
-                _reconcile_adopt_audit(oid, "ORPHAN_SURFACE", "RECONCILE_FOREIGN_NO_CID",
+                _reconcile_adopt_audit(oid, "ORPHAN_SURFACE", "RECONCILE_FOREIGN_UNOWNED",
                                        {"trade_id": tid})
                 continue
             entry = _adopted_pending_order_view(exo, tid)
@@ -26892,6 +28373,8 @@ def _adopted_open_position_view(exch_pos: dict, trade_id: str, fill_price: float
     ladder = exit_cfg.get("trail_ladder") or TRAIL_LADDER
     return {
         "trade_id": trade_id,
+        "bitfinex_live_entry": True,
+        "execution_mode": EXEC_MODE_LIVE,
         "dir": direction,
         "entry": entry,
         "fill_price": entry,
@@ -26920,80 +28403,242 @@ def _adopted_open_position_view(exch_pos: dict, trade_id: str, fill_price: float
 
 
 def _adopt_position_from_rebuild(rebuilt: dict) -> dict:
-    """Fold exchange open positions into open_positions (idempotent, under
-    trade_lock). For each exchange position NOT already in open_positions:
-      - recover fill_price from recent_trades matching the cid (when available)
-      - if fill_price cannot be recovered, surface the position on
-        state["orphan_position_ids"] with reason RECONCILE_STOP_REARM_REFUSED
-        and DO NOT re-arm a stop with a stale price (money-path safety).
+    """Adopt only exchange positions attributable to this bot.
+
+    A late limit fill can race disarm/cancellation. The local pending row then
+    remains while the exchange order disappears and an exchange position
+    appears. We conservatively match by a proven bot order ID (local lifecycle
+    or executor sidecar), direction and quantity. Foreign/manual positions are
+    surfaced as orphans and never auto-managed or auto-closed.
     """
     if not isinstance(rebuilt, dict):
         return {"adopted": 0, "orphaned": 0, "skipped": 0}
     ex_positions = rebuilt.get("positions") or []
     recent = rebuilt.get("recent_trades") or []
-    # Map cid -> {price, ts} from recent fills for fill_price recovery.
-    cid_to_fill = {}
-    for t in recent:
-        cid = (t or {}).get("client_order_id") or (t or {}).get("cid")
-        if cid:
-            cid_to_fill[str(cid)] = {
-                "price": float((t or {}).get("price") or 0),
-                "ts": float((t or {}).get("timestamp") or 0) / 1000.0 if (t or {}).get("timestamp") else time.time(),
-            }
+    open_exchange_order_ids = {
+        str(row.get("id") or "")
+        for row in (rebuilt.get("open_orders") or [])
+        if isinstance(row, dict) and row.get("id")
+    }
+    identities = _managed_exchange_identity_snapshot()
+    owned_order_ids = set(identities.get("order_ids") or [])
+    owned_trade_ids = set(identities.get("trade_ids") or [])
+    pending_candidates = list(identities.get("pending_candidates") or [])
+
+    owned_fills = []
+    for trade in recent:
+        if not isinstance(trade, dict):
+            continue
+        order_id = str(trade.get("order_id") or "")
+        cid = str(trade.get("client_order_id") or trade.get("cid") or "")
+        if not (
+            (order_id and order_id in owned_order_ids)
+            or (cid and cid in owned_trade_ids)
+        ):
+            continue
+        raw_ts = float(trade.get("timestamp") or 0)
+        if raw_ts > 10_000_000_000:
+            raw_ts /= 1000.0
+        owned_fills.append({
+            "order_id": order_id,
+            "trade_id": cid,
+            "direction": _normalize_order_side_to_dir(trade.get("side")),
+            "qty": abs(float(trade.get("amount") or 0)),
+            "price": float(trade.get("price") or 0),
+            "ts": raw_ts or time.time(),
+        })
+
+    def _qty_matches(actual: float, expected: float) -> bool:
+        return bool(
+            actual > 0
+            and expected > 0
+            and abs(actual - expected) <= max(1e-8, expected * 0.05)
+        )
 
     adopted = 0
     orphaned = 0
     skipped = 0
+    orphan_ids = []
+    audit_rows = []
     with trade_lock:
         existing_pids = {
-            str(p.get("bitfinex_position_id") or p.get("trade_id") or "")
+            str(p.get("bitfinex_position_id") or "")
             for p in open_positions
-            if isinstance(p, dict)
+            if isinstance(p, dict) and p.get("bitfinex_position_id")
         }
         existing_pids.discard("")
         existing_tids = {str(p.get("trade_id") or "") for p in open_positions if isinstance(p, dict)}
         for exp in ex_positions:
+            if not isinstance(exp, dict):
+                orphaned += 1
+                orphan_ids.append("UNIDENTIFIED_POSITION")
+                continue
             pid = str(exp.get("id") or "")
-            contracts = float(exp.get("contracts") or exp.get("amount") or 0)
+            contracts = abs(float(exp.get("contracts") or exp.get("amount") or 0))
             if abs(contracts) < 1e-9:
                 # Closed / flat row from fetch_positions — skip.
                 skipped += 1
                 continue
             info = exp.get("info") or {}
-            cid = str((info.get("cid") if isinstance(info, dict) else None) or exp.get("client_order_id") or "")
-            tid = cid or pid or f"reconcile-pos-{pid}"
-            key = pid or tid
-            if key and key in existing_pids:
+            exp_direction = _normalize_order_side_to_dir(exp.get("side"))
+            cid = str(
+                (info.get("cid") if isinstance(info, dict) else None)
+                or exp.get("client_order_id")
+                or ""
+            )
+            if pid and pid in existing_pids:
                 skipped += 1
                 continue
+
+            # A local position can exist before Bitfinex exposes a stable
+            # position ID. Attach the ID only on an unambiguous side/qty match.
+            local_matches = [
+                row
+                for row in open_positions
+                if isinstance(row, dict)
+                and row.get("status") in ("OPEN", "FILLED")
+                and row.get("bitfinex_live_entry")
+                and _normalize_order_side_to_dir(row.get("dir")) == exp_direction
+                and _qty_matches(abs(float(row.get("qty") or 0)), contracts)
+            ]
+            if len(local_matches) == 1:
+                if pid:
+                    local_matches[0]["bitfinex_position_id"] = pid
+                skipped += 1
+                continue
+
+            disappeared_pending = [
+                candidate
+                for candidate in pending_candidates
+                if candidate.get("order_id")
+                and candidate.get("order_id") not in open_exchange_order_ids
+                and candidate.get("direction") == exp_direction
+            ]
+            matched_pending = [
+                candidate
+                for candidate in disappeared_pending
+                if _qty_matches(float(candidate.get("qty") or 0), contracts)
+            ]
+            if not matched_pending and disappeared_pending:
+                aggregate_qty = sum(
+                    float(candidate.get("qty") or 0)
+                    for candidate in disappeared_pending
+                )
+                if _qty_matches(aggregate_qty, contracts):
+                    matched_pending = disappeared_pending
+
+            candidate_fills = [
+                fill
+                for fill in owned_fills
+                if fill.get("direction") == exp_direction
+                and (
+                    not fill.get("qty")
+                    or fill["qty"] <= contracts * 1.05
+                )
+            ]
+            matched_fills = [
+                fill
+                for fill in candidate_fills
+                if _qty_matches(float(fill.get("qty") or 0), contracts)
+            ]
+            if not matched_fills and candidate_fills:
+                aggregate_fill_qty = sum(
+                    float(fill.get("qty") or 0)
+                    for fill in candidate_fills
+                )
+                if _qty_matches(aggregate_fill_qty, contracts):
+                    matched_fills = candidate_fills
+            owned_cid = cid if cid and cid in owned_trade_ids else ""
+            ownership_proven = bool(matched_pending or matched_fills or owned_cid)
+            if not ownership_proven:
+                orphaned += 1
+                orphan_key = pid or f"UNIDENTIFIED_{exp_direction}_{contracts:.12g}"
+                orphan_ids.append(orphan_key)
+                audit_rows.append((
+                    orphan_key,
+                    "ORPHAN_SURFACE",
+                    "RECONCILE_FOREIGN_POSITION",
+                    {"cid": cid or "-", "direction": exp_direction, "qty": contracts},
+                ))
+                continue
+
+            pending_tids = {
+                str(candidate.get("trade_id") or "")
+                for candidate in matched_pending
+                if candidate.get("trade_id")
+            }
+            fill_tids = {
+                str(fill.get("trade_id") or "")
+                for fill in matched_fills
+                if fill.get("trade_id")
+            }
+            candidate_tids = pending_tids | fill_tids | ({owned_cid} if owned_cid else set())
+            if len(candidate_tids) == 1:
+                tid = next(iter(candidate_tids))
+            else:
+                tid = f"reconcile-pos-{pid or exp_direction.lower()}"
             if tid in existing_tids:
                 skipped += 1
                 continue
-            fill = cid_to_fill.get(cid)
-            fill_price = (fill or {}).get("price") or float(exp.get("entry") or 0)
-            fill_ts = (fill or {}).get("ts") or time.time()
-            # Money-path safety: refuse to re-arm a stop with a stale / missing
-            # entry price. Surface as orphan for manual decision instead.
+
+            fill_price = float(exp.get("entry") or 0)
+            if fill_price <= 0 and matched_fills:
+                priced = [row for row in matched_fills if row.get("price") and row.get("qty")]
+                total_qty = sum(float(row["qty"]) for row in priced)
+                if total_qty > 0:
+                    fill_price = sum(
+                        float(row["price"]) * float(row["qty"])
+                        for row in priced
+                    ) / total_qty
+            fill_ts = min(
+                [float(row.get("ts") or time.time()) for row in matched_fills]
+                or [time.time()]
+            )
             if fill_price <= 0:
-                with state_lock:
-                    orphans = state.setdefault("orphan_position_ids", [])
-                    if pid and pid not in orphans:
-                        orphans.append(pid)
-                        if len(orphans) > 200:
-                            del orphans[: len(orphans) - 200]
                 orphaned += 1
-                logger.warning(
-                    f"[RECONCILE-ADOPT] REFUSED stop re-arm pid={pid} cid={cid or '-'} "
-                    f"— fill_price unrecoverable, surfacing as orphan [PIPELINE ENFORCEMENT]"
-                )
-                _reconcile_adopt_audit(pid or tid, "ORPHAN_SURFACE", "RECONCILE_STOP_REARM_REFUSED",
-                                       {"cid": cid or "-"})
+                orphan_key = pid or tid
+                orphan_ids.append(orphan_key)
+                audit_rows.append((
+                    orphan_key,
+                    "ORPHAN_SURFACE",
+                    "RECONCILE_STOP_REARM_REFUSED",
+                    {"cid": cid or "-"},
+                ))
                 continue
             entry = _adopted_open_position_view(exp, tid, fill_price, fill_ts)
             entry["bitfinex_position_id"] = pid
-            open_positions.append(entry)
-            lane_open_positions[_ensure_lane_bucket(entry)].append(entry)
-            existing_pids.add(key)
+            matched_order_ids = [
+                str(candidate.get("order_id") or "")
+                for candidate in matched_pending
+                if candidate.get("order_id")
+            ] or [
+                str(fill.get("order_id") or "")
+                for fill in matched_fills
+                if fill.get("order_id")
+            ]
+            if matched_order_ids:
+                entry["bitfinex_order_id"] = matched_order_ids[0]
+                entry["bitfinex_order_ids"] = matched_order_ids
+            matched_rows = [
+                candidate.get("row")
+                for candidate in matched_pending
+                if isinstance(candidate.get("row"), dict)
+            ]
+            if matched_rows:
+                entry["research_lane"] = _normalize_lane_key(matched_rows[0])
+                for pending in matched_rows:
+                    lane_unregister_pending_order(pending)
+                    pending["status"] = "FILLED_ON_EXCHANGE"
+                    pending["exchange_fill_reconciled"] = True
+                    signal = (trades_map.get(pending.get("trade_id")) or {}).get("signal_ref")
+                    if isinstance(signal, dict):
+                        signal["status"] = "FILLED"
+                        signal["outcome"] = "FILLED"
+                        signal["bitfinex_position_id"] = pid
+                        signal["bitfinex_live_entry"] = True
+            lane_register_open_position(entry)
+            if pid:
+                existing_pids.add(pid)
             existing_tids.add(tid)
             adopted += 1
             logger.warning(
@@ -27002,9 +28647,28 @@ def _adopt_position_from_rebuild(rebuilt: dict) -> dict:
                 f"peak_reset=0 profit_lock_floor={entry['profit_lock_floor']} (degraded ladder) "
                 f"[PIPELINE ENFORCEMENT]"
             )
-            _reconcile_adopt_audit(pid or tid, "ADOPT_POSITION", "RECONCILE",
-                                   {"trade_id": tid, "dir": entry["dir"], "qty": entry["qty"],
-                                    "entry": entry["entry"]})
+            audit_rows.append((
+                pid or tid,
+                "ADOPT_POSITION",
+                "RECONCILE_LATE_FILL",
+                {
+                    "trade_id": tid,
+                    "dir": entry["dir"],
+                    "qty": entry["qty"],
+                    "entry": entry["entry"],
+                    "order_ids": matched_order_ids,
+                },
+            ))
+    if orphan_ids:
+        with state_lock:
+            orphans = state.setdefault("orphan_position_ids", [])
+            for orphan_id in orphan_ids:
+                if orphan_id and orphan_id not in orphans:
+                    orphans.append(orphan_id)
+            if len(orphans) > 200:
+                del orphans[: len(orphans) - 200]
+    for oid, action, reason, extra in audit_rows:
+        _reconcile_adopt_audit(oid, action, reason, extra)
     if adopted or orphaned:
         pipeline_state_sync()
     return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
@@ -27017,29 +28681,46 @@ def bitfinex_live_reconcile_loop() -> None:
     interval = 30.0
     while True:
         try:
-            if _bitfinex_live_active() and _private_api_keys_ok():
-                import bitfinex_live_executor as bx
-
-                with trade_lock:
-                    local_pos = copy.deepcopy(open_positions)
-                    local_orders = copy.deepcopy(pending_orders)
-                drift = bx.reconcile_exchange_state(
-                    bitfinex_private,
-                    _exchange_call_with_retry,
-                    SYMBOL_CCXT,
-                    local_positions=local_pos,
-                    local_orders=local_orders,
-                )
+            if _direct_private_exchange_owner():
+                strict_result = _refresh_bitfinex_exposure_audit()
+                rebuilt = strict_result.pop("_rebuild_payload", None)
+                adopt_orders = {"adopted": 0, "orphaned": 0, "skipped": 0}
+                adopt_positions = {"adopted": 0, "orphaned": 0, "skipped": 0}
+                if rebuilt:
+                    # Use the exact successful strict-read payload. Never make
+                    # a second "best effort" private read that can swallow one
+                    # failed endpoint and incorrectly look flat.
+                    adopt_orders = _adopt_from_rebuild(None, rebuilt)
+                    adopt_positions = _adopt_position_from_rebuild(rebuilt)
+                cancel_result = {"cancelled": [], "failed": []}
+                exit_only = {}
+                if not _bitfinex_live_active():
+                    cancel_result = _cancel_managed_live_pending_entries(
+                        "RECONCILE_DISARMED"
+                    )
+                    exit_only = _mark_exit_only_for_open_bitfinex_positions(
+                        reason="RECONCILE_DISARMED"
+                    )
+                if (
+                    adopt_orders.get("adopted")
+                    or adopt_positions.get("adopted")
+                    or cancel_result.get("cancelled")
+                ):
+                    refreshed = _refresh_bitfinex_exposure_audit()
+                    refreshed.pop("_rebuild_payload", None)
+                drift = {
+                    "strict_audit": strict_result,
+                    "adopted_orders": adopt_orders,
+                    "adopted_positions": adopt_positions,
+                    "disarm_cancel": cancel_result,
+                    "exit_only_lanes": list(exit_only.keys()),
+                }
                 with state_lock:
                     state["bitfinex_live_drift"] = drift
-                if drift.get("manual_closes"):
-                    logger.warning(
-                        f"[BITFINEX LIVE] manual closes detected for trade_ids={drift['manual_closes']} "
-                        f"- position_manager will flatten local view [PIPELINE ENFORCEMENT]"
-                    )
-                if drift.get("new_fills"):
+                if adopt_positions.get("adopted"):
                     logger.info(
-                        f"[BITFINEX LIVE] {len(drift['new_fills'])} new fill(s) ingested "
+                        f"[BITFINEX LIVE] {adopt_positions['adopted']} strict-reconcile "
+                        f"fill(s) adopted "
                         f"[PIPELINE ENFORCEMENT]"
                     )
             time.sleep(interval)
@@ -27349,7 +29030,7 @@ _RELAY_EXECUTION_MAX_STALE_SEC = max(
 def _publish_relay_execution_snapshot() -> dict:
     """Build canonical authority once and publish one immutable JSON response.
 
-    Cloudflare, the production relay, Agent Hub and local health probes can all
+    Fly, the production relay, Agent Hub and local health probes can all
     poll simultaneously.  Rebuilding in every request multiplied lock pressure
     and left request workers pinned after a tunnel client disconnected.  A
     single builder keeps authority current while HTTP workers only copy two
@@ -27575,6 +29256,8 @@ def build_state_integrity() -> dict:
     global _SNAPSHOT_SEQ
     _SNAPSHOT_SEQ += 1
     now = time.time()
+    runtime = _recompute_system_readiness(now)
+    exchange_audit = _exchange_exposure_audit_snapshot(now)
     with state_lock:
         diag = state.get("diag") or {}
         ws_status = diag.get("ws_status", "UNKNOWN")
@@ -27586,14 +29269,18 @@ def build_state_integrity() -> dict:
         live_armed = bool(state.get("live_armed", False))
         execution_paused = bool(state.get("execution_paused", False))
         last_fresh_reset_ts = state.get("last_fresh_reset_ts")
-    ws_connected = ws_connected_ts and (now - ws_connected_ts) < 600
+    with state_lock:
+        ws_transport_connected = bool(state.get("ws_transport_connected"))
+        ws_tick = float(state.get("ws_last_tick") or 0)
+        rest_tick = float(state.get("rest_last_tick") or 0)
+    ws_connected = bool(runtime["ws_transport_ready"])
     # Truthful alignment: if the WS subscription is not live, ws_status must not
     # claim OK even if REST price is fresh. REST_FALLBACK covers the case where
     # we still have a price but the socket itself is down. This fixes the
     # contradictory "ws_status=OK, ws_connected=false" the audit flagged.
     if not ws_connected:
-        ws_status = "REST_FALLBACK" if (price_age is not None and price_age < 30) else "DISCONNECTED"
-    rest_healthy = price_age is not None and price_age < 30
+        ws_status = "REST_FALLBACK" if (rest_tick and now - rest_tick < 30) else "DISCONNECTED"
+    rest_healthy = bool(rest_tick and (now - rest_tick) < 30)
     last_fill_sec_ago = (now - _last_fill_ts()) if _last_fill_ts() else None
     bridge = None
     try:
@@ -27642,9 +29329,13 @@ def build_state_integrity() -> dict:
         "rest_healthy": bool(rest_healthy),
         "price_age_sec": price_age,
         "book_age_sec": (now - book_ts) if book_ts else None,
-        "orders_synced": True,
-        "positions_synced": True,
-        "trades_synced": True,
+        "orders_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("orders_synced")),
+        "positions_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("positions_synced")),
+        "trades_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("trades_synced")),
+        "exchange_sync_audit": exchange_audit,
+        "system_ready": runtime["system_ready"],
+        "signal_generation_ready": runtime["signal_generation_ready"],
+        "readiness_reasons": runtime["readiness_reasons"],
         "last_fill_sec_ago": last_fill_sec_ago,
         "execution_paused": execution_paused,
         "live_armed": live_armed,
@@ -27721,7 +29412,10 @@ def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
         "created_ts": row.get("created_ts"),
         "age_min": (now_ts - row["created_ts"]) / 60 if row.get("created_ts") else 0,
         "limit_chase_count": row.get("limit_chase_count") or 0,
+        "dashboard_chase_activation_count": row.get("dashboard_chase_activation_count"),
         "chase_3plus_virtual_chase_count": row.get("chase_3plus_virtual_chase_count"),
+        "entry_limit_policy": row.get("entry_limit_policy"),
+        "entry_reason": row.get("entry_reason"),
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model"),
         "ttl_sec": row.get("ttl_sec"),
@@ -27789,6 +29483,9 @@ def _build_relay_execution_state_snapshot() -> dict:
     exact limit/order/position/closure fields consumed by the isolated executor.
     """
     now_ts = time.time()
+    runtime = _recompute_system_readiness(now_ts)
+    exchange_audit = _exchange_exposure_audit_snapshot(now_ts)
+    exit_tick_px = _observable_exit_price()
     session_start = _showcase_trade_session_start()
     state_acquired = state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
     if not state_acquired:
@@ -27804,8 +29501,16 @@ def _build_relay_execution_state_snapshot() -> dict:
             "data_source": state.get("data_source"),
             "data_quality": state.get("data_quality"),
             "ws_ready": bool(state.get("ws_ready", False)),
-            "ws_age": state.get("ws_age"),
+            "ws_transport_connected": bool(state.get("ws_transport_connected", False)),
+            "ws_age": (
+                now_ts - float(state.get("ws_last_tick") or 0)
+                if state.get("ws_last_tick")
+                else None
+            ),
             "ws_last_tick": state.get("ws_last_tick"),
+            "rest_price": state.get("rest_price"),
+            "rest_price_ts": state.get("rest_price_ts"),
+            "rest_last_tick": state.get("rest_last_tick"),
             "bot_version": EXECUTION_FIX_VERSION,
             **_dashboard_owner_metadata(),
             "bot_start_time": bot_start_time,
@@ -27828,6 +29533,19 @@ def _build_relay_execution_state_snapshot() -> dict:
             "regime": state.get("regime"),
             "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
             "live_armed": bool(state.get("live_armed", False)),
+            "system_ready": runtime["system_ready"],
+            "signal_generation_ready": runtime["signal_generation_ready"],
+            "new_entry_progress_ready": runtime["signal_generation_ready"],
+            "new_entry_block_reason": (
+                None
+                if runtime["signal_generation_ready"]
+                else (
+                    runtime["readiness_reasons"][0]
+                    if runtime["readiness_reasons"]
+                    else "NEW_ENTRY_NOT_READY"
+                )
+            ),
+            "runtime_readiness": runtime,
             "server_ts": utc_iso(),
         }
     finally:
@@ -27870,7 +29588,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         if isinstance(row, dict)
     ]
     snapshot["positions"] = [
-        _relay_position_row_lite(row, tick_px)
+        _relay_position_row_lite(row, exit_tick_px)
         for row in positions_copy
         if isinstance(row, dict)
     ]
@@ -27900,11 +29618,18 @@ def _build_relay_execution_state_snapshot() -> dict:
         "bot_version": EXECUTION_FIX_VERSION,
         "execution_paused": snapshot["execution_paused"],
         "live_armed": snapshot["live_armed"],
-        "rest_healthy": bool(price_ts and now_ts - price_ts < 30),
+        "rest_healthy": bool(
+            snapshot.get("rest_last_tick")
+            and now_ts - float(snapshot.get("rest_last_tick")) < 30
+        ),
         "price_age_sec": (now_ts - price_ts) if price_ts else None,
-        "orders_synced": True,
-        "positions_synced": True,
-        "trades_synced": True,
+        "orders_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("orders_synced")),
+        "positions_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("positions_synced")),
+        "trades_synced": bool(exchange_audit.get("fresh") and exchange_audit.get("trades_synced")),
+        "exchange_sync_audit": exchange_audit,
+        "system_ready": runtime["system_ready"],
+        "signal_generation_ready": runtime["signal_generation_ready"],
+        "readiness_reasons": runtime["readiness_reasons"],
     }
     return snapshot
 
@@ -27981,7 +29706,7 @@ def api_relay_state(force_rebuild: bool = False):
                 # Relay execution path (pollBotForIntents + buildIntentEnvelope) needs these.
                 # Without last_approve_outcome the relay never creates INTENT cycles => sim
                 # mirrors nothing. /api/state carries them but is 108KB and times out through
-                # the Cloudflare tunnel; relay-state is 48KB and reliable, so include them here.
+                # the canonical Fly route; relay-state is bounded, so include them here.
                 "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
                 "last_ai": copy.deepcopy(state.get("last_ai")),
                 "pullback_threshold": state.get("pullback_threshold"),
@@ -28101,13 +29826,52 @@ def _analyzer_proxy_fetch(path: str, timeout: float = 6.0):
         return None, None
 
 
+def _external_analyzer_status_payload(endpoint: str) -> dict:
+    """Truthful Fly response: analysis is uploaded, never localhost-proxied."""
+    mirror_status = {}
+    mirror_dir = _analyzer_mirror_dir()
+    try:
+        mirror_status = json.loads(
+            (mirror_dir / "status.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        mirror_status = {}
+    return {
+        "ok": False,
+        "endpoint": endpoint,
+        "mode": "external_desktop_analyzer",
+        "source": "Fly trading owner + uploaded desktop analyzer mirror",
+        "live_analyzer_process": False,
+        "mirror_available": (mirror_dir / "analysis_dashboard.html").is_file(),
+        "mirror_status": mirror_status,
+        "dashboard_path": "/analysis",
+        "status_path": "/api/analyzer-mirror/status",
+        "note": (
+            "Fly intentionally runs the trading owner only; fresh analyzer and "
+            "genome outputs are produced externally and uploaded as a mirror."
+        ),
+    }
+
+
+def _external_analyzer_response(endpoint: str):
+    resp = jsonify(_external_analyzer_status_payload(endpoint))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp, 200
+
+
 @app.route('/api/analyzer/summary')
 def api_analyzer_summary():
     """Proxy to research dashboard /api/summary — full-session PnL/WR/trade count."""
+    if (os.getenv("FLY_APP_NAME") or "").strip():
+        return _external_analyzer_response("summary")
     status, body = _analyzer_proxy_fetch("/api/summary")
     if status is None:
         return jsonify({"ok": False, "error": "analyzer unreachable on :9001"}), 502
-    resp = jsonify(json.loads(body))
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "analyzer returned invalid JSON"}), 502
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "public, max-age=15"
     return resp
 
@@ -28115,10 +29879,16 @@ def api_analyzer_summary():
 @app.route('/api/analyzer/genome')
 def api_analyzer_genome():
     """Proxy to research dashboard /api/genome — decision genome library/discoveries."""
+    if (os.getenv("FLY_APP_NAME") or "").strip():
+        return _external_analyzer_response("genome")
     status, body = _analyzer_proxy_fetch("/api/genome", timeout=10.0)
     if status is None:
         return jsonify({"ok": False, "error": "analyzer unreachable on :9001"}), 502
-    resp = jsonify(json.loads(body))
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "analyzer returned invalid JSON"}), 502
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "public, max-age=30"
     return resp
 
@@ -28216,6 +29986,23 @@ def _build_api_state_snapshot():
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
         finally:
             state_lock.release()
+        runtime = _recompute_system_readiness(now_ts)
+        snapshot["strategy_price"] = snapshot.get("price")
+        snapshot["strategy_price_ts"] = snapshot.get("price_ts")
+        rest_display_price = float(snapshot.get("rest_price") or 0)
+        rest_display_ts = float(snapshot.get("rest_price_ts") or 0)
+        if (
+            not runtime["ws_transport_ready"]
+            and rest_display_price > 0
+            and rest_display_ts
+            and 0 <= (now_ts - rest_display_ts) <= 30.0
+        ):
+            snapshot["price"] = rest_display_price
+            snapshot["price_ts"] = rest_display_ts
+            snapshot["price_source"] = "REST_DISPLAY_ONLY"
+        snapshot["system_ready"] = runtime["system_ready"]
+        snapshot["signal_generation_ready"] = runtime["signal_generation_ready"]
+        snapshot["runtime_readiness"] = runtime
         trade_acquired = trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
         if not trade_acquired:
             raise TimeoutError("api-state snapshot timed out waiting for trade_lock")
@@ -28433,9 +30220,10 @@ def _build_api_state_snapshot():
         snapshot.setdefault("heartbeat", 0)
         snapshot.setdefault("price_ts", 0)
         snapshot["server_ts"] = utc_iso()
-        price_ts = snapshot.get("price_ts") or snapshot.get("ws_last_tick") or 0
+        price_ts = snapshot.get("price_ts") or 0
         snapshot["price_age"] = (now_ts - price_ts) if price_ts else None
-        snapshot["ws_age"] = snapshot["price_age"]
+        ws_tick = float(snapshot.get("ws_last_tick") or 0)
+        snapshot["ws_age"] = (now_ts - ws_tick) if ws_tick else None
         if snapshot.get("price") is None:
             snapshot["price"] = None
         sync_cooldown_debug_state()
@@ -28606,6 +30394,8 @@ def _api_state_cache_refresher_loop():
                     "ws_ready",
                     "ws_age",
                     "ws_last_tick",
+                    "rest_last_tick",
+                    "ws_transport_connected",
                     "execution_paused",
                     "execution_reason",
                     "manual_admin_pause",
@@ -28724,6 +30514,7 @@ _PUBLIC_STATE_SAFE_TOP_KEYS = {
     "server_ts", "server_ts_melbourne",
     # market data
     "price", "price_ts", "price_age", "ws_age", "ws_last_tick",
+    "rest_last_tick", "ws_transport_connected",
     "last_heartbeat", "heartbeat", "time_since_heartbeat",
     # account / PnL (marketing)
     "equity", "account_balance", "session_pnl_usd",
@@ -28839,6 +30630,46 @@ def api_state():
     return resp
 
 
+def _market_data_health_snapshot(now: float = None) -> dict:
+    """Separate genuine WS transport health from an intentional REST fallback."""
+    now = float(now or time.time())
+    with state_lock:
+        ws_tick = float(state.get("ws_last_tick") or 0)
+        rest_tick = float(state.get("rest_last_tick") or 0)
+        price_tick = float(state.get("price_ts") or 0)
+        ws_connected = bool(state.get("ws_transport_connected", False))
+    ws_age = max(0.0, now - ws_tick) if ws_tick else None
+    rest_age = max(0.0, now - rest_tick) if rest_tick else None
+    price_age = max(0.0, now - price_tick) if price_tick else None
+    ws_transport_ready = _genuine_ws_transport_ready(now)
+    rest_fallback_ready = bool(
+        rest_age is not None
+        and rest_age < 30.0
+        and price_age is not None
+        and price_age < 30.0
+    )
+    market_data_ready = bool(ws_transport_ready or rest_fallback_ready)
+    if ws_transport_ready:
+        mode = "WS"
+    elif rest_fallback_ready:
+        mode = "REST_FALLBACK"
+    elif ws_tick or rest_tick or price_tick:
+        mode = "STALE"
+    else:
+        mode = "BOOTING"
+    return {
+        "market_data_ready": market_data_ready,
+        "market_data_mode": mode,
+        "ws_ready": ws_transport_ready,
+        "ws_transport_ready": ws_transport_ready,
+        "ws_transport_connected": ws_connected,
+        "ws_age": ws_age,
+        "rest_fallback_ready": rest_fallback_ready,
+        "rest_age": rest_age,
+        "price_age": price_age,
+    }
+
+
 @app.route('/health')
 @app.route('/api/status')
 @app.route('/status')
@@ -28850,30 +30681,41 @@ def health():
         manual = bool(state.get("manual_admin_pause", False))
         bot_version = state.get("bot_version") or EXECUTION_FIX_VERSION
         analyzer_sync_id = state.get("analyzer_sync_id") or ANALYZER_SYNC_ID
-        ws_ready = bool(state.get("ws_ready", False))
-        ws_tick = state.get("ws_last_tick")
-        system_ready = bool(state.get("system_ready", False))
         live_armed = bool(state.get("live_armed", False))
         bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled", False))
     now = time.time()
     heartbeat_age = max(0.0, now - float(hb or 0))
-    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
-    force_paper_mode = (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in (
-        "1", "true", "yes", "on",
+    market_health = _market_data_health_snapshot(now)
+    runtime = _recompute_system_readiness(now)
+    armable, arm_block_reason, _ = can_open_live_entry(
+        require_armed=False,
+        now=now,
     )
+    trading_ready, trading_block_reason, _ = can_open_live_entry(
+        require_armed=True,
+        now=now,
+    )
+    force_paper_mode = _force_paper_mode_active()
     relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
-    status = "paused" if paused else "alive"
+    process_alive = heartbeat_age <= 15.0
+    status = "paused" if paused else ("alive" if process_alive else "degraded")
     return jsonify({
         "status": status,
         **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
         "time_since_heartbeat": heartbeat_age,
+        "process_alive": process_alive,
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
-        "system_ready": system_ready,
-        "ws_ready": ws_ready,
-        "ws_age": ws_age,
+        "system_ready": runtime["system_ready"],
+        "signal_generation_ready": runtime["signal_generation_ready"],
+        "runtime_readiness": runtime,
+        **market_health,
+        "live_entry_armable": armable,
+        "live_entry_arm_block_reason": None if armable else arm_block_reason,
+        "trading_ready": trading_ready,
+        "trading_block_reason": None if trading_ready else trading_block_reason,
         "live_armed": live_armed,
         "bitfinex_live_enabled": bitfinex_live_enabled,
         "force_paper_mode": force_paper_mode,
@@ -28890,34 +30732,53 @@ def health():
 @app.route('/ready')
 @app.route('/api/ready')
 def ready():
-    """Strict Fly/deploy readiness probe; unlike /health it fails on stale market data."""
+    """Strict strategy readiness; /health remains the process-liveness probe."""
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
-        ws_tick = state.get("ws_last_tick")
-        ws_ready = bool(state.get("ws_ready", False))
-        system_ready = bool(state.get("system_ready", False))
+        ohlcv_ready = bool(state.get("ohlcv_ready", False))
     now = time.time()
     heartbeat_age = max(0.0, now - float(hb or 0))
-    ws_age = max(0.0, now - float(ws_tick)) if ws_tick else None
-    dashboard_owner = is_active_dashboard_owner()
-    ok = bool(
-        dashboard_owner
-        and system_ready
-        and ws_ready
-        and heartbeat_age <= 15.0
-        and ws_age is not None
-        and ws_age < STALE_HARD_SEC
+    market_health = _market_data_health_snapshot(now)
+    runtime = _recompute_system_readiness(now)
+    armable, arm_block_reason, _ = can_open_live_entry(
+        require_armed=False,
+        now=now,
     )
+    trading_ready, trading_block_reason, _ = can_open_live_entry(
+        require_armed=True,
+        now=now,
+    )
+    dashboard_owner = is_active_dashboard_owner()
+    process_ready = bool(
+        dashboard_owner
+        and heartbeat_age <= 15.0
+        and ohlcv_ready
+        and market_health["market_data_ready"]
+    )
+    # A deliberate operator pause must not make Fly mark the process unhealthy
+    # or remove the sole risk manager from service. Readiness proves that the
+    # canonical owner is alive, warmed and receiving genuine market data;
+    # signal_generation_ready separately proves whether new entries may run.
+    ready_ok = bool(process_ready and runtime["system_ready"])
     return jsonify({
-        "ok": ok,
-        "status": "ready" if ok else "not_ready",
+        "ok": ready_ok,
+        "process_ready": process_ready,
+        "status": (
+            "ready" if ready_ok else ("alive_not_strategy_ready" if process_ready else "not_ready")
+        ),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
         "heartbeat_age": heartbeat_age,
-        "ws_age": ws_age,
-        "system_ready": system_ready,
-        "ws_ready": ws_ready,
-    }), (200 if ok else 503)
+        **market_health,
+        "ohlcv_ready": ohlcv_ready,
+        "system_ready": runtime["system_ready"],
+        "signal_generation_ready": runtime["signal_generation_ready"],
+        "runtime_readiness": runtime,
+        "live_entry_armable": armable,
+        "live_entry_arm_block_reason": None if armable else arm_block_reason,
+        "trading_ready": trading_ready,
+        "trading_block_reason": None if trading_ready else trading_block_reason,
+    }), (200 if ready_ok else 503)
 
 
 @app.route('/debug_state')
@@ -28939,14 +30800,35 @@ def get_debug_state():
 def api_pause():
     with state_lock:
         state["manual_admin_pause"] = True
-        state["live_armed"] = False
-    save_persistent_config()
+    disarm = _disarm_live_control("ADMIN_MANUAL")
     set_execution_paused("ADMIN_MANUAL")
     logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
-    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
+    response = jsonify({
+        "status": "paused",
+        "execution_paused": True,
+        "execution_reason": "ADMIN_MANUAL",
+        "live_pending_cancel": disarm["cancel"],
+        "exit_only_lanes": list(disarm["exit_only"].keys()),
+    })
+    response.status_code = 409 if disarm["cancel"]["failed"] else 200
+    return response
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    runtime = _recompute_system_readiness()
+    if not runtime.get("system_ready"):
+        response = jsonify({
+            "status": "resume_blocked",
+            "execution_paused": True,
+            "reason": (
+                runtime.get("readiness_reasons", ["SYSTEM_NOT_READY"])[0]
+                if runtime.get("readiness_reasons")
+                else "SYSTEM_NOT_READY"
+            ),
+            "runtime_readiness": runtime,
+        })
+        response.status_code = 409
+        return response
     with state_lock:
         state["manual_admin_pause"] = False
     save_persistent_config()
@@ -29205,48 +31087,107 @@ def toggle_fresh_collection():
     logger.info("[FRESH COLLECTION] Mode turned OFF - no file wipe [PIPELINE ENFORCEMENT]")
     return jsonify({"fresh_collection_mode": False})
 
+def _arm_live_control() -> tuple:
+    exchange_audit = _refresh_bitfinex_exposure_audit()
+    # Private exchange rows are caller-internal recovery material, never an API
+    # response. The central gate reads the sanitized state audit.
+    exchange_audit.pop("_rebuild_payload", None)
+    with _live_control_lock:
+        armable, block_reason, runtime = can_open_live_entry(require_armed=False)
+        if not armable:
+            return False, block_reason, runtime, exchange_audit
+        with state_lock:
+            state["live_armed"] = True
+            state["bitfinex_live_enabled"] = True
+        save_persistent_config()
+        return True, "READY", runtime, exchange_audit
+
+
+def _disarm_live_control(reason: str) -> dict:
+    with _live_control_lock:
+        with state_lock:
+            state["live_armed"] = False
+            state["bitfinex_live_enabled"] = False
+        save_persistent_config()
+    # Flags are already false before cancellation begins. A concurrent submit
+    # must acquire the same lock and will fail its armed gate; private I/O is
+    # never performed while holding trade_lock/state_lock.
+    cancel_result = _cancel_managed_live_pending_entries(reason)
+    exit_only = _mark_exit_only_for_open_bitfinex_positions(reason=reason)
+    return {
+        "cancel": cancel_result,
+        "exit_only": exit_only,
+    }
+
+
 @app.route('/api/live_arm', methods=['POST'])
 def live_arm():
-    data = request.get_json() or {}
-    armed = bool(data.get("armed", False))
-    if armed and not _private_api_keys_ok():
-        return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
+    data = request.get_json(silent=True)
+    armed = _strict_json_boolean(data, "armed")
+    if armed is None:
+        return jsonify({
+            "error": "'armed' must be a JSON boolean",
+            "example": {"armed": True},
+        }), 400
+    if armed:
+        ok, block_reason, runtime, exchange_audit = _arm_live_control()
+        if not ok:
+            return jsonify({
+                "error": "Live arming blocked by the runtime safety gate",
+                "block_reason": block_reason,
+                "runtime_readiness": runtime,
+                "exchange_sync_audit": exchange_audit,
+                **_market_data_health_snapshot(),
+            }), 409
+        control = {"cancel": {"cancelled": [], "failed": []}, "exit_only": {}}
+    else:
+        control = _disarm_live_control("LIVE_ARM_DISARMED")
+    cancel_result = control["cancel"]
+    exit_only = control["exit_only"]
     with state_lock:
-        prev = bool(state.get("live_armed") and state.get("bitfinex_live_enabled"))
-        state["live_armed"] = armed
-        state["bitfinex_live_enabled"] = armed
-        save_persistent_config()
-    exit_only = {}
-    if prev and not armed:
-        exit_only = _mark_exit_only_for_open_bitfinex_positions(reason="LIVE_ARM_DISARMED")
-    return jsonify({
-        "live_armed": state["live_armed"],
-        "bitfinex_live_enabled": state["bitfinex_live_enabled"],
+        live_armed_now = bool(state.get("live_armed"))
+        live_enabled_now = bool(state.get("bitfinex_live_enabled"))
+    payload = {
+        "live_armed": live_armed_now,
+        "bitfinex_live_enabled": live_enabled_now,
         "exit_only_lanes": list(exit_only.keys()),
-    })
+        "live_pending_cancel": cancel_result,
+    }
+    return jsonify(payload), (409 if cancel_result["failed"] else 200)
 
 
 @app.route('/api/bitfinex_live', methods=['POST'])
 def api_bitfinex_live():
-    data = request.get_json() or {}
-    enabled = bool(data.get("enabled", False))
-    if enabled and not _private_api_keys_ok():
-        return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
+    data = request.get_json(silent=True)
+    enabled = _strict_json_boolean(data, "enabled")
+    if enabled is None:
+        return jsonify({
+            "error": "'enabled' must be a JSON boolean",
+            "example": {"enabled": True},
+        }), 400
+    if enabled:
+        ok, block_reason, runtime, exchange_audit = _arm_live_control()
+        if not ok:
+            return jsonify({
+                "error": "Bitfinex live execution blocked by the runtime safety gate",
+                "block_reason": block_reason,
+                "runtime_readiness": runtime,
+                "exchange_sync_audit": exchange_audit,
+                **_market_data_health_snapshot(),
+            }), 409
+        control = {"cancel": {"cancelled": [], "failed": []}, "exit_only": {}}
+    else:
+        control = _disarm_live_control("BITFINEX_DISARMED")
     with state_lock:
-        prev = bool(state.get("bitfinex_live_enabled", False))
-        state["bitfinex_live_enabled"] = enabled
-        # Pt 3 (toggle contract): keep live_armed synchronized with the Bitfinex
-        # toggle so the dashboard never shows "disarmed" while orders can fire.
-        state["live_armed"] = enabled
-        save_persistent_config()
+        live_enabled_now = bool(state.get("bitfinex_live_enabled"))
+        live_armed_now = bool(state.get("live_armed"))
     import bitfinex_live_executor as bx
 
     # Pt 4b (toggle contract): when Bitfinex is disarmed while positions remain
     # open, mark those lanes EXIT_ONLY -- no new entries, but exit management
     # continues until flat.
-    disarm_exit_only = {}
-    if prev and not enabled:
-        disarm_exit_only = _mark_exit_only_for_open_bitfinex_positions(reason="BITFINEX_DISARMED")
+    cancel_result = control["cancel"]
+    disarm_exit_only = control["exit_only"]
 
     logger.warning(
         f"[BITFINEX LIVE] dashboard toggle -> {'ON' if enabled else 'OFF'} "
@@ -29254,15 +31195,15 @@ def api_bitfinex_live():
         f"exit_only_lanes={list(disarm_exit_only.keys()) if disarm_exit_only else []} "
         f"[PIPELINE ENFORCEMENT]"
     )
-    return jsonify(
-        {
-            "bitfinex_live_enabled": state["bitfinex_live_enabled"],
-            "live_armed": state["live_armed"],
+    response = jsonify({
+            "bitfinex_live_enabled": live_enabled_now,
+            "live_armed": live_armed_now,
             "keys_ok": _private_api_keys_ok(),
             "exit_only_lanes": list(disarm_exit_only.keys()) if disarm_exit_only else [],
+            "live_pending_cancel": cancel_result,
             **bx.live_status(state, _private_api_keys_ok()),
-        }
-    )
+        })
+    return response, (409 if cancel_result["failed"] else 200)
 
 
 def _mark_exit_only_for_open_bitfinex_positions(reason: str = "BITFINEX_DISARMED") -> dict:
@@ -29274,6 +31215,11 @@ def _mark_exit_only_for_open_bitfinex_positions(reason: str = "BITFINEX_DISARMED
         with trade_lock:
             for p in open_positions:
                 if p.get("status") not in ("FILLED", "OPEN"):
+                    continue
+                if not (
+                    p.get("bitfinex_position_id")
+                    or p.get("bitfinex_order_id")
+                ):
                     continue
                 lane = _normalize_lane_key(p)
                 if not lane:
@@ -30030,78 +31976,21 @@ def compute_regime_pressure():
     velocity = (tick_prices[-1] - tick_prices[0]) / tick_prices[0] if tick_prices[0] else 0
     return max(-1.0, min(1.0, 0.7 * persistence + 0.3 * velocity))
 
-def update_price(price: float):
-    if price <= 0:
-        return
-    now = time.time()
-    with state_lock:
-        state["price"] = price
-        state["price_ts"] = now
-        state["ws_last_tick"] = now
-        state["price_seq"] += 1
-        state["price_source"] = "WS"
-        state["last_data_ts"] = now
-        if not state["ws_ready"]:
-            state["ws_ready"] = True
-            state["data_source"] = "ws_ready"
-            logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
-            if not is_system_ready():
-                state["system_ready"] = True
-                state["ready_since"] = now
-                logger.info("[SYSTEM] READY STATE INITIALIZED FROM FIRST TICK - execution unpaused [PIPELINE ENFORCEMENT]")
-            if state.get("execution_paused") and state.get("execution_reason") in ["WS_STALE", "THREAD_CRASH", "STALE_DATA_HARD_STOP"]:
-                set_execution_paused("")
-                logger.info("[WS RECOVERY][STATE_SYNC] Execution auto-resumed after first tick [PIPELINE ENFORCEMENT]")
-            sync_dashboard_branding()
-    tick_prices.append(price)
-    full_pipeline_trace("[WS]", f"PRICE_UPDATED price={price}", None)
-    if not state.get("ws_ready") or len(latest_candles) < MIN_CANDLES:
-        logger.info("[SYSTEM] Not ready for context build")
-        return
-    event = detect_event_light()
-    if event and event.get("event_trigger"):
-        process_signal(event)
-    elif not event:
-        logger.info("[EVENT GATE] No meaningful event - skipping pipeline")
-
 def validate_market_data():
+    """Validate the one central readiness contract without promoting REST to WS."""
+    runtime = _recompute_system_readiness()
+    if not runtime["system_ready"]:
+        reason = ", ".join(runtime["readiness_reasons"]) or "SYSTEM_NOT_READY"
+        with state_lock:
+            state["last_engine_error"] = f"Market data invalid: {reason}"
+        logger.debug(
+            f"[SYSTEM] not ready: Market data invalid: {reason} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False
     with state_lock:
-        now = time.time()
-        price_ok = state.get("price") is not None and state["price"] > 0
-        price_ts = state.get("price_ts") or 0
-        ws_tick = state.get("ws_last_tick") or 0
-        ref_ts = max(price_ts, ws_tick)
-        ws_ok = ref_ts > 0 and (now - ref_ts < STALE_HARD_SEC)
-        ohlcv_ok = state.get("ohlcv_ready", False)
-        ema_ok = all([state["ema_status"].get("ema9") is not None,state["ema_status"].get("ema21") is not None,state["ema_status"].get("ema200") is not None])
-        candle_ok = (now - last_candle_ts < CANDLE_STALE_SEC) or (len(latest_candles) >= MIN_CANDLES)
-        market_ready = price_ok and ws_ok
-        indicator_ready = ohlcv_ok and ema_ok and candle_ok
-        system_ready = market_ready and indicator_ready
-        if not system_ready:
-            reason = []
-            if not price_ok: reason.append("no_price")
-            if not ws_ok: reason.append("ws_stale")
-            if not ohlcv_ok: reason.append("ohlcv_not_ready")
-            if not ema_ok: reason.append("ema_not_ready")
-            if not candle_ok: reason.append("candle_stale")
-            state["last_engine_error"] = f"Market data invalid: {', '.join(reason)}"
-            state["system_ready"] = False
-            if not ws_ok:
-                state["allow_rest_price"] = True
-            logger.warning(f"[SYSTEM] not ready: {state['last_engine_error']} [PIPELINE ENFORCEMENT]")
-            return False
-        if state.get("last_ready_ts", 0) == 0:
-            state["last_ready_ts"] = now
-        elif now - state["last_ready_ts"] >= READY_STABLE_SEC:
-            if not state.get("system_ready"):
-                logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
-            state["system_ready"] = True
-        state["price_source"] = "WS"
-        state["allow_rest_price"] = False
         state["last_engine_error"] = ""
-        state["engine_reason"] = ""
-        return True
+    return True
 
 def trend_info():
     with state_lock:
@@ -30213,6 +32102,10 @@ def reset_transient_runtime_state():
             "last_pipeline_stage": "IDLE",
             "ai_call_count": 0,
             "stability_ai_call_count": 0,
+            # Live authority is never a restart-persistent state. Every process
+            # starts disarmed and requires a fresh runtime arm after readiness.
+            "live_armed": False,
+            "bitfinex_live_enabled": False,
         })
 
 def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label: str = "FILE") -> bool:
@@ -32011,7 +33904,7 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "invert_signal", "debug_enabled", "live_armed", "bitfinex_live_enabled", "account_balance",
+        "invert_signal", "debug_enabled", "account_balance",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "ai_execution_bands", "chase_execution_buckets",
         "spread_gate",
@@ -32314,7 +34207,7 @@ def _create_dashboard_server():
         def _request_cap(self, request):
             """Reserve independent workers for authority and controls.
 
-            Cloudflare, Agent Hub, the relay pusher, and local diagnostics can
+            Fly, Agent Hub, the relay pusher, and local diagnostics can
             synchronize after a restart. Presentation polls may consume all
             eight general workers and slow tunnel clients may consume relay
             authority workers, but neither may crowd out the operator's safety
@@ -32445,45 +34338,50 @@ def ttl_monitor():
             time.sleep(5)
 
 def system_health_check():
+    now = time.time()
+    runtime = _recompute_system_readiness(now)
+    healthy = bool(runtime["system_ready"])
+    recover_reason = ""
+    should_hard_stop = False
     with state_lock:
-        now = time.time()
-        price_ok = state.get("price") is not None and state["price"] > 0
-        ws_ok = state.get("ws_last_tick") is not None and (now - state["ws_last_tick"] < STALE_HARD_SEC)
-        ohlcv_ok = state.get("ohlcv_ready", False)
-        ema_ok = all([state["ema_status"].get("ema9") is not None,state["ema_status"].get("ema21") is not None,state["ema_status"].get("ema200") is not None])
-        candle_ok = (now - last_candle_ts < CANDLE_STALE_SEC) or (len(latest_candles) >= MIN_CANDLES)
-        healthy = price_ok and ws_ok and ohlcv_ok and ema_ok and candle_ok
-        if healthy:
-            if state.get("last_ready_ts", 0) == 0:
-                state["last_ready_ts"] = now
-            elif now - state["last_ready_ts"] >= READY_STABLE_SEC:
-                if not state.get("system_ready"):
-                    logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
-                state["system_ready"] = True
-                if state.get("execution_paused") and not state.get("manual_admin_pause"):
-                    set_execution_paused("")
-        else:
-            state["last_ready_ts"] = 0
-            state["system_ready"] = False
-            ws_tick = state.get("ws_last_tick")
-            if ws_tick is not None and not ws_ok:
-                ws_age = now - ws_tick
-                if ws_age >= STALE_HARD_SEC:
-                    state["execution_paused"] = True
-                    state["execution_reason"] = "STALE_DATA_HARD_STOP"
-                    logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s - execution paused")
+        ws_tick = float(state.get("ws_last_tick") or 0)
+        ws_age = (now - ws_tick) if ws_tick else float("inf")
+        current_reason = str(state.get("execution_reason") or "")
+        manual_paused = bool(state.get("manual_admin_pause"))
+        if healthy and not manual_paused and current_reason in (
+            "WS_STALE",
+            "STALE_DATA_HARD_STOP",
+            "PRICE_STALE_OR_MISSING",
+        ):
+            recover_reason = current_reason
+        elif (
+            not runtime["ws_transport_ready"]
+            and ws_tick
+            and ws_age >= STALE_HARD_SEC
+            and not manual_paused
+        ):
+            should_hard_stop = True
+    if recover_reason:
+        _clear_execution_pause_if_reason(recover_reason)
+        logger.info(
+            f"[RECOVERY] central readiness restored; cleared {recover_reason} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    elif should_hard_stop:
+        set_execution_paused("STALE_DATA_HARD_STOP")
+        logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s - new entries paused")
     if not healthy:
-        logger.warning(f"[HEALTH] NOT READY ws={ws_ok} price={price_ok} candle={candle_ok}")
+        logger.warning(
+            f"[HEALTH] NOT READY reasons={runtime['readiness_reasons']} "
+            f"ws={runtime['ws_transport_ready']} price={runtime['price_ready']} "
+            f"candle={runtime['candle_ready']}"
+        )
     else:
         logger.info("[HEALTH] OK")
     return healthy
 
 def auto_recovery_check():
-    if system_health_check():
-        with state_lock:
-            if state.get("execution_reason") == "THREAD_CRASH":
-                logger.info("[RECOVERY][STATE_SYNC] SYSTEM HEALTH RESTORED -> RESUMING")
-                set_execution_paused("")
+    system_health_check()
 
 def startup_hard_fix_ai_threshold():
     with state_lock:
@@ -32519,10 +34417,10 @@ def startup_log_research_sync():
 
 def recover_from_crash():
     reason = state.get("execution_reason")
-    if reason in ("THREAD_CRASH", "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"):
+    if reason in _WS_RECOVERABLE_PAUSE_REASONS:
         if system_health_check():
             logger.info(f"[RECOVERY] Health OK - clearing pause ({reason})")
-            set_execution_paused("")
+            _clear_execution_pause_if_reason(reason)
         else:
             logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
@@ -32535,7 +34433,7 @@ def heartbeat_loop():
             state["last_heartbeat"] = now
         last_heartbeat = now
         time.sleep(HEARTBEAT_INTERVAL)
-        if not (state.get("ws_ready") and len(latest_candles) >= MIN_CANDLES):
+        if not can_progress_new_entry(now)[0]:
             continue
         now = time.time()
         ai_cd = get_effective_ai_cooldown_sec()
@@ -32780,7 +34678,6 @@ def main():
     except Exception as exc:
         logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
     _start_api_state_cache_refresher()
-    _DASHBOARD_BOOTSTRAP_COMPLETE = True
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
@@ -32940,13 +34837,27 @@ def main():
         import bitfinex_live_executor as bx
 
         bx.configure(SYMBOL_CCXT)
-        # If live execution is armed, rebuild local state from Bitfinex truth
-        # so a restart never silently loses fills / open positions / manual closes.
-        if bx.is_enabled(state) and _private_api_keys_ok():
+        # Reconcile private exchange truth even though every process starts
+        # disarmed. Entry authority and risk-management authority are separate:
+        # an inherited open position must still be adopted and exited safely.
+        if _direct_private_exchange_owner():
             try:
-                rebuilt = bx.rebuild_state_from_exchange(bitfinex_private, _exchange_call_with_retry, SYMBOL_CCXT)
+                startup_audit = _refresh_bitfinex_exposure_audit()
+                rebuilt = startup_audit.pop("_rebuild_payload", None)
+                if not rebuilt:
+                    raise RuntimeError(
+                        "strict private exposure audit did not produce a rebuild payload"
+                    )
                 with state_lock:
-                    state["bitfinex_live_rebuild"] = rebuilt
+                    state["bitfinex_live_rebuild"] = {
+                        "rebuilt_at": rebuilt.get("rebuilt_at"),
+                        "positions": len(rebuilt.get("positions") or []),
+                        "open_orders": len(rebuilt.get("open_orders") or []),
+                        "recent_trades": len(rebuilt.get("recent_trades") or []),
+                        "orders_synced": rebuilt.get("orders_synced"),
+                        "positions_synced": rebuilt.get("positions_synced"),
+                        "trades_synced": rebuilt.get("trades_synced"),
+                    }
                 logger.warning(
                     f"[BITFINEX LIVE] startup rebuild positions={len(rebuilt.get('positions', []))} "
                     f"orders={len(rebuilt.get('open_orders', []))} trades={len(rebuilt.get('recent_trades', []))} "
@@ -32959,8 +34870,18 @@ def main():
                 try:
                     adopt_o = _adopt_from_rebuild(None, rebuilt)
                     adopt_p = _adopt_position_from_rebuild(rebuilt)
+                    cancel_result = _cancel_managed_live_pending_entries("PROCESS_START_DISARM")
+                    exit_only = _mark_exit_only_for_open_bitfinex_positions(
+                        reason="PROCESS_START_DISARM"
+                    )
+                    post_start_audit = _refresh_bitfinex_exposure_audit()
+                    post_start_audit.pop("_rebuild_payload", None)
                     logger.warning(
                         f"[RECONCILE-ADOPT] startup adoption pending={adopt_o} positions={adopt_p} "
+                        f"cancelled={len(cancel_result['cancelled'])} "
+                        f"cancel_failed={len(cancel_result['failed'])} "
+                        f"exit_only={list(exit_only.keys())} "
+                        f"audit_flat={post_start_audit.get('flat')} "
                         f"write_window={RECONCILE_WRITE_WINDOW} chase_cap_adopted={MAX_CHASE_COUNT_ADOPTED} "
                         f"[PIPELINE ENFORCEMENT]"
                     )
@@ -32970,6 +34891,9 @@ def main():
                 logger.warning(f"[BITFINEX LIVE] startup rebuild failed: {exc} [PIPELINE ENFORCEMENT]")
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] executor init: {exc} [PIPELINE ENFORCEMENT]")
+    # Control endpoints become available only after the private exposure audit,
+    # rebuild/adoption, disarm cancellation, and EXIT_ONLY marking complete.
+    _DASHBOARD_BOOTSTRAP_COMPLETE = True
     try:
         from pathway_lab_validation import run_startup_pathway_validation
         with state_lock:
@@ -33070,5 +34994,29 @@ def main():
             logger.critical(f"[FATAL] Restarting after crash: {e}")
             time.sleep(5)
 
+def _require_fly_runtime_for_direct_start() -> None:
+    """Fail closed when someone tries to start a second strategy owner.
+
+    Imports remain available to tests and tooling, but the executable bot is
+    Fly-only. Desktop processes may run analyzers/mirrors; they must never make
+    their own AI call or strategy decision.
+    """
+    fly_app = (os.getenv("FLY_APP_NAME") or "").strip()
+    fly_machine = (
+        (os.getenv("FLY_MACHINE_ID") or "").strip()
+        or (os.getenv("FLY_ALLOC_ID") or "").strip()
+    )
+    fly_region = (os.getenv("FLY_REGION") or "").strip()
+    if fly_app == "doxed-btc-bot" and fly_machine and fly_region:
+        return
+    logger.critical(
+        "[STARTUP] Refusing non-Fly strategy owner. Run the external analyzer/"
+        "mirror locally; deploy bot.py to Fly for AI and strategy execution. "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    raise SystemExit(78)
+
+
 if __name__ == "__main__":
+    _require_fly_runtime_for_direct_start()
     main()

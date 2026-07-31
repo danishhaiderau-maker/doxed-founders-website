@@ -144,7 +144,7 @@ export function AgentRelaySimPanel({
           <h2 className="mt-1 text-lg font-bold text-white">Bitfinex API relay test</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
             Real Bitfinex API orders, tightly capped — 1 position at a time · $20 margin · 100x
-            leverage. Showcase signals come from global bot :7002.
+            leverage. Showcase signals come from the canonical Fly strategy owner.
           </p>
         </div>
         {signedIn ? (
@@ -393,7 +393,7 @@ export function AgentRelaySimPanel({
             </p>
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
-              Sim is running but no order yet — waiting for the next showcase signal from :7002. One
+              Sim is running but no order yet — waiting for the next signed signal from the canonical Fly bot. One
               real $20 / 100x order will be placed; no new entries until it closes.
             </p>
           ) : null}

@@ -6,12 +6,27 @@
  * - Railway PORT binding + early /health before slow preload (fixes healthcheck failure)
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertBotSyncAllowed } from './lib/bot-sync-guard.mjs';
 
-const TARGET =
-  process.env.BTC_BOT_PATCH_TARGET?.trim() ||
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'services/btc-conservative-agent/bot.py');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const CANONICAL_TARGET = join(ROOT, 'services/btc-conservative-agent/bot.py');
+const TARGET = process.env.BTC_BOT_PATCH_TARGET?.trim() || CANONICAL_TARGET;
+const probeOnly = process.env.BTC_BOT_PATCH_PROBE_ONLY === '1';
+
+if (probeOnly && resolve(TARGET) === resolve(CANONICAL_TARGET)) {
+  throw new Error('BTC_BOT_PATCH_PROBE_ONLY cannot target the canonical bot.py');
+}
+if (!probeOnly && resolve(TARGET) !== resolve(CANONICAL_TARGET)) {
+  throw new Error('A non-canonical patch target requires BTC_BOT_PATCH_PROBE_ONLY=1');
+}
+
+assertBotSyncAllowed({
+  root: ROOT,
+  syncKind: `patch-btc-bot-production.mjs (${probeOnly ? 'temporary probe' : 'canonical bot.py'})`,
+  checkOnly: probeOnly,
+});
 
 let src = readFileSync(TARGET, 'utf8');
 let changed = false;

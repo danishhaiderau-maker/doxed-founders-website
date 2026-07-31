@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       force_sync:
-        description: 'Type FORCE to override architecture lock (human only)'
+        description: 'Type REVIEWED_REPLACEMENT after a reviewed allowBluntSync=true commit'
         required: true
         default: ''
 
@@ -27,19 +27,15 @@ jobs:
           node -e "
           const fs = require('fs');
           const lock = JSON.parse(fs.readFileSync('config/bot-architecture.lock.json','utf8'));
-          if (lock.allowBluntSync === true) {
-            console.log('allow=true');
-            process.exit(0);
-          }
-          const force = process.env.FORCE_INPUT === 'FORCE';
-          if (!force) {
-            console.error('::error::Blunt research-bot sync blocked by config/bot-architecture.lock.json');
-            console.error('Global showcase (:7002) and research repo bybit_bot.py are different architectures.');
-            console.error('Edit services/btc-conservative-agent/ in this repo instead.');
-            console.error('To override: workflow_dispatch with force_sync=FORCE');
+          const reviewed = lock.allowBluntSync === true;
+          const confirmed = process.env.FORCE_INPUT === 'REVIEWED_REPLACEMENT';
+          if (!reviewed || !confirmed) {
+            console.error('::error::External bot replacement is locked.');
+            console.error('It requires BOTH a reviewed allowBluntSync=true commit and force_sync=REVIEWED_REPLACEMENT.');
+            console.error('Edit services/btc-conservative-agent/ directly for normal production work.');
             process.exit(1);
           }
-          console.log('force override');
+          console.log('reviewed replacement enabled');
           "
         env:
           FORCE_INPUT: ${{ github.event.inputs.force_sync }}

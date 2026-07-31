@@ -47,9 +47,41 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+# QUARANTINE CONTRACT
+# -------------------
+# Fly is the sole AI/strategy/trading owner. This file remains only as a
+# recoverable disaster-recovery artifact. A missing/renamed lock file must
+# never silently promote this obsolete supervisor into a second owner.
+$obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$obsoleteOwnerEnabled = (
+  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  $obsoleteOwnerOptIn
+)
+if (-not $obsoleteOwnerEnabled) {
+  if (
+    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    "NO_SIDE_EFFECTS"
+  ) {
+    Write-Error "Obsolete Windows supervisor is quarantined; no process was started."
+    exit 78
+  }
+
+  $mirrorScript = Join-Path $scriptDir "start-fly-desktop-mirror.ps1"
+  if (Test-Path -LiteralPath $mirrorScript) {
+    Write-Warning "Obsolete Windows supervisor is quarantined. Starting the safe Fly desktop mirror/analyzer instead."
+    & $mirrorScript -NoWait
+    exit 0
+  }
+
+  Write-Error "Obsolete Windows supervisor is quarantined and the safe Fly desktop mirror launcher is missing."
+  exit 78
+}
+
+Write-Warning "DISASTER-RECOVERY OPT-IN ACTIVE: obsolete Windows AI/trading supervisor is permitted."
 if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
-  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
-  exit 0
+  Write-Error "Fly canonical lock is present; refusing to start a second AI/trading owner."
+  exit 78
 }
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort $BridgePort
 . (Join-Path $scriptDir "home-stack-health.ps1")

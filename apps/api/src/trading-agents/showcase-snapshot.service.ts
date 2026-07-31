@@ -6,11 +6,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type ShowcaseSnapshotBody = {
   snapshot_seq?: number;
   snapshot?: Record<string, unknown>;
+  snapshot_json?: string;
+  snapshot_hmac?: string;
   bot_version?: string;
   server_ts?: string;
 };
@@ -24,12 +27,18 @@ export class ShowcaseSnapshotService {
     private readonly prisma: PrismaService,
   ) {}
 
-  assertAuthorized(secretHeader: string | undefined) {
+  private controlSecret(): string {
     const expected = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
     if (!expected) {
       throw new UnauthorizedException('Showcase snapshot push not configured');
     }
-    if (secretHeader?.trim() !== expected) {
+    return expected;
+  }
+
+  assertAuthorized(secretHeader: string | undefined) {
+    const expected = Buffer.from(this.controlSecret(), 'utf8');
+    const supplied = Buffer.from(secretHeader?.trim() ?? '', 'utf8');
+    if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
       throw new UnauthorizedException('Invalid bot control secret');
     }
   }
@@ -40,7 +49,33 @@ export class ShowcaseSnapshotService {
       throw new BadRequestException('snapshot_seq must be a positive safe integer');
     }
     const seq = BigInt(rawSeq);
-    const rawSnapshot = body.snapshot ?? body;
+    const snapshotJson =
+      typeof body.snapshot_json === 'string' ? body.snapshot_json : '';
+    const suppliedHmac =
+      typeof body.snapshot_hmac === 'string'
+        ? body.snapshot_hmac.trim().toLowerCase()
+        : '';
+    if (!snapshotJson || !/^[a-f0-9]{64}$/.test(suppliedHmac)) {
+      throw new UnauthorizedException('Signed showcase snapshot required');
+    }
+    const expectedHmac = createHmac('sha256', this.controlSecret())
+      .update(`${rawSeq}.${snapshotJson}`, 'utf8')
+      .digest('hex');
+    const expectedBytes = Buffer.from(expectedHmac, 'hex');
+    const suppliedBytes = Buffer.from(suppliedHmac, 'hex');
+    if (
+      expectedBytes.length !== suppliedBytes.length
+      || !timingSafeEqual(expectedBytes, suppliedBytes)
+    ) {
+      throw new UnauthorizedException('Invalid showcase snapshot signature');
+    }
+
+    let rawSnapshot: unknown;
+    try {
+      rawSnapshot = JSON.parse(snapshotJson) as unknown;
+    } catch {
+      throw new BadRequestException('snapshot_json must contain valid JSON');
+    }
     if (!rawSnapshot || typeof rawSnapshot !== 'object' || Array.isArray(rawSnapshot)) {
       throw new BadRequestException('snapshot must be an object');
     }

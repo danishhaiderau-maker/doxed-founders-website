@@ -59,9 +59,24 @@ def run():
     check("raw NO_TRADE remains auditable", no_trade["raw_direction"] == "NO_TRADE")
     check("exact five-point gap is a Continuous soft approve", no_trade["decision"] == "SOFT_APPROVE")
     check("legacy confidence bands cannot block direction-only v12", not bot.dashboard_ai_band_blocks(0))
-    fallback_limit, fallback_reason = bot.resolve_ai_direct_limit("LONG", 100.0, {})
-    check("direction-only call gets deterministic pullback limit", 0 < fallback_limit < 100.0)
-    check("direction-only limit is labelled deterministic", fallback_reason == "DIRECTIONAL_PULLBACK_LIMIT")
+    structural_limit, structural_reason = bot.resolve_ai_direct_limit(
+        "LONG",
+        64000.0,
+        {},
+        market_structure={"micro_support": 63900.0},
+        support_resistance={},
+    )
+    check("direction-only call gets local-support limit", structural_limit == 63915.0)
+    check("direction-only limit is labelled structural", structural_reason == "LOCAL_SUPPORT_LIMIT")
+    missing_limit, missing_reason = bot.resolve_ai_direct_limit(
+        "LONG",
+        64000.0,
+        {},
+        market_structure={},
+        support_resistance={},
+    )
+    check("direction-only call fails closed without local support", missing_limit is None)
+    check("missing local support is explicit", missing_reason == "LOCAL_SUPPORT_UNAVAILABLE")
     check(
         "shared LONG scores normalize to the legacy Type B spread",
         bot.compute_directional_spread(
@@ -264,7 +279,10 @@ def run():
         if row.get("lane") == RESEARCH_LANE_TYPE_B_HUNTER_V1
     )
     check("Type B tile truthfully labels its chase entry", tile.get("entry_mode_label") == "Bounded Limit Chase")
-    check("Type B tile is platform-relay eligible when ON", tile.get("platform_relay_eligible") is True)
+    check(
+        "Type B remains paper research and is never platform-relay eligible",
+        tile.get("platform_relay_eligible") is False,
+    )
     check(
         "Type B tile exposes raw and normalized score gates",
         "Raw score gap >=20/100" in tile.get("filter_chips", [])
@@ -529,6 +547,7 @@ def run():
     )
     process_positions_source = inspect.getsource(bot.process_positions)
     cleanup_expired_source = inspect.getsource(bot.cleanup_expired_orders)
+    cancel_pending_source = inspect.getsource(bot._cancel_pending_order_confirmed)
     close_position_source = inspect.getsource(bot.close_position)
     check(
         "position exits run after releasing trade_lock",
@@ -554,8 +573,11 @@ def run():
         bot.position_evaluation_lock.release()
     check(
         "expired-order persistence runs after releasing trade_lock",
-        cleanup_expired_source.find("with trade_lock:")
-        < cleanup_expired_source.find("_record_expired_order("),
+        "_cancel_pending_order_confirmed(" in cleanup_expired_source
+        and cancel_pending_source.find("with trade_lock:")
+        < cancel_pending_source.find('result["confirmed"] = True')
+        < cancel_pending_source.find("if record_expired:")
+        < cancel_pending_source.find("_record_expired_order("),
     )
     check(
         "position close uses a dedicated serialization lock",

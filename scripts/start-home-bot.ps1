@@ -8,11 +8,27 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
-  Write-Host "Fly.io is the sole AI/trading owner; starting the desktop mirror instead." -ForegroundColor Yellow
-  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
-  exit 0
+
+# QUARANTINED LEGACY OWNER. Normal desktop operation is
+# start-fly-desktop-mirror.ps1; it never runs this Python strategy process.
+# Keep the old launcher reversible for an operator-led disaster recovery only.
+$legacyOwnerOptInName = "DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"
+$legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction SilentlyContinue).Value
+if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
+  Write-Host "REFUSED: this obsolete launcher would start a second AI/strategy owner on Windows." -ForegroundColor Red
+  Write-Host "Fly.io remains the sole production owner." -ForegroundColor Yellow
+  Write-Host "Safe desktop mirror: powershell -File scripts\start-fly-desktop-mirror.ps1 -NoWait"
+  Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
+  exit 78
 }
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Write-Host "REFUSED: Fly canonical lock is present; Windows cannot become a second trading owner." -ForegroundColor Red
+  Write-Host "Lock: $flyCanonicalLock" -ForegroundColor Yellow
+  exit 78
+}
+Write-Warning "DISASTER-RECOVERY OPT-IN ACCEPTED: starting an obsolete second Windows AI/strategy owner."
 $logsDir = Join-Path $repoRoot "logs"
 $startupStdoutLog = Join-Path $logsDir "bot-startup.stdout.log"
 $startupStderrLog = Join-Path $logsDir "bot-startup.stderr.log"

@@ -274,6 +274,35 @@ test('showcase reports a healthy REST fallback and renders canonical AI decision
     recentTrades: [],
     marketStructure: 'BULL_ALIGNED',
     aiReasoning: 'Shared direction approved LONG.',
+    latestAiVerdict: {
+      decision: 'APPROVE',
+      direction: 'LONG',
+      longScore: 65,
+      shortScore: 35,
+      rawScoreGap: 30,
+      gapBucket: 3,
+      winProbability: 0,
+      reason: 'Shared direction approved LONG.',
+      comment: 'Shared direction approved LONG.',
+      blockReason: null,
+      edgeScore: 3.4,
+      requiredEdge: 3,
+      marketRegime: 'BULL',
+      updatedAt: '2026-07-30T03:35:00.000Z',
+    },
+    pendingApproval: {
+      tradeId: 'cont-gap-30',
+      status: 'APPROVE_PENDING',
+      direction: 'LONG',
+      reason: 'Waiting for selected chase bucket 3',
+      rawScoreGap: 30,
+      gapBucket: 3,
+      chaseCount: 2,
+      selectedChaseBuckets: [3, 4],
+      exactLimitPrice: null,
+      entryLimitPolicy: 'micro_sr_structural_limit_v1',
+      updatedAt: '2026-07-30T03:35:00.000Z',
+    },
     riskStatus: 'NORMAL',
     fundingStatus: '',
     dataSource: 'bitfinex_rest',
@@ -363,8 +392,15 @@ test('showcase reports a healthy REST fallback and renders canonical AI decision
     } as never),
   );
 
-  assert.match(html, /Bot online · REST price fallback/);
+  assert.match(html, /Fly bot online · REST price fallback/);
   assert.match(html, /AI Approved/);
   assert.match(html, /Shared direction approved LONG/);
+  assert.match(html, /Approved candidate · waiting in virtual chase/);
+  assert.match(html, /Raw AI gap 30\/100 · execution bucket 3/);
+  assert.match(html, /Entry buckets selected: 3, 4/);
+  assert.match(html, /not yet a resting Bitfinex order/);
+  assert.match(html, /Fly.io is the sole AI, strategy, and trading owner/);
+  assert.equal(html.includes('Home PC command center'), false);
+  assert.equal(html.includes('30% confidence'), false);
   assert.equal(html.includes('No AI decisions yet this session.'), false);
 });

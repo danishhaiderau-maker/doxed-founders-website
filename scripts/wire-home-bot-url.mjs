@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * Point production API + Neon at home bot URL; optionally pause Railway showcase bot.
+ * Point production API + Neon at the canonical Fly bot URL.
+ *
+ * The historical command name is retained for compatibility. Any laptop,
+ * Cloudflare, or other non-Fly URL is rejected before external state changes.
  *
  * Usage:
  *   npm run wire:home-bot
@@ -16,6 +19,7 @@ import path from 'path';
 import {
   readDotEnv,
   resolveHomeBotPublicUrl,
+  assertCanonicalFlyBotUrl,
   RAILWAY_API_SERVICE,
   RAILWAY_BOT_SERVICE,
 } from './home-bot-config.mjs';
@@ -27,10 +31,10 @@ loadVaultEnv(root);
 const GQL = 'https://backboard.railway.com/graphql/v2';
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith('--')));
-const botUrl = resolveHomeBotPublicUrl(args[0]);
+const botUrl = assertCanonicalFlyBotUrl(resolveHomeBotPublicUrl(args[0]));
 const skipHealth = flags.has('--skip-health-check');
 const pauseBot = flags.has('--pause-railway-bot');
-const deleteBot = flags.has('--delete-railway-bot') || (!flags.has('--keep-railway-bot') && !pauseBot);
+const deleteBot = flags.has('--delete-railway-bot');
 
 async function gql(token, query, variables = {}) {
   const res = await fetch(GQL, {
@@ -62,21 +66,20 @@ async function checkHealth(url) {
   return false;
 }
 
-console.log('\n=== Wire home bot URL ===\n');
+console.log('\n=== Wire canonical Fly bot URL ===\n');
 console.log(`Target: ${botUrl}\n`);
 
 if (!skipHealth) {
-  console.log('Health check (start tunnel + bot on home first, or pass --skip-health-check):');
+  console.log('Health check (canonical Fly runtime):');
   const ok = await checkHealth(botUrl);
   if (!ok) {
     console.error(`
-Home bot not reachable at ${botUrl}
+Canonical Fly bot not reachable at ${botUrl}
 
-1. On home PC: npm run setup:home-bot-tunnel  (or scripts/setup-home-bot-tunnel.ps1)
-2. Start bot:   npm run print:home-bot-env then start-home-bot.ps1
-3. Re-run:      npm run wire:home-bot -- ${botUrl}
+Confirm the Fly app is healthy, then re-run:
+  npm run wire:home-bot -- ${botUrl}
 
-Or wire now and fix tunnel later:
+For a reviewed recovery wire without the health probe:
   npm run wire:home-bot -- ${botUrl} --skip-health-check
 `);
     process.exit(1);

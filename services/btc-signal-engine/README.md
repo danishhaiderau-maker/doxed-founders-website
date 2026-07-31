@@ -1,22 +1,33 @@
-# BTC Signal Engine
+# BTC Signal Engine — Generated Compatibility Mirror
 
-Shared strategy contract for **research** and **showcase** runtimes.
+This folder is not a second bot and is not an independently editable strategy.
 
-## Architecture
+`engine.py` must be the normalized byte-for-byte mirror of:
 
 ```text
-bybit-15m-research-bot/bybit_bot.py
-        ↓ sync-btc-research-bot.mjs
-services/btc-signal-engine/engine.py   ← synced signal engine (full pipeline)
-services/btc-conservative-agent/bot.py ← import alias (same engine until split completes)
-        ↓
-btc_conservative_agent.py              ← Railway entry (execution wrapper only)
+services/btc-conservative-agent/bot.py
 ```
 
-Research wrapper (local): full `bybit_bot.py` + analyzer + telemetry.
+The canonical source-to-mirror direction is always:
 
-Showcase wrapper (Railway): `btc_conservative_agent.py` — signal + dashboard + health only.
+```text
+btc-conservative-agent/bot.py
+              ↓  scripts/mirror-signal-engine.mjs
+btc-signal-engine/engine.py
+```
 
-## manifest.json
+It exists for CI parity validation, source fingerprints, probes, and legacy
+consumers that still expect the old folder name. No production launcher,
+Fly.io process, Railway service, or desktop task may run `engine.py` as a
+separate strategy owner.
 
-Updated on every research sync. Dashboard displays engine version + signal hash for drift detection.
+Never edit `engine.py` directly. Never use the deprecated research/local sync
+scripts to overwrite the canonical bot. After a canonical bot change:
+
+```bash
+npm run mirror:signal-engine
+npm run verify:signal-parity
+```
+
+`manifest.json` records the canonical source path and fingerprint. Its
+timestamp/fingerprint changes when the safe mirror command runs.

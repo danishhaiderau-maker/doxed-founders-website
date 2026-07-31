@@ -22,6 +22,17 @@ import { loadCloudflareEnv } from './cloudflare-env.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 
+const flyLockPath = path.join(repoRoot, 'config', 'fly-canonical.lock.json');
+if (fs.existsSync(flyLockPath)) {
+  const flyLock = JSON.parse(fs.readFileSync(flyLockPath, 'utf8'));
+  if (flyLock.frozen === true && flyLock.desktopBotEnabled === false) {
+    console.error(
+      'REFUSED_LEGACY_TUNNEL: Fly.io is the sole bot owner; Cloudflare bot tunnel setup is retired.',
+    );
+    process.exit(78);
+  }
+}
+
 loadCloudflareEnv();
 const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN?.trim();
 const ACCOUNT_ID = (process.env.CLOUDFLARE_ACCOUNT_ID || '242582298202462d75198184516c54d2').trim();

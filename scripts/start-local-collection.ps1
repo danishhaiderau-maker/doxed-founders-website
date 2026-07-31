@@ -1,11 +1,30 @@
 # Start frozen local collection stack: bot :7002 + analyzer :9500 (visible consoles, no tunnel).
+# QUARANTINED: this still starts a second AI/strategy process.
 param([switch]$OnceAnalyzer)
 
 $ErrorActionPreference = "Continue"
-. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "local-collection-config.ps1")
-
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+
+$legacyOwnerOptInName = "DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"
+$legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction SilentlyContinue).Value
+if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
+  Write-Host "REFUSED: local collection would start a second AI/strategy owner and replace :7002/:9001." -ForegroundColor Red
+  Write-Host "Use scripts\start-fly-desktop-mirror.ps1; its analyzer reads the synchronized Fly mirror."
+  Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
+  exit 78
+}
+$flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
+if (Test-Path -LiteralPath $flyCanonicalLock) {
+  Write-Host "REFUSED: Fly canonical lock is present; local collection cannot start another owner." -ForegroundColor Red
+  Write-Host "Lock: $flyCanonicalLock" -ForegroundColor Yellow
+  exit 78
+}
+Write-Warning "DISASTER-RECOVERY OPT-IN ACCEPTED: starting the obsolete local collection bot."
+
+. (Join-Path $scriptDir "local-collection-config.ps1")
+
 $flagFile = Join-Path $repoRoot ".local-collection-mode"
 Set-Content -Path $flagFile -Value "bot=$($LocalCollection.BotPort) analyzer=$($LocalCollection.AnalyzerPort)" -NoNewline
 

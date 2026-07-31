@@ -202,8 +202,8 @@ function deskHeader(
       eyebrow: 'Showcase bot · live',
       title: 'Conservative BTC Agent · live action',
       hint: botConnected
-        ? 'Real-time signals, limit orders, positions, and closed trades from the admin showcase bot on :7002. Observe only — not your exchange.'
-        : 'Showcase bot reachable on local network only — public tunnel down. Refresh once the bot + tunnel are back online.',
+        ? 'Real-time signals, exact limit orders, positions, and closed trades from the canonical Fly bot. Observe only — not your exchange.'
+        : 'Canonical Fly snapshot unavailable from the platform API. Desktop :7002 and Cloudflare are monitoring fallbacks only.',
     };
   }
   if (activeDesk === 'relay-sim') {
@@ -228,7 +228,7 @@ function deskHeader(
   return {
     eyebrow: `${exchange} live copy`,
     title: `Connect ${exchange} for live copy`,
-    hint: 'Mirror the global showcase bot on your real Bitfinex derivatives account.',
+    hint: 'Mirror the canonical Fly showcase bot on your real Bitfinex derivatives account.',
   };
 }
 
@@ -328,7 +328,7 @@ export function CopyTradeHub({
             <div className="shrink-0 text-right">
               <p className="text-[10px] uppercase tracking-widest text-violet-400">Showcase</p>
               <p className="mt-0.5 text-sm font-bold text-white">
-                {botConnected ? 'Live · :7002' : 'Tunnel down'}
+                {botConnected ? 'Fly feed online' : 'Fly feed unavailable'}
               </p>
               <p className="text-[10px] text-zinc-500">observe only</p>
             </div>

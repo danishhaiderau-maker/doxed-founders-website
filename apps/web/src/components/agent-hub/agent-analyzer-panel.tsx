@@ -133,10 +133,9 @@ export function AgentAnalyzerPanel({
             Analyzer session unavailable
             {summary?.error ? ` — ${summary.error}` : ''}
             <p className="mt-1 text-amber-200/70">
-              Full-session metrics come from the home showcase bot on{' '}
-              <span className="font-mono">bot.doxxedcrypto.digital</span> (:7002 analyzer :9001). When the
-              Cloudflare tunnel or analyzer proxy blips, cached /api/state metrics will repopulate this block
-              automatically — the separate Fly.io bot is not the canonical showcase.
+              Fly.io is the sole AI, strategy, and trading owner. This research card is produced by the desktop
+              analyzer on <span className="font-mono">:9001</span> from synchronized Fly data. If this PC or analyzer
+              is off, Fly trading continues; the research card will repopulate after the desktop mirror catches up.
             </p>
           </div>
         )}

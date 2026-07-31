@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /**
- * Guard blunt bot code sync when config/bot-architecture.lock.json disallows it.
- * Agents and CI should hit this and STOP — call out to the user instead of overwriting bot.py.
+ * Guard any blunt replacement of the canonical Conservative BTC source.
+ *
+ * A command-line flag is deliberately insufficient. A write requires:
+ *   1. a reviewed, source-controlled allowBluntSync=true change; and
+ *   2. an explicit BOT_SYNC_FORCE/--force confirmation for that invocation.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,7 +12,7 @@ import { join } from 'node:path';
 const DEFAULT_LOCK = {
   allowBluntSync: false,
   agentInstruction:
-    'STOP: blunt bot sync is disabled. Edit services/btc-conservative-agent/ in this repo instead.',
+    'STOP: blunt bot sync is disabled. Edit services/btc-conservative-agent/ directly.',
 };
 
 export function loadBotArchitectureLock(root) {
@@ -31,60 +34,57 @@ function isForceEnabled(lock, argv = process.argv) {
 
 /**
  * @param {{ root: string, syncKind: string, checkOnly?: boolean }} opts
- * @returns {{ allowed: boolean, forced?: boolean }}
+ * @returns {{ allowed: boolean, forced?: boolean, reviewedLock?: boolean, checkOnly?: boolean }}
  */
 export function assertBotSyncAllowed({ root, syncKind, checkOnly = false }) {
   const lock = loadBotArchitectureLock(root);
   const forced = isForceEnabled(lock);
 
-  if (lock.allowBluntSync === true) {
-    return { allowed: true };
-  }
-
-  if (checkOnly && !forced) {
+  if (checkOnly) {
     console.warn(
-      `\n⚠  [bot-sync-guard] ${syncKind} --check-only: read-only probe allowed, but blunt sync is DISABLED.\n` +
-        `   ${lock.summary ?? lock.agentInstruction ?? DEFAULT_LOCK.agentInstruction}\n`,
+      `\n[bot-sync-guard] ${syncKind}: read-only probe allowed; source replacement remains disabled.\n` +
+        `  ${lock.summary ?? lock.agentInstruction ?? DEFAULT_LOCK.agentInstruction}\n`,
     );
     return { allowed: true, checkOnly: true };
   }
 
-  if (forced) {
+  if (lock.allowBluntSync === true && forced) {
     console.warn(
-      `\n⚠  [bot-sync-guard] FORCE override for ${syncKind}. Proceeding despite architecture lock.\n` +
-        `   Human confirmation assumed (${lock.forceOverride?.envVar ?? 'BOT_SYNC_FORCE'} or --force).\n`,
+      `\n[bot-sync-guard] REVIEWED replacement enabled for ${syncKind}.\n` +
+        '  Source-controlled allowBluntSync=true and invocation confirmation are both present.\n',
     );
-    return { allowed: true, forced: true };
+    return { allowed: true, forced: true, reviewedLock: true };
   }
 
   const lines = [
     '',
-    '══════════════════════════════════════════════════════════════════════',
-    '  DANGER: blunt bot sync is BLOCKED (config/bot-architecture.lock.json)',
-    '══════════════════════════════════════════════════════════════════════',
+    '======================================================================',
+    'DANGER: blunt bot source replacement is BLOCKED',
+    '======================================================================',
     '',
-    `  Attempted: ${syncKind}`,
+    `Attempted: ${syncKind}`,
     '',
-    '  These are NOT the same bot — do not overwrite blindly:',
+    'These sources are not interchangeable with the canonical production bot:',
   ];
 
-  for (const src of lock.deprecatedBluntSyncSources ?? []) {
-    const detail = src.path ?? `${src.repo}/${src.file ?? 'bybit_bot.py'}`;
-    lines.push(`    • ${src.label ?? src.id}: ${detail}`);
+  for (const source of lock.deprecatedBluntSyncSources ?? []) {
+    const detail =
+      source.path ?? `${source.repo}/${source.file ?? 'bybit_bot.py'}`;
+    lines.push(`  - ${source.label ?? source.id}: ${detail}`);
   }
 
   lines.push(
     '',
-    `  Canonical source: ${lock.canonicalSource?.directory ?? 'services/btc-conservative-agent/'}`,
-    `  Global showcase:  :${lock.canonicalSource?.runtime?.match(/:(\d+)/)?.[1] ?? '7002'}  ${lock.canonicalSource?.publicUrl ?? ''}`,
+    `Canonical source: ${lock.canonicalSource?.directory ?? 'services/btc-conservative-agent/'}`,
+    `Canonical runtime: ${lock.canonicalSource?.runtime ?? 'Fly.io'}`,
     '',
-    '  Safe without code sync: sync:production, wire:home-bot, RECOVER-GLOBAL-STACK',
+    'Safe operations do not replace bot.py: deployment, mirror startup, data sync, and analysis.',
     '',
-    '  FOR AI AGENTS: STOP. Tell the user this sync is dangerous and ask before proceeding.',
-    `  ${lock.agentInstruction ?? DEFAULT_LOCK.agentInstruction}`,
+    'FOR AI AGENTS: STOP. Edit the canonical in-repo bot directly.',
+    `${lock.agentInstruction ?? DEFAULT_LOCK.agentInstruction}`,
     '',
-    '  Human override only: BOT_SYNC_FORCE=1 … --force',
-    '══════════════════════════════════════════════════════════════════════',
+    'Replacement requires BOTH a reviewed allowBluntSync=true commit and BOT_SYNC_FORCE/--force.',
+    '======================================================================',
     '',
   );
 

@@ -1,6 +1,4 @@
-/**
- * Shared config for home-hosted BTC bot (replaces Railway btc-conservative-agent).
- */
+/** Shared compatibility config for the canonical Fly BTC runtime. */
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getVaultDir } from './secrets-vault-path.mjs';
@@ -8,12 +6,25 @@ import { getVaultDir } from './secrets-vault-path.mjs';
 // Fly is the authoritative 24/7 showcase. The custom hostname may be repointed
 // later, but operational tools must not silently fall back to the retired
 // home/Cloudflare route.
-export const DEFAULT_HOME_BOT_PUBLIC_URL = 'https://doxed-btc-bot.fly.dev';
+export const CANONICAL_FLY_BOT_PUBLIC_URL = 'https://doxed-btc-bot.fly.dev';
+export const DEFAULT_HOME_BOT_PUBLIC_URL = CANONICAL_FLY_BOT_PUBLIC_URL;
 export const DEFAULT_HOME_BOT_LOCAL_PORT = 7002;
 export const RAILWAY_BOT_SERVICE = 'btc-conservative-agent';
 export const RAILWAY_API_SERVICE = 'doxed-founders-website';
 export const RELAY_WEBHOOK_URL =
   'https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event';
+
+export function assertCanonicalFlyBotUrl(value) {
+  const normalized = String(value || '').trim().replace(/\/$/, '');
+  if (normalized !== CANONICAL_FLY_BOT_PUBLIC_URL) {
+    throw new Error(
+      `REFUSED_NON_FLY_BOT_URL: expected ${CANONICAL_FLY_BOT_PUBLIC_URL}, received ${
+        normalized || '(empty)'
+      }`,
+    );
+  }
+  return normalized;
+}
 
 export function readDotEnv(path) {
   const map = {};

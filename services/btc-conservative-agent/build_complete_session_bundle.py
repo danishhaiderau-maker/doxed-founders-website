@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ BENCHMARK_LANE = "CONTINUOUS"
 CSV_CANDIDATES = (
     "trades_3factor.csv",
     "decisions_3factor.csv",
+    "blocked_signals_3factor.csv",
     "blocked_3factor.csv",
 )
 
@@ -42,6 +44,16 @@ def _read_json(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
+
+
+def _file_record(path: Path, *, role: str) -> dict:
+    data = path.read_bytes()
+    return {
+        "name": path.name,
+        "role": role,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 def _continuous_from_benchmark(path: Path) -> dict | None:
@@ -225,26 +237,70 @@ def build_bundle(
     history_root: Path,
     live_root: Path | None = None,
     out_path: Path | None = None,
+    data_root: Path | None = None,
 ) -> Path:
     history_root = Path(history_root)
     live_root = Path(live_root or DEFAULT_AGENT_ROOT)
+    data_root = Path(data_root or live_root)
     out_path = Path(out_path or (history_root / DOWNLOADS_DIR / "trading_sessions_complete.zip"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(".zip.tmp")
 
     timeline = _session_timeline(history_root)
-    trades_path = live_root / "trades_3factor.csv"
+    trades_path = data_root / "trades_3factor.csv"
+    if not trades_path.is_file():
+        trades_path = live_root / "trades_3factor.csv"
     if not trades_path.is_file():
         trades_path = history_root / "trades_3factor.csv"
     weekend = _trades_weekend_breakdown(trades_path)
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report_manifest_path = live_root / "report_manifest.json"
+    report_manifest = _read_json(report_manifest_path, {}) or {}
+    raw_sources = []
+    for name in CSV_CANDIDATES:
+        source = next(
+            (
+                candidate
+                for candidate in (data_root / name, live_root / name, history_root / name)
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if source is not None:
+            raw_sources.append(
+                _file_record(
+                    source,
+                    role=(
+                        "configured_data_root"
+                        if source.parent.resolve() == data_root.resolve()
+                        else "fallback"
+                    ),
+                )
+            )
+    bundle_manifest = {
+        "schema": "trading_sessions_complete_manifest_v2",
+        "generated_at": stamp,
+        "report_generated_at": report_manifest.get("generated_at"),
+        "analyzer_sync_id": report_manifest.get("analyzer_sync_id"),
+        "session_ids": [
+            row.get("session_id") for row in timeline if row.get("session_id")
+        ],
+        "raw_sources": raw_sources,
+        "report_manifest": (
+            _file_record(report_manifest_path, role="configured_report_root")
+            if report_manifest_path.is_file()
+            else None
+        ),
+    }
     readme = f"""Trading Sessions — Complete Bundle
 Generated: {stamp}
 History root: {history_root}
-Live root: {live_root}
+Report root: {live_root}
+Current data root: {data_root}
 
 Contents:
+  BUNDLE_MANIFEST.json        â€” source hashes and freshness contract
   session_index.json          — flat list of all archived analyzer runs
   continuous_session_timeline.json — CONTINUOUS lane stats per archive snapshot
   continuous_weekend_breakdown.json — weekday vs weekend from trades CSV
@@ -261,6 +317,7 @@ Open continuous_weekend_breakdown.json for weekend vs weekday split.
     file_count = 0
     with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.writestr("README.txt", readme)
+        zf.writestr("BUNDLE_MANIFEST.json", json.dumps(bundle_manifest, indent=2))
         zf.writestr("session_index.json", json.dumps({"generated_at": stamp, "sessions": timeline}, indent=2))
         zf.writestr("continuous_session_timeline.json", json.dumps({"generated_at": stamp, "sessions": timeline}, indent=2))
         zf.writestr("continuous_weekend_breakdown.json", json.dumps({"generated_at": stamp, **weekend}, indent=2))
@@ -296,7 +353,7 @@ Open continuous_weekend_breakdown.json for weekend vs weekday split.
         file_count += _add_tree(zf, live_root / REPORTS_DIR / "all_data", "live/reports/all_data", seen)
 
         for name in CSV_CANDIDATES:
-            for root in (live_root, history_root):
+            for root in (data_root, live_root, history_root):
                 p = root / name
                 if p.is_file():
                     arc = f"csv/{name}"
@@ -331,10 +388,17 @@ def main():
     ap = argparse.ArgumentParser(description="Build complete trading-session ZIP bundle")
     ap.add_argument("--history-root", default=str(FINAL_BOTS_ROOT))
     ap.add_argument("--live-root", default=str(DEFAULT_AGENT_ROOT))
+    ap.add_argument("--data-root", default="")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
     out = Path(args.out) if args.out else None
-    path = build_bundle(Path(args.history_root), Path(args.live_root), out)
+    data_root = Path(args.data_root) if args.data_root else None
+    path = build_bundle(
+        Path(args.history_root),
+        Path(args.live_root),
+        out,
+        data_root=data_root,
+    )
     print(path.resolve())
 
 

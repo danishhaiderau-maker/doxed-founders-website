@@ -1,5 +1,6 @@
-# Load home-bot.env and run the research analyzer (30-min loop, or --Once).
-# Embedded Flask research dashboard (:9001 global showcase / :9500 local lab — see research/research_dashboard.py).
+# Run the read-only desktop analyzer (30-min loop, or --Once) against the
+# canonical Fly data mirror. It binds to loopback and receives no trading,
+# exchange, Fly, Railway, or AI credentials.
 param([switch]$Once, [switch]$NoWait, [int]$Port = 0)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -37,16 +38,30 @@ function Test-PortOpen([int]$P) {
   }
 }
 
+function Get-AnalyzerListenerPids([int]$P) {
+  try {
+    return @(
+      Get-NetTCPConnection -LocalPort $P -State Listen -ErrorAction Stop |
+        Select-Object -ExpandProperty OwningProcess -Unique |
+        Where-Object { [int]$_ -gt 0 -and [int]$_ -ne 4 }
+    )
+  } catch {
+    $matches = @(
+      netstat -ano -p tcp 2>$null |
+        Select-String -Pattern "^\s*TCP\s+\S+:$P\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    )
+    return @(
+      $matches |
+        ForEach-Object { [int]$_.Matches[0].Groups[1].Value } |
+        Sort-Object -Unique
+    )
+  }
+}
+
 function Wait-ForKey {
   Write-Host ""
   Write-Host "--- Console stays open so you can copy logs. Press Enter to close ---" -ForegroundColor Cyan
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
-}
-
-if (-not (Test-Path $vaultEnv)) {
-  Write-Host "Missing $vaultEnv - run: npm run print:home-bot-env" -ForegroundColor Red
-  Wait-ForKey
-  exit 1
 }
 
 if (-not (Test-Path $agentDir)) {
@@ -77,15 +92,36 @@ try {
 Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
 
 Set-Location $agentDir
-Get-Content $vaultEnv | ForEach-Object {
-  if ($_ -match '^\s*([^#=]+)=(.*)$') {
-    Set-Item -Path ("env:" + $matches[1].Trim()) -Value $matches[2].Trim()
+foreach ($secretName in @(
+  "BITFINEX_API_KEY", "BITFINEX_API_SECRET", "DEEPSEEK_API_KEY",
+  "DDOLLAR_GATE_TOKEN", "BOT_ADMIN_TOKEN", "BOT_CONTROL_SECRET",
+  "FLY_API_TOKEN", "RAILWAY_TOKEN", "DATABASE_URL",
+  "CREDENTIALS_ENCRYPTION_KEY"
+)) {
+  Remove-Item -LiteralPath ("Env:" + $secretName) -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $vaultEnv) {
+  $allowedAnalyzerVars = @(
+    "ANALYZER_INTERVAL_MINUTES",
+    "ANALYZER_GRID_SWEEP_MAX_REPLAYS",
+    "ANALYZER_SKIP_3D_SWEEP",
+    "RESEARCH_API_CACHE_TTL_SEC",
+    "RESEARCH_OPPORTUNITY_CACHE_TTL_SEC"
+  )
+  Get-Content -LiteralPath $vaultEnv | ForEach-Object {
+    if ($_ -match '^\s*([^#=]+)=(.*)$') {
+      $name = $matches[1].Trim()
+      if ($name -in $allowedAnalyzerVars) {
+        Set-Item -LiteralPath ("Env:" + $name) -Value $matches[2].Trim().Trim('"').Trim("'")
+      }
+    }
   }
 }
 
-$env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
+$env:RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"
 $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
-$env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
+$env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
+$env:ANALYZER_EMBEDDED_DASHBOARD = "0"
 $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory
@@ -97,14 +133,19 @@ $env:BTC_AGENT_REPORT_DIR = $agentDir
 
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
-  if (Test-AnalyzerHealthy) {
+  $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
+  if ((Test-AnalyzerHealthy) -and $listenerPids.Count -eq 1) {
     Write-Host "Analyzer healthy on :$AnalyzerPort (manifest + sync OK) - not starting a duplicate." -ForegroundColor Yellow
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     if (-not $NoWait) { Wait-ForKey }
     exit 0
   }
-  Write-Host "Port $AnalyzerPort has stale dashboard-only listener - clearing and starting full analyzer..." -ForegroundColor Yellow
+  if ($listenerPids.Count -gt 1) {
+    Write-Host "Port $AnalyzerPort has $($listenerPids.Count) listeners - replacing them with one loopback dashboard owner..." -ForegroundColor Yellow
+  } else {
+    Write-Host "Port $AnalyzerPort has a stale dashboard listener - clearing and starting the analyzer..." -ForegroundColor Yellow
+  }
   $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
   if (Test-Path -LiteralPath $analyzerPidFile) {
     try {
@@ -134,7 +175,7 @@ if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $analyzerDataDir"
-Write-Host "Research dashboard (Flask): http://127.0.0.1:$AnalyzerPort/  LAN: http://10.0.0.102:$AnalyzerPort/"
+Write-Host "Research dashboard (Flask, this PC only): http://127.0.0.1:$AnalyzerPort/"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""

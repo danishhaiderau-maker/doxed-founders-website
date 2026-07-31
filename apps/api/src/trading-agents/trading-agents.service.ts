@@ -42,6 +42,13 @@ import {
   type BotActivityEntry,
   type BotApiState,
 } from './bot-state.mapper';
+import { normalizeAnalyzerGenomeStatus } from './analyzer-genome-status';
+import {
+  probePublicBotHealth,
+  summarizeCanonicalBotHealth,
+  type CanonicalBotHealth,
+} from './public-bot-health-probe';
+import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
 import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
 import {
   buildShowcaseFlashFromBot,
@@ -686,42 +693,29 @@ export class TradingAgentsService implements OnModuleInit {
         ok: false,
         source: 'bot /api/state cumulative',
         error:
-          'showcase bot unreachable — cannot read cumulative session metrics from bot.doxxedcrypto.digital /api/state',
+          'canonical Fly bot unreachable — cannot read cumulative session metrics from /api/state',
       };
     }
     return this.analyzerSummaryFromMetrics(metrics);
   }
 
-  /** Server-side Fly.io + Cloudflare tunnel reachability for the conservative-btc showcase.
-   *  Used by the Agent Hub command center so the "Fly bot (sin)" status chip is NOT a
-   *  client-side browser probe (which fails on CORS/region). This bypasses the Neon
-   *  `showcaseBotPublicUrl` wiring that gates `botConnected` on the agent endpoint —
-   *  probing Fly + CF directly via the bot bridge's resilient URL resolver. */
-  async getBotHealth(slug: string): Promise<{
-    ok: boolean;
-    fly: boolean;
-    cloudflare: boolean;
-    botConnected: boolean;
-    source?: string;
-    error?: string;
-  }> {
+  /** Exact Fly-host health plus authenticated canonical snapshot availability. */
+  async getBotHealth(slug: string): Promise<CanonicalBotHealth> {
     if (slug !== 'conservative-btc') {
-      return { ok: false, fly: false, cloudflare: false, botConnected: false, error: 'only conservative-btc' };
+      return {
+        ok: false,
+        fly: false,
+        snapshotFresh: false,
+        botConnected: false,
+        source: 'unreachable',
+        error: 'only conservative-btc',
+      };
     }
-    const canonical = await this.botBridge.fetchPublicShowcaseState(true).catch(() => null);
-    const ok = Boolean(canonical);
-    const fromCloudflare = ok && canonical?.snapshot_source !== 'railway_cache';
-    return {
-      ok,
-      fly: false,
-      cloudflare: fromCloudflare,
-      botConnected: ok,
-      source: ok
-        ? canonical?.snapshot_source === 'railway_cache'
-          ? 'railway-snapshot'
-          : 'cloudflare-fallback'
-        : 'unreachable',
-    };
+    const [flyProbe, canonical] = await Promise.all([
+      probePublicBotHealth(CANONICAL_SHOWCASE_BOT_URL),
+      this.botBridge.fetchPublicShowcaseState(true).catch(() => null),
+    ]);
+    return summarizeCanonicalBotHealth(flyProbe, canonical);
   }
 
   /** Decision genome from the analyzer (:9001) via bot proxy. */
@@ -739,30 +733,7 @@ export class TradingAgentsService implements OnModuleInit {
       return { ok: false, error: 'genome only available for conservative-btc' };
     }
     const raw = await this.botBridge.fetchAnalyzerGenome();
-    if (!raw) {
-      return {
-        ok: false,
-        source: 'analyzer :9001 via bot proxy',
-        error: 'analyzer genome unavailable — bot may not have /api/analyzer/genome yet (restart bot)',
-      };
-    }
-    const stats = (raw.genome_stats as Record<string, unknown> | undefined) ?? null;
-    const discoveries = raw.discoveries as unknown[] | undefined;
-    const library = raw.library as unknown[] | Record<string, unknown> | undefined;
-    const libraryCount = Array.isArray(library)
-      ? library.length
-      : library && typeof library === 'object'
-        ? Object.keys(library).length
-        : 0;
-    return {
-      ok: true,
-      source: 'analyzer :9001 via bot proxy',
-      analyzer_mode: typeof raw.analyzer_mode === 'string' ? raw.analyzer_mode : undefined,
-      architecture_frozen: typeof raw.architecture_frozen === 'string' ? raw.architecture_frozen : undefined,
-      genome_stats: stats,
-      discoveries_count: Array.isArray(discoveries) ? discoveries.length : 0,
-      library_count: libraryCount,
-    };
+    return normalizeAnalyzerGenomeStatus(raw);
   }
 
   async getBotBridgeStatusAdmin() {
@@ -1142,7 +1113,7 @@ export class TradingAgentsService implements OnModuleInit {
       } else {
         // Same Railway-to-tunnel packet-loss resilience pattern that fixed
         // getPublicAgentStatus (commits a8ff68df..a2005456). When the
-        // canonical Cloudflare tunnel probe loses the race from Railway's
+        // canonical Fly probe loses the cross-region race from Railway's
         // network, the dashboard endpoint previously fell through to
         // getDashboard() which hardcodes botConnected:false + botSource:
         // FALLBACK — surfacing a false "Showcase bot offline" alert even

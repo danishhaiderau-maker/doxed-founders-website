@@ -297,8 +297,13 @@ print("\n[7] Direct local bridge control is safe during secret rotation")
 reset_state()
 original_admin_token = bot._BOT_ADMIN_TOKEN
 original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+original_recompute_system_readiness = bot._recompute_system_readiness
 bot._BOT_ADMIN_TOKEN = "required-test-token"
 bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+bot._recompute_system_readiness = lambda: {
+    "system_ready": False,
+    "readiness_reasons": ["TEST_NOT_READY"],
+}
 with bot.app.test_client() as client:
     direct_pause = client.post("/api/pause", environ_base={"REMOTE_ADDR": "127.0.0.1"})
     check("direct loopback pause is accepted without a token", direct_pause.status_code == 200)
@@ -310,11 +315,19 @@ with bot.app.test_client() as client:
     )
     check("proxied loopback resume remains token-protected", forwarded_resume.status_code == 401)
     check("rejected proxied resume leaves pause active", bot.state.get("execution_paused") is True)
-    direct_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
-    check("direct loopback resume is accepted without a token", direct_resume.status_code == 200)
-    check("direct loopback resume changes state", bot.state.get("execution_paused") is False)
+    unready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    check("unready direct loopback resume fails closed", unready_resume.status_code == 409)
+    check("unready direct loopback resume leaves pause active", bot.state.get("execution_paused") is True)
+    bot._recompute_system_readiness = lambda: {
+        "system_ready": True,
+        "readiness_reasons": [],
+    }
+    ready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    check("ready direct loopback resume is accepted without a token", ready_resume.status_code == 200)
+    check("ready direct loopback resume changes state", bot.state.get("execution_paused") is False)
 bot._BOT_ADMIN_TOKEN = original_admin_token
 bot._DASHBOARD_BOOTSTRAP_COMPLETE = original_bootstrap_complete
+bot._recompute_system_readiness = original_recompute_system_readiness
 
 
 print("\n[8] Paused shadow replay is visible without entering global books")
@@ -390,6 +403,11 @@ bot.circuit_breaker_cancel_pending = lambda reason: (
     observe_state_lock("cancel"),
     0,
 )[1]
+original_recompute_system_readiness = bot._recompute_system_readiness
+bot._recompute_system_readiness = lambda: {
+    "system_ready": True,
+    "readiness_reasons": [],
+}
 with bot.app.test_request_context("/api/pause", method="POST"):
     pause_response = bot.api_pause()
 with bot.app.test_request_context("/api/resume", method="POST"):
@@ -407,6 +425,7 @@ check(
 )
 bot.circuit_breaker_cancel_pending = original_cancel
 bot.save_persistent_config = lambda: None
+bot._recompute_system_readiness = original_recompute_system_readiness
 
 
 print("\n" + "=" * 72)

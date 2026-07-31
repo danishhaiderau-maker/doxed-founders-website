@@ -47,7 +47,7 @@ export class ShowcaseInferenceUsageService {
 
   /**
    * Persist batched token usage from the home showcase BTC bot (DeepSeek on
-   * bot.doxxedcrypto.digital). Each entry becomes one `AiTokenUsageLog` row.
+   * the canonical Fly bot). Each entry becomes one `AiTokenUsageLog` row.
    */
   async recordBatch(entries: ShowcaseInferenceUsageEntry[]): Promise<{
     received: number;

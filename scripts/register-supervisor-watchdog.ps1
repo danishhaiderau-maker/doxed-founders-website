@@ -59,6 +59,29 @@ if ($Uninstall) {
   exit 0
 }
 
+# Registration is intentionally fail-closed. Existing obsolete task actions
+# cannot be recreated accidentally; only an explicit disaster-recovery opt-in
+# may register this second-owner watchdog.
+$obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+$obsoleteOwnerEnabled = (
+  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  $obsoleteOwnerOptIn
+)
+if (-not $obsoleteOwnerEnabled) {
+  [Console]::Error.WriteLine(
+    "Refusing to register obsolete Windows supervisor watchdog. " +
+    "Fly is the sole AI/trading owner; use the Fly desktop mirror/analyzer launcher instead."
+  )
+  exit 78
+}
+
+Write-Warning "DISASTER-RECOVERY OPT-IN ACTIVE: registering an obsolete second-owner watchdog."
+$repoRoot = Split-Path -Parent $scriptRoot
+if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
+  [Console]::Error.WriteLine("Fly canonical lock is present; refusing to register a second AI/trading owner watchdog.")
+  exit 78
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principalCheck = New-Object Security.Principal.WindowsPrincipal($identity)
 $isAdministrator = $principalCheck.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -97,7 +120,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Principal $taskPrincipal `
   -Settings $settings `
-  -Description "DCF: every ${IntervalMinutes} minutes, restore one healthy home-stack supervisor from its progress heartbeat." `
+  -Description "OBSOLETE DISASTER RECOVERY ONLY: may restore a second Windows AI/trading owner; Fly remains canonical." `
   -Force | Out-Null
 
 Log "Registered scheduled task '$TaskName'."

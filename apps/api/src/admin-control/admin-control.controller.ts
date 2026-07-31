@@ -128,7 +128,7 @@ export class AdminControlController {
   @UseGuards(AdminGuard)
   @Post('showcase-runtime/push')
   pushShowcaseRuntime(@CurrentUser() user: AuthUser) {
-    return this.showcaseRuntime.pushToRailwayRuntime(user.id);
+    return this.showcaseRuntime.pushToCanonicalRuntime(user.id);
   }
 
   @UseGuards(AdminGuard)

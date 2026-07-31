@@ -90,7 +90,6 @@ export class SignalCyclesService implements OnModuleInit {
   private readonly logger = new Logger(SignalCyclesService.name);
   private lastSeenTradeId: string | null = null;
   private pollingIntents = false;
-  private backfilling = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -108,11 +107,6 @@ export class SignalCyclesService implements OnModuleInit {
     this.logger.log(`Signal cycle bridge polling every ${SIGNAL_POLL_MS / 1000}s`);
     setInterval(() => void this.pollBotForIntents(), SIGNAL_POLL_MS);
     setInterval(() => void this.syncShowcaseCycleClosures(), SIGNAL_POLL_MS);
-    // C4 fix: periodic reconnect-backfill — catches signals missed while the bot was
-    // briefly unreachable (a poll failed during a trade's lao window and the bot
-    // advanced past it). Scans session trades for still-OPEN showcase positions with
-    // no cycle row and creates INTENT cycles so the relay can still copy them.
-    setInterval(() => void this.backfillMissedIntents(), 30_000);
     setTimeout(() => void this.pollBotForIntents(), 1_000);
   }
 
@@ -231,13 +225,16 @@ export class SignalCyclesService implements OnModuleInit {
 
     const lao = extractBotApproveSnapshot(bot);
     if (!lao?.trade_id) return false;
-    if (lao.trade_id === this.lastSeenTradeId) return false;
+    // A PENDING approval is visibility-only by itself, but polling remains the
+    // crash/retry backstop when a signed ORDER_PLACED webhook is missed. The
+    // envelope mapper is the money-path gate: it returns null unless the same
+    // trade_id already owns a canonical resting order with an exact limit.
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
     // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only the
-    // Continuous (`cont-`) and Type B (`tbhv1-`)
-    // may create live-copy intents. All
+    // Continuous (`cont-`) is the only lane that may create live-copy intents.
+    // Type B (`tbhv1-`) and all other
     // research lanes (vc603-, szdc1-, slav1-, a160v2-, scan-, etc.) are skipped
     // — they have no real Bitfinex counterpart and would put real money on a
     // trade that exists only in the showcase bot's paper book. Replaces the
@@ -261,6 +258,40 @@ export class SignalCyclesService implements OnModuleInit {
       where: { agentId_tradeId: { agentId: agent.id, tradeId: canonicalTradeId } },
     });
     if (existing) {
+      const current = existing.intentEnvelope as
+        | { action?: unknown; entry?: { mode?: unknown } }
+        | null;
+      const alreadyExact =
+        current?.action === 'ENTER' && current.entry?.mode === 'EXACT_LIMIT';
+      if (existing.status === SignalCycleStatus.INTENT && !alreadyExact) {
+        const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
+        const exactEnvelope = buildIntentEnvelope(
+          existing.id,
+          canonicalTradeId,
+          bot,
+          { maxMarginUsd },
+        );
+        if (exactEnvelope) {
+          await this.prisma.signalCycle.update({
+            where: { id: existing.id },
+            data: {
+              intentEnvelope: exactEnvelope as unknown as Prisma.InputJsonValue,
+              botVersion: bot.bot_version ?? null,
+              expiresAt: new Date(
+                Date.now() + exactEnvelope.entry.ttl_sec * 1000,
+              ),
+            },
+          });
+          this.lastSeenTradeId = intentTradeId;
+          this.logger.log(
+            `Enriched visibility-only cycle with canonical exact limit trade=${canonicalTradeId}`,
+          );
+          return true;
+        }
+        // Approval is still in virtual-chase visibility state. Do not mark it
+        // seen: the same trade must be reconsidered after its exact order rests.
+        return false;
+      }
       this.lastSeenTradeId = intentTradeId;
       return false;
     }
@@ -310,87 +341,6 @@ export class SignalCyclesService implements OnModuleInit {
     return true;
   }
 
-  /**
-   * C4 reconnect-backfill: scan the showcase bot's session trades for still-OPEN
-   * positions that have no signalCycle row (missed because a poll failed during the
-   * trade's last_approve_outcome window and the bot advanced past it). Creates INTENT
-   * cycles so the relay can still copy them. Already-closed showcase trades are skipped
-   * (handled by syncShowcaseCycleClosures + the cycle-close-cancel path).
-   */
-  async backfillMissedIntents(): Promise<boolean> {
-    if (this.backfilling) return false;
-    this.backfilling = true;
-    try {
-      if (!this.botBridge.isEnabled()) return false;
-      const agent = await this.prisma.tradingAgent.findUnique({
-        where: { slug: 'conservative-btc' },
-      });
-      if (!agent) return false;
-      const bot = await this.botBridge.fetchStateForExecution(true);
-      if (!bot) return false;
-
-      const sessionTrades = normalizeBotSessionTrades(bot).filter(
-        (t) => t.trade_id && t.exit == null,
-      );
-      if (!sessionTrades.length) return false;
-
-      const existing = await this.prisma.signalCycle.findMany({
-        where: { agentId: agent.id },
-        orderBy: { createdAt: 'desc' },
-        take: 300,
-        select: { tradeId: true },
-      });
-      const existingIds = existing.map((c) => c.tradeId);
-
-      const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
-      let created = 0;
-      for (const t of sessionTrades) {
-        const tid = String(t.trade_id);
-        // F7 — never backfill non-mirrorable lanes (whitelist). Same rationale
-        // as pollBotForIntents: only explicitly allow-listed lanes may be mirrored.
-        if (!isMirrorableLaneTradeId(tid)) {
-          this.logger.warn(
-            `Skipping backfill of non-mirrorable lane trade_id=${tid} (F7: explicit showcase relay allowlist)`,
-          );
-          continue;
-        }
-        const showcaseMatch = resolveShowcaseTradeDetails(bot, tid);
-        const canonical = pickCanonicalTradeId(tid, showcaseMatch?.matchedTradeId ?? tid);
-        if (existingIds.some((e) => tradeIdsMatch(e, canonical))) continue;
-
-        const cycleId = `cyc_${randomBytes(8).toString('hex')}`;
-        const envelope = buildIntentEnvelope(cycleId, canonical, bot, { maxMarginUsd });
-        if (!envelope) continue;
-        const ttlSec = envelope.entry.ttl_sec;
-        try {
-          await this.prisma.signalCycle.create({
-            data: {
-              id: cycleId,
-              agentId: agent.id,
-              tradeId: canonical,
-              status: SignalCycleStatus.INTENT,
-              botVersion: bot.bot_version ?? null,
-              intentEnvelope: envelope as unknown as Prisma.InputJsonValue,
-              researchVenue: 'bitfinex',
-              expiresAt: new Date(Date.now() + ttlSec * 1000),
-            },
-          });
-          existingIds.push(canonical);
-          created++;
-          this.logger.log(
-            `Signal cycle BACKFILL ${cycleId} trade=${canonical} (missed-during-outage)`,
-          );
-        } catch (err) {
-          if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') continue;
-          throw err;
-        }
-      }
-      return created > 0;
-    } finally {
-      this.backfilling = false;
-    }
-  }
-
   /** Push wake from showcase bot — returns true when a new INTENT was created. */
   async wakeFromShowcase(opts?: { intents?: boolean; closures?: boolean }) {
     const intents = opts?.intents !== false;
@@ -398,9 +348,6 @@ export class SignalCyclesService implements OnModuleInit {
     let created = false;
     if (intents) {
       created = await this.pollBotForIntents();
-      // Also run the missed-signal backfill on wake so signals dropped during a brief
-      // bot outage are recovered when the showcase pushes its next event.
-      if (await this.backfillMissedIntents()) created = true;
     }
     if (closures) {
       await this.syncShowcaseCycleClosures(true);

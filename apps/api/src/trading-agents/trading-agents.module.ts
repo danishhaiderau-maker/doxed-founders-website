@@ -20,7 +20,6 @@ import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 import { TradingAgentsService } from './trading-agents.service';
-import { FlyControlService } from './fly-control.service';
 
 @Module({
   imports: [ProjectsModule, NotificationsModule, PointsModule, ExchangesModule],
@@ -39,7 +38,6 @@ import { FlyControlService } from './fly-control.service';
     ShowcaseRelayEventsService,
     ShowcaseSnapshotService,
     ShowcaseInferenceUsageService,
-    FlyControlService,
   ],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],
 })

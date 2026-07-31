@@ -15,6 +15,7 @@ import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   resolveSubscriberLeverage,
   BITFINEX_COPY_POLICY_VERSION,
+  SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
   resolveMaxConcurrentCopySignals,
   resolveMirrorDisasterStopMarginPct,
   isCopyRelaySimActive,
@@ -62,10 +63,23 @@ import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
-import { applyDashboardPatch } from './instance-view.mapper';
+import {
+  applyDashboardPatch,
+  participantTouchesSession,
+} from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
-import { mapBotStateToAgentStats, normalizeBotSessionTrades, type BotApiState } from './bot-state.mapper';
-import { resolveShowcaseTradeDetails, tradeIdsMatch } from './relay-fidelity.mapper';
+import {
+  isExecutableStructuralShowcaseOrder,
+  mapBotStateToAgentStats,
+  normalizeBotSessionTrades,
+  type BotApiState,
+} from './bot-state.mapper';
+import {
+  buildRelayFidelitySnapshot,
+  resolveShowcaseTradeDetails,
+  tradeIdsMatch,
+  type RelayFidelitySnapshot,
+} from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const AGENT_SLUG = 'conservative-btc';
@@ -80,6 +94,232 @@ const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 const PENDING_FILL_RECONCILE_GRACE_MS = 15_000;
+export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
+export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
+export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
+export const LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS = 30_000;
+const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
+
+export type LiveFidelityGuardState = {
+  schema: 'live_fidelity_guard_v1';
+  enabled: true;
+  thresholdPct: number;
+  requiredLowObservations: number;
+  minBreachDurationMs: number;
+  status: 'IDLE' | 'HEALTHY' | 'LOW_PENDING' | 'TRIPPED';
+  relayArmedAt: string | null;
+  lowObservationCount: number;
+  breachStartedAt: string | null;
+  lastObservedAt: string | null;
+  lastScorePct: number | null;
+  comparisonCount: number;
+  lastResetReason: string | null;
+  lastTrippedAt: string | null;
+  action?: {
+    relayPaused: boolean;
+    pendingEntriesCancelled: number | null;
+    pendingEntryCleanupError: string | null;
+    openPositionsFlattened: false;
+    flattenPolicy: 'NOT_CONFIGURED';
+  } | null;
+};
+
+export type LiveFidelityGuardDecision = {
+  state: LiveFidelityGuardState;
+  shouldTrip: boolean;
+  observationAccepted: boolean;
+};
+
+function readLiveFidelityGuardState(value: unknown): LiveFidelityGuardState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Partial<LiveFidelityGuardState>;
+  if (raw.schema !== 'live_fidelity_guard_v1') return null;
+  return raw as LiveFidelityGuardState;
+}
+
+function liveFidelityGuardBase(
+  previous: LiveFidelityGuardState | null,
+  relayArmedAt: string | null,
+): LiveFidelityGuardState {
+  return {
+    schema: 'live_fidelity_guard_v1',
+    enabled: true,
+    thresholdPct: LIVE_FIDELITY_GUARD_THRESHOLD_PCT,
+    requiredLowObservations: LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS,
+    minBreachDurationMs: LIVE_FIDELITY_GUARD_MIN_BREACH_MS,
+    status: 'IDLE',
+    relayArmedAt,
+    lowObservationCount: 0,
+    breachStartedAt: null,
+    lastObservedAt: null,
+    lastScorePct: null,
+    comparisonCount: 0,
+    lastResetReason: null,
+    lastTrippedAt: previous?.lastTrippedAt ?? null,
+    action: previous?.action ?? null,
+  };
+}
+
+/**
+ * Durable sustained-drop policy. Readiness remains a separate >=98% release
+ * gate; this guard only stops an already-active live relay after fidelity is
+ * strictly below the user's chosen 60% for 3 observations spanning >=90s.
+ */
+export function advanceLiveFidelityGuard(input: {
+  previous: unknown;
+  nowMs: number;
+  activeLive: boolean;
+  relayArmedAt: string | null;
+  evidenceFresh: boolean;
+  scorePct: number | null;
+  comparisonCount: number;
+  resetReason?: string | null;
+}): LiveFidelityGuardDecision {
+  const parsed = readLiveFidelityGuardState(input.previous);
+  const sameEpoch = parsed?.relayArmedAt === input.relayArmedAt;
+  const previous = sameEpoch ? parsed : null;
+  const base = liveFidelityGuardBase(parsed, input.relayArmedAt);
+  const reset = (reason: string): LiveFidelityGuardDecision => ({
+    state: {
+      ...base,
+      lastObservedAt: new Date(input.nowMs).toISOString(),
+      lastResetReason: reason,
+    },
+    shouldTrip: false,
+    observationAccepted: true,
+  });
+
+  if (!input.activeLive) return reset('LIVE_RELAY_INACTIVE');
+  if (!input.evidenceFresh) return reset(input.resetReason ?? 'EVIDENCE_STALE_OR_UNKNOWN');
+  if (
+    input.comparisonCount <= 0 ||
+    input.scorePct == null ||
+    !Number.isFinite(input.scorePct)
+  ) {
+    return reset(input.resetReason ?? 'NO_MEANINGFUL_COMPARISON_DATA');
+  }
+
+  const lastObservedMs = previous?.lastObservedAt
+    ? Date.parse(previous.lastObservedAt)
+    : Number.NaN;
+  if (
+    Number.isFinite(lastObservedMs) &&
+    input.nowMs - lastObservedMs < LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS
+  ) {
+    return {
+      state: previous!,
+      shouldTrip: false,
+      observationAccepted: false,
+    };
+  }
+
+  const observedAt = new Date(input.nowMs).toISOString();
+  const scorePct = Math.max(0, Math.min(100, input.scorePct));
+  if (scorePct >= LIVE_FIDELITY_GUARD_THRESHOLD_PCT) {
+    return {
+      state: {
+        ...base,
+        status: 'HEALTHY',
+        lastObservedAt: observedAt,
+        lastScorePct: scorePct,
+        comparisonCount: input.comparisonCount,
+        lastResetReason: 'FIDELITY_RECOVERED',
+      },
+      shouldTrip: false,
+      observationAccepted: true,
+    };
+  }
+
+  const startedAtMs =
+    previous?.breachStartedAt && Number.isFinite(Date.parse(previous.breachStartedAt))
+      ? Date.parse(previous.breachStartedAt)
+      : input.nowMs;
+  const lowObservationCount = (previous?.lowObservationCount ?? 0) + 1;
+  const shouldTrip =
+    lowObservationCount >= LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS &&
+    input.nowMs - startedAtMs >= LIVE_FIDELITY_GUARD_MIN_BREACH_MS;
+  return {
+    state: {
+      ...base,
+      status: shouldTrip ? 'TRIPPED' : 'LOW_PENDING',
+      lowObservationCount,
+      breachStartedAt: new Date(startedAtMs).toISOString(),
+      lastObservedAt: observedAt,
+      lastScorePct: scorePct,
+      comparisonCount: input.comparisonCount,
+      lastResetReason: null,
+      lastTrippedAt: shouldTrip ? observedAt : (previous?.lastTrippedAt ?? null),
+      action: shouldTrip ? null : (previous?.action ?? null),
+    },
+    shouldTrip,
+    observationAccepted: true,
+  };
+}
+
+/** Only canonical, current Fly state can supply a live fidelity observation. */
+export function isFreshCanonicalFidelityBotState(
+  bot: BotApiState | null,
+  nowMs = Date.now(),
+  maxAgeMs = LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS,
+): boolean {
+  if (
+    !bot ||
+    bot.dashboard_owner !== true ||
+    bot.dashboard_port !== 7002 ||
+    !bot.bot_instance_id?.trim() ||
+    !bot.source_git_rev?.trim() ||
+    bot.api_state_error
+  ) {
+    return false;
+  }
+  const sourceAt = bot.server_ts ? Date.parse(bot.server_ts) : Number.NaN;
+  const ageMs = nowMs - sourceAt;
+  return Number.isFinite(sourceAt) && ageMs >= -10_000 && ageMs <= maxAgeMs;
+}
+
+/** The exchange/ledger proof must come from this tick and match to the satoshi. */
+export function isFreshExactFidelityReconcile(
+  value: unknown,
+  nowMs = Date.now(),
+  maxAgeMs = LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS,
+): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const reconcile = value as Record<string, unknown>;
+  const updatedAt = Date.parse(String(reconcile.updatedAt ?? ''));
+  const ageMs = nowMs - updatedAt;
+  return (
+    Number.isFinite(updatedAt) &&
+    ageMs >= 0 &&
+    ageMs <= maxAgeMs &&
+    reconcile.alert === false &&
+    btcToSats(Number(reconcile.deltaBtc ?? Number.NaN)) === 0
+  );
+}
+
+/**
+ * Identity/gap fidelity for the current relay epoch. Offline showcase misses
+ * are already excluded by buildRelayFidelitySnapshot and cannot trip this.
+ */
+export function liveRelayFidelityObservation(
+  fidelity: RelayFidelitySnapshot,
+): { scorePct: number | null; comparisonCount: number } {
+  const actionableShowcaseOnly = fidelity.summary.unmatchedShowcaseCount ?? 0;
+  const rows = fidelity.rows ?? [];
+  const comparisonCount = rows.length + actionableShowcaseOnly;
+  if (comparisonCount <= 0) return { scorePct: null, comparisonCount: 0 };
+
+  const badRelayRows = rows.filter((row) => (
+    row.matchKind === 'none' ||
+    !row.localBotTradeId ||
+    (row.bitfinexEntry != null && row.showcaseEntry == null) ||
+    (row.bitfinexExit != null && row.showcaseExit == null)
+  )).length;
+  const healthy = Math.max(0, rows.length - badRelayRows);
+  return {
+    scorePct: Math.round((healthy / comparisonCount) * 10_000) / 100,
+    comparisonCount,
+  };
+}
 
 export type RelayExecutorHealthSnapshot = {
   healthy: boolean;
@@ -657,12 +897,9 @@ export function canonicalPendingIntentCycles<
   if (!bot) return [];
   const canonicalRank = new Map<string, number>();
   for (const [index, order] of (bot.orders ?? []).entries()) {
-    if (
-      order.trade_id &&
-      (order.status === 'PENDING' || order.status === 'ORDERED') &&
-      (order.limit_price ?? 0) > 0
-    ) {
-      canonicalRank.set(order.trade_id, index);
+    const tradeId = order.trade_id;
+    if (tradeId && isExecutableStructuralShowcaseOrder(order)) {
+      canonicalRank.set(tradeId, index);
     }
   }
   return cycles
@@ -691,6 +928,7 @@ type SignedShowcaseEnvelope = SignalIntentEnvelope & {
     showcase_event?: string;
     showcase_event_at?: string;
     platform_received_at?: string;
+    entry_limit_policy?: string;
   };
 };
 
@@ -700,15 +938,22 @@ export function readFreshSignedShowcaseExactLimit(
   nowMs = Date.now(),
 ): SignedShowcaseExactLimit | null {
   const intent = envelopeJson as SignedShowcaseEnvelope | null;
+  const envelopeTradeId = String(intent?.trade_id ?? intent?.signalId ?? '');
   const receivedAtMs = Date.parse(String(intent?.context?.platform_received_at ?? ''));
   const sourceEventAtMs = Date.parse(String(intent?.context?.showcase_event_at ?? ''));
   const limitPrice = Number(intent?.entry?.exact_limit_price ?? 0);
   const direction = intent?.direction;
   const event = String(intent?.context?.showcase_event ?? '');
   if (
-    intent?.action !== 'ENTER'
+    !tradeId
+    || envelopeTradeId !== tradeId
+    || intent?.signalId !== tradeId
+    || intent?.action !== 'ENTER'
     || intent?.context?.signed_showcase_event !== true
     || (event !== 'ORDER_PLACED' && event !== 'LIMIT_UPDATED')
+    || intent?.entry?.mode !== 'EXACT_LIMIT'
+    || intent?.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
+    || intent?.context?.entry_limit_policy !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
     || (direction !== 'LONG' && direction !== 'SHORT')
     || !Number.isFinite(limitPrice)
     || limitPrice <= 0
@@ -771,6 +1016,7 @@ function mergeSignedShowcaseOrders(
         trade_id: order.tradeId,
         status: 'PENDING',
         limit_price: order.limitPrice,
+        entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
         side: order.direction,
       })),
       ...(bot?.orders ?? []).filter((order) => !order.trade_id || !signedIds.has(order.trade_id)),
@@ -944,9 +1190,8 @@ export function pendingCopyShowcaseDisposition(
   if (!bot || !tradeId) return 'SOURCE_UNAVAILABLE';
   const pending = (bot.orders ?? []).some(
     (order) =>
-      order.trade_id === tradeId &&
-      (order.status === 'PENDING' || order.status === 'ORDERED') &&
-      (order.limit_price ?? 0) > 0,
+      order.trade_id === tradeId
+      && isExecutableStructuralShowcaseOrder(order),
   );
   if (pending) return 'SHOWCASE_PENDING';
   const filled = (bot.positions ?? []).some(
@@ -1698,7 +1943,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
       try {
         await Promise.race([
-          this.cancelVerifiedUnfilledEntriesAfterWatchdog(agent.id, instance),
+          this.cancelVerifiedUnfilledPendingEntries(
+            agent.id,
+            instance,
+            'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+            'Relay watchdog',
+          ),
           new Promise<never>((_, reject) => {
             const timer = setTimeout(
               () => reject(new Error('watchdog pending-order cleanup timed out after 8000ms')),
@@ -1723,16 +1973,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * completely unfilled. Partial/full fills and open positions are deliberately
    * left to restart reconciliation and normal exit management.
    */
-  private async cancelVerifiedUnfilledEntriesAfterWatchdog(
+  private async cancelVerifiedUnfilledPendingEntries(
     agentId: string,
     instance: TradingAgentInstance,
-  ): Promise<void> {
+    auditReason: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED' | 'LIVE_FIDELITY_GUARD_CANCELLED_UNFILLED',
+    logLabel: string,
+  ): Promise<number> {
     const creds = await this.exchanges.getUserCredentials(
       instance.userId,
       instance.exchangeProvider,
     );
-    if (!creds) return;
+    if (!creds) {
+      throw new Error('EXCHANGE_CREDENTIALS_MISSING_DURING_PENDING_ENTRY_CLEANUP');
+    }
     this.activeTrading = this.bitfinex;
+    let cancelledCount = 0;
     const pending = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId: instance.userId,
@@ -1745,12 +2000,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const meta = await this.loadExecutionMeta(participant.id);
       const orderId = meta.bitfinexOrderId;
       if (!orderId) continue;
-      const order = await this.activeTrading.findOrder(creds, orderId).catch(() => null);
+      const order = await this.activeTrading.findOrder(creds, orderId);
       if (!order) continue;
       const filledQty = Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount));
       if (!relayEntryOrderIsCompletelyUnfilled(order)) {
         this.logger.warn(
-          `Relay watchdog left partially filled entry ${orderId} untouched ` +
+          `${logLabel} left partially filled entry ${orderId} untouched ` +
             `participant=${participant.id} filledQty=${filledQty.toFixed(8)}; restart reconciliation required`,
         );
         continue;
@@ -1758,7 +2013,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const cancelled = await this.cancelManagedOrderGone(
         creds,
         orderId,
-        `Relay watchdog cancel verified-unfilled entry ${orderId} participant=${participant.id}`,
+        `${logLabel} cancel verified-unfilled entry ${orderId} participant=${participant.id}`,
       );
       if (!cancelled.gone) {
         throw new Error(
@@ -1777,8 +2032,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             eventType: 'EXPIRED',
             payload: {
               venue: 'bitfinex',
-              reason: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
-              event: 'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED',
+              reason: auditReason,
+              event: auditReason,
               bitfinex_order_id: orderId,
               pnl_usd: 0,
               source: 'hire',
@@ -1796,11 +2051,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           },
         }),
       ]);
+      cancelledCount += 1;
       this.logger.warn(
-        `Relay watchdog cancelled verified-unfilled entry ${orderId} ` +
+        `${logLabel} cancelled verified-unfilled entry ${orderId} ` +
           `participant=${participant.id} cycle=${participant.cycleId}`,
       );
     }
+    return cancelledCount;
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
@@ -1876,6 +2133,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           // they should see why. Throttled to once per hour per instance.
           await this.surfaceExpiredHire(instance).catch(() => {
             /* surfacing is best-effort — never abort the tick */
+          });
+          await this.resetLiveFidelityGuardWithoutEvidence(
+            instance,
+            'HIRE_EXPIRED',
+          ).catch(() => {
+            /* reset is best-effort; an expired hire cannot execute */
           });
           continue;
         }
@@ -2164,6 +2427,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     this.currentStage = 'LOAD_CREDENTIALS';
     const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
     if (!creds) {
+      if (!simActive) {
+        await this.resetLiveFidelityGuardWithoutEvidence(
+          instance,
+          'EXCHANGE_CREDENTIALS_MISSING',
+        ).catch(() => {
+          /* missing credentials already prevent execution */
+        });
+      }
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
         data: { lastError: 'Exchange credentials missing — re-hire with API keys' },
@@ -2641,6 +2912,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
     });
 
+    // Backend-owned sustained fidelity stop. This runs in the existing
+    // executor tick (no browser/localStorage and no second monitor loop), only
+    // after exact exchange-ledger reconciliation and a fresh canonical Fly
+    // snapshot are both available.
+    this.currentStage = 'ENFORCE_LIVE_FIDELITY_GUARD';
+    const fidelityGuardTripped = await this.enforceSustainedLiveFidelityGuard(
+      agentId,
+      instance,
+      canonicalSignedBook,
+      simActive,
+    ).catch((err) => {
+      // Unknown/stale evidence must never be converted into a false breach.
+      this.logger.warn(
+        `[LIVE-FIDELITY-GUARD] observation skipped ${instance.userId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return false;
+    });
+    if (fidelityGuardTripped) {
+      await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
+      return;
+    }
+
     if (exitOnlyNow) {
       this.currentStage = 'PERSIST_PAUSED_CAPACITY';
       await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
@@ -2885,7 +3180,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   /** Resolve showcase bot pending limit for chase sync. */
   private resolveBotLimitPrice(
-    bot: { orders?: Array<{ trade_id?: string; limit_price?: number; status?: string }> } | null,
+    bot: BotApiState | null,
     tradeId: string,
   ): number | null {
     if (!bot) return null;
@@ -2899,7 +3194,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     tradeId: string,
   ) {
     return (bot?.orders ?? []).find(
-      (o) => o.trade_id === tradeId && (o.status === 'PENDING' || o.status === 'ORDERED'),
+      (o) =>
+        o.trade_id === tradeId
+        && isExecutableStructuralShowcaseOrder(o),
     );
   }
 
@@ -3365,6 +3662,324 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (now - at > 60 * 60_000) this.mirrorDiffEventAt.delete(pid);
       }
     }
+  }
+
+  private async enforceSustainedLiveFidelityGuard(
+    agentId: string,
+    instance: TradingAgentInstance,
+    botState: BotApiState | null,
+    simActive: boolean,
+  ): Promise<boolean> {
+    const nowMs = Date.now();
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: {
+        status: true,
+        exchangeProvider: true,
+        dashboardState: true,
+      },
+    });
+    if (!fresh) return false;
+
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const relayArmedAt =
+      typeof dash.relayArmedAt === 'string' ? dash.relayArmedAt : null;
+    const activeLive =
+      !simActive &&
+      fresh.exchangeProvider === 'bitfinex' &&
+      fresh.status === TradingAgentInstanceStatus.ACTIVE &&
+      dash.relayExecutionMode === 'LIVE' &&
+      relayArmedAt != null;
+    const previous = readLiveFidelityGuardState(dash.liveFidelityGuard);
+
+    const sourceFresh =
+      isFreshCanonicalFidelityBotState(botState, nowMs) &&
+      botState?.execution_paused !== true;
+    const reconcileFresh = isFreshExactFidelityReconcile(
+      dash.copyRelayReconcile,
+      nowMs,
+    );
+
+    if (!activeLive || !sourceFresh || !reconcileFresh) {
+      const resetReason = !activeLive
+        ? 'LIVE_RELAY_INACTIVE'
+        : !sourceFresh
+          ? 'CANONICAL_SOURCE_STALE_UNKNOWN_OR_PAUSED'
+          : 'EXCHANGE_RECONCILE_STALE_OR_UNKNOWN';
+      if (
+        previous?.relayArmedAt === relayArmedAt &&
+        previous.status === 'IDLE' &&
+        previous.lowObservationCount === 0 &&
+        previous.lastResetReason === resetReason
+      ) {
+        return false;
+      }
+      const decision = advanceLiveFidelityGuard({
+        previous,
+        nowMs,
+        activeLive,
+        relayArmedAt,
+        evidenceFresh: sourceFresh && reconcileFresh,
+        scorePct: null,
+        comparisonCount: 0,
+        resetReason,
+      });
+      await this.persistLiveFidelityGuardState(instance.id, decision.state);
+      return false;
+    }
+
+    // Do not repeat the history query every 2-second execution tick. The guard
+    // observes at most every 30s inside this existing loop; the 90s persistence
+    // requirement is therefore durable without creating another timer.
+    if (
+      previous?.relayArmedAt === relayArmedAt &&
+      previous.lastObservedAt &&
+      Number.isFinite(Date.parse(previous.lastObservedAt)) &&
+      nowMs - Date.parse(previous.lastObservedAt) <
+        LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS
+    ) {
+      return false;
+    }
+
+    const sessionStartedAt = new Date(relayArmedAt);
+    if (!Number.isFinite(sessionStartedAt.getTime())) {
+      const decision = advanceLiveFidelityGuard({
+        previous,
+        nowMs,
+        activeLive,
+        relayArmedAt,
+        evidenceFresh: false,
+        scorePct: null,
+        comparisonCount: 0,
+        resetReason: 'RELAY_EPOCH_INVALID',
+      });
+      await this.persistLiveFidelityGuardState(instance.id, decision.state);
+      return false;
+    }
+
+    const recentParticipants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        cycle: { agentId },
+      },
+      include: {
+        cycle: {
+          select: {
+            id: true,
+            tradeId: true,
+            showcaseExitReason: true,
+            closedAt: true,
+          },
+        },
+        events: { orderBy: { createdAt: 'asc' } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 512,
+    });
+    const sessionParticipants = recentParticipants.filter((participant) =>
+      participantTouchesSession(participant, sessionStartedAt),
+    );
+    const fidelity = buildRelayFidelitySnapshot({
+      bot: botState,
+      participants: sessionParticipants,
+      limit: 50,
+      sessionStartedAt,
+    });
+    const observation = liveRelayFidelityObservation(fidelity);
+    const decision = advanceLiveFidelityGuard({
+      previous,
+      nowMs,
+      activeLive,
+      relayArmedAt,
+      evidenceFresh: true,
+      scorePct: observation.scorePct,
+      comparisonCount: observation.comparisonCount,
+      resetReason: 'NO_MEANINGFUL_COMPARISON_DATA',
+    });
+
+    if (!decision.shouldTrip) {
+      await this.persistLiveFidelityGuardState(instance.id, decision.state);
+      return false;
+    }
+
+    await this.pauseRelayForSustainedFidelityBreach(
+      agentId,
+      instance,
+      decision.state,
+    );
+    return true;
+  }
+
+  private async persistLiveFidelityGuardState(
+    instanceId: string,
+    state: LiveFidelityGuardState,
+  ): Promise<void> {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(dash, {
+          liveFidelityGuard: state,
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private async resetLiveFidelityGuardWithoutEvidence(
+    instance: TradingAgentInstance,
+    reason: string,
+  ): Promise<void> {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const relayArmedAt =
+      typeof dash.relayArmedAt === 'string' ? dash.relayArmedAt : null;
+    const previous = readLiveFidelityGuardState(dash.liveFidelityGuard);
+    if (
+      previous?.relayArmedAt === relayArmedAt &&
+      previous.status === 'IDLE' &&
+      previous.lowObservationCount === 0 &&
+      previous.lastResetReason === reason
+    ) {
+      return;
+    }
+    const decision = advanceLiveFidelityGuard({
+      previous,
+      nowMs: Date.now(),
+      activeLive: true,
+      relayArmedAt,
+      evidenceFresh: false,
+      scorePct: null,
+      comparisonCount: 0,
+      resetReason: reason,
+    });
+    await this.persistLiveFidelityGuardState(instance.id, decision.state);
+  }
+
+  private async pauseRelayForSustainedFidelityBreach(
+    agentId: string,
+    instance: TradingAgentInstance,
+    state: LiveFidelityGuardState,
+  ): Promise<void> {
+    const scorePct = state.lastScorePct ?? 0;
+    const spanSec = state.breachStartedAt && state.lastObservedAt
+      ? Math.max(
+          0,
+          Math.round(
+            (Date.parse(state.lastObservedAt) - Date.parse(state.breachStartedAt)) /
+              1000,
+          ),
+        )
+      : 0;
+    const reason =
+      `LIVE_FIDELITY_GUARD: ${scorePct.toFixed(2)}% below ` +
+      `${LIVE_FIDELITY_GUARD_THRESHOLD_PCT}% for ${state.lowObservationCount} ` +
+      `observations spanning ${spanSec}s; relay paused and pending entries cancelled. ` +
+      'Open positions remain under exit/risk management; auto-flatten was not configured.';
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    const dash = (
+      fresh?.dashboardState ??
+      instance.dashboardState ??
+      {}
+    ) as Record<string, unknown>;
+    const trippedState: LiveFidelityGuardState = {
+      ...state,
+      status: 'TRIPPED',
+      action: {
+        relayPaused: true,
+        pendingEntriesCancelled: null,
+        pendingEntryCleanupError: null,
+        openPositionsFlattened: false,
+        // There is currently no durable backend user consent for automatic
+        // flattening. Browser localStorage is intentionally not treated as
+        // permission to market-close real positions.
+        flattenPolicy: 'NOT_CONFIGURED',
+      },
+    };
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        status: TradingAgentInstanceStatus.PAUSED,
+        lastError: reason.slice(0, 500),
+        dashboardState: applyDashboardPatch(dash, {
+          relayExecutionMode: 'PAUSED',
+          relayArmedAt: null,
+          realTradingConfirmedAt: null,
+          liveFidelityGuard: trippedState,
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    let pendingEntriesCancelled = 0;
+    let pendingEntryCleanupError: string | null = null;
+    try {
+      pendingEntriesCancelled =
+        await this.cancelVerifiedUnfilledPendingEntries(
+          agentId,
+          instance,
+          'LIVE_FIDELITY_GUARD_CANCELLED_UNFILLED',
+          'Live fidelity guard',
+        );
+    } catch (err) {
+      pendingEntryCleanupError =
+        err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `[LIVE-FIDELITY-GUARD] pending cleanup incomplete ${instance.userId}: ${pendingEntryCleanupError}`,
+      );
+    }
+
+    const finalState: LiveFidelityGuardState = {
+      ...trippedState,
+      action: {
+        ...trippedState.action!,
+        pendingEntriesCancelled,
+        pendingEntryCleanupError,
+      },
+    };
+    const after = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    const afterDash = (
+      after?.dashboardState ??
+      dash
+    ) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        lastError: pendingEntryCleanupError
+          ? `${reason} Pending cleanup incomplete: ${pendingEntryCleanupError}`.slice(0, 500)
+          : reason.slice(0, 500),
+        dashboardState: applyDashboardPatch(afterDash, {
+          liveFidelityGuard: finalState,
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    await this.notifications
+      .notifyUser(instance.userId, {
+        type: NotificationType.TRADING_AGENT_UPDATE,
+        title: 'Conservative BTC live copy auto-stopped',
+        body:
+          `Relay fidelity stayed at ${scorePct.toFixed(1)}% (below 60%) for ` +
+          `${spanSec}s. New entries are paused and ${pendingEntriesCancelled} ` +
+          'unfilled pending order(s) were cancelled. Open positions were not auto-flattened.',
+        link: `/agent-hub/${AGENT_SLUG}`,
+      })
+      .catch(() => {
+        /* notification is best-effort after durable fail-closed persistence */
+      });
   }
 
   private async buildVirtualLotSummary(
@@ -4289,14 +4904,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     envelopeJson: unknown,
     creds: ExchangeCredentials,
     marginCap: number,
-    tradeId?: string,
+    tradeId: string,
     venue = 'bitfinex',
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
-    if (!intent?.direction || intent.action !== 'ENTER') return false;
-    const signedExactLimit = tradeId
-      ? readFreshSignedShowcaseExactLimit(tradeId, envelopeJson)
-      : null;
+    if (
+      !tradeId
+      || !intent?.direction
+      || intent.action !== 'ENTER'
+      || intent.signalId !== tradeId
+      || intent.entry?.mode !== 'EXACT_LIMIT'
+      || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
+      || intent.context?.entry_limit_policy !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+    ) {
+      this.logger.warn(
+        `Hire reject ${instance.userId} cycle=${cycleId}: exact structural envelope identity/policy missing`,
+      );
+      return false;
+    }
+    const signedExactLimit = readFreshSignedShowcaseExactLimit(tradeId, envelopeJson);
 
     // F1 — Showcase-unreachable safe mode. Refuse new entries while the
     // showcase has been unreachable past ENTRY_BLOCK_MS. The 2026-07-07
@@ -4327,6 +4953,86 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         return false;
       }
+    }
+
+    // Resolve the one authoritative exact price before creating an atomic
+    // participant claim. Visibility-only approvals and legacy percentage
+    // envelopes are never allowed to reach the exchange write below.
+    let botStateForEntry: BotApiState | null = null;
+    let rawLimit: number | null = signedExactLimit?.limitPrice ?? null;
+    if (!signedExactLimit) {
+      if (!(await this.botBridge.isEnabledAsync())) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: { lastError: 'Showcase bridge unavailable - exact-copy entry blocked.' },
+        });
+        return false;
+      }
+      botStateForEntry = await this.fetchExecutionBotState();
+      if (!botStateForEntry) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: { lastError: 'Showcase state unavailable - exact-copy entry blocked.' },
+        });
+        return false;
+      }
+      const defer = this.showcaseCopyEntryReady(botStateForEntry, tradeId);
+      if (!defer.ready) {
+        const reason = defer.reason ?? 'Waiting for showcase limit.';
+        this.cycleAudit.stage('SIGNAL', {
+          userId: instance.userId,
+          agentId,
+          cycleId,
+          tradeId,
+          detail: reason,
+        });
+        return false;
+      }
+      const canonicalOrder = this.showcasePendingOrder(botStateForEntry, tradeId);
+      const canonicalDirectionRaw = String(
+        canonicalOrder?.signal_dir ?? canonicalOrder?.side ?? '',
+      ).toUpperCase();
+      const canonicalDirection =
+        canonicalDirectionRaw === 'BUY' || canonicalDirectionRaw.includes('LONG')
+          ? 'LONG'
+          : canonicalDirectionRaw === 'SELL' || canonicalDirectionRaw.includes('SHORT')
+            ? 'SHORT'
+            : null;
+      if (
+        !canonicalOrder
+        || canonicalDirection !== intent.direction
+        || !Number.isFinite(canonicalOrder.limit_price)
+        || Number(canonicalOrder.limit_price) <= 0
+      ) {
+        this.logger.warn(
+          `Hire reject ${instance.userId} cycle=${cycleId}: canonical exact order direction/price mismatch`,
+        );
+        return false;
+      }
+      rawLimit = Number(canonicalOrder.limit_price);
+    } else {
+      botStateForEntry = mergeSignedShowcaseOrders(null, [signedExactLimit]);
+      this.logger.log(
+        `[SIGNED-FAST] exact showcase limit accepted trade=${tradeId} limit=${signedExactLimit.limitPrice.toFixed(2)} ageMs=${Date.now() - signedExactLimit.receivedAtMs}`,
+      );
+    }
+
+    const mark = await this.activeTrading.getMarkPrice();
+    const limitPrice =
+      rawLimit != null
+        ? sanitizeLimitPrice(mark, rawLimit, intent.direction)
+        : null;
+    if (rawLimit == null || limitPrice == null) {
+      this.logger.error(
+        `Hire reject ${instance.userId} cycle=${cycleId}: exact limit ${rawLimit ?? 'missing'} failed sanity vs mark ${mark.toFixed(2)}`,
+      );
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError: `Exact showcase limit rejected - price sanity check failed (mark ~$${mark.toFixed(0)}).`,
+        },
+      });
+      return false;
     }
 
     const intentCap = intent.risk?.max_margin_usd;
@@ -4400,83 +5106,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       throw err;
     }
-    const mark = await this.activeTrading.getMarkPrice();
-    const rawLimit =
-      signedExactLimit?.limitPrice
-      ?? computeLimitFromMark(mark, intent.entry.offset_pct);
-    let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
-    if (limitPrice == null) {
-      this.logger.error(
-          `Hire reject ${instance.userId} cycle=${cycleId}: absurd limit ${rawLimit.toFixed(2)} vs mark ${mark.toFixed(2)} offset=${intent.entry.offset_pct}%`,
-        );
-        await this.prisma.tradingAgentInstance.update({
-          where: { id: instance.id },
-          data: {
-            lastError: `Entry limit ${rawLimit.toFixed(0)} rejected — price sanity check failed (mark ~$${mark.toFixed(0)}). Signal will retry on next cycle.`,
-          },
-        });
-        return false;
-    }
-
-      let botStateForEntry: BotApiState | null = null;
-      if (tradeId && !signedExactLimit && !(await this.botBridge.isEnabledAsync())) {
-        await this.prisma.tradingAgentInstance.update({
-          where: { id: instance.id },
-          data: { lastError: 'Showcase bridge unavailable — exact-copy entry blocked.' },
-        });
-        if (claimParticipantId) {
-          await this.prisma.signalCycleParticipant
-            .delete({ where: { id: claimParticipantId } })
-            .catch(() => {});
-          claimParticipantId = null;
-        }
-        return false;
-      }
-      if (tradeId && !signedExactLimit) {
-        botStateForEntry = await this.fetchExecutionBotState();
-        if (!botStateForEntry) {
-          await this.prisma.tradingAgentInstance.update({
-            where: { id: instance.id },
-            data: { lastError: 'Showcase state unavailable — exact-copy entry blocked.' },
-          });
-          if (claimParticipantId) {
-            await this.prisma.signalCycleParticipant
-              .delete({ where: { id: claimParticipantId } })
-              .catch(() => {});
-            claimParticipantId = null;
-          }
-          return false;
-        }
-        const defer = this.showcaseCopyEntryReady(botStateForEntry, tradeId);
-        if (!defer.ready) {
-          const reason = defer.reason ?? 'Waiting for showcase limit.';
-          this.cycleAudit.stage('SIGNAL', {
-            userId: instance.userId,
-            agentId,
-            cycleId,
-            tradeId,
-            detail: reason,
-          });
-          if (claimParticipantId) {
-            await this.prisma.signalCycleParticipant
-              .delete({ where: { id: claimParticipantId } })
-              .catch(() => {});
-            claimParticipantId = null;
-          }
-          return false;
-        }
-        const botLimit = this.resolveBotLimitPrice(botStateForEntry, tradeId);
-        if (botLimit != null && botLimit > 0) {
-          const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
-          if (anchored != null) limitPrice = anchored;
-        }
-      } else if (signedExactLimit) {
-        botStateForEntry = mergeSignedShowcaseOrders(null, [signedExactLimit]);
-        this.logger.log(
-          `[SIGNED-FAST] exact showcase limit accepted trade=${tradeId} limit=${signedExactLimit.limitPrice.toFixed(2)} ageMs=${Date.now() - signedExactLimit.receivedAtMs}`,
-        );
-      }
-
       // Phase 1 — book-state dedupe (flag-gated). If the copy already has a
       // real resting order at this limit price (any lane/participant), do NOT
       // place a second: the earlier participant is the mirror owner of this
@@ -7911,10 +8540,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    *   - N4: INTENT_MIRROR_DRY_RUN — logs + audit row, no submitLimitOrder.
    *   - N5: SignalCycleEvent "INTENT_MIRROR_ENTER" / "INTENT_MIRROR_ENTER_DRY".
    *
-   * Limit price source (decision §8 #4): the webhook payload's signal_price
-   * ± pullback_pct (forwarded in the cycle's intentEnvelope). Falls back to
-   * the mark only if the payload lacked signal_price — never to a stale bot
-   * limit, which would diverge from the showcase's actual signal.
+   * Limit price source: the signed/canonical `SHOWCASE_EXACT_LIMIT` produced
+   * only after the selected virtual chase bucket activates. There is no
+   * subscriber-mark, percentage-offset, or market-price fallback.
    *
    * Returns the number of entries placed (0 or 1 per call; at most one intent
    * per tick per instance to preserve the atomic-claim contract).
@@ -7990,7 +8618,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       const intent = cycle.intentEnvelope as SignalIntentEnvelope & {
         intent_source?: 'paper' | 'live';
-        entry?: { signal_price?: number; pullback_pct?: number };
+        entry?: { exact_limit_price?: number };
         margin_usdt?: number;
       };
       if (!intent?.direction || intent.action !== 'ENTER') continue;
@@ -8016,33 +8644,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         continue;
       }
 
-      // Decision §8 #4 — limit price from the webhook's signal_price ± pullback.
-      // Fall back to the live mark ONLY if the envelope lacks signal_price.
-      const sigPriceRaw = intent.entry?.signal_price;
-      const pullbackPctRaw = intent.entry?.pullback_pct;
-      const sigPrice = typeof sigPriceRaw === 'number' && Number.isFinite(sigPriceRaw) && sigPriceRaw > 0
-        ? sigPriceRaw
-        : null;
-      const pullback = typeof pullbackPctRaw === 'number' && Number.isFinite(pullbackPctRaw)
-        ? Math.max(0, Math.min(0.05, pullbackPctRaw))
-        : 0.001;
-
-      let limitPrice: number;
-      if (sigPrice != null) {
-        limitPrice =
-          intent.direction === 'LONG'
-            ? sigPrice * (1 - pullback)
-            : intent.direction === 'SHORT'
-              ? sigPrice * (1 + pullback)
-              : sigPrice;
-      } else {
-        // No signal_price in payload — use live mark (best-effort; rare since
-        // emit_signal_webhook always forwards signal_price).
-        const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
-        if (!mark || mark <= 0) continue;
-        limitPrice = mark;
+      // Exact-copy contract: this path is never allowed to reconstruct a
+      // percentage pullback from signal/mark. Both signed fast-path and polling
+      // backstop must carry the canonical structural resting limit.
+      const exactLimit = Number(intent.entry?.exact_limit_price ?? 0);
+      if (
+        intent.entry?.mode !== 'EXACT_LIMIT'
+        || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
+        || intent.context?.entry_limit_policy
+          !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+        || !Number.isFinite(exactLimit)
+        || exactLimit <= 0
+      ) {
+        this.logger.warn(
+          `[INTENT-MIRROR] rejected non-structural exact entry trade=${tid} user=${instance.userId}`,
+        );
+        continue;
       }
-      const sanitized = sanitizeLimitPrice(limitPrice, limitPrice, intent.direction);
+      const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+      if (!mark || mark <= 0) continue;
+      let limitPrice = exactLimit;
+      const sanitized = sanitizeLimitPrice(mark, limitPrice, intent.direction);
       if (sanitized == null) {
         this.logger.warn(
           `[INTENT-MIRROR] rejected absurd limit ${limitPrice.toFixed(2)} trade=${tid} user=${instance.userId}`,
@@ -8069,8 +8691,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           leverage,
           intent_source: intent.intent_source ?? 'unknown',
           cycle_id: cycle.id,
-          signal_price: sigPrice ?? null,
-          pullback_pct: pullback,
+          entry_mode: 'EXACT_LIMIT',
+          entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
           reason: 'INTENT_MIRROR_DRY_RUN',
         };
         this.logger.log(
@@ -8095,10 +8717,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       // Live path — re-use placeEntry so the C5 atomic-claim, F1 safe-mode,
       // price-sanity, ORDER_PLACED audit, and applyLimitChase wiring all run
-      // identically to the legacy entry path. placeEntry reads the cycle's
-      // intentEnvelope for offset_pct; our envelope already carries signal_price
-      // + pullback_pct so the legacy offset path is overridden by the bot limit
-      // anchor resolution inside placeEntry when the showcase book has a price.
+      // identically. placeEntry consumes the same exact structural envelope.
       // We additionally emit the N5 audit tag here so the event stream
       // distinguishes mirror-from-intent from mirror-from-showcase-fill.
       const placed = await this.placeEntry(
@@ -8132,8 +8751,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
                 margin_usd: marginCap,
                 leverage,
                 intent_source: intent.intent_source ?? 'unknown',
-                signal_price: sigPrice ?? null,
-                pullback_pct: pullback,
+                entry_mode: 'EXACT_LIMIT',
+                entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
               } as unknown as import('@prisma/client').Prisma.InputJsonValue,
             },
           });
@@ -9625,8 +10244,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const intent = intentEnvelope as SignalIntentEnvelope;
     const direction = meta.direction ?? intent?.direction;
-    let limitPrice = meta.limitPrice ?? meta.originalLimitPrice;
-    if ((!limitPrice || limitPrice <= 0) && intent?.entry?.offset_pct != null && direction) {
+    let limitPrice =
+      meta.limitPrice
+      ?? meta.originalLimitPrice
+      ?? (intent?.entry?.mode === 'EXACT_LIMIT'
+        ? Number(intent.entry.exact_limit_price ?? 0)
+        : undefined);
+    if (
+      (!limitPrice || limitPrice <= 0)
+      && intent?.entry?.mode !== 'EXACT_LIMIT'
+      && intent?.entry?.offset_pct != null
+      && direction
+    ) {
       const mark = await this.activeTrading.getMarkPrice().catch(() => null);
       if (mark && mark > 0) {
         const raw = computeLimitFromMark(mark, intent.entry.offset_pct);

@@ -2,10 +2,11 @@
   "version": 2,
   "effectiveFrom": "2026-07-31",
   "allowBluntSync": false,
-  "summary": "Fly.io is the sole 24/7 AI and trading owner. The desktop is a dashboard proxy, data mirror, and analyzer only; it must never run a second production AI loop.",
+  "summary": "Fly.io is the sole 24/7 AI, strategy, paper-execution, and relay-signal owner. Railway's isolated subscriber executor is the sole private Bitfinex live executor. The desktop is a dashboard proxy, data mirror, and analyzer only; it must never run a second production AI loop.",
   "canonicalSource": {
     "directory": "services/btc-conservative-agent/",
-    "entrypoint": "bot.py",
+    "processEntrypoint": "btc_conservative_agent.py",
+    "strategyModule": "bot.py",
     "runtime": "Fly.io app doxed-btc-bot",
     "publicUrl": "https://doxed-btc-bot.fly.dev"
   },
@@ -14,13 +15,26 @@
       "aiOwner": true,
       "strategyOwner": true,
       "paperExecutionOwner": true,
-      "relaySignalOwner": true
+      "relaySignalOwner": true,
+      "liveExecutionOwner": false,
+      "privateExchangeOwner": false
+    },
+    "railway": {
+      "apiOwner": true,
+      "aiOwner": false,
+      "strategyOwner": false,
+      "paperExecutionOwner": false,
+      "relaySignalOwner": false,
+      "liveExecutionOwner": true,
+      "privateExchangeOwner": true
     },
     "desktop": {
       "aiOwner": false,
       "strategyOwner": false,
       "paperExecutionOwner": false,
       "relaySignalOwner": false,
+      "liveExecutionOwner": false,
+      "privateExchangeOwner": false,
       "dashboardProxyPort": 7002,
       "analyzerPort": 9001,
       "dataSource": "Fly incremental mirror"
@@ -49,12 +63,12 @@
     "npm run wire:home-bot",
     "RECOVER-GLOBAL-STACK.cmd",
     "RESTART-LAUNCHER.cmd",
-    "scripts/start-home-bot.ps1"
+    "scripts/start-fly-desktop-mirror.ps1"
   ],
   "forceOverride": {
     "envVar": "BOT_SYNC_FORCE",
     "cliFlag": "--force",
-    "note": "Human-only escape hatch. Agents must ask the user before using this."
+    "note": "Invocation confirmation only; it cannot bypass the source-controlled allowBluntSync lock."
   },
-  "agentInstruction": "STOP before any blunt bot sync. Fly.io is the only production AI/trading runtime. Desktop :7002 must remain a proxy to Fly and desktop :9001 must analyze the Fly data mirror. Do NOT start bot.py on the desktop and do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
+  "agentInstruction": "STOP before any blunt bot sync. Fly.io is the only production AI/trading runtime. Desktop :7002 must remain a proxy to Fly and desktop :9001 must analyze the Fly data mirror. Do NOT start bot.py on the desktop. External/local replacement requires a reviewed source-controlled allowBluntSync=true change plus explicit BOT_SYNC_FORCE/--force confirmation; a force flag alone is never sufficient. Edit services/btc-conservative-agent/ directly instead."
 }

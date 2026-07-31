@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:LegacyOwnerOptInName = "DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"
+$script:LegacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
@@ -25,6 +27,83 @@ try { Add-Type -AssemblyName System.Net.Http -ErrorAction Stop } catch {
   Write-Warning "System.Net.Http preload failed: $($_.Exception.Message)"
 }
 $prefix = "http://127.0.0.1:$Port/"
+
+function Test-LegacyWindowsOwnerOptIn {
+  $actual = (Get-Item -Path "env:$($script:LegacyOwnerOptInName)" -ErrorAction SilentlyContinue).Value
+  return ($actual -ceq $script:LegacyOwnerOptInPhrase)
+}
+
+function Get-LegacyStartRefusal([string]$RequestedAction) {
+  return @{
+    ok = $false
+    error = (
+      "REFUSED '$RequestedAction': this obsolete Windows path can start a second AI/strategy owner " +
+      "or Cloudflare tunnel. Fly.io remains the sole production owner. Use start-mirror, " +
+      "start-analyzer, or start-analyzer-once. Disaster recovery requires the exact audited " +
+      "$($script:LegacyOwnerOptInName) phrase in this bridge process."
+    )
+    architecture_owner = "fly.io"
+    legacy_opt_in_required = $true
+  }
+}
+
+function Invoke-FlyDesktopMirror {
+  try {
+    & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+    return @{
+      ok = $true
+      message = "Fly desktop mirror started: :7002 proxy, data sync, and :9001 analyzer."
+      architecture_owner = "fly.io"
+    }
+  } catch {
+    return @{ ok = $false; error = "Fly desktop mirror failed to start: $($_.Exception.Message)" }
+  }
+}
+
+function Stop-RecordedMirrorProcess(
+  [string]$MarkerName,
+  [string[]]$ExpectedCommandFragments
+) {
+  $markerPath = Join-Path $repoRoot $MarkerName
+  if (-not (Test-Path -LiteralPath $markerPath)) { return }
+  try {
+    $recordedPid = [int](Get-Content -LiteralPath $markerPath -Raw)
+    if ($recordedPid -gt 0) {
+      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$recordedPid" -ErrorAction SilentlyContinue
+      $commandLine = [string]$process.CommandLine
+      $matchesExpectedProcess = @(
+        $ExpectedCommandFragments |
+          Where-Object { $commandLine -like "*$_*" }
+      ).Count -gt 0
+      if ($process -and $matchesExpectedProcess) {
+        Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
+      }
+    }
+  } catch { }
+  Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-ResetFlyDesktopMirror {
+  # Stop only explicitly recorded desktop mirror/analyzer processes. Never
+  # enumerate or stop the canonical Fly machine, a local strategy process, or
+  # the :7810 bridge serving this request.
+  Stop-RecordedMirrorProcess ".fly-dashboard-proxy.pid" @("fly-dashboard-proxy.py")
+  Stop-RecordedMirrorProcess ".fly-data-sync-loop.lock" @("sync-fly-bot-data-loop.ps1")
+  Stop-RecordedMirrorProcess ".home-analyzer-crash-monitor.pid" @("analyzer-auto-restart.ps1")
+  Stop-RecordedMirrorProcess ".home-analyzer-starter.pid" @("start-home-analyzer.ps1")
+  Stop-RecordedMirrorProcess ".home-analyzer-dashboard.pid" @("research_dashboard.py")
+  Stop-RecordedMirrorProcess ".home-analyzer.pid" @("analyzer_research_engine_v62.py")
+  foreach ($marker in @(
+    ".fly-data-sync-loop.heartbeat.json",
+    ".home-analyzer-start.lock",
+    ".home-analyzer-auto-restart.lock",
+    ".home-analyzer-auto-restart.heartbeat"
+  )) {
+    Remove-Item -LiteralPath (Join-Path $repoRoot $marker) -Force -ErrorAction SilentlyContinue
+  }
+  Start-Sleep -Milliseconds 500
+  return (Invoke-FlyDesktopMirror)
+}
 
 function Import-BotAdminToken {
   $token = (Get-Item -Path "env:BOT_ADMIN_TOKEN" -ErrorAction SilentlyContinue).Value
@@ -242,6 +321,9 @@ function Invoke-TradingControl([ValidateSet("pause", "resume")][string]$Action) 
 }
 
 function Invoke-StartAllGlobal {
+  if (-not (Test-LegacyWindowsOwnerOptIn)) {
+    return $false
+  }
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   # Keep the single-threaded bridge listener responsive. The worker owns the
   # visible orchestration window; the HTTP request only queues that work.
@@ -261,7 +343,16 @@ function Invoke-RestartBridge {
 
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
+    "start-mirror" {
+      return (Invoke-FlyDesktopMirror)
+    }
+    "reset-mirror" {
+      return (Invoke-ResetFlyDesktopMirror)
+    }
     "start-all-local" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       Invoke-HomeCommandBackground "start-all-local"
       return @{
         ok = $true
@@ -269,6 +360,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-all-global" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       Invoke-StartAllGlobal
       return @{
         ok = $true
@@ -280,6 +374,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-all" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       if ($stackMode.Mode -eq "local-collection") {
         Start-Process -FilePath "powershell.exe" -ArgumentList @(
           "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -326,6 +423,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-bot" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       # Starting/repairing a process may inspect listeners and stale owners.
       # Never hold the bridge's single request thread across that work.
       Invoke-HomeCommandBackground "start-bot"
@@ -350,6 +450,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started on :$AnalyzerPort." }
     }
     "start-tunnel" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       if (-not (Test-PortOpen $BotPort)) {
         return @{
           ok = $false
@@ -372,6 +475,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "enable-named-tunnel" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline
       Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
       return @{
@@ -380,6 +486,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "wire" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       $url = $QueryUrl
       if (-not $url) { $url = Get-TunnelUrl }
       if (-not $url) {
@@ -435,6 +544,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "reset-home-stack" {
+      if (-not (Test-LegacyWindowsOwnerOptIn)) {
+        return (Get-LegacyStartRefusal $Action)
+      }
       Invoke-HomeCommandBackground "reset-home-stack"
       return @{
         ok = $true
@@ -471,8 +583,10 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
   try {
     $payload = switch -Regex ($path) {
       "^/status$" { Get-FullStatus }
-      "^/health$" { @{ ok = $true; launcher = "running" } }
-      "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
+      "^/health$" { @{ ok = $true; launcher = "running"; architecture_owner = "fly.io"; legacy_starts_quarantined = $true } }
+      "^/start$" { Invoke-HomeCommand "start-mirror" $tunnelParam }
+      "^/cmd/start-mirror$" { Invoke-HomeCommand "start-mirror" $tunnelParam }
+      "^/cmd/reset-mirror$" { Invoke-HomeCommand "reset-mirror" $tunnelParam }
       "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
       "^/cmd/restart-bridge$" { Invoke-HomeCommand "restart-bridge" $tunnelParam }
       "^/cmd/start-all-global$" { Invoke-HomeCommand "start-all-global" $tunnelParam }

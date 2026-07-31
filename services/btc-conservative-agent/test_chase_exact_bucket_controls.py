@@ -1,4 +1,5 @@
 import ast
+import copy
 import threading
 from pathlib import Path
 
@@ -151,6 +152,221 @@ def test_gap_analytics_matches_analyzer_matrix_schema():
     assert "updates the same config-7002.json gate as the dashboard" in BOT_SOURCE
     assert 'for key in ("directional_spread", "conviction_spread"):' in BOT_SOURCE
     assert 'signal["directional_spread"] = spread' in BOT_SOURCE
+
+
+def _compile_function(name, namespace):
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), f"<{name}-test>", "exec"), namespace)
+    return namespace[name]
+
+
+def test_structural_limit_uses_local_support_and_resistance_not_percentage_offset():
+    namespace = {
+        "copy": copy,
+        "state_lock": threading.RLock(),
+        "state": {"support_resistance": {}},
+        "build_micro_sr_levels": lambda: {},
+        "MICRO_SR_ENTRY_BUFFER_USD": 15.0,
+        "AI_DIRECT_MAX_DIST_PCT": 0.01,
+    }
+    resolve = _compile_function("resolve_local_structural_limit", namespace)
+
+    long_limit, long_source, _ = resolve(
+        "LONG",
+        64000,
+        market_structure={"micro_support": 63900},
+        support_resistance={},
+    )
+    assert long_limit == 63915.0
+    assert long_source == "LOCAL_SUPPORT_LIMIT"
+
+    short_limit, short_source, _ = resolve(
+        "SHORT",
+        64000,
+        market_structure={"micro_resistance": 64100},
+        support_resistance={},
+    )
+    assert short_limit == 64085.0
+    assert short_source == "LOCAL_RESISTANCE_LIMIT"
+
+    unavailable, reason, _ = resolve(
+        "LONG",
+        64000,
+        market_structure={},
+        support_resistance={},
+    )
+    assert unavailable is None
+    assert reason == "LOCAL_SUPPORT_UNAVAILABLE"
+
+    too_far, reason, _ = resolve(
+        "LONG",
+        64000,
+        market_structure={"micro_support": 62000},
+        support_resistance={},
+    )
+    assert too_far is None
+    assert reason == "LOCAL_SUPPORT_LIMIT_OUT_OF_RANGE"
+
+
+def test_exact_dashboard_chase_bucket_rests_before_next_chase():
+    chase_calls = []
+    namespace = {
+        "is_virtual_chase_entry_lane": lambda _lane: False,
+        "is_research_data_collection": lambda: True,
+        "limit_chase_enabled": lambda: True,
+        "state": {"price": 64000},
+        "time": __import__("time"),
+        "_limit_chase_eligible_order": lambda *_args: True,
+        "_apply_limit_chase": lambda *_args: chase_calls.append(True) or True,
+        "logger": type("Logger", (), {"info": staticmethod(lambda *_args: None)})(),
+        "fmt": str,
+    }
+    first_chase = _compile_function("_try_immediate_first_chase", namespace)
+    order = {
+        "trade_id": "cont-chase3",
+        "status": "PENDING",
+        "entry_type": "SIM_LIMIT",
+        "research_lane": "CONTINUOUS",
+        "dashboard_exact_chase_managed": True,
+        "limit_chase_count": 3,
+    }
+    assert first_chase(order, {}) is False
+    assert chase_calls == []
+
+    tree = ast.parse(BOT_SOURCE)
+    place_fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_place_simulated_limit_order"
+    )
+    for variable in ("order_created_ts", "dashboard_exact_chase_managed"):
+        stores = [
+            node.lineno for node in ast.walk(place_fn)
+            if isinstance(node, ast.Name)
+            and node.id == variable
+            and isinstance(node.ctx, ast.Store)
+        ]
+        loads = [
+            node.lineno for node in ast.walk(place_fn)
+            if isinstance(node, ast.Name)
+            and node.id == variable
+            and isinstance(node.ctx, ast.Load)
+        ]
+        assert stores
+        assert loads
+        assert min(stores) < min(loads)
+
+    unrelated_tile = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_submit_tile2_paper_resting_limit"
+    )
+    assert not any(
+        isinstance(node, ast.Name)
+        and node.id in ("order_created_ts", "dashboard_exact_chase_managed")
+        for node in ast.walk(unrelated_tile)
+    )
+
+
+def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
+    assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
+    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0," in BOT_SOURCE
+    assert "A second lane offset here would make the" in BOT_SOURCE
+
+
+def test_edge_is_telemetry_only_even_outside_paper_research_mode():
+    profit_gate = _compile_function(
+        "evaluate_profitability_entry_gates",
+        {
+            "EDGE_RESEARCH_TELEMETRY_ONLY": True,
+            "get_edge_threshold": lambda: 3.0,
+            "is_research_data_collection": lambda: False,
+            "is_profit_gates_lane": lambda _lane: False,
+            "dashboard_ai_band_blocks": lambda _prob: False,
+        },
+    )
+    assert profit_gate({}, {}, 0.0, "CONTINUOUS") == (False, None)
+
+    evidence_gate = _compile_function(
+        "evaluate_evidence_entry_filter",
+        {
+            "EDGE_RESEARCH_TELEMETRY_ONLY": True,
+            "is_research_data_collection": lambda: False,
+            "_sole_ai_research_mode": lambda: False,
+            "EDGE_DEAD_ZONE_LOW": 0.5,
+            "EDGE_DEAD_ZONE_HIGH": 2.5,
+            "RESEARCH_FREE_RUN_DISABLE_CHOP_GATE": True,
+        },
+    )
+    assert evidence_gate("LONG", {}, {}, {}, 1.0) == (False, None)
+    assert "if EDGE_RESEARCH_TELEMETRY_ONLY:" in BOT_SOURCE
+    assert "not EDGE_RESEARCH_TELEMETRY_ONLY" in BOT_SOURCE
+
+
+def test_pending_intent_is_non_executable_and_only_published_after_exact_limit_policy():
+    tree = ast.parse(BOT_SOURCE)
+    process_fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "process_signal"
+    )
+    execute_lines = [
+        node.lineno
+        for node in ast.walk(process_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "execute_simulated_order"
+    ]
+    pending_lines = [
+        node.lineno
+        for node in ast.walk(process_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "record_approve_outcome"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "PENDING"
+    ]
+    assert len(execute_lines) == 1
+    assert pending_lines
+    assert min(pending_lines) > execute_lines[0]
+
+    webhook = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "emit_signal_webhook"
+    )
+    webhook_source = ast.get_source_segment(BOT_SOURCE, webhook)
+    assert '"executable": event == "ORDER_PLACED"' in webhook_source
+    assert '"entry_limit_policy": entry_limit_policy' in webhook_source
+    assert "STRUCTURAL_ENTRY_POLICY_VERSION" in webhook_source
+    assert '"pullback_pct"' not in webhook_source
+
+
+def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
+    assert 'id="pullbackThresh"' not in BOT_SOURCE
+    assert "<th>AI Band</th>" not in BOT_SOURCE
+    assert "AI Win Prob" not in BOT_SOURCE
+    assert "continuous_shared_direction_gap_structural_v2" in BOT_SOURCE
+    assert "STRUCTURAL_LIMIT_BLOCKED" in BOT_SOURCE
+
+
+def test_only_continuous_can_emit_platform_live_relay_lifecycle():
+    tree = ast.parse(BOT_SOURCE)
+    assignment = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "PLATFORM_RELAY_ELIGIBLE_LANES"
+            for target in node.targets
+        )
+    )
+    assigned_source = ast.get_source_segment(BOT_SOURCE, assignment)
+    assert "RESEARCH_LANE_CONTINUOUS" in assigned_source
+    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in assigned_source
 
 
 def test_market_bid_ask_spread_is_collected_separately():

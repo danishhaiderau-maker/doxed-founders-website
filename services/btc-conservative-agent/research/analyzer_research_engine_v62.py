@@ -185,7 +185,19 @@ def resolve_analyzer_session_scope() -> tuple:
 
 
 def start_research_dashboard_server() -> threading.Thread | None:
-    """Embedded read-only research dashboard (:9001) — same process as analyzer."""
+    """Start the embedded dashboard unless a dedicated desktop listener owns it."""
+    if os.getenv("ANALYZER_EMBEDDED_DASHBOARD", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        print(
+            "  Embedded dashboard disabled; using the single external "
+            f"loopback listener at {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://127.0.0.1:9001/')} "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
+        return None
     try:
         from research_dashboard import (
             app,

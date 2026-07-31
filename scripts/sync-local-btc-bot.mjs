@@ -97,7 +97,10 @@ for (const [rel, dest] of LOCAL_MIRROR_FILES) {
 
 const raw = readFileSync(LOCAL, 'utf8');
 writeFileSync(TARGET, patchForProduction(raw), 'utf8');
-execSync('node scripts/patch-btc-bot-production.mjs', { cwd: ROOT, stdio: 'inherit' });
+execSync('node scripts/patch-btc-bot-production.mjs --force', {
+  cwd: ROOT,
+  stdio: 'inherit',
+});
 const final = readFileSync(TARGET, 'utf8');
 const comboPath = join(AGENT, 'combo_pathway_config.py');
 const stackVer = existsSync(comboPath) ? extractStackVersion(readFileSync(comboPath, 'utf8')) : 'unknown';

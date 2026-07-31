@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
 . (Join-Path $PSScriptRoot "write-dev-env.ps1")
 
 function Get-CloudflaredPath {

@@ -1,23 +1,19 @@
 @echo off
 REM ====================================================================
-REM  DCF showcase bot autostart entry point.
-REM  Target of the DcfShowcaseBotAutostart scheduled task (AtLogon +30s,
-REM  daily 04:00 +30s).
+REM  DCF desktop mirror autostart entry point.
+REM  Target of the already-registered DcfShowcaseBotAutostart task.
 REM
-REM  FAIL-SAFE GUARD: if the bot is already bound to :7002 by a python
-REM  process, this script exits 0 IMMEDIATELY without invoking the
-REM  orchestrator. Prevents the 04:00 scheduled task from racing the
-REM  supervisor when the bot is already healthy (observed 04:16-04:35
-REM  crash clusters). The supervisor stays in charge.
+REM  SINGLE-OWNER CONTRACT:
+REM    Fly.io owns AI, strategy decisions, orders, and trading state.
+REM    Windows starts only the :7002 Fly dashboard proxy, Fly data sync,
+REM    and the :9001 analyzer over that mirrored data.
+REM
+REM  This scheduled-task path intentionally has NO legacy fallback and
+REM  ignores every legacy opt-in. It can never start a second Python bot,
+REM  supervisor, relay publisher, or Cloudflare tunnel.
 REM ====================================================================
 setlocal
 cd /d "%~dp0.."
-if exist "%~dp0..\config\fly-canonical.lock.json" (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-fly-desktop-mirror.ps1" -NoWait
-  goto :skipped
-)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-showcase-bot-guard.ps1"
-if %ERRORLEVEL% EQU 99 goto :skipped
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0home-stack-start-everything.ps1" -NoWait
-:skipped
-endlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-fly-desktop-mirror.ps1" -NoWait
+set "DCF_MIRROR_EXIT=%ERRORLEVEL%"
+endlocal & exit /b %DCF_MIRROR_EXIT%

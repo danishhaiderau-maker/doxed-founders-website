@@ -3,9 +3,11 @@ import {
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   DEFAULT_SUBSCRIBER_LEVERAGE,
   SUBSCRIBER_TRAIL_LADDER,
-  normalizePullbackToOffsetPct,
 } from '@dcf/utils';
-import type { BotApiState } from './bot-state.mapper';
+import {
+  isExecutableStructuralShowcaseOrder,
+  type BotApiState,
+} from './bot-state.mapper';
 
 const DEFAULT_STOP_LOSS_MARGIN_PCT = -18;
 const LIMIT_TTL_SEC = 1800;
@@ -24,33 +26,32 @@ export function extractBotApproveSnapshot(bot: BotApiState): BotApproveSnapshot 
   return raw;
 }
 
-function resolveDirection(bot: BotApiState): 'LONG' | 'SHORT' | null {
-  const dir = (
-    bot.last_ai?.final_direction ??
-    bot.last_ai?.direction ??
-    ''
-  )
-    .toString()
-    .toUpperCase();
+function normalizeDirection(value: unknown): 'LONG' | 'SHORT' | null {
+  const dir = String(value ?? '').toUpperCase();
   if (dir === 'LONG' || dir === 'SHORT') return dir;
+  if (dir === 'BUY') return 'LONG';
+  if (dir === 'SELL') return 'SHORT';
   return null;
 }
 
-function resolveOffsetPct(bot: BotApiState, direction: 'LONG' | 'SHORT'): number {
-  const signals = bot.signal_info?.signals ?? [];
-  const active = signals.find((s) => s.status === 'ORDERED' || s.status === 'ACTIVE' || s.status === 'PENDING');
-  return normalizePullbackToOffsetPct(direction, {
-    botPullbackThreshold: bot.pullback_threshold,
-    signalPullback: active?.pullback_pct,
-    signalPullReq: active?.pull_req,
-  });
-}
+function resolveExactCanonicalEntry(
+  bot: BotApiState,
+  tradeId: string,
+): { direction: 'LONG' | 'SHORT'; limitPrice: number; source: string } | null {
+  const order = (bot.orders ?? []).find(
+    (candidate) =>
+      candidate.trade_id === tradeId
+      && isExecutableStructuralShowcaseOrder(candidate),
+  );
+  if (order) {
+    const direction = normalizeDirection(order.signal_dir ?? order.side);
+    const limitPrice = Number(order.limit_price);
+    if (direction && Number.isFinite(limitPrice) && limitPrice > 0) {
+      return { direction, limitPrice, source: 'SHOWCASE_PENDING_ORDER' };
+    }
+  }
 
-function resolveEntryModeSource(bot: BotApiState): string {
-  const signals = bot.signal_info?.signals ?? [];
-  const active = signals.find((s) => s.status === 'ORDERED' || s.status === 'ACTIVE');
-  const mode = (active as { entry_mode?: string } | undefined)?.entry_mode;
-  return mode ?? 'PULLBACK_PCT';
+  return null;
 }
 
 export function buildIntentEnvelope(
@@ -59,12 +60,11 @@ export function buildIntentEnvelope(
   bot: BotApiState,
   options?: { maxMarginUsd?: number },
 ): SignalIntentEnvelope | null {
-  const direction = resolveDirection(bot);
-  if (!direction) return null;
   const lao = extractBotApproveSnapshot(bot);
-  if (lao?.status === 'BLOCKED') return null;
-
-  const offsetPct = resolveOffsetPct(bot, direction);
+  if (lao?.status === 'BLOCKED' && lao.trade_id === tradeId) return null;
+  const exact = resolveExactCanonicalEntry(bot, tradeId);
+  if (!exact) return null;
+  const { direction, limitPrice, source } = exact;
   const edge =
     lao?.edge_at_approve ??
     bot.debug_state?.last_edge_score ??
@@ -81,9 +81,10 @@ export function buildIntentEnvelope(
     direction,
     entry: {
       type: 'LIMIT',
-      mode: resolveEntryModeSource(bot).includes('EMA') ? 'EMA_OFFSET_PCT' : 'PULLBACK_PCT',
-      offset_pct: offsetPct,
-      reference: 'SUBSCRIBER_MARK_AT_RECEIPT',
+      mode: 'EXACT_LIMIT',
+      offset_pct: 0,
+      exact_limit_price: limitPrice,
+      reference: 'SHOWCASE_EXACT_LIMIT',
       ttl_sec: LIMIT_TTL_SEC,
     },
     risk: {
@@ -99,10 +100,11 @@ export function buildIntentEnvelope(
       regime: bot.regime ?? 'UNKNOWN',
       edge: Number(edge),
       ai_win_prob: Number(aiWin),
-      entry_mode_source: resolveEntryModeSource(bot),
+      entry_mode_source: source,
+      entry_limit_policy: 'micro_sr_structural_limit_v1',
       research_venue: 'bitfinex',
       disclaimer:
-        'Research alpha from Bitfinex pipeline. Execute on your venue using your local mark at receipt. Exchange stop required at fill.',
+        'Exact canonical Bitfinex showcase limit. Exchange stop required at fill.',
     },
   };
 }

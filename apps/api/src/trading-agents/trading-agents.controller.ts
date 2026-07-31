@@ -8,7 +8,6 @@ import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import { AdminGuard } from '../auth/guards';
 import { CopyRelaySimService } from './copy-relay-sim.service';
-import { FlyControlService, type FlyControlAction, type FlyControlResult } from './fly-control.service';
 import { ShowcaseRelayEventsService, type ShowcaseRelayEventBody } from './showcase-relay-events.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
@@ -22,7 +21,6 @@ export class TradingAgentsController {
     private readonly relaySim: CopyRelaySimService,
     private readonly showcaseRelay: ShowcaseRelayEventsService,
     private readonly execution: SignalSubscriberExecutionService,
-    private readonly flyControlService: FlyControlService,
   ) {}
 
   @Public()
@@ -52,7 +50,10 @@ export class TradingAgentsController {
   @Public()
   @Get('showcase-host')
   showcaseHost() {
-    const host = (process.env.SHOWCASE_HOST ?? 'local').trim().toLowerCase();
+    // Fly is the production strategy owner. Local is an explicit development
+    // override only; an omitted Railway env must not make production claim that
+    // the desktop owns execution.
+    const host = (process.env.SHOWCASE_HOST?.trim() || 'fly').toLowerCase();
     return { host: host === 'fly' ? 'fly' : 'local' };
   }
 
@@ -171,18 +172,6 @@ export class TradingAgentsController {
       rawBody: (req as unknown as { rawBody?: Buffer }).rawBody,
       signatureHeader: signature,
     });
-  }
-
-  @UseGuards(AdminGuard)
-  @Post(':slug/fly-control')
-  flyControl(@Param('slug') slug: string, @Body() body: { action: FlyControlAction }): Promise<FlyControlResult> {
-    return this.flyControlService.control(body.action);
-  }
-
-  @UseGuards(AdminGuard)
-  @Get(':slug/fly-control')
-  flyControlStatus(@Param('slug') slug: string): Promise<{ status: string; machineState: string }> {
-    return this.flyControlService.getMachineState().then((state) => ({ status: state, machineState: state }));
   }
 
   @Post(':slug/relay-sim/start')

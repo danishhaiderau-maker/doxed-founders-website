@@ -6,8 +6,8 @@ import { pauseTradingAgent, resumeTradingAgent, fetchServerBotHealth } from '@/l
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
-const DEFAULT_ANALYZER_PORT = 9001; // :9500 was a phantom port — bot.py confirms nothing listens there
-const PUBLIC_BOT_URL = 'https://bot.doxxedcrypto.digital';
+const DEFAULT_ANALYZER_PORT = 9001;
+const FLY_BOT_URL = 'https://doxed-btc-bot.fly.dev';
 
 type HomeStatus = {
   mode?: string;
@@ -15,7 +15,6 @@ type HomeStatus = {
   ports?: { bot?: number; analyzer?: number; launcher?: number };
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
-  tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
 };
 
 function botPortFrom(status: HomeStatus | null): number {
@@ -47,17 +46,15 @@ async function probeLocalHealth(url: string): Promise<boolean> {
 async function probeDirectHomeStatus(): Promise<HomeStatus> {
   const botPort = DEFAULT_BOT_PORT;
   const analyzerPort = DEFAULT_ANALYZER_PORT;
-  const [botOk, analyzerOk, tunnelOk] = await Promise.all([
+  const [botOk, analyzerOk] = await Promise.all([
     probeLocalHealth(`http://127.0.0.1:${botPort}/api/ping`),
     probeLocalHealth(`http://127.0.0.1:${analyzerPort}/api/status`),
-    probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`),
   ]);
   return {
     mode: 'production',
     ports: { bot: botPort, analyzer: analyzerPort, launcher: 7810 },
     bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
     analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
-    tunnel: { live: tunnelOk, url: PUBLIC_BOT_URL, enabled: true, cloudflaredRunning: tunnelOk },
   };
 }
 
@@ -69,11 +66,6 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
   const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
   if (raw.ok) {
-    const [tunnelProbe] = await Promise.all([
-      raw.tunnel?.live === undefined || raw.tunnel?.live === false
-        ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`)
-        : Promise.resolve(Boolean(raw.tunnel?.live)),
-    ]);
     return {
       ...raw,
       bot: { ...raw.bot, online: Boolean(raw.bot?.online), dashboard: botDash },
@@ -82,28 +74,19 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
         online: Boolean(raw.analyzer?.online),
         dashboard: analyzerDash,
       },
-      tunnel: {
-        ...raw.tunnel,
-        live: Boolean(raw.tunnel?.live) || tunnelProbe,
-        url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
-        enabled: raw.tunnel?.enabled ?? true,
-      },
     };
   }
 
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
-  const tunnelLive = Boolean(raw.tunnel?.live);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
   const needsAnalyzerProbe =
     !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
-  const needsTunnelProbe = !tunnelLive && raw.tunnel?.live === undefined;
 
-  const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
+  const [botProbe, analyzerProbe] = await Promise.all([
     needsBotProbe ? probeLocalHealth(`${botDash}/api/ping`) : Promise.resolve(botOnline),
     needsAnalyzerProbe ? probeLocalHealth(`${analyzerDash}api/status`) : Promise.resolve(analyzerOnline),
-    needsTunnelProbe ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`) : Promise.resolve(tunnelLive),
   ]);
 
   return {
@@ -113,12 +96,6 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
       ...raw.analyzer,
       online: analyzerOnline || analyzerProbe,
       dashboard: analyzerDash,
-    },
-    tunnel: {
-      ...raw.tunnel,
-      live: tunnelLive || tunnelProbe,
-      url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
-      enabled: raw.tunnel?.enabled ?? true,
     },
   };
 }
@@ -136,33 +113,33 @@ const SLOW_CMD_TIMEOUT_MS = 120000;
 
 function cmdTimeoutMs(id: string): number {
   if (id === 'wipe-research') return SLOW_CMD_TIMEOUT_MS;
-  if (id === 'start-tunnel') return 60_000;
+  if (id === 'start-tunnel' || id === 'reset-mirror') return 60_000;
   return INSTANT_CMD_TIMEOUT_MS;
 }
 
-/** One-click orchestration — same sequence as home-stack-start-everything.ps1 */
+/** Desktop observability only. The launcher lock keeps strategy/execution on Fly.io. */
 const START_SHOWCASE: HomeCmd = {
   id: 'start-showcase',
-  label: '▶ Start showcase',
-  hint: 'Bridge :7810 → bot :7002 → analyzer :9001 → tunnel → auto-wire (correct order, one click)',
-  path: '/cmd/start-all-global',
+  label: '▶ Start desktop tools',
+  hint: 'Start the :7002 Fly proxy, Fly data mirror, and desktop analyzer :9001. Fly remains the sole trader.',
+  path: '/cmd/start-mirror',
   tone: 'primary',
 };
 
 const STOP_SHOWCASE: HomeCmd = {
   id: 'stop-showcase',
-  label: '■ Stop showcase',
-  hint: 'Stop bot, analyzer, and tunnel (bridge :7810 stays running for next Start)',
+  label: '■ Stop desktop tools',
+  hint: 'Stop the desktop proxy, analyzer, and optional tunnel. This does not stop the Fly trading owner.',
   path: '/cmd/stop-all-global',
   tone: 'danger',
 };
 
 const ADVANCED_COMMANDS: HomeCmd[] = [
   {
-    id: 'reset-home-stack',
-    label: '↻ Clean reset + start',
-    hint: 'Stop everything, wait 8s, then run the full Start sequence (use when stack keeps flapping)',
-    path: '/cmd/reset-home-stack',
+    id: 'reset-mirror',
+    label: '↻ Reset desktop tools',
+    hint: 'Restart the local Fly proxy, data mirror, and analyzer without creating a second trading owner',
+    path: '/cmd/reset-mirror',
     tone: 'primary',
   },
   {
@@ -199,6 +176,7 @@ export function AgentAdminShowcaseControl({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
   const [serverUplinkOnline, setServerUplinkOnline] = useState<boolean | null>(null);
+  const [flyOnline, setFlyOnline] = useState<boolean | null>(null);
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
@@ -236,14 +214,17 @@ export function AgentAdminShowcaseControl({
     return () => clearInterval(t);
   }, [refreshStatus]);
 
-  // Server-side canonical snapshot reachability. This proves the authenticated
-  // outbound home-bot uplink without making Cloudflare part of the money path.
+  // Server-side signed-feed reachability. `botConnected` proves the platform has
+  // a canonical snapshot; it does not by itself prove a direct Fly probe.
   useEffect(() => {
     let cancelled = false;
     const probe = async () => {
       try {
         const json = await fetchServerBotHealth('conservative-btc');
-        if (!cancelled) setServerUplinkOnline(Boolean(json.botConnected || json.ok));
+        if (!cancelled) {
+          setServerUplinkOnline(Boolean(json.botConnected || json.ok));
+          setFlyOnline(json.fly === true ? true : json.fly === false ? false : null);
+        }
       } catch {
         // leave as-is; client-side probe remains a secondary fallback
       }
@@ -273,16 +254,16 @@ export function AgentAdminShowcaseControl({
           id === 'start-showcase' ||
           id === 'restart-bridge' ||
           id === 'stop-showcase' ||
-          id === 'reset-home-stack'
+          id === 'reset-mirror'
         ) {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
           setTimeout(() => void refreshStatus(), 45000);
           setTimeout(() => void refreshStatus(), 90000);
         }
-        if (id === 'start-showcase' || id === 'reset-home-stack') {
+        if (id === 'start-showcase' || id === 'reset-mirror') {
           setStartSteps(
-            'Starting in order: (1) bridge :7810 → (2) bot :7002 → (3) analyzer :9001 → (4) tunnel → (5) auto-wire. Four console windows should open — keep them open. Refresh this page at 30s, 60s, 90s.',
+            'Starting desktop observability: (1) :7002 compatibility proxy to Fly → (2) incremental Fly data mirror → (3) analyzer :9001. Fly.io remains the only AI, strategy, and trading owner. Refresh status in 30–60s.',
           );
           setTimeout(() => onUpdated?.(), 20000);
           setTimeout(() => onUpdated?.(), 60000);
@@ -339,7 +320,7 @@ export function AgentAdminShowcaseControl({
           : typeof res.error === 'string'
             ? res.error
             : null;
-      setMsg(message ?? (res.ok ? 'Execution updated' : 'Failed — is home bot online?'));
+      setMsg(message ?? (res.ok ? 'Fly execution state updated' : 'Failed — is the Fly bot reachable?'));
       if (res.ok) {
         onUpdated?.();
         setTimeout(() => onUpdated?.(), 15000);
@@ -354,18 +335,18 @@ export function AgentAdminShowcaseControl({
   return (
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
-        Home PC command center
+        Fly strategy owner + desktop research tools
       </p>
       <p className="mt-1 text-xs text-zinc-400">
-        Runs the <strong>doxxedcrypto.digital</strong> showcase stack on this PC: conservative BTC signals
-        at <strong>:{botPort}</strong>, research at <strong>:{analyzerPort}</strong>, bridge at{' '}
-        <strong>:7810</strong>. The public site and Bitfinex relay reach your bot through{' '}
-        <strong className="text-sky-300">signed webhooks + Railway snapshots</strong>. Cloudflare is an
-        optional dashboard/admin fallback. Open{' '}
+        <strong className="text-sky-300">Fly.io is the sole AI, strategy, and trading owner.</strong>{' '}
+        This PC is observability only: <strong>:{botPort}</strong> proxies the Fly dashboard,{' '}
+        <strong>:{analyzerPort}</strong> analyzes synchronized Fly research data, and <strong>:7810</strong>{' '}
+        controls those desktop tools. The Agent Hub and Bitfinex relay receive signed Fly lifecycle events
+        through the platform API; the desktop mirror cannot place an independent trade. Open{' '}
         <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
           Agent Hub
         </a>{' '}
-        on this same machine to use these controls. Site mirror:{' '}
+        on this PC to use the local controls. Platform feed:{' '}
         {botConnected ? (
           <span className="text-emerald-400">online</span>
         ) : (
@@ -376,46 +357,47 @@ export function AgentAdminShowcaseControl({
 
       {launcherOnline === false && (
         <p className="mt-2 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-          Bridge :7810 is offline — click <strong>Start showcase</strong> below (step 1 reloads the bridge), or
-          double-click <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then hard-refresh this page.
+          Desktop bridge :7810 is offline — local Start/Stop controls are unavailable. Fly trading is separate
+          and may still be online. Run <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then refresh.
         </p>
       )}
 
       <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
-        <p className="font-semibold text-zinc-200">One-click on this PC</p>
+        <p className="font-semibold text-zinc-200">Desktop observability (optional)</p>
         <p className="mt-1.5 text-zinc-400">
-          <strong className="text-zinc-300">Start showcase</strong> runs the full stack in the correct order (bridge →
-          bot → analyzer → tunnel → wire). <strong className="text-zinc-300">Stop showcase</strong> shuts down bot,
-          analyzer, and tunnel. After Start, wait <strong className="text-zinc-300">60–90s</strong> for the live Agent
-          Hub page to sync — &quot;Live bot slow&quot; clears once the tunnel and bot are up.
+          <strong className="text-zinc-300">Start desktop tools</strong> starts the Fly dashboard proxy, bounded data
+          synchronization, and analyzer. <strong className="text-zinc-300">Stop desktop tools</strong> stops only
+          those local viewers. The production bot keeps running on Fly when this PC is off.
         </p>
         <p className="mt-2 text-[10px] text-zinc-500">
-          Keep the four Doxed console windows open. Do not press Enter in them unless stopping. Use Advanced only for
-          clean reset or bridge-only restart.
+          Desktop :7002 and :9001 being offline does not mean the Fly bot is offline. Use the Fly/Agent Hub feed
+          indicators below for production health.
         </p>
       </div>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
         <StatusChip
-          label={`Showcase bot :${botPort}`}
-          ok={Boolean(status?.bot?.online) || Boolean(botConnected)}
-          sub={
-            status?.bot?.online
-              ? 'Local health confirmed'
-              : botConnected
-                ? 'Server health confirmed'
-                : undefined
-          }
+          label="Fly strategy/trading owner"
+          ok={flyOnline === true}
+          sub={FLY_BOT_URL}
+          inactiveLabel={flyOnline === false ? 'unreachable' : 'not directly verified'}
         />
-        <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
         <StatusChip
-          label="Signed snapshot uplink"
+          label="Agent Hub signed feed"
           ok={Boolean(serverUplinkOnline ?? botConnected)}
-          sub="Home :7002 → Railway"
+          sub="Fly → platform API"
         />
-        <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />
-        <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
+        <StatusChip
+          label={`Desktop Fly proxy :${botPort}`}
+          ok={Boolean(status?.bot?.online)}
+          sub="Viewer only · no AI or execution"
+        />
+        <StatusChip
+          label={`Desktop analyzer :${analyzerPort}`}
+          ok={Boolean(status?.analyzer?.online)}
+          sub="Reads synchronized Fly data"
+        />
+        <StatusChip label="Desktop control bridge :7810" ok={launcherOnline === true} />
       </div>
 
       <div className="mt-4 flex flex-wrap gap-3">
@@ -494,13 +476,13 @@ export function AgentAdminShowcaseControl({
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <a href={botDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Bot dashboard :{botPort} →
+          Desktop Fly mirror :{botPort} →
         </a>
         <a href={analyzerDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Analyzer :{analyzerPort} →
+          Desktop analyzer :{analyzerPort} →
         </a>
-        <a href={PUBLIC_BOT_URL} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Public bot URL →
+        <a href={FLY_BOT_URL} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Canonical Fly bot →
         </a>
         <a
           href={`${botDash}/api/export_csv`}
@@ -519,8 +501,8 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <p className="mt-2 text-[10px] text-zinc-600">
-        Money path: signed webhooks + authenticated Railway snapshots. Cloudflare only exposes the optional public bot
-        and analyzer dashboard. Start showcase still manages that fallback tunnel.
+        Production path: Fly strategy owner → signed lifecycle events/snapshots → platform relay → Bitfinex.
+        Desktop :7002/:9001 are optional monitoring tools and never health evidence for production.
       </p>
 
       {status?.analyzer?.note && (
@@ -537,11 +519,13 @@ function StatusChip({
   ok,
   hidden,
   sub,
+  inactiveLabel,
 }: {
   label: string;
   ok: boolean;
   hidden?: boolean;
   sub?: string;
+  inactiveLabel?: string;
 }) {
   if (hidden) return null;
   return (
@@ -559,7 +543,7 @@ function StatusChip({
           aria-hidden
         />
         <span>
-          {label}: <strong>{ok ? 'online' : 'offline'}</strong>
+          {label}: <strong>{ok ? 'online' : (inactiveLabel ?? 'offline')}</strong>
         </span>
       </div>
       {sub && <span className="truncate pl-4 text-[9px] text-zinc-600">{sub}</span>}

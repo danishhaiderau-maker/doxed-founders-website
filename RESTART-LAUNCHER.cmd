@@ -1,15 +1,15 @@
 @echo off
 
-title Recover Home Stack (bridge + bot + analyzer + tunnel)
+title Recover Fly Desktop Mirror
 
 cd /d "%~dp0"
 
 echo.
-echo === Full home stack recovery ===
-echo Bridge :7810 ^| Bot :7002 ^| Analyzer :9500 ^| Tunnel
+echo === Fly desktop mirror recovery ===
+echo Bridge :7810 ^| Fly proxy :7002 ^| Analyzer :9001
 echo.
-echo Agent Hub buttons only work when bridge :7810 is already running.
-echo This script starts everything from scratch on your PC.
+echo Fly.io remains the only AI, strategy, and trading owner.
+echo This PC starts monitoring and control views only.
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fast-recover-global.ps1"
@@ -23,8 +23,9 @@ if errorlevel 1 (
 curl -sS -m 4 http://127.0.0.1:7810/health
 echo.
 echo.
-echo Wait 30-60 seconds, then hard-refresh Agent Hub (Ctrl+F5).
-echo Keep open: Doxed Home Bridge, Doxed Bot :7002, Doxed Analyzer :9500, Cloudflare Tunnel.
+echo Hard-refresh Agent Hub if its cached status is old.
+echo Dashboard: http://127.0.0.1:7002/
+echo Analyzer:  http://127.0.0.1:9001/
 
 if "%~1"=="--no-pause" exit /b 0
 pause

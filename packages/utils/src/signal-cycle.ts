@@ -53,7 +53,9 @@ export function resolveSignalCyclePollMs(envValue?: string | number | null): num
 }
 
 /** Exchange-neutral signal envelope (ENSE) � portable across venues. */
-export type SignalEntryMode = 'PULLBACK_PCT' | 'EMA_OFFSET_PCT';
+export type SignalEntryMode = 'PULLBACK_PCT' | 'EMA_OFFSET_PCT' | 'EXACT_LIMIT';
+export const SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION =
+  'micro_sr_structural_limit_v1' as const;
 
 export type SignalIntentEnvelope = {
   schema: 'dcf-signal-intent/v1';
@@ -67,7 +69,9 @@ export type SignalIntentEnvelope = {
     mode: SignalEntryMode;
     /** Signed % from subscriber mark at receipt (LONG: negative = below mark). */
     offset_pct: number;
-    reference: 'SUBSCRIBER_MARK_AT_RECEIPT';
+    /** Canonical showcase limit; authoritative whenever mode=EXACT_LIMIT. */
+    exact_limit_price?: number;
+    reference: 'SUBSCRIBER_MARK_AT_RECEIPT' | 'SHOWCASE_EXACT_LIMIT';
     ttl_sec: number;
   };
   risk: {
@@ -83,6 +87,7 @@ export type SignalIntentEnvelope = {
     edge: number;
     ai_win_prob: number;
     entry_mode_source: string;
+    entry_limit_policy?: typeof SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION;
     research_venue: string;
     disclaimer: string;
   };

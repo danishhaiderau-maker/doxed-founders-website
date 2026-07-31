@@ -24,6 +24,8 @@ import { AgentAnalyzerPanel } from '@/components/agent-hub/agent-analyzer-panel'
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
+import { directionGap } from '@/components/agent-hub/agent-direction-gap';
+import { AgentDecisionPipelineStatus } from '@/components/agent-hub/agent-decision-pipeline-status';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
@@ -113,6 +115,8 @@ function PublicReasoningPanel({
     marketRegime: bias,
     hubUrl: `https://doxxedcrypto.digital/agent-hub/${slug}`,
   });
+  const directionOnly = slug === 'conservative-btc';
+  const gap = directionGap(verdict?.rawScoreGap);
 
   return (
     <section className="rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 to-zinc-950/50 p-6">
@@ -131,7 +135,8 @@ function PublicReasoningPanel({
             <>
               <p>
                 <span className="font-semibold text-violet-200">Verdict:</span>{' '}
-                {verdict.decision} · {verdict.direction} · {verdict.winProbability}% confidence
+                {verdict.decision} · {verdict.direction}
+                {!directionOnly ? ` · ${verdict.winProbability}% confidence` : ''}
               </p>
               {verdict.reason && (
                 <p>
@@ -164,9 +169,17 @@ function PublicReasoningPanel({
         <span className="rounded-full border border-emerald-500/40 bg-emerald-950/40 px-3 py-1 font-semibold text-emerald-200">
           Bias: {bias}
         </span>
-        <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-violet-200">
-          Confidence: {verdict?.winProbability ?? dashboard.aiWinProbability ?? 0}%
-        </span>
+        {directionOnly ? (
+          <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-violet-200">
+            {gap
+              ? `Raw AI gap ${gap.raw}/100 · bucket ${gap.bucketLabel}`
+              : 'Direction-only call · probability not requested'}
+          </span>
+        ) : (
+          <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-violet-200">
+            Confidence: {verdict?.winProbability ?? dashboard.aiWinProbability ?? 0}%
+          </span>
+        )}
         <span className="rounded-full border border-zinc-600 px-3 py-1 text-zinc-400">
           Decision: {dashboard.aiDecision}
         </span>
@@ -429,33 +442,47 @@ function StateIntegrityHeader({ dashboard }: { dashboard: TradingAgentDashboardS
     return (
       <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs text-amber-200/90">
         <strong>Live bot snapshot unavailable.</strong> Showing cached/database numbers.
-        Start the home bot and refresh, or click Start in the command center.
+        Fly.io is the production owner; refresh the Agent Hub feed. Desktop :7002/:9001 are optional viewers.
       </div>
     );
   }
   const uptimeH = dashboard.botUptimeHours ?? 0;
   const windowH = dashboard.dataWindowHours ?? uptimeH;
-  const ageSec = si.snapshot_age_sec ?? 0;
+  const ageSec = Number.isFinite(Number(si.snapshot_age_sec))
+    ? Number(si.snapshot_age_sec)
+    : Number.POSITIVE_INFINITY;
   const source = dashboard.snapshotSource ?? 'live_bot';
-  const wsOk = si.ws_connected && si.rest_healthy;
+  const snapshotFresh = ageSec >= 0 && ageSec < 90;
+  const wsOk = si.ws_connected && si.rest_healthy && snapshotFresh;
   // REST_FALLBACK (ws down) is NOT "offline" — if REST is healthy and the snapshot is
   // fresh, the bot is up and serving data via REST. Only a stale snapshot / unhealthy
   // REST means the bot is truly unreachable. Without this, a bot in long REST_FALLBACK
   // (ws disconnected for hours) showed a red "Bot offline" dot while still trading fine.
-  const restUp = !wsOk && si.rest_healthy && ageSec < 30;
+  const restUp = !wsOk && si.rest_healthy && snapshotFresh;
   const dot = wsOk ? 'bg-emerald-400' : restUp ? 'bg-amber-400' : 'bg-rose-400';
   return (
     <div className="mb-4 rounded-xl border border-zinc-700/60 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-300">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span className="flex items-center gap-1.5 font-semibold text-zinc-100">
           <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
-          {wsOk ? 'Live bot connected' : restUp ? 'Bot online · REST price fallback' : 'Bot offline'}
+          {wsOk
+            ? 'Fly bot connected'
+            : restUp
+              ? 'Fly bot online · REST price fallback'
+              : !snapshotFresh
+                ? 'Fly feed stale · not live'
+                : 'Fly bot unavailable'}
         </span>
         <span>Data from last {windowH > 0 ? `${windowH.toFixed(1)}h` : '—'}</span>
         <span>Running for {uptimeH > 0 ? `${uptimeH.toFixed(1)}h` : '—'}</span>
         <span>source: <span className="text-zinc-100">{source}</span></span>
         <span>seq: <span className="text-zinc-100">{si.snapshot_seq}</span></span>
-        <span>age: <span className="text-zinc-100">{Math.round(ageSec)}s</span></span>
+        <span>
+          age:{' '}
+          <span className="text-zinc-100">
+            {Number.isFinite(ageSec) ? `${Math.round(ageSec)}s` : 'unknown'}
+          </span>
+        </span>
         <span>exchange: <span className="text-zinc-100">{si.exchange}</span></span>
         <span>genome: <span className="text-zinc-100">{si.genome_recorder}</span></span>
         <span>relay: <span className="text-zinc-100">{si.relay_push?.configured ? `on (${si.relay_push.seq ?? 0})` : 'off'}</span></span>
@@ -634,7 +661,17 @@ export function AgentPublicProfile({
         ? 'relay-sim'
         : activeDesk;
   const isUserSession = resolvedDesk !== 'showcase' && (viewScope === 'user' || isCopySession || isLiveSession);
-  const isLive = resolvedDesk === 'showcase' && botConnected && !executionPaused && publicStatus === 'online';
+  const integrity = dashboard.stateIntegrity;
+  const canonicalSnapshotFresh =
+    integrity == null ||
+    (integrity.rest_healthy && Number(integrity.snapshot_age_sec ?? Infinity) < 90);
+  const showcaseOnline =
+    resolvedDesk === 'showcase' &&
+    botConnected &&
+    publicStatus !== 'offline' &&
+    canonicalSnapshotFresh;
+  const isLive = showcaseOnline && !executionPaused;
+  const showcasePaused = showcaseOnline && executionPaused;
   const heroBadge = isLiveSession
     ? instanceStatus === 'PAUSED'
       ? { label: 'Relay off', className: 'bg-red-500/20 text-red-200 ring-1 ring-red-500/40' }
@@ -645,16 +682,20 @@ export function AgentPublicProfile({
       ? { label: 'Legacy paper', className: 'bg-zinc-800 text-zinc-400 ring-1 ring-zinc-600' }
     : isLive
       ? { label: 'Live', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
+      : showcasePaused
+        ? { label: 'Online · trading paused', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
       : publicStatus === 'updating'
         ? { label: 'Updating', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
         : { label: 'Offline', className: 'bg-zinc-800 text-zinc-400' };
   const statusLabel = resolvedDesk === 'showcase'
     ? isLive
       ? 'Admin showcase (observe only)'
+      : botConnected && !canonicalSnapshotFresh
+        ? 'Fly feed stale · awaiting a fresh signed snapshot'
       : publicStatus === 'offline' && !botConnected
         ? 'Showcase stopped'
-        : executionPaused
-          ? 'Showcase paused'
+      : executionPaused && botConnected
+          ? 'Fly bot online · trading paused'
           : 'Showcase offline'
     : isLiveSession
     ? instanceStatus === 'PAUSED'
@@ -669,7 +710,7 @@ export function AgentPublicProfile({
     ? 'text-violet-300'
     : isLive
       ? 'text-emerald-400'
-      : executionPaused && publicStatus !== 'offline'
+      : showcasePaused || (executionPaused && publicStatus !== 'offline')
         ? 'text-amber-400'
         : 'text-zinc-400';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
@@ -730,6 +771,8 @@ export function AgentPublicProfile({
     resolvedDesk === 'showcase'
       ? isLive
         ? { label: 'Showcase live', className: 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40' }
+        : showcasePaused
+          ? { label: 'Fly online · paused', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
         : publicStatus === 'updating'
           ? { label: 'Updating', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
           : { label: 'Showcase', className: 'bg-zinc-800 text-zinc-400' }
@@ -929,6 +972,9 @@ export function AgentPublicProfile({
 
           <div className="space-y-4">
             <AgentDeskView {...deskViewProps} executionOnly={false} />
+            {resolvedDesk === 'showcase' && isAdmin ? (
+              <AgentDecisionPipelineStatus dashboard={dashboard} />
+            ) : null}
             {copyDetailsMode ? (
               <CopyTradeDetailsStrip
                 agent={agent}

@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"

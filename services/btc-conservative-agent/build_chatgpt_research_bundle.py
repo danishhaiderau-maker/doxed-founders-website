@@ -8,6 +8,7 @@ Output: research/downloads/chatgpt_research_bundle.zip
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -52,12 +53,55 @@ _SEARCH_ROOTS = (
 )
 
 
-def _find_file(name: str) -> Path | None:
-    for root in _SEARCH_ROOTS:
+def _find_file(name: str, roots=None) -> Path | None:
+    for root in (roots or _SEARCH_ROOTS):
         for candidate in (root / name, root / "reports" / name):
             if candidate.is_file():
                 return candidate
     return None
+
+
+def _find_report_file(name: str, report_root: Path) -> Path | None:
+    """Prefer the active fresh-collection report over newer all-time fallbacks."""
+    candidates = (
+        report_root / name,
+        report_root / "reports" / name,
+        report_root / "reports" / "all_data" / name,
+    )
+    best = None
+    best_key = (-1, -1.0)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        scope_rank = 1
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            scope = str(
+                payload.get("session_scope")
+                or payload.get("data_scope")
+                or payload.get("scope")
+                or ""
+            ).upper()
+            if "FRESH" in scope or scope == "SESSION":
+                scope_rank = 3
+            elif scope in ("ALL-DATA", "ALL-TIME", "ALL"):
+                scope_rank = 0
+        except (OSError, json.JSONDecodeError):
+            pass
+        key = (scope_rank, candidate.stat().st_mtime)
+        if key > best_key:
+            best_key = key
+            best = candidate
+    return best
+
+
+def _source_record(path: Path) -> dict:
+    data = path.read_bytes()
+    return {
+        "name": path.name,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 def _trade_stats(path: Path) -> dict:
@@ -89,8 +133,10 @@ def _trade_stats(path: Path) -> dict:
     }
 
 
-def _session_archive_count() -> int:
-    for arch in (RESEARCH_ROOT / "research_session_archives", AGENT_ROOT / "research_session_archives"):
+def _session_archive_count(roots=None) -> int:
+    roots = roots or (RESEARCH_ROOT, AGENT_ROOT)
+    for root in roots:
+        arch = root / "research_session_archives"
         if arch.is_dir():
             return sum(1 for d in arch.iterdir() if d.is_dir() and d.name.startswith("session_"))
     return 0
@@ -115,12 +161,19 @@ def _atomic_zip_build(files: list[tuple[Path, str]], out_zip: Path) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
-def build(agent_root: Path | None = None) -> tuple[Path, dict]:
+def build(
+    agent_root: Path | None = None,
+    *,
+    data_root: Path | None = None,
+    report_root: Path | None = None,
+) -> tuple[Path, dict]:
     global AGENT_ROOT, RESEARCH_ROOT, OUT_DIR
     if agent_root is not None:
         AGENT_ROOT = Path(agent_root).resolve()
         RESEARCH_ROOT = AGENT_ROOT / "research" if (AGENT_ROOT / "research").is_dir() else AGENT_ROOT
         OUT_DIR = RESEARCH_ROOT / "downloads"
+    data_root = Path(data_root or AGENT_ROOT).resolve()
+    report_root = Path(report_root or AGENT_ROOT).resolve()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now(timezone.utc).isoformat()
@@ -131,14 +184,39 @@ def build(agent_root: Path | None = None) -> tuple[Path, dict]:
         "purpose": "Upload this ZIP to ChatGPT for regime/lane analysis",
         "files_included": [],
         "trade_stats": None,
-        "session_archives_on_disk": _session_archive_count(),
+        "session_archives_on_disk": _session_archive_count(
+            (report_root, report_root / "research", AGENT_ROOT)
+        ),
+        "source_contract": {
+            "schema": "split_report_and_data_roots_v1",
+            "report_manifest_generated_at": None,
+            "analyzer_sync_id": None,
+            "raw_sources": [],
+        },
     }
 
-    trades = _find_file("trades_3factor.csv")
+    report_manifest_path = _find_report_file("report_manifest.json", report_root)
+    if report_manifest_path is not None:
+        try:
+            report_manifest = json.loads(report_manifest_path.read_text(encoding="utf-8"))
+            manifest["source_contract"]["report_manifest_generated_at"] = report_manifest.get(
+                "generated_at"
+            )
+            manifest["source_contract"]["analyzer_sync_id"] = report_manifest.get(
+                "analyzer_sync_id"
+            )
+            manifest["source_contract"]["report_manifest"] = _source_record(
+                report_manifest_path
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    trades = _find_file("trades_3factor.csv", (data_root, AGENT_ROOT))
     if trades:
         manifest["trade_stats"] = _trade_stats(trades)
         to_pack.append((trades, f"csv/{trades.name}"))
         manifest["files_included"].append(f"csv/{trades.name}")
+        manifest["source_contract"]["raw_sources"].append(_source_record(trades))
 
     for acc_path in (
         RESEARCH_ROOT / "research_accumulator" / "trades_accumulated.csv",
@@ -147,25 +225,29 @@ def build(agent_root: Path | None = None) -> tuple[Path, dict]:
         if acc_path.is_file():
             to_pack.append((acc_path, "accumulator/trades_accumulated.csv"))
             manifest["files_included"].append("accumulator/trades_accumulated.csv")
-            manifest["accumulator_trades"] = max(0, sum(1 for _ in acc_path.open(encoding="utf-8")) - 1)
+            with acc_path.open(encoding="utf-8", errors="replace", newline="") as handle:
+                manifest["accumulator_trades"] = sum(
+                    1 for _ in csv.DictReader(handle)
+                )
             break
 
     for name in KEY_CSV:
         if name == "trades_3factor.csv":
             continue
-        p = _find_file(name)
+        p = _find_file(name, (data_root, AGENT_ROOT))
         if p:
             to_pack.append((p, f"csv/{p.name}"))
             manifest["files_included"].append(f"csv/{p.name}")
+            manifest["source_contract"]["raw_sources"].append(_source_record(p))
 
     for name in KEY_JSON_ROOT:
-        p = _find_file(name)
+        p = _find_report_file(name, report_root)
         if p:
             to_pack.append((p, f"reports/{p.name}"))
             manifest["files_included"].append(f"reports/{p.name}")
 
     for name in KEY_TXT:
-        p = _find_file(name)
+        p = _find_file(name, (report_root, report_root / "research", AGENT_ROOT))
         if p:
             to_pack.append((p, f"summaries/{p.name}"))
             manifest["files_included"].append(f"summaries/{p.name}")

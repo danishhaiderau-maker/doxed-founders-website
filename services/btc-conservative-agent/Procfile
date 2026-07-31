@@ -1,1 +1,3 @@
+# Retired non-Fly compatibility entry. btc_conservative_agent.py fails closed
+# unless Fly.io supplies FLY_APP_NAME.
 web: python btc_conservative_agent.py

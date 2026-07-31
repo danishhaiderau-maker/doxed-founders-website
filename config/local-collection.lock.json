@@ -1,11 +1,15 @@
 {
+  "schema": "retired_local_collection_v1",
   "frozen": true,
-  "purpose": "Local data collection only — separate from doxxedcrypto production stack",
-  "botPort": 7002,
-  "analyzerPort": 9001,
+  "enabled": false,
+  "purpose": "Retired local strategy collection profile; retained only for compatibility checks",
+  "reason": "Fly.io is the sole AI, strategy, paper-execution, and relay-signal owner.",
+  "botPort": 9702,
+  "analyzerPort": 9901,
   "dataDirRelative": "services/btc-conservative-agent/local-collection-data",
   "doNotUsePorts": [7002, 9001, 7810],
   "doNotCopyFrom": "Bybit-15m-research-bot",
+  "disableLocalStrategy": true,
   "disableRelayWebhook": true,
   "disableTunnel": true,
   "disableSupervisor": true

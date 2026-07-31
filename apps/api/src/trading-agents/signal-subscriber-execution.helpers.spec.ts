@@ -42,7 +42,237 @@ import {
   shouldRetryImmediateFlatReconcile,
   shouldClearShowcaseStatusError,
   sourceEntityCreatedAtMs,
+  advanceLiveFidelityGuard,
+  isFreshCanonicalFidelityBotState,
+  isFreshExactFidelityReconcile,
+  liveRelayFidelityObservation,
+  LIVE_FIDELITY_GUARD_THRESHOLD_PCT,
 } from './signal-subscriber-execution.service';
+
+test('live fidelity guard needs three fresh low observations spanning at least 90 seconds', () => {
+  const relayArmedAt = '2026-07-31T00:00:00.000Z';
+  const start = Date.parse(relayArmedAt);
+  const first = advanceLiveFidelityGuard({
+    previous: null,
+    nowMs: start,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 40,
+    comparisonCount: 5,
+  });
+  assert.equal(first.shouldTrip, false);
+  assert.equal(first.state.status, 'LOW_PENDING');
+  assert.equal(first.state.lowObservationCount, 1);
+  assert.equal(first.state.breachStartedAt, relayArmedAt);
+
+  const duplicate = advanceLiveFidelityGuard({
+    previous: first.state,
+    nowMs: start + 10_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 20,
+    comparisonCount: 5,
+  });
+  assert.equal(duplicate.observationAccepted, false);
+  assert.equal(duplicate.state.lowObservationCount, 1);
+
+  const second = advanceLiveFidelityGuard({
+    previous: first.state,
+    nowMs: start + 45_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 50,
+    comparisonCount: 6,
+  });
+  assert.equal(second.shouldTrip, false);
+  assert.equal(second.state.lowObservationCount, 2);
+
+  const third = advanceLiveFidelityGuard({
+    previous: second.state,
+    nowMs: start + 90_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 59.99,
+    comparisonCount: 7,
+  });
+  assert.equal(third.shouldTrip, true);
+  assert.equal(third.state.status, 'TRIPPED');
+  assert.equal(third.state.lowObservationCount, 3);
+  assert.equal(third.state.thresholdPct, LIVE_FIDELITY_GUARD_THRESHOLD_PCT);
+});
+
+test('live fidelity guard resets on recovery, inactivity, stale evidence, empty data, and a new arm epoch', () => {
+  const relayArmedAt = '2026-07-31T00:00:00.000Z';
+  const start = Date.parse(relayArmedAt);
+  const low = advanceLiveFidelityGuard({
+    previous: null,
+    nowMs: start,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 10,
+    comparisonCount: 1,
+  }).state;
+
+  const recovered = advanceLiveFidelityGuard({
+    previous: low,
+    nowMs: start + 30_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: 60,
+    comparisonCount: 1,
+  });
+  assert.equal(recovered.state.status, 'HEALTHY');
+  assert.equal(recovered.state.lowObservationCount, 0);
+
+  const stale = advanceLiveFidelityGuard({
+    previous: low,
+    nowMs: start + 30_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: false,
+    scorePct: 1,
+    comparisonCount: 10,
+  });
+  assert.equal(stale.shouldTrip, false);
+  assert.equal(stale.state.lowObservationCount, 0);
+  assert.equal(stale.state.lastResetReason, 'EVIDENCE_STALE_OR_UNKNOWN');
+
+  const empty = advanceLiveFidelityGuard({
+    previous: low,
+    nowMs: start + 30_000,
+    activeLive: true,
+    relayArmedAt,
+    evidenceFresh: true,
+    scorePct: null,
+    comparisonCount: 0,
+  });
+  assert.equal(empty.shouldTrip, false);
+  assert.equal(empty.state.lastResetReason, 'NO_MEANINGFUL_COMPARISON_DATA');
+
+  const inactive = advanceLiveFidelityGuard({
+    previous: low,
+    nowMs: start + 30_000,
+    activeLive: false,
+    relayArmedAt: null,
+    evidenceFresh: true,
+    scorePct: 0,
+    comparisonCount: 10,
+  });
+  assert.equal(inactive.shouldTrip, false);
+  assert.equal(inactive.state.status, 'IDLE');
+  assert.equal(inactive.state.lastResetReason, 'LIVE_RELAY_INACTIVE');
+
+  const rearmed = advanceLiveFidelityGuard({
+    previous: low,
+    nowMs: start + 120_000,
+    activeLive: true,
+    relayArmedAt: '2026-07-31T00:02:00.000Z',
+    evidenceFresh: true,
+    scorePct: 10,
+    comparisonCount: 1,
+  });
+  assert.equal(rearmed.shouldTrip, false);
+  assert.equal(rearmed.state.lowObservationCount, 1);
+  assert.equal(rearmed.state.breachStartedAt, '2026-07-31T00:02:00.000Z');
+});
+
+test('live fidelity evidence rejects noncanonical, stale, errored, and mismatched reconcile data', () => {
+  const now = Date.parse('2026-07-31T00:00:30.000Z');
+  const bot = {
+    dashboard_owner: true,
+    dashboard_port: 7002,
+    bot_instance_id: 'fly-machine-1',
+    source_git_rev: 'abc123',
+    server_ts: '2026-07-31T00:00:20.000Z',
+  };
+  assert.equal(isFreshCanonicalFidelityBotState(bot as never, now), true);
+  assert.equal(
+    isFreshCanonicalFidelityBotState(
+      { ...bot, dashboard_owner: false } as never,
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    isFreshCanonicalFidelityBotState(
+      { ...bot, server_ts: '2026-07-30T23:59:00.000Z' } as never,
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    isFreshCanonicalFidelityBotState(
+      { ...bot, api_state_error: 'snapshot incomplete' } as never,
+      now,
+    ),
+    false,
+  );
+
+  const reconcile = {
+    updatedAt: '2026-07-31T00:00:20.000Z',
+    alert: false,
+    deltaBtc: 0,
+  };
+  assert.equal(isFreshExactFidelityReconcile(reconcile, now), true);
+  assert.equal(
+    isFreshExactFidelityReconcile({ ...reconcile, deltaBtc: 0.00000001 }, now),
+    false,
+  );
+  assert.equal(
+    isFreshExactFidelityReconcile(
+      { ...reconcile, updatedAt: '2026-07-30T23:59:00.000Z' },
+      now,
+    ),
+    false,
+  );
+});
+
+test('live relay fidelity counts actionable identity/gap defects but excludes offline misses', () => {
+  const observation = liveRelayFidelityObservation({
+    rows: [
+      {
+        tradeId: 'cont-good',
+        localBotTradeId: 'cont-good',
+        matchKind: 'exact',
+        bitfinexEntry: 64_000,
+        showcaseEntry: 64_000,
+        bitfinexExit: 64_100,
+        showcaseExit: 64_100,
+      },
+      {
+        tradeId: 'cont-orphan',
+        localBotTradeId: null,
+        matchKind: 'none',
+        bitfinexEntry: 64_000,
+        showcaseEntry: null,
+        bitfinexExit: null,
+        showcaseExit: null,
+      },
+    ],
+    summary: {
+      unmatchedShowcaseCount: 1,
+      unmatchedShowcaseOfflineCount: 99,
+    },
+  } as never);
+  assert.equal(observation.comparisonCount, 3);
+  assert.equal(observation.scorePct, 33.33);
+  assert.deepEqual(
+    liveRelayFidelityObservation({
+      rows: [],
+      summary: {
+        unmatchedShowcaseCount: 0,
+        unmatchedShowcaseOfflineCount: 20,
+      },
+    } as never),
+    { scorePct: null, comparisonCount: 0 },
+  );
+});
 
 test('retries immediate-flat proof only for an unambiguous managed exit race', () => {
   const base = {
@@ -919,13 +1149,27 @@ test('a still-resting showcase limit remains eligible for exact-price chase', ()
         trade_id: 'cont-pending',
         status: 'PENDING',
         limit_price: 66_000,
+        entry_limit_policy: 'micro_sr_structural_limit_v1',
       },
     ],
     positions: [],
-  } as never;
+  };
   assert.equal(
-    pendingCopyShowcaseDisposition(bot, 'cont-pending'),
+    pendingCopyShowcaseDisposition(bot as never, 'cont-pending'),
     'SHOWCASE_PENDING',
+  );
+  assert.equal(
+    pendingCopyShowcaseDisposition(
+      {
+        ...bot,
+        orders: [{
+          ...bot.orders[0],
+          entry_limit_policy: 'legacy_pullback_pct',
+        }],
+      } as never,
+      'cont-pending',
+    ),
+    'SHOWCASE_ABSENT',
   );
 });
 
@@ -1265,6 +1509,7 @@ test('ignores stale intents and selects only trades resting in the canonical ord
         trade_id: 'cont-live',
         status: 'PENDING',
         limit_price: 64_500,
+        entry_limit_policy: 'micro_sr_structural_limit_v1',
       },
     ],
   });
@@ -1275,11 +1520,18 @@ test('rejects terminal or price-less canonical orders', () => {
   const cycles = [
     { tradeId: 'cont-filled', createdAt: new Date('2026-07-19T12:00:00Z') },
     { tradeId: 'cont-no-price', createdAt: new Date('2026-07-19T12:01:00Z') },
+    { tradeId: 'cont-legacy', createdAt: new Date('2026-07-19T12:02:00Z') },
   ];
   const result = canonicalPendingIntentCycles(cycles, {
     orders: [
       { trade_id: 'cont-filled', status: 'FILLED', limit_price: 64_500 },
       { trade_id: 'cont-no-price', status: 'PENDING', limit_price: 0 },
+      {
+        trade_id: 'cont-legacy',
+        status: 'PENDING',
+        limit_price: 64_450,
+        entry_limit_policy: 'legacy_pullback_pct',
+      },
     ],
   });
   assert.deepEqual(result, []);
@@ -1290,8 +1542,18 @@ test('preserves canonical book order when more than one live intent is ready', (
   const secondCreated = { tradeId: 'cont-b', createdAt: new Date('2026-07-19T12:01:00Z') };
   const result = canonicalPendingIntentCycles([firstCreated, secondCreated], {
     orders: [
-      { trade_id: 'cont-b', status: 'ORDERED', limit_price: 64_600 },
-      { trade_id: 'cont-a', status: 'PENDING', limit_price: 64_500 },
+      {
+        trade_id: 'cont-b',
+        status: 'ORDERED',
+        limit_price: 64_600,
+        entry_limit_policy: 'micro_sr_structural_limit_v1',
+      },
+      {
+        trade_id: 'cont-a',
+        status: 'PENDING',
+        limit_price: 64_500,
+        entry_limit_policy: 'micro_sr_structural_limit_v1',
+      },
     ],
   });
   assert.deepEqual(result, [secondCreated, firstCreated]);
@@ -1304,14 +1566,21 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
       'cont-fast',
       {
         schema: 'dcf-signal-intent/v1',
+        signalId: 'cont-fast',
+        trade_id: 'cont-fast',
         action: 'ENTER',
         direction: 'SHORT',
-        entry: { exact_limit_price: 64_555.25 },
+        entry: {
+          mode: 'EXACT_LIMIT',
+          reference: 'SHOWCASE_EXACT_LIMIT',
+          exact_limit_price: 64_555.25,
+        },
         context: {
           signed_showcase_event: true,
           showcase_event: 'ORDER_PLACED',
           showcase_event_at: '2026-07-20T01:02:01.750Z',
           platform_received_at: '2026-07-20T01:02:02.250Z',
+          entry_limit_policy: 'micro_sr_structural_limit_v1',
         },
       },
       now,
@@ -1330,24 +1599,31 @@ test('rejects unsigned, stale, and non-resting exact-limit events', () => {
   const now = Date.parse('2026-07-20T01:02:30.000Z');
   const base = {
     schema: 'dcf-signal-intent/v1',
+    signalId: 'cont-base',
+    trade_id: 'cont-base',
     action: 'ENTER',
     direction: 'LONG',
-    entry: { exact_limit_price: 64_500 },
+    entry: {
+      mode: 'EXACT_LIMIT',
+      reference: 'SHOWCASE_EXACT_LIMIT',
+      exact_limit_price: 64_500,
+    },
     context: {
       signed_showcase_event: true,
       showcase_event: 'ORDER_PLACED',
       platform_received_at: '2026-07-20T01:02:29.000Z',
+      entry_limit_policy: 'micro_sr_structural_limit_v1',
     },
   };
   assert.equal(
-    readFreshSignedShowcaseExactLimit('cont-unsigned', {
+    readFreshSignedShowcaseExactLimit('cont-base', {
       ...base,
       context: { ...base.context, signed_showcase_event: false },
     }, now),
     null,
   );
   assert.equal(
-    readFreshSignedShowcaseExactLimit('cont-stale', {
+    readFreshSignedShowcaseExactLimit('cont-base', {
       ...base,
       context: {
         ...base.context,
@@ -1357,10 +1633,51 @@ test('rejects unsigned, stale, and non-resting exact-limit events', () => {
     null,
   );
   assert.equal(
-    readFreshSignedShowcaseExactLimit('cont-approve', {
+    readFreshSignedShowcaseExactLimit('cont-base', {
       ...base,
       context: { ...base.context, showcase_event: 'APPROVE_PENDING' },
     }, now),
+    null,
+  );
+  assert.equal(
+    readFreshSignedShowcaseExactLimit('cont-base', {
+      ...base,
+      entry: {
+        mode: 'PULLBACK_PCT',
+        reference: 'SUBSCRIBER_MARK_AT_RECEIPT',
+        offset_pct: -0.1,
+        exact_limit_price: 64_500,
+      },
+    }, now),
+    null,
+  );
+});
+
+test('rejects a signed exact limit whose envelope identity does not match the cycle trade', () => {
+  const now = Date.parse('2026-07-20T01:02:30.000Z');
+  assert.equal(
+    readFreshSignedShowcaseExactLimit(
+      'cont-requested',
+      {
+        schema: 'dcf-signal-intent/v1',
+        signalId: 'cont-other',
+        trade_id: 'cont-other',
+        action: 'ENTER',
+        direction: 'LONG',
+        entry: {
+          mode: 'EXACT_LIMIT',
+          reference: 'SHOWCASE_EXACT_LIMIT',
+          exact_limit_price: 64_500,
+        },
+        context: {
+          signed_showcase_event: true,
+          showcase_event: 'ORDER_PLACED',
+          platform_received_at: '2026-07-20T01:02:29.000Z',
+          entry_limit_policy: 'micro_sr_structural_limit_v1',
+        },
+      },
+      now,
+    ),
     null,
   );
 });

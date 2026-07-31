@@ -9,7 +9,7 @@ import {
 } from '@/lib/api';
 
 /**
- * Compact global showcase bot strip — shown above live copy / relay sim desks.
+ * Compact canonical Fly showcase strip — shown above live copy / relay sim desks.
  *
  * Source of truth: the browser-safe session-summary endpoint (:9001 via bot proxy) which
  * reports the FULL session since the last Fresh Collection wipeout — the same
@@ -199,7 +199,7 @@ export function ShowcaseReferenceBar({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-violet-300">
-            Global showcase bot · :7002
+            Canonical Fly showcase bot
           </p>
           <p className="mt-0.5 text-[11px] text-zinc-500">
             {usingDelta

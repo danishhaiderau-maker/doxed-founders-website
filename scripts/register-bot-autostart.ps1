@@ -2,16 +2,17 @@
 #
 # Registers the DcfShowcaseBotAutostart scheduled task: launches
 # scripts/start-showcase-bot.cmd on every user logon (30s delay) and once
-# daily as a safety net. Elevated installs use RunLevel Highest; standard-user
-# installs use a current-user Limited fallback that can still start the paper
-# bot, analyzer, tunnel, and recovery supervisor. This is the missing link that
-# lets the showcase bot survive a Windows reboot / Windows Update restart /
-# power failure without a human having to click "Start everything".
+# daily as a safety net. The entry point is deliberately mirror-only:
+#   - :7002 compatibility proxy -> canonical Fly bot
+#   - incremental Fly data synchronization
+#   - :9001 analyzer over the synchronized mirror
+# It never starts a Windows AI/strategy bot, relay publisher, supervisor, or
+# Cloudflare tunnel. Fly.io remains the sole production owner.
 #
-# Uptime contract (see scripts/BOT_UPTIME.md):
-#   - Crash / python.exe dies        -> bot-auto-restart.ps1 + home-stack-supervisor.ps1
-#   - Windows reboot / power failure -> THIS task (AtLogon) + start-showcase-bot.cmd
-#   - Manual Stop (dashboard)        -> .home-stack-user-stopped flag, respected everywhere
+# Uptime contract:
+#   - Fly process availability       -> Fly machine restart policy
+#   - Windows reboot / power failure -> THIS task restores desktop mirror tools
+#   - Windows unavailable            -> Fly AI/trading owner remains independent
 #
 # Administrator is preferred (one-time setup) but no longer mandatory.
 #   Run from an Administrator console for Highest process-control privileges,
@@ -44,8 +45,6 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) { $scriptRoot = $PSScriptRoot }
 if ([string]::IsNullOrWhiteSpace($scriptRoot)) { $scriptRoot = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('.') }
 $repoRoot  = Split-Path -Parent $scriptRoot
 $startCmd  = Join-Path $scriptRoot 'start-showcase-bot.cmd'
-$supervisorScript = Join-Path $scriptRoot 'home-stack-supervisor.ps1'
-
 if (-not (Test-Path $startCmd)) {
   throw "start-showcase-bot.cmd not found at $startCmd"
 }
@@ -65,9 +64,10 @@ if ($Status) {
     }
     Log ("  Action   : {0}" -f ($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" })[0])
   }
-  # Also surface the supervisor-watchdog task since it is part of the same contract.
+  # Surface the old watchdog so operators can see that it is a separate legacy
+  # task. It is not installed or invoked by this mirror-only registration.
   $wd = Get-ScheduledTask -TaskName 'DoxedSupervisorWatchdog' -ErrorAction SilentlyContinue
-  Log ("Watchdog task 'DoxedSupervisorWatchdog': {0}" -f $(if ($wd) { $wd.State } else { 'NOT REGISTERED' }))
+  Log ("Legacy watchdog 'DoxedSupervisorWatchdog': {0} (not part of mirror autostart)" -f $(if ($wd) { $wd.State } else { 'NOT REGISTERED' }))
   exit 0
 }
 
@@ -86,7 +86,7 @@ if ($Uninstall) {
 # ---- Install mode -----------------------------------------------------------
 # Prefer Highest when this script is run from an elevated console. A standard
 # desktop session can still register a current-user Limited task, which is
-# enough to keep the paper showcase bot/analyzer/supervisor alive. Previously
+# enough to restore the dashboard proxy, data sync, and analyzer. Previously
 # we aborted outright for non-admin users, leaving machines with no durable
 # recovery task at all.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -104,8 +104,8 @@ $action = New-ScheduledTaskAction `
   -Argument "/c `"$startCmd`""
 
 # Triggers:
-#   (1) At logon, with a 30s delay so the network/DNS stack is ready (the bot
-#       and cloudflared both need outbound HTTPS to come up before they bind).
+#   (1) At logon, with a 30s delay so the network/DNS stack is ready for Fly
+#       proxying and data synchronization.
 #   (2) Once-daily safety net at 04:00 local - if the stack died overnight and
 #       no one logged in, this brings it back. Repetition covers missed runs.
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
@@ -113,8 +113,8 @@ $logonTrigger.Delay = "PT${LogonDelaySec}S"
 $dailyTrigger = New-ScheduledTaskTrigger -Daily -At '4:00 AM'
 $dailyTrigger.RandomDelay = 'PT5M'
 
-# Run with highest privilege so cloudflared can bind the tunnel and the
-# supervisor can kill / relaunch elevated sibling processes.
+# Preserve the historical run-level behavior so an existing installation can
+# update its action without changing the user's task ownership.
 $taskPrincipal = New-ScheduledTaskPrincipal `
   -UserId $identity.Name `
   -LogonType Interactive `
@@ -155,7 +155,7 @@ Register-ScheduledTask `
   -Trigger @($logonTrigger, $dailyTrigger) `
   -Principal $taskPrincipal `
   -Settings $settings `
-  -Description "DCF: start the showcase bot stack (bot :7002 + analyzer :9001 + tunnel + supervisor) at logon and daily. Respects manual Stop via .home-stack-user-stopped flag." `
+  -Description "DCF desktop mirror only: :7002 proxies the canonical Fly bot, synchronizes Fly data, and starts the :9001 analyzer. Never starts a Windows AI bot or Cloudflare tunnel." `
   -Force | Out-Null
 
 Log ""

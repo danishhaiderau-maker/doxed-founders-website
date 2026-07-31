@@ -30,9 +30,10 @@ export PYTHONPATH="/app${PYTHONPATH:+:$PYTHONPATH}"
 export BOT_SINGLETON_DIR="$DATA_DIR/locks"
 cd "$RUNTIME_DIR"
 
-# Analyzer :9001 is OFF on Fly by default — Fly is a pure trading host (100% uptime,
-# no heavy data collection/analysis). The local bot owns data collection + Genome analysis.
-# Set ANALYZER_ENABLED=true to run the analyzer here too (heavier; needs more memory).
+# Analyzer :9001 is OFF on Fly by default: Fly owns the single strategy/trading
+# process and persists its raw evidence; the desktop incrementally mirrors that
+# evidence and runs the heavy analyzer without starting a second bot.
+# Set ANALYZER_ENABLED=true only for an explicit reviewed recovery deployment.
 if [ "${ANALYZER_ENABLED:-false}" = "true" ]; then
   echo "[fly-entrypoint] starting analyzer_research_engine_v62.py on :9001 (background)..."
   python /app/analyzer_research_engine_v62.py > /tmp/analyzer.log 2>&1 &

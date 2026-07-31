@@ -14,6 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "refuse-legacy-tunnel.ps1")
 $localUrl = "http://127.0.0.1:$Port"
 
 function Ensure-Cloudflared {

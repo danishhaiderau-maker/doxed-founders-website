@@ -1,10 +1,16 @@
 {
+  "schema": "desktop_fly_mirror_v1",
   "frozen": true,
-  "purpose": "Doxxedcrypto global showcase on home PC (Agent Hub + Bitfinex relay)",
-  "mode": "production",
+  "authoritative": false,
+  "purpose": "Desktop dashboard proxy and analyzer mirror for the canonical Fly bot",
+  "mode": "fly-mirror",
+  "sourceUrl": "https://doxed-btc-bot.fly.dev",
   "botPort": 7002,
+  "botRole": "fly-dashboard-proxy",
   "analyzerPort": 9001,
-  "dataDirRelative": "services/btc-conservative-agent",
-  "disableRelayWebhook": false,
-  "disableTunnel": false
+  "analyzerRole": "fly-data-mirror-analysis",
+  "dataDirRelative": "services/btc-conservative-agent/fly-data-mirror",
+  "disableLocalStrategy": true,
+  "disableRelayWebhook": true,
+  "disableTunnel": true
 }

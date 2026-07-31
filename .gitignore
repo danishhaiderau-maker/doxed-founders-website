@@ -152,6 +152,9 @@ scripts/_*.mjs
 scripts/_*.ps1
 services/btc-conservative-agent/local-collection-data/
 services/btc-conservative-agent/fly-data-mirror/
+services/btc-conservative-agent/analyzer_mirror/
+/.audit-data-*/
+/outputs/
 .fly-dashboard-proxy.pid
 .fly-data-sync-loop.lock
 .fly-data-sync-loop.heartbeat.json
@@ -299,8 +302,13 @@ services/btc-conservative-agent/research_retention/
 services/btc-conservative-agent/past_analysis/
 /artifacts/
 /exports/
+/ai_tranche_log.csv
+/blocked_signals_3factor.csv
+/decisions_3factor.csv
 /execution_funnel.jsonl*
 /lane_opportunity_capture.jsonl*
+/type_b_adx_v3_shadow_decisions.jsonl*
+/type_b_research_v2.jsonl*
 *.log.*
 *.jsonl.tmp
 *.jsonl.*.tmp

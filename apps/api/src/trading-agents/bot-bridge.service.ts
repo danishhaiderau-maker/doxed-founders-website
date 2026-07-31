@@ -7,8 +7,8 @@ import {
   mapBotStateToAgentStats,
   mapBotStateToDashboard,
 } from './bot-state.mapper';
-import { PrismaService } from '../prisma/prisma.service';
 import { ShowcaseSnapshotService } from './showcase-snapshot.service';
+import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
 
 /** Cumulative full-session metrics derived from the bot's /api/state. */
 export type CumulativeSessionMetrics = {
@@ -69,10 +69,23 @@ export class BotBridgeService {
       Number(process.env.BOT_BRIDGE_PUSHED_EXEC_MAX_AGE_MS ?? 8_000),
     ),
   );
-  private dbUrlCache: { url: string | null; at: number } | null = null;
   /** Execution-path cache — one canonical showcase bot only; no source race. */
   private execCached: BotApiState | null = null;
   private execFetchAt = 0;
+  /**
+   * A pushed snapshot is transport data, not proof of who owns the strategy.
+   * The API must first contact the source-controlled Fly URL directly and see
+   * the same instance/revision. This prevents an old publisher that still has
+   * the shared secret from establishing its own owner identity.
+   */
+  private directFlyOwnerProof: {
+    instanceId: string;
+    sourceRevision: string;
+    pid: number | null;
+    port: number;
+    seenAt: number;
+  } | null = null;
+  private readonly directFlyOwnerProofMaxAgeMs = 60_000;
   /**
    * All canonical `/api/relay-state` readers share one short-lived live fetch.
    * The Agent Hub, relay subscriber, session sync and webhook wake path can all
@@ -95,62 +108,36 @@ export class BotBridgeService {
 
   constructor(
     private readonly config: ConfigService,
-    private readonly prisma: PrismaService,
     private readonly showcaseSnapshot: ShowcaseSnapshotService,
   ) {}
 
-  /** Default canonical showcase bot URL — Fly is the authoritative 24/7 owner. */
-  private readonly DEFAULT_CANONICAL_URL = 'https://doxed-btc-bot.fly.dev';
+  /** Fly is the authoritative 24/7 owner. */
+  private readonly DEFAULT_CANONICAL_URL = CANONICAL_SHOWCASE_BOT_URL;
 
-  getBotUrl(): string | null {
-    const url = (
-      this.config.get<string>('TRADING_AGENT_BOT_URL') ??
-      this.config.get<string>('CONSERVATIVE_BTC_BOT_URL') ??
-      ''
-    ).trim();
-    return url ? url.replace(/\/$/, '') : null;
+  getBotUrl(): string {
+    return this.DEFAULT_CANONICAL_URL;
   }
 
-  /** Home tunnel URL is wired to Neon first; env vars need a Railway restart to catch up. */
-  async resolveBotUrl(): Promise<string | null> {
-    const now = Date.now();
-    if (this.dbUrlCache && now - this.dbUrlCache.at < 15_000 && this.dbUrlCache.url) {
-      return this.dbUrlCache.url;
-    }
-    try {
-      const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-      const db = row?.showcaseBotPublicUrl?.trim();
-      const normalized = db ? db.replace(/\/$/, '') : null;
-      this.dbUrlCache = { url: normalized, at: now };
-      if (normalized) return normalized;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`Bot URL DB lookup failed: ${msg}`);
-    }
-    const envUrl = this.getBotUrl();
-    if (envUrl && /127\.0\.0\.1|:7002\b|localhost/i.test(envUrl)) {
-      this.logger.warn(
-        `Ignoring local env bot URL (${envUrl}) — wire showcase to ${this.DEFAULT_CANONICAL_URL}`,
-      );
-      return null;
-    }
-    return envUrl;
+  /**
+   * Resolve the single source-controlled owner. Database rows and environment
+   * variables are deliberately not routing inputs: both previously allowed an
+   * old Railway or laptop URL to silently take control of the money path.
+   */
+  async resolveBotUrl(): Promise<string> {
+    return this.DEFAULT_CANONICAL_URL;
   }
 
   /** Canonical showcase URL — exactly one configured owner, Fly by default. */
   async resolveShowcaseUrl(): Promise<string> {
-    return (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
+    return this.resolveBotUrl();
   }
 
   async isEnabledAsync(): Promise<boolean> {
-    return Boolean(await this.resolveBotUrl());
+    return (await this.resolveBotUrl()) === this.DEFAULT_CANONICAL_URL;
   }
 
   isEnabled(): boolean {
-    if (this.getBotUrl()) return true;
-    // Sync callers (relay tick) — use last Neon-resolved URL from resolveBotUrl().
-    if (this.dbUrlCache?.url) return true;
-    return false;
+    return true;
   }
 
   invalidateCache() {
@@ -181,29 +168,18 @@ export class BotBridgeService {
     port: number | null;
     seenAt: number;
   } | null {
-    const now = Date.now();
-    const candidates: Array<{ state: BotApiState | null; seenAt: number }> = [
-      { state: this.execCached, seenAt: this.execFetchAt },
-      { state: this.cached, seenAt: this.lastFetchAt },
-    ];
-    for (const candidate of candidates) {
-      const state = candidate.state;
-      const instanceId = state?.bot_instance_id?.trim();
-      if (
-        state?.dashboard_owner === true
-        && instanceId
-        && candidate.seenAt > 0
-        && now - candidate.seenAt <= 30_000
-      ) {
-        return {
-          instanceId,
-          pid: typeof state.dashboard_pid === 'number' ? state.dashboard_pid : null,
-          port: typeof state.dashboard_port === 'number' ? state.dashboard_port : null,
-          seenAt: candidate.seenAt,
-        };
-      }
-    }
-    return null;
+    const proof = this.directFlyOwnerProof;
+    if (
+      !proof
+      || Date.now() - proof.seenAt < 0
+      || Date.now() - proof.seenAt > this.directFlyOwnerProofMaxAgeMs
+    ) return null;
+    return {
+      instanceId: proof.instanceId,
+      pid: proof.pid,
+      port: proof.port,
+      seenAt: proof.seenAt,
+    };
   }
 
   /**
@@ -217,8 +193,8 @@ export class BotBridgeService {
     const instanceId = this.execCached?.bot_instance_id?.trim();
     if (
       !this.execCached
-      || this.execCached.dashboard_owner !== true
       || !instanceId
+      || !this.matchesDirectFlyOwnerProof(this.execCached)
       || ageMs < 0
       || ageMs > maxAgeMs
     ) {
@@ -227,9 +203,8 @@ export class BotBridgeService {
     return this.execCached;
   }
 
-  /** Agent Hub showcase desk — canonical home bot (:7002 via Cloudflare) ONLY.
-   *  Never the Fly.io stale instance. Falls back to the Railway-pushed relay snapshot
-   *  (up to 10m stale) when the tunnel blips. */
+  /** Agent Hub showcase desk — canonical Fly bot only.
+   *  Uses the fresh signed platform snapshot first, then the same Fly owner. */
   async fetchPublicShowcaseState(force = true): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
@@ -257,7 +232,7 @@ export class BotBridgeService {
     return null;
   }
 
-  /** Cache-first relay snapshot pushed from home bot every ~2s (admin display only). */
+  /** Cache-first relay snapshot pushed by the canonical Fly bot. */
   private async fetchCachedRelaySnapshot(maxAgeMs = 15_000): Promise<BotApiState | null> {
     try {
       const cached = await this.showcaseSnapshot.getCachedSnapshot();
@@ -297,7 +272,49 @@ export class BotBridgeService {
       && !state.api_state_error
       && Number.isFinite(sourceAt)
       && sourceAgeMs >= -10_000
-      && sourceAgeMs <= maxAgeMs,
+      && sourceAgeMs <= maxAgeMs
+      && this.matchesDirectFlyOwnerProof(state),
+    );
+  }
+
+  private recordDirectFlyOwnerProof(state: BotApiState): boolean {
+    const instanceId = state.bot_instance_id?.trim();
+    const sourceRevision = state.source_git_rev?.trim();
+    const sourceAt = state.server_ts ? Date.parse(state.server_ts) : Number.NaN;
+    const sourceAgeMs = Date.now() - sourceAt;
+    if (
+      state.dashboard_owner !== true
+      || state.dashboard_port !== 7002
+      || !instanceId
+      || !sourceRevision
+      || state.api_state_error
+      || !Number.isFinite(sourceAt)
+      || sourceAgeMs < -10_000
+      || sourceAgeMs > 120_000
+    ) {
+      return false;
+    }
+    this.directFlyOwnerProof = {
+      instanceId,
+      sourceRevision,
+      pid: typeof state.dashboard_pid === 'number' ? state.dashboard_pid : null,
+      port: 7002,
+      seenAt: Date.now(),
+    };
+    return true;
+  }
+
+  private matchesDirectFlyOwnerProof(state: BotApiState): boolean {
+    const proof = this.directFlyOwnerProof;
+    if (!proof) return false;
+    const proofAgeMs = Date.now() - proof.seenAt;
+    return Boolean(
+      proofAgeMs >= 0
+      && proofAgeMs <= this.directFlyOwnerProofMaxAgeMs
+      && state.dashboard_owner === true
+      && state.dashboard_port === proof.port
+      && state.bot_instance_id?.trim() === proof.instanceId
+      && state.source_git_rev?.trim() === proof.sourceRevision,
     );
   }
 
@@ -326,7 +343,7 @@ export class BotBridgeService {
         lane: 'execution',
       },
     );
-    if (data?.dashboard_owner === true && data.bot_instance_id?.trim()) {
+    if (data && this.matchesDirectFlyOwnerProof(data)) {
       this.execCached = data;
       this.execFetchAt = Date.now();
       return data;
@@ -340,13 +357,7 @@ export class BotBridgeService {
     return null;
   }
 
-  /** Canonical showcase bot state for session-epoch tracking — never races owners.
-   *  Always reads from PlatformSettings.showcaseBotPublicUrl, falling back to the
-   *  authoritative Fly URL, so the epoch key stays stable across polls.
-   *  Racing Fly + home returns different bot_start_time values (they are distinct bot instances)
-   *  and flips the epoch on every poll where the race winner changes — which wipes every user's
-   *  armed relay sim via resetAllUserCopySessions. Only the canonical showcase bot (the one the
-   *  relay mirrors via :7002) is authoritative for session-epoch detection. */
+  /** Canonical Fly state for session-epoch tracking — never races owners. */
   async fetchShowcaseCanonicalState(force = true): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
@@ -359,7 +370,7 @@ export class BotBridgeService {
       this.lastLiveFetchAt = now;
       return pushed;
     }
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
+    const cf = await this.resolveBotUrl();
     try {
       const res = await fetch(`${cf}/api/state`, {
         signal: AbortSignal.timeout(20_000),
@@ -371,6 +382,10 @@ export class BotBridgeService {
       }
       const data = (await res.json()) as BotApiState;
       if (!data || typeof data !== 'object') return null;
+      if (!this.recordDirectFlyOwnerProof(data)) {
+        this.logger.warn('Canonical Fly /api/state did not prove exact owner identity');
+        return null;
+      }
       this.cached = data;
       this.lastFetchAt = now;
         this.lastLiveFetchAt = now;
@@ -382,7 +397,7 @@ export class BotBridgeService {
     }
   }
 
-  /** Admin panels — canonical showcase only (never Fly). Cache-first, then live tunnel. */
+  /** Admin panels — canonical Fly owner only. Cache-first, then live Fly state. */
   async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
@@ -390,7 +405,7 @@ export class BotBridgeService {
     }
 
     const cached = await this.fetchCachedRelaySnapshot();
-    if (cached) {
+    if (cached && this.isCanonicalPushedSnapshot(cached, 15_000)) {
       this.cached = cached;
       this.lastFetchAt = now;
         this.lastLiveFetchAt = now;
@@ -418,7 +433,7 @@ export class BotBridgeService {
 
     if (mode === 'relay') {
       const cached = await this.fetchCachedRelaySnapshot();
-      if (cached) {
+      if (cached && this.isCanonicalPushedSnapshot(cached, 15_000)) {
         this.cached = cached;
         this.lastFetchAt = now;
         this.lastLiveFetchAt = now;
@@ -442,7 +457,7 @@ export class BotBridgeService {
     return null;
   }
 
-  /** Fetch state from the canonical showcase tunnel only — never Fly (split-brain guard). */
+  /** Fetch state from the canonical Fly owner only (split-brain guard). */
   private async fetchShowcaseState(
     paths: string[],
     opts: {
@@ -521,6 +536,12 @@ export class BotBridgeService {
         }
         const data = (await res.json()) as BotApiState;
         if (!data || typeof data !== 'object') continue;
+        if (!this.recordDirectFlyOwnerProof(data)) {
+          this.logger.warn(
+            `Canonical Fly ${base}${path} did not prove exact owner identity`,
+          );
+          continue;
+        }
         return data;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -530,17 +551,7 @@ export class BotBridgeService {
     return null;
   }
 
-  /** True when the canonical Cloudflare showcase tunnel responds.
-   *  Mirrors fetchHealth()'s probe pattern: race `/api/ping` AND `/health`
-   *  across ALL candidate bot URLs (Cloudflare + Fly legacy) with
-   *  Promise.any, so the first 200 wins. The previous ping-only probe on
-   *  the canonical Cloudflare URL was fragile — from inside Railway's
-   *  network the home tunnel's `/api/ping` occasionally fails while its
-   *  `/health` and Fly's `/api/ping` succeed, which made the public
-   *  agent-status dot flick red even when the dashboard was happily
-   *  streaming live trades. Racing all probes the way fetchHealth already
-   *  does keeps the status dot consistent with the dashboard's botConnected
-   *  flag — they now use the same reachability definition. */
+  /** True when either canonical Fly health endpoint responds. */
   async isReachable(force = false): Promise<boolean> {
     const pushed = await this.fetchCachedRelaySnapshot(15_000);
     if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
@@ -600,13 +611,23 @@ export class BotBridgeService {
     if (bases.length === 0 || !bases[0]) {
       return { ok: false, error: 'Bot bridge not configured' };
     }
-    const secret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
+    const adminToken = this.config.get<string>('BOT_ADMIN_TOKEN')?.trim();
+    if (!adminToken) {
+      return {
+        ok: false,
+        error: 'BOT_ADMIN_TOKEN is not configured for canonical Fly controls',
+      };
+    }
+    const controlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      'X-Bot-Admin-Token': adminToken,
     };
-    if (secret) {
-      headers['X-Bot-Control-Secret'] = secret;
+    if (controlSecret) {
+      // Retained only for bot builds that also audit the platform identity.
+      // It never substitutes for the dedicated admin credential above.
+      headers['X-Bot-Control-Secret'] = controlSecret;
     }
     const p = path.startsWith('/') ? path : `/${path}`;
     for (const base of bases) {
@@ -630,8 +651,7 @@ export class BotBridgeService {
     return { ok: false, error: 'All bot endpoints unreachable' };
   }
 
-  /** Health probe — race Fly + Cloudflare in parallel; online if either responds 200.
-   *  Promise.any returns on the first 200 without waiting on dead endpoints. */
+  /** Health probe — race Fly `/api/ping` and `/health`; first 200 wins. */
   async fetchHealth() {
     const state = await this.fetchPublicShowcaseState(true);
     if (state) {
@@ -642,7 +662,7 @@ export class BotBridgeService {
         dashboard_port: state.dashboard_port ?? null,
         source_git_rev: state.source_git_rev ?? null,
         server_ts: state.server_ts ?? null,
-        source: state.snapshot_source ?? 'cloudflare-fallback',
+        source: state.snapshot_source ?? 'fly-direct',
       };
     }
     const base = await this.resolveShowcaseUrl();
@@ -674,12 +694,9 @@ export class BotBridgeService {
     }
   }
 
-  /** Read-only proxy to the research analyzer (:9001) via the bot's public tunnel.
-   *  The analyzer runs only on the LOCAL showcase bot (Cloudflare tunnel) — Fly does NOT run it.
-   *  Try the Cloudflare tunnel for analyzer paths; fall back to Fly for non-analyzer state. */
+  /** Read-only analyzer snapshot exposed by the canonical Fly dashboard API. */
   private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 20_000): Promise<T | null> {
-    // Analyzer proxy is only on the home showcase bot (Cloudflare tunnel :7002) — Fly does NOT run :9001.
-    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CANONICAL_URL;
+    const cf = await this.resolveBotUrl();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetch(`${cf}${path}`, {
@@ -711,9 +728,8 @@ export class BotBridgeService {
    *  (fresh cache 60s; last-known-good retained up to 10m on tunnel blips).
    *  Used when the :9001 analyzer proxy is intermittent/unavailable.
    *
-   *  Display-only: always uses `fetchShowcaseCanonicalState` (home tunnel `/api/state`).
-   *  Never slim `/api/relay-state` (lacks equity/trade_count/session_pnl) and never Fly
-   *  (separate stale instance). Never invents $500 / 0 trades / $0 PnL defaults. */
+   *  Display-only: uses the canonical Fly `/api/state`; never invents
+   *  $500 / 0 trades / $0 PnL defaults from a slim relay payload. */
   private cumulativeCache: { at: number; data: CumulativeSessionMetrics } | null = null;
   private readonly cumulativeCacheMs = 60_000;
   /** Serve last successful metrics through brief /api/state tunnel failures. */

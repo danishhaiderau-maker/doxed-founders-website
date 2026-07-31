@@ -24,6 +24,12 @@ const STATUS_STYLES: Record<
     text: 'text-amber-200',
     dot: 'bg-amber-400 animate-pulse',
   },
+  degraded: {
+    border: 'border-orange-500/35',
+    bg: 'bg-orange-950/20',
+    text: 'text-orange-200',
+    dot: 'bg-orange-400 animate-pulse',
+  },
 };
 
 export function AgentPublicStatusBanner({
@@ -55,6 +61,11 @@ export function AgentPublicStatusBanner({
       {!compact && status === 'updating' && (
         <p className="mt-1 text-xs text-amber-100/70">
           The agent is paused or updating. Check back shortly.
+        </p>
+      )}
+      {!compact && status === 'degraded' && (
+        <p className="mt-1 text-xs text-orange-100/70">
+          The last verified state is shown, but current Fly reachability is not confirmed.
         </p>
       )}
     </div>

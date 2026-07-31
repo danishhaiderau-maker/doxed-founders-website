@@ -175,7 +175,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setError(null);
       } else if (agent) {
         setError(
-          'Live data slow — showing last known stats. If you just clicked Start showcase, wait 60–90s for bot + tunnel, then refresh.',
+          'Fly feed is slow — showing the last verified snapshot. Wait briefly and refresh; desktop :7002/:9001 are not required for production trading.',
         );
       }
 
@@ -183,12 +183,21 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       // carries the same live bot snapshot used to render positions/orders.
       // Do not let a separate, transiently stale status probe paint the hero
       // "Offline" while that snapshot is actively streaming current data.
-      if (dashR.status === 'fulfilled' && dashR.value.botConnected) {
+      const integrity =
+        dashR.status === 'fulfilled'
+          ? dashR.value.dashboard.stateIntegrity
+          : undefined;
+      const canonicalSnapshotFresh =
+        integrity == null ||
+        (integrity.rest_healthy && Number(integrity.snapshot_age_sec ?? Infinity) < 90);
+      if (dashR.status === 'fulfilled' && dashR.value.botConnected && canonicalSnapshotFresh) {
         setPublicStatus(
           dashR.value.executionPaused
             ? { status: 'updating', label: 'Agent updating' }
             : { status: 'online', label: 'Agent online' },
         );
+      } else if (dashR.status === 'fulfilled' && dashR.value.botConnected) {
+        setPublicStatus({ status: 'degraded', label: 'Fly feed stale — showing last verified state' });
       } else if (statusR.status === 'fulfilled') {
         setPublicStatus(statusR.value);
       }
@@ -440,7 +449,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
             <p className="mt-2 text-sm text-amber-200/90">{error}</p>
           )}
           <p className="mt-2 text-xs text-zinc-600">
-            If the home bot is offline, open this page on your Home PC and use Start showcase in the command center.
+            The canonical bot runs on Fly.io. If only desktop :7002/:9001 are offline, start the optional desktop
+            mirror from the command center after the agent record loads.
           </p>
           <Link href="/agent-hub" className="mt-2 inline-block text-violet-400">
             ← Marketplace
