@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(trading-agents): lock Fly as canonical owner; reject desktop authority
 
 ## Last Activity
 
