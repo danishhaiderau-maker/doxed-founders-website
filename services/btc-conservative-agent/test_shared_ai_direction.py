@@ -59,24 +59,33 @@ def run():
     check("raw NO_TRADE remains auditable", no_trade["raw_direction"] == "NO_TRADE")
     check("exact five-point gap is a Continuous soft approve", no_trade["decision"] == "SOFT_APPROVE")
     check("legacy confidence bands cannot block direction-only v12", not bot.dashboard_ai_band_blocks(0))
-    structural_limit, structural_reason = bot.resolve_ai_direct_limit(
+    deterministic_limit, deterministic_reason = bot.resolve_ai_direct_limit(
         "LONG",
-        64000.0,
+        63000.0,
         {},
-        market_structure={"micro_support": 63900.0},
+        market_structure={"micro_support": 62900.0},
         support_resistance={},
     )
-    check("direction-only call gets local-support limit", structural_limit == 63915.0)
-    check("direction-only limit is labelled structural", structural_reason == "LOCAL_SUPPORT_LIMIT")
+    check("direction-only call gets deterministic 0.1% offset", deterministic_limit == 62937.0)
+    check("direction-only limit is labelled deterministic", deterministic_reason == "DETERMINISTIC_LONG_OFFSET")
+    short_limit, short_reason = bot.resolve_ai_direct_limit(
+        "SHORT",
+        63000.0,
+        {},
+        market_structure={"micro_resistance": 63100.0},
+        support_resistance={},
+    )
+    check("direction-only SHORT gets deterministic 0.1% offset", short_limit == 63063.0)
+    check("direction-only SHORT limit is labelled deterministic", short_reason == "DETERMINISTIC_SHORT_OFFSET")
     missing_limit, missing_reason = bot.resolve_ai_direct_limit(
         "LONG",
-        64000.0,
+        63000.0,
         {},
         market_structure={},
         support_resistance={},
     )
-    check("direction-only call fails closed without local support", missing_limit is None)
-    check("missing local support is explicit", missing_reason == "LOCAL_SUPPORT_UNAVAILABLE")
+    check("direction-only anchor survives missing micro S/R", missing_limit == 62937.0)
+    check("missing micro S/R is not a fail-closed reason", missing_reason == "DETERMINISTIC_LONG_OFFSET")
     check(
         "shared LONG scores normalize to the legacy Type B spread",
         bot.compute_directional_spread(

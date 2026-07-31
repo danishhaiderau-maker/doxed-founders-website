@@ -16,6 +16,8 @@ import {
   resolveSubscriberLeverage,
   BITFINEX_COPY_POLICY_VERSION,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+  SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
+  isExecutableEntryPolicy,
   resolveMaxConcurrentCopySignals,
   resolveMirrorDisasterStopMarginPct,
   isCopyRelaySimActive,
@@ -953,7 +955,7 @@ export function readFreshSignedShowcaseExactLimit(
     || (event !== 'ORDER_PLACED' && event !== 'LIMIT_UPDATED')
     || intent?.entry?.mode !== 'EXACT_LIMIT'
     || intent?.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
-    || intent?.context?.entry_limit_policy !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+    || !isExecutableEntryPolicy(intent?.context?.entry_limit_policy)
     || (direction !== 'LONG' && direction !== 'SHORT')
     || !Number.isFinite(limitPrice)
     || limitPrice <= 0
@@ -1016,7 +1018,7 @@ function mergeSignedShowcaseOrders(
         trade_id: order.tradeId,
         status: 'PENDING',
         limit_price: order.limitPrice,
-        entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+        entry_limit_policy: SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
         side: order.direction,
       })),
       ...(bot?.orders ?? []).filter((order) => !order.trade_id || !signedIds.has(order.trade_id)),
@@ -4915,7 +4917,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       || intent.signalId !== tradeId
       || intent.entry?.mode !== 'EXACT_LIMIT'
       || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
-      || intent.context?.entry_limit_policy !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      || !isExecutableEntryPolicy(intent.context?.entry_limit_policy)
     ) {
       this.logger.warn(
         `Hire reject ${instance.userId} cycle=${cycleId}: exact structural envelope identity/policy missing`,
@@ -8646,18 +8648,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       // Exact-copy contract: this path is never allowed to reconstruct a
       // percentage pullback from signal/mark. Both signed fast-path and polling
-      // backstop must carry the canonical structural resting limit.
+      // backstop must carry the canonical executable resting limit (deterministic
+      // 0.1% offset policy, or the legacy structural policy for in-flight intents).
       const exactLimit = Number(intent.entry?.exact_limit_price ?? 0);
       if (
         intent.entry?.mode !== 'EXACT_LIMIT'
         || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
-        || intent.context?.entry_limit_policy
-          !== SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+        || !isExecutableEntryPolicy(intent.context?.entry_limit_policy)
         || !Number.isFinite(exactLimit)
         || exactLimit <= 0
       ) {
         this.logger.warn(
-          `[INTENT-MIRROR] rejected non-structural exact entry trade=${tid} user=${instance.userId}`,
+          `[INTENT-MIRROR] rejected non-executable exact entry trade=${tid} user=${instance.userId}`,
         );
         continue;
       }
@@ -8692,7 +8694,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           intent_source: intent.intent_source ?? 'unknown',
           cycle_id: cycle.id,
           entry_mode: 'EXACT_LIMIT',
-          entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+          entry_limit_policy:
+            intent.context?.entry_limit_policy ?? SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
           reason: 'INTENT_MIRROR_DRY_RUN',
         };
         this.logger.log(
@@ -8752,7 +8755,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
                 leverage,
                 intent_source: intent.intent_source ?? 'unknown',
                 entry_mode: 'EXACT_LIMIT',
-                entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+                entry_limit_policy:
+                  intent.context?.entry_limit_policy ?? SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
               } as unknown as import('@prisma/client').Prisma.InputJsonValue,
             },
           });

@@ -1,8 +1,5 @@
 import type { TradingAgentDashboardState, BotStateIntegrity } from '@dcf/utils';
-import {
-  formatMelbourneDateTime,
-  SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
-} from '@dcf/utils';
+import { formatMelbourneDateTime, isExecutableEntryPolicy } from '@dcf/utils';
 
 /** Shape returned by the Python bot GET /api/state (subset we use). */
 export type BotApiState = {
@@ -290,7 +287,7 @@ export function isExecutableStructuralShowcaseOrder(
   return Boolean(
     order?.trade_id
       && (order.status === 'PENDING' || order.status === 'ORDERED')
-      && order.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      && isExecutableEntryPolicy(order?.entry_limit_policy)
       && Number.isFinite(Number(order.limit_price))
       && Number(order.limit_price) > 0,
   );

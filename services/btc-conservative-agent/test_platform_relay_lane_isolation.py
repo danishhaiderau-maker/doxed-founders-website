@@ -76,7 +76,7 @@ def test_type_b_chase_and_close_events_stop_before_network_post() -> None:
             "research_lane": "TYPE_B_HUNTER_V1",
             "direction": "LONG",
             "limit_price": 63_900,
-            "entry_limit_policy": "micro_sr_structural_limit_v1",
+            "entry_limit_policy": "deterministic_0.1pct_offset_v1",
             "executable": True,
         },
     )

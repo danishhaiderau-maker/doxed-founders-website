@@ -5525,12 +5525,25 @@ def resolve_local_structural_limit(
     market_structure: dict = None,
     support_resistance: dict = None,
 ) -> tuple:
-    """Return the nearest valid local support/resistance maker limit.
+    """Return the deterministic 0.1% maker limit plus advisory micro S/R levels.
 
-    Direction-only AI deliberately supplies no order price. Entry location must
-    therefore come from observed market structure, never an arbitrary percentage
-    offset. A structural level outside the bounded entry distance is rejected
-    instead of silently clipping it to a synthetic price.
+    Danish decision 3 (2026-08-01): the Continuous-lane executable anchor is
+    always a deterministic offset from the signal/reference price::
+
+        LONG  = price * (1 - DETERMINISTIC_ENTRY_OFFSET_PCT)   # default 0.999
+        SHORT = price * (1 + DETERMINISTIC_ENTRY_OFFSET_PCT)   # default 1.001
+
+    Micro support/resistance, EMA hybrid, AI-planner zone and 5m-trigger prices
+    may still be displayed on the dashboard as research/advisory fields, but
+    they MUST NOT silently replace this anchor for the production lane. The
+    earlier behaviour anchored the limit to the nearest valid local S/R level
+    (``micro_sr_structural_limit_v1``); that was reverted because the AI supplies
+    direction only, so the anchor price must be deterministic and reproducible.
+
+    Returns ``(limit, source, advisory)`` where ``advisory`` carries the
+    observed micro S/R levels (``micro_support``/``micro_resistance`` plus the
+    legacy ``local_support_limit``/``local_resistance_limit`` and their
+    availability) so dashboards/tests can still surface them as research fields.
     """
     direction = str(direction or "").upper()
     price = float(price or 0)
@@ -5542,6 +5555,28 @@ def resolve_local_structural_limit(
         with state_lock:
             support_resistance = copy.deepcopy(state.get("support_resistance") or {})
     sr = support_resistance if isinstance(support_resistance, dict) else {}
+
+    offset = DETERMINISTIC_ENTRY_OFFSET_PCT
+    if direction == "LONG":
+        limit = round(price * (1 - offset), 2)
+        source = "DETERMINISTIC_LONG_OFFSET"
+    else:
+        limit = round(price * (1 + offset), 2)
+        source = "DETERMINISTIC_SHORT_OFFSET"
+
+    # --- Advisory only: nearest valid local S/R (research display field) -------
+    # Computed for transparency but never returned as the executable limit.
+    advisory = dict(ms) if isinstance(ms, dict) else {}
+    advisory.setdefault("micro_support", ms.get("micro_support"))
+    advisory.setdefault("micro_resistance", ms.get("micro_resistance"))
+    advisory.setdefault("prior_support", ms.get("prior_support"))
+    advisory.setdefault("prior_resistance", ms.get("prior_resistance"))
+    advisory["local_support_available"] = False
+    advisory["local_resistance_available"] = False
+    advisory["local_support_limit"] = None
+    advisory["local_resistance_limit"] = None
+    advisory["local_support_out_of_range"] = False
+    advisory["local_resistance_out_of_range"] = False
 
     if direction == "LONG":
         raw_levels = (
@@ -5560,11 +5595,13 @@ def resolve_local_structural_limit(
                 continue
             if 0 < level < price:
                 candidates.append(level)
-        if not candidates:
-            return None, "LOCAL_SUPPORT_UNAVAILABLE", ms
-        limit = max(candidates)
-        source = "LOCAL_SUPPORT_LIMIT"
-        distance = (price - limit) / price
+        if candidates:
+            advisory["local_support_limit"] = max(candidates)
+            advisory["local_support_available"] = True
+            support_distance = (price - advisory["local_support_limit"]) / price
+            advisory["local_support_out_of_range"] = support_distance > AI_DIRECT_MAX_DIST_PCT
+        else:
+            advisory["local_support_available"] = False
     else:
         raw_levels = (
             ms.get("micro_resistance"),
@@ -5582,15 +5619,15 @@ def resolve_local_structural_limit(
                 continue
             if level > price:
                 candidates.append(level)
-        if not candidates:
-            return None, "LOCAL_RESISTANCE_UNAVAILABLE", ms
-        limit = min(candidates)
-        source = "LOCAL_RESISTANCE_LIMIT"
-        distance = (limit - price) / price
+        if candidates:
+            advisory["local_resistance_limit"] = min(candidates)
+            advisory["local_resistance_available"] = True
+            resistance_distance = (advisory["local_resistance_limit"] - price) / price
+            advisory["local_resistance_out_of_range"] = resistance_distance > AI_DIRECT_MAX_DIST_PCT
+        else:
+            advisory["local_resistance_available"] = False
 
-    if distance > AI_DIRECT_MAX_DIST_PCT:
-        return None, f"{source}_OUT_OF_RANGE", ms
-    return round(float(limit), 2), source, ms
+    return limit, source, advisory
 
 
 def resolve_ai_direct_limit(
@@ -5600,9 +5637,15 @@ def resolve_ai_direct_limit(
     market_structure: dict = None,
     support_resistance: dict = None,
 ) -> tuple:
-    """Resolve direction-only entry from local S/R; legacy AI price fields are ignored."""
+    """Resolve direction-only executable anchor — deterministic 0.1% offset.
+
+    Returns ``(limit, source)`` for backward compatibility with existing
+    callers/tests. The deterministic anchor is always available when direction
+    + price are valid, so this no longer fails closed on missing micro S/R.
+    ``resolve_local_structural_limit`` is the canonical 3-tuple entrypoint.
+    """
     _ = trade_planner  # retained only for old call/schema compatibility
-    limit, source, _ms = resolve_local_structural_limit(
+    limit, source, _advisory = resolve_local_structural_limit(
         direction,
         price,
         market_structure=market_structure,
@@ -5612,35 +5655,55 @@ def resolve_ai_direct_limit(
 
 
 def compute_continuous_ai_direct_entry(signal: dict) -> dict:
-    """Shared direction lane — structural local S/R limit, then exact virtual chase."""
+    """Shared direction lane — deterministic 0.1% anchor, then exact virtual chase.
+
+    Danish decision 3 (2026-08-01): the executable maker limit is the
+    deterministic 0.1% offset from the signal/reference price. Micro S/R
+    levels remain visible on the dashboard as research/advisory fields but
+    never replace this anchor.
+    """
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     trade_planner = signal.get("trade_planner") or (signal.get("ai_output") or {}).get("trade_planner") or {}
     market_structure = build_micro_sr_levels()
-    limit_price, entry_reason = resolve_ai_direct_limit(
+    limit_price, entry_reason, advisory = resolve_local_structural_limit(
         direction,
         price,
-        trade_planner,
         market_structure=market_structure,
     )
-    signal["entry_limit_policy"] = STRUCTURAL_ENTRY_POLICY_VERSION
+    signal["entry_limit_policy"] = DETERMINISTIC_ENTRY_POLICY_VERSION
     signal["structural_entry_valid"] = limit_price is not None
+    # Advisory / research display fields — never the executable anchor.
     signal["micro_support"] = market_structure.get("micro_support")
     signal["micro_resistance"] = market_structure.get("micro_resistance")
     signal["prior_support"] = market_structure.get("prior_support")
     signal["prior_resistance"] = market_structure.get("prior_resistance")
     signal["pivot_count"] = market_structure.get("pivot_count")
+    signal["advisory_local_support_limit"] = advisory.get("local_support_limit")
+    signal["advisory_local_resistance_limit"] = advisory.get("local_resistance_limit")
+    signal["advisory_local_support_available"] = bool(advisory.get("local_support_available"))
+    signal["advisory_local_resistance_available"] = bool(advisory.get("local_resistance_available"))
+    # Deterministic anchor fields (the actual executable price).
+    signal["deterministic_entry_offset_pct"] = DETERMINISTIC_ENTRY_OFFSET_PCT
+    if price > 0:
+        signal["deterministic_initial_limit"] = round(
+            price * (1 - DETERMINISTIC_ENTRY_OFFSET_PCT) if direction == "LONG"
+            else price * (1 + DETERMINISTIC_ENTRY_OFFSET_PCT) if direction == "SHORT"
+            else price, 2
+        )
+    else:
+        signal["deterministic_initial_limit"] = None
     if limit_price is None:
         signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
         signal["entry_reason"] = entry_reason
-        signal["entry_path"] = "STRUCTURAL_LIMIT_BLOCKED"
+        signal["entry_path"] = "DETERMINISTIC_LIMIT_BLOCKED"
         signal["ai_direct_limit"] = None
         signal["micro_sr_limit"] = None
         signal["await_micro_confirm"] = False
         signal["micro_structure_confirmed"] = False
         signal["order_placed"] = False
         logger.warning(
-            f"[STRUCTURAL ENTRY] blocked trade_id={signal.get('trade_id', '?')} "
+            f"[DETERMINISTIC ENTRY] blocked trade_id={signal.get('trade_id', '?')} "
             f"dir={direction} market={fmt(price)} reason={entry_reason} "
             f"support={fmt(signal.get('micro_support'))} "
             f"resistance={fmt(signal.get('micro_resistance'))} "
@@ -5649,7 +5712,7 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
         return {
             "entry_mode": ENTRY_MODE_AI_DIRECT,
             "entry_reason": entry_reason,
-            "entry_path": "STRUCTURAL_LIMIT_BLOCKED",
+            "entry_path": "DETERMINISTIC_LIMIT_BLOCKED",
             "ai_direct_limit": None,
             "await_micro_confirm": False,
         }
@@ -5657,6 +5720,11 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
     signal["entry_reason"] = entry_reason
     signal["entry_path"] = "AI_DIRECT"
     signal["ai_direct_limit"] = limit_price
+    # NOTE: ai_planner_limit / micro_sr_limit are kept for schema/back-compat
+    # with older snapshots and dashboards. They equal the deterministic anchor
+    # so historical readers keep working, but the canonical anchor is
+    # ``ai_direct_limit`` / ``deterministic_initial_limit`` under the
+    # ``deterministic_0.1pct_offset_v1`` policy.
     signal["ai_planner_limit"] = limit_price
     signal["micro_sr_limit"] = limit_price
     signal["ai_entry_zone_low"] = trade_planner.get("entry_zone_low")
@@ -5666,10 +5734,11 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
     signal["order_placed"] = False
     trade_id = signal.get("trade_id", "?")
     logger.info(
-        f"[STRUCTURAL ENTRY] trade_id={trade_id} dir={direction} limit={fmt(limit_price)} "
+        f"[DETERMINISTIC ENTRY] trade_id={trade_id} dir={direction} limit={fmt(limit_price)} "
+        f"offset={DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% "
         f"support={fmt(signal.get('micro_support'))} "
         f"resistance={fmt(signal.get('micro_resistance'))} market={fmt(price)} "
-        f"policy={STRUCTURAL_ENTRY_POLICY_VERSION} path=AI_DIRECT [PIPELINE ENFORCEMENT]"
+        f"policy={DETERMINISTIC_ENTRY_POLICY_VERSION} path=AI_DIRECT [PIPELINE ENFORCEMENT]"
     )
     return {
         "entry_mode": ENTRY_MODE_AI_DIRECT,
@@ -6077,7 +6146,33 @@ ENTRY_MODE_AI_PLANNER = "AI_PLANNER_LIMIT"
 ENTRY_MODE_AI_DIRECT = "AI_DIRECT_LIMIT"
 ENTRY_MODE_5M_TRIGGER = "5M_TRIGGER_LIMIT"
 AI_DIRECT_MAX_DIST_PCT = float(os.getenv("AI_DIRECT_MAX_DIST_PCT", "0.01"))
+# v102 — Deterministic 0.1% entry anchor (Danish decision 3, 2026-08-01).
+# The Continuous-lane executable maker limit is always:
+#   LONG  = signal/reference price * (1 - 0.001)
+#   SHORT = signal/reference price * (1 + 0.001)
+# Micro S/R, EMA hybrid, AI-planner and 5m-trigger prices remain visible as
+# research/advisory fields only — they must NOT silently replace this anchor
+# for the production lane. The earlier "micro_sr_structural_limit_v1" policy
+# anchored the limit to nearest local support/resistance; that was a mistake
+# (the AI supplies direction only, so the anchor must be deterministic). It is
+# retained below as the legacy policy string so old persisted snapshots/webhooks
+# are still recognised, but new entries use the deterministic policy.
+DETERMINISTIC_ENTRY_OFFSET_PCT = float(os.getenv("DETERMINISTIC_ENTRY_OFFSET_PCT", "0.001"))
+DETERMINISTIC_ENTRY_POLICY_VERSION = "deterministic_0.1pct_offset_v1"
 STRUCTURAL_ENTRY_POLICY_VERSION = "micro_sr_structural_limit_v1"
+# Policies under which the maker limit is the canonical executable price that
+# may be relayed to the live-copy executor. Add new executable policies here.
+EXECUTABLE_ENTRY_POLICY_VERSIONS = frozenset({
+    DETERMINISTIC_ENTRY_POLICY_VERSION,
+    STRUCTURAL_ENTRY_POLICY_VERSION,
+})
+
+
+def is_executable_entry_policy(policy) -> bool:
+    """True when ``entry_limit_policy`` is one of the canonical executable anchors."""
+    return str(policy or "") in EXECUTABLE_ENTRY_POLICY_VERSIONS
+
+
 RESEARCH_QUALITY_MIN = 15.0
 PROFITABLE_REJECT_FEATURES_FILE = "profitable_reject_features.json"
 EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
@@ -7356,7 +7451,7 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             (
                 event == "LIMIT_UPDATED"
                 and isinstance(payload.get("limit_price"), (int, float))
-                and payload.get("entry_limit_policy") == STRUCTURAL_ENTRY_POLICY_VERSION
+                and payload.get("entry_limit_policy") in EXECUTABLE_ENTRY_POLICY_VERSIONS
                 and payload.get("executable") is True
             )
             or (
@@ -7504,7 +7599,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         direction not in ("LONG", "SHORT")
         or not limit_price
         or limit_price <= 0
-        or entry_limit_policy != STRUCTURAL_ENTRY_POLICY_VERSION
+        or not is_executable_entry_policy(entry_limit_policy)
     ):
         logger.warning(
             f"[INTENT WEBHOOK] blocked inexact lifecycle event={event} "
@@ -8052,14 +8147,23 @@ def _entry_limit_would_fill_immediately(direction: str, market_price: float, lim
 def _apply_smart_submit_limit(
     signal: dict, planned_limit: float, entry_mode: str, market_price: float
 ) -> tuple:
-    """Re-anchor below/above market when price crossed planned limit; enable immediate chase."""
+    """Re-anchor below/above market when price crossed planned limit; enable immediate chase.
+
+    Danish decision 5 (2026-08-01): under the deterministic 0.1% anchor a
+    crossed virtual limit before the first selected entry stage is recorded as
+    ``VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY`` by ``_expire_skipped_virtual_fill``
+    (handled in ``process_awaiting_dashboard_virtual_chase_entries`` before this
+    function is reached). When the candidate survives to a selected stage and
+    the planned limit is already marketable, smart-submit re-anchors to a fresh
+    maker offset under the documented rule — it does NOT invent a fill and does
+    NOT reset the chase counter. Only the legacy ``micro_sr_structural_limit_v1``
+    policy preserves its observed pivot (kept for back-compat with old snapshots).
+    """
     direction = _signal_direction(signal)
     original = float(planned_limit)
-    # Structural entries must remain anchored to the observed pivot. If market
-    # touches/crosses that virtual level before an enabled chase bucket, the
-    # cohort correctly expires as VIRTUAL_FILL_SKIPPED_CHASE_n. Re-anchoring it
-    # to a synthetic 0.1% offset would silently change both the entry thesis and
-    # the chase count being measured.
+    # Legacy structural-limit snapshots preserve their observed pivot anchor.
+    # The deterministic policy intentionally falls through to the re-anchor path
+    # below so a touched limit at a selected stage becomes a fresh maker offset.
     if signal.get("entry_limit_policy") == STRUCTURAL_ENTRY_POLICY_VERSION:
         signal["smart_submit_reanchored"] = False
         return original, entry_mode, {
@@ -8287,19 +8391,33 @@ def _virtual_limit_would_fill(signal: dict, market_price: float) -> bool:
 
 
 def _expire_skipped_virtual_fill(signal: dict) -> None:
-    """Close a virtual-only path when an unchecked chase count would have filled."""
+    """Close a virtual-only path when an unchecked chase count would have filled.
+
+    Danish decision 5 (2026-08-01): when market crosses a virtual limit before
+    the first selected entry stage, record ``VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY``
+    — never invent an exchange fill, never submit a marketable order at the old
+    price. At later unchecked stages the legacy ``VIRTUAL_FILL_SKIPPED_CHASE_n``
+    reason is retained for cohort fidelity.
+    """
     chase_n = _signal_virtual_chase_count(signal)
-    reason = f"VIRTUAL_FILL_SKIPPED_CHASE_{chase_n}"
+    min_enabled = min_enabled_chase_count()
+    if min_enabled is None or chase_n < min_enabled:
+        reason = "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY"
+    else:
+        reason = f"VIRTUAL_FILL_SKIPPED_CHASE_{chase_n}"
     signal["status"] = "EXPIRED"
     signal["outcome"] = reason
     signal["exit_reason"] = reason
+    signal["virtual_touch_before_selected_entry"] = (
+        reason == "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY"
+    )
     signal["order_placed"] = False
     _record_expired_order(signal, reason)
     _funnel_signal_expired(signal, reason)
     logger.info(
         f"[DASHBOARD GATE] skipped virtual fill trade_id={signal.get('trade_id')} "
-        f"chase_count={chase_n} limit={fmt(signal.get('limit_price'))} "
-        f"reason={reason} [PIPELINE ENFORCEMENT]"
+        f"chase_count={chase_n} min_enabled={min_enabled} "
+        f"limit={fmt(signal.get('limit_price'))} reason={reason} [PIPELINE ENFORCEMENT]"
     )
 
 
@@ -16580,7 +16698,8 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
         "max_concurrent_signals": max_sig,
         "leverage": lev,
         "pullback_threshold": pull,  # legacy schema only; direction-only lanes ignore it
-        "entry_limit_policy": STRUCTURAL_ENTRY_POLICY_VERSION,
+        "entry_limit_policy": DETERMINISTIC_ENTRY_POLICY_VERSION,
+        "deterministic_entry_offset_pct": DETERMINISTIC_ENTRY_OFFSET_PCT,
         "bitfinex_live_enabled": bfx,
     }
 
@@ -23990,8 +24109,8 @@ def build_static_pathway_lane_specs() -> dict:
             "STRONG_APPROVE": "gap >=15",
         },
         "confidence_weight": 0.0,
-        "limit_entry": "nearest valid local support/resistance, then bounded 25% chase",
-        "entry_limit_policy": STRUCTURAL_ENTRY_POLICY_VERSION,
+        "limit_entry": "deterministic 0.1% offset (LONG=price*0.999 / SHORT=price*1.001), then bounded 25% chase",
+        "entry_limit_policy": DETERMINISTIC_ENTRY_POLICY_VERSION,
         "shared_call_consumers": [
             RESEARCH_LANE_CONTINUOUS,
             RESEARCH_LANE_TYPE_B_HUNTER_V1,
@@ -24065,8 +24184,9 @@ def build_static_pathway_lane_specs() -> dict:
                 "  - The higher score deterministically selects LONG or SHORT; raw NO_TRADE cannot suppress evaluation",
                 "  - Reject gap<5; execute SOFT_APPROVE 5-9, APPROVE 10-14, STRONG_APPROVE >=15",
                 "  - AI confidence/win probability is not requested and has zero entry weight",
-                "  - Derive the maker limit from nearest valid local support/resistance; no percentage pullback",
-                "  - If no valid structural level exists within 1%, fail closed and show the block reason",
+                "  - Maker limit = deterministic 0.1% offset from signal/reference price (LONG=price×0.999, SHORT=price×1.001); no AI/planner/S-R price replaces it",
+                "  - Micro S/R, EMA hybrid, AI-planner zone and 5-min trigger prices remain advisory display fields only",
+                "  - Direction is valid as soon as price>0; the deterministic anchor never fails closed on missing structure",
                 "  - Tile ON and capacity available: enter exact virtual-chase counting",
                 "  - Chase the pending limit by the bounded 25% shared chase policy; manage its own exit and ledger",
                 f"Policy: {_continuous_policy_id} (introduced 2026-07-19)",
@@ -25474,9 +25594,9 @@ HTML = """<!DOCTYPE html>
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Direction-only entries are anchored to local support/resistance.</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Direction-only entries use the deterministic 0.1% offset anchor.</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry anchor:</strong> nearest valid local support for LONG / resistance for SHORT (+/− $15 maker buffer, max 1% distance). No percentage pullback control.</p>
+<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. Example at BTC $63,000 → LONG $62,937 / SHORT $63,063. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain visible below as research/advisory fields only and never replace this anchor.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
@@ -25625,8 +25745,28 @@ HTML = """<!DOCTYPE html>
   Historical approvals on the tiles may already be executed, rejected later, or expired, so they are
   not the same as the live queue below.
 </p>
+<p style="color:#58a6ff;font-size:0.82em;margin:4px 0 8px;">
+  Anchor = deterministic 0.1% offset (LONG=price×0.999 / SHORT=price×1.001). Virtual limit is the
+  chased price; exchange order ID appears only after a real order exists. A crossed virtual limit
+  before the first selected stage is recorded as <code>VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY</code>
+  (no invented fill, no marketable order at the old price).
+</p>
 <table>
-    <thead><tr><th>Signal Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Direction</th><th>Raw gap</th><th>Gap bucket</th><th>Virtual limit</th><th>Current virtual chase</th><th>Next enabled chase</th><th>Expires in</th><th>State</th></tr></thead>
+    <thead><tr>
+      <th>Signal ID</th>
+      <th>Dir</th>
+      <th>Signal/ref price</th>
+      <th>Initial 0.1% limit</th>
+      <th>Virt. stage</th>
+      <th>Selected stages</th>
+      <th>Virtual limit</th>
+      <th>Market</th>
+      <th>Next chase</th>
+      <th>State</th>
+      <th>No-order reason</th>
+      <th>Smart-submit re-anchor</th>
+      <th>Exchange order ID</th>
+    </tr></thead>
     <tbody id="virtualChaseTable"></tbody>
 </table>
 
@@ -25815,7 +25955,7 @@ DASHBOARD_JS = """(function () {
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
         '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + '</div>' +
-        '<div><strong>Entry anchor:</strong> local support/resistance · <strong>Policy:</strong> ' + (gates.entry_limit_policy || 'structural') + '</div>';
+        '<div><strong>Entry anchor:</strong> deterministic 0.1% offset (LONG=price×0.999 / SHORT=price×1.001) · <strong>Policy:</strong> ' + (gates.entry_limit_policy || 'deterministic_0.1pct_offset_v1') + '</div>';
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -27006,36 +27146,56 @@ DASHBOARD_JS = """(function () {
           capWarn.innerText = msgs.join(' ');
         }
         const allLiveSignals = d.signal_info?.signals || [];
-        const virtualSignals = allLiveSignals.filter(s => !s.terminal && (s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE"));
+        const chaseBuckets = d.dashboard_execution_gates?.chase_execution_buckets || {};
+        const selectedStages = Object.entries(chaseBuckets)
+          .filter(([, v]) => v)
+          .map(([k]) => k.replace('_chases', '').replace('_chase', '').replace('5+', '5+'))
+          .join(', ') || 'none';
+        const marketPrice = d.price != null ? Number(d.price) : null;
+        const virtualSignals = allLiveSignals.filter(s => !s.terminal && (s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE" || s.status === "VIRTUAL_CHASE"));
         const virtualRows = virtualSignals.map(s => {
           const virtualN = s.dashboard_virtual_chase_count != null
             ? s.dashboard_virtual_chase_count
             : (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0);
-          const spread = Number(s.directional_spread);
-          const rawGap = s.score_gap != null
-            ? Number(s.score_gap)
-            : (Number.isFinite(spread) ? Math.round(spread * 10) : null);
-          const gapBucket = Number.isFinite(spread)
-            ? (spread >= 5 ? '5+' : String(Math.max(0, Math.floor(spread))))
-            : '-';
+          const refPrice = s.signal_price != null ? Number(s.signal_price) : null;
+          const initLimit = s.deterministic_initial_limit != null
+            ? Number(s.deterministic_initial_limit)
+            : (refPrice != null && s.final_direction
+                ? (s.final_direction === 'LONG' ? refPrice * 0.999 : refPrice * 1.001)
+                : null);
+          const virtLimit = s.limit_price != null ? Number(s.limit_price) : null;
+          const noOrderReason = s.virtual_touch_before_selected_entry
+            ? 'VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY'
+            : (s.exit_reason || s.outcome || (virtualN === 0 ? 'Chase 0 not selected' : '-'));
+          const smartReanchor = s.smart_submit_reanchored === true
+            ? 'YES (new limit ' + (virtLimit != null ? virtLimit.toFixed(2) : '?') + ')'
+            : 'no';
+          const state = s.order_placed
+            ? 'REAL_LIMIT_PENDING'
+            : (s.virtual_touch_before_selected_entry ? 'EXPIRED' : 'WAITING_VIRTUAL_CHASE');
+          const exchangeId = s.exchange_order_id || s.order_id || (s.order_placed ? 'pending' : '—');
+          const nextChase = s.next_chase_ts_melbourne
+            || (s.next_enabled_chase != null ? 'chase ' + s.next_enabled_chase : 'none');
           return `
           <tr>
-            <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts)}</td>
-            <td>${s.age_min != null ? s.age_min.toFixed(1) : '-'}</td>
-            <td>${laneBadge(s.research_lane, s.research_model)}</td>
+            <td>${s.trade_id || '-'}</td>
             <td>${s.final_direction || s.dir || '-'}</td>
-            <td>${Number.isFinite(rawGap) ? rawGap.toFixed(0) : '-'}</td>
-            <td>${gapBucket}</td>
-            <td>${s.limit_price != null ? s.limit_price.toFixed(2) : '-'}</td>
+            <td>${refPrice != null ? refPrice.toFixed(2) : '-'}</td>
+            <td>${initLimit != null ? initLimit.toFixed(2) : '-'}</td>
             <td>${virtualN}</td>
-            <td>${s.next_enabled_chase != null ? s.next_enabled_chase : 'none'}</td>
-            <td>${s.ttl_remaining != null ? Math.max(0, s.ttl_remaining / 60).toFixed(1) + 'm' : '-'}</td>
-            <td>VIRTUAL ONLY · no order/exposure</td>
+            <td>${selectedStages}</td>
+            <td>${virtLimit != null ? virtLimit.toFixed(2) : '-'}</td>
+            <td>${marketPrice != null ? marketPrice.toFixed(2) : '-'}</td>
+            <td>${nextChase}</td>
+            <td>${state}</td>
+            <td>${noOrderReason}</td>
+            <td>${smartReanchor}</td>
+            <td>${exchangeId}</td>
           </tr>`;
         }).join('');
         safeHTML(
           'virtualChaseTable',
-          virtualRows || '<tr><td colspan="11" style="color:#8b949e;">No live virtual-chase candidate right now. Tile approval totals are historical for the current collection/settings period, not a count of orders waiting at this moment.</td></tr>'
+          virtualRows || '<tr><td colspan="13" style="color:#8b949e;">No live virtual-chase candidate right now. Tile approval totals are historical for the current collection/settings period, not a count of orders waiting at this moment.</td></tr>'
         );
         safeHTML('signalsTable', allLiveSignals.filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
@@ -28979,6 +29139,18 @@ def _collect_dashboard_active_signals(
             "score_gap": s.get("score_gap"),
             "chase_3plus_activation_reason": s.get("chase_3plus_activation_reason"),
             "entry_path": s.get("entry_path"),
+            # Danish decision 6 (2026-08-01) — dashboard transparency fields:
+            "trade_id": s.get("trade_id"),
+            "final_direction": s.get("final_direction"),
+            "deterministic_initial_limit": s.get("deterministic_initial_limit"),
+            "deterministic_entry_offset_pct": s.get("deterministic_entry_offset_pct"),
+            "virtual_touch_before_selected_entry": bool(s.get("virtual_touch_before_selected_entry")),
+            "smart_submit_reanchored": bool(s.get("smart_submit_reanchored")),
+            "smart_submit_original_planned": s.get("smart_submit_original_planned"),
+            "exchange_order_id": s.get("exchange_order_id") or s.get("order_id"),
+            "order_placed": bool(s.get("order_placed")),
+            "advisory_local_support_limit": s.get("advisory_local_support_limit"),
+            "advisory_local_resistance_limit": s.get("advisory_local_resistance_limit"),
         })
     exposure_count = max(len(active_list), len(live_ids))
     return active_list, exposure_count

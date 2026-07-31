@@ -12,6 +12,7 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  isExecutableEntryPolicy,
   isMirrorableLaneTradeId,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
   SUBSCRIBER_TRAIL_LADDER,
@@ -140,10 +141,13 @@ function relayIntentEnvelope(
   }
 
   const dir = direction as 'LONG' | 'SHORT';
+  const executablePolicy = isExecutableEntryPolicy(body?.entry_limit_policy)
+    ? (body!.entry_limit_policy as string)
+    : null;
   const exactLimitPrice =
     (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
     && body?.executable === true
-    && body?.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+    && executablePolicy !== null
     && typeof body?.limit_price === 'number'
     && Number.isFinite(body.limit_price)
     && body.limit_price > 0
@@ -161,9 +165,7 @@ function relayIntentEnvelope(
       ? { platform_received_at: body.platform_received_at }
       : {}),
     ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
-    ...(body?.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
-      ? { entry_limit_policy: SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION }
-      : {}),
+    ...(executablePolicy !== null ? { entry_limit_policy: executablePolicy } : {}),
     ...(body?.event === 'POSITION_CLOSED'
       && typeof body.exit_price === 'number'
       && Number.isFinite(body.exit_price)
@@ -498,7 +500,7 @@ export class ShowcaseRelayEventsService {
       signedLifecycleEvent
       && (event === 'ORDER_PLACED' || event === 'LIMIT_UPDATED')
       && body.executable === true
-      && body.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+      && isExecutableEntryPolicy(body.entry_limit_policy)
       && typeof body.limit_price === 'number'
       && Number.isFinite(body.limit_price)
       && body.limit_price > 0;
@@ -509,7 +511,7 @@ export class ShowcaseRelayEventsService {
       && !directExecutableIntent
     ) {
       throw new BadRequestException(
-        'Signed executable relay event requires exact structural limit policy',
+        'Signed executable relay event requires exact executable limit policy',
       );
     }
 
@@ -716,7 +718,7 @@ export class ShowcaseRelayEventsService {
       const carriesExactLimit =
         (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
         && body.executable === true
-        && body.entry_limit_policy === SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION
+        && isExecutableEntryPolicy(body?.entry_limit_policy)
         && typeof body?.limit_price === 'number'
         && Number.isFinite(body.limit_price)
         && body.limit_price > 0;

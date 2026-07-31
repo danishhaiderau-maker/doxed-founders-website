@@ -56,10 +56,20 @@ def test_server_is_authoritative_for_execution_gate_controls():
 
 def test_virtual_chase_candidates_are_separate_from_pending_orders():
     assert '<tbody id="virtualChaseTable"></tbody>' in SOURCE
-    assert "VIRTUAL ONLY · no order/exposure" in SOURCE
+    # Danish decision 6 (2026-08-01) — virtual candidates expose the full
+    # 12-field transparency set and never appear as exchange pending orders.
     assert "These are <strong>not pending orders</strong>" in SOURCE
+    assert "WAITING_VIRTUAL_CHASE" in SOURCE
+    assert "REAL_LIMIT_PENDING" in SOURCE
+    assert "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY" in SOURCE
+    assert "deterministic 0.1% offset" in SOURCE
     assert "next_enabled_chase" in SOURCE
     assert "No live virtual-chase candidate right now" in SOURCE
+    # Exchange order id column only appears AFTER a real order exists.
+    assert "<th>Exchange order ID</th>" in SOURCE
+    # The old ambiguous "VIRTUAL ONLY" cell text was replaced with explicit
+    # state + no-order reason columns.
+    assert "VIRTUAL ONLY" not in SOURCE
 
 
 def test_settings_period_approvals_reconcile_to_analyzer_headline():

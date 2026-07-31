@@ -165,7 +165,10 @@ def _compile_function(name, namespace):
     return namespace[name]
 
 
-def test_structural_limit_uses_local_support_and_resistance_not_percentage_offset():
+def test_deterministic_anchor_uses_0_1_pct_offset_not_local_support_resistance():
+    """Danish decision 3 (2026-08-01) — the executable maker limit is always
+    the deterministic 0.1% offset from the signal/reference price. Micro S/R
+    levels must remain advisory only and never replace this anchor."""
     namespace = {
         "copy": copy,
         "state_lock": threading.RLock(),
@@ -173,44 +176,61 @@ def test_structural_limit_uses_local_support_and_resistance_not_percentage_offse
         "build_micro_sr_levels": lambda: {},
         "MICRO_SR_ENTRY_BUFFER_USD": 15.0,
         "AI_DIRECT_MAX_DIST_PCT": 0.01,
+        "DETERMINISTIC_ENTRY_OFFSET_PCT": 0.001,
     }
     resolve = _compile_function("resolve_local_structural_limit", namespace)
 
-    long_limit, long_source, _ = resolve(
+    long_limit, long_source, long_adv = resolve(
         "LONG",
-        64000,
-        market_structure={"micro_support": 63900},
+        63000,
+        market_structure={"micro_support": 62900},
         support_resistance={},
     )
-    assert long_limit == 63915.0
-    assert long_source == "LOCAL_SUPPORT_LIMIT"
+    # LONG = 63000 * (1 - 0.001) = 62937.00 — NOT the micro support + buffer.
+    assert long_limit == 62937.0
+    assert long_source == "DETERMINISTIC_LONG_OFFSET"
+    # Advisory micro S/R is still surfaced for the dashboard.
+    assert long_adv["local_support_available"] is True
+    assert long_adv["local_support_limit"] == 62915.0  # 62900 + 15 buffer
 
-    short_limit, short_source, _ = resolve(
+    short_limit, short_source, short_adv = resolve(
         "SHORT",
-        64000,
-        market_structure={"micro_resistance": 64100},
+        63000,
+        market_structure={"micro_resistance": 63100},
         support_resistance={},
     )
-    assert short_limit == 64085.0
-    assert short_source == "LOCAL_RESISTANCE_LIMIT"
+    # SHORT = 63000 * (1 + 0.001) = 63063.00 — NOT the micro resistance - buffer.
+    assert short_limit == 63063.0
+    assert short_source == "DETERMINISTIC_SHORT_OFFSET"
+    assert short_adv["local_resistance_available"] is True
+    assert short_adv["local_resistance_limit"] == 63085.0  # 63100 - 15 buffer
 
-    unavailable, reason, _ = resolve(
+    # The deterministic anchor must NOT fail closed on missing micro S/R —
+    # that was the bug that masked the wrong anchor. Direction + price is enough.
+    no_sr_long, long_reason, no_sr_adv = resolve(
         "LONG",
-        64000,
+        63000,
         market_structure={},
         support_resistance={},
     )
-    assert unavailable is None
-    assert reason == "LOCAL_SUPPORT_UNAVAILABLE"
+    assert no_sr_long == 62937.0
+    assert long_reason == "DETERMINISTIC_LONG_OFFSET"
+    assert no_sr_adv["local_support_available"] is False
 
-    too_far, reason, _ = resolve(
+    # Invalid direction / price still fails closed.
+    invalid, invalid_reason, _ = resolve("LONG", 0, market_structure={})
+    assert invalid is None
+    assert invalid_reason == "INVALID_DIRECTION_OR_PRICE"
+
+    # Advisory out-of-range flag is still recorded for transparency.
+    far_long, _, far_adv = resolve(
         "LONG",
         64000,
         market_structure={"micro_support": 62000},
         support_resistance={},
     )
-    assert too_far is None
-    assert reason == "LOCAL_SUPPORT_LIMIT_OUT_OF_RANGE"
+    assert far_long == 63936.0  # 64000 * 0.999
+    assert far_adv["local_support_out_of_range"] is True
 
 
 def test_exact_dashboard_chase_bucket_rests_before_next_chase():
@@ -341,7 +361,11 @@ def test_pending_intent_is_non_executable_and_only_published_after_exact_limit_p
     webhook_source = ast.get_source_segment(BOT_SOURCE, webhook)
     assert '"executable": event == "ORDER_PLACED"' in webhook_source
     assert '"entry_limit_policy": entry_limit_policy' in webhook_source
-    assert "STRUCTURAL_ENTRY_POLICY_VERSION" in webhook_source
+    # The webhook admits any canonical executable anchor policy (deterministic
+    # 0.1% offset or the legacy structural limit) via is_executable_entry_policy.
+    assert "is_executable_entry_policy(entry_limit_policy)" in webhook_source
+    assert "EXECUTABLE_ENTRY_POLICY_VERSIONS" in BOT_SOURCE
+    assert "DETERMINISTIC_ENTRY_POLICY_VERSION" in BOT_SOURCE
     assert '"pullback_pct"' not in webhook_source
 
 
@@ -350,7 +374,7 @@ def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
     assert "<th>AI Band</th>" not in BOT_SOURCE
     assert "AI Win Prob" not in BOT_SOURCE
     assert "continuous_shared_direction_gap_structural_v2" in BOT_SOURCE
-    assert "STRUCTURAL_LIMIT_BLOCKED" in BOT_SOURCE
+    assert "DETERMINISTIC_LIMIT_BLOCKED" in BOT_SOURCE
 
 
 def test_only_continuous_can_emit_platform_live_relay_lifecycle():
@@ -373,3 +397,85 @@ def test_market_bid_ask_spread_is_collected_separately():
     assert '"market_bid_ask_spread_usd_at_entry"' in BOT_SOURCE
     assert '"market_bid_ask_spread_bps_at_entry"' in BOT_SOURCE
     assert "the older “conviction spread” is this same normalized AI gap" in BOT_SOURCE
+
+
+def test_decision5_virtual_touch_before_selected_entry_state_exists():
+    """Danish decision 5 — crossed virtual limit before first selected stage
+    records VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY; no invented fill, no marketable
+    order at the old price."""
+    assert "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY" in BOT_SOURCE
+    assert '"virtual_touch_before_selected_entry"' in BOT_SOURCE
+    assert "signal[\"virtual_touch_before_selected_entry\"] = (" in BOT_SOURCE
+
+    # The crossed-limit path must remain wired into the virtual-chase loop.
+    assert "if _virtual_limit_would_fill(signal, market):" in BOT_SOURCE
+    assert "_expire_skipped_virtual_fill(signal)" in BOT_SOURCE
+
+    # Decision 5 forbids: inventing an exchange fill or submitting a marketable
+    # order at the old price. The expiring path must set EXPIRED + order_placed=False.
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_expire_skipped_virtual_fill"
+    )
+    src = ast.get_source_segment(BOT_SOURCE, fn)
+    assert 'signal["status"] = "EXPIRED"' in src
+    assert 'signal["order_placed"] = False' in src
+    assert "min_enabled_chase_count()" in src
+    assert "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY" in src
+    assert "VIRTUAL_FILL_SKIPPED_CHASE_" in src
+
+
+def test_decision5_smart_submit_does_not_reset_chase_counter():
+    """Smart-submit re-anchoring under the deterministic policy must NOT reset
+    the chase counter or masquerade as Chase 0 (Danish decision 4 rule 10)."""
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_apply_smart_submit_limit"
+    )
+    src = ast.get_source_segment(BOT_SOURCE, fn)
+    # The deterministic policy falls through to re-anchor (no bypass).
+    assert "DETERMINISTIC_ENTRY_POLICY_VERSION" not in src.split("STRUCTURAL_ENTRY_POLICY_VERSION")[0]
+    # Smart-submit sets smart_submit_reanchored True and planned_limit_price,
+    # but must NOT touch limit_chase_count / dashboard_virtual_chase_count.
+    assert "signal[\"smart_submit_reanchored\"] = True" in src
+    assert "limit_chase_count" not in src
+    assert "dashboard_virtual_chase_count" not in src
+
+
+def test_decision6_dashboard_transparency_fields_are_emitted():
+    """Danish decision 6 — every approved candidate exposes the 12 transparency
+    fields on the dashboard snapshot."""
+    required = (
+        '"trade_id"',
+        '"final_direction"',
+        '"signal_price"',
+        '"deterministic_initial_limit"',
+        '"dashboard_virtual_chase_count"',
+        '"limit_price"',
+        '"virtual_touch_before_selected_entry"',
+        '"smart_submit_reanchored"',
+        '"exchange_order_id"',
+        '"order_placed"',
+        '"advisory_local_support_limit"',
+        '"advisory_local_resistance_limit"',
+    )
+    for field in required:
+        assert field in BOT_SOURCE, f"missing transparency field {field}"
+
+    # Virtual candidate must never appear as an exchange pending order.
+    assert "VIRTUAL ONLY" not in BOT_SOURCE
+    assert "REAL_LIMIT_PENDING" in BOT_SOURCE
+    assert "WAITING_VIRTUAL_CHASE" in BOT_SOURCE
+
+
+def test_decision7_chase_effectiveness_prospective_reporting_preserved():
+    """Danish decision 7 — chase effectiveness reporting remains observational
+    and prospective (settings epoch recorded on chase change)."""
+    assert "_record_execution_settings_epoch(\"CHASE_CHANGED\")" in BOT_SOURCE
+    assert "CHASE_EFFECTIVENESS_REPORT_FILE" in BOT_SOURCE
+    assert "CHASE_EFFICIENCY_MATRIX_FILE" in BOT_SOURCE

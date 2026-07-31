@@ -2,6 +2,7 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   DEFAULT_SUBSCRIBER_LEVERAGE,
+  SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
   SUBSCRIBER_TRAIL_LADDER,
 } from '@dcf/utils';
 import {
@@ -37,7 +38,7 @@ function normalizeDirection(value: unknown): 'LONG' | 'SHORT' | null {
 function resolveExactCanonicalEntry(
   bot: BotApiState,
   tradeId: string,
-): { direction: 'LONG' | 'SHORT'; limitPrice: number; source: string } | null {
+): { direction: 'LONG' | 'SHORT'; limitPrice: number; source: string; policy: string } | null {
   const order = (bot.orders ?? []).find(
     (candidate) =>
       candidate.trade_id === tradeId
@@ -46,8 +47,12 @@ function resolveExactCanonicalEntry(
   if (order) {
     const direction = normalizeDirection(order.signal_dir ?? order.side);
     const limitPrice = Number(order.limit_price);
+    // Preserve the executable policy the bot emitted. New entries carry the
+    // deterministic 0.1% offset policy; legacy in-flight orders may still carry
+    // micro_sr_structural_limit_v1 (both are in EXECUTABLE_ENTRY_POLICY_VERSIONS).
+    const policy = String(order.entry_limit_policy ?? SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION);
     if (direction && Number.isFinite(limitPrice) && limitPrice > 0) {
-      return { direction, limitPrice, source: 'SHOWCASE_PENDING_ORDER' };
+      return { direction, limitPrice, source: 'SHOWCASE_PENDING_ORDER', policy };
     }
   }
 
@@ -64,7 +69,7 @@ export function buildIntentEnvelope(
   if (lao?.status === 'BLOCKED' && lao.trade_id === tradeId) return null;
   const exact = resolveExactCanonicalEntry(bot, tradeId);
   if (!exact) return null;
-  const { direction, limitPrice, source } = exact;
+  const { direction, limitPrice, source, policy } = exact;
   const edge =
     lao?.edge_at_approve ??
     bot.debug_state?.last_edge_score ??
@@ -101,7 +106,7 @@ export function buildIntentEnvelope(
       edge: Number(edge),
       ai_win_prob: Number(aiWin),
       entry_mode_source: source,
-      entry_limit_policy: 'micro_sr_structural_limit_v1',
+      entry_limit_policy: policy,
       research_venue: 'bitfinex',
       disclaimer:
         'Exact canonical Bitfinex showcase limit. Exchange stop required at fill.',

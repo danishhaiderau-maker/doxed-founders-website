@@ -1173,6 +1173,27 @@ test('a still-resting showcase limit remains eligible for exact-price chase', ()
   );
 });
 
+test('deterministic 0.1% offset anchor is the canonical executable policy', () => {
+  // Danish decision 3 (2026-08-01) — the live production anchor is the
+  // deterministic 0.1% offset policy. It must be recognised as executable
+  // everywhere the legacy structural policy is.
+  const deterministicBot = {
+    orders: [
+      {
+        trade_id: 'cont-det',
+        status: 'PENDING',
+        limit_price: 62_937,
+        entry_limit_policy: 'deterministic_0.1pct_offset_v1',
+      },
+    ],
+    positions: [],
+  };
+  assert.equal(
+    pendingCopyShowcaseDisposition(deterministicBot as never, 'cont-det'),
+    'SHOWCASE_PENDING',
+  );
+});
+
 test('full cancel-race fill is recorded and the managed order is not cancelled', async () => {
   let cancelCalls = 0;
   const result = await resolveMissedShowcaseFill({

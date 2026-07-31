@@ -52,10 +52,34 @@ export function resolveSignalCyclePollMs(envValue?: string | number | null): num
   return Number.isFinite(raw) && raw >= MIN_SUBSCRIBER_POLL_MS ? raw : DEFAULT_SIGNAL_CYCLE_POLL_MS;
 }
 
-/** Exchange-neutral signal envelope (ENSE) � portable across venues. */
+/** Exchange-neutral signal envelope (ENSE) — portable across venues. */
 export type SignalEntryMode = 'PULLBACK_PCT' | 'EMA_OFFSET_PCT' | 'EXACT_LIMIT';
+
+/**
+ * Canonical executable entry-limit policy versions.
+ *
+ * Danish decision 3 (2026-08-01): the live production anchor is the
+ * deterministic 0.1% offset (LONG=price×0.999, SHORT=price×1.001) under
+ * ``SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION``. The legacy
+ * ``SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION`` (micro S/R anchored limit) is
+ * retained so in-flight intents persisted before the cutover still validate;
+ * new intents always carry the deterministic policy.
+ */
+export const SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION =
+  'deterministic_0.1pct_offset_v1' as const;
 export const SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION =
   'micro_sr_structural_limit_v1' as const;
+
+/** Policies under which the limit price is the canonical executable anchor. */
+export const EXECUTABLE_ENTRY_POLICY_VERSIONS: ReadonlySet<string> = new Set([
+  SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
+  SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+]);
+
+/** True when ``entry_limit_policy`` is one of the canonical executable anchors. */
+export function isExecutableEntryPolicy(policy: unknown): policy is string {
+  return typeof policy === 'string' && EXECUTABLE_ENTRY_POLICY_VERSIONS.has(policy);
+}
 
 export type SignalIntentEnvelope = {
   schema: 'dcf-signal-intent/v1';
@@ -87,7 +111,7 @@ export type SignalIntentEnvelope = {
     edge: number;
     ai_win_prob: number;
     entry_mode_source: string;
-    entry_limit_policy?: typeof SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION;
+    entry_limit_policy?: string;
     research_venue: string;
     disclaimer: string;
   };

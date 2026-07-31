@@ -477,7 +477,7 @@ test('rejects signed ORDER_PLACED without executable structural exact-limit cont
       rawBody,
       signatureHeader: signature,
     }),
-    /requires exact structural limit policy/,
+    /requires exact executable limit policy/,
   );
 });
 
