@@ -11,6 +11,13 @@ export type BotApiState = {
   dashboard_pid?: number | null;
   dashboard_port?: number | null;
   source_git_rev?: string | null;
+  /**
+   * Bot-declared public dashboard URL. On canonical Fly this is set by
+   * btc_conservative_agent.py to https://doxed-btc-bot.fly.dev/. A rogue
+   * desktop owner would report a loopback/LAN URL instead — this is the
+   * cleanest signal that the responding process is the Fly runtime.
+   */
+  dashboard_url?: string | null;
   server_ts?: string | null;
   api_state_error?: string | null;
   price?: number | null;

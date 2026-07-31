@@ -12,6 +12,10 @@ function canonicalSnapshot(overrides: Record<string, unknown> = {}) {
     dashboard_port: 7002,
     bot_instance_id: 'dashboard-7002-test',
     source_git_rev: 'dc55f47673ff',
+    // FIX 2: canonical Fly declares its public dashboard URL via
+    // DASHBOARD_PUBLIC_URL. The lock-enforced snapshot service rejects
+    // snapshots whose dashboard_url is not the canonical Fly URL.
+    dashboard_url: 'https://doxed-btc-bot.fly.dev/',
     server_ts: new Date().toISOString(),
     ...overrides,
   };
@@ -127,4 +131,35 @@ test('rejects unsigned and tampered snapshots before persistence', async () => {
     () => service.ingest(signed),
     (error: unknown) => error instanceof UnauthorizedException,
   );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 2 — Fly-canonical owner proof at the snapshot ingestion boundary.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('FIX 2: rejects a snapshot whose dashboard_url is not canonical Fly', async () => {
+  const { service } = makeService();
+  const desktopSnapshot = canonicalSnapshot({
+    // A desktop publisher (rogue legacy owner) reports a loopback URL.
+    dashboard_url: 'http://127.0.0.1:7002/',
+    bot_instance_id: 'dashboard-7002-pid-670-stale',
+  });
+  await assert.rejects(
+    () => service.ingest(signedBody(desktopSnapshot)),
+    (error: unknown) =>
+      error instanceof BadRequestException
+      && /desktop publishers cannot be canonical/i.test(error.message),
+  );
+});
+
+test('FIX 2: accepts a snapshot whose dashboard_url matches canonical Fly', async () => {
+  const { service, storedSeq } = makeService();
+  const flySnapshot = canonicalSnapshot({
+    dashboard_url: 'https://doxed-btc-bot.fly.dev/',
+    bot_instance_id: 'dashboard-7002-pid-1234-fly',
+    source_git_rev: '8afc5715c0ab',
+  });
+  const result = await service.ingest(signedBody(flySnapshot));
+  assert.equal(result.ok, true);
+  assert.equal(storedSeq() > 0n, true);
 });

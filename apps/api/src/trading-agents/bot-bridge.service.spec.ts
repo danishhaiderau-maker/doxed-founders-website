@@ -8,6 +8,10 @@ const canonicalState = {
   dashboard_pid: 1234,
   dashboard_port: 7002,
   source_git_rev: 'dc55f47673ff',
+  // FIX 2: canonical Fly declares its public dashboard URL via
+  // DASHBOARD_PUBLIC_URL in /api/state. A desktop process would report a
+  // loopback/LAN URL; the lock-enforced bridge rejects non-Fly URLs.
+  dashboard_url: 'https://doxed-btc-bot.fly.dev/',
   server_ts: new Date().toISOString(),
   price: 64_000,
 };
@@ -314,4 +318,118 @@ test('isFlyHealthReachable returns false when both /api/ping and /health fail', 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 2 — Fly-canonical owner proof. Desktop 7002 must never be canonical.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('FIX 2: rejects a desktop-shaped direct owner proof when the lock is enforced', () => {
+  // Mirror the runtime check performed by `recordDirectFlyOwnerProof`
+  // when FLY_CANONICAL_LOCK_ENFORCED is true (the committed
+  // config/fly-canonical.lock.json sets desktopBotEnabled=false).
+  const desktopState = {
+    ...canonicalState,
+    // A rogue desktop process reports a loopback URL, not the Fly URL.
+    dashboard_url: 'http://127.0.0.1:7002/',
+    bot_instance_id: 'dashboard-7002-pid-670-deadbeef',
+  };
+  const bridge = makeBridge();
+  const recorder = bridge as unknown as {
+    recordDirectFlyOwnerProof(state: typeof desktopState): boolean;
+  };
+  // The desktop dashboard_url fails isFlyDeclaredDashboardUrl regardless
+  // of the rest of the owner metadata, so the proof is rejected.
+  assert.equal(recorder.recordDirectFlyOwnerProof(desktopState), false);
+  // No cached identity is published for a rejected proof.
+  assert.equal(bridge.getCachedDashboardOwnerIdentity(), null);
+});
+
+test('FIX 2: accepts a Fly-shaped direct owner proof when the lock is enforced', () => {
+  const flyState = {
+    ...canonicalState,
+    dashboard_url: 'https://doxed-btc-bot.fly.dev/',
+    bot_instance_id: 'dashboard-7002-pid-1234-feedface',
+    source_git_rev: '8afc5715c0ab',
+  };
+  const bridge = makeBridge();
+  const recorder = bridge as unknown as {
+    recordDirectFlyOwnerProof(state: typeof flyState): boolean;
+  };
+  assert.equal(recorder.recordDirectFlyOwnerProof(flyState), true);
+  const identity = bridge.getCachedDashboardOwnerIdentity();
+  assert.equal(identity?.instanceId, flyState.bot_instance_id);
+  assert.equal(identity?.port, 7002);
+});
+
+test('FIX 2: evicts a stale direct owner proof on the next read after TTL', async () => {
+  // A successful direct proof establishes the cached identity...
+  const bridge = makeBridge();
+  const recorder = bridge as unknown as {
+    recordDirectFlyOwnerProof(state: typeof canonicalState): boolean;
+    directFlyOwnerProof: { seenAt: number } | null;
+  };
+  assert.equal(recorder.recordDirectFlyOwnerProof(canonicalState), true);
+  assert.equal(bridge.getCachedDashboardOwnerIdentity()?.instanceId, canonicalState.bot_instance_id);
+
+  // Simulate the 60s TTL elapsing by rewinding the recorded seenAt. The
+  // next read must treat the record as stale and return null (fail closed).
+  // This is the eviction contract that prevents a stale desktop-pid-*
+  // claim from authorizing relay events after the real Fly owner changes.
+  recorder.directFlyOwnerProof!.seenAt = Date.now() - 61_000;
+  assert.equal(bridge.getCachedDashboardOwnerIdentity(), null);
+
+  // And the explicit eviction helper clears the field outright.
+  bridge.evictStaleDirectFlyOwnerProof();
+  assert.equal(recorder.directFlyOwnerProof, null);
+});
+
+test('FIX 2: rejects a desktop-mirrored direct fetch when the lock is enforced', async () => {
+  const originalFetch = globalThis.fetch;
+  // The desktop :7002 proxy (scripts/fly-dashboard-proxy.py) adds
+  // `X-Desktop-Mirror: fly` to every response. Even if the body looks
+  // like a canonical Fly payload (because the proxy is forwarding Fly's
+  // state), the lock-enforced bridge must reject it as a direct owner
+  // proof source — only Fly itself may establish that proof.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(canonicalState), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'x-desktop-mirror': 'fly',
+      },
+    });
+
+  try {
+    const bridge = makeBridge();
+    const state = await bridge.fetchStateForExecution(true);
+    // Owner proof was refused, so execution must hold (null return).
+    assert.equal(state, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('FIX 2: requires the source-controlled lock to be enforced before applying the desktop guard', () => {
+  // This is a static contract assertion, not a runtime bypass. The lock
+  // file is read once at module load; if it's missing or not frozen,
+  // FLY_CANONICAL_LOCK_ENFORCED is false and the desktop_url check is
+  // skipped (legacy behavior). The committed lock in this repo IS
+  // enforced, which is exactly what blocks a stale desktop publisher.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const lockModule = require('./fly-canonical-lock');
+  assert.equal(lockModule.FLY_CANONICAL_LOCK_ENFORCED, true);
+  assert.equal(
+    lockModule.isFlyDeclaredDashboardUrl('https://doxed-btc-bot.fly.dev/'),
+    true,
+  );
+  assert.equal(
+    lockModule.isFlyDeclaredDashboardUrl('http://127.0.0.1:7002/'),
+    false,
+  );
+  assert.equal(
+    lockModule.isFlyDeclaredDashboardUrl('https://evil.example/'),
+    false,
+  );
+  assert.equal(lockModule.isFlyDeclaredDashboardUrl(undefined), false);
 });

@@ -9,6 +9,10 @@ import {
 } from './bot-state.mapper';
 import { ShowcaseSnapshotService } from './showcase-snapshot.service';
 import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
+import {
+  FLY_CANONICAL_LOCK_ENFORCED,
+  isFlyDeclaredDashboardUrl,
+} from './fly-canonical-lock';
 
 /** Cumulative full-session metrics derived from the bot's /api/state. */
 export type CumulativeSessionMetrics = {
@@ -161,6 +165,16 @@ export class BotBridgeService {
   /**
    * Relay webhooks may mutate trading state only when their instance identity
    * matches a recently fetched canonical dashboard owner.
+   *
+   * FIX 2 — stale records are reported as null (already evicted on read by
+   * the TTL check). The in-memory field is intentionally not cleared on a
+   * miss so a transient clock skew or GC pause does not wipe a still-valid
+   * proof mid-window; the age check is authoritative. Callers must treat a
+   * null return as "no active canonical owner" and fail closed (relay
+   * webhooks surface this as 401 "Active dashboard owner is not currently
+   * confirmed"). Use {@link evictStaleDirectFlyOwnerProof} to explicitly
+   * clear a record that is known to be stale (e.g. after a Fly rolling
+   * deploy is observed via a changed source_git_rev on a fresh fetch).
    */
   getCachedDashboardOwnerIdentity(): {
     instanceId: string;
@@ -180,6 +194,16 @@ export class BotBridgeService {
       port: proof.port,
       seenAt: proof.seenAt,
     };
+  }
+
+  /**
+   * Explicitly clear the cached canonical owner proof. Called when a fresh
+   * direct fetch returns a different instanceId/revision (rolling deploy)
+   * or when an upper layer observes that the recorded proof no longer
+   * matches the canonical Fly process. Idempotent.
+   */
+  evictStaleDirectFlyOwnerProof(): void {
+    this.directFlyOwnerProof = null;
   }
 
   /**
@@ -292,6 +316,20 @@ export class BotBridgeService {
       || sourceAgeMs < -10_000
       || sourceAgeMs > 120_000
     ) {
+      return false;
+    }
+    // FIX 2 — Fly-origin proof. When config/fly-canonical.lock.json is
+    // enforced, the responding process must declare its public dashboard
+    // URL as the canonical Fly URL. A desktop process (loopback :7002 or
+    // LAN) reports a non-Fly URL in /api/state, so this guard rejects a
+    // stale or rogue desktop publisher even if it shares the relay
+    // BOT_CONTROL_SECRET. The instance-id format `dashboard-7002-pid-*`
+    // alone is not sufficient because both Fly and the legacy desktop
+    // owner use the same format string in bot.py.
+    if (FLY_CANONICAL_LOCK_ENFORCED && !isFlyDeclaredDashboardUrl(state.dashboard_url)) {
+      this.logger.warn(
+        `Rejecting direct owner proof: dashboard_url='${state.dashboard_url ?? ''}' is not canonical Fly`,
+      );
       return false;
     }
     this.directFlyOwnerProof = {
@@ -508,6 +546,22 @@ export class BotBridgeService {
           signal: AbortSignal.timeout(timeoutMs),
           headers: { Accept: 'application/json', 'User-Agent': opts.userAgent },
         });
+        // FIX 2 — reject desktop-mirrored responses when verifying direct
+        // Fly ownership. The desktop :7002 proxy (scripts/fly-dashboard-proxy.py)
+        // adds `X-Desktop-Mirror: fly` to every response. When the lock is
+        // enforced, the canonical-owner proof must come from Fly itself,
+        // not a local loopback proxy that happens to share the relay
+        // secret. Without this guard, a misconfigured direct-Fly fetch
+        // URL pointing at a desktop proxy would still satisfy the proof.
+        if (
+          FLY_CANONICAL_LOCK_ENFORCED
+          && (res.headers.get('x-desktop-mirror') || '').toLowerCase() === 'fly'
+        ) {
+          this.logger.warn(
+            `Canonical Fly ${base}${path} was served by the desktop mirror — rejecting owner proof`,
+          );
+          continue;
+        }
         if (res.status === 429) {
           const retryAfterSec = Number(res.headers.get('retry-after') ?? 0);
           const backoffMs = Math.min(

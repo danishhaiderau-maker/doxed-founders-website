@@ -8,6 +8,10 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  FLY_CANONICAL_LOCK_ENFORCED,
+  isFlyDeclaredDashboardUrl,
+} from './fly-canonical-lock';
 
 export type ShowcaseSnapshotBody = {
   snapshot_seq?: number;
@@ -99,6 +103,21 @@ export class ShowcaseSnapshotService {
       || sourceAgeMs > 120_000
     ) {
       throw new BadRequestException('snapshot did not prove a fresh canonical :7002 owner');
+    }
+    // FIX 2 — pushed-snapshot Fly-origin proof. When the source-controlled
+    // lock is enforced, the publisher's snapshot must declare its public
+    // dashboard URL as the canonical Fly URL. The lock files the desktop
+    // launchers and prevents a desktop process from claiming ownership,
+    // but this is the API-side belt-and-suspenders guard: even if a
+    // desktop publisher somehow held BOT_CONTROL_SECRET, its snapshot
+    // would carry a loopback/LAN dashboard_url and be rejected here.
+    if (
+      FLY_CANONICAL_LOCK_ENFORCED
+      && !isFlyDeclaredDashboardUrl(identity.dashboard_url)
+    ) {
+      throw new BadRequestException(
+        'snapshot dashboard_url is not canonical Fly; desktop publishers cannot be canonical',
+      );
     }
     const snapshot = rawSnapshot as Prisma.InputJsonValue;
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
