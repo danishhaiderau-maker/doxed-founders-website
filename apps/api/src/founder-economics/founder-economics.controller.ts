@@ -73,6 +73,32 @@ export class FounderEconomicsController {
     });
   }
 
+  /**
+   * Authenticated — DDollar gate shim. Translates the canonical rawDdollar
+   * ledger (User.reputationPoints) into the exact JSON shape the strategy
+   * bot's DDOLLAR_GATE_URL expects: `{ "ddollarBalance": <number> }`.
+   *
+   * The bot reads one of `ddollar | balance | ddollarBalance | points` as a
+   * numeric field; we emit `ddollarBalance` so the field is unambiguous and
+   * stable. Auth is the standard @CurrentUser session — no separate token,
+   * no bypass. The value is the same rawDdollar source the founder-economics
+   * snapshot exposes, rounded to 2 decimals for display stability.
+   */
+  @Get('ddollar/gate-balance')
+  ddollarGateBalance(@CurrentUser() user: AuthUser) {
+    return this.ddollarEngine.exportSnapshot(0).then((snap) => {
+      const founder = snap.founders.find((f) => f.userId === user.id);
+      const rawDdollar = founder?.rawDdollar ?? user.reputationPoints ?? 0;
+      const ddollarBalance = Number(
+        (typeof rawDdollar === 'number' && Number.isFinite(rawDdollar)
+          ? rawDdollar
+          : 0
+        ).toFixed(2),
+      );
+      return { ddollarBalance };
+    });
+  }
+
   /** Public — DDollar balance by userId (used by profile pages). */
   @Public()
   @Get('ddollar/balance/:userId')
