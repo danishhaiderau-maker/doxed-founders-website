@@ -604,7 +604,14 @@ export class ShowcaseRelayEventsService {
         // compare-and-write atomic across every Railway API replica. Without
         // it, concurrent seq=N and seq=N+1 requests can both read N-1 and the
         // older request can commit last.
-        await tx.$queryRaw`
+        //
+        // Use $executeRaw (not $queryRaw): pg_advisory_xact_lock() returns
+        // Postgres `void`, and Prisma 6.x throws
+        // "Failed to deserialize column of type 'void'" if you try to read
+        // the row back via $queryRaw. $executeRaw discards the result so the
+        // advisory lock is still acquired inside the transaction without
+        // triggering the deserializer. (P2010 raw-query failure.)
+        await tx.$executeRaw`
           SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))
         `;
 

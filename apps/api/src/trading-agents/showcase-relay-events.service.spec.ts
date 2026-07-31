@@ -93,6 +93,7 @@ function createService(
   const transactionClient = {
     ...prismaBase,
     $queryRaw: async () => [],
+    $executeRaw: async () => 0,
   };
   const prisma = {
     ...prismaBase,
@@ -194,6 +195,20 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
           await previous;
           acquired = true;
           return [];
+        },
+        $executeRaw: async (
+          _queryParts: TemplateStringsArray,
+          ...values: unknown[]
+        ) => {
+          // Mirror $queryRaw accounting: the advisory lock is now acquired
+          // via $executeRaw (Prisma 6.x throws P2010 on void columns when
+          // read back through $queryRaw). The lock key is still the first
+          // interpolated value.
+          advisoryCalls += 1;
+          advisoryKeys.push(values[0]);
+          await previous;
+          acquired = true;
+          return 0;
         },
       };
       try {
