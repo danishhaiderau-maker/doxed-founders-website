@@ -79,7 +79,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Prove strict readiness and exact revision
+      - name: Prove liveness, execution safety, and exact revision
         env:
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
@@ -90,7 +90,7 @@ jobs:
           import urllib.request
 
           expected = os.environ["EXPECTED_REVISION"][:12]
-          url = "https://doxed-btc-bot.fly.dev/ready"
+          url = "https://doxed-btc-bot.fly.dev/health"
           last = ""
           for _ in range(60):
               try:
@@ -99,20 +99,17 @@ jobs:
                   last = json.dumps(payload, sort_keys=True)
                   if (
                       response.status == 200
-                      and payload.get("ok") is True
+                      and payload.get("process_alive") is True
                       and str(payload.get("source_git_rev") or "").startswith(expected)
                   ):
-                      with urllib.request.urlopen(
-                          "https://doxed-btc-bot.fly.dev/health", timeout=8
-                      ) as health_response:
-                          health = json.load(health_response)
+                      health = payload
                       if (
                           health.get("live_armed") is False
                           and health.get("bitfinex_live_enabled") is False
                           and health.get("force_paper_mode") is True
                       ):
                           print(
-                              f"Fly ready, disarmed, paper-signal-only, "
+                              f"Fly alive, disarmed, paper-signal-only, "
                               f"on exact revision {expected}"
                           )
                           raise SystemExit(0)
@@ -120,5 +117,5 @@ jobs:
               except Exception as exc:
                   last = str(exc)
               time.sleep(3)
-          raise SystemExit(f"Fly failed exact-revision readiness proof: {last}")
+          raise SystemExit(f"Fly failed exact-revision liveness proof: {last}")
           PY

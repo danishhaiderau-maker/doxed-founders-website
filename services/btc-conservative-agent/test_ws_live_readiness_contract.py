@@ -56,9 +56,12 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
         self.state = {
             "price": 64_000.0,
             "price_ts": self.now,
+            "bid": 64_000.0,
+            "ask": 64_020.0,
             "rest_price": 64_010.0,
             "rest_price_ts": self.now,
             "rest_last_tick": self.now,
+            "bbo_ts": self.now,
             "ws_last_tick": self.now - 500.0,
             "ws_transport_connected": False,
             "ws_ready": False,
@@ -92,7 +95,8 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             "time": time,
             "state": self.state,
             "state_lock": threading.RLock(),
-            "WS_ENTRY_FRESH_SEC": 15.0,
+            "WS_ENTRY_FRESH_SEC": 60.0,
+            "REST_ENTRY_FRESH_SEC": 10.0,
             "STALE_HARD_SEC": 180.0,
             "CANDLE_STALE_SEC": 180.0,
             "OHLCV_FETCH_INTERVAL": 60.0,
@@ -122,6 +126,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             (
                 "_force_paper_mode_active",
                 "_genuine_ws_transport_ready",
+                "_fresh_rest_entry_quote_ready",
                 "_runtime_readiness_components",
                 "_recompute_system_readiness",
                 "can_progress_new_entry",
@@ -174,10 +179,21 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
 
     def test_ws_entry_freshness_is_stricter_than_old_hard_stale_window(self):
         self._make_ws_ready()
-        self.state["ws_last_tick"] = self.now - 16.0
+        self.state["ws_last_tick"] = self.now - 61.0
         runtime = self.namespace["_runtime_readiness_components"](self.now)
         self.assertFalse(runtime["ws_transport_ready"])
         self.assertIn("WS_NOT_READY", runtime["readiness_reasons"])
+
+    def test_fresh_ws_cannot_enter_without_fresh_rest_bid_ask(self):
+        self._make_ws_ready()
+        self.state["rest_price_ts"] = self.now - 11.0
+        self.state["rest_last_tick"] = self.now - 11.0
+        self.state["bbo_ts"] = self.now - 11.0
+        runtime = self.namespace["_runtime_readiness_components"](self.now)
+        self.assertTrue(runtime["ws_transport_ready"])
+        self.assertFalse(runtime["rest_entry_quote_ready"])
+        self.assertFalse(runtime["prerequisites_ready"])
+        self.assertIn("REST_ENTRY_QUOTE_NOT_READY", runtime["readiness_reasons"])
 
     def test_stale_ohlcv_blocks_new_entry_even_with_fresh_ws(self):
         self._make_ws_ready()
@@ -1032,6 +1048,17 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         # Diagnostic tag still emitted for observability.
         self.assertTrue(self.diag_calls)
 
+    def test_ws_pong_keeps_transport_alive_without_authorizing_entry(self):
+        self.state["ws_last_tick"] = None
+        self.state["ws_ready"] = False
+        before = time.time()
+        self.namespace["safe_ws_handler"](json.dumps({"event": "pong", "cid": 1}))
+        self.assertGreaterEqual(self.state["ws_last_hb_ts"], before)
+        self.assertTrue(self.state["ws_transport_connected"])
+        self.assertIsNone(self.state["ws_last_tick"])
+        self.assertFalse(self.state["ws_ready"])
+        self.assertEqual(self.trades_seen, [])
+
     def test_watchdog_accepts_recent_heartbeat_as_liveness(self):
         """ws_watchdog must NOT trip a reconnect when only a heartbeat is
         recent (no recent trade tick). This is the direct sin-region fix."""
@@ -1124,16 +1151,12 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         threshold = _module_level_float_default("WATCHDOG_WS_STALE_SEC")
         self.assertEqual(threshold, 30.0)
 
-    def test_entry_fresh_sec_unchanged_at_15s(self):
-        """WS_ENTRY_FRESH_SEC must remain 15s, decoupled from the watchdog
-        threshold widening. Entry authorization is unchanged by the fix."""
+    def test_entry_fresh_sec_is_60s_with_separate_fresh_rest_gate(self):
+        """The quiet-tape tolerance is 60s, while submit-time REST BBO has
+        its own stricter freshness requirement."""
         fresh = _module_level_float_default("WS_ENTRY_FRESH_SEC")
-        self.assertEqual(fresh, 15.0)
-        # And the two are genuinely independent.
-        self.assertNotEqual(
-            _module_level_float_default("WATCHDOG_WS_STALE_SEC"),
-            _module_level_float_default("WS_ENTRY_FRESH_SEC"),
-        )
+        self.assertEqual(fresh, 60.0)
+        self.assertEqual(_module_level_float_default("REST_ENTRY_FRESH_SEC"), 10.0)
 
     def test_reconnect_resets_heartbeat_timestamp(self):
         """Both _mark_ws_transport_disconnected AND on_open must reset
