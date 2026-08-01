@@ -693,7 +693,7 @@ export class TradingAgentsService implements OnModuleInit {
         ok: false,
         source: 'bot /api/state cumulative',
         error:
-          'canonical Fly bot unreachable — cannot read cumulative session metrics from /api/state',
+          'cumulative session metrics unavailable — the desktop analyzer is offline or authenticated full Fly state is temporarily unavailable',
       };
     }
     return this.analyzerSummaryFromMetrics(metrics);

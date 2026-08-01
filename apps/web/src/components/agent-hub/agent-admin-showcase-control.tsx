@@ -2,7 +2,12 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { pauseTradingAgent, resumeTradingAgent, fetchServerBotHealth } from '@/lib/api';
+import {
+  pauseTradingAgent,
+  resumeTradingAgent,
+  forceFlatShowcasePaper,
+  fetchServerBotHealth,
+} from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
@@ -242,6 +247,7 @@ export function AgentAdminShowcaseControl({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [execBusy, setExecBusy] = useState(false);
+  const [flatBusy, setFlatBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [launcherOnline, setLauncherOnline] = useState<boolean | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
@@ -413,6 +419,25 @@ export function AgentAdminShowcaseControl({
     }
   }
 
+  async function forcePaperFlat() {
+    const confirmed = window.confirm(
+      'Force the Fly showcase PAPER book flat? This pauses new entries, cancels paper pending limits, closes every exact open paper trade through normal accounting, and leaves trading PAUSED.',
+    );
+    if (!confirmed) return;
+    setFlatBusy(true);
+    setMsg(null);
+    try {
+      const result = await forceFlatShowcasePaper(token);
+      setMsg(result.message);
+      onUpdated?.();
+      setTimeout(() => onUpdated?.(), 5000);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Paper force-flat failed');
+    } finally {
+      setFlatBusy(false);
+    }
+  }
+
   return (
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
@@ -548,6 +573,14 @@ export function AgentAdminShowcaseControl({
           }`}
         >
           {execBusy ? '…' : stopped ? '▶ Resume trading' : '■ Pause trading'}
+        </button>
+        <button
+          type="button"
+          disabled={flatBusy || execBusy}
+          onClick={() => void forcePaperFlat()}
+          className="rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-2 text-sm font-bold text-red-100 hover:bg-red-900/50 disabled:opacity-50"
+        >
+          {flatBusy ? 'Flattening paper bookâ€¦' : 'Force paper flat & pause'}
         </button>
       </div>
 

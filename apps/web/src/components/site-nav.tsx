@@ -655,8 +655,8 @@ function SiteNavInner() {
 
   return (
     <>
-      <div ref={navRef} className="relative flex flex-col items-end gap-1">
-        <nav className="flex items-center gap-1 text-sm">
+      <div ref={navRef} className="relative flex min-w-0 flex-1 flex-col items-end gap-1">
+        <nav className="flex min-w-0 max-w-full items-center gap-1 text-sm">
         {/* Founder Chat launcher — placed before nav dropdowns (between brand and section links) */}
         <FounderChatLauncher />
 
@@ -714,7 +714,10 @@ function SiteNavInner() {
       </nav>
 
       {/* Mobile section tabs — each opens its own dropdown, always visible */}
-      <div className="flex items-center gap-1.5 md:hidden" aria-label="Sections">
+      <div
+        className="flex max-w-full items-center gap-1.5 overflow-x-auto pb-1 md:hidden"
+        aria-label="Sections"
+      >
         {HUB_NAV_ROWS.map((row) => {
           const accent = sectionAccent(row.id);
           const active = sectionHasActive(pathname, row, (item) => resolveHref(item) ?? '');

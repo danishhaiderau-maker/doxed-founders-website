@@ -408,12 +408,17 @@ export class BotBridgeService {
   }
 
   /** Canonical Fly state for session-epoch tracking — never races owners. */
-  async fetchShowcaseCanonicalState(force = true): Promise<BotApiState | null> {
+  async fetchShowcaseCanonicalState(
+    force = true,
+    allowPushedSnapshot = true,
+  ): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
     }
-    const pushed = await this.fetchCachedRelaySnapshot(15_000);
+    const pushed = allowPushedSnapshot
+      ? await this.fetchCachedRelaySnapshot(15_000)
+      : null;
     if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) {
       this.cached = pushed;
       this.lastFetchAt = now;
@@ -840,7 +845,10 @@ export class BotBridgeService {
     if (this.cumulativeCache && now - this.cumulativeCache.at < this.cumulativeCacheMs) {
       return this.cumulativeCache.data;
     }
-    let bot = await this.fetchShowcaseCanonicalState(true);
+    // Cumulative analytics require the authenticated full Fly /api/state.
+    // The fresh Railway relay snapshot intentionally contains only the
+    // execution/showcase subset and cannot prove full-session totals.
+    let bot = await this.fetchShowcaseCanonicalState(true, false);
     if (!bot) {
       bot = await this.fetchCachedRelaySnapshot(this.cumulativeStaleMs);
     }

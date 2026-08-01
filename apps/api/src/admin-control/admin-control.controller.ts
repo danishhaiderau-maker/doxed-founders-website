@@ -55,6 +55,12 @@ export class AdminControlController {
   }
 
   @UseGuards(AdminGuard)
+  @Post('agent/force-flat-paper')
+  forceFlatPaper() {
+    return this.adminControl.forceFlatShowcasePaper();
+  }
+
+  @UseGuards(AdminGuard)
   @Post('agent/resume')
   resumeAgent() {
     return this.adminControl.resumeAgentTrading();

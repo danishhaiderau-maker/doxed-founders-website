@@ -205,6 +205,70 @@ export class AdminControlService {
     };
   }
 
+  async forceFlatShowcasePaper() {
+    // Paper flattening is deliberately separate from the Bitfinex relay
+    // emergency path. Pause first so no fresh paper entry can race the close.
+    const pause = await this.botBridge.proxyBotPost('/api/pause', {});
+    const pauseData = (pause.data ?? {}) as Record<string, unknown>;
+    const paused =
+      pause.ok === true &&
+      (pauseData.execution_paused === true || pauseData.status === 'paused');
+    if (!paused) {
+      return {
+        ok: false,
+        paused: false,
+        closedPositions: 0,
+        remainingPositions: null,
+        remainingOrders: null,
+        message: 'Paper force-flat stopped because Fly did not confirm the paused entry gate.',
+      };
+    }
+
+    this.botBridge.invalidateCache();
+    const before = await this.botBridge.fetchPublicShowcaseState(true);
+    if (!before) {
+      return {
+        ok: false,
+        paused: true,
+        closedPositions: 0,
+        remainingPositions: null,
+        remainingOrders: null,
+        message: 'Fly is paused, but its exact paper book could not be read; no blind closes were sent.',
+      };
+    }
+
+    const tradeIds = Array.from(
+      new Set(
+        (before.positions ?? [])
+          .map((position) => String(position.trade_id ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+    let closedPositions = 0;
+    for (const tradeId of tradeIds) {
+      const close = await this.botBridge.proxyBotPost('/api/positions/close', {
+        trade_id: tradeId,
+      });
+      if (close.ok) closedPositions += 1;
+    }
+
+    this.botBridge.invalidateCache();
+    const after = await this.botBridge.fetchPublicShowcaseState(true);
+    const remainingPositions = after?.positions?.length ?? null;
+    const remainingOrders = after?.orders?.length ?? null;
+    const flat = remainingPositions === 0 && remainingOrders === 0;
+    return {
+      ok: flat,
+      paused: true,
+      closedPositions,
+      remainingPositions,
+      remainingOrders,
+      message: flat
+        ? `Paper book is flat and paused; closed ${closedPositions} position(s).`
+        : 'Paper book is still not provably flat; keep trading paused and inspect the remaining rows.',
+    };
+  }
+
   async resumeAgentTrading() {
     const health = await this.botBridge.fetchHealth();
     if (!health) {

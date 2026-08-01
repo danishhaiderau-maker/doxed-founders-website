@@ -61,6 +61,52 @@ test('canonical cumulative-state fallback authenticates to protected Fly /api/st
   }
 });
 
+test('cumulative metrics bypass the slim Railway snapshot and fetch full Fly state', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  const fullState = {
+    ...canonicalState,
+    account_balance: 512.5,
+    session_pnl_usd: 12.5,
+    trade_count_session: 7,
+    analytics: { total_trades: 7, win_rate: 71.4 },
+  };
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify(fullState), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const slimSnapshot = {
+      ...canonicalState,
+      server_ts: new Date().toISOString(),
+      snapshot_source: 'railway_cache',
+    };
+    const config = {
+      get: (name: string) => name === 'BOT_ADMIN_TOKEN' ? 'fly-admin-token' : undefined,
+    };
+    const snapshots = {
+      getCachedSnapshot: async () => ({
+        snapshot: slimSnapshot,
+        at: new Date(),
+        snapshot_seq: Date.now(),
+      }),
+    };
+    const bridge = new BotBridgeService(config as never, snapshots as never);
+    const metrics = await bridge.fetchCumulativeSessionMetrics();
+
+    assert.equal(calls, 1, 'full-session analytics must make a direct Fly request');
+    assert.equal(metrics?.current_balance, 512.5);
+    assert.equal(metrics?.total_pnl_usd, 12.5);
+    assert.equal(metrics?.trade_count, 7);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('locks every bridge route to the canonical Fly owner', async () => {
   const config = {
     get: (name: string) =>
