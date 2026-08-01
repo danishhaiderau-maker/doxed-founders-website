@@ -17077,7 +17077,7 @@ def write_report_manifest(payload=None):
             RESEARCH_COMPACT_SUMMARY_FILE,
         ],
         "research_dashboard_url": os.getenv(
-            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/"
+            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
     try:
@@ -17767,7 +17767,7 @@ def format_terminal_status(payload):
         lines.append("  (run analyzer to populate findings)")
     lines.extend([
         "",
-        f"Research Dashboard: {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://10.0.0.102:9001/')}",
+        f"Research Dashboard: {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://127.0.0.1:9001/')}",
         "  (bundled — starts automatically with analyzer_research_engine_v62.py)",
         "",
         "Full reports (not printed here):",
@@ -18031,9 +18031,9 @@ def finalize_analyzer_outputs(
     console_text = format_terminal_status(payload)
     print("\n" + console_text)
     art = payload.get("artifacts") or {}
-    print(f"\n  ✅ Research UI:    {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://10.0.0.102:9001/')}")
+    print(f"\n  ✅ Research UI:    {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://127.0.0.1:9001/')}")
     print(f"  ✅ Dashboard:      isolated read-only process (same report root)")
-    print(f"  ✅ Download ZIP:   http://10.0.0.102:9001/download/reports")
+    print(f"  ✅ Download ZIP:   {os.getenv('RESEARCH_DASHBOARD_PUBLIC_URL', 'http://127.0.0.1:9001/').rstrip('/')}/download/reports")
     if snap:
         print(f"  ✅ Snapshot:       {os.path.abspath(snap)}")
     print(f"  ✅ Manifest:       {os.path.abspath(REPORT_MANIFEST_FILE)}")
@@ -18057,7 +18057,7 @@ if __name__ == "__main__":
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()
-    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/")
+    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/")
 
     _once_mode = len(sys.argv) > 1 and str(sys.argv[1]).startswith("--once")
 
