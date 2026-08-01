@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-Merge remote-tracking branch 'origin/master'
+chore: reduce idle cloud polling and builds
 
 ## Last Activity
 
