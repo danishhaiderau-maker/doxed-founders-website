@@ -221,12 +221,23 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
-WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "15"))
-# Only a genuinely fresh trade-channel tick may authorize new strategy work.
-# REST quotes remain available for display and risk-reducing exits.
+# Transport liveness threshold. Bitfinex documents that idle subscribed
+# channels emit [CHAN_ID, "hb"] every ~15s; we use 30s as the default so
+# normal heartbeat jitter never trips a self-inflicted reconnect. Only the
+# watchdog uses this — entry authorization uses WS_ENTRY_FRESH_SEC below.
+WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "30"))
+# A genuine trade-channel tick remains mandatory for new strategy work. The
+# 60s window tolerates the quiet Bitfinex derivative tape, but entry also
+# requires a separately fresh REST bid/ask snapshot (see
+# _fresh_rest_entry_quote_ready), so the submit price itself is never allowed
+# to be one minute old. Kept independent of the transport watchdog.
 WS_ENTRY_FRESH_SEC = max(
     1.0,
-    float(os.getenv("WS_ENTRY_FRESH_SEC", str(WATCHDOG_WS_STALE_SEC))),
+    float(os.getenv("WS_ENTRY_FRESH_SEC", "60")),
+)
+REST_ENTRY_FRESH_SEC = max(
+    1.0,
+    float(os.getenv("REST_ENTRY_FRESH_SEC", "10")),
 )
 MOMENTUM_ALIGN_EPS = 1e-6
 MOMENTUM_FLAT_MAX = 0.01
@@ -4174,6 +4185,18 @@ def purge_dead_pending_orders():
     return removed
 
 def execution_allowed(lane: str = None) -> bool:
+    # Preserve the operator's kill switch as the authoritative reason. The
+    # older flow called get_execution_status() and replaced ADMIN_MANUAL with
+    # the generic string BLOCKED, which made health and dashboard snapshots
+    # disagree even though the entry gate itself remained closed.
+    if manual_admin_pause_active():
+        with state_lock:
+            state["manual_admin_pause"] = True
+            state["execution_paused"] = True
+            state["execution_reason"] = "ADMIN_MANUAL"
+            state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"]
+        logger.warning("[EXECUTION BLOCK] operator manual pause [PIPELINE ENFORCEMENT]")
+        return False
     if lane and is_ai_scan_lane(lane):
         with state_lock:
             state["execution_reason"] = "AI_SCAN_NO_ORDERS"
@@ -6973,6 +6996,7 @@ state = {
     "support_resistance": {"pivot": None, "s1": None, "s2": None, "r1": None, "r2": None, "swing_high": None, "swing_low": None, "ts": None, "window": "96x15m (~24h rolling)", "dist_to_resistance": 0.0, "dist_to_support": 0.0, "sr_zone_pct": SR_ZONE_PCT, "sr_state": "UNKNOWN", "sr_bias": "BOTH_ALLOWED"},
     "ema_status": {},
     "ws_last_tick": None,
+    "ws_last_hb_ts": None,
     "rest_last_tick": None,
     "ws_transport_connected": False,
     "last_engine_error": "None",
@@ -8124,10 +8148,19 @@ def _signal_age_sec(signal: dict) -> float:
 
 def _refresh_signal_price_for_submit(signal: dict) -> float:
     """Use current market at submit time (not stale APPROVE-time price)."""
-    price = state.get("price")
+    now = time.time()
+    with state_lock:
+        ws_price = float(state.get("price") or 0)
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
+        rest_price = (bid + ask) / 2.0 if bid > 0 and ask >= bid else 0.0
+    price = rest_price if _fresh_rest_entry_quote_ready(now) else ws_price
     if price and float(price) > 0:
         signal["signal_price"] = float(price)
         signal["signal_price_submit"] = float(price)
+        signal["signal_price_submit_source"] = (
+            "REST_BBO" if price == rest_price and rest_price > 0 else "WS"
+        )
         return float(price)
     return float(signal.get("signal_price") or 0)
 
@@ -17351,6 +17384,34 @@ def _genuine_ws_transport_ready(now: float = None) -> bool:
         )
 
 
+def _fresh_rest_entry_quote_ready(now: float = None) -> bool:
+    """Require a recent, internally consistent Bitfinex REST bid/ask snapshot.
+
+    This is an additional entry condition, never a substitute for the genuine
+    WebSocket trade-tick requirement above.
+    """
+    now = float(now or time.time())
+    with state_lock:
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
+        last = float(state.get("rest_price") or state.get("last_trade_price") or 0)
+        quote_ts = float(
+            state.get("rest_price_ts")
+            or state.get("rest_last_tick")
+            or state.get("bbo_ts")
+            or 0
+        )
+    quote_age = (now - quote_ts) if quote_ts else float("inf")
+    return bool(
+        bid > 0
+        and ask > 0
+        and ask >= bid
+        and last > 0
+        and ((ask - bid) / bid) <= 0.02
+        and 0 <= quote_age <= REST_ENTRY_FRESH_SEC
+    )
+
+
 def _runtime_readiness_components(now: float = None) -> dict:
     """One non-mutating definition of strategy readiness."""
     now = float(now or time.time())
@@ -17366,6 +17427,7 @@ def _runtime_readiness_components(now: float = None) -> dict:
         paused = bool(state.get("execution_paused", False))
         manual_paused = bool(state.get("manual_admin_pause", False))
     ws_ok = _genuine_ws_transport_ready(now)
+    rest_entry_quote_ok = _fresh_rest_entry_quote_ready(now)
     ohlcv_age = (
         now - float(last_ohlcv_fetch or 0)
         if last_ohlcv_fetch
@@ -17389,6 +17451,7 @@ def _runtime_readiness_components(now: float = None) -> dict:
     prerequisites_ready = bool(
         price_ok
         and ws_ok
+        and rest_entry_quote_ok
         and ohlcv_ok
         and ema_ok
         and candle_ok
@@ -17409,6 +17472,8 @@ def _runtime_readiness_components(now: float = None) -> dict:
         reasons.append("NO_PRICE")
     if not ws_ok:
         reasons.append("WS_NOT_READY")
+    if not rest_entry_quote_ok:
+        reasons.append("REST_ENTRY_QUOTE_NOT_READY")
     if not ohlcv_ok:
         reasons.append("OHLCV_NOT_READY")
     if not ema_ok:
@@ -17428,6 +17493,7 @@ def _runtime_readiness_components(now: float = None) -> dict:
     return {
         "price_ready": price_ok,
         "ws_transport_ready": ws_ok,
+        "rest_entry_quote_ready": rest_entry_quote_ok,
         "ohlcv_ready": ohlcv_ok,
         "ohlcv_age_sec": ohlcv_age if math.isfinite(ohlcv_age) else None,
         "ema_ready": ema_ok,
@@ -20639,12 +20705,37 @@ def safe_ws_handler(message):
                     with state_lock:
                         state["ws_connected_ts"] = time.time()
                     logger.info(f"[WS] Subscribed trades chanId={data.get('chanId')} symbol={data.get('symbol')}")
+                elif ev == "pong":
+                    # A server pong proves the socket is live when the quiet
+                    # derivatives trade channel emits no hb frame. It must not
+                    # touch ws_last_tick/ws_ready, so it never authorizes entry.
+                    pong_now = time.time()
+                    with state_lock:
+                        state["ws_last_hb_ts"] = pong_now
+                        state["ws_transport_connected"] = True
+                        state["data_source"] = "ws_alive_pong"
+                        state.setdefault("diag", {})["ws_status"] = "PONG"
                 return
             if ev == "error":
                 logger.error(f"[WS] Bitfinex error: {data}")
                 _mark_ws_transport_disconnected("ERROR_EVENT")
                 _close_ws_app()
                 return
+            return
+        # Bitfinex sends [CHANNEL_ID, "hb"] every ~15s on idle subscribed
+        # channels (documented). A heartbeat proves the transport is alive
+        # even when no trades are printing on tBTCF0:USTF0 (quiet book), so
+        # it must suppress the watchdog's reconnect-nudge. It MUST NOT,
+        # however, satisfy ws_last_tick / ws_ready — only a real te/tu tick
+        # authorizes new strategy entries (fail-closed entry gate preserved).
+        if isinstance(data, list) and len(data) == 2 and data[1] == "hb":
+            hb_now = time.time()
+            with state_lock:
+                state["ws_last_hb_ts"] = hb_now
+                state["ws_transport_connected"] = True
+                state["data_source"] = "ws_alive_hb"
+                state.setdefault("diag", {})["ws_status"] = "HB"
+            _agent_dbg("H2", "safe_ws_handler", "hb", {"chan_id": data[0]})
             return
         trades = _bitfinex_ws_trades_from_message(data)
         if not trades:
@@ -20680,6 +20771,7 @@ def _mark_ws_transport_disconnected(status: str = "DISCONNECTED") -> None:
     with state_lock:
         state["ws_transport_connected"] = False
         state["ws_ready"] = False
+        state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
         state["system_ready"] = False
         state["allow_rest_price"] = True
@@ -20703,6 +20795,7 @@ def on_open(ws):
         # A connected socket is not trading-ready until this new session emits
         # a fresh trade tick. Never inherit ws_ready from a prior session.
         state["ws_ready"] = False
+        state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
         state["system_ready"] = False
         state.setdefault("diag", {})["ws_status"] = "CONNECTED_WAITING_TICK"
@@ -20814,16 +20907,51 @@ def ws_watchdog():
             now = time.time()
             with state_lock:
                 ws_tick = float(state.get("ws_last_tick") or 0)
+                ws_hb = float(state.get("ws_last_hb_ts") or 0)
+                ws_connected_ts = float(state.get("ws_connected_ts") or 0)
                 connected = bool(state.get("ws_transport_connected"))
                 ws_state_ready = bool(state.get("ws_ready", False))
             ws_age = (now - ws_tick) if ws_tick else float("inf")
+            # Transport is alive if EITHER a real trade tick OR a Bitfinex
+            # heartbeat arrived recently. The trades channel emits [chanId,"hb"]
+            # every ~15s during quiet books — that is a server-signed liveness
+            # proof, not a phantom connection. Entry authorization still
+            # requires ws_last_tick freshness via _genuine_ws_transport_ready
+            # (unaffected here), so fail-closed entry gating is preserved.
+            hb_age = (now - ws_hb) if ws_hb else float("inf")
+            connected_age = (
+                (now - ws_connected_ts)
+                if ws_connected_ts
+                else float("inf")
+            )
+            # A newly subscribed channel needs one full heartbeat window to
+            # deliver its first trade or [chanId,"hb"] frame. Without this
+            # grace, the 3s watchdog closes the socket after only a few
+            # iterations, before Bitfinex's ~15s idle heartbeat can arrive,
+            # creating an endless connect/subscribe/reconnect loop.
+            startup_grace = bool(
+                connected
+                and ws_connected_ts
+                and 0 <= connected_age <= WATCHDOG_WS_STALE_SEC
+            )
+            transport_alive = (
+                connected
+                and (
+                    startup_grace
+                    or
+                    (ws_tick and ws_age <= WATCHDOG_WS_STALE_SEC)
+                    or (ws_hb and hb_age <= WATCHDOG_WS_STALE_SEC)
+                )
+            )
+            # ws_fresh remains the strict "had a real trade tick lately" flag,
+            # used only to drive the reconnect-recovery bookkeeping below.
             ws_fresh = bool(
                 connected
                 and ws_state_ready
                 and ws_tick
                 and ws_age <= WATCHDOG_WS_STALE_SEC
             )
-            if not ws_fresh:
+            if not transport_alive:
                 # REST keeps dashboards and existing-position exits observable,
                 # but it must never satisfy or suppress the WS reconnect loop.
                 refresh_dashboard_market_snapshot(force=True)
@@ -20835,6 +20963,8 @@ def ws_watchdog():
                     logger.warning(
                         f"[WS] TRANSPORT/TICK STALE connected={connected} "
                         f"age={fmt(ws_age) if math.isfinite(ws_age) else 'never'}s "
+                        f"hb_age={fmt(hb_age) if math.isfinite(hb_age) else 'never'}s "
+                        f"connected_age={fmt(connected_age) if math.isfinite(connected_age) else 'never'}s "
                         f"(count={ws_stale_count}) - nudging reconnect"
                     )
                     _close_ws_app()
@@ -30808,10 +30938,14 @@ def _market_data_health_snapshot(now: float = None) -> dict:
     with state_lock:
         ws_tick = float(state.get("ws_last_tick") or 0)
         rest_tick = float(state.get("rest_last_tick") or 0)
-        price_tick = float(state.get("price_ts") or 0)
+        ws_price_tick = float(state.get("price_ts") or 0)
+        rest_price_tick = float(
+            state.get("rest_price_ts") or state.get("rest_last_tick") or 0
+        )
         ws_connected = bool(state.get("ws_transport_connected", False))
     ws_age = max(0.0, now - ws_tick) if ws_tick else None
     rest_age = max(0.0, now - rest_tick) if rest_tick else None
+    price_tick = max(ws_price_tick, rest_price_tick)
     price_age = max(0.0, now - price_tick) if price_tick else None
     ws_transport_ready = _genuine_ws_transport_ready(now)
     rest_fallback_ready = bool(
@@ -30974,6 +31108,18 @@ def api_pause():
         state["manual_admin_pause"] = True
     disarm = _disarm_live_control("ADMIN_MANUAL")
     set_execution_paused("ADMIN_MANUAL")
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+    _patch_api_state_cache_fields(
+        execution_paused=True,
+        execution_reason="ADMIN_MANUAL",
+        manual_admin_pause=True,
+        live_armed=False,
+        bitfinex_live_enabled=False,
+        orders=paper_orders,
+        positions=paper_positions,
+    )
     logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
     response = jsonify({
         "status": "paused",
@@ -31005,6 +31151,11 @@ def api_resume():
         state["manual_admin_pause"] = False
     save_persistent_config()
     set_execution_paused("")
+    _patch_api_state_cache_fields(
+        execution_paused=False,
+        execution_reason="",
+        manual_admin_pause=False,
+    )
     logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
     return jsonify({"status": "resumed", "execution_paused": False})
 
@@ -31040,6 +31191,15 @@ def api_close_showcase_position():
         )
     if still_open:
         return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+        paper_trades = copy.deepcopy(trades[-50:])
+    _patch_api_state_cache_fields(
+        orders=paper_orders,
+        positions=paper_positions,
+        trades=paper_trades,
+    )
     logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
     return jsonify({
         "status": "closed",
