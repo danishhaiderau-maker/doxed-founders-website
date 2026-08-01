@@ -305,9 +305,25 @@ bot._recompute_system_readiness = lambda: {
     "readiness_reasons": ["TEST_NOT_READY"],
 }
 with bot.app.test_client() as client:
+    with bot._api_state_cache_lock:
+        bot._api_state_cache["payload"] = {
+            "execution_paused": False,
+            "execution_reason": "",
+            "manual_admin_pause": False,
+            "orders": [{"trade_id": "stale-cache-order"}],
+            "positions": [],
+        }
     direct_pause = client.post("/api/pause", environ_base={"REMOTE_ADDR": "127.0.0.1"})
     check("direct loopback pause is accepted without a token", direct_pause.status_code == 200)
     check("direct loopback pause changes state", bot.state.get("execution_paused") is True)
+    direct_state = client.get(
+        "/api/state",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    ).get_json()
+    check("pause immediately patches cached execution state", direct_state.get("execution_paused") is True)
+    check("pause immediately patches cached manual flag", direct_state.get("manual_admin_pause") is True)
+    check("pause preserves ADMIN_MANUAL as cached reason", direct_state.get("execution_reason") == "ADMIN_MANUAL")
+    check("pause immediately removes cancelled paper order from cache", direct_state.get("orders") == [])
     forwarded_resume = client.post(
         "/api/resume",
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
@@ -325,9 +341,27 @@ with bot.app.test_client() as client:
     ready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
     check("ready direct loopback resume is accepted without a token", ready_resume.status_code == 200)
     check("ready direct loopback resume changes state", bot.state.get("execution_paused") is False)
+    resumed_state = client.get(
+        "/api/state",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    ).get_json()
+    check("resume immediately patches cached execution state", resumed_state.get("execution_paused") is False)
+    check("resume immediately patches cached manual flag", resumed_state.get("manual_admin_pause") is False)
 bot._BOT_ADMIN_TOKEN = original_admin_token
 bot._DASHBOARD_BOOTSTRAP_COMPLETE = original_bootstrap_complete
 bot._recompute_system_readiness = original_recompute_system_readiness
+
+
+print("\n[7b] Manual pause reason cannot be overwritten by generic execution status")
+reset_state()
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = True
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
+    bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
+check("execution remains blocked", bot.execution_allowed(bot.RESEARCH_LANE_CONTINUOUS) is False)
+check("manual pause reason remains authoritative", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check("manual pause priority remains authoritative", bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"])
 
 
 print("\n[8] Paused shadow replay is visible without entering global books")

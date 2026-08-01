@@ -68,6 +68,15 @@ export function hasFullOwnerOrderState(bot) {
   );
 }
 
+export function hasCurrentOwnerExposureState(bot) {
+  return (
+    bot != null
+    && typeof bot === 'object'
+    && Array.isArray(bot.orders)
+    && Array.isArray(bot.positions)
+  );
+}
+
 export function describeOwnerFetchError(error, url, timeoutMs) {
   const name = String(error?.name ?? 'Error');
   const message = String(error?.message ?? error ?? 'unknown error');
@@ -99,7 +108,7 @@ async function fetchOwnerState() {
   for (const baseUrl of [...new Set(botUrls)]) {
     const stateUrl = `${baseUrl}/api/state`;
     try {
-      const bot = await fetch(stateUrl, {
+      let bot = await fetch(stateUrl, {
         headers: adminToken
           ? { 'X-Bot-Admin-Token': adminToken }
           : undefined,
@@ -122,6 +131,39 @@ async function fetchOwnerState() {
           throw new Error(
             `${baseUrl} did not return the authenticated owner order state`,
           );
+        }
+        // /api/state is a presentation snapshot and can legitimately lag a
+        // successful Pause/cancel by one refresh. The lightweight relay-state
+        // endpoint is rebuilt from the current in-memory execution book, so it
+        // is the authoritative paper exposure boundary for deployment.
+        const relayStateUrl = `${baseUrl}/api/relay-state`;
+        try {
+          const relayState = await fetch(relayStateUrl, {
+            headers: adminToken
+              ? { 'X-Bot-Admin-Token': adminToken }
+              : undefined,
+            signal: AbortSignal.timeout(ownerFetchTimeoutMs),
+          }).then((response) => {
+            if (!response.ok) throw new Error(`relay-state HTTP ${response.status}`);
+            return response.json();
+          });
+          if (!hasCurrentOwnerExposureState(relayState)) {
+            throw new Error('relay-state omitted current orders or positions');
+          }
+          bot = {
+            ...bot,
+            orders: relayState.orders,
+            positions: relayState.positions,
+            flat_state_source: 'authenticated_relay_state',
+          };
+        } catch (error) {
+          if (process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES') {
+            throw describeOwnerFetchError(
+              error,
+              relayStateUrl,
+              ownerFetchTimeoutMs,
+            );
+          }
         }
         return { bot, baseUrl };
       }
