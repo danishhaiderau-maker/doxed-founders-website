@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): restore truthful Fly and relay visibility
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
