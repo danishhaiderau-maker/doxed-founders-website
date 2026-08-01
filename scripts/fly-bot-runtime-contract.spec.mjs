@@ -18,6 +18,10 @@ const railwayConfigPath = new URL(
   '../services/btc-conservative-agent/railway.toml',
   import.meta.url,
 );
+const flyConfigPath = new URL(
+  '../services/btc-conservative-agent/fly.toml',
+  import.meta.url,
+);
 const retiredProvisionerPath = new URL('./ensure-btc-bot-public-url.mjs', import.meta.url);
 const retiredHomeFinishPath = new URL('./finish-home-production.mjs', import.meta.url);
 const patcherPath = new URL('./patch-btc-bot-production.mjs', import.meta.url);
@@ -91,6 +95,13 @@ test('Fly deploy proves a disarmed paper-signal owner, never a direct live execu
   assert.match(workflow, /paper-signal-only/);
   assert.match(workflow, /python test_paper_mode_private_api_isolation\.py/);
   assert.match(workflow, /python test_showcase_manual_close\.py/);
+});
+
+test('Fly routes on process liveness while strategy readiness stays separate', async () => {
+  const config = await readFile(flyConfigPath, 'utf8');
+
+  assert.match(config, /path\s*=\s*"\/health"/);
+  assert.doesNotMatch(config, /path\s*=\s*"\/ready"/);
 });
 
 test('Fly runbook never provisions private Bitfinex execution credentials', async () => {

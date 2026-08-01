@@ -42,6 +42,10 @@ const adminToken =
 const CANONICAL_FLY_OWNER_URL = 'https://doxed-btc-bot.fly.dev';
 const requireCanonicalFlyOwner =
   process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
+const ownerFetchTimeoutMs = Math.max(
+  1_000,
+  Number.parseInt(process.env.OWNER_STATE_TIMEOUT_MS ?? '15000', 10) || 15_000,
+);
 const botUrls = requireCanonicalFlyOwner
   ? [CANONICAL_FLY_OWNER_URL]
   : [
@@ -64,6 +68,26 @@ export function hasFullOwnerOrderState(bot) {
   );
 }
 
+export function describeOwnerFetchError(error, url, timeoutMs) {
+  const name = String(error?.name ?? 'Error');
+  const message = String(error?.message ?? error ?? 'unknown error');
+  if (
+    name === 'TimeoutError'
+    || name === 'AbortError'
+    || /timed?\s*out|aborted due to timeout/i.test(message)
+  ) {
+    return new Error(
+      `canonical owner state timed out after ${timeoutMs}ms at ${url}; `
+      + 'check Fly machine health and whether a critical service check removed public routing',
+      { cause: error },
+    );
+  }
+  return new Error(
+    `canonical owner state request failed at ${url}: ${name}: ${message}`,
+    { cause: error },
+  );
+}
+
 async function fetchOwnerState() {
   if (
     process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES'
@@ -73,12 +97,13 @@ async function fetchOwnerState() {
   }
   let lastError = null;
   for (const baseUrl of [...new Set(botUrls)]) {
+    const stateUrl = `${baseUrl}/api/state`;
     try {
-      const bot = await fetch(`${baseUrl}/api/state`, {
+      const bot = await fetch(stateUrl, {
         headers: adminToken
           ? { 'X-Bot-Admin-Token': adminToken }
           : undefined,
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(ownerFetchTimeoutMs),
       }).then((response) => {
         if (!response.ok) throw new Error(`showcase HTTP ${response.status}`);
         return response.json();
@@ -102,7 +127,11 @@ async function fetchOwnerState() {
       }
       lastError = new Error(`${baseUrl} is not the dashboard owner`);
     } catch (error) {
-      lastError = error;
+      lastError = describeOwnerFetchError(
+        error,
+        stateUrl,
+        ownerFetchTimeoutMs,
+      );
     }
   }
   throw lastError ?? new Error('showcase owner unavailable');

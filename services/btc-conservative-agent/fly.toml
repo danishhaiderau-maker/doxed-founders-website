@@ -18,7 +18,13 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   interval = "15s"
   method = "GET"
   timeout = "5s"
-  path = "/ready"
+  # Fly routing must test process liveness, not entry eligibility. `/ready`
+  # intentionally returns 503 while the Bitfinex trade channel is quiet or
+  # any strategy prerequisite is missing; using it here removes the healthy
+  # risk manager from public routing and makes both probes appear to hang.
+  # `/health` remains fail-closed about trading through its explicit
+  # system_ready/trading_ready/live_armed fields.
+  path = "/health"
 
 [[restart]]
   policy = "always"
