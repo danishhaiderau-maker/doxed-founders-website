@@ -73,7 +73,8 @@ const relayEnv = {
   SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
   SUBSCRIBER_EXECUTION_ENABLED: 'true',
   SUBSCRIBER_EXECUTION_POLL_MS: '800',
-  SIGNAL_CYCLE_POLL_MS: '250',
+  // Signed webhooks are primary; this is the documented crash/backfill poll.
+  SIGNAL_CYCLE_POLL_MS: '2000',
   BITFINEX_COPY_POLICY_VERSION: '4',
 };
 

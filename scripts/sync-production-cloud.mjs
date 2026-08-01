@@ -236,7 +236,8 @@ async function main() {
       CONSERVATIVE_BTC_BOT_URL: BTC_BOT_URL,
       SUBSCRIBER_EXECUTION_ENABLED: 'true',
       SUBSCRIBER_EXECUTION_POLL_MS: '800',
-      SIGNAL_CYCLE_POLL_MS: '250',
+      // Signed webhooks are primary; retain the 2s crash/backfill poll.
+      SIGNAL_CYCLE_POLL_MS: '2000',
       SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
       X402_SIGNAL_ENABLED: localEnv.X402_SIGNAL_ENABLED?.trim() || 'true',
       X402_SIGNAL_INTENT_PRICE: localEnv.X402_SIGNAL_INTENT_PRICE?.trim() || '$0.10',
@@ -259,7 +260,7 @@ async function main() {
       SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
       SUBSCRIBER_EXECUTION_ENABLED: 'true',
       SUBSCRIBER_EXECUTION_POLL_MS: '800',
-      SIGNAL_CYCLE_POLL_MS: '250',
+      SIGNAL_CYCLE_POLL_MS: '2000',
       BITFINEX_COPY_POLICY_VERSION: '4',
     });
     if (!x402PayTo) {
