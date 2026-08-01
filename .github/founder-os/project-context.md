@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): restore truthful Fly and relay visibility
+Merge remote-tracking branch 'origin/master'
 
 ## Last Activity
 
