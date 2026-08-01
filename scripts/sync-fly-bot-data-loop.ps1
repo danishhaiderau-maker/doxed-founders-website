@@ -19,7 +19,7 @@ $machineStateBase = if ($env:LOCALAPPDATA) {
 }
 $machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
 New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
-$guardFile = Join-Path $machineLockDir "fly-data-sync-loop.guard"
+$guardFile = Join-Path $machineLockDir ".fly-data-sync-loop.guard"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 
