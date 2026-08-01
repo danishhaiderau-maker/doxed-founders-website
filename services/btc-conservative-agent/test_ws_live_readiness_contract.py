@@ -2,8 +2,10 @@
 
 import ast
 import copy
+import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +35,19 @@ def compile_functions(names, namespace):
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace
+
+
+def _module_level_float_default(var_name: str) -> float:
+    """Read the literal default of a module-level
+    `VAR = ...float(os.getenv(NAME, "<v>"))...` definition (handles both the
+    direct `float(...)` form and the `max(..., float(...))` wrapper form)."""
+    pattern = re.compile(
+        rf'{re.escape(var_name)}\s*=\s.*?os\.getenv\([^)]+,\s*"([^"]+)"\)',
+        re.DOTALL,
+    )
+    match = pattern.search(SOURCE)
+    assert match, f"could not locate module-level definition of {var_name}"
+    return float(match.group(1))
 
 
 class WsLiveReadinessBehaviorTest(unittest.TestCase):
@@ -950,6 +965,304 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertIn("FLY_REGION", guard)
         self.assertIn('fly_app == "doxed-btc-bot"', guard)
         self.assertIn("SystemExit(78)", guard)
+
+
+class WsHeartbeatTransportLivenessTest(unittest.TestCase):
+    """Bitfinex `[chanId, "hb"]` heartbeats keep the transport alive without
+    authorizing entries. Regression guard for the sin-region reconnect loop."""
+
+    def setUp(self):
+        self.now = 10_000.0
+        self.trades_seen = []
+        self.diag_calls = []
+        self.state = {
+            "ws_last_tick": None,
+            "ws_last_hb_ts": None,
+            "ws_transport_connected": False,
+            "ws_ready": False,
+            "ws_connected_ts": None,
+            "data_source": None,
+            "diag": {},
+        }
+        self.namespace = {
+            "json": json,
+            "time": time,
+            "state": self.state,
+            "state_lock": threading.RLock(),
+            "last_ws_message_time": 0.0,
+            # Trade-handling path must never run for an hb-only message. The
+            # handler returns before reaching _bitfinex_ws_trades_from_message
+            # for an hb frame, so these helpers should never be called.
+            "_bitfinex_ws_trades_from_message": lambda data: self.trades_seen.append(data) or [],
+            "_process_ws_trade_tick": lambda *a, **k: self.trades_seen.append((a, k)),
+            "_ws_trade_timestamp_sec": lambda t: 0.0,
+            "_agent_dbg": lambda *a, **k: self.diag_calls.append((a, k)),
+            "_mark_ws_transport_disconnected": lambda *a, **k: None,
+            "_close_ws_app": lambda *a, **k: None,
+            "logger": SimpleNamespace(
+                debug=lambda *a, **k: None,
+                info=lambda *a, **k: None,
+                warning=lambda *a, **k: None,
+                error=lambda *a, **k: None,
+                critical=lambda *a, **k: None,
+                exception=lambda *a, **k: None,
+            ),
+        }
+        compile_functions(("safe_ws_handler",), self.namespace)
+
+    def _send_hb(self, chan_id: int = 7):
+        # Bitfinex on-wire frame for an idle trades channel heartbeat.
+        self.namespace["safe_ws_handler"](json.dumps([chan_id, "hb"]))
+
+    def test_ws_heartbeat_keeps_transport_alive_without_authorizing_entry(self):
+        self.state["ws_last_tick"] = None
+        self.state["ws_ready"] = False
+        before = time.time()
+        self._send_hb(chan_id=7)
+        # hb stamp recorded.
+        self.assertIsNotNone(self.state["ws_last_hb_ts"])
+        self.assertGreaterEqual(self.state["ws_last_hb_ts"], before)
+        # Transport stays connected.
+        self.assertTrue(self.state["ws_transport_connected"])
+        # Entry authorization state is NOT touched by a heartbeat.
+        self.assertIsNone(self.state["ws_last_tick"])
+        self.assertFalse(self.state["ws_ready"])
+        # Trade path never invoked.
+        self.assertEqual(self.trades_seen, [])
+        # Diagnostic tag still emitted for observability.
+        self.assertTrue(self.diag_calls)
+
+    def test_watchdog_accepts_recent_heartbeat_as_liveness(self):
+        """ws_watchdog must NOT trip a reconnect when only a heartbeat is
+        recent (no recent trade tick). This is the direct sin-region fix."""
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        # Transport up, recent heartbeat, NO trade tick at all.
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_last_hb_ts": 10_000.0 - 5.0,  # 5s ago — well within 30s
+                "ws_last_tick": None,
+                "ws_ready": False,
+            }
+        )
+        # Replace real side effects with spies.
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+        ns["_recompute_system_readiness"] = lambda now: {"system_ready": False}
+        ns["_clear_execution_pause_if_reason"] = lambda reason: calls.append(("clear", reason))
+
+        # Run one iteration of the watchdog with a fake clock.
+        ran = _run_watchdog_once(ns, now=10_000.0)
+        self.assertTrue(ran)
+        # No reconnect was triggered.
+        self.assertNotIn("close", calls)
+        # And no stale-nudge refresh was triggered.
+        self.assertNotIn("refresh", calls)
+
+    def test_watchdog_triggers_reconnect_when_both_tick_and_hb_stale(self):
+        """Safety check: heartbeat tolerance does not silence genuinely dead
+        transports. If both tick and hb are older than the threshold, the
+        watchdog must still nudge a reconnect."""
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_last_hb_ts": 10_000.0 - 120.0,  # 120s ago — stale
+                "ws_last_tick": 10_000.0 - 120.0,  # also stale
+                "ws_ready": True,
+            }
+        )
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+        ns["_recompute_system_readiness"] = lambda now: {"system_ready": False}
+        ns["_clear_execution_pause_if_reason"] = lambda reason: calls.append(("clear", reason))
+
+        ran = _run_watchdog_once(ns, now=10_000.0)
+        self.assertTrue(ran)
+        self.assertIn("close", calls)
+
+    def test_watchdog_threshold_is_30s(self):
+        """WATCHDOG_WS_STALE_SEC default must be 30 (2x Bitfinex's 15s hb
+        cadence), not the old 15s that caused the flap."""
+        threshold = _module_level_float_default("WATCHDOG_WS_STALE_SEC")
+        self.assertEqual(threshold, 30.0)
+
+    def test_entry_fresh_sec_unchanged_at_15s(self):
+        """WS_ENTRY_FRESH_SEC must remain 15s, decoupled from the watchdog
+        threshold widening. Entry authorization is unchanged by the fix."""
+        fresh = _module_level_float_default("WS_ENTRY_FRESH_SEC")
+        self.assertEqual(fresh, 15.0)
+        # And the two are genuinely independent.
+        self.assertNotEqual(
+            _module_level_float_default("WATCHDOG_WS_STALE_SEC"),
+            _module_level_float_default("WS_ENTRY_FRESH_SEC"),
+        )
+
+    def test_reconnect_resets_heartbeat_timestamp(self):
+        """Both _mark_ws_transport_disconnected AND on_open must reset
+        ws_last_hb_ts so a stale hb from a prior session can never be
+        mistaken for fresh transport liveness."""
+        for fn_name in ("_mark_ws_transport_disconnected", "on_open"):
+            self.assertIn(fn_name, FUNCTIONS, fn_name)
+            src = function_source(fn_name)
+            self.assertIn('"ws_last_hb_ts"] = None', src, fn_name)
+
+    def test_sin_region_quiet_book_does_not_trip_reconnect(self):
+        """Regression for the 9-hour Fly sin flap: 25s of ONLY heartbeats (no
+        trade ticks) must keep the transport alive and avoid WS_NOT_READY.
+        The old 15s watchdog would have killed this connection."""
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_last_tick": None,
+                "ws_ready": False,
+            }
+        )
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+        ns["_recompute_system_readiness"] = lambda now: {"system_ready": False}
+        ns["_clear_execution_pause_if_reason"] = lambda reason: calls.append(("clear", reason))
+
+        # Simulate Bitfinex's ~15s heartbeat cadence across 25s of quiet book.
+        for elapsed in (0, 15, 25):
+            ns["state"]["ws_last_hb_ts"] = 10_000.0 - (25 - elapsed)
+            ok = _run_watchdog_once(ns, now=10_000.0 + elapsed)
+            self.assertTrue(ok, f"watchdog iteration at t={elapsed}")
+        # No reconnect should have been triggered.
+        self.assertNotIn("close", calls)
+        self.assertNotIn("refresh", calls)
+        # And transport should still be considered alive by the source-level
+        # readiness recomputation — system_ready stays gated on ws_ready /
+        # ws_last_tick freshness, which only real ticks satisfy.
+        self.assertTrue(ns["state"]["ws_transport_connected"])
+
+
+def _build_watchdog_namespace(self_now: float):
+    """Build a minimal namespace capable of exec-ing ws_watchdog in isolation.
+
+    ws_watchdog uses time, state, state_lock, and module-level constants. We
+    inject spies for the side-effects it can trigger and patch the global
+    counters it mutates so behavior is observable without real threads. The
+    `now` parameter sets the value returned by `time.time()` so the watchdog's
+    age arithmetic is deterministic."""
+    state = {
+        "ws_last_tick": None,
+        "ws_last_hb_ts": None,
+        "ws_transport_connected": False,
+        "ws_ready": False,
+        "system_ready": False,
+        "execution_reason": "",
+        "diag": {},
+    }
+    calls = []
+    clock = {"t": self_now}
+
+    class _Clock:
+        """Stand-in for the `time` module with a controllable wall clock."""
+
+        def __init__(self, real):
+            self._real = real
+            self._sleep_handler = None
+
+        def time(self):
+            return clock["t"]
+
+        def set(self, value):
+            clock["t"] = value
+
+        def sleep(self, seconds):
+            if self._sleep_handler is not None:
+                self._sleep_handler(seconds)
+            else:
+                self._real.sleep(seconds)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    fake_time = _Clock(time)
+    namespace = {
+        "time": fake_time,
+        "math": math,
+        "state": state,
+        "state_lock": threading.RLock(),
+        "WATCHDOG_WS_STALE_SEC": 30.0,
+        "fmt": lambda x: f"{x:.1f}",
+        # Module-level ws_* globals the watchdog mutates.
+        "ws_app": object(),
+        "ws_reconnecting": False,
+        "last_ws_reconnect": 0.0,
+        "ws_alive": True,
+        "ws_stale_count": 0,
+        "ws_retry": 0,
+        "shutdown_event": threading.Event(),
+        # Spy-able side effects.
+        "refresh_dashboard_market_snapshot": lambda *a, **k: None,
+        "_close_ws_app": lambda *a, **k: calls.append("close"),
+        "_recompute_system_readiness": lambda now: {"system_ready": False},
+        "_clear_execution_pause_if_reason": lambda reason: False,
+        "_WS_RECOVERABLE_PAUSE_REASONS": frozenset(
+            {"WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"}
+        ),
+        "logger": SimpleNamespace(
+            debug=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+            critical=lambda *a, **k: None,
+            exception=lambda *a, **k: None,
+        ),
+    }
+    compile_functions(("ws_watchdog",), namespace)
+    return namespace, calls
+
+
+def _run_watchdog_once(ns, now: float) -> bool:
+    """Drive exactly one body iteration of ws_watchdog.
+
+    The real ws_watchdog loops on `time.sleep(3)` until `shutdown_event` is
+    set. We rewrite the injected `time` module so its first `sleep` call sets
+    the shutdown event, then invoke the watchdog. This exercises the full
+    body — including the transport_alive decision branch — exactly once."""
+    sleep_calls = []
+    original_shutdown = ns["shutdown_event"]
+
+    class _OneShotEvent:
+        def __init__(self, real):
+            self._real = real
+            self._fired = False
+
+        def is_set(self):
+            return self._fired
+
+        def set(self):
+            self._fired = True
+            self._real.set()
+
+        def clear(self):
+            self._fired = False
+            self._real.clear()
+
+        def wait(self, timeout=None):
+            return self._real.wait(timeout)
+
+    event = _OneShotEvent(original_shutdown)
+    ns["shutdown_event"] = event
+
+    def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        event.set()
+
+    # Set the fake clock BEFORE invoking so time.time() returns `now`.
+    ns["time"].set(now)
+    ns["time"]._sleep_handler = _fake_sleep
+    try:
+        ns["ws_watchdog"]()
+    finally:
+        ns["time"]._sleep_handler = None
+        ns["shutdown_event"] = original_shutdown
+    # The watchdog should have done at least one sleep(3) before exiting.
+    return len(sleep_calls) >= 1
 
 
 if __name__ == "__main__":

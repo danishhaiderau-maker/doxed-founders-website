@@ -221,12 +221,18 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
-WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "15"))
+# Transport liveness threshold. Bitfinex documents that idle subscribed
+# channels emit [CHAN_ID, "hb"] every ~15s; we use 30s as the default so
+# normal heartbeat jitter never trips a self-inflicted reconnect. Only the
+# watchdog uses this — entry authorization uses WS_ENTRY_FRESH_SEC below.
+WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "30"))
 # Only a genuinely fresh trade-channel tick may authorize new strategy work.
-# REST quotes remain available for display and risk-reducing exits.
+# REST quotes remain available for display and risk-reducing exits. Kept
+# independent of WATCHDOG_WS_STALE_SEC so transport tolerance can widen
+# without loosening the entry fail-closed gate (15s default).
 WS_ENTRY_FRESH_SEC = max(
     1.0,
-    float(os.getenv("WS_ENTRY_FRESH_SEC", str(WATCHDOG_WS_STALE_SEC))),
+    float(os.getenv("WS_ENTRY_FRESH_SEC", "15")),
 )
 MOMENTUM_ALIGN_EPS = 1e-6
 MOMENTUM_FLAT_MAX = 0.01
@@ -6973,6 +6979,7 @@ state = {
     "support_resistance": {"pivot": None, "s1": None, "s2": None, "r1": None, "r2": None, "swing_high": None, "swing_low": None, "ts": None, "window": "96x15m (~24h rolling)", "dist_to_resistance": 0.0, "dist_to_support": 0.0, "sr_zone_pct": SR_ZONE_PCT, "sr_state": "UNKNOWN", "sr_bias": "BOTH_ALLOWED"},
     "ema_status": {},
     "ws_last_tick": None,
+    "ws_last_hb_ts": None,
     "rest_last_tick": None,
     "ws_transport_connected": False,
     "last_engine_error": "None",
@@ -20646,6 +20653,21 @@ def safe_ws_handler(message):
                 _close_ws_app()
                 return
             return
+        # Bitfinex sends [CHANNEL_ID, "hb"] every ~15s on idle subscribed
+        # channels (documented). A heartbeat proves the transport is alive
+        # even when no trades are printing on tBTCF0:USTF0 (quiet book), so
+        # it must suppress the watchdog's reconnect-nudge. It MUST NOT,
+        # however, satisfy ws_last_tick / ws_ready — only a real te/tu tick
+        # authorizes new strategy entries (fail-closed entry gate preserved).
+        if isinstance(data, list) and len(data) == 2 and data[1] == "hb":
+            hb_now = time.time()
+            with state_lock:
+                state["ws_last_hb_ts"] = hb_now
+                state["ws_transport_connected"] = True
+                state["data_source"] = "ws_alive_hb"
+                state.setdefault("diag", {})["ws_status"] = "HB"
+            _agent_dbg("H2", "safe_ws_handler", "hb", {"chan_id": data[0]})
+            return
         trades = _bitfinex_ws_trades_from_message(data)
         if not trades:
             return
@@ -20680,6 +20702,7 @@ def _mark_ws_transport_disconnected(status: str = "DISCONNECTED") -> None:
     with state_lock:
         state["ws_transport_connected"] = False
         state["ws_ready"] = False
+        state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
         state["system_ready"] = False
         state["allow_rest_price"] = True
@@ -20703,6 +20726,7 @@ def on_open(ws):
         # A connected socket is not trading-ready until this new session emits
         # a fresh trade tick. Never inherit ws_ready from a prior session.
         state["ws_ready"] = False
+        state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
         state["system_ready"] = False
         state.setdefault("diag", {})["ws_status"] = "CONNECTED_WAITING_TICK"
@@ -20814,16 +20838,33 @@ def ws_watchdog():
             now = time.time()
             with state_lock:
                 ws_tick = float(state.get("ws_last_tick") or 0)
+                ws_hb = float(state.get("ws_last_hb_ts") or 0)
                 connected = bool(state.get("ws_transport_connected"))
                 ws_state_ready = bool(state.get("ws_ready", False))
             ws_age = (now - ws_tick) if ws_tick else float("inf")
+            # Transport is alive if EITHER a real trade tick OR a Bitfinex
+            # heartbeat arrived recently. The trades channel emits [chanId,"hb"]
+            # every ~15s during quiet books — that is a server-signed liveness
+            # proof, not a phantom connection. Entry authorization still
+            # requires ws_last_tick freshness via _genuine_ws_transport_ready
+            # (unaffected here), so fail-closed entry gating is preserved.
+            hb_age = (now - ws_hb) if ws_hb else float("inf")
+            transport_alive = (
+                connected
+                and (
+                    (ws_tick and ws_age <= WATCHDOG_WS_STALE_SEC)
+                    or (ws_hb and hb_age <= WATCHDOG_WS_STALE_SEC)
+                )
+            )
+            # ws_fresh remains the strict "had a real trade tick lately" flag,
+            # used only to drive the reconnect-recovery bookkeeping below.
             ws_fresh = bool(
                 connected
                 and ws_state_ready
                 and ws_tick
                 and ws_age <= WATCHDOG_WS_STALE_SEC
             )
-            if not ws_fresh:
+            if not transport_alive:
                 # REST keeps dashboards and existing-position exits observable,
                 # but it must never satisfy or suppress the WS reconnect loop.
                 refresh_dashboard_market_snapshot(force=True)
@@ -20835,6 +20876,7 @@ def ws_watchdog():
                     logger.warning(
                         f"[WS] TRANSPORT/TICK STALE connected={connected} "
                         f"age={fmt(ws_age) if math.isfinite(ws_age) else 'never'}s "
+                        f"hb_age={fmt(hb_age) if math.isfinite(hb_age) else 'never'}s "
                         f"(count={ws_stale_count}) - nudging reconnect"
                     )
                     _close_ws_app()
