@@ -64,7 +64,7 @@ if ($Uninstall) {
 # may register this second-owner watchdog.
 $obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 $obsoleteOwnerEnabled = (
-  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  [Environment]::GetEnvironmentVariable("DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER", "Process") -ceq
   $obsoleteOwnerOptIn
 )
 if (-not $obsoleteOwnerEnabled) {

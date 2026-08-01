@@ -235,6 +235,16 @@ WS_ENTRY_FRESH_SEC = max(
     1.0,
     float(os.getenv("WS_ENTRY_FRESH_SEC", "60")),
 )
+# A live Bitfinex connection can keep emitting heartbeats while its subscribed
+# trades channel has silently stopped delivering data. Heartbeats still prevent
+# the aggressive 30s dead-transport reconnect, but a trade stream that remains
+# stale past the 60s entry window plus a 30s grace is recycled once. This keeps
+# quiet-tape tolerance without allowing a half-alive socket to block strategy
+# readiness indefinitely.
+WATCHDOG_WS_TRADE_STALE_SEC = max(
+    WS_ENTRY_FRESH_SEC + 30.0,
+    float(os.getenv("WATCHDOG_WS_TRADE_STALE_SEC", "90")),
+)
 REST_ENTRY_FRESH_SEC = max(
     1.0,
     float(os.getenv("REST_ENTRY_FRESH_SEC", "10")),
@@ -20943,6 +20953,24 @@ def ws_watchdog():
                     or (ws_hb and hb_age <= WATCHDOG_WS_STALE_SEC)
                 )
             )
+            # A heartbeat proves only that the socket is alive; it does not
+            # prove that the subscribed trades channel is still flowing. Give
+            # the 60s entry-freshness window another 30s to recover naturally,
+            # then recycle this partially alive connection.
+            trade_stream_stale = bool(
+                connected
+                and not startup_grace
+                and (
+                    (ws_tick and ws_age > WATCHDOG_WS_TRADE_STALE_SEC)
+                    or (
+                        not ws_tick
+                        and ws_connected_ts
+                        and connected_age > WATCHDOG_WS_TRADE_STALE_SEC
+                    )
+                )
+            )
+            if trade_stream_stale:
+                transport_alive = False
             # ws_fresh remains the strict "had a real trade tick lately" flag,
             # used only to drive the reconnect-recovery bookkeeping below.
             ws_fresh = bool(
@@ -20965,6 +20993,7 @@ def ws_watchdog():
                         f"age={fmt(ws_age) if math.isfinite(ws_age) else 'never'}s "
                         f"hb_age={fmt(hb_age) if math.isfinite(hb_age) else 'never'}s "
                         f"connected_age={fmt(connected_age) if math.isfinite(connected_age) else 'never'}s "
+                        f"trade_stream_stale={trade_stream_stale} "
                         f"(count={ws_stale_count}) - nudging reconnect"
                     )
                     _close_ws_app()
@@ -21533,7 +21562,9 @@ def _expired_entry_created_ts(source: dict) -> float:
         try:
             return float(raw)
         except (TypeError, ValueError):
-            pass
+            parsed = parse_ts(str(raw))
+            if parsed > 0:
+                return parsed
     return time.time()
 
 
@@ -21954,6 +21985,25 @@ def _expired_order_api_row(row: dict) -> dict:
     if out.get("dir"):
         out["dir"] = _normalize_order_side_to_dir(out.get("dir"))
     return _enrich_melbourne_time_fields(out)
+
+
+def _dashboard_expired_order_rows(rows, limit: int = MAX_EXPIRED_ORDERS) -> list:
+    """Return presentation rows for genuine lane orders/candidates only.
+
+    AI_SCAN is the shared direction-call coordinator and is contractually
+    incapable of placing an order. Its TTL evidence remains in the research
+    registry/CSV, but presenting it as an expired order creates a false trade.
+    """
+    visible = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and str(row.get("research_lane") or "").upper() != "AI_SCAN"
+    ]
+    return [
+        _expired_order_api_row(row)
+        for row in visible[-max(0, int(limit)) :]
+    ]
 
 def cleanup_expired_orders():
     now = time.time()
@@ -29865,8 +29915,14 @@ def _build_relay_execution_state_snapshot() -> dict:
             for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
             if isinstance(row, dict)
         ]
-        expired_orders_total = len(expired_orders)
-        recent_expired = copy.deepcopy(expired_orders[-MAX_EXPIRED_ORDERS:])
+        visible_expired = [
+            row
+            for row in expired_orders
+            if isinstance(row, dict)
+            and str(row.get("research_lane") or "").upper() != "AI_SCAN"
+        ]
+        expired_orders_total = len(visible_expired)
+        recent_expired = copy.deepcopy(visible_expired[-MAX_EXPIRED_ORDERS:])
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
             positions_copy,
@@ -29900,11 +29956,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         if isinstance(row, dict)
     ]
     snapshot["fidelity_trades"] = fidelity_trades
-    snapshot["expired_orders"] = [
-        _expired_order_api_row(row)
-        for row in recent_expired
-        if isinstance(row, dict)
-    ]
+    snapshot["expired_orders"] = _dashboard_expired_order_rows(recent_expired)
     snapshot["expired_orders_total"] = expired_orders_total
     snapshot["signal_info"] = {
         "active": bool(active_list),
@@ -30043,7 +30095,7 @@ def api_relay_state(force_rebuild: bool = False):
                 if tick_px and tick_px > 0:
                     oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
                 orders.append(oc)
-            expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
+            expired_orders_copy = copy.deepcopy(expired_orders)
         active_list, _exposure = _collect_dashboard_active_signals(
             pending_orders_copy,
             positions_copy,
@@ -30055,7 +30107,10 @@ def api_relay_state(force_rebuild: bool = False):
         snapshot["positions"] = positions_copy
         snapshot["trades"] = trades_for_relay
         snapshot["fidelity_trades"] = fidelity_trades
-        snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
+        snapshot["expired_orders"] = _dashboard_expired_order_rows(
+            expired_orders_copy,
+            _DASHBOARD_HISTORY_MAX,
+        )
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
             "count": len(active_list),
@@ -30310,8 +30365,14 @@ def _build_api_state_snapshot():
             raise TimeoutError("api-state snapshot timed out waiting for trade_lock")
         try:
             trades_copy = _snapshot_trades_for_api(session_start)
-            expired_orders_total = len(expired_orders)
-            expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
+            visible_expired = [
+                row
+                for row in expired_orders
+                if isinstance(row, dict)
+                and str(row.get("research_lane") or "").upper() != "AI_SCAN"
+            ]
+            expired_orders_total = len(visible_expired)
+            expired_orders_copy = copy.deepcopy(visible_expired[-_DASHBOARD_HISTORY_MAX:])
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
                     # Snapshot construction must never perform exchange I/O.
@@ -30363,7 +30424,10 @@ def _build_api_state_snapshot():
             if tid and not sig.get("fill_price"):
                 po = pending_by_tid.get(tid) or {}
                 sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
-        expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
+        expired_orders_copy = _dashboard_expired_order_rows(
+            expired_orders_copy,
+            _DASHBOARD_HISTORY_MAX,
+        )
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total

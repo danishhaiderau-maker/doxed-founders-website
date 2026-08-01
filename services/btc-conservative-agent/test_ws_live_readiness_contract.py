@@ -1145,6 +1145,26 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         self.assertTrue(ran)
         self.assertIn("close", calls)
 
+    def test_watchdog_recycles_heartbeat_only_partial_trade_stream(self):
+        """A fresh heartbeat must not mask a trades subscription that has
+        delivered no trade tick for the bounded 90-second recovery window."""
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_connected_ts": 10_000.0 - 300.0,
+                "ws_last_hb_ts": 10_000.0 - 5.0,
+                "ws_last_tick": 10_000.0 - 91.0,
+                "ws_ready": True,
+            }
+        )
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+
+        self.assertTrue(_run_watchdog_once(ns, now=10_000.0))
+        self.assertIn("close", calls)
+        self.assertIn("refresh", calls)
+
     def test_watchdog_threshold_is_30s(self):
         """WATCHDOG_WS_STALE_SEC default must be 30 (2x Bitfinex's 15s hb
         cadence), not the old 15s that caused the flap."""
@@ -1156,6 +1176,10 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         its own stricter freshness requirement."""
         fresh = _module_level_float_default("WS_ENTRY_FRESH_SEC")
         self.assertEqual(fresh, 60.0)
+        self.assertEqual(
+            _module_level_float_default("WATCHDOG_WS_TRADE_STALE_SEC"),
+            90.0,
+        )
         self.assertEqual(_module_level_float_default("REST_ENTRY_FRESH_SEC"), 10.0)
 
     def test_reconnect_resets_heartbeat_timestamp(self):
@@ -1248,6 +1272,7 @@ def _build_watchdog_namespace(self_now: float):
         "state": state,
         "state_lock": threading.RLock(),
         "WATCHDOG_WS_STALE_SEC": 30.0,
+        "WATCHDOG_WS_TRADE_STALE_SEC": 90.0,
         "fmt": lambda x: f"{x:.1f}",
         # Module-level ws_* globals the watchdog mutates.
         "ws_app": object(),

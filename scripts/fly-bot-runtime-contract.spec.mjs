@@ -53,6 +53,7 @@ const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url)
 const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
 const flyLockHelperPath = new URL('./fly-canonical-lock.ps1', import.meta.url);
 const homeLauncherPath = new URL('./home-stack-launcher.ps1', import.meta.url);
+const fastRecoverPath = new URL('./fast-recover-global.ps1', import.meta.url);
 const overnightGuardPath = new URL(
   './overnight-architecture-guard.ps1',
   import.meta.url,
@@ -301,5 +302,29 @@ test('desktop Start and Reset routes manage the mirror only', async () => {
   assert.doesNotMatch(
     launcher.match(/function Invoke-ResetFlyDesktopMirror[\s\S]*?^}/m)?.[0] ?? '',
     /fly-control|api\.machines\.dev|stop-bot|start-bot/,
+  );
+});
+
+test('desktop recovery rejects zombie mirror processes and restores watchdog ownership', async () => {
+  const launcher = await readFile(desktopMirrorPath, 'utf8');
+  const recovery = await readFile(fastRecoverPath, 'utf8');
+  const syncLoop = await readFile(flySyncLoopPath, 'utf8');
+  const sync = await readFile(flySyncPath, 'utf8');
+
+  assert.match(launcher, /syncHeartbeatMaxAgeSec\s*=\s*600/);
+  assert.match(launcher, /LastWriteTimeUtc/);
+  assert.match(launcher, /Stop-Process -Id \$syncPid -Force/);
+  assert.match(launcher, /Get-NetTCPConnection[\s\S]*LocalPort 7002/);
+  assert.match(launcher, /X-Desktop-Mirror/);
+  assert.match(launcher, /proxyEndpointAlive/);
+  assert.match(launcher, /unowned listener\(s\)/);
+  assert.match(syncLoop, /FileShare\]::None/);
+  assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
+  assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
+  assert.match(recovery, /Clear-HomeStackUserStopped/);
+  assert.match(recovery, /ensure-home-bridge\.ps1/);
+  assert.match(
+    recovery,
+    /Desktop command bridge did not become reachable on :\$bridgePort/,
   );
 });

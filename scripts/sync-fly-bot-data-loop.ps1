@@ -12,6 +12,7 @@ $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
+$guardFile = Join-Path $repoRoot ".fly-data-sync-loop.guard"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 
@@ -19,11 +20,19 @@ if (-not (Test-Path (Split-Path -Parent $logFile))) {
   New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
 }
 
-if (Test-Path -LiteralPath $lockFile) {
-  try {
-    $existingPid = [int](Get-Content -LiteralPath $lockFile -Raw)
-    if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) { exit 0 }
-  } catch { }
+# The PID marker is useful for recovery, but checking then writing it was not an
+# atomic lock. Hold an exclusive file handle for the lifetime of this loop so
+# two simultaneous Start desktop tools requests cannot create competing syncs.
+$guardStream = $null
+try {
+  $guardStream = [System.IO.File]::Open(
+    $guardFile,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+} catch {
+  exit 0
 }
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
@@ -101,4 +110,6 @@ try {
   }
 } finally {
   Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+  if ($guardStream) { $guardStream.Dispose() }
+  Remove-Item -LiteralPath $guardFile -Force -ErrorAction SilentlyContinue
 }

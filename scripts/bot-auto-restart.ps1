@@ -30,12 +30,12 @@ $repoRoot  = Split-Path -Parent $scriptDir
 # btc_conservative_agent.py when invoked by an old supervisor/scheduled task.
 $obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 $obsoleteOwnerEnabled = (
-  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  [Environment]::GetEnvironmentVariable("DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER", "Process") -ceq
   $obsoleteOwnerOptIn
 )
 if (-not $obsoleteOwnerEnabled) {
   if (
-    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    [Environment]::GetEnvironmentVariable("DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST", "Process") -ceq
     "NO_SIDE_EFFECTS"
   ) {
     Write-Error "Obsolete Windows bot restart monitor is quarantined; no process was started."

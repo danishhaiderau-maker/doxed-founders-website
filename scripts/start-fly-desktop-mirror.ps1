@@ -32,11 +32,50 @@ foreach ($name in @(
 # Start the local :7002 compatibility proxy. It has no AI or strategy code.
 $proxyPidFile = Join-Path $repoRoot ".fly-dashboard-proxy.pid"
 $proxyAlive = $false
+$proxyEndpointAlive = $false
+try {
+  $proxyProbe = Invoke-WebRequest `
+    -UseBasicParsing `
+    -Uri "http://127.0.0.1:7002/health" `
+    -TimeoutSec 8
+  $proxyEndpointAlive = (
+    [string]$proxyProbe.Headers["X-Desktop-Mirror"] -eq "fly"
+  )
+} catch { }
+$proxyListenerPids = @(
+  Get-NetTCPConnection `
+    -LocalAddress "127.0.0.1" `
+    -LocalPort 7002 `
+    -State Listen `
+    -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique
+)
 if (Test-Path -LiteralPath $proxyPidFile) {
   try {
     $proxyPid = [int](Get-Content -LiteralPath $proxyPidFile -Raw)
-    $proxyAlive = [bool](Get-Process -Id $proxyPid -ErrorAction SilentlyContinue)
+    $proxyAlive = [bool](
+      (Get-Process -Id $proxyPid -ErrorAction SilentlyContinue) -and
+      ($proxyEndpointAlive -or ($proxyPid -in $proxyListenerPids))
+    )
   } catch { }
+}
+# A recovery can be launched from a clean integration worktree while an older
+# read-only mirror (from the normal desktop checkout) is already healthy. Adopt
+# that sole listener instead of relying only on a worktree-local PID marker and
+# accidentally creating a second SO_REUSEADDR listener on Windows.
+if (-not $proxyAlive -and $proxyEndpointAlive) {
+  $proxyAlive = $true
+  if ($proxyListenerPids.Count -eq 1) {
+    $proxyPid = [int]$proxyListenerPids[0]
+    Set-Content -LiteralPath $proxyPidFile -Value "$proxyPid" -NoNewline -Encoding UTF8
+  }
+}
+if (-not $proxyAlive -and $proxyListenerPids.Count -gt 0) {
+  throw (
+    "Desktop mirror port 127.0.0.1:7002 already has $($proxyListenerPids.Count) " +
+    "unowned listener(s). Use the authenticated Reset desktop tools control; " +
+    "recovery will not start another proxy or terminate an unverified process."
+  )
 }
 if (-not $proxyAlive) {
   $proxyScript = Join-Path $scriptDir "fly-dashboard-proxy.py"
@@ -51,14 +90,29 @@ if (-not $proxyAlive) {
 
 # Start one incremental Fly data synchronizer.
 $syncLock = Join-Path $repoRoot ".fly-data-sync-loop.lock"
+$syncHeartbeat = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
+$syncHeartbeatMaxAgeSec = 600
 $syncAlive = $false
 if (Test-Path -LiteralPath $syncLock) {
   try {
     $syncPid = [int](Get-Content -LiteralPath $syncLock -Raw)
-    $syncAlive = [bool](Get-Process -Id $syncPid -ErrorAction SilentlyContinue)
+    $syncProcess = Get-Process -Id $syncPid -ErrorAction SilentlyContinue
+    if ($syncProcess -and $syncProcess.ProcessName -match "^(powershell|pwsh)$") {
+      $syncAgeSec = ((Get-Date) - $syncProcess.StartTime).TotalSeconds
+      $heartbeatAgeSec = if (Test-Path -LiteralPath $syncHeartbeat) {
+        ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $syncHeartbeat).LastWriteTimeUtc).TotalSeconds
+      } else {
+        $syncAgeSec
+      }
+      $syncAlive = ($heartbeatAgeSec -le $syncHeartbeatMaxAgeSec)
+      if (-not $syncAlive) {
+        Stop-Process -Id $syncPid -Force -ErrorAction SilentlyContinue
+      }
+    }
   } catch { }
 }
 if (-not $syncAlive) {
+  Remove-Item -LiteralPath $syncLock,$syncHeartbeat -Force -ErrorAction SilentlyContinue
   Start-Process -FilePath "powershell.exe" `
     -ArgumentList (
       "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"" +

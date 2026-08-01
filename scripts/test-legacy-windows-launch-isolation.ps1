@@ -103,7 +103,8 @@ foreach ($forbidden in @(
 
 $recovery = Read-RepoFile "scripts\fast-recover-global.ps1"
 Assert-Contract ($recovery.Contains("start-fly-desktop-mirror.ps1")) "global recovery starts the Fly desktop mirror"
-Assert-Contract ($recovery.Contains("home-stack-launcher.ps1")) "global recovery may restore the local command bridge"
+Assert-Contract ($recovery.Contains("ensure-home-bridge.ps1")) "global recovery restores one verified local command bridge"
+Assert-Contract ($recovery.Contains("Clear-HomeStackUserStopped")) "global recovery clears an obsolete voluntary-stop marker"
 foreach ($forbidden in @(
   "btc_conservative_agent.py",
   "Start-Process -FilePath `"python",

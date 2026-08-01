@@ -158,6 +158,7 @@ services/btc-conservative-agent/analyzer_mirror/
 .fly-dashboard-proxy.pid
 .fly-data-sync-loop.lock
 .fly-data-sync-loop.heartbeat.json
+.fly-data-sync-loop.guard
 services/btc-conservative-agent/research.db
 services/btc-conservative-agent/research.db-journal
 services/btc-conservative-agent/research/genome/*.jsonl

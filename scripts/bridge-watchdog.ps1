@@ -29,12 +29,12 @@ $repoRoot = Split-Path -Parent $scriptDir
 # forgotten scheduled task. Default execution is mirror/analyzer-only.
 $obsoleteOwnerOptIn = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 $obsoleteOwnerEnabled = (
-  (Get-Item -Path "env:DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER" -ErrorAction SilentlyContinue).Value -ceq
+  [Environment]::GetEnvironmentVariable("DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER", "Process") -ceq
   $obsoleteOwnerOptIn
 )
 if (-not $obsoleteOwnerEnabled) {
   if (
-    (Get-Item -Path "env:DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST" -ErrorAction SilentlyContinue).Value -ceq
+    [Environment]::GetEnvironmentVariable("DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST", "Process") -ceq
     "NO_SIDE_EFFECTS"
   ) {
     Write-Error "Obsolete bridge/Cloudflare watchdog is quarantined; no process was started."

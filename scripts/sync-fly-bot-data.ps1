@@ -46,9 +46,16 @@ if (Test-Path -LiteralPath $statePath) {
 }
 
 function Save-SyncState {
-  $stateTmp = "$statePath.tmp"
-  $syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
-  Move-Item -LiteralPath $stateTmp -Destination $statePath -Force
+  # A unique same-directory temporary file makes replacement atomic even if a
+  # stale worker is still unwinding. A fixed `.tmp` name let one worker move a
+  # different worker's file and caused the desktop analyzer sync to go dark.
+  $stateTmp = "$statePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    $syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+    Move-Item -LiteralPath $stateTmp -Destination $statePath -Force
+  } finally {
+    Remove-Item -LiteralPath $stateTmp -Force -ErrorAction SilentlyContinue
+  }
 }
 
 $base = $SourceUrl.TrimEnd("/")

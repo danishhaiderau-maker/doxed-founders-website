@@ -33,7 +33,7 @@ test('direction-only score gap and virtual chase approval survive the API mappin
           trade_id: 'scan-gap-30',
           dir: 'LONG',
           status: 'AWAITING_DASHBOARD_CHASE',
-          score_gap: 30,
+          directional_spread: 4,
           dashboard_virtual_chase_count: 2,
           planned_limit_price: 63_936,
           entry_limit_policy: 'STRUCTURAL_SR_V1',
@@ -48,7 +48,7 @@ test('direction-only score gap and virtual chase approval survive the API mappin
           trade_id: 'scan-gap-30',
           dir: 'LONG',
           status: 'AWAITING_DASHBOARD_CHASE',
-          score_gap: 30,
+          directional_spread: 4,
           dashboard_virtual_chase_count: 2,
           planned_limit_price: 63_936,
           entry_limit_policy: 'STRUCTURAL_SR_V1',
@@ -94,4 +94,62 @@ test('direction-only score gap and virtual chase approval survive the API mappin
   assert.deepEqual(dashboard.liveBook.activeSignals[0]?.selectedChaseBuckets, [3, 4]);
   assert.match(dashboard.aiReasoning, /Raw LONG\/SHORT gap: 30\/100 · execution bucket 3/);
   assert.doesNotMatch(dashboard.aiReasoning, /Win probability: 0%/);
+});
+
+test('normalized directional spread restores the raw gap and execution bucket', () => {
+  const bot: BotApiState = {
+    price: 64_000,
+    strategy_mode: 'RESEARCH',
+    last_ai: {
+      decision: 'APPROVE',
+      direction: 'SHORT',
+      confidence_requested: false,
+    },
+    last_approve_outcome: {
+      trade_id: 'cont-spread-4',
+      status: 'PENDING',
+      direction: 'SHORT',
+      reason: 'CHASE_BUCKET_WAIT',
+      ts: '2026-08-02T00:00:00.000Z',
+    },
+    chase_execution_buckets: {
+      '2_chases': true,
+      '3_chases': true,
+      '4_chases': true,
+    },
+    trades_map: {
+      'cont-spread-4': {
+        signal_ref: {
+          trade_id: 'cont-spread-4',
+          dir: 'SHORT',
+          status: 'AWAITING_DASHBOARD_CHASE',
+          directional_spread: 4,
+          dashboard_virtual_chase_count: 0,
+          planned_limit_price: 64_064,
+        },
+      },
+    },
+    signal_info: {
+      active: true,
+      count: 1,
+      signals: [
+        {
+          trade_id: 'cont-spread-4',
+          dir: 'SHORT',
+          status: 'AWAITING_DASHBOARD_CHASE',
+          directional_spread: 4,
+          dashboard_virtual_chase_count: 0,
+          planned_limit_price: 64_064,
+        },
+      ],
+    },
+  };
+
+  const dashboard = mapBotStateToDashboard(bot);
+
+  assert.equal(dashboard.liveBook.activeSignals[0]?.rawScoreGap, 40);
+  assert.equal(dashboard.liveBook.activeSignals[0]?.gapBucket, 4);
+  assert.equal(dashboard.pendingApproval?.rawScoreGap, 40);
+  assert.equal(dashboard.pendingApproval?.gapBucket, 4);
+  assert.deepEqual(dashboard.pendingApproval?.selectedChaseBuckets, [2, 3, 4]);
 });

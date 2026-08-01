@@ -221,6 +221,7 @@ export type BotApiState = {
       exit_reason?: string | null;
       status?: string;
       score_gap?: number;
+      directional_spread?: number;
       conviction_spread?: number;
       long_score_at_entry?: number;
       short_score_at_entry?: number;
@@ -331,6 +332,32 @@ function inBotSession(row: Record<string, unknown>, sessionStart: number): boole
   return ts <= 0 || ts >= sessionStart - 1;
 }
 
+function resolveRawScoreGap(
+  signal: Record<string, unknown> | undefined,
+  longScore: number | null,
+  shortScore: number | null,
+): number | null {
+  const explicitRawGap = optionalFiniteNumber(signal?.score_gap);
+  if (explicitRawGap != null) return Math.abs(explicitRawGap);
+
+  // When both raw AI scores exist, they are the most direct source of truth.
+  // The normalized spread is only a lossless fallback for compact rows that
+  // intentionally omitted those scores.
+  if (longScore != null && shortScore != null) {
+    return Math.abs(longScore - shortScore);
+  }
+
+  // Compact direction-only rows can retain the normalized 0-10 spread while
+  // omitting the original 0-100 scores. Restore the raw-gap scale used by the
+  // dashboard and its bucket controls (spread 4 => gap 40 => bucket 4).
+  const normalizedSpread = optionalFiniteNumber(
+    signal?.directional_spread ?? signal?.conviction_spread,
+  );
+  if (normalizedSpread != null) return Math.abs(normalizedSpread) * 10;
+
+  return null;
+}
+
 function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
   return rows.slice(-max).reverse();
 }
@@ -418,9 +445,11 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
         const ai = entry?.ai ?? {};
         const longScore = optionalFiniteNumber(s.long_score_at_entry ?? ai.long_score);
         const shortScore = optionalFiniteNumber(s.short_score_at_entry ?? ai.short_score);
-        const rawScoreGap =
-          optionalFiniteNumber(s.score_gap) ??
-          (longScore != null && shortScore != null ? Math.abs(longScore - shortScore) : null);
+        const rawScoreGap = resolveRawScoreGap(
+          s as Record<string, unknown>,
+          longScore,
+          shortScore,
+        );
         const chaseCount =
           optionalFiniteNumber(
             s.dashboard_virtual_chase_count ??
@@ -757,10 +786,8 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
     approvalSignal?.short_score_at_entry ?? approvalAi?.short_score ?? bot.last_ai?.short_score,
   );
   const approvalRawGap =
-    optionalFiniteNumber(approvalSignal?.score_gap) ??
-    (approvalLong != null && approvalShort != null
-      ? Math.abs(approvalLong - approvalShort)
-      : latestAiVerdict.rawScoreGap);
+    resolveRawScoreGap(approvalSignal, approvalLong, approvalShort) ??
+    latestAiVerdict.rawScoreGap;
   const selectedApprovalChaseBuckets = Object.entries(bot.chase_execution_buckets ?? {})
     .filter(([, enabled]) => enabled)
     .map(([key]) => Number.parseInt(key, 10))
