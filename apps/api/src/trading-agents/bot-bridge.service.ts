@@ -887,7 +887,27 @@ export class BotBridgeService {
     }
 
     const totalTrades = tradeCountRaw != null ? Number(tradeCountRaw) : 0;
-    const winRate = Number(analytics.win_rate ?? 0) || 0;
+    const explicitWinRate = Number(analytics.win_rate);
+    const aggregateWins = Number(analytics.wins);
+    const aggregateLosses = Number(analytics.losses);
+    const aggregateDecisions = aggregateWins + aggregateLosses;
+    const winRate = Number.isFinite(explicitWinRate)
+      ? explicitWinRate
+      : Number.isFinite(aggregateWins)
+        && Number.isFinite(aggregateLosses)
+        && aggregateWins >= 0
+        && aggregateLosses >= 0
+        && aggregateDecisions > 0
+        ? (aggregateWins / aggregateDecisions) * 100
+        : totalTrades === 0
+          ? 0
+          : null;
+    if (winRate == null) {
+      return this.serveStaleCumulativeMetrics(
+        now,
+        'canonical /api/state omitted cumulative win-rate evidence',
+      );
+    }
     const currentBalance =
       balanceRaw != null
         ? Number(balanceRaw)

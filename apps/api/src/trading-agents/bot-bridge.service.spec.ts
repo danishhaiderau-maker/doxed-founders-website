@@ -107,6 +107,37 @@ test('cumulative metrics bypass the slim Railway snapshot and fetch full Fly sta
   }
 });
 
+test('cumulative metrics derive win rate from aggregate wins and losses when the bot field is absent', async () => {
+  const originalFetch = globalThis.fetch;
+  const fullState = {
+    ...canonicalState,
+    account_balance: 491.15,
+    session_pnl_usd: -8.85,
+    trade_count_session: 20,
+    analytics: { total_trades: 20, wins: 9, losses: 11 },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify(fullState), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+
+  try {
+    const config = {
+      get: (name: string) => name === 'BOT_ADMIN_TOKEN' ? 'fly-admin-token' : undefined,
+    };
+    const snapshots = {
+      getCachedSnapshot: async () => ({ snapshot: null, at: null, snapshot_seq: null }),
+    };
+    const bridge = new BotBridgeService(config as never, snapshots as never);
+    const metrics = await bridge.fetchCumulativeSessionMetrics();
+
+    assert.equal(metrics?.trade_count, 20);
+    assert.equal(metrics?.win_rate, 45);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('locks every bridge route to the canonical Fly owner', async () => {
   const config = {
     get: (name: string) =>

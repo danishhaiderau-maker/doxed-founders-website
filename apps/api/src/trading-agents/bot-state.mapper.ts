@@ -34,6 +34,8 @@ export type BotApiState = {
   analytics?: {
     total_trades?: number;
     win_rate?: number;
+    wins?: number;
+    losses?: number;
     by_regime?: Record<string, unknown>;
     by_strategy?: Record<string, unknown>;
     exit_reasons?: Record<string, unknown>;

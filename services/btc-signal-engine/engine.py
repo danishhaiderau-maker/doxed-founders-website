@@ -33950,6 +33950,14 @@ def compute_analytics():
         analytics["ai_bands"][band]["pnl"] += pnl
         if pnl > 0:
             analytics["ai_bands"][band]["wins"] += 1
+    # Keep the aggregate contract complete. The Agent Hub reads this field
+    # from authenticated /api/state; previously compute_analytics() replaced
+    # update_analytics_summary()'s payload and silently dropped win_rate,
+    # causing a missing metric to render as a real-looking 0.0%.
+    analytics["win_rate"] = round(
+        100.0 * analytics["wins"] / analytics["total_trades"],
+        2,
+    ) if analytics["total_trades"] else 0.0
     with state_lock:
         state["analytics"] = analytics
         state["analytics_ts"] = utc_iso()
