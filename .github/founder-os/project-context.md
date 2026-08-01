@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-chore: refresh Bitfinex policy and signal mirrors
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
