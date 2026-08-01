@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix(fly): separate liveness from strategy readiness
+fix(agent-hub): restore truthful Fly and relay visibility
 
 ## Last Activity
 
