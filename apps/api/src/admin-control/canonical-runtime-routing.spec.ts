@@ -46,6 +46,72 @@ test('admin pause disarms the canonical process without stopping infrastructure'
   assert.equal(invalidations, 1);
 });
 
+test('paper force-flat pauses first, closes exact trades, and proves the final book', async () => {
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let reads = 0;
+  const bridge = {
+    proxyBotPost: async (path: string, body: Record<string, unknown>) => {
+      calls.push({ path, body });
+      if (path === '/api/pause') {
+        return { ok: true, data: { status: 'paused', execution_paused: true } };
+      }
+      return { ok: true, data: { status: 'closed' } };
+    },
+    invalidateCache: () => undefined,
+    fetchPublicShowcaseState: async () => {
+      reads += 1;
+      return reads === 1
+        ? {
+            positions: [{ trade_id: 'paper-1' }, { trade_id: 'paper-2' }],
+            orders: [],
+          }
+        : { positions: [], orders: [] };
+    },
+  };
+  const service = new AdminControlService(
+    {} as never,
+    bridge as never,
+    {} as never,
+    {} as never,
+  );
+
+  const result = await service.forceFlatShowcasePaper();
+  assert.equal(result.ok, true);
+  assert.equal(result.paused, true);
+  assert.equal(result.closedPositions, 2);
+  assert.equal(result.remainingPositions, 0);
+  assert.equal(result.remainingOrders, 0);
+  assert.deepEqual(calls, [
+    { path: '/api/pause', body: {} },
+    { path: '/api/positions/close', body: { trade_id: 'paper-1' } },
+    { path: '/api/positions/close', body: { trade_id: 'paper-2' } },
+  ]);
+});
+
+test('paper force-flat refuses blind closes when the exact Fly book is unavailable', async () => {
+  const calls: string[] = [];
+  const bridge = {
+    proxyBotPost: async (path: string) => {
+      calls.push(path);
+      return { ok: true, data: { status: 'paused', execution_paused: true } };
+    },
+    invalidateCache: () => undefined,
+    fetchPublicShowcaseState: async () => null,
+  };
+  const service = new AdminControlService(
+    {} as never,
+    bridge as never,
+    {} as never,
+    {} as never,
+  );
+
+  const result = await service.forceFlatShowcasePaper();
+  assert.equal(result.ok, false);
+  assert.equal(result.paused, true);
+  assert.deepEqual(calls, ['/api/pause']);
+  assert.match(result.message, /no blind closes/i);
+});
+
 test('admin resume targets the existing canonical Fly process only', async () => {
   const calls: string[] = [];
   const bridge = {

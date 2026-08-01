@@ -4595,6 +4595,21 @@ export function pauseTradingAgent(token: string) {
   );
 }
 
+export function forceFlatShowcasePaper(token: string) {
+  return apiFetch<{
+    ok: boolean;
+    paused: boolean;
+    closedPositions: number;
+    remainingPositions: number | null;
+    remainingOrders: number | null;
+    message: string;
+  }>(
+    '/admin-control/agent/force-flat-paper',
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function resumeTradingAgent(token: string) {
   return apiFetch<{ ok: boolean; error?: string; message?: string; resumed?: boolean; data?: unknown }>(
     '/admin-control/agent/resume',

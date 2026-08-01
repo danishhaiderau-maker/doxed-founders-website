@@ -192,6 +192,28 @@ export function ExchangeHirePanel({
               onAutoStop={onSyncProtectionBreach}
               autoStopBusy={syncProtectionBusy}
             />
+            {onSyncProtectionBreach ? (
+              <div className="mt-3 rounded-xl border border-red-500/30 bg-red-950/20 p-3">
+                <p className="text-[11px] text-red-100/80">
+                  Emergency recovery cancels verified unfilled Bitfinex entries, closes only
+                  platform-managed copy positions, and leaves the relay paused. It never resumes
+                  trading automatically.
+                </p>
+                <button
+                  type="button"
+                  disabled={syncProtectionBusy}
+                  onClick={() => {
+                    const confirmed = window.confirm(
+                      'Emergency flatten Bitfinex copy trading? This will cancel managed pending orders, market-close managed copy positions, and keep the relay PAUSED.',
+                    );
+                    if (confirmed) onSyncProtectionBreach({ flatten: true });
+                  }}
+                  className="mt-2 w-full rounded-lg border border-red-500/50 bg-red-700/30 px-3 py-2 text-xs font-bold text-red-100 transition hover:bg-red-700/45 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {syncProtectionBusy ? 'Flattening and verifyingâ€¦' : 'Emergency flatten & pause'}
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
