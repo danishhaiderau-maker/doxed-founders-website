@@ -1059,6 +1059,43 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         # And no stale-nudge refresh was triggered.
         self.assertNotIn("refresh", calls)
 
+    def test_watchdog_allows_first_heartbeat_window_after_subscribe(self):
+        """A fresh subscription must survive long enough to receive the
+        first ~15s Bitfinex heartbeat when no trade tick arrives immediately."""
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_connected_ts": 10_000.0 - 9.0,
+                "ws_last_hb_ts": None,
+                "ws_last_tick": None,
+                "ws_ready": False,
+            }
+        )
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+
+        self.assertTrue(_run_watchdog_once(ns, now=10_000.0))
+        self.assertNotIn("close", calls)
+        self.assertNotIn("refresh", calls)
+
+    def test_watchdog_reconnects_if_first_frame_never_arrives_after_grace(self):
+        ns, calls = _build_watchdog_namespace(self_now=10_000.0)
+        ns["state"].update(
+            {
+                "ws_transport_connected": True,
+                "ws_connected_ts": 10_000.0 - 31.0,
+                "ws_last_hb_ts": None,
+                "ws_last_tick": None,
+                "ws_ready": False,
+            }
+        )
+        ns["_close_ws_app"] = lambda *a, **k: calls.append("close")
+        ns["refresh_dashboard_market_snapshot"] = lambda *a, **k: calls.append("refresh")
+
+        self.assertTrue(_run_watchdog_once(ns, now=10_000.0))
+        self.assertIn("close", calls)
+
     def test_watchdog_triggers_reconnect_when_both_tick_and_hb_stale(self):
         """Safety check: heartbeat tolerance does not silence genuinely dead
         transports. If both tick and hb are older than the threshold, the
@@ -1149,6 +1186,7 @@ def _build_watchdog_namespace(self_now: float):
     state = {
         "ws_last_tick": None,
         "ws_last_hb_ts": None,
+        "ws_connected_ts": None,
         "ws_transport_connected": False,
         "ws_ready": False,
         "system_ready": False,

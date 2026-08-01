@@ -20839,6 +20839,7 @@ def ws_watchdog():
             with state_lock:
                 ws_tick = float(state.get("ws_last_tick") or 0)
                 ws_hb = float(state.get("ws_last_hb_ts") or 0)
+                ws_connected_ts = float(state.get("ws_connected_ts") or 0)
                 connected = bool(state.get("ws_transport_connected"))
                 ws_state_ready = bool(state.get("ws_ready", False))
             ws_age = (now - ws_tick) if ws_tick else float("inf")
@@ -20849,9 +20850,26 @@ def ws_watchdog():
             # requires ws_last_tick freshness via _genuine_ws_transport_ready
             # (unaffected here), so fail-closed entry gating is preserved.
             hb_age = (now - ws_hb) if ws_hb else float("inf")
+            connected_age = (
+                (now - ws_connected_ts)
+                if ws_connected_ts
+                else float("inf")
+            )
+            # A newly subscribed channel needs one full heartbeat window to
+            # deliver its first trade or [chanId,"hb"] frame. Without this
+            # grace, the 3s watchdog closes the socket after only a few
+            # iterations, before Bitfinex's ~15s idle heartbeat can arrive,
+            # creating an endless connect/subscribe/reconnect loop.
+            startup_grace = bool(
+                connected
+                and ws_connected_ts
+                and 0 <= connected_age <= WATCHDOG_WS_STALE_SEC
+            )
             transport_alive = (
                 connected
                 and (
+                    startup_grace
+                    or
                     (ws_tick and ws_age <= WATCHDOG_WS_STALE_SEC)
                     or (ws_hb and hb_age <= WATCHDOG_WS_STALE_SEC)
                 )
@@ -20877,6 +20895,7 @@ def ws_watchdog():
                         f"[WS] TRANSPORT/TICK STALE connected={connected} "
                         f"age={fmt(ws_age) if math.isfinite(ws_age) else 'never'}s "
                         f"hb_age={fmt(hb_age) if math.isfinite(hb_age) else 'never'}s "
+                        f"connected_age={fmt(connected_age) if math.isfinite(connected_age) else 'never'}s "
                         f"(count={ws_stale_count}) - nudging reconnect"
                     )
                     _close_ws_app()
