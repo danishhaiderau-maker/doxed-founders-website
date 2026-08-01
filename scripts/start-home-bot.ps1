@@ -67,7 +67,10 @@ try {
   # an age-based grace window.
   $starterAgeSec = [double]::PositiveInfinity
   if ($recordedStarterPid -gt 0) {
-    $starterProcess = Get-Process -Id $recordedStarterPid -ErrorAction SilentlyContinue
+    $starterProcess = $null
+    try {
+      $starterProcess = [System.Diagnostics.Process]::GetProcessById($recordedStarterPid)
+    } catch { }
     if ($starterProcess -and $starterProcess.StartTime) {
       $starterAgeSec = [Math]::Max(0, ((Get-Date) - $starterProcess.StartTime).TotalSeconds)
     }

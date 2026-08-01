@@ -19,6 +19,9 @@ const startEverything = read("home-stack-start-everything.ps1");
 const autoWire = read("auto-wire-after-tunnel.ps1");
 const startBot = read("start-home-bot.ps1");
 const botAutoRestart = read("bot-auto-restart.ps1");
+const startAnalyzer = read("start-home-analyzer.ps1");
+const analyzerAutoRestart = read("analyzer-auto-restart.ps1");
+const flyDataSyncLoop = read("sync-fly-bot-data-loop.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
 const health = read("home-stack-health.ps1");
@@ -126,7 +129,19 @@ assert.match(
 assert.match(botAutoRestart, /\$p\.StartTime/);
 assert.match(botAutoRestart, /\$p\.WaitForExit\(2000\)/);
 assert.match(startBot, /\.home-bot-starter\.pid/);
-assert.match(read("start-home-analyzer.ps1"), /\.home-analyzer-starter\.pid/);
+assert.match(startAnalyzer, /\.home-analyzer-starter\.pid/);
+assert.match(startAnalyzer, /DoxxedCrypto\\locks/);
+assert.match(startAnalyzer, /home-analyzer-start-\$AnalyzerPort\.lock/);
+assert.match(startAnalyzer, /home-analyzer-auto-restart-\$AnalyzerPort\.lock/);
+assert.match(startAnalyzer, /Test-MachineAnalyzerMonitorActive/);
+assert.match(startAnalyzer, /Machine-wide analyzer supervisor already active/);
+assert.match(analyzerAutoRestart, /DoxxedCrypto\\locks/);
+assert.match(analyzerAutoRestart, /home-analyzer-auto-restart-\$Port\.lock/);
+assert.match(analyzerAutoRestart, /FileShare\]::None/);
+assert.match(analyzerAutoRestart, /\$lockHandle\.Dispose\(\)/);
+assert.match(flyDataSyncLoop, /DoxxedCrypto\\locks/);
+assert.match(flyDataSyncLoop, /fly-data-sync-loop\.guard/);
+assert.match(flyDataSyncLoop, /FileShare\]::None/);
 assert.match(
   startEverything,
   /start-home-analyzer\.ps1"\)\s+@\(\s*"-Port",\s*"\$AnalyzerPort",\s*"-NoWait"/,

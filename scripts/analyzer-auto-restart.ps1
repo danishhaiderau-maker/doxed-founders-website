@@ -43,7 +43,14 @@ $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
 }
 $logsDir   = Join-Path $repoRoot "logs"
 $pidFile   = Join-Path $repoRoot ".home-analyzer.pid"
-$lockFile  = Join-Path $repoRoot ".home-analyzer-auto-restart.lock"
+$machineStateBase = if ($env:LOCALAPPDATA) {
+  $env:LOCALAPPDATA
+} else {
+  [System.IO.Path]::GetTempPath()
+}
+$machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
+New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
+$lockFile  = Join-Path $machineLockDir "home-analyzer-auto-restart-$Port.lock"
 $restartLog = Join-Path $logsDir "analyzer-auto-restart.log"
 
 # Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
@@ -54,42 +61,27 @@ $restartLog = Join-Path $logsDir "analyzer-auto-restart.log"
 
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 
-# --- Single-instance lock -----------------------------------------------------
-# Only one auto-restart monitor should ever run. If a stale lock points at a dead
-# PID, reclaim it; if a live monitor is already running, exit silently.
-function Test-AnalyzerMonitorAlive([int]$ProcId) {
-  if ($ProcId -le 0) { return $false }
-  return (Test-ProcessIdAliveFast $ProcId)
+# --- Machine-wide single-instance lock ---------------------------------------
+# Worktrees share the same desktop services. A repo-local PID marker allowed an
+# old integration worktree's monitor to revive a second analyzer after its
+# engine was intentionally stopped. Hold one exclusive handle for this port so
+# exactly one monitor can own recovery across every checkout.
+$lockHandle = $null
+try {
+  $lockHandle = [System.IO.File]::Open(
+    $lockFile,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+  $lockBytes = [System.Text.Encoding]::UTF8.GetBytes("$PID")
+  $lockHandle.SetLength(0)
+  $lockHandle.Write($lockBytes, 0, $lockBytes.Length)
+  $lockHandle.Flush($true)
+} catch {
+  if ($lockHandle) { try { $lockHandle.Dispose() } catch { } }
+  exit 0
 }
-
-function Stop-StaleAnalyzerCrashMonitors([int]$ExceptPid = 0) {
-  $killed = @()
-  $monitorPidFile = Join-Path $repoRoot ".home-analyzer-crash-monitor.pid"
-  if (Test-Path -LiteralPath $monitorPidFile) {
-    try {
-      $oldPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
-      if ($oldPid -gt 0 -and ($ExceptPid -le 0 -or $oldPid -ne $ExceptPid)) {
-        Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-        $killed += $oldPid
-      }
-    } catch { }
-  }
-  return $killed
-}
-
-function Test-LockHeldByLive {
-  if (-not (Test-Path $lockFile)) { return $false }
-  try {
-    $raw = (Get-Content $lockFile -Raw -ErrorAction SilentlyContinue)
-    $lockPid = [int]"$raw".Trim()
-    if ($lockPid -le 0) { return $false }
-    return (Test-AnalyzerMonitorAlive $lockPid)
-  } catch { return $false }
-}
-
-Stop-StaleAnalyzerCrashMonitors -ExceptPid $PID | Out-Null
-if (Test-LockHeldByLive) { exit 0 }
-Set-Content -Path $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 $lockHeld = $true
 try {
   # --- Least-privilege analyzer environment -----------------------------------
@@ -369,6 +361,9 @@ try {
     Start-Sleep -Seconds 2
   }
 } finally {
+  if ($lockHandle) {
+    try { $lockHandle.Dispose() } catch { }
+  }
   if ($lockHeld) {
     try { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue } catch { }
   }

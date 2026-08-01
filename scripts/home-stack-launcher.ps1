@@ -69,13 +69,13 @@ function Stop-RecordedMirrorProcess(
   try {
     $recordedPid = [int](Get-Content -LiteralPath $markerPath -Raw)
     if ($recordedPid -gt 0) {
-      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$recordedPid" -ErrorAction SilentlyContinue
-      $commandLine = [string]$process.CommandLine
+      $processAlive = Test-ProcessIdAliveFast $recordedPid
+      $commandLine = [string](Get-ProcessCommandLineFast $recordedPid)
       $matchesExpectedProcess = @(
         $ExpectedCommandFragments |
           Where-Object { $commandLine -like "*$_*" }
       ).Count -gt 0
-      if ($process -and $matchesExpectedProcess) {
+      if ($processAlive -and $matchesExpectedProcess) {
         Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
       }
     }

@@ -23,7 +23,15 @@ $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
   $agentDir
 }
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
-$lockFile = Join-Path $repoRoot ".home-analyzer-start.lock"
+$machineStateBase = if ($env:LOCALAPPDATA) {
+  $env:LOCALAPPDATA
+} else {
+  [System.IO.Path]::GetTempPath()
+}
+$machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
+New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
+$lockFile = Join-Path $machineLockDir "home-analyzer-start-$AnalyzerPort.lock"
+$monitorLockFile = Join-Path $machineLockDir "home-analyzer-auto-restart-$AnalyzerPort.lock"
 $starterPidFile = Join-Path $repoRoot ".home-analyzer-starter.pid"
 
 function Test-PortOpen([int]$P) {
@@ -64,6 +72,24 @@ function Wait-ForKey {
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
 }
 
+function Test-MachineAnalyzerMonitorActive {
+  if (-not (Test-Path -LiteralPath $monitorLockFile)) { return $false }
+  $probe = $null
+  try {
+    $probe = [System.IO.File]::Open(
+      $monitorLockFile,
+      [System.IO.FileMode]::OpenOrCreate,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+    return $false
+  } catch {
+    return $true
+  } finally {
+    if ($probe) { $probe.Dispose() }
+  }
+}
+
 if (-not (Test-Path $agentDir)) {
   Write-Host "Agent dir not found: $agentDir" -ForegroundColor Red
   Wait-ForKey
@@ -90,6 +116,17 @@ try {
   }
 }
 Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
+
+# A monitor from any checkout owns both analyzer recovery and the :9001
+# dashboard. Do not launch a competing engine merely because a report-version
+# refresh is still in progress; the machine-wide owner will recover it.
+if (Test-MachineAnalyzerMonitorActive) {
+  Write-Host "Machine-wide analyzer supervisor already active - not starting a duplicate." -ForegroundColor Yellow
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  if (-not $NoWait) { Wait-ForKey }
+  exit 0
+}
 
 Set-Location $agentDir
 foreach ($secretName in @(

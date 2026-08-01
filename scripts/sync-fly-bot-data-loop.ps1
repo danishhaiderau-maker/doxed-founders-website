@@ -12,7 +12,14 @@ $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
-$guardFile = Join-Path $repoRoot ".fly-data-sync-loop.guard"
+$machineStateBase = if ($env:LOCALAPPDATA) {
+  $env:LOCALAPPDATA
+} else {
+  [System.IO.Path]::GetTempPath()
+}
+$machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
+New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
+$guardFile = Join-Path $machineLockDir "fly-data-sync-loop.guard"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 
