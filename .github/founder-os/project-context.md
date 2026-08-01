@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-chore: reduce idle cloud polling and builds
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
