@@ -71,7 +71,11 @@ def test_fly_has_strict_readiness_and_restart_contract():
     assert "@app.route('/ready')" in BOT
     assert '"force_paper_mode": force_paper_mode' in BOT
     assert '"relay_configured": relay_configured' in BOT
-    assert 'path = "/ready"' in FLY_CONFIG
+    # Fly routing proves process liveness. The separate /ready route remains
+    # strict strategy readiness and may intentionally return 503 while the
+    # market is quiet or execution is gated.
+    assert 'path = "/health"' in FLY_CONFIG
+    assert 'path = "/ready"' not in FLY_CONFIG
     assert 'policy = "always"' in FLY_CONFIG
     assert "k: state.get(k)" in BOT
 
