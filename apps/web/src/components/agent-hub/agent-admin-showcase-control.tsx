@@ -120,7 +120,7 @@ function cmdTimeoutMs(id: string): number {
 /** Desktop observability only. The launcher lock keeps strategy/execution on Fly.io. */
 const START_SHOWCASE: HomeCmd = {
   id: 'start-showcase',
-  label: '▶ Start desktop tools',
+  label: '▶ Start local analyzer & mirror',
   hint: 'Start the :7002 Fly proxy, Fly data mirror, and desktop analyzer :9001. Fly remains the sole trader.',
   path: '/cmd/start-mirror',
   tone: 'primary',
@@ -128,7 +128,7 @@ const START_SHOWCASE: HomeCmd = {
 
 const STOP_SHOWCASE: HomeCmd = {
   id: 'stop-showcase',
-  label: '■ Stop desktop tools',
+  label: '■ Stop local analyzer & mirror',
   hint: 'Stop the desktop proxy, analyzer, and optional tunnel. This does not stop the Fly trading owner.',
   path: '/cmd/stop-all-global',
   tone: 'danger',
@@ -437,17 +437,18 @@ export function AgentAdminShowcaseControl({
       </p>
 
       {launcherOnline === false && (
-        <p className="mt-2 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-          Desktop bridge :7810 is offline — local Start/Stop controls are unavailable. Fly trading is separate
-          and may still be online. Run <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then refresh.
+        <p className="mt-2 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2 text-xs text-zinc-400">
+          Optional local control bridge :7810 is offline. This affects only the PC analyzer/mirror controls;
+          Fly trading and its server-side risk manager continue independently. Start{' '}
+          <code className="text-zinc-300">RESTART-LAUNCHER.cmd</code> only when local research tools are needed.
         </p>
       )}
 
       <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
         <p className="font-semibold text-zinc-200">Desktop observability (optional)</p>
         <p className="mt-1.5 text-zinc-400">
-          <strong className="text-zinc-300">Start desktop tools</strong> starts the Fly dashboard proxy, bounded data
-          synchronization, and analyzer. <strong className="text-zinc-300">Stop desktop tools</strong> stops only
+          <strong className="text-zinc-300">Start local analyzer &amp; mirror</strong> starts the Fly dashboard proxy, bounded data
+          synchronization, and analyzer. <strong className="text-zinc-300">Stop local analyzer &amp; mirror</strong> stops only
           those local viewers. The production bot keeps running on Fly when this PC is off.
         </p>
         <p className="mt-2 text-[10px] text-zinc-500">
@@ -469,7 +470,11 @@ export function AgentAdminShowcaseControl({
           ok={Boolean(status?.analyzer?.online)}
           sub="Reads synchronized Fly data"
         />
-        <StatusChip label="Desktop control bridge :7810" ok={launcherOnline === true} />
+        <StatusChip
+          label="Optional local control :7810"
+          ok={launcherOnline === true}
+          sub="Offline is safe; Fly remains active"
+        />
       </div>
 
       <div className="mt-4 flex flex-wrap gap-3">

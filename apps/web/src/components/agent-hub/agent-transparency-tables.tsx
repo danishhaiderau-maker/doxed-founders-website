@@ -87,7 +87,10 @@ export function AgentTransparencyTables({
 }: {
   liveBook?: TradingAgentDashboardState['liveBook'];
   maxRows?: number;
-  /** Public showcase — positions, orders, trades only (no signals / AI columns). */
+  /** Public execution-only view — one real exchange position / resting order /
+   *  completed trades plus the session-scoped active relay signals and this-session
+   *  expired orders. Omits the showcase source-bot's AI columns (raw gap, chase buckets,
+   *  gross/fees/funding). */
   executionOnly?: boolean;
 }) {
   const sourceBook = liveBook ?? EMPTY_LIVE_BOOK;
@@ -163,6 +166,37 @@ export function AgentTransparencyTables({
     o.mode,
   ]);
 
+  // Live-copy active signals and expired orders come from the SUBSCRIBER session
+  // book, which is scoped to this user's relay copy session. selectLiveExecutionBook
+  // strips them (the public execution-only view historically only showed the
+  // real exchange position / resting order / closed trades), but the subscriber
+  // backend (mapSubscriberExchangeLiveBook) does populate them — pending relay
+  // intents and this-session expired cycles are meaningful at session scope, so
+  // we surface them here directly from the source book. The slim header set
+  // omits the showcase-only AI columns (raw gap / chase buckets) which do not
+  // exist for a copy subscriber.
+  const liveSignalRows = sourceBook.activeSignals.slice(0, cap).map((s) => [
+    displayMelbourneTime(s.time),
+    s.tradeId ?? '—',
+    s.direction,
+    s.regime ?? '—',
+    s.strategy ?? 'COPY',
+    s.trigger ?? 'RELAY',
+    s.signalPrice != null && s.signalPrice > 0 ? fmtPrice(s.signalPrice) : '—',
+    s.waitingReason ?? s.outcome,
+    s.fillPrice != null ? fmtPrice(s.fillPrice) : '—',
+    s.exitReason ?? '—',
+  ]);
+
+  const liveExpiredRows = sourceBook.expiredOrders.slice(0, cap).map((o) => [
+    displayMelbourneTime(o.createdTime ?? o.time),
+    displayMelbourneTime(o.expiredTime ?? o.time),
+    o.direction,
+    fmtPrice(o.limitPrice),
+    String(o.ageMin),
+    o.reason,
+  ]);
+
   const tradeRows = book.trades.slice(0, cap).map((t) => {
     // pnlPct defaults to 0 when the close path didn't record pnl_margin_pct
     // (already-flat / immediate-flat reconciles). Showing "+0.00%" for a trade
@@ -214,6 +248,38 @@ export function AgentTransparencyTables({
             emptyMessage="No resting order."
           />
         ) : null}
+        <MiniTable
+          title="Active relay signals"
+          subtitle="Relay intents the copy engine is actioning on your exchange this session — scoped to your session only"
+          headers={[
+            'Time (Melbourne)',
+            'Trade ID',
+            'Dir',
+            'Regime',
+            'Strategy',
+            'Trigger',
+            'Signal price',
+            'Status',
+            'Fill price',
+            'Exit reason',
+          ]}
+          rows={liveSignalRows}
+          emptyMessage="No active relay signal on your session right now."
+        />
+        <MiniTable
+          title="Expired / blocked relay signals"
+          subtitle="Copy intents that ended without a live position. The reason states whether an exchange limit expired, was cancelled, or no order was created."
+          headers={[
+            'Created (Melbourne)',
+            'Expired (Melbourne)',
+            'Dir',
+            'Limit price',
+            'Age min',
+            'Reason',
+          ]}
+          rows={liveExpiredRows}
+          emptyMessage="No expired or blocked relay signals on your session."
+        />
         <MiniTable
           title="Completed trades & P/L"
           subtitle="Realized Bitfinex results — one row per completed trade"

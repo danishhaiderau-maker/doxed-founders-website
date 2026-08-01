@@ -177,7 +177,7 @@ export function mapSubscriberExchangeLiveBook(input: {
     if (row.status === 'EXPIRED' || (row.status === 'PENDING_ENTRY' && !cycleLive)) {
       const ageMin = Math.max(
         0,
-        Math.round((Date.now() - row.createdAt.getTime()) / 60_000),
+        Math.round((row.updatedAt.getTime() - row.createdAt.getTime()) / 60_000),
       );
       expiredOrders.push({
         time: fmtTime(row.updatedAt),

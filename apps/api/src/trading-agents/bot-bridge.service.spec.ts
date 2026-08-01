@@ -30,6 +30,37 @@ function makeBridge(snapshot: Record<string, unknown> | null = null, at: Date | 
   return new BotBridgeService(config as never, snapshots as never);
 }
 
+test('canonical cumulative-state fallback authenticates to protected Fly /api/state', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedHeaders: Headers | null = null;
+  globalThis.fetch = async (_input, init) => {
+    capturedHeaders = new Headers(init?.headers);
+    return new Response(JSON.stringify(canonicalState), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const config = {
+      get: (name: string) => name === 'BOT_ADMIN_TOKEN' ? 'fly-admin-token' : undefined,
+    };
+    const snapshots = {
+      getCachedSnapshot: async () => ({ snapshot: null, at: null, snapshot_seq: null }),
+    };
+    const bridge = new BotBridgeService(config as never, snapshots as never);
+    const state = await bridge.fetchShowcaseCanonicalState(true);
+    assert.equal(state?.bot_instance_id, canonicalState.bot_instance_id);
+    assert.ok(capturedHeaders);
+    assert.equal(
+      (capturedHeaders as Headers).get('X-Bot-Admin-Token'),
+      'fly-admin-token',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('locks every bridge route to the canonical Fly owner', async () => {
   const config = {
     get: (name: string) =>

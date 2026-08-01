@@ -422,9 +422,15 @@ export class BotBridgeService {
     }
     const cf = await this.resolveBotUrl();
     try {
+      const adminToken = this.config.get<string>('BOT_ADMIN_TOKEN')?.trim();
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        'User-Agent': 'doxxedcrypto-sync/1.0',
+      };
+      if (adminToken) headers['X-Bot-Admin-Token'] = adminToken;
       const res = await fetch(`${cf}/api/state`, {
         signal: AbortSignal.timeout(20_000),
-        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-sync/1.0' },
+        headers,
       });
       if (!res.ok) {
         this.logger.warn(`Canonical showcase ${cf}/api/state HTTP ${res.status}`);
