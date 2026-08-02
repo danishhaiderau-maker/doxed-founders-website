@@ -16723,6 +16723,49 @@ def dashboard_virtual_chase_submit_ready(signal: dict) -> bool:
     return vcount >= mn
 
 
+def _resolve_selected_virtual_submit_limit(signal: dict) -> Optional[tuple]:
+    """Carry the selected virtual-chase price into the first resting limit.
+
+    The virtual gate has already advanced ``chase_3plus_virtual_limit`` toward
+    market. Re-running the normal deterministic resolver at promotion would
+    reset that price to the original 0.1% anchor while still labelling the
+    order as chase 2/3/4. That breaks both execution fidelity and the research
+    cohort. Preserve the chased price and its original anchor as separate
+    values so later visible chase steps retain the correct gap baseline.
+    """
+    if not isinstance(signal, dict) or not dashboard_virtual_chase_submit_ready(signal):
+        return None
+    try:
+        virtual_limit = float(
+            signal.get("chase_3plus_virtual_limit")
+            or signal.get("dashboard_virtual_limit")
+            or signal.get("limit_price")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return None
+    if virtual_limit <= 0:
+        return None
+    try:
+        original_limit = float(
+            signal.get("chase_3plus_original_limit")
+            or signal.get("original_limit_price")
+            or virtual_limit
+        )
+    except (TypeError, ValueError):
+        original_limit = virtual_limit
+    if original_limit <= 0:
+        original_limit = virtual_limit
+    entry_mode = str(signal.get("entry_mode") or ENTRY_MODE_AI_DIRECT)
+    return virtual_limit, entry_mode, {
+        "reanchored": bool(signal.get("smart_submit_reanchored")),
+        "immediate_chase": True,
+        "original_planned": original_limit,
+        "preserve_original_limit": True,
+        "selected_virtual_chase_count": _signal_virtual_chase_count(signal),
+    }
+
+
 def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict:
     """Snapshot of dashboard execution gates for API / logging."""
     bands = get_ai_execution_bands()
@@ -18094,6 +18137,14 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         return False
     direction = signal.get("final_direction") or _signal_direction(signal)
     limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
+    original_limit_price = limit_price
+    if smart_meta.get("preserve_original_limit"):
+        try:
+            preserved_original = float(smart_meta.get("original_planned") or 0)
+        except (TypeError, ValueError):
+            preserved_original = 0.0
+        if preserved_original > 0:
+            original_limit_price = preserved_original
     price = state.get("price")
     if not price or price <= 0:
         return False
@@ -18128,7 +18179,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "signal_price": signal.get("signal_price"),
         "fee_type": "MAKER",
         "micro_structure_confirmed": True,
-        "original_limit_price": limit_price,
+        "original_limit_price": original_limit_price,
         "limit_chase_count": (
             int(signal.get("limit_chase_count") or 0)
             if is_virtual_chase_entry_lane(lane)
@@ -18152,7 +18203,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     order["fill_model"] = _resolve_fill_model(signal, order)
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
-    signal["original_limit_price"] = limit_price
+    signal["original_limit_price"] = original_limit_price
     if is_virtual_chase_entry_lane(lane):
         lc = int(signal.get("limit_chase_count") or 0)
         signal["limit_chase_count"] = lc
@@ -18419,7 +18470,23 @@ def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = Fals
     if fills_first_continuous_enabled(signal):
         signal["await_micro_confirm"] = False
         signal["await_5m_confirm"] = False
-    limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
+    selected_virtual = (
+        _resolve_selected_virtual_submit_limit(signal)
+        if skip_virtual_defer
+        else None
+    )
+    if selected_virtual is not None:
+        limit_price, entry_mode, smart_meta = selected_virtual
+        _planned = limit_price
+        logger.info(
+            f"[DASHBOARD GATE] preserving selected virtual limit "
+            f"trade_id={signal.get('trade_id')} "
+            f"virtual_chase={_signal_virtual_chase_count(signal)} "
+            f"limit={fmt(limit_price)} original={fmt(smart_meta.get('original_planned'))} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
     signal["entry_mode"] = entry_mode
     if fills_first_continuous_enabled(signal):
         smart_meta = dict(smart_meta or {})

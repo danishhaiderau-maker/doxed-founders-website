@@ -292,6 +292,102 @@ def test_exact_dashboard_chase_bucket_rests_before_next_chase():
     )
 
 
+def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
+    """The first real/paper resting limit must be the selected virtual price.
+
+    Regression for the live chase-2 observation where promotion recomputed the
+    original deterministic anchor and therefore labelled an unchased price as
+    chase 2.
+    """
+    namespace = {
+        "Optional": __import__("typing").Optional,
+        "ENTRY_MODE_AI_DIRECT": "AI_DIRECT_LIMIT",
+        "dashboard_virtual_chase_submit_ready": lambda signal: int(
+            signal.get("dashboard_virtual_chase_count") or 0
+        ) in (2, 3, 4),
+        "_signal_virtual_chase_count": lambda signal: int(
+            signal.get("dashboard_virtual_chase_count") or 0
+        ),
+    }
+    resolve = _compile_function("_resolve_selected_virtual_submit_limit", namespace)
+    signal = {
+        "dashboard_virtual_chase_count": 2,
+        "chase_3plus_virtual_limit": 63214.54,
+        "chase_3plus_original_limit": 63242.18,
+        "limit_price": 63225.39,
+        "entry_mode": "AI_DIRECT_LIMIT",
+    }
+    limit_price, entry_mode, smart_meta = resolve(signal)
+    assert limit_price == 63214.54
+    assert limit_price != signal["chase_3plus_original_limit"]
+    assert entry_mode == "AI_DIRECT_LIMIT"
+    assert smart_meta["original_planned"] == 63242.18
+    assert smart_meta["preserve_original_limit"] is True
+    assert smart_meta["selected_virtual_chase_count"] == 2
+
+    captured = {}
+
+    class QuietLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+    def place_order(_signal, submit_limit, submit_mode, smart_meta=None):
+        captured.update(
+            limit_price=submit_limit,
+            entry_mode=submit_mode,
+            smart_meta=dict(smart_meta or {}),
+        )
+        return True
+
+    namespace.update(
+        {
+            "_manual_pause_block_entry": lambda *_args, **_kwargs: False,
+            "state": {"price": 63000.0},
+            "trades_map": {},
+            "fills_first_continuous_enabled": lambda _signal: False,
+            "evaluate_dashboard_execution_gate": lambda *_args, **_kwargs: (
+                True,
+                "ALLOWED",
+                False,
+            ),
+            "_defer_dashboard_virtual_chase": lambda _signal: False,
+            "_resolve_submit_limit_price": lambda _signal: (_ for _ in ()).throw(
+                AssertionError("selected virtual promotion must not reset the anchor")
+            ),
+            "fmt": str,
+            "logger": QuietLogger(),
+            "_reject_duplicate_limit_order": lambda *_args, **_kwargs: False,
+            "_place_simulated_limit_order": place_order,
+        }
+    )
+    promote_runtime = _compile_function("_promote_signal_to_limit_order", namespace)
+    assert promote_runtime(signal, skip_virtual_defer=True) is True
+    assert captured["limit_price"] == 63214.54
+    assert captured["entry_mode"] == "AI_DIRECT_LIMIT"
+    assert captured["smart_meta"]["original_planned"] == 63242.18
+    assert captured["smart_meta"]["preserve_original_limit"] is True
+
+    tree = ast.parse(BOT_SOURCE)
+    promote = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_promote_signal_to_limit_order"
+    )
+    promote_source = ast.get_source_segment(BOT_SOURCE, promote)
+    assert "_resolve_selected_virtual_submit_limit(signal)" in promote_source
+    assert "if skip_virtual_defer" in promote_source
+
+    place = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_place_simulated_limit_order"
+    )
+    place_source = ast.get_source_segment(BOT_SOURCE, place)
+    assert 'smart_meta.get("preserve_original_limit")' in place_source
+    assert '"original_limit_price": original_limit_price' in place_source
+    assert 'signal["original_limit_price"] = original_limit_price' in place_source
+
+
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
     assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
     assert "RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0," in BOT_SOURCE

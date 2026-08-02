@@ -6678,6 +6678,10 @@ POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
 POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
+PROCESS_HEARTBEAT_INTERVAL_SEC = max(
+    1.0,
+    min(10.0, float(os.getenv("PROCESS_HEARTBEAT_INTERVAL_SEC", "5"))),
+)
 ANALYTICS_INTERVAL_SEC = 600
 MIN_ANALYTICS_TRADES = 20
 OHLCV_FETCH_INTERVAL = 60
@@ -8971,7 +8975,12 @@ def build_full_feature_snapshot():
     try:
         logger.info("[FEATURE BUILD] Starting aggregated feature construction with WINDOW=10 [PIPELINE ENFORCEMENT]")
         update_candle_features()
-        price = nz(state.get("price"))
+        # A WS snapshot can legitimately warm every analytical buffer before
+        # the first genuine live trade tick authorizes a strategy price. Keep
+        # that fail-closed state quiet and explicit instead of comparing None
+        # with zero and emitting a misleading FEATURE BUILD ERROR on every
+        # periodic pass.
+        price = nz(state.get("price"), 0.0)
         if price <= 0:
             logger.warning("[FEATURE BUILD] price <=0 [PIPELINE ENFORCEMENT]")
             return None
@@ -16714,6 +16723,49 @@ def dashboard_virtual_chase_submit_ready(signal: dict) -> bool:
     return vcount >= mn
 
 
+def _resolve_selected_virtual_submit_limit(signal: dict) -> Optional[tuple]:
+    """Carry the selected virtual-chase price into the first resting limit.
+
+    The virtual gate has already advanced ``chase_3plus_virtual_limit`` toward
+    market. Re-running the normal deterministic resolver at promotion would
+    reset that price to the original 0.1% anchor while still labelling the
+    order as chase 2/3/4. That breaks both execution fidelity and the research
+    cohort. Preserve the chased price and its original anchor as separate
+    values so later visible chase steps retain the correct gap baseline.
+    """
+    if not isinstance(signal, dict) or not dashboard_virtual_chase_submit_ready(signal):
+        return None
+    try:
+        virtual_limit = float(
+            signal.get("chase_3plus_virtual_limit")
+            or signal.get("dashboard_virtual_limit")
+            or signal.get("limit_price")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return None
+    if virtual_limit <= 0:
+        return None
+    try:
+        original_limit = float(
+            signal.get("chase_3plus_original_limit")
+            or signal.get("original_limit_price")
+            or virtual_limit
+        )
+    except (TypeError, ValueError):
+        original_limit = virtual_limit
+    if original_limit <= 0:
+        original_limit = virtual_limit
+    entry_mode = str(signal.get("entry_mode") or ENTRY_MODE_AI_DIRECT)
+    return virtual_limit, entry_mode, {
+        "reanchored": bool(signal.get("smart_submit_reanchored")),
+        "immediate_chase": True,
+        "original_planned": original_limit,
+        "preserve_original_limit": True,
+        "selected_virtual_chase_count": _signal_virtual_chase_count(signal),
+    }
+
+
 def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict:
     """Snapshot of dashboard execution gates for API / logging."""
     bands = get_ai_execution_bands()
@@ -18085,6 +18137,14 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         return False
     direction = signal.get("final_direction") or _signal_direction(signal)
     limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
+    original_limit_price = limit_price
+    if smart_meta.get("preserve_original_limit"):
+        try:
+            preserved_original = float(smart_meta.get("original_planned") or 0)
+        except (TypeError, ValueError):
+            preserved_original = 0.0
+        if preserved_original > 0:
+            original_limit_price = preserved_original
     price = state.get("price")
     if not price or price <= 0:
         return False
@@ -18119,7 +18179,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "signal_price": signal.get("signal_price"),
         "fee_type": "MAKER",
         "micro_structure_confirmed": True,
-        "original_limit_price": limit_price,
+        "original_limit_price": original_limit_price,
         "limit_chase_count": (
             int(signal.get("limit_chase_count") or 0)
             if is_virtual_chase_entry_lane(lane)
@@ -18143,7 +18203,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     order["fill_model"] = _resolve_fill_model(signal, order)
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
-    signal["original_limit_price"] = limit_price
+    signal["original_limit_price"] = original_limit_price
     if is_virtual_chase_entry_lane(lane):
         lc = int(signal.get("limit_chase_count") or 0)
         signal["limit_chase_count"] = lc
@@ -18410,7 +18470,23 @@ def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = Fals
     if fills_first_continuous_enabled(signal):
         signal["await_micro_confirm"] = False
         signal["await_5m_confirm"] = False
-    limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
+    selected_virtual = (
+        _resolve_selected_virtual_submit_limit(signal)
+        if skip_virtual_defer
+        else None
+    )
+    if selected_virtual is not None:
+        limit_price, entry_mode, smart_meta = selected_virtual
+        _planned = limit_price
+        logger.info(
+            f"[DASHBOARD GATE] preserving selected virtual limit "
+            f"trade_id={signal.get('trade_id')} "
+            f"virtual_chase={_signal_virtual_chase_count(signal)} "
+            f"limit={fmt(limit_price)} original={fmt(smart_meta.get('original_planned'))} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
     signal["entry_mode"] = entry_mode
     if fills_first_continuous_enabled(signal):
         smart_meta = dict(smart_meta or {})
@@ -20613,12 +20689,56 @@ def _bitfinex_ws_trades_from_message(data) -> list:
                     out.append(t)
     return out
 
+def _seed_ws_trade_buffers(trades: list) -> int:
+    """Warm analytical buffers from the Bitfinex trades-channel snapshot.
+
+    The snapshot contains real recent exchange trades but is historical. It may
+    initialize feature windows after a deploy; it must never set ``ws_ready``
+    or ``ws_last_tick``, progress an order, or run exits. A subsequent genuine
+    ``te``/``tu`` tick remains the only writer of live WS readiness.
+    """
+    ordered = sorted(
+        (trade for trade in trades if isinstance(trade, dict)),
+        key=_ws_trade_timestamp_sec,
+    )
+    capacities = [
+        int(buffer.maxlen or WINDOW_SIZE)
+        for buffer in (price_buffer, volume_buffer, delta_buffer)
+    ]
+    selected = ordered[-min(capacities):]
+    seeded = 0
+    for trade in selected:
+        price = float(trade.get("p", 0) or 0)
+        size = float(trade.get("v", 0) or 0)
+        if price <= 0:
+            continue
+        price_buffer.append(price)
+        volume_buffer.append(size)
+        update_orderflow(trade)
+        delta_buffer.append(orderflow["delta"])
+        delta_change = orderflow["delta"] - orderflow.get("prev_delta", 0)
+        delta_change_buffer.append(delta_change)
+        imbalance_buffer.append(orderflow["imbalance"])
+        if len(price_buffer) >= 2 and price_buffer[-2] != 0:
+            velocity_buffer.append(
+                (price_buffer[-1] - price_buffer[-2]) / price_buffer[-2]
+            )
+        seeded += 1
+    if seeded:
+        update_feature_snapshot()
+        logger.info(
+            f"[WS] Seeded {seeded} historical trades into feature buffers; "
+            "waiting for genuine live tick [PIPELINE ENFORCEMENT]"
+        )
+    return seeded
+
+
 def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     global _last_ws_trade_fp, _last_ws_trade_fp_ts, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
-    # Bitfinex sends a historical snapshot immediately after subscribe.  It is
-    # useful neither as proof of a live transport nor as an execution tick;
-    # OHLCV REST already seeds the analytical buffers. Wait for a real te/tu.
+    # A single historical row is still permitted to warm the feature buffers,
+    # but it must never authorize entry or touch a live order/position.
     if snapshot_seed:
+        _seed_ws_trade_buffers([trade])
         return
     trade_fp = (trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
     if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
@@ -20752,8 +20872,7 @@ def safe_ws_handler(message):
             return
         _agent_dbg("H2", "safe_ws_handler", "batch", {"trades_in_msg": len(trades), "msg_len": len(message)})
         if len(trades) > 1:
-            newest = max(trades, key=_ws_trade_timestamp_sec)
-            _process_ws_trade_tick(newest, snapshot_seed=True)
+            _seed_ws_trade_buffers(trades)
         else:
             _process_ws_trade_tick(trades[0])
     except IndexError as ie:
@@ -23028,7 +23147,22 @@ def _emergency_api_guard():
     # General per-IP rate limit on every /api/* hit (read + write).
     # Local operator (127.0.0.1 / ::1) is exempt — demo harness + dashboard
     # polls would otherwise trip the 60/min cap and fail bot_ping/state checks.
-    if path.startswith("/api/") and not _is_local_operator(ip):
+    # The authenticated incremental mirror can legitimately request hundreds
+    # of checksum-verified chunks during first sync/recovery. Counting those
+    # private requests against the public 60/minute bucket made every large
+    # mirror fail with 429 before it could acknowledge rotations. The admin
+    # token already gates this narrow namespace; unauthorized callers remain
+    # subject to the normal limiter and then fail authentication below.
+    is_authenticated_data_sync = (
+        path.startswith("/api/data-sync/")
+        and bool(_BOT_ADMIN_TOKEN)
+        and _admin_authed()
+    )
+    if (
+        path.startswith("/api/")
+        and not _is_local_operator(ip)
+        and not is_authenticated_data_sync
+    ):
         if not _rate_check(_API_RATE_LOG, ip, _API_RATE_WINDOW_S, _API_RATE_MAX_PER_IP):
             resp = jsonify({"error": "rate limit exceeded", "retry_after_s": _API_RATE_WINDOW_S})
             resp.status_code = 429
@@ -31836,6 +31970,25 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 
 
+def _data_sync_rotation_parts(raw_name: str):
+    """Return ``(base_name, generation)`` for a supported numbered rotation.
+
+    ``Path.suffix`` sees ``signal_replay.jsonl.28`` as ``.28``. Treating only
+    the final suffix as the file type silently excluded every closed replay
+    generation from the desktop mirror, so the Fly volume could never receive
+    an acknowledgement and eventually filled. A rotation is supported only
+    when the filename before its numeric generation has an explicitly allowed
+    data extension.
+    """
+    name = Path(str(raw_name or "")).name
+    base_name, separator, generation = name.rpartition(".")
+    if not separator or not generation.isdigit():
+        return None
+    if Path(base_name).suffix.lower() not in _DATA_SYNC_EXTENSIONS:
+        return None
+    return base_name, int(generation)
+
+
 def _data_sync_runtime_root() -> Path:
     return Path.cwd().resolve()
 
@@ -31884,7 +32037,11 @@ def _data_sync_path_allowed(path: Path) -> bool:
         return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
-    return resolved.is_file() and resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+    supported_type = (
+        resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+        or _data_sync_rotation_parts(resolved.name) is not None
+    )
+    return resolved.is_file() and supported_type
 
 
 def _data_sync_resolve_relpath(raw_rel: str) -> Path:
@@ -31951,19 +32108,39 @@ def _write_data_sync_ack(payload: dict) -> None:
 
 
 def _prune_acknowledged_rotations(acks: dict) -> list:
-    """Delete only fully acknowledged, old .3+ rotation files.
+    """Delete only fully acknowledged, old closed rotation files.
 
-    Active files and the two newest rotations are never touched. Unacknowledged
-    evidence is never deleted, even under disk pressure.
+    Active files and the two highest/newest numeric rotations are never
+    touched. Unacknowledged evidence is never deleted, even under disk
+    pressure. Rotation generations increase monotonically and may contain
+    gaps after retention, so ``.1``/``.2`` are not necessarily the newest.
     """
     removed = []
     cutoff = time.time() - (24 * 3600)
+    newest_by_family = {}
     for rel, ack in list((acks or {}).items()):
-        match = re.search(r"\.(\d+)$", rel)
-        if not match or int(match.group(1)) < 3 or not isinstance(ack, dict):
+        rotation = _data_sync_rotation_parts(rel)
+        if rotation is None or not isinstance(ack, dict):
             continue
         try:
             path = _data_sync_resolve_relpath(rel)
+            base_name, rotation_index = rotation
+            family_key = (path.parent, base_name)
+            newest_two = newest_by_family.get(family_key)
+            if newest_two is None:
+                generations = []
+                for sibling in path.parent.iterdir():
+                    sibling_rotation = _data_sync_rotation_parts(sibling.name)
+                    if (
+                        sibling_rotation is not None
+                        and sibling_rotation[0] == base_name
+                        and _data_sync_path_allowed(sibling)
+                    ):
+                        generations.append(sibling_rotation[1])
+                newest_two = frozenset(sorted(generations)[-2:])
+                newest_by_family[family_key] = newest_two
+            if rotation_index in newest_two:
+                continue
             stat = path.stat()
             if (
                 stat.st_mtime <= cutoff
@@ -32061,7 +32238,7 @@ def api_data_sync_ack():
         "ok": True,
         "accepted": accepted,
         "removed_acknowledged_rotations": removed,
-        "policy": "only acknowledged .3+ rotations older than 24h; active/unacked files retained",
+        "policy": "acknowledged rotations older than 24h are pruned except the two newest generations; active/unacked files retained",
     })
 
 
@@ -34744,36 +34921,55 @@ def ttl_monitor():
 def system_health_check():
     now = time.time()
     runtime = _recompute_system_readiness(now)
+    market_health = _market_data_health_snapshot(now)
     healthy = bool(runtime["system_ready"])
     recover_reason = ""
     should_hard_stop = False
+    freshest_observed_age = None
     with state_lock:
-        ws_tick = float(state.get("ws_last_tick") or 0)
-        ws_age = (now - ws_tick) if ws_tick else float("inf")
         current_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause"))
-        if healthy and not manual_paused and current_reason in (
-            "WS_STALE",
-            "STALE_DATA_HARD_STOP",
-            "PRICE_STALE_OR_MISSING",
+        observed_ages = [
+            age
+            for age in (
+                market_health.get("ws_age"),
+                market_health.get("rest_age"),
+                market_health.get("price_age"),
+            )
+            if age is not None
+        ]
+        if observed_ages:
+            freshest_observed_age = min(observed_ages)
+        if (
+            market_health["market_data_ready"]
+            and not manual_paused
+            and current_reason in (
+                "WS_STALE",
+                "STALE_DATA_HARD_STOP",
+                "PRICE_STALE_OR_MISSING",
+            )
         ):
             recover_reason = current_reason
         elif (
-            not runtime["ws_transport_ready"]
-            and ws_tick
-            and ws_age >= STALE_HARD_SEC
+            not market_health["market_data_ready"]
+            and freshest_observed_age is not None
+            and freshest_observed_age >= STALE_HARD_SEC
             and not manual_paused
         ):
             should_hard_stop = True
     if recover_reason:
         _clear_execution_pause_if_reason(recover_reason)
         logger.info(
-            f"[RECOVERY] central readiness restored; cleared {recover_reason} "
+            f"[RECOVERY] market-data path restored via "
+            f"{market_health['market_data_mode']}; cleared {recover_reason} "
             f"[PIPELINE ENFORCEMENT]"
         )
     elif should_hard_stop:
         set_execution_paused("STALE_DATA_HARD_STOP")
-        logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s - new entries paused")
+        logger.error(
+            f"[HARD STOP] ALL MARKET DATA STALE "
+            f"freshest_age={fmt(freshest_observed_age)}s - new entries paused"
+        )
     if not healthy:
         logger.warning(
             f"[HEALTH] NOT READY reasons={runtime['readiness_reasons']} "
@@ -34829,6 +35025,7 @@ def recover_from_crash():
             logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
 def heartbeat_loop():
+    """Publish process liveness independently of AI or strategy latency."""
     global last_heartbeat
     while not shutdown_event.is_set():
         now = time.time()
@@ -34836,10 +35033,18 @@ def heartbeat_loop():
             state["heartbeat"] = now
             state["last_heartbeat"] = now
         last_heartbeat = now
-        time.sleep(HEARTBEAT_INTERVAL)
+        if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):
+            break
+
+
+def periodic_pipeline_loop():
+    """Keep the legacy five-minute pipeline cadence off the liveness thread."""
+    while not shutdown_event.is_set():
+        if shutdown_event.wait(HEARTBEAT_INTERVAL):
+            break
+        now = time.time()
         if not can_progress_new_entry(now)[0]:
             continue
-        now = time.time()
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
             logger.debug(
@@ -35350,6 +35555,7 @@ def main():
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()
     threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
     update_logger_level()
