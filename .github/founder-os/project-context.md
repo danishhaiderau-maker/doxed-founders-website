@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix: preserve sync guard contract name
+fix: supervise Fly mirror and isolate liveness heartbeat
 
 ## Last Activity
 
