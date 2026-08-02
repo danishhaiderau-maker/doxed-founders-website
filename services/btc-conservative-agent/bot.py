@@ -23032,7 +23032,22 @@ def _emergency_api_guard():
     # General per-IP rate limit on every /api/* hit (read + write).
     # Local operator (127.0.0.1 / ::1) is exempt — demo harness + dashboard
     # polls would otherwise trip the 60/min cap and fail bot_ping/state checks.
-    if path.startswith("/api/") and not _is_local_operator(ip):
+    # The authenticated incremental mirror can legitimately request hundreds
+    # of checksum-verified chunks during first sync/recovery. Counting those
+    # private requests against the public 60/minute bucket made every large
+    # mirror fail with 429 before it could acknowledge rotations. The admin
+    # token already gates this narrow namespace; unauthorized callers remain
+    # subject to the normal limiter and then fail authentication below.
+    is_authenticated_data_sync = (
+        path.startswith("/api/data-sync/")
+        and bool(_BOT_ADMIN_TOKEN)
+        and _admin_authed()
+    )
+    if (
+        path.startswith("/api/")
+        and not _is_local_operator(ip)
+        and not is_authenticated_data_sync
+    ):
         if not _rate_check(_API_RATE_LOG, ip, _API_RATE_WINDOW_S, _API_RATE_MAX_PER_IP):
             resp = jsonify({"error": "rate limit exceeded", "retry_after_s": _API_RATE_WINDOW_S})
             resp.status_code = 429

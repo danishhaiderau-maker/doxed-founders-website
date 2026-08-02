@@ -75,7 +75,7 @@ if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
 }
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
-$chunkLimit = 1MB
+$chunkLimit = 4MB
 $selectedFiles = @($manifest.files)
 if ($IncludePath.Count -gt 0) {
   $selectedFiles = @(

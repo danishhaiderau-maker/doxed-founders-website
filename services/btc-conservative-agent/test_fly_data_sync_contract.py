@@ -47,10 +47,13 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "/api/data-sync/manifest" not in BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
+    assert "$chunkLimit = 4MB" in SYNC_SCRIPT
     assert '$appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")' in SYNC_SCRIPT
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT
     assert "def _data_sync_rotation_parts" in BOT
     assert "_data_sync_rotation_parts(resolved.name) is not None" in BOT
+    assert 'path.startswith("/api/data-sync/")' in BOT
+    assert "and not is_authenticated_data_sync" in BOT
 
 
 def test_retention_never_removes_active_or_unacknowledged_files():
