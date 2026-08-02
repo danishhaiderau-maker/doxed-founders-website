@@ -327,6 +327,8 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
   assert.match(sync, /\[System\.IO\.File\]::Replace\(\$stateTmp, \$statePath/);
+  assert.match(sync, /\$stateBackup\s*=\s*"\$stateTmp\.bak"/);
+  assert.match(sync, /Remove-Item -LiteralPath \$stateBackup/);
   assert.doesNotMatch(sync, /Move-Item -LiteralPath \$stateTmp -Destination \$statePath -Force/);
   assert.match(recovery, /Clear-HomeStackUserStopped/);
   assert.match(recovery, /ensure-home-bridge\.ps1/);

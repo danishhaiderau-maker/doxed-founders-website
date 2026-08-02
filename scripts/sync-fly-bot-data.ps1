@@ -50,6 +50,7 @@ function Save-SyncState {
   # stale worker is still unwinding. A fixed `.tmp` name let one worker move a
   # different worker's file and caused the desktop analyzer sync to go dark.
   $stateTmp = "$statePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  $stateBackup = "$stateTmp.bak"
   try {
     $syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
     if (Test-Path -LiteralPath $statePath) {
@@ -57,12 +58,13 @@ function Save-SyncState {
       # with "Cannot create a file when that file already exists". Replace the
       # complete temporary file in one filesystem operation so the analyzer can
       # never observe a partially-written JSON state document.
-      [System.IO.File]::Replace($stateTmp, $statePath, $null, $true)
+      [System.IO.File]::Replace($stateTmp, $statePath, $stateBackup, $true)
     } else {
       [System.IO.File]::Move($stateTmp, $statePath)
     }
   } finally {
     Remove-Item -LiteralPath $stateTmp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stateBackup -Force -ErrorAction SilentlyContinue
   }
 }
 
