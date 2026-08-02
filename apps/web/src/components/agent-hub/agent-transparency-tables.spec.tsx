@@ -116,7 +116,8 @@ test('executionOnly live copy surfaces session-scoped active signals and expired
 
   // New live-copy sections are present and scoped to the session.
   assert.match(html, /Active relay signals/);
-  assert.match(html, /Expired \/ blocked relay signals/);
+  assert.match(html, /Expired relay orders/);
+  assert.match(html, /Blocked signals/);
   assert.match(html, /scoped to your session only/);
   // The session signal and the expired cycle appear.
   assert.match(html, /64,306/);
@@ -132,4 +133,111 @@ test('executionOnly live copy surfaces session-scoped active signals and expired
   assert.match(html, /Open Bitfinex position/);
   assert.match(html, /Resting Bitfinex order/);
   assert.match(html, /Completed trades/);
+});
+
+test('expired relay orders table computes age from expired-created timestamps, not server ageMin alone', () => {
+  // Defect 2: a row whose server-supplied ageMin is missing/0 but whose
+  // timestamps clearly span 12 minutes must show 12, not 0. The displayed age
+  // must always agree with the displayed Created / Expired columns.
+  const html = renderToStaticMarkup(
+    React.createElement(AgentTransparencyTables, {
+      executionOnly: true,
+      liveBook: {
+        activeSignals: [],
+        positions: [],
+        pendingOrders: [],
+        expiredOrders: [
+          {
+            time: '2026-07-31 16:30:00 AEST',
+            createdTime: '2026-07-31 16:00:00 AEST',
+            expiredTime: '2026-07-31 16:12:00 AEST',
+            direction: 'LONG',
+            limitPrice: 63_900,
+            ageMin: 0, // legacy snapshot — server forgot to populate
+            reason: 'SIGNAL_TTL_EXPIRED',
+            confidence: 0,
+            mode: 'LIVE_COPY',
+          },
+        ],
+        trades: [],
+      },
+    }),
+  );
+
+  // Row appears in the genuine "Expired relay orders" table (limit price > 0).
+  assert.match(html, /Expired relay orders/);
+  assert.match(html, /SIGNAL_TTL_EXPIRED/);
+  // Age column shows 12, derived from (16:12 - 16:00), not the stale 0.
+  // Anchor to the cell that immediately follows the limit-price cell so we
+  // don't accidentally match a 0 inside a date or price.
+  const ageCellMatch = /63,900<\/td><td[^>]*>(\d+)<\/td><td[^>]*>SIGNAL_TTL_EXPIRED/.exec(html);
+  assert.ok(ageCellMatch, 'could not locate the expired-row age cell');
+  assert.equal(ageCellMatch![1], '12');
+});
+
+test('blocked signals (limitPrice 0 / SPREAD_BUCKET_BLOCKED) render in a separate table, not as expired orders', () => {
+  // Defect 3: a row representing a signal that was blocked before any exchange
+  // order existed must NOT appear under "Expired relay orders" — it belongs in
+  // the dedicated "Blocked signals" table, labelled with the block reason.
+  const html = renderToStaticMarkup(
+    React.createElement(AgentTransparencyTables, {
+      executionOnly: true,
+      liveBook: {
+        activeSignals: [],
+        positions: [],
+        pendingOrders: [],
+        expiredOrders: [
+          {
+            time: '2026-07-31 17:00:00 AEST',
+            createdTime: '2026-07-31 16:59:59 AEST',
+            expiredTime: '2026-07-31 17:00:00 AEST',
+            direction: 'LONG',
+            limitPrice: 0, // no order was ever created
+            ageMin: 0,
+            reason: 'SPREAD_BUCKET_BLOCKED',
+            confidence: 0,
+            mode: 'LIVE_COPY',
+          },
+          {
+            time: '2026-07-31 17:10:00 AEST',
+            createdTime: '2026-07-31 16:40:00 AEST',
+            expiredTime: '2026-07-31 17:10:00 AEST',
+            direction: 'LONG',
+            limitPrice: 63_950,
+            ageMin: 30,
+            reason: 'SIGNAL_TTL_EXPIRED',
+            confidence: 0,
+            mode: 'LIVE_COPY',
+          },
+        ],
+        trades: [],
+      },
+    }),
+  );
+
+  // Both tables exist with their distinct labels.
+  assert.match(html, /Expired relay orders/);
+  assert.match(html, /Blocked signals/);
+  // The blocked-signals table clearly states no order was created.
+  assert.match(html, /no Bitfinex order ever existed/i);
+  assert.match(html, /Block reason/);
+
+  // The genuine TTL expiry (limitPrice > 0) appears under Expired orders, with
+  // its age computed from timestamps (30 minutes between 16:40 and 17:10).
+  assert.match(html, /SIGNAL_TTL_EXPIRED/);
+  assert.match(html, /63,950/);
+  assert.match(html, /2026-07-31 17:10:00 AEST/);
+
+  // The blocked signal appears once, under Blocked signals, with its block
+  // reason — and is NOT mislabelled as an expired order. The cell text marks
+  // it as having no real order so it cannot be confused with an expired
+  // exchange order that had a limit price.
+  const blockedMatches = html.split('SPREAD_BUCKET_BLOCKED').length - 1;
+  assert.equal(blockedMatches, 1);
+  assert.match(html, />No order</);
+
+  // The blocked signal's price cell is "No order", never a numeric price —
+  // this is the visible signal that distinguishes it from a real expired order.
+  const blockedRowHasFakePrice = /Blocked signals[\s\S]*?No order[\s\S]*?SPREAD_BUCKET_BLOCKED/.test(html);
+  assert.equal(blockedRowHasFakePrice, true);
 });

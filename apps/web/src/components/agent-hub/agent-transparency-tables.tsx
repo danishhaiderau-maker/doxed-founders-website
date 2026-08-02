@@ -1,11 +1,39 @@
 'use client';
 
-import { displayMelbourneTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
+import { displayMelbourneTime, formatUsd, parseMelbourneTimestampMs, type TradingAgentDashboardState } from '@dcf/utils';
 import { selectLiveExecutionBook } from '@/components/agent-hub/agent-live-execution-view';
 import {
   chaseSelectionLabel,
   directionGap,
 } from '@/components/agent-hub/agent-direction-gap';
+
+/**
+ * Age (minutes) between an expired order's creation and its terminal expiry.
+ *
+ * The bot populates `age_min` as `expired_ts - created_ts` at the moment of
+ * expiry, which is correct. However, some legacy snapshots and alternate
+ * mappers round it or omit it, and downstream viewers can then show "0" beside
+ * two real timestamps that disagree. To keep the rendered Age column
+ * internally consistent with the rendered Created / Expired columns, we prefer
+ * the difference between the parsed timestamps and only fall back to the
+ * server-supplied `ageMin` when one or both timestamps cannot be parsed.
+ *
+ * `parseMelbourneTimestampMs` understands the bot's pre-formatted Melbourne
+ * strings (`2026-07-31 16:00:00 AEST`); plain `Date.parse` does not.
+ */
+function expiredAgeMin(o: {
+  createdTime?: string;
+  expiredTime?: string;
+  time: string;
+  ageMin: number;
+}): number {
+  const created = parseMelbourneTimestampMs(o.createdTime ?? o.time);
+  const expired = parseMelbourneTimestampMs(o.expiredTime ?? o.time);
+  if (created != null && expired != null && expired >= created) {
+    return Math.max(0, Math.round((expired - created) / 60_000));
+  }
+  return Math.max(0, Math.round(o.ageMin ?? 0));
+}
 
 function MiniTable({
   title,
@@ -161,7 +189,7 @@ export function AgentTransparencyTables({
     displayMelbourneTime(o.expiredTime ?? o.time),
     o.direction,
     fmtPrice(o.limitPrice),
-    String(o.ageMin),
+    String(expiredAgeMin(o)),
     o.reason,
     o.mode,
   ]);
@@ -188,14 +216,56 @@ export function AgentTransparencyTables({
     s.exitReason ?? '—',
   ]);
 
-  const liveExpiredRows = sourceBook.expiredOrders.slice(0, cap).map((o) => [
-    displayMelbourneTime(o.createdTime ?? o.time),
-    displayMelbourneTime(o.expiredTime ?? o.time),
-    o.direction,
-    fmtPrice(o.limitPrice),
-    String(o.ageMin),
-    o.reason,
+  // Live-copy "expiredOrders" actually conflates two very different outcomes:
+  //   1. A real exchange limit existed and then expired/cancelled (TTL, duplicate,
+  //      price-moved-away). limitPrice > 0 and reason describes the order's end.
+  //   2. No order was ever created — the relay intent was blocked pre-flight
+  //      (SPREAD_BUCKET_BLOCKED, NO_EDGE, AI_REJECT, ...). limitPrice is 0/null
+  //      and the row's reason is a *signal block reason*, not an order event.
+  // Showing both in a single "Expired / blocked" table mislabels blocked signals
+  // as if a real order had expired. Split them so each carries an honest label.
+  const BLOCK_REASONS = new Set([
+    'SPREAD_BUCKET_BLOCKED',
+    'AI_REJECT',
+    'AI_REJECTED',
+    'NO_EDGE',
+    'EDGE_BELOW_THRESHOLD',
+    'PRE_ENTRY_BLOCKED',
+    'BLOCKED',
+    'POLICY_BLOCKED',
   ]);
+  function isBlockedSignal(o: { limitPrice: number; reason: string }): boolean {
+    if (!o) return false;
+    const noOrderCreated = !o.limitPrice || o.limitPrice <= 0;
+    const reasonUpper = String(o.reason ?? '').toUpperCase();
+    const reasonIsBlock =
+      BLOCK_REASONS.has(reasonUpper) || reasonUpper.endsWith('_BLOCKED');
+    // Either signal is sufficient on its own — both together is the clearest case.
+    return noOrderCreated || reasonIsBlock;
+  }
+
+  const liveExpired = sourceBook.expiredOrders.slice(0, cap);
+  const liveGenuineExpiredRows = liveExpired
+    .filter((o) => !isBlockedSignal(o))
+    .map((o) => [
+      displayMelbourneTime(o.createdTime ?? o.time),
+      displayMelbourneTime(o.expiredTime ?? o.time),
+      o.direction,
+      fmtPrice(o.limitPrice),
+      String(expiredAgeMin(o)),
+      o.reason,
+    ]);
+  const liveBlockedSignalRows = liveExpired
+    .filter((o) => isBlockedSignal(o))
+    .map((o) => [
+      displayMelbourneTime(o.createdTime ?? o.time),
+      displayMelbourneTime(o.expiredTime ?? o.time),
+      o.direction,
+      // No real order existed — render the signal price if known, else 'No order'.
+      o.limitPrice && o.limitPrice > 0 ? fmtPrice(o.limitPrice) : 'No order',
+      String(expiredAgeMin(o)),
+      o.reason || 'Blocked',
+    ]);
 
   const tradeRows = book.trades.slice(0, cap).map((t) => {
     // pnlPct defaults to 0 when the close path didn't record pnl_margin_pct
@@ -267,8 +337,8 @@ export function AgentTransparencyTables({
           emptyMessage="No active relay signal on your session right now."
         />
         <MiniTable
-          title="Expired / blocked relay signals"
-          subtitle="Copy intents that ended without a live position. The reason states whether an exchange limit expired, was cancelled, or no order was created."
+          title="Expired relay orders"
+          subtitle="Real exchange limit orders that ended without a fill — TTL expired, cancelled as duplicate, or price moved away. One row per real order that was actually created."
           headers={[
             'Created (Melbourne)',
             'Expired (Melbourne)',
@@ -277,8 +347,22 @@ export function AgentTransparencyTables({
             'Age min',
             'Reason',
           ]}
-          rows={liveExpiredRows}
-          emptyMessage="No expired or blocked relay signals on your session."
+          rows={liveGenuineExpiredRows}
+          emptyMessage="No expired exchange orders on your session."
+        />
+        <MiniTable
+          title="Blocked signals (no order created)"
+          subtitle="Relay intents that were blocked before any exchange limit was placed. The reason is the signal's pre-entry block reason — no Bitfinex order ever existed for these rows."
+          headers={[
+            'Created (Melbourne)',
+            'Blocked (Melbourne)',
+            'Dir',
+            'Limit price',
+            'Age min',
+            'Block reason',
+          ]}
+          rows={liveBlockedSignalRows}
+          emptyMessage="No blocked relay signals on your session."
         />
         <MiniTable
           title="Completed trades & P/L"
