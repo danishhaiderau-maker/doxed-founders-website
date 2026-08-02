@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: refresh Bitfinex policy lock
+fix: settle exact-limit relay fills
 
 ## Last Activity
 
