@@ -6678,6 +6678,10 @@ POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
 POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
+PROCESS_HEARTBEAT_INTERVAL_SEC = max(
+    1.0,
+    min(10.0, float(os.getenv("PROCESS_HEARTBEAT_INTERVAL_SEC", "5"))),
+)
 ANALYTICS_INTERVAL_SEC = 600
 MIN_ANALYTICS_TRADES = 20
 OHLCV_FETCH_INTERVAL = 60
@@ -34829,6 +34833,7 @@ def recover_from_crash():
             logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
 def heartbeat_loop():
+    """Publish process liveness independently of AI or strategy latency."""
     global last_heartbeat
     while not shutdown_event.is_set():
         now = time.time()
@@ -34836,10 +34841,18 @@ def heartbeat_loop():
             state["heartbeat"] = now
             state["last_heartbeat"] = now
         last_heartbeat = now
-        time.sleep(HEARTBEAT_INTERVAL)
+        if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):
+            break
+
+
+def periodic_pipeline_loop():
+    """Keep the legacy five-minute pipeline cadence off the liveness thread."""
+    while not shutdown_event.is_set():
+        if shutdown_event.wait(HEARTBEAT_INTERVAL):
+            break
+        now = time.time()
         if not can_progress_new_entry(now)[0]:
             continue
-        now = time.time()
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
             logger.debug(
@@ -35350,6 +35363,7 @@ def main():
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()
     threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
     update_logger_level()

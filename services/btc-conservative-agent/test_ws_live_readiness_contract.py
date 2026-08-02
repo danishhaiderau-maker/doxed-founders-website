@@ -829,7 +829,7 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
             "execute_market_order",
             "create_limit_order",
             "process_signal",
-            "heartbeat_loop",
+            "periodic_pipeline_loop",
         ):
             self.assertIn("can_progress_new_entry", function_source(name), name)
         for name in (

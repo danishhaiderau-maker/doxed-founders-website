@@ -51,6 +51,11 @@ const dashboardProxyPath = new URL('./fly-dashboard-proxy.py', import.meta.url);
 const desktopMirrorPath = new URL('./start-fly-desktop-mirror.ps1', import.meta.url);
 const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url);
 const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
+const analyzerAutoRestartPath = new URL('./analyzer-auto-restart.ps1', import.meta.url);
+const botSourcePath = new URL(
+  '../services/btc-conservative-agent/bot.py',
+  import.meta.url,
+);
 const flyLockHelperPath = new URL('./fly-canonical-lock.ps1', import.meta.url);
 const homeLauncherPath = new URL('./home-stack-launcher.ps1', import.meta.url);
 const fastRecoverPath = new URL('./fast-recover-global.ps1', import.meta.url);
@@ -321,10 +326,37 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(syncLoop, /FileShare\]::None/);
   assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
+  assert.match(sync, /\[System\.IO\.File\]::Replace\(\$stateTmp, \$statePath/);
+  assert.doesNotMatch(sync, /Move-Item -LiteralPath \$stateTmp -Destination \$statePath -Force/);
   assert.match(recovery, /Clear-HomeStackUserStopped/);
   assert.match(recovery, /ensure-home-bridge\.ps1/);
   assert.match(
     recovery,
     /Desktop command bridge did not become reachable on :\$bridgePort/,
   );
+});
+
+test('analyzer singleton self-heals the data-only Fly mirror worker', async () => {
+  const monitor = await readFile(analyzerAutoRestartPath, 'utf8');
+
+  assert.match(monitor, /function Ensure-FlyDataSyncLoop/);
+  assert.match(monitor, /\.fly-data-sync-loop\.heartbeat\.json/);
+  assert.match(monitor, /flySyncHeartbeatMaxAgeSec\s*=\s*600/);
+  assert.match(monitor, /sync-fly-bot-data-loop\.ps1/);
+  assert.match(monitor, /syncArgString[\s\S]*-File `"/);
+  assert.match(monitor, /Ensure-FlyDataSyncLoop/);
+  assert.doesNotMatch(
+    monitor.match(/function Ensure-FlyDataSyncLoop[\s\S]*?^  }/m)?.[0] ?? '',
+    /bot\.py|btc_conservative_agent\.py|DEEPSEEK|BITFINEX_API/,
+  );
+});
+
+test('Fly process heartbeat cannot be blocked by the five-minute AI pipeline', async () => {
+  const bot = await readFile(botSourcePath, 'utf8');
+
+  assert.match(bot, /PROCESS_HEARTBEAT_INTERVAL_SEC[\s\S]*"5"/);
+  assert.match(bot, /def heartbeat_loop\(\):[\s\S]*shutdown_event\.wait\(PROCESS_HEARTBEAT_INTERVAL_SEC\)/);
+  assert.match(bot, /def periodic_pipeline_loop\(\):[\s\S]*shutdown_event\.wait\(HEARTBEAT_INTERVAL\)/);
+  assert.match(bot, /target=safe_thread\(heartbeat_loop\)/);
+  assert.match(bot, /target=safe_thread\(periodic_pipeline_loop\)/);
 });

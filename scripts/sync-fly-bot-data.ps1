@@ -52,7 +52,15 @@ function Save-SyncState {
   $stateTmp = "$statePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
   try {
     $syncState | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
-    Move-Item -LiteralPath $stateTmp -Destination $statePath -Force
+    if (Test-Path -LiteralPath $statePath) {
+      # Move-Item -Force is not an atomic overwrite on Windows and can fail
+      # with "Cannot create a file when that file already exists". Replace the
+      # complete temporary file in one filesystem operation so the analyzer can
+      # never observe a partially-written JSON state document.
+      [System.IO.File]::Replace($stateTmp, $statePath, $null, $true)
+    } else {
+      [System.IO.File]::Move($stateTmp, $statePath)
+    }
   } finally {
     Remove-Item -LiteralPath $stateTmp -Force -ErrorAction SilentlyContinue
   }

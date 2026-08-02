@@ -52,6 +52,10 @@ $machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
 New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
 $lockFile  = Join-Path $machineLockDir "home-analyzer-auto-restart-$Port.lock"
 $restartLog = Join-Path $logsDir "analyzer-auto-restart.log"
+$flySyncPidFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
+$flySyncHeartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
+$flySyncScript = Join-Path $scriptDir "sync-fly-bot-data-loop.ps1"
+$flySyncHeartbeatMaxAgeSec = 600
 
 # Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
 # dot-sources the same file; we mirror it so this monitor stands down when the user
@@ -162,6 +166,58 @@ try {
     Add-Content -Path $restartLog -Value "$ts`t$Line" -Encoding UTF8
   }
 
+  # The read-only analyzer is useful only while its Fly mirror advances. The
+  # sync loop has its own machine-wide exclusive guard, but a killed PowerShell
+  # process cannot revive itself. Let the already-singleton analyzer monitor
+  # supervise that one data-only worker. This never starts bot.py, an AI call,
+  # an exchange client, or a second strategy owner.
+  function Ensure-FlyDataSyncLoop {
+    if (-not (Test-Path -LiteralPath $flyCanonicalLock)) { return }
+
+    $syncAlive = $false
+    $syncPid = 0
+    if (Test-Path -LiteralPath $flySyncPidFile) {
+      try {
+        $syncPid = [int](Get-Content -LiteralPath $flySyncPidFile -Raw)
+        $syncProcess = Get-Process -Id $syncPid -ErrorAction SilentlyContinue
+        if ($syncProcess -and $syncProcess.ProcessName -match "^(powershell|pwsh)$") {
+          $syncAgeSec = ((Get-Date) - $syncProcess.StartTime).TotalSeconds
+          $heartbeatAgeSec = if (Test-Path -LiteralPath $flySyncHeartbeatFile) {
+            ((Get-Date).ToUniversalTime() -
+              (Get-Item -LiteralPath $flySyncHeartbeatFile).LastWriteTimeUtc).TotalSeconds
+          } else {
+            $syncAgeSec
+          }
+          $syncAlive = ($heartbeatAgeSec -le $flySyncHeartbeatMaxAgeSec)
+          if (-not $syncAlive) {
+            Stop-Process -Id $syncPid -Force -ErrorAction SilentlyContinue
+            Write-RestartLog "fly_sync_stale`tpid=$syncPid`theartbeat_age_sec=$([Math]::Round($heartbeatAgeSec, 1))"
+          }
+        }
+      } catch { }
+    }
+    if ($syncAlive) { return }
+
+    Remove-Item -LiteralPath $flySyncPidFile,$flySyncHeartbeatFile -Force -ErrorAction SilentlyContinue
+    try {
+      # Start-Process joins an ArgumentList array without preserving quoting;
+      # this repository path contains spaces. Pass one explicitly quoted
+      # command line so -File receives the complete script path.
+      $syncArgString = (
+        "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"" +
+        $flySyncScript + "`""
+      )
+      $syncProc = Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $syncArgString `
+        -WorkingDirectory $repoRoot `
+        -WindowStyle Hidden `
+        -PassThru
+      Write-RestartLog "fly_sync_started`tlauncher_pid=$($syncProc.Id)"
+    } catch {
+      Write-RestartLog "fly_sync_start_failed`terror=$($_.Exception.Message)"
+    }
+  }
+
   # --- Health probe -------------------------------------------------------------
   # The analyzer exposes /api/status (Flask research dashboard). The bridge uses
   # the same endpoint in Test-AnalyzerHealthy. We treat HTTP 200 as healthy and
@@ -269,6 +325,8 @@ try {
     }
 
     Start-Sleep -Seconds $PollIntervalSec
+
+    Ensure-FlyDataSyncLoop
 
     $processAlive = Test-ProcessIdAliveFast $currentPid
     $code = -1
