@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix: supervise Fly mirror and isolate liveness heartbeat
+fix: use valid atomic Fly sync replacement
 
 ## Last Activity
 
