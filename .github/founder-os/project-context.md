@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (21 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix: exempt authenticated Fly mirror chunks
+fix: keep live relay dashboard truthful
 
 ## Last Activity
 
