@@ -215,6 +215,7 @@ export function mapSubscriberExchangeLiveBook(input: {
             : lotUnrealizedPnlUsd(entry, current, side, legQty),
       });
       activeSignals.push({
+        tradeId: row.cycle.tradeId,
         time: fmtTime(row.createdAt),
         direction,
         confidence: Math.round(Number(intent.confidence ?? 0)),
@@ -260,6 +261,7 @@ export function mapSubscriberExchangeLiveBook(input: {
         };
       }
       activeSignals.push({
+        tradeId: row.cycle.tradeId,
         time: fmtTime(row.createdAt),
         direction,
         confidence: Math.round(Number(intent.confidence ?? 0)),
@@ -345,6 +347,7 @@ export function mapSubscriberExchangeLiveBook(input: {
   if (activeSignals.length === 0 && exchangePending.length > 0) {
     for (const o of exchangePending) {
       activeSignals.push({
+        tradeId: o.tradeId,
         time: fmtTime(new Date()),
         direction: o.side,
         confidence: 0,

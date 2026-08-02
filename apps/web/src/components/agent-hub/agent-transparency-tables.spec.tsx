@@ -58,6 +58,7 @@ test('executionOnly live copy surfaces session-scoped active signals and expired
       liveBook: {
         activeSignals: [
           {
+            tradeId: 'cont-8f1a0939a7e6',
             time: '2026-07-31 17:00:00 AEST',
             direction: 'SHORT',
             confidence: 0,
@@ -121,8 +122,8 @@ test('executionOnly live copy surfaces session-scoped active signals and expired
   assert.match(html, /64,306/);
   assert.match(html, /PENDING_ENTRY/);
   assert.match(html, /PRICE_MOVED_AWAY/);
-  // The real Bitfinex order is still rendered exactly once.
-  assert.equal(html.split('cont-8f1a0939a7e6').length - 1, 1);
+  // The same traceable trade id links the live intent and real Bitfinex order.
+  assert.equal(html.split('cont-8f1a0939a7e6').length - 1, 2);
   // Showcase-only AI columns are NOT rendered in executionOnly mode.
   assert.equal(html.includes('Raw AI gap'), false);
   assert.equal(html.includes('Gap bucket'), false);

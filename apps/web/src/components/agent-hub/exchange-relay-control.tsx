@@ -8,7 +8,7 @@ type RelayState = 'idle' | 'active' | 'paused' | 'copy' | 'sim';
 function relayLabel(state: RelayState, exchangeLabel: string) {
   switch (state) {
     case 'active':
-      return `Copying Continuous + Type B showcase orders on ${exchangeLabel}`;
+      return `Copying Continuous showcase orders on ${exchangeLabel}`;
     case 'sim':
       return `Relay simulation active — paper book on ${exchangeLabel}; live orders blocked`;
     case 'paused':

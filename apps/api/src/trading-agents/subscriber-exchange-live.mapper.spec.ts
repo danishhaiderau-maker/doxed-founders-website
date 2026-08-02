@@ -79,6 +79,7 @@ test('renders one pending row when Bitfinex rounds the relay quantity', () => {
   assert.equal(book.pendingOrders.length, 1);
   assert.equal(book.pendingOrders[0]?.tradeId, 'cont-6aec65edb25c');
   assert.equal(book.pendingOrders[0]?.status, 'ACTIVE');
+  assert.equal(book.activeSignals[0]?.tradeId, 'cont-6aec65edb25c');
 });
 
 test('keeps genuinely separate pending orders visible', () => {
@@ -211,6 +212,7 @@ test('labels the actual exchange net separately from its virtual tracked lot', (
   );
   assert.equal(book.positions[0]?.pnlUsd, 0.81);
   assert.equal(book.positions[1]?.pnlUsd, 0.744);
+  assert.equal(book.activeSignals[0]?.tradeId, 'cont-ccf411542b21');
 });
 
 test('session P&L uses one exchange accounting basis without virtual-lot double counting', () => {
