@@ -3,8 +3,76 @@ import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import {
   ShowcaseRelayEventsService,
+  exactLifecycleRevisionMatches,
+  relayIntentEnvelope,
   shouldApplyExactLifecycleUpdate,
 } from './showcase-relay-events.service';
+
+test('durable receipt matches the exact canonical event id, sequence, and limit', () => {
+  const current = {
+    action: 'ENTER',
+    trade_id: 'cont-race',
+    entry: { exact_limit_price: 63_167 },
+    context: {
+      showcase_event: 'LIMIT_UPDATED',
+      showcase_event_id: 'revision-a',
+      showcase_event_seq: 4,
+    },
+  };
+  assert.equal(
+    exactLifecycleRevisionMatches(current, {
+      event: 'LIMIT_UPDATED',
+      trade_id: 'cont-race',
+      event_id: 'revision-a',
+      event_seq: 4,
+      limit_price: 63_167,
+    }),
+    true,
+  );
+  assert.equal(
+    exactLifecycleRevisionMatches(current, {
+      event: 'LIMIT_UPDATED',
+      trade_id: 'cont-race',
+      event_id: 'revision-b',
+      event_seq: 4,
+      limit_price: 63_166,
+    }),
+    false,
+  );
+});
+
+test('terminal fallback marker survives only on its signed exact-limit revision', () => {
+  const base = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'LIMIT_UPDATED' as const,
+    trade_id: 'cont-settle',
+    ts: '2026-08-02T13:05:00.000Z',
+    event_seq: 4,
+    platform_received_at: '2026-08-02T13:05:00.500Z',
+    direction: 'SHORT',
+    executable: true,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    limit_price: 63_167,
+  };
+  const terminal = relayIntentEnvelope('cycle-1', 'cont-settle', {
+    ...base,
+    marketable_fallback: true,
+    relay_settle_not_before_ts: '2026-08-02T13:05:15.000Z',
+  }) as { context?: Record<string, unknown> };
+  assert.equal(terminal.context?.marketable_fallback, true);
+  assert.equal(
+    terminal.context?.relay_settle_not_before_ts,
+    '2026-08-02T13:05:15.000Z',
+  );
+
+  const ordinary = relayIntentEnvelope('cycle-1', 'cont-settle', {
+    ...base,
+    event_seq: 5,
+    ts: '2026-08-02T13:05:20.000Z',
+  }) as { context?: Record<string, unknown> };
+  assert.equal(ordinary.context?.marketable_fallback, false);
+  assert.equal(ordinary.context?.relay_settle_not_before_ts, null);
+});
 
 test('exact-limit lifecycle revisions are monotonic and cannot regress after close', () => {
   const current = {

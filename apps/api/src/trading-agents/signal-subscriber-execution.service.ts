@@ -1202,6 +1202,70 @@ export function pendingCopyShowcaseDisposition(
   return filled ? 'MISSED_SHOWCASE_FILL' : 'SHOWCASE_ABSENT';
 }
 
+/**
+ * A fresh source fill may immediately follow a signed exact-limit reprice.
+ * Keep the managed Bitfinex order alive during the bounded convergence window
+ * instead of cancelling it before the exchange replacement/fill is visible.
+ */
+export function missedShowcaseFillWithinSettlementGrace(
+  bot: BotApiState | null,
+  tradeId: string,
+  intentEnvelope: unknown,
+  nowMs = Date.now(),
+  graceMs = PENDING_FILL_RECONCILE_GRACE_MS,
+): boolean {
+  if (!bot || !tradeId) return false;
+  const intent = intentEnvelope as {
+    action?: unknown;
+    trade_id?: unknown;
+    context?: {
+      signed_showcase_event?: unknown;
+      showcase_event?: unknown;
+      showcase_event_at?: unknown;
+      showcase_event_seq?: unknown;
+      marketable_fallback?: unknown;
+      relay_settle_not_before_ts?: unknown;
+    };
+  } | null;
+  const context = intent?.context;
+  if (
+    intent?.action !== 'ENTER'
+    || String(intent?.trade_id ?? '') !== tradeId
+    || context?.signed_showcase_event !== true
+    || context?.showcase_event !== 'LIMIT_UPDATED'
+    || context?.marketable_fallback !== true
+  ) {
+    return false;
+  }
+  const eventSeq = Number(context.showcase_event_seq);
+  const eventAtMs = sourceTimestampMs(context.showcase_event_at);
+  const settleAtMs = sourceTimestampMs(context.relay_settle_not_before_ts);
+  if (
+    !Number.isInteger(eventSeq)
+    || eventSeq < 0
+    || eventAtMs == null
+    || settleAtMs == null
+    || settleAtMs < eventAtMs
+    || settleAtMs - eventAtMs > 120_000
+  ) {
+    return false;
+  }
+  const position = (bot.positions ?? []).find(
+    (row) => String(row.trade_id ?? '') === tradeId,
+  ) as Record<string, unknown> | undefined;
+  if (!position) return false;
+  const filledAtMs = [position.entry_ts, position.fill_ts, position.filled_ts]
+    .map((raw) => sourceTimestampMs(raw))
+    .find((value): value is number => value != null);
+  if (filledAtMs == null) return false;
+  const boundedGraceMs = Math.max(1, graceMs);
+  const deadlineMs = Math.min(
+    filledAtMs + boundedGraceMs,
+    settleAtMs + boundedGraceMs,
+  );
+  return nowMs >= settleAtMs - 5_000 && nowMs <= deadlineMs;
+}
+
 export type MissedShowcaseFillResolution =
   | { outcome: 'FILL_RECORDED' }
   | { outcome: 'PENDING_RETRY_AFTER_FILL' }
@@ -5800,6 +5864,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
         if (abandon.reason === 'MISSED_SHOWCASE_FILL') {
+          if (
+            missedShowcaseFillWithinSettlementGrace(
+              botState,
+              cycle.tradeId,
+              intent,
+            )
+          ) {
+            // Reconcile an already-visible exchange fill immediately, but do
+            // not cancel a managed replacement that may still be crossing the
+            // exchange boundary. The next executor tick retries until the
+            // source-fill settlement grace has elapsed.
+            const fill = await this.detectEntryFillBeforeCancel(
+              creds,
+              meta,
+              true,
+            ).catch(() => null);
+            if (fill) {
+              const recorded = await this.recordCancelRaceFill(
+                agentId,
+                userId,
+                cycle,
+                participant.id,
+                meta,
+                creds,
+                intent,
+                fill,
+                'MISSED_SHOWCASE_FILL_SETTLEMENT',
+              );
+              if (recorded) return;
+            }
+            this.logger.warn(
+              `Missed showcase fill ${userId} cycle=${cycle.id}: source fill is within ${PENDING_FILL_RECONCILE_GRACE_MS}ms settlement grace — retaining managed order ${orderId}`,
+            );
+            return;
+          }
           const resolution = await resolveMissedShowcaseFill({
             managedOrderId: orderId,
             detectFill: () =>

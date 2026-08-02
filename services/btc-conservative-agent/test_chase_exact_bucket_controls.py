@@ -1,6 +1,9 @@
 import ast
 import copy
+import sys
 import threading
+import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -37,6 +40,25 @@ def test_virtual_wait_and_cancel_paths_remain_wired():
     assert "if not chase_bucket_allowed(next_chase_count):" in BOT_SOURCE
     assert "def _virtual_limit_would_fill(signal: dict, market_price: float)" in BOT_SOURCE
     assert "VIRTUAL_FILL_SKIPPED_CHASE_" in BOT_SOURCE
+
+
+def test_production_chase_never_invokes_terminal_marketable_fallback():
+    """Selected maker buckets must cancel/expire instead of forcing a fill."""
+    tree = ast.parse(BOT_SOURCE)
+    process_chase = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "process_limit_chase"
+    )
+    invoked = {
+        node.func.id
+        for node in ast.walk(process_chase)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_apply_marketable_limit_fallback" not in invoked
+    assert "the next disallowed bucket cancels them" in ast.get_source_segment(
+        BOT_SOURCE, process_chase
+    )
 
 
 def test_pending_order_registration_is_trade_id_idempotent():
@@ -163,6 +185,409 @@ def _compile_function(name, namespace):
     )
     exec(compile(ast.Module(body=[fn], type_ignores=[]), f"<{name}-test>", "exec"), namespace)
     return namespace[name]
+
+
+def test_marketable_limit_fill_never_violates_hard_limit_price():
+    market_walk_calls = []
+    namespace = {
+        "refresh_bbo_state": lambda: None,
+        "refresh_order_book_state": lambda: None,
+        "state_lock": threading.RLock(),
+        "state": {"bid": 63167.0, "ask": 63177.0, "price": 63154.44},
+        "simulate_market_fill": lambda side, qty: market_walk_calls.append((side, qty))
+        or {
+            "avg_price": 63154.44 if side == "sell" else 63189.0,
+            "filled_qty": qty,
+            "fully_filled": True,
+            "partial_fill": False,
+        },
+    }
+    resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
+
+    short_fill = resolve(
+        {
+            "side": "sell",
+            "qty": 0.03163,
+            "limit_price": 63167.0,
+            "entry_type": "SIM_LIMIT",
+        }
+    )
+    assert short_fill["fill_price"] == 63167.0
+    assert short_fill["fill_price"] >= 63167.0
+    assert short_fill["is_taker"] is True
+
+    namespace["state"].update({"bid": 63157.0, "ask": 63167.0})
+    long_fill = resolve(
+        {
+            "side": "buy",
+            "qty": 0.03163,
+            "limit_price": 63167.0,
+            "entry_type": "SIM_LIMIT",
+        }
+    )
+    assert long_fill["fill_price"] == 63167.0
+    assert long_fill["fill_price"] <= 63167.0
+    assert market_walk_calls == []
+
+    market_fill = resolve(
+        {
+            "side": "sell",
+            "qty": 0.03163,
+            "limit_price": 63167.0,
+            "entry_type": "SIM_MARKET",
+        }
+    )
+    assert market_fill["fill_price"] == 63154.44
+    assert market_walk_calls == [("sell", 0.03163)]
+
+
+def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
+    depth = _compile_function(
+        "_marketable_limit_full_depth_available",
+        {
+            "state_lock": threading.RLock(),
+            "state": {
+                "order_book": {
+                    "bids": [[63167.0, 1, 0.02], [63166.0, 1, 1.0]],
+                    "asks": [[63177.0, 1, 0.05]],
+                },
+                "bid_size_btc": 0.02,
+                "ask_size_btc": 0.05,
+            },
+        },
+    )
+    assert depth("SHORT", 63167.0, 0.03163) == (False, 0.02)
+    assert depth("SHORT", 63166.0, 0.03163)[0] is True
+    assert depth("LONG", 63177.0, 0.03163)[0] is True
+
+
+def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
+    receipt_ok = _compile_function("_relay_response_has_durable_receipt", {})
+    expected = {
+        "event_id": "cont-settle:LIMIT_UPDATED:4:token",
+        "event_seq": 4,
+        "trade_id": "cont-settle",
+        "limit_price": 63167.0,
+    }
+    good = {
+        "persisted": True,
+        "intentCreated": True,
+        "canonical_revision_applied": True,
+        "canonical_event_id": expected["event_id"],
+        "canonical_event_seq": 4,
+        "canonical_trade_id": "cont-settle",
+        "canonical_limit_price": 63167.0,
+        "platform_received_at": "2026-08-02T13:05:00Z",
+    }
+    assert receipt_ok(good, expected) is True
+    assert receipt_ok({**good, "canonical_limit_price": 63166.0}, expected) is False
+    assert receipt_ok({**good, "canonical_revision_applied": False}, expected) is False
+    assert receipt_ok({**good, "intentCreated": False}, expected) is False
+    assert receipt_ok({**good, "persisted": False}, expected) is False
+    assert receipt_ok({**good, "platform_received_at": None}, expected) is False
+    assert receipt_ok(None) is False
+
+
+def test_marketable_fallback_waits_for_relay_settlement_and_is_terminal():
+    touched_calls = []
+    ready = _compile_function(
+        "_pending_limit_ready_for_fill",
+        {
+            "time": type("Clock", (), {"time": staticmethod(lambda: 110.0)}),
+            "_pending_limit_touched": lambda *_args, **_kwargs: touched_calls.append(True)
+            or False,
+        },
+    )
+    order = {
+        "marketable_fallback": True,
+        "relay_settle_not_before_ts": 115.0,
+        "relay_event_durable_ack": True,
+    }
+    assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=110.0) is False
+    assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=115.0) is True
+    order["relay_event_durable_ack"] = False
+    assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=120.0) is False
+    assert touched_calls == []
+
+    tree = ast.parse(BOT_SOURCE)
+    fallback = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_apply_marketable_limit_fallback"
+    )
+    fallback_source = ast.get_source_segment(BOT_SOURCE, fallback)
+    assert 'order.get("marketable_fallback") or order.get("marketable_fallback_inflight")' in fallback_source
+    assert "wait_for_durable_receipt=True" in fallback_source
+    assert 'order["relay_event_durable_ack"] = True' in fallback_source
+    assert 'signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]' in fallback_source
+
+    pending_source = ast.get_source_segment(
+        BOT_SOURCE,
+        next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "process_pending_orders"
+        ),
+    )
+    assert "_pending_limit_ready_for_fill(" in pending_source
+
+
+def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatch):
+    deliveries = []
+    delivery_ok = {"value": False}
+    block_delivery = {"value": False}
+    delivery_entered = threading.Event()
+    delivery_release = threading.Event()
+
+    def push(event, trade_id, extra, *, wait_for_durable_receipt=False):
+        deliveries.append((event, trade_id, dict(extra), wait_for_durable_receipt))
+        if block_delivery["value"]:
+            delivery_entered.set()
+            assert delivery_release.wait(timeout=5)
+        return delivery_ok["value"]
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "execution_funnel",
+        types.SimpleNamespace(funnel_on_limit_chase=lambda *_args, **_kwargs: None),
+    )
+    apply_fallback = _compile_function(
+        "_apply_marketable_limit_fallback",
+        {
+            "MARKETABLE_CHASE_SEC": 0,
+            "MARKETABLE_CHASE_DISTANCE_USD": 10.0,
+            "MARKETABLE_RELAY_SETTLE_SEC": 15,
+            "_is_static_no_chase_order": lambda _order: False,
+            "_normalize_order_side_to_dir": lambda _side: "SHORT",
+            "_chase_structure_valid": lambda _direction: True,
+            "_limit_chase_market_gap": lambda *_args: 20.0,
+            "_marketable_limit_full_depth_available": lambda *_args: (True, 1.0),
+            "refresh_bbo_state": lambda: None,
+            "state_lock": threading.RLock(),
+            "state": {"bid": 63167.0, "ask": 63177.0},
+            "chase_bucket_allowed": lambda bucket: bucket == 4,
+            "chase_count_bucket": lambda count: f"{count}_chases",
+            "_cancel_pending_for_chase_gate": lambda *_args: None,
+            "_push_showcase_relay_event": push,
+            "_resolve_fill_model": lambda *_args: "AI_DIRECT_CHASE",
+            "datetime": datetime,
+            "timezone": timezone,
+            "trade_lock": threading.RLock(),
+            "uuid": __import__("uuid"),
+            "time": types.SimpleNamespace(time=lambda: 100.5),
+            "logger": Logger(),
+            "fmt": str,
+        },
+    )
+    touch_checks = []
+    pending_limit_ready_for_fill = _compile_function(
+        "_pending_limit_ready_for_fill",
+        {
+            "time": types.SimpleNamespace(time=lambda: 100.5),
+            "_pending_limit_touched": (
+                lambda *_args, **_kwargs: touch_checks.append(True) or True
+            ),
+        },
+    )
+    order = {
+        "status": "PENDING",
+        "created_ts": 1.0,
+        "signal_dir": "SHORT",
+        "side": "sell",
+        "qty": 0.03163,
+        "limit_price": 63225.8,
+        "limit_chase_count": 3,
+        "trade_id": "cont-settlement",
+        "entry_limit_policy": "micro_sr_structural_limit_v1",
+        "research_lane": "CONTINUOUS",
+    }
+    signal = {
+        "entry_limit_policy": "micro_sr_structural_limit_v1",
+        "research_lane": "CONTINUOUS",
+    }
+
+    assert apply_fallback(order, signal, 63154.44, 100.0) is False
+    assert order["limit_price"] == 63225.8
+    assert "marketable_fallback" not in order
+    assert deliveries[-1][2]["marketable_fallback"] is True
+    assert deliveries[-1][3] is True
+
+    delivery_ok["value"] = True
+    assert apply_fallback(order, signal, 63154.44, 100.0) is True
+    assert order["limit_price"] == 63167.0
+    assert order["limit_chase_count"] == 4
+    assert order["marketable_fallback"] is True
+    assert order["relay_event_durable_ack"] is True
+    assert order["relay_settle_not_before_ts"] == 115.0
+    assert signal["relay_event_durable_ack"] is True
+
+    concurrent_order = {
+        **order,
+        "trade_id": "cont-concurrent",
+        "status": "PENDING",
+        "limit_price": 63225.8,
+        "limit_chase_count": 3,
+    }
+    for key in (
+        "marketable_fallback",
+        "marketable_fallback_inflight",
+        "relay_event_durable_ack",
+        "relay_settle_not_before_ts",
+    ):
+        concurrent_order.pop(key, None)
+    concurrent_signal = dict(signal)
+    block_delivery["value"] = True
+    delivery_release.clear()
+    delivery_entered.clear()
+    results = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            apply_fallback(concurrent_order, concurrent_signal, 63154.44, 100.0)
+        )
+    )
+    before = len(deliveries)
+    worker.start()
+    assert delivery_entered.wait(timeout=5)
+    assert concurrent_order.get("marketable_fallback_inflight")
+    assert (
+        pending_limit_ready_for_fill(
+            concurrent_order,
+            63225.8,
+            bid=63225.8,
+            ask=63235.8,
+            now=100.5,
+        )
+        is False
+    )
+    assert touch_checks == []
+    assert apply_fallback(concurrent_order, concurrent_signal, 63154.44, 100.0) is False
+    assert len(deliveries) == before + 1
+    delivery_release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert results == [True]
+    assert concurrent_order["marketable_fallback"] is True
+    assert (
+        pending_limit_ready_for_fill(
+            concurrent_order,
+            63167.0,
+            bid=63167.0,
+            ask=63177.0,
+            now=114.999,
+        )
+        is False
+    )
+    assert (
+        pending_limit_ready_for_fill(
+            concurrent_order,
+            63167.0,
+            bid=63167.0,
+            ask=63177.0,
+            now=115.0,
+        )
+        is True
+    )
+
+    failed_order = {
+        **concurrent_order,
+        "trade_id": "cont-failed-inflight",
+        "status": "PENDING",
+        "limit_price": 63225.8,
+        "limit_chase_count": 3,
+    }
+    for key in (
+        "marketable_fallback",
+        "marketable_fallback_inflight",
+        "relay_event_durable_ack",
+        "relay_settle_not_before_ts",
+    ):
+        failed_order.pop(key, None)
+    failed_signal = dict(signal)
+    delivery_ok["value"] = False
+    delivery_entered.clear()
+    delivery_release.clear()
+    touch_checks.clear()
+    failed_results = []
+    failed_worker = threading.Thread(
+        target=lambda: failed_results.append(
+            apply_fallback(failed_order, failed_signal, 63154.44, 100.0)
+        )
+    )
+    failed_worker.start()
+    assert delivery_entered.wait(timeout=5)
+    assert failed_order.get("marketable_fallback_inflight")
+    assert (
+        pending_limit_ready_for_fill(
+            failed_order,
+            63225.8,
+            bid=63225.8,
+            ask=63235.8,
+            now=100.5,
+        )
+        is False
+    )
+    assert touch_checks == []
+    delivery_release.set()
+    failed_worker.join(timeout=5)
+    assert not failed_worker.is_alive()
+    assert failed_results == [False]
+    assert "marketable_fallback_inflight" not in failed_order
+    assert "marketable_fallback" not in failed_order
+    assert (
+        pending_limit_ready_for_fill(
+            failed_order,
+            63225.8,
+            bid=63225.8,
+            ask=63235.8,
+            now=100.5,
+        )
+        is True
+    )
+    assert touch_checks == [True]
+
+    cancelled_order = {
+        **concurrent_order,
+        "trade_id": "cont-cancel-race",
+        "status": "PENDING",
+        "limit_price": 63225.8,
+        "limit_chase_count": 3,
+    }
+    for key in (
+        "marketable_fallback",
+        "marketable_fallback_inflight",
+        "relay_event_durable_ack",
+        "relay_settle_not_before_ts",
+    ):
+        cancelled_order.pop(key, None)
+    delivery_entered.clear()
+    delivery_release.clear()
+    delivery_ok["value"] = True
+    cancelled_results = []
+    cancelled_worker = threading.Thread(
+        target=lambda: cancelled_results.append(
+            apply_fallback(cancelled_order, {}, 63154.44, 100.0)
+        )
+    )
+    cancelled_worker.start()
+    assert delivery_entered.wait(timeout=5)
+    cancelled_order["status"] = "CANCELLED"
+    delivery_release.set()
+    cancelled_worker.join(timeout=5)
+    assert cancelled_results == [False]
+    assert cancelled_order["status"] == "CANCELLED"
+    assert "marketable_fallback" not in cancelled_order
 
 
 def test_deterministic_anchor_uses_0_1_pct_offset_not_local_support_resistance():

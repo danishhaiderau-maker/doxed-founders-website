@@ -268,6 +268,9 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
 
     def test_live_guard_requires_fresh_flat_audit_and_explicit_arm(self):
         self._make_ws_ready()
+        # This unit contract exercises the live arm/audit gates themselves;
+        # isolate it from an operator's shell-level paper-mode setting.
+        self.namespace["_force_paper_mode_active"] = lambda: False
         armable, reason, _ = self.namespace["can_open_live_entry"](
             require_armed=False, now=self.now
         )
@@ -957,7 +960,7 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
     def test_direct_live_limits_never_simulate_fill_or_local_only_chase(self):
         pending = function_source("process_pending_orders")
         live_check = pending.index('order.get("bitfinex_order_id")')
-        touch = pending.index("if not _pending_limit_touched")
+        touch = pending.index("if not _pending_limit_ready_for_fill")
         self.assertLess(live_check, touch)
         chase = function_source("_apply_limit_chase")
         self.assertIn('order.get("bitfinex_order_id")', chase)

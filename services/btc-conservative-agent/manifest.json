@@ -3,8 +3,8 @@
   "combo_version": "2026-08-02",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "0470bd1d29b7",
+  "signal_hash": "0211de1cb99e",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-02T12:05:00.360Z",
+  "updated_at": "2026-08-02T15:40:27.186Z",
   "note": "Canonical production bot; signal-engine copy is verification-only and must match this hash."
 }

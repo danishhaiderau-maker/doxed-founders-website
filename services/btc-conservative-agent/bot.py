@@ -4845,7 +4845,7 @@ def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
 
 
 def resolve_sim_fill_with_depth(order: dict) -> dict:
-    """Depth-aware sim fill: taker walks book; maker fills at limit."""
+    """Depth-aware market fill; every limit fill respects its hard price."""
     limit = float(order.get("limit_price") or 0)
     side = str(order.get("side") or "").lower()
     qty = float(order.get("qty") or 0)
@@ -4855,14 +4855,12 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
         bid = float(state.get("bid") or 0)
         ask = float(state.get("ask") or 0)
         last = float(state.get("price") or limit or 0)
-    is_taker = (
-        order.get("entry_type") in ("SIM_MARKET", "MARKET")
-        or (
-            (side == "buy" and ask > 0 and limit >= ask)
-            or (side == "sell" and bid > 0 and limit <= bid)
-        )
+    is_market_order = order.get("entry_type") in ("SIM_MARKET", "MARKET")
+    crossed_limit = (
+        (side == "buy" and ask > 0 and limit >= ask)
+        or (side == "sell" and bid > 0 and limit <= bid)
     )
-    if is_taker and qty > 0:
+    if is_market_order and qty > 0:
         sim = simulate_market_fill(side, qty)
         fill_px = sim["avg_price"]
         filled_qty = sim["filled_qty"]
@@ -4871,6 +4869,24 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
             filled_qty = qty
             sim = dict(sim, avg_price=round(fill_px, 2), filled_qty=qty, fully_filled=True, partial_fill=False)
         return {"fill_price": fill_px, "filled_qty": filled_qty, "is_taker": True, **sim}
+    if crossed_limit and limit > 0:
+        # A newly marketable LIMIT can be a taker, but it can never execute at
+        # a worse price than its limit.  Walking the unrestricted market book
+        # here previously produced impossible fills (for example a SHORT sell
+        # below its sell limit) and broke paper-to-Bitfinex lifecycle fidelity.
+        fill_px = round(limit, 2)
+        return {
+            "fill_price": fill_px,
+            "filled_qty": qty,
+            "is_taker": True,
+            "avg_price": fill_px,
+            "best_price": ask if side == "buy" else bid,
+            "slippage_usd": 0.0,
+            "fully_filled": True,
+            "partial_fill": False,
+            "levels_consumed": 1,
+            "unfilled_qty": 0.0,
+        }
     fill_px = round(limit, 2) if limit > 0 else last
     return {
         "fill_price": fill_px,
@@ -6651,6 +6667,13 @@ LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
 LIMIT_CHASE_HOLD_SEC = 0  # v1.1.23: no post-submit hold before chase
 MARKETABLE_CHASE_SEC = 600  # v1.1.23: marketable limit fallback at 10m
 MARKETABLE_CHASE_DISTANCE_USD = 10.0
+# A marketable fallback must be visible to the relay long enough for the
+# signed LIMIT_UPDATED event to be persisted and cancel/replaced at Bitfinex.
+# Without this dwell the paper order can publish a source fill in the very
+# same loop as the reprice, making an exact live copy physically impossible.
+MARKETABLE_RELAY_SETTLE_SEC = max(
+    15, int(os.getenv("MARKETABLE_RELAY_SETTLE_SEC", "15"))
+)
 LIMIT_CHASE_STEP_PCT_DEFAULT = 0.25
 LIMIT_CHASE_MAX_GAP_CLOSE_PCT = float(os.getenv("LIMIT_CHASE_MAX_GAP_CLOSE_PCT", "0.90"))
 LIMIT_CHASE_MIN_BUFFER_USD = float(os.getenv("LIMIT_CHASE_MIN_BUFFER_USD", str(MICRO_SR_ENTRY_BUFFER_USD)))
@@ -7299,6 +7322,33 @@ def _record_relay_delivery(
         _relay_push_history.append(row)
 
 
+def _relay_response_has_durable_receipt(response_payload, expected_payload=None) -> bool:
+    """True only after Railway confirms durable lifecycle persistence."""
+    base_ok = bool(
+        isinstance(response_payload, dict)
+        and response_payload.get("persisted") is True
+        and response_payload.get("intentCreated") is True
+        and response_payload.get("canonical_revision_applied") is True
+        and response_payload.get("platform_received_at")
+    )
+    if not base_ok or not expected_payload:
+        return base_ok
+    try:
+        return bool(
+            response_payload.get("canonical_event_id") == expected_payload.get("event_id")
+            and int(response_payload.get("canonical_event_seq"))
+            == int(expected_payload.get("event_seq"))
+            and response_payload.get("canonical_trade_id") == expected_payload.get("trade_id")
+            and abs(
+                float(response_payload.get("canonical_limit_price"))
+                - float(expected_payload.get("limit_price"))
+            )
+            < 0.005
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _relay_delivery_history_snapshot(limit=10):
     with _relay_push_history_lock:
         return list(_relay_push_history)[-max(1, int(limit)):]
@@ -7444,16 +7494,36 @@ def _platform_relay_lane_for_event(
     return derived_lane
 
 
-def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
-    """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
+def _push_showcase_relay_event(
+    event: str,
+    trade_id: str = None,
+    extra: dict = None,
+    *,
+    wait_for_durable_receipt: bool = False,
+) -> bool:
+    """Push a lifecycle event, optionally waiting for Railway durability.
+
+    Ordinary chase updates remain fire-and-forget.  The terminal marketable
+    reprice is different: the source must not declare a fill until Railway has
+    durably persisted the signed exact-limit revision.  In that one path the
+    caller sets ``wait_for_durable_receipt`` and this function returns ``True``
+    only after a response containing both ``persisted=true`` and a platform
+    receipt timestamp.
+    """
     if not is_active_dashboard_owner():
         logger.warning(f"[RELAY PUSH] blocked non-owner process event={event} trade={trade_id}")
-        return
+        return False
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     if not url:
-        return
+        return False
     secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
     webhook_secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    if wait_for_durable_receipt and not webhook_secret:
+        logger.warning(
+            f"[RELAY PUSH] durable receipt blocked without HMAC secret "
+            f"event={event} trade={trade_id}"
+        )
+        return False
     payload = {
         "event": event,
         "trade_id": trade_id,
@@ -7473,11 +7543,14 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 f"{payload.get('research_lane') or 'UNKNOWN'} "
                 f"event={event} trade={trade_id or 'MISSING'}"
             )
-            return
+            return False
         payload["research_lane"] = relay_lane
-    payload["event_id"] = (
-        f"{trade_id or 'none'}:{event}:"
-        f"{payload.get('event_seq', 'na')}:{payload['ts']}"
+    payload["event_id"] = str(
+        payload.get("event_id")
+        or (
+            f"{trade_id or 'none'}:{event}:"
+            f"{payload.get('event_seq', 'na')}:{payload['ts']}"
+        )
     )
     # Exact chase updates are safe to consume without waiting for a platform callback
     # only when this canonical owner also HMAC-signs the payload.
@@ -7501,7 +7574,7 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
         payload["schema"] = "dcf-showcase-intent-v1"
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-    def _post():
+    def _post() -> bool:
         started = time.perf_counter()
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -7519,6 +7592,10 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             )
             response.raise_for_status()
             response_payload = response.json() if response.content else {}
+            if wait_for_durable_receipt and not _relay_response_has_durable_receipt(
+                response_payload, payload
+            ):
+                raise RuntimeError("relay event was not durably acknowledged")
             _relay_push_state["seq"] += 1
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
@@ -7540,6 +7617,7 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 http_latency_ms=_relay_push_state["last_latency_ms"],
                 platform_received_at=_relay_push_state["last_platform_received_at"],
             )
+            return True
         except Exception as exc:
             _relay_push_state["last_ts"] = time.time()
             _relay_push_state["last_event"] = event
@@ -7557,8 +7635,12 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
                 error=exc,
             )
             logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
+            return False
 
+    if wait_for_durable_receipt:
+        return _post()
     threading.Thread(target=_post, daemon=True).start()
+    return True
 
 
 def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
@@ -18703,6 +18785,46 @@ def _limit_chase_market_gap(direction: str, limit_price: float, market_price: fl
     return 0.0
 
 
+def _marketable_limit_full_depth_available(
+    direction: str,
+    limit_price: float,
+    requested_qty: float,
+) -> tuple[bool, float]:
+    """Require enough visible executable depth before a forced full paper fill."""
+    direction = str(direction or "").upper()
+    limit_price = float(limit_price or 0)
+    requested_qty = float(requested_qty or 0)
+    if direction not in ("LONG", "SHORT") or limit_price <= 0 or requested_qty <= 0:
+        return False, 0.0
+    with state_lock:
+        book = state.get("order_book") or {}
+        levels = list(book.get("asks") or []) if direction == "LONG" else list(book.get("bids") or [])
+        bbo_size = float(
+            state.get("ask_size_btc" if direction == "LONG" else "bid_size_btc")
+            or 0
+        )
+    available = 0.0
+    for level in levels:
+        try:
+            level_price = float(level[0])
+            level_size = max(0.0, float(level[2]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        executable = (
+            level_price <= limit_price
+            if direction == "LONG"
+            else level_price >= limit_price
+        )
+        if not executable:
+            break
+        available += level_size
+        if available + 1e-12 >= requested_qty:
+            break
+    if not levels:
+        available = bbo_size
+    return available + 1e-12 >= requested_qty, round(available, 8)
+
+
 def _is_static_no_chase_order(order: dict) -> bool:
     """True when an order must rest at its original price until touch or TTL."""
     order = order or {}
@@ -18976,6 +19098,10 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     """After patient chase, set marketable limit at ask/bid when structure still valid."""
     if order.get("status") != "PENDING":
         return False
+    if order.get("marketable_fallback") or order.get("marketable_fallback_inflight"):
+        # Terminal reprice: do not consume another chase bucket or cancel the
+        # order while its relay settlement dwell is in progress.
+        return False
     if _is_static_no_chase_order(order):
         return False
     created = float(order.get("created_ts") or 0)
@@ -18987,6 +19113,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     if not _chase_structure_valid(direction):
         return False
     old_limit = float(order.get("limit_price") or 0)
+    base_chase_count = int(order.get("limit_chase_count") or 0)
     if old_limit <= 0 or price <= 0:
         return False
     gap = _limit_chase_market_gap(direction, old_limit, float(price))
@@ -18999,9 +19126,21 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     new_limit = round(ask, 2) if direction == "LONG" else round(bid, 2)
     if abs(new_limit - old_limit) < 0.01:
         return False
+    requested_qty = float(order.get("qty") or 0)
+    full_depth, available_qty = _marketable_limit_full_depth_available(
+        direction, new_limit, requested_qty
+    )
+    if not full_depth:
+        order["marketable_fallback_last_available_qty"] = available_qty
+        logger.warning(
+            f"[SIM] MARKETABLE_LIMIT deferred trade_id={order.get('trade_id')} "
+            f"requested_qty={requested_qty:.8f} available_qty={available_qty:.8f} "
+            "at the hard limit"
+        )
+        return False
     age_min = round((now - created) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
-    chase_count = int(order.get("limit_chase_count") or 0) + 1
+    chase_count = base_chase_count + 1
     if not chase_bucket_allowed(chase_count):
         logger.info(
             f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
@@ -19009,17 +19148,91 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         )
         _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
-    order["limit_price"] = new_limit
-    order["limit_chase_count"] = chase_count
-    order["last_chase_ts"] = now
-    order["marketable_fallback"] = True
-    order["fill_model"] = _resolve_fill_model(signal, order)
-    if signal:
-        signal["limit_price"] = new_limit
-        signal["limit_chase_count"] = chase_count
-        signal["last_chase_ts"] = now
-        signal["marketable_fallback"] = True
-        signal["fill_model"] = order["fill_model"]
+    settle_not_before_ts = now + MARKETABLE_RELAY_SETTLE_SEC
+    settle_not_before_iso = datetime.fromtimestamp(
+        settle_not_before_ts, timezone.utc
+    ).isoformat()
+    transition_id = (
+        f"{order.get('trade_id') or 'none'}:LIMIT_UPDATED:{chase_count}:"
+        f"{uuid.uuid4().hex}"
+    )
+    with trade_lock:
+        if (
+            order.get("status") != "PENDING"
+            or order.get("marketable_fallback")
+            or order.get("marketable_fallback_inflight")
+            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+            or int(order.get("limit_chase_count") or 0) != base_chase_count
+        ):
+            return False
+        order["marketable_fallback_inflight"] = transition_id
+    try:
+        relay_acked = _push_showcase_relay_event(
+            "LIMIT_UPDATED",
+            order.get("trade_id"),
+            {
+                "event_id": transition_id,
+                "limit_price": new_limit,
+                "direction": direction,
+                "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+                "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+                "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+                "event_seq": chase_count,
+                "executable": True,
+                "marketable_fallback": True,
+                "relay_settle_not_before_ts": settle_not_before_iso,
+            },
+            wait_for_durable_receipt=True,
+        )
+    except Exception:
+        with trade_lock:
+            if order.get("marketable_fallback_inflight") == transition_id:
+                order.pop("marketable_fallback_inflight", None)
+        raise
+    if not relay_acked:
+        with trade_lock:
+            if order.get("marketable_fallback_inflight") == transition_id:
+                order.pop("marketable_fallback_inflight", None)
+                order["marketable_fallback_last_delivery_failed_ts"] = now
+        logger.warning(
+            f"[SIM] MARKETABLE_LIMIT deferred trade_id={order.get('trade_id')} "
+            "because the signed exact-limit update has no durable platform receipt"
+        )
+        return False
+    with trade_lock:
+        transition_still_current = (
+            order.get("status") == "PENDING"
+            and order.get("marketable_fallback_inflight") == transition_id
+            and not order.get("marketable_fallback")
+            and abs(float(order.get("limit_price") or 0) - old_limit) < 0.005
+            and int(order.get("limit_chase_count") or 0) == base_chase_count
+        )
+        order.pop("marketable_fallback_inflight", None)
+        if not transition_still_current:
+            logger.warning(
+                f"[SIM] MARKETABLE_LIMIT receipt ignored trade_id={order.get('trade_id')} "
+                "because the source order changed while Railway acknowledged it"
+            )
+            return False
+        order["limit_price"] = new_limit
+        order["limit_chase_count"] = chase_count
+        order["last_chase_ts"] = now
+        order["marketable_fallback"] = True
+        order["relay_settle_not_before_ts"] = settle_not_before_ts
+        order["relay_event_durable_ack"] = True
+        order["relay_event_ack_at_ts"] = time.time()
+        order["marketable_fallback_depth_qty"] = available_qty
+        order["fill_model"] = _resolve_fill_model(signal, order)
+        if signal:
+            signal["limit_price"] = new_limit
+            signal["limit_chase_count"] = chase_count
+            signal["last_chase_ts"] = now
+            signal["marketable_fallback"] = True
+            signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]
+            signal["relay_event_durable_ack"] = True
+            signal["relay_event_ack_at_ts"] = order["relay_event_ack_at_ts"]
+            signal["marketable_fallback_depth_qty"] = available_qty
+            signal["fill_model"] = order["fill_model"]
     logger.info(
         f"[SIM] MARKETABLE_LIMIT trade_id={order.get('trade_id')} dir={direction} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -19030,19 +19243,6 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] marketable limit log failed: {_fe}")
-    _push_showcase_relay_event(
-        "LIMIT_UPDATED",
-        order.get("trade_id"),
-        {
-            "limit_price": new_limit,
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        },
-    )
     return True
 
 
@@ -19107,13 +19307,11 @@ def process_limit_chase(price: float):
             continue
         if _apply_limit_chase(order, signal, price, now):
             chased += 1
-    for order in pending:
-        if _is_static_no_chase_order(order):
-            continue
-        tid = order.get("trade_id")
-        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
-        if _apply_marketable_limit_fallback(order, signal, price, now):
-            chased += 1
+    # Production relay contract: never convert an unfilled maker entry into a
+    # terminal marketable reprice. Selected chase buckets stay exact, resting
+    # LIMITs; the next disallowed bucket cancels them and TTL remains the final
+    # backstop. This avoids an impossible cross-system fill/cancel transaction
+    # between Fly and Bitfinex while preserving chase-2/3/4 semantics.
     if chased:
         pipeline_state_sync()
 
@@ -19193,6 +19391,34 @@ def _pending_limit_touched(
         return max_p >= limit or price >= limit
     return False
 
+
+def _pending_limit_ready_for_fill(
+    order: dict,
+    price: float,
+    *,
+    bid: float | None = None,
+    ask: float | None = None,
+    now: float | None = None,
+) -> bool:
+    """Honor relay settlement before a terminal marketable source fill."""
+    now = time.time() if now is None else float(now)
+    if order.get("marketable_fallback_inflight"):
+        # Freeze natural source fills while the exact terminal revision is
+        # crossing the platform boundary. Cancellation/TTL may still change
+        # status; the receipt path revalidates that state afterward.
+        return False
+    settle_not_before = float(order.get("relay_settle_not_before_ts") or 0)
+    if settle_not_before > 0 and now < settle_not_before:
+        return False
+    if order.get("marketable_fallback") and settle_not_before > 0:
+        if order.get("relay_event_durable_ack") is not True:
+            return False
+        # The order was marketable on the source book when LIMIT_UPDATED was
+        # durably acknowledged. Complete the deterministic paper fill after
+        # the bounded relay dwell even if the next public tick has moved away.
+        return True
+    return _pending_limit_touched(order, price, bid=bid, ask=ask)
+
 def process_pending_orders():
     if manual_admin_pause_active():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
@@ -19239,7 +19465,7 @@ def process_pending_orders():
                 # payload is the only authority that can convert it to an
                 # EXIT_ONLY managed position.
                 continue
-            if not _pending_limit_touched(
+            if not _pending_limit_ready_for_fill(
                 order,
                 price,
                 bid=fill_bid,

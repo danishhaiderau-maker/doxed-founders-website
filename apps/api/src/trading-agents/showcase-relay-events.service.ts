@@ -55,6 +55,10 @@ export type ShowcaseRelayEventBody = {
   entry_limit_policy?: string | null;
   entry_reason?: string | null;
   executable?: boolean | null;
+  /** True only for the terminal, exchange-crossing exact-limit revision. */
+  marketable_fallback?: boolean | null;
+  /** Source-selected UTC instant before which its paper fill is forbidden. */
+  relay_settle_not_before_ts?: string | null;
   bot_version?: string | null;
   strategy_mode?: string | null;
   bot_instance_id?: string | null;
@@ -68,6 +72,10 @@ export type ShowcaseRelayEventBody = {
 
 type RelayLifecycleEnvelope = {
   action?: unknown;
+  trade_id?: unknown;
+  entry?: {
+    exact_limit_price?: unknown;
+  };
   context?: {
     showcase_event?: unknown;
     showcase_event_at?: unknown;
@@ -75,6 +83,30 @@ type RelayLifecycleEnvelope = {
     showcase_event_seq?: unknown;
   };
 };
+
+type RelayPersistenceReceipt = {
+  persisted: boolean;
+  intentApplied: boolean;
+};
+
+/** Prove that the exact incoming revision is the cycle's canonical envelope. */
+export function exactLifecycleRevisionMatches(
+  current: RelayLifecycleEnvelope | null | undefined,
+  incoming: ShowcaseRelayEventBody,
+): boolean {
+  const currentLimit = Number(current?.entry?.exact_limit_price);
+  const incomingLimit = Number(incoming.limit_price);
+  return Boolean(
+    current?.action === 'ENTER'
+    && String(current?.trade_id ?? '') === String(incoming.trade_id ?? '')
+    && current?.context?.showcase_event === incoming.event
+    && String(current?.context?.showcase_event_id ?? '') === String(incoming.event_id ?? '')
+    && Number(current?.context?.showcase_event_seq) === Number(incoming.event_seq)
+    && Number.isFinite(currentLimit)
+    && Number.isFinite(incomingLimit)
+    && Math.abs(currentLimit - incomingLimit) < 0.005,
+  );
+}
 
 /** Prevent a delayed webhook retry from replacing a newer canonical exact limit. */
 export function shouldApplyExactLifecycleUpdate(
@@ -118,7 +150,7 @@ export function shouldApplyExactLifecycleUpdate(
  * a signed ORDER_PLACED/LIMIT_UPDATED carrying the canonical structural
  * policy and an exact positive limit can produce an executable ENTER envelope.
  */
-function relayIntentEnvelope(
+export function relayIntentEnvelope(
   cycleId: string,
   tradeId: string,
   body?: ShowcaseRelayEventBody,
@@ -153,6 +185,15 @@ function relayIntentEnvelope(
     && body.limit_price > 0
       ? body.limit_price
       : null;
+  const settleNotBeforeMs = Date.parse(
+    String(body?.relay_settle_not_before_ts ?? ''),
+  );
+  const marketableFallback =
+    body?.event === 'LIMIT_UPDATED'
+    && body?.marketable_fallback === true
+    && Number.isFinite(settleNotBeforeMs);
+  const exactEntryLifecycle =
+    body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED';
   const lifecycleContext = {
     signed_showcase_event: Boolean(body?.platform_received_at),
     ...(body?.event ? { showcase_event: body.event } : {}),
@@ -166,6 +207,16 @@ function relayIntentEnvelope(
       : {}),
     ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
     ...(executablePolicy !== null ? { entry_limit_policy: executablePolicy } : {}),
+    ...(exactEntryLifecycle
+      ? {
+          // Always overwrite these fields on an exact lifecycle revision so
+          // a later ordinary reprice cannot inherit a stale settlement marker.
+          marketable_fallback: marketableFallback,
+          relay_settle_not_before_ts: marketableFallback
+            ? body?.relay_settle_not_before_ts
+            : null,
+        }
+      : {}),
     ...(body?.event === 'POSITION_CLOSED'
       && typeof body.exit_price === 'number'
       && Number.isFinite(body.exit_price)
@@ -537,8 +588,11 @@ export class ShowcaseRelayEventsService {
     // POSITION_CLOSED rows. Best-effort — never let persistence failure kill
     // the relay wake (the wake is the critical side-effect).
     let persisted = false;
+    let canonicalRevisionApplied = false;
     try {
-      persisted = await this.persistRelayEvent(slug, persistBody);
+      const receipt = await this.persistRelayEvent(slug, persistBody);
+      persisted = receipt.persisted;
+      canonicalRevisionApplied = receipt.intentApplied;
     } catch (err) {
       this.logger.error(
         `Showcase relay persist failed: ${err instanceof Error ? err.message : err}`,
@@ -555,7 +609,8 @@ export class ShowcaseRelayEventsService {
     }
     if (signedLifecycleEvent) {
       this.queueCanonicalReconcile(event);
-      intentCreated = persisted && directExecutableIntent;
+      intentCreated =
+        persisted && directExecutableIntent && canonicalRevisionApplied;
     }
 
     this.logger.log(
@@ -568,6 +623,12 @@ export class ShowcaseRelayEventsService {
       trade_id: body.trade_id ?? null,
       intentCreated,
       persisted,
+      canonical_revision_applied: canonicalRevisionApplied,
+      canonical_event_id: canonicalRevisionApplied ? persistBody.event_id ?? null : null,
+      canonical_event_seq: canonicalRevisionApplied ? persistBody.event_seq ?? null : null,
+      canonical_limit_price:
+        canonicalRevisionApplied ? persistBody.limit_price ?? null : null,
+      canonical_trade_id: canonicalRevisionApplied ? persistBody.trade_id ?? null : null,
       platform_received_at: persistBody.platform_received_at ?? null,
       ingest_ms: Date.now() - ingestStartedAt,
     };
@@ -584,9 +645,12 @@ export class ShowcaseRelayEventsService {
    *   - POSITION_CLOSED -> ensure cycle exists, transition to CLOSED, + POSITION_CLOSED event
    *   - LIMIT_UPDATED   -> ensure cycle exists, + LIMIT_UPDATED event (no status change)
    */
-  private async persistRelayEvent(slug: string, body: ShowcaseRelayEventBody): Promise<boolean> {
+  private async persistRelayEvent(
+    slug: string,
+    body: ShowcaseRelayEventBody,
+  ): Promise<RelayPersistenceReceipt> {
     const tradeId = (body.trade_id ?? '').trim();
-    if (!tradeId) return false;
+    if (!tradeId) return { persisted: false, intentApplied: false };
     const eventId =
       body.event_id?.trim()
       || [
@@ -597,7 +661,7 @@ export class ShowcaseRelayEventsService {
       ].join(':');
     const eventBody: ShowcaseRelayEventBody = { ...body, event_id: eventId };
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
-    if (!agent) return false;
+    if (!agent) return { persisted: false, intentApplied: false };
 
     const lockKey = `${agent.id}:${tradeId}`;
     return this.withRelayPersistenceLock(lockKey, () =>
@@ -620,14 +684,15 @@ export class ShowcaseRelayEventsService {
         // Idempotency is per source event, not merely per event type: every
         // unique LIMIT_UPDATED revision remains visible while retries of the
         // same revision remain harmless.
-        const cycleId = await this.ensureCycle(
+        const cycleReceipt = await this.ensureCycle(
           tx,
           agent.id,
           tradeId,
           eventBody.direction,
           eventBody,
         );
-        if (!cycleId) return false;
+        if (!cycleReceipt) return { persisted: false, intentApplied: false };
+        const { cycleId, intentApplied } = cycleReceipt;
         const already = await tx.signalCycleEvent.findFirst({
           where: {
             cycleId,
@@ -636,7 +701,7 @@ export class ShowcaseRelayEventsService {
           },
           select: { id: true },
         });
-        if (already) return true; // replay protection
+        if (already) return { persisted: true, intentApplied }; // replay protection
 
         await tx.signalCycleEvent.create({
           data: {
@@ -652,14 +717,16 @@ export class ShowcaseRelayEventsService {
         // Bitfinex has accepted its own order.
         if (eventBody.event === 'POSITION_CLOSED') {
           const cycle = await tx.signalCycle.findUnique({ where: { id: cycleId } });
-          if (!cycle || cycle.status === SignalCycleStatus.CLOSED) return true;
+          if (!cycle || cycle.status === SignalCycleStatus.CLOSED) {
+            return { persisted: true, intentApplied };
+          }
           await tx.signalCycle.update({
             where: { id: cycleId },
             data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
           });
         }
 
-        return true;
+        return { persisted: true, intentApplied };
       }),
     );
   }
@@ -697,7 +764,7 @@ export class ShowcaseRelayEventsService {
     tradeId: string,
     direction?: string | null,
     body?: ShowcaseRelayEventBody,
-  ): Promise<string | null> {
+  ): Promise<{ cycleId: string; intentApplied: boolean } | null> {
     const existing = await db.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId, tradeId } },
       select: { id: true, intentEnvelope: true, status: true },
@@ -729,6 +796,9 @@ export class ShowcaseRelayEventsService {
         carriesExactLimit
         && existing.status !== SignalCycleStatus.CLOSED
         && shouldApplyExactLifecycleUpdate(current, body);
+      let intentApplied = Boolean(
+        carriesExactLimit && exactLifecycleRevisionMatches(current, body ?? { event: 'APPROVE_PENDING' }),
+      );
       if (
         signedIntent
         && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose)
@@ -759,8 +829,11 @@ export class ShowcaseRelayEventsService {
             expiresAt: new Date(Date.now() + 1_800_000),
           },
         });
+        intentApplied = Boolean(
+          carriesExactLimit && exactLifecycleRevisionMatches(intentEnvelope, body ?? { event: 'APPROVE_PENDING' }),
+        );
       }
-      return existing.id;
+      return { cycleId: existing.id, intentApplied };
     }
 
     // Stable-ish id for the cycle — derived from the trade_id so replays land
@@ -768,30 +841,46 @@ export class ShowcaseRelayEventsService {
     const raw = tradeId.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(8, '0');
     const cycleId = `cyc_rel_${raw.slice(0, 22)}`.slice(0, 30);
     try {
+      const createdEnvelope = relayIntentEnvelope(
+        cycleId,
+        tradeId,
+        body ?? { event: 'APPROVE_PENDING', direction },
+      );
       await db.signalCycle.create({
         data: {
           id: cycleId,
           agentId,
           tradeId,
           status: SignalCycleStatus.INTENT,
-          intentEnvelope: relayIntentEnvelope(
-            cycleId,
-            tradeId,
-            body ?? { event: 'APPROVE_PENDING', direction },
-          ) as unknown as import('@prisma/client').Prisma.InputJsonValue,
+          intentEnvelope:
+            createdEnvelope as unknown as import('@prisma/client').Prisma.InputJsonValue,
           researchVenue: 'bitfinex',
           botVersion: body?.bot_version ?? undefined,
           expiresAt: new Date(Date.now() + 1_800_000),
         },
       });
-      return cycleId;
+      return {
+        cycleId,
+        intentApplied: exactLifecycleRevisionMatches(
+          createdEnvelope as RelayLifecycleEnvelope,
+          body ?? { event: 'APPROVE_PENDING' },
+        ),
+      };
     } catch (err) {
       // Concurrent create race — re-fetch.
       const retry = await db.signalCycle.findUnique({
         where: { agentId_tradeId: { agentId, tradeId } },
-        select: { id: true },
+        select: { id: true, intentEnvelope: true },
       });
-      if (retry) return retry.id;
+      if (retry) {
+        return {
+          cycleId: retry.id,
+          intentApplied: exactLifecycleRevisionMatches(
+            retry.intentEnvelope as RelayLifecycleEnvelope,
+            body ?? { event: 'APPROVE_PENDING' },
+          ),
+        };
+      }
       throw err;
     }
   }

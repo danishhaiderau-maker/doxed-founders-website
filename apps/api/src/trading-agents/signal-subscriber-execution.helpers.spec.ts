@@ -30,6 +30,7 @@ import {
   pendingFillReconcileDecision,
   showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
+  missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
   relayWatchdogShouldRestart,
@@ -1212,6 +1213,77 @@ test('showcase fill makes a still-pending copy fail closed even while relay is p
     'MISSED_SHOWCASE_FILL',
   );
   assert.equal(pendingCopyShowcaseDisposition(null, 'cont-filled'), 'SOURCE_UNAVAILABLE');
+});
+
+test('fresh source fill retains the managed copy order during settlement grace', () => {
+  const now = Date.parse('2026-08-02T13:05:20.000Z');
+  const bot = {
+    orders: [],
+    positions: [
+      {
+        trade_id: 'cont-settle',
+        entry_ts: (now - 8_000) / 1000,
+      },
+    ],
+  } as never;
+  const terminalFallbackIntent = {
+    action: 'ENTER',
+    trade_id: 'cont-settle',
+    context: {
+      signed_showcase_event: true,
+      showcase_event: 'LIMIT_UPDATED',
+      showcase_event_at: '2026-08-02T13:04:55.000Z',
+      showcase_event_seq: 4,
+      marketable_fallback: true,
+      relay_settle_not_before_ts: '2026-08-02T13:05:10.000Z',
+    },
+  };
+  assert.equal(
+    missedShowcaseFillWithinSettlementGrace(
+      bot,
+      'cont-settle',
+      terminalFallbackIntent,
+      now,
+      60_000,
+    ),
+    true,
+  );
+  assert.equal(
+    missedShowcaseFillWithinSettlementGrace(
+      bot,
+      'cont-settle',
+      terminalFallbackIntent,
+      now + 60_001,
+      60_000,
+    ),
+    false,
+  );
+  assert.equal(
+    missedShowcaseFillWithinSettlementGrace(
+      bot,
+      'other-trade',
+      terminalFallbackIntent,
+      now,
+      60_000,
+    ),
+    false,
+  );
+  assert.equal(
+    missedShowcaseFillWithinSettlementGrace(
+      bot,
+      'cont-settle',
+      {
+        ...terminalFallbackIntent,
+        context: {
+          ...terminalFallbackIntent.context,
+          marketable_fallback: false,
+        },
+      },
+      now,
+      60_000,
+    ),
+    false,
+  );
 });
 
 test('a still-resting showcase limit remains eligible for exact-price chase', () => {
