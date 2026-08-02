@@ -95,7 +95,7 @@ const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
-const PENDING_FILL_RECONCILE_GRACE_MS = 15_000;
+const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
@@ -1585,11 +1585,39 @@ const MIRROR_EXEC_STATE_MEMO_MS = 1_000;
 const SHOWCASE_VANISHED_CONSECUTIVE_MISSES = 3;
 
 /** Cross-ID / ghost-fill exit: OPEN copy lot whose trade_id is not in showcase
- *  open positions for this many consecutive fresh bot states is market-closed
- *  (SHOWCASE_POSITION_ABSENT). Unlike SHOWCASE_VANISHED, this only checks
- *  positions — trades_map may still list PENDING/VIRTUAL_CHASE for a trade the
- *  copy filled but showcase never opened. Fail-closed on unreachable fetch. */
+ *  open positions for repeated fresh bot states and the bounded convergence
+ *  grace is market-closed (SHOWCASE_POSITION_ABSENT). Unlike
+ *  SHOWCASE_VANISHED, this only checks positions — trades_map may still list
+ *  PENDING/VIRTUAL_CHASE for a trade the copy filled but showcase never opened.
+ *  Fail-closed on unreachable fetch. */
 const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
+
+/**
+ * A real Bitfinex fill can be visible just before the canonical Fly paper book
+ * publishes the corresponding OPEN position. Do not turn that normal
+ * cross-system convergence race into an immediate market close. The exchange
+ * protective stop remains armed during this bounded wait; a genuine ghost fill
+ * is still closed after both the miss-count and elapsed-time gates pass.
+ */
+const SHOWCASE_POSITION_ABSENT_GRACE_MS = 60_000;
+
+export function showcasePositionAbsenceActionable(input: {
+  misses: number;
+  firstAbsentAtMs: number;
+  nowMs: number;
+  consecutiveMissesRequired?: number;
+  graceMs?: number;
+}): boolean {
+  const missesRequired = Math.max(
+    1,
+    input.consecutiveMissesRequired ?? SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES,
+  );
+  const graceMs = Math.max(1, input.graceMs ?? SHOWCASE_POSITION_ABSENT_GRACE_MS);
+  return (
+    input.misses >= missesRequired &&
+    input.nowMs - input.firstAbsentAtMs >= graceMs
+  );
+}
 
 /** Belt-and-suspenders: OPEN copy lot while showcase is flat/closed for this long
  *  triggers operator alert + forced SHOWCASE_MIRROR close (covers stale EXIT events
@@ -1739,6 +1767,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** participantId → consecutive fresh states where showcase has no OPEN position
    *  for this lot's trade_id (cross-ID / ghost-fill exit). In-memory; resets on restart. */
   private readonly showcasePositionAbsentMisses = new Map<string, number>();
+  /** participantId → first fresh-state absence time for the bounded convergence grace. */
+  private readonly showcasePositionAbsentSince = new Map<string, number>();
   /** Fix E — instanceId → last time the expired-hire notice was surfaced (ms). */
   private readonly hireExpiryNoticeAt = new Map<string, number>();
   /** Action-miss audit throttle: userId:tradeId:reason → last event ms. */
@@ -4461,7 +4491,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       fillGrace.reason === 'GRACE_EXPIRED'
         ? `PENDING_FILL_RECONCILE_GRACE_EXPIRED: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
           `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
-          'Managed fill attribution did not converge within 15 seconds; relay paused.'
+          'Managed fill attribution did not converge within 60 seconds; relay paused.'
         : `RECONCILE ALERT: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
           `ledger ${signedLedgerOpenAmount.toFixed(8)} BTC (Δ ${delta.toFixed(8)}). ` +
           'Relay paused; no blind close or ledger rewrite was attempted.';
@@ -7385,7 +7415,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
         this.consumeWakeTrigger();
         this.logger.warn(
-          `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId} — market-closing copy lot after ${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh states without an open showcase position`,
+          `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId} — ` +
+            `market-closing copy lot after ${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} ` +
+            `consecutive fresh states and ${SHOWCASE_POSITION_ABSENT_GRACE_MS}ms convergence grace`,
         );
       } else {
         this.consumeWakeTrigger();
@@ -7858,6 +7890,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         this.showcaseVanishedMisses.delete(participant.id);
         this.showcasePositionAbsentMisses.delete(participant.id);
+        this.showcasePositionAbsentSince.delete(participant.id);
         this.showcaseFlatOpenSince.delete(participant.id);
         this.logger.log(
           `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
@@ -7939,6 +7972,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
       this.showcaseVanishedMisses.delete(participant.id);
       this.showcasePositionAbsentMisses.delete(participant.id);
+      this.showcasePositionAbsentSince.delete(participant.id);
       this.showcaseFlatOpenSince.delete(participant.id);
       return true;
     } finally {
@@ -8903,9 +8937,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * Cross-ID / ghost-fill tracker. Returns true when the participant's
    * showcase trade_id is absent from open positions for
    * {@link SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh bot
-   * states. Unlike {@link trackShowcaseVanished}, this does NOT require the
-   * trade to be wiped from trades_map — a PENDING/VIRTUAL_CHASE entry that
-   * never became an open showcase position still counts as absent.
+   * states and {@link SHOWCASE_POSITION_ABSENT_GRACE_MS} has elapsed. Unlike
+   * {@link trackShowcaseVanished}, this does NOT require the trade to be wiped
+   * from trades_map — a PENDING/VIRTUAL_CHASE entry that never became an open
+   * showcase position still counts as absent.
    * Fail-closed: caller must pass a successfully-fetched bot state.
    */
   private trackShowcasePositionAbsent(
@@ -8915,6 +8950,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): boolean {
     if (!tradeId || tradeId.startsWith('adopt:')) {
       this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcasePositionAbsentSince.delete(participantId);
       return false;
     }
     const inPositions = (bot.positions ?? []).some(
@@ -8922,13 +8958,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
     if (inPositions) {
       this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcasePositionAbsentSince.delete(participantId);
       return false;
     }
+    const nowMs = Date.now();
+    const firstAbsentAtMs =
+      this.showcasePositionAbsentSince.get(participantId) ?? nowMs;
+    this.showcasePositionAbsentSince.set(participantId, firstAbsentAtMs);
     const misses = (this.showcasePositionAbsentMisses.get(participantId) ?? 0) + 1;
     this.showcasePositionAbsentMisses.set(participantId, misses);
-    if (misses < SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES) {
+    if (
+      !showcasePositionAbsenceActionable({
+        misses,
+        firstAbsentAtMs,
+        nowMs,
+      })
+    ) {
       this.logger.warn(
-        `Showcase position absent ${tradeId} (participant=${participantId}) — miss ${misses}/${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES}`,
+        `Showcase position absent ${tradeId} (participant=${participantId}) — ` +
+          `miss ${misses}/${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES}, ` +
+          `elapsed=${nowMs - firstAbsentAtMs}ms/${SHOWCASE_POSITION_ABSENT_GRACE_MS}ms`,
       );
       return false;
     }
@@ -9472,6 +9521,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
       this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcasePositionAbsentSince.delete(participantId);
       this.showcaseFlatOpenSince.delete(participantId);
       // Option A — clear dynamic-stops circuit state on full exit.
       this.stopManagerCircuitOpen.delete(participantId);

@@ -28,6 +28,7 @@ import {
   mergedDirectionCompatible,
   pendingEntryMayOwnExchangePosition,
   pendingFillReconcileDecision,
+  showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -559,6 +560,77 @@ test('managed pending fill gets one bounded ledger-reconcile grace window', () =
   });
   assert.equal(nextTick.defer, true);
   assert.equal(nextTick.firstObservedAtMs, nowMs);
+
+  const stillInsideDefaultWindow = pendingFillReconcileDecision({
+    nowMs: nowMs + 59_999,
+    signedDeltaBtc: -0.0307,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT',
+        qty: 0.0307,
+        bitfinexOrderId: 241167676255,
+      },
+    ],
+    managedOrderIds: [241167676255],
+    activeOrders: [],
+    prior: {
+      firstObservedAtMs: first.firstObservedAtMs!,
+      direction: 'SHORT',
+      ownerParticipantIds: first.ownerParticipantIds,
+    },
+  });
+  assert.equal(stillInsideDefaultWindow.defer, true);
+
+  const expiredDefaultWindow = pendingFillReconcileDecision({
+    nowMs: nowMs + 60_001,
+    signedDeltaBtc: -0.0307,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT',
+        qty: 0.0307,
+        bitfinexOrderId: 241167676255,
+      },
+    ],
+    managedOrderIds: [241167676255],
+    activeOrders: [],
+    prior: {
+      firstObservedAtMs: first.firstObservedAtMs!,
+      direction: 'SHORT',
+      ownerParticipantIds: first.ownerParticipantIds,
+    },
+  });
+  assert.equal(expiredDefaultWindow.defer, false);
+  assert.equal(expiredDefaultWindow.reason, 'GRACE_EXPIRED');
+});
+
+test('showcase position absence needs both repeated misses and a 60-second convergence window', () => {
+  const firstAbsentAtMs = Date.parse('2026-08-02T09:32:03.000Z');
+  assert.equal(
+    showcasePositionAbsenceActionable({
+      misses: 100,
+      firstAbsentAtMs,
+      nowMs: firstAbsentAtMs + 59_999,
+    }),
+    false,
+  );
+  assert.equal(
+    showcasePositionAbsenceActionable({
+      misses: 1,
+      firstAbsentAtMs,
+      nowMs: firstAbsentAtMs + 60_000,
+    }),
+    false,
+  );
+  assert.equal(
+    showcasePositionAbsenceActionable({
+      misses: 2,
+      firstAbsentAtMs,
+      nowMs: firstAbsentAtMs + 60_000,
+    }),
+    true,
+  );
 });
 
 test('pending fill grace accepts only exchange-proven filled quantity from an active managed order', () => {
