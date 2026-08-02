@@ -8975,7 +8975,12 @@ def build_full_feature_snapshot():
     try:
         logger.info("[FEATURE BUILD] Starting aggregated feature construction with WINDOW=10 [PIPELINE ENFORCEMENT]")
         update_candle_features()
-        price = nz(state.get("price"))
+        # A WS snapshot can legitimately warm every analytical buffer before
+        # the first genuine live trade tick authorizes a strategy price. Keep
+        # that fail-closed state quiet and explicit instead of comparing None
+        # with zero and emitting a misleading FEATURE BUILD ERROR on every
+        # periodic pass.
+        price = nz(state.get("price"), 0.0)
         if price <= 0:
             logger.warning("[FEATURE BUILD] price <=0 [PIPELINE ENFORCEMENT]")
             return None

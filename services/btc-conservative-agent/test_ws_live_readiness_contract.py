@@ -871,6 +871,14 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertFalse(state["ws_ready"])
         self.assertIsNone(state["ws_last_tick"])
 
+    def test_feature_builder_treats_pre_tick_price_as_zero_not_an_exception(self):
+        builder = function_source("build_full_feature_snapshot")
+        self.assertIn('price = nz(state.get("price"), 0.0)', builder)
+        self.assertLess(
+            builder.index('price = nz(state.get("price"), 0.0)'),
+            builder.index("if price <= 0:"),
+        )
+
     def test_all_new_entry_progression_uses_central_guard(self):
         for name in (
             "process_awaiting_dashboard_virtual_chase_entries",
