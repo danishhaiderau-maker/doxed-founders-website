@@ -12,7 +12,7 @@ Product & platform (21 recent commits)
 
 ## Last Commit
 
-fix: use valid atomic Fly sync replacement
+fix: exempt authenticated Fly mirror chunks
 
 ## Last Activity
 
