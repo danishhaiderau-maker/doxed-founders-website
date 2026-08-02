@@ -5,6 +5,7 @@ import {
   hasFullOwnerOrderState,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
+  ownerFetchErrorChain,
 } from './check-relay-flat.mjs';
 
 const now = Date.parse('2026-07-24T05:45:00.000Z');
@@ -100,6 +101,24 @@ test('owner non-timeout failure retains URL and original diagnosis', () => {
   );
   assert.match(described.message, /request failed/);
   assert.match(described.message, /showcase HTTP 503/);
+  assert.match(described.message, /check Fly \/health/);
+});
+
+test('owner fetch diagnosis includes nested undici socket cause and attempts', () => {
+  const socket = new Error('other side closed');
+  socket.name = 'SocketError';
+  socket.code = 'UND_ERR_SOCKET';
+  const outer = new TypeError('fetch failed', { cause: socket });
+  assert.match(ownerFetchErrorChain(outer), /UND_ERR_SOCKET/);
+  const described = describeOwnerFetchError(
+    outer,
+    'https://doxed-btc-bot.fly.dev/api/relay-state',
+    15_000,
+    3,
+  );
+  assert.match(described.message, /after 3 attempts/);
+  assert.match(described.message, /UND_ERR_SOCKET/);
+  assert.match(described.message, /route\/socket reset/);
 });
 
 test('strict exchange order proof requires a fresh known zero-order snapshot', () => {

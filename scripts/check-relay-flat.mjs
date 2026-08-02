@@ -46,6 +46,13 @@ const ownerFetchTimeoutMs = Math.max(
   1_000,
   Number.parseInt(process.env.OWNER_STATE_TIMEOUT_MS ?? '15000', 10) || 15_000,
 );
+const ownerFetchAttempts = Math.max(
+  1,
+  Math.min(
+    5,
+    Number.parseInt(process.env.OWNER_STATE_FETCH_ATTEMPTS ?? '3', 10) || 3,
+  ),
+);
 const botUrls = requireCanonicalFlyOwner
   ? [CANONICAL_FLY_OWNER_URL]
   : [
@@ -77,23 +84,71 @@ export function hasCurrentOwnerExposureState(bot) {
   );
 }
 
-export function describeOwnerFetchError(error, url, timeoutMs) {
-  const name = String(error?.name ?? 'Error');
-  const message = String(error?.message ?? error ?? 'unknown error');
+export function ownerFetchErrorChain(error) {
+  const parts = [];
+  const seen = new Set();
+  let current = error;
+  while (current != null && !seen.has(current) && parts.length < 5) {
+    seen.add(current);
+    const name = String(current?.name ?? 'Error');
+    const code = String(current?.code ?? '').trim();
+    const message = String(current?.message ?? current ?? 'unknown error');
+    parts.push(`${name}${code ? ` [${code}]` : ''}: ${message}`);
+    current = current?.cause;
+  }
+  return parts.join(' <- ');
+}
+
+export function describeOwnerFetchError(error, url, timeoutMs, attempts = 1) {
+  const detail = ownerFetchErrorChain(error);
+  const attemptText = attempts > 1 ? ` after ${attempts} attempts` : '';
   if (
-    name === 'TimeoutError'
-    || name === 'AbortError'
-    || /timed?\s*out|aborted due to timeout/i.test(message)
+    /TimeoutError|AbortError|timed?\s*out|aborted due to timeout|UND_ERR_CONNECT_TIMEOUT/i.test(detail)
   ) {
     return new Error(
-      `canonical owner state timed out after ${timeoutMs}ms at ${url}; `
-      + 'check Fly machine health and whether a critical service check removed public routing',
+      `canonical owner state timed out after ${timeoutMs}ms per attempt${attemptText} at ${url}; `
+      + `root cause: ${detail}; check Fly machine health, whether a critical service check removed public routing, and /health`,
       { cause: error },
     );
   }
+  const diagnosis = /ENOTFOUND|EAI_AGAIN/i.test(detail)
+    ? 'DNS resolution failed; check the Fly hostname and local resolver'
+    : /ECONNREFUSED/i.test(detail)
+      ? 'the public route refused the connection; check Fly machine/service binding'
+      : /ECONNRESET|UND_ERR_SOCKET|socket/i.test(detail)
+        ? 'the route/socket reset; check Fly logs and retry after confirming /health'
+        : 'check Fly /health, machine status, and public routing';
   return new Error(
-    `canonical owner state request failed at ${url}: ${name}: ${message}`,
+    `canonical owner state request failed${attemptText} at ${url}; `
+    + `root cause: ${detail}; ${diagnosis}`,
     { cause: error },
+  );
+}
+
+async function fetchOwnerJson(url) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= ownerFetchAttempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: adminToken
+          ? { 'X-Bot-Admin-Token': adminToken }
+          : undefined,
+        signal: AbortSignal.timeout(ownerFetchTimeoutMs),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < ownerFetchAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 350));
+      }
+    }
+  }
+  throw describeOwnerFetchError(
+    lastError,
+    url,
+    ownerFetchTimeoutMs,
+    ownerFetchAttempts,
   );
 }
 
@@ -108,15 +163,7 @@ async function fetchOwnerState() {
   for (const baseUrl of [...new Set(botUrls)]) {
     const stateUrl = `${baseUrl}/api/state`;
     try {
-      let bot = await fetch(stateUrl, {
-        headers: adminToken
-          ? { 'X-Bot-Admin-Token': adminToken }
-          : undefined,
-        signal: AbortSignal.timeout(ownerFetchTimeoutMs),
-      }).then((response) => {
-        if (!response.ok) throw new Error(`showcase HTTP ${response.status}`);
-        return response.json();
-      });
+      let bot = await fetchOwnerJson(stateUrl);
       if (bot?.dashboard_owner === true) {
         if (
           requireCanonicalFlyOwner
@@ -138,15 +185,7 @@ async function fetchOwnerState() {
         // is the authoritative paper exposure boundary for deployment.
         const relayStateUrl = `${baseUrl}/api/relay-state`;
         try {
-          const relayState = await fetch(relayStateUrl, {
-            headers: adminToken
-              ? { 'X-Bot-Admin-Token': adminToken }
-              : undefined,
-            signal: AbortSignal.timeout(ownerFetchTimeoutMs),
-          }).then((response) => {
-            if (!response.ok) throw new Error(`relay-state HTTP ${response.status}`);
-            return response.json();
-          });
+          const relayState = await fetchOwnerJson(relayStateUrl);
           if (!hasCurrentOwnerExposureState(relayState)) {
             throw new Error('relay-state omitted current orders or positions');
           }
@@ -158,22 +197,17 @@ async function fetchOwnerState() {
           };
         } catch (error) {
           if (process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES') {
-            throw describeOwnerFetchError(
-              error,
-              relayStateUrl,
-              ownerFetchTimeoutMs,
-            );
+            throw error;
           }
         }
         return { bot, baseUrl };
       }
       lastError = new Error(`${baseUrl} is not the dashboard owner`);
     } catch (error) {
-      lastError = describeOwnerFetchError(
-        error,
-        stateUrl,
-        ownerFetchTimeoutMs,
-      );
+      lastError = error instanceof Error
+        && error.message.startsWith('canonical owner state')
+        ? error
+        : describeOwnerFetchError(error, stateUrl, ownerFetchTimeoutMs);
     }
   }
   throw lastError ?? new Error('showcase owner unavailable');
