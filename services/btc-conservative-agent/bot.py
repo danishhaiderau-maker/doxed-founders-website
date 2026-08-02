@@ -20617,12 +20617,56 @@ def _bitfinex_ws_trades_from_message(data) -> list:
                     out.append(t)
     return out
 
+def _seed_ws_trade_buffers(trades: list) -> int:
+    """Warm analytical buffers from the Bitfinex trades-channel snapshot.
+
+    The snapshot contains real recent exchange trades but is historical. It may
+    initialize feature windows after a deploy; it must never set ``ws_ready``
+    or ``ws_last_tick``, progress an order, or run exits. A subsequent genuine
+    ``te``/``tu`` tick remains the only writer of live WS readiness.
+    """
+    ordered = sorted(
+        (trade for trade in trades if isinstance(trade, dict)),
+        key=_ws_trade_timestamp_sec,
+    )
+    capacities = [
+        int(buffer.maxlen or WINDOW_SIZE)
+        for buffer in (price_buffer, volume_buffer, delta_buffer)
+    ]
+    selected = ordered[-min(capacities):]
+    seeded = 0
+    for trade in selected:
+        price = float(trade.get("p", 0) or 0)
+        size = float(trade.get("v", 0) or 0)
+        if price <= 0:
+            continue
+        price_buffer.append(price)
+        volume_buffer.append(size)
+        update_orderflow(trade)
+        delta_buffer.append(orderflow["delta"])
+        delta_change = orderflow["delta"] - orderflow.get("prev_delta", 0)
+        delta_change_buffer.append(delta_change)
+        imbalance_buffer.append(orderflow["imbalance"])
+        if len(price_buffer) >= 2 and price_buffer[-2] != 0:
+            velocity_buffer.append(
+                (price_buffer[-1] - price_buffer[-2]) / price_buffer[-2]
+            )
+        seeded += 1
+    if seeded:
+        update_feature_snapshot()
+        logger.info(
+            f"[WS] Seeded {seeded} historical trades into feature buffers; "
+            "waiting for genuine live tick [PIPELINE ENFORCEMENT]"
+        )
+    return seeded
+
+
 def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     global _last_ws_trade_fp, _last_ws_trade_fp_ts, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
-    # Bitfinex sends a historical snapshot immediately after subscribe.  It is
-    # useful neither as proof of a live transport nor as an execution tick;
-    # OHLCV REST already seeds the analytical buffers. Wait for a real te/tu.
+    # A single historical row is still permitted to warm the feature buffers,
+    # but it must never authorize entry or touch a live order/position.
     if snapshot_seed:
+        _seed_ws_trade_buffers([trade])
         return
     trade_fp = (trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
     if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
@@ -20756,8 +20800,7 @@ def safe_ws_handler(message):
             return
         _agent_dbg("H2", "safe_ws_handler", "batch", {"trades_in_msg": len(trades), "msg_len": len(message)})
         if len(trades) > 1:
-            newest = max(trades, key=_ws_trade_timestamp_sec)
-            _process_ws_trade_tick(newest, snapshot_seed=True)
+            _seed_ws_trade_buffers(trades)
         else:
             _process_ws_trade_tick(trades[0])
     except IndexError as ie:

@@ -815,8 +815,61 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertIn("if ws_app is app:", starter)
         self.assertIn("_mark_ws_transport_disconnected()", starter)
         self.assertIn('"ws_ready"] = False', opened)
-        self.assertIn("snapshot_seed=True", function_source("safe_ws_handler"))
+        self.assertIn("_seed_ws_trade_buffers(trades)", function_source("safe_ws_handler"))
         self.assertIn("if snapshot_seed:", function_source("_process_ws_trade_tick"))
+        self.assertIn("_seed_ws_trade_buffers([trade])", function_source("_process_ws_trade_tick"))
+    def test_snapshot_warms_features_without_authorizing_ws_or_execution(self):
+        state = {
+            "ws_ready": False,
+            "ws_last_tick": None,
+            "ws_transport_connected": True,
+        }
+        price_buffer = deque(maxlen=200)
+        volume_buffer = deque(maxlen=200)
+        delta_buffer = deque(maxlen=200)
+        delta_change_buffer = deque(maxlen=200)
+        imbalance_buffer = deque(maxlen=200)
+        velocity_buffer = deque(maxlen=200)
+        orderflow = {"delta": 0.0, "prev_delta": 0.0, "imbalance": 0.0}
+        feature_refreshes = []
+
+        def update_orderflow(trade):
+            orderflow["prev_delta"] = orderflow["delta"]
+            orderflow["delta"] += float(trade["v"])
+            orderflow["imbalance"] = orderflow["delta"] / 100.0
+
+        namespace = {
+            "WINDOW_SIZE": 10,
+            "state": state,
+            "price_buffer": price_buffer,
+            "volume_buffer": volume_buffer,
+            "delta_buffer": delta_buffer,
+            "delta_change_buffer": delta_change_buffer,
+            "imbalance_buffer": imbalance_buffer,
+            "velocity_buffer": velocity_buffer,
+            "orderflow": orderflow,
+            "update_orderflow": update_orderflow,
+            "update_feature_snapshot": lambda: feature_refreshes.append(True),
+            "_ws_trade_timestamp_sec": lambda trade: float(trade["T"]),
+            "logger": SimpleNamespace(info=lambda *a, **k: None),
+        }
+        compile_functions(("_seed_ws_trade_buffers",), namespace)
+        trades = [
+            {"T": 1_000 + index, "p": 63_000 + index, "v": 0.01, "S": 1}
+            for index in range(12)
+        ]
+
+        seeded = namespace["_seed_ws_trade_buffers"](list(reversed(trades)))
+
+        self.assertEqual(seeded, 12)
+        self.assertEqual(len(price_buffer), 12)
+        self.assertEqual(len(volume_buffer), 12)
+        self.assertEqual(len(delta_buffer), 12)
+        self.assertEqual(price_buffer[0], 63_000)
+        self.assertEqual(price_buffer[-1], 63_011)
+        self.assertEqual(feature_refreshes, [True])
+        self.assertFalse(state["ws_ready"])
+        self.assertIsNone(state["ws_last_tick"])
 
     def test_all_new_entry_progression_uses_central_guard(self):
         for name in (
