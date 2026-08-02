@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: settle exact-limit relay fills
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
