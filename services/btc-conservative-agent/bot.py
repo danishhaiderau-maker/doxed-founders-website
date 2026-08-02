@@ -31840,6 +31840,25 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 
 
+def _data_sync_rotation_parts(raw_name: str):
+    """Return ``(base_name, generation)`` for a supported numbered rotation.
+
+    ``Path.suffix`` sees ``signal_replay.jsonl.28`` as ``.28``. Treating only
+    the final suffix as the file type silently excluded every closed replay
+    generation from the desktop mirror, so the Fly volume could never receive
+    an acknowledgement and eventually filled. A rotation is supported only
+    when the filename before its numeric generation has an explicitly allowed
+    data extension.
+    """
+    name = Path(str(raw_name or "")).name
+    base_name, separator, generation = name.rpartition(".")
+    if not separator or not generation.isdigit():
+        return None
+    if Path(base_name).suffix.lower() not in _DATA_SYNC_EXTENSIONS:
+        return None
+    return base_name, int(generation)
+
+
 def _data_sync_runtime_root() -> Path:
     return Path.cwd().resolve()
 
@@ -31888,7 +31907,11 @@ def _data_sync_path_allowed(path: Path) -> bool:
         return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
-    return resolved.is_file() and resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+    supported_type = (
+        resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
+        or _data_sync_rotation_parts(resolved.name) is not None
+    )
+    return resolved.is_file() and supported_type
 
 
 def _data_sync_resolve_relpath(raw_rel: str) -> Path:
@@ -31955,19 +31978,39 @@ def _write_data_sync_ack(payload: dict) -> None:
 
 
 def _prune_acknowledged_rotations(acks: dict) -> list:
-    """Delete only fully acknowledged, old .3+ rotation files.
+    """Delete only fully acknowledged, old closed rotation files.
 
-    Active files and the two newest rotations are never touched. Unacknowledged
-    evidence is never deleted, even under disk pressure.
+    Active files and the two highest/newest numeric rotations are never
+    touched. Unacknowledged evidence is never deleted, even under disk
+    pressure. Rotation generations increase monotonically and may contain
+    gaps after retention, so ``.1``/``.2`` are not necessarily the newest.
     """
     removed = []
     cutoff = time.time() - (24 * 3600)
+    newest_by_family = {}
     for rel, ack in list((acks or {}).items()):
-        match = re.search(r"\.(\d+)$", rel)
-        if not match or int(match.group(1)) < 3 or not isinstance(ack, dict):
+        rotation = _data_sync_rotation_parts(rel)
+        if rotation is None or not isinstance(ack, dict):
             continue
         try:
             path = _data_sync_resolve_relpath(rel)
+            base_name, rotation_index = rotation
+            family_key = (path.parent, base_name)
+            newest_two = newest_by_family.get(family_key)
+            if newest_two is None:
+                generations = []
+                for sibling in path.parent.iterdir():
+                    sibling_rotation = _data_sync_rotation_parts(sibling.name)
+                    if (
+                        sibling_rotation is not None
+                        and sibling_rotation[0] == base_name
+                        and _data_sync_path_allowed(sibling)
+                    ):
+                        generations.append(sibling_rotation[1])
+                newest_two = frozenset(sorted(generations)[-2:])
+                newest_by_family[family_key] = newest_two
+            if rotation_index in newest_two:
+                continue
             stat = path.stat()
             if (
                 stat.st_mtime <= cutoff
@@ -32065,7 +32108,7 @@ def api_data_sync_ack():
         "ok": True,
         "accepted": accepted,
         "removed_acknowledged_rotations": removed,
-        "policy": "only acknowledged .3+ rotations older than 24h; active/unacked files retained",
+        "policy": "acknowledged rotations older than 24h are pruned except the two newest generations; active/unacked files retained",
     })
 
 
