@@ -34854,36 +34854,55 @@ def ttl_monitor():
 def system_health_check():
     now = time.time()
     runtime = _recompute_system_readiness(now)
+    market_health = _market_data_health_snapshot(now)
     healthy = bool(runtime["system_ready"])
     recover_reason = ""
     should_hard_stop = False
+    freshest_observed_age = None
     with state_lock:
-        ws_tick = float(state.get("ws_last_tick") or 0)
-        ws_age = (now - ws_tick) if ws_tick else float("inf")
         current_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause"))
-        if healthy and not manual_paused and current_reason in (
-            "WS_STALE",
-            "STALE_DATA_HARD_STOP",
-            "PRICE_STALE_OR_MISSING",
+        observed_ages = [
+            age
+            for age in (
+                market_health.get("ws_age"),
+                market_health.get("rest_age"),
+                market_health.get("price_age"),
+            )
+            if age is not None
+        ]
+        if observed_ages:
+            freshest_observed_age = min(observed_ages)
+        if (
+            market_health["market_data_ready"]
+            and not manual_paused
+            and current_reason in (
+                "WS_STALE",
+                "STALE_DATA_HARD_STOP",
+                "PRICE_STALE_OR_MISSING",
+            )
         ):
             recover_reason = current_reason
         elif (
-            not runtime["ws_transport_ready"]
-            and ws_tick
-            and ws_age >= STALE_HARD_SEC
+            not market_health["market_data_ready"]
+            and freshest_observed_age is not None
+            and freshest_observed_age >= STALE_HARD_SEC
             and not manual_paused
         ):
             should_hard_stop = True
     if recover_reason:
         _clear_execution_pause_if_reason(recover_reason)
         logger.info(
-            f"[RECOVERY] central readiness restored; cleared {recover_reason} "
+            f"[RECOVERY] market-data path restored via "
+            f"{market_health['market_data_mode']}; cleared {recover_reason} "
             f"[PIPELINE ENFORCEMENT]"
         )
     elif should_hard_stop:
         set_execution_paused("STALE_DATA_HARD_STOP")
-        logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s - new entries paused")
+        logger.error(
+            f"[HARD STOP] ALL MARKET DATA STALE "
+            f"freshest_age={fmt(freshest_observed_age)}s - new entries paused"
+        )
     if not healthy:
         logger.warning(
             f"[HEALTH] NOT READY reasons={runtime['readiness_reasons']} "

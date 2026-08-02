@@ -88,6 +88,13 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             },
         }
         self.saved = []
+        self.pause_reasons = []
+
+        def set_execution_paused(reason):
+            self.pause_reasons.append(reason)
+            self.state["execution_paused"] = True
+            self.state["execution_reason"] = reason
+
         self.namespace = {
             "copy": copy,
             "math": math,
@@ -114,6 +121,8 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             ),
             "_private_api_keys_ok": lambda: True,
             "save_persistent_config": lambda: self.saved.append(True),
+            "set_execution_paused": set_execution_paused,
+            "fmt": lambda value: f"{float(value):.1f}",
             "logger": SimpleNamespace(
                 debug=lambda *args, **kwargs: None,
                 info=lambda *args, **kwargs: None,
@@ -126,6 +135,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             (
                 "_force_paper_mode_active",
                 "_genuine_ws_transport_ready",
+                "_market_data_health_snapshot",
                 "_fresh_rest_entry_quote_ready",
                 "_runtime_readiness_components",
                 "_recompute_system_readiness",
@@ -137,6 +147,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
                 "_clear_execution_pause_if_reason",
                 "validate_market_data",
                 "_require_fly_runtime_for_direct_start",
+                "system_health_check",
             ),
             self.namespace,
         )
@@ -183,6 +194,50 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
         runtime = self.namespace["_runtime_readiness_components"](self.now)
         self.assertFalse(runtime["ws_transport_ready"])
         self.assertIn("WS_NOT_READY", runtime["readiness_reasons"])
+
+    def test_quiet_ws_tape_with_fresh_rest_does_not_hard_stop(self):
+        self.namespace["time"] = SimpleNamespace(time=lambda: self.now)
+        healthy = self.namespace["system_health_check"]()
+        self.assertFalse(healthy)
+        self.assertFalse(self.state["execution_paused"])
+        self.assertEqual(self.pause_reasons, [])
+        self.assertFalse(
+            self.namespace["_runtime_readiness_components"](self.now)[
+                "signal_generation_ready"
+            ]
+        )
+
+    def test_all_market_data_stale_triggers_hard_stop(self):
+        self.namespace["time"] = SimpleNamespace(time=lambda: self.now)
+        stale_ts = self.now - 200.0
+        self.state.update(
+            {
+                "price_ts": stale_ts,
+                "rest_price_ts": stale_ts,
+                "rest_last_tick": stale_ts,
+                "bbo_ts": stale_ts,
+            }
+        )
+        healthy = self.namespace["system_health_check"]()
+        self.assertFalse(healthy)
+        self.assertTrue(self.state["execution_paused"])
+        self.assertEqual(self.state["execution_reason"], "STALE_DATA_HARD_STOP")
+        self.assertEqual(self.pause_reasons, ["STALE_DATA_HARD_STOP"])
+
+    def test_fresh_rest_clears_stale_hard_stop_but_not_entry_gate(self):
+        self.namespace["time"] = SimpleNamespace(time=lambda: self.now)
+        self.state["execution_paused"] = True
+        self.state["execution_reason"] = "STALE_DATA_HARD_STOP"
+        healthy = self.namespace["system_health_check"]()
+        self.assertFalse(healthy)
+        self.assertFalse(self.state["execution_paused"])
+        self.assertEqual(self.state["execution_reason"], "")
+        self.assertFalse(
+            self.namespace["_runtime_readiness_components"](self.now)[
+                "signal_generation_ready"
+            ]
+        )
+        self.assertEqual(self.pause_reasons, [])
 
     def test_fresh_ws_cannot_enter_without_fresh_rest_bid_ask(self):
         self._make_ws_ready()
