@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: keep live relay dashboard truthful
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
