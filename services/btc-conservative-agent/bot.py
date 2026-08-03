@@ -30326,6 +30326,32 @@ def _build_relay_execution_state_snapshot() -> dict:
     snapshot["trades_map"] = trades_map_lite
     snapshot["snapshot_age_sec"] = 0
     snapshot["relay_cache"] = {"mode": "EXECUTION_DIRECT", "age_sec": 0}
+    # Surface relay-push health and DDollar gate state on this lightweight
+    # money-path snapshot too. The full /api/relay-state endpoint exposes
+    # both via its own integrity builder; without mirroring them here, audit
+    # dashboards and verification checklists that only read
+    # /api/relay-execution-state cannot confirm relay delivery health or
+    # DDollar entry-gate state, which has previously led to false "field
+    # missing" reports. Read-only — never places orders or mutates state.
+    relay_url_exec = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    relay_push_summary = {
+        "configured": bool(relay_url_exec),
+        "seq": _relay_push_state["seq"],
+        "last_event": _relay_push_state["last_event"],
+        "last_ok": _relay_push_state["last_ok"],
+        "last_error": _relay_push_state["last_error"],
+        "last_latency_ms": _relay_push_state["last_latency_ms"],
+        "last_sec_ago": (
+            now_ts - _relay_push_state["last_ts"]
+        ) if _relay_push_state["last_ts"] else None,
+        "recent_deliveries_count": len(_relay_delivery_history_snapshot(10)),
+    }
+    ddollar_gate_summary = None
+    try:
+        import bitfinex_live_executor as _bx_exec
+        ddollar_gate_summary = _bx_exec.ddollar_gate_status()
+    except Exception as exc:
+        ddollar_gate_summary = {"error": str(exc)[:200]}
     snapshot["state_integrity"] = {
         "snapshot_ts": snapshot["server_ts"],
         "snapshot_age_sec": 0,
@@ -30344,6 +30370,8 @@ def _build_relay_execution_state_snapshot() -> dict:
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
         "readiness_reasons": runtime["readiness_reasons"],
+        "relay_push": relay_push_summary,
+        "ddollar_gate": ddollar_gate_summary,
     }
     return snapshot
 
