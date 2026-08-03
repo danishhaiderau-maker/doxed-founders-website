@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): correct Melbourne time, expired-order age, and blocked-signal labels (#70)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
