@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: diagnose canonical flat-check failures
+fix(agent-hub): correct Melbourne time, expired-order age, and blocked-signal labels (#70)
 
 ## Last Activity
 
