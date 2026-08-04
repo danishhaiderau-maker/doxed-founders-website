@@ -24,7 +24,10 @@ AI_PROMPT_FOCUS = (
 )
 
 MIN_SCORE_TO_ENTER = 3.0
-MIN_SPREAD_FLOOR = 2
+# Raised from 2 -> 4 (2026-08-04): backtest on 21 realized trades showed
+# spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
+# See trade_outcome.jsonl analysis (commit b22acacd backtest).
+MIN_SPREAD_FLOOR = 4
 ADX_FLOOR = 20.0
 BULL_ADX_FLOOR = 28.0
 VOLUME_DANGER = 2.0
