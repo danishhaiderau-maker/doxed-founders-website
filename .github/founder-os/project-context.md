@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-fix(build): use workspace prisma binary + widen pickLatestRelease types
+fix(agent-hub): restore showcase activity feed + performance chart in public profile
 
 ## Last Activity
 
