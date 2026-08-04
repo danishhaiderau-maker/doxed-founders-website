@@ -24388,7 +24388,7 @@ def build_static_pathway_lane_specs() -> dict:
             ]
             entry_filters = {
                 "ai_probability_bucket": "not requested; not an entry gate",
-                "directional_spread_bucket": "≥2",
+                "directional_spread_bucket": "≥4",
                 "entry_mode": "TYPE_B_SHARED_DIRECTION_FIXED_POLICY",
                 "policy_version": _tb_policy,
                 "adx_floor": float(_TB_ADX_FLOOR),
