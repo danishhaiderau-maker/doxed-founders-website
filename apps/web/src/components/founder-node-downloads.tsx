@@ -88,8 +88,8 @@ function parseVersionFromTag(tag?: string): string | null {
 
 /** Picks the newest relevant release, preferring Founder Stack bundles. */
 function pickLatestRelease(
-  releases: Array<{ tag_name?: string }> | null | undefined,
-): { tag_name?: string } | undefined {
+  releases: Array<{ tag_name?: string; assets?: ReleaseAsset[] }> | null | undefined,
+): { tag_name?: string; assets?: ReleaseAsset[] } | undefined {
   if (!releases?.length) return undefined;
   const stack = releases.find((r) => /^founder-stack-v\d/i.test(r.tag_name ?? ''));
   if (stack) return stack;
