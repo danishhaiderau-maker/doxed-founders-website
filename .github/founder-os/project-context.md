@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-fix(ai-proxy): resolve TS errors blocking Vercel deploy (#72)
+fix(build): use workspace prisma binary + widen pickLatestRelease types
 
 ## Last Activity
 
