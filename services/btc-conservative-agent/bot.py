@@ -6538,6 +6538,12 @@ GOLDEN_STACK_ADX_BLOCK_LOW = 25.0
 GOLDEN_STACK_ADX_BLOCK_HIGH = 30.0
 GOLDEN_STACK_SPREAD_MIN = 2
 GOLDEN_STACK_SPREAD_MAX = 8
+# R2 spread floor (2026-08-04): backtest on 21 realized trades showed
+# spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
+# Applied to the CONTINUOUS lane spawn path (the live cont-* order path).
+# Score scale is 0-100; bucket = raw/10. Floor value is in BUCKETS, so the
+# raw-gap threshold is CONTINUOUS_MIN_SPREAD_FLOOR * 10.
+CONTINUOUS_MIN_SPREAD_FLOOR = 4
 GOLDEN_STACK_SHORT_STRUCT_MAX = -3.0
 GOLDEN_STACK_EMA_DIST_MAX_PCT = 1.0
 GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT = 0.5
@@ -14706,6 +14712,28 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         or ai.get("decision")
         or "NO_VERDICT"
     )
+    # R2 spread floor (2026-08-04): backtest on 21 realized trades showed
+    # spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
+    # Filter weak-edge signals before they enter the chase lifecycle. Only
+    # applied when AI said execute; preserves shadow data collection when AI
+    # rejected. Score scale is 0-100, bucket = raw/10, so bucket<4 = raw<40.
+    r2_floor_blocked = False
+    if continuous_accept:
+        long_score = int(ai.get("long_score", 0) or 0)
+        short_score = int(ai.get("short_score", 0) or 0)
+        spread = abs(long_score - short_score)
+        if spread < CONTINUOUS_MIN_SPREAD_FLOOR * 10:
+            r2_floor_blocked = True
+            continuous_accept = False
+            continuous_reason = (
+                f"R2_SPREAD_FLOOR_BLOCKED spread={spread}"
+                f"<{CONTINUOUS_MIN_SPREAD_FLOOR * 10}"
+            )
+            logger.info(
+                f"[CONTINUOUS LANE] skip trade_id={spawn_ctx.get('trade_id')} "
+                f"spread={spread}<{CONTINUOUS_MIN_SPREAD_FLOOR * 10} (R2 floor) "
+                f"[CONTINUOUS_R2_FLOOR]"
+            )
     _stamp_shared_ai_lane_verdict(
         call_id,
         RESEARCH_LANE_CONTINUOUS,
@@ -14714,6 +14742,8 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         score=abs(int(ai.get("long_score", 0) or 0) - int(ai.get("short_score", 0) or 0)),
         policy_version="continuous_shared_direction_gap_v1",
     )
+    if r2_floor_blocked:
+        return
     logger.info(
         f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
         f"decision={ai.get('decision')} orders={'ON' if orders_on else 'OFF(data-only)'} "
