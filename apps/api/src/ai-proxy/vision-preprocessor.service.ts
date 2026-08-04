@@ -93,7 +93,6 @@ export class VisionPreprocessorService {
           Accept: 'application/json',
         },
         body: JSON.stringify(payload),
-        // @ts-expect-error -- node-fetch vs dom fetch typing on signal union
         signal: controller.signal,
       });
 
@@ -141,21 +140,24 @@ export class VisionPreprocessorService {
     parts: ChatCompletionMessageContentPart[],
   ): Promise<string> {
     const textHint = parts
-      .filter((p) => p.type === 'text' && typeof p.text === 'string')
+      .filter((p): p is Extract<ChatCompletionMessageContentPart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text)
       .join(' ')
       .slice(0, 800);
 
     const descriptions = await Promise.all(
       parts
-        .filter((p) => p.type === 'image_url' && Boolean(p.image_url?.url))
+        .filter(
+          (p): p is Extract<ChatCompletionMessageContentPart, { type: 'image_url' }> =>
+            p.type === 'image_url',
+        )
         .map((p) => this.describeImage(p.image_url.url, textHint)),
     );
 
     // Collapse to a single string. The coding model gets the user's text
     // followed by [Image N: description] blocks for each image.
     const textParts = parts
-      .filter((p) => p.type === 'text' && typeof p.text === 'string')
+      .filter((p): p is Extract<ChatCompletionMessageContentPart, { type: 'text' }> => p.type === 'text')
       .map((p) => p.text);
     const imageBlocks = descriptions.map(
       (d, i) => `[Image ${i + 1}: ${d}]`,

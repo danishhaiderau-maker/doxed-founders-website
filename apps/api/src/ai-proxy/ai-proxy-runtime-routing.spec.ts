@@ -26,6 +26,7 @@ function runtimeWithDecision(model: string, provider = 'deepseek') {
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
     {} as never,
+    {} as never,
   );
   return { runtime, calls };
 }
@@ -52,6 +53,7 @@ function runtimeWithV2Failure() {
     {} as never,
     {} as never,
     { classify: async () => ({ intent: 'reasoning' }) } as never,
+    {} as never,
     {} as never,
   );
 }
