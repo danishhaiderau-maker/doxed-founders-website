@@ -31620,22 +31620,62 @@ def api_pause():
     response.status_code = 409 if disarm["cancel"]["failed"] else 200
     return response
 
+# Pause reasons that /api/resume is allowed to clear even when the readiness
+# latch (system_ready) is still stabilizing. system_ready can't stabilize while
+# the bot is paused (the pipeline doesn't run), so requiring it on resume
+# created a deadlock: once DAILY_DRAWDOWN tripped, /api/resume would 409
+# forever and only a process restart could recover. These reasons are
+# operator/risk-initiated pauses — they are not symptoms of a broken
+# market-data feed, so it is safe to clear them before system_ready latches.
+_RESUMABLE_PAUSE_REASONS = frozenset({
+    "DAILY_DRAWDOWN",
+    "LOSS_STREAK",
+    "ADMIN_MANUAL",
+    "MANUAL",
+})
+
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
     runtime = _recompute_system_readiness()
+    # The system_ready latch can't stabilize while the bot is paused (the
+    # pipeline doesn't run, so readiness components never get ticked). Requiring
+    # system_ready=true on resume created a deadlock: once DAILY_DRAWDOWN
+    # tripped, /api/resume 409'd forever. Allow resume to clear a resumable
+    # pause even when system_ready is false, as long as the WS transport is
+    # genuinely healthy — that proves the market-data feed is alive, which is
+    # the only safety property system_ready was indirectly checking here.
+    with state_lock:
+        active_reason = str(state.get("execution_reason") or "")
+        manual_paused = bool(state.get("manual_admin_pause", False))
+    ws_healthy = bool(runtime.get("ws_transport_ready", False))
     if not runtime.get("system_ready"):
-        response = jsonify({
-            "status": "resume_blocked",
-            "execution_paused": True,
-            "reason": (
-                runtime.get("readiness_reasons", ["SYSTEM_NOT_READY"])[0]
-                if runtime.get("readiness_reasons")
-                else "SYSTEM_NOT_READY"
-            ),
-            "runtime_readiness": runtime,
-        })
-        response.status_code = 409
-        return response
+        # Real WS issue (not just a paused pipeline) — keep blocking.
+        actionable_reason = (
+            runtime.get("readiness_reasons", ["SYSTEM_NOT_READY"])[0]
+            if runtime.get("readiness_reasons")
+            else "SYSTEM_NOT_READY"
+        )
+        can_resume_while_unready = (
+            ws_healthy
+            and (active_reason in _RESUMABLE_PAUSE_REASONS or manual_paused)
+        )
+        if not can_resume_while_unready:
+            response = jsonify({
+                "status": "resume_blocked",
+                "execution_paused": True,
+                "reason": actionable_reason,
+                "active_pause_reason": active_reason,
+                "ws_transport_ready": ws_healthy,
+                "runtime_readiness": runtime,
+            })
+            response.status_code = 409
+            return response
+        logger.info(
+            f"[ADMIN] /api/resume proceeding while system_ready=False "
+            f"(ws_healthy={ws_healthy}, active_reason={active_reason!r}, "
+            f"manual_paused={manual_paused}) — deadlock workaround [PIPELINE ENFORCEMENT]"
+        )
     with state_lock:
         state["manual_admin_pause"] = False
     save_persistent_config()
