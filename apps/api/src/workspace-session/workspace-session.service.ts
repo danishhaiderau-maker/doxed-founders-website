@@ -137,6 +137,30 @@ export class WorkspaceSessionService {
     return this.mapRow(row);
   }
 
+  /**
+   * Node-authenticated conversation push from the Founder IDE desktop client.
+   *
+   * The IDE calls this on every chat turn so the website's /founder-ide panel
+   * reflects the desktop conversation in near-real-time. Only the
+   * `conversation` field is mutable from this path — the IDE MUST NOT be able
+   * to mutate selectedAiProvider / panelState / publishDraft / etc. (those are
+   * web-ui-owned).
+   *
+   * Auth is enforced at the controller level via FounderNodeGuard; the userId
+   * arrives from the node credentials, not from the request body, so a paired
+   * node can only ever write to its owner's session.
+   */
+  async patchConversationForUser(
+    userId: string,
+    conversation: unknown,
+  ): Promise<WorkspaceSessionShape> {
+    if (!Array.isArray(conversation)) {
+      throw new BadRequestException('conversation must be an array');
+    }
+    // Reuse the existing patch path — restrict to the conversation key only.
+    return this.patchForUser(userId, { conversation });
+  }
+
   private createUncheckedPayloadFromPatch(
     patch: Record<string, unknown>,
   ): Partial<Prisma.WorkspaceSessionUncheckedCreateInput> {

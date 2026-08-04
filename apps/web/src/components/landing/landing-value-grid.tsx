@@ -3,7 +3,7 @@
 import { LandingFunFactBar } from '@/components/landing/landing-fun-fact-bar';
 
 const GRID_ALT =
-  'Curated builders in public. Conviction over hype. Founder OS for shipping. Founder Stack vault + bring your own keys. Fund founders who deliver.';
+  'Curated builders in public. Conviction over hype. Founder IDE for shipping. Founder Stack vault + bring your own keys. Fund founders who deliver.';
 
 /**
  * Four-panel infographic — serves 1x/2x/3x assets so large displays stay sharp (no upscaled 1024px stretch).

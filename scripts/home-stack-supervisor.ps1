@@ -523,7 +523,8 @@ while ($true) {
       if ($botRestartTimes.Count -ge $MaxBotRestartsInWindow) {
         $botHalted = $true
         Log ("RECOVER bot HALTED - crash-loop breaker tripped: $MaxBotRestartsInWindow restarts in $BotRestartWindowMin min. Manual intervention required. Last log: logs\last_crash.json")
-        try { msg * /TIME:120 "Doxed supervisor: bot crash-loop breaker tripped ($MaxBotRestartsInWindow in $BotRestartWindowMin min). Auto-restart HALTED. See logs\.home-stack-supervisor.log" 2>$null } catch { }
+        # Desktop toast popup permanently silenced per platform owner request.
+        # Crash-loop breaker still triggers (logged above + in .home-stack-supervisor.log).
         $fail.bot = 0
       } else {
         $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec

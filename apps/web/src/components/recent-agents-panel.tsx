@@ -37,7 +37,7 @@ function relativeTime(iso: string | null): string {
 
 const SOURCE_LABEL: Record<RecentAgent['source'], string> = {
   live_desktop: 'Live desktop',
-  dispatched_run: 'Dispatched from Founder OS',
+  dispatched_run: 'Dispatched from Founder IDE',
   cursor_history: 'Recent Cursor session',
 };
 
@@ -65,7 +65,7 @@ export function RecentAgentsPanel({
           Resume Desktop
         </p>
         <p className="mt-2 text-xs text-zinc-500">
-          No recent agents yet. Dispatch a Cursor agent from Founder OS or connect Founder Node to see
+          No recent agents yet. Dispatch a Cursor agent from Founder IDE or connect Founder Node to see
           your live desktop sessions here.
         </p>
       </div>

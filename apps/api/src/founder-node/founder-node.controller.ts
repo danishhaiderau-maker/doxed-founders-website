@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Req,
   Res,
@@ -21,6 +22,7 @@ import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { IdeBridgeService } from '../ide-bridge/ide-bridge.service';
+import { WorkspaceSessionService } from '../workspace-session/workspace-session.service';
 import type { Response } from 'express';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -56,6 +58,7 @@ export class FounderNodeController {
     private readonly syncJobs: FounderNodeSyncService,
     private readonly vaultSync: FounderNodeVaultSyncService,
     private readonly ideBridge: IdeBridgeService,
+    private readonly workspaceSessions: WorkspaceSessionService,
   ) {}
 
   @Post('pairing-code')
@@ -332,5 +335,37 @@ export class FounderNodeController {
   ) {
     const result = body.error ? `error: ${body.error}` : body.result;
     return this.ideBridge.markDispatched(id, result);
+  }
+
+  /**
+   * IDE → website chat sync (the missing piece from the audit).
+   *
+   * The Founder IDE desktop client calls this on every chat turn so the
+   * website's /founder-ide chat panel reflects the desktop conversation in
+   * near-real-time. Auth is via Founder Node bearer credentials — the userId
+   * is resolved from the paired node, NOT from the request body, so a paired
+   * node can only ever write to its owner's null-workspace session row.
+   *
+   * Only the `conversation` field is mutable from this path. The IDE MUST NOT
+   * be able to mutate selectedAiProvider / panelState / publishDraft / etc.
+   * (those are web-ui-owned). Body shape:
+   *
+   *   { conversation: WorkspaceConversationMessage[] }
+   *
+   * See docs/PRODUCTION-AI-KEYS.md §"IDE ↔ website chat sync".
+   */
+  @UseGuards(FounderNodeGuard)
+  @Patch('workspace-session/conversation')
+  async patchWorkspaceConversation(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: { conversation?: unknown },
+  ) {
+    if (!body || !('conversation' in body)) {
+      throw new BadRequestException('conversation field is required');
+    }
+    return this.workspaceSessions.patchConversationForUser(
+      req.founderNode.userId,
+      body.conversation,
+    );
   }
 }

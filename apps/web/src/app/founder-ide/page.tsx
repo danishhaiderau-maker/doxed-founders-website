@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { FounderOsShell } from '@/components/founder-os/founder-os-shell';
 
-export default function FounderOsPage() {
+export default function FounderIdePage() {
   const { data: session } = useSession();
 
   return (
@@ -15,7 +15,7 @@ export default function FounderOsPage() {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold text-white">Founder OS</h1>
+            <h1 className="mt-1 text-2xl font-bold text-white">Founder IDE</h1>
             <p className="text-xs text-zinc-500">
               The operating system for building companies · v0.1 kernel
             </p>
@@ -26,7 +26,7 @@ export default function FounderOsPage() {
 
       <div className="mx-auto max-w-6xl px-6 py-8">
         <div className="mb-6 flex flex-wrap gap-4 text-sm">
-          <Link href="/founder-os/decisions" className="text-violet-400 hover:underline">
+          <Link href="/founder-ide/decisions" className="text-violet-400 hover:underline">
             Decision Log →
           </Link>
           <Link href="/phone" className="text-emerald-400 hover:underline">
@@ -42,10 +42,10 @@ export default function FounderOsPage() {
 
         {!session?.accessToken ? (
           <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100">
-            <Link href="/login?callbackUrl=/founder-os" className="font-semibold underline">
+            <Link href="/login?callbackUrl=/founder-ide" className="font-semibold underline">
               Sign in
             </Link>{' '}
-            to open your Founder OS workspace.
+            to open your Founder IDE workspace.
           </div>
         ) : (
           <Suspense fallback={<p className="text-sm text-zinc-500">Loading workspace…</p>}>

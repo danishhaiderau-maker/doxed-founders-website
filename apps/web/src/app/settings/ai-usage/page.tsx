@@ -16,7 +16,7 @@ export default function AiUsagePage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">AI Usage</h1>
             <p className="text-sm text-zinc-500">
-              Founder OS proxy spend · DDollar burn · Cursor Pro saved
+              Founder IDE proxy spend · DDollar burn · Cursor Pro saved
             </p>
           </div>
           <SiteNav />

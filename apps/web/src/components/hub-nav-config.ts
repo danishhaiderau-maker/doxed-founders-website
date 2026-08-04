@@ -13,7 +13,7 @@ const HUB_PREFIXES = [
   '/paper-trading',
   '/watchlist',
   '/portfolio',
-  '/founder-os',
+  '/founder-ide',
   '/founder-den',
   '/settings/builder',
   '/settings/integrations',
@@ -58,7 +58,7 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/paper-trading')) return 'Trading Alpha';
   if (pathname.startsWith('/watchlist')) return 'Watchlist';
   if (pathname.startsWith('/portfolio')) return 'Portfolio';
-  if (pathname.startsWith('/founder-os')) return 'Founder OS';
+  if (pathname.startsWith('/founder-ide') || pathname.startsWith('/founder-os')) return 'Founder IDE';
   if (pathname.startsWith('/founder-den')) return 'Founder Den';
   if (pathname.startsWith('/phone')) return 'Phone Remote';
   if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations'))
@@ -136,13 +136,13 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     id: 'build',
     rowNumber: 'Row 3',
     label: 'Build',
-    subtitle: 'Founder OS · Downloads · Ship',
+    subtitle: 'Founder IDE · Downloads · Ship',
     sidebarDescription: 'Development Workspace, install apps, connect AI and infra, raise capital, list your project.',
     borderClass: 'border-violet-500/25',
     labelClass: 'text-violet-200',
     rowBgClass: 'bg-violet-950/20',
     items: [
-      { href: '/founder-os', label: 'Founder OS', icon: '⚡', auth: true },
+      { href: '/founder-ide', label: 'Founder IDE', icon: '⚡', auth: true },
       { href: '/founder-den', label: 'Founder Den', icon: '🛠', auth: true },
       { href: '/settings/builder?tab=downloads', label: 'Founder Stack', icon: '🖥', auth: true },
       { href: '/settings/builder?tab=downloads', label: 'Pair Node', icon: '🔗', auth: true },

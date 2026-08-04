@@ -45,6 +45,16 @@ const apiRewrites = [
   },
 ];
 
+// 301 permanent redirects for renamed user-visible URL slugs.
+// Internal API slugs (/api/founder-os/*, /api/founder-node/*) are intentionally
+// NOT redirected — they are wire-protocol contracts. Only the user-facing
+// /founder-os page route moved to /founder-ide. See docs/PRODUCTION-AI-KEYS.md
+// §"URL changes" for the rationale.
+const permanentRedirects = [
+  { source: '/founder-os', destination: '/founder-ide', permanent: true },
+  { source: '/founder-os/:path*', destination: '/founder-ide/:path*', permanent: true },
+];
+
 const securityHeaders = [
   { key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains; preload' },
   { key: 'X-Frame-Options', value: 'DENY' },
@@ -77,6 +87,9 @@ const nextConfig: NextConfig = {
         : !isLocalApiTarget(apiProxyTarget);
 
     return useProxy ? apiRewrites : [];
+  },
+  async redirects() {
+    return permanentRedirects;
   },
 };
 

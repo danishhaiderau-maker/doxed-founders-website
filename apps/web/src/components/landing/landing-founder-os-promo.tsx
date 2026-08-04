@@ -70,7 +70,7 @@ export function LandingFounderOsPromo() {
     <section className="overflow-hidden rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/30 via-[#0a0a12] to-black shadow-[0_0_60px_rgba(139,92,246,0.08)]">
       {/* Headline + pitch */}
       <div className="border-b border-violet-500/15 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-        <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-violet-400">Founder OS</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-violet-400">Founder IDE</p>
         <h2 className="mt-2 text-2xl font-bold leading-tight tracking-tight text-white sm:text-3xl lg:text-4xl">
           Your laptop is the compute.
         </h2>
@@ -85,10 +85,10 @@ export function LandingFounderOsPromo() {
         </p>
       </div>
 
-      {/* Why founders use Founder OS */}
+      {/* Why founders use Founder IDE */}
       <div className="border-b border-violet-500/15 px-4 py-5 sm:px-6 lg:px-8">
         <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-300/80">
-          Why founders use Founder OS
+          Why founders use Founder IDE
         </p>
         <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {WHY_BULLETS.map((b) => (
@@ -129,7 +129,7 @@ export function LandingFounderOsPromo() {
           Start building before you start spending.
         </p>
         <p className="mt-1 text-[12px] text-zinc-400">
-          Most founders spend money before they validate an idea. Founder OS helps you validate first.
+          Most founders spend money before they validate an idea. Founder IDE helps you validate first.
           Then scale.
         </p>
       </div>
@@ -156,7 +156,7 @@ export function LandingFounderOsPromo() {
               href="/founder-den?onboard=sovereign"
               className="mt-3 inline-flex rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-1.5 text-xs font-bold text-amber-200 transition hover:bg-amber-500/20"
             >
-              Start Founder OS →
+              Start Founder IDE →
             </Link>
           </div>
         ) : (
@@ -173,7 +173,7 @@ export function LandingFounderOsPromo() {
               href="/founder-den?onboard=sovereign"
               className="mt-3 inline-flex rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-bold text-violet-200 transition hover:bg-violet-500/20"
             >
-              Start Founder OS →
+              Start Founder IDE →
             </Link>
           </div>
         )}

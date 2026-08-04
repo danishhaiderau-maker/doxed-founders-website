@@ -1,0 +1,41 @@
+fix(bot): surface relay_push and ddollar_gate in /api/relay-execution-state
+
+The lightweight money-path snapshot (_build_relay_execution_state_snapshot)
+did not include relay-push health or DDollar entry-gate state. The richer
+/api/relay-state endpoint already exposes both via its integrity builder,
+but audit dashboards and verification checklists that only read
+/api/relay-execution-state could not confirm:
+
+  - relay delivery health (relay_push.last_ok, recent_deliveries_count)
+  - DDollar entry-gate state (ddollar_gate.passed, balance, minimum)
+
+This previously led to false "field missing" reports and a suspicion that
+ChatGPT had fabricated the fields. They are not fabricated — the live
+/api/relay-state endpoint confirms last_ok=true and ddollar_gate.passed=true
+with balance=17030 >= minimum=2000 — they were simply not mirrored into
+the slim money-path snapshot.
+
+Change is pure read-only observability:
+  - Reads _relay_push_state (module-level tracker) and counts
+    _relay_delivery_history_snapshot() entries.
+  - Calls bitfinex_live_executor.ddollar_gate_status() — the same function
+    the live entry path consults, so the slim snapshot can never disagree
+    with the authoritative gate.
+  - Never places orders, never mutates state, never weakens any safety
+    contract (FORCE_PAPER_MODE, signature checks, fail-closed gates,
+    60% guard, NEXT_FRESH_ONLY, lane isolation, flat-state gate).
+
+Adds test_relay_execution_state_telemetry.py — source-level AST contract
+checks that lock:
+  1. state_integrity surfaces a "relay_push" block reading from
+     _relay_push_state (incl. last_ok) and _relay_delivery_history_snapshot.
+  2. state_integrity surfaces a "ddollar_gate" block calling
+     ddollar_gate_status().
+  3. The builder is read-only (no assignment into _relay_push_state, no
+     _record_relay_delivery calls, no _relay_push_history.append).
+  4. The DDollar summary never hard-codes a passed/failed boolean.
+
+No reserved founder-node / ide-bridge files touched. No changes to
+strategy/entry/chase code. Existing test_shared_ai_direction.py contract
+on the snapshot builder (excludes presentation ledgers, bounded lock
+waits, active-signal rendering after trade_lock release) stays green.

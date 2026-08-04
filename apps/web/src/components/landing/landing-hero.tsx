@@ -59,7 +59,7 @@ function FounderOsTease() {
       href="/founder-den?onboard=sovereign"
       className="group block rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/40 via-zinc-950/90 to-black p-4 transition hover:border-violet-400/50 hover:shadow-[0_0_40px_rgba(139,92,246,0.15)]"
     >
-      <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Founder OS</p>
+      <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Founder IDE</p>
       <p className="mt-1 text-lg font-bold text-white group-hover:text-violet-50">Your laptop is the compute</p>
       <p className="mt-2 text-[11px] leading-relaxed text-zinc-400">
         Brainstorm, research, and prototype on your own hardware first —{' '}
@@ -85,11 +85,11 @@ export function LandingHero({ topAgent }: Props) {
           <h1 className="mt-2 text-2xl font-bold leading-tight tracking-tight text-white sm:text-3xl lg:text-4xl">
             Trade verified agents.{' '}
             <span className="bg-gradient-to-r from-emerald-300 to-violet-300 bg-clip-text text-transparent">
-              Ship on Founder OS.
+              Ship on Founder IDE.
             </span>
           </h1>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-            Founder OS is the control plane. Your laptop is the compute. Cloud is optional glue — DB, auth, sync.
+            Founder IDE is the control plane. Your laptop is the compute. Cloud is optional glue — DB, auth, sync.
             Built for shrimps, not whales — everyone starts with free DDollar. Skill over capital.
             We back doxxed founders who show their face, not anonymous pump cycles.
           </p>

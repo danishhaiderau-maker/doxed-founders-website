@@ -85,8 +85,10 @@ function navActive(pathname: string, href: string) {
   if (href === '/mobile') return pathname.startsWith('/downloads');
   if (href === '/founder-node') return pathname.startsWith('/downloads');
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
-  if (href === '/founder-os') {
-    return pathname.startsWith('/founder-os');
+  if (href === '/founder-ide') {
+    // Active-link detection accepts both the new /founder-ide slug and the
+    // legacy /founder-os slug (which 301-redirects here). See next.config.ts.
+    return pathname.startsWith('/founder-ide') || pathname.startsWith('/founder-os');
   }
   if (href === '/founder-den') {
     return (

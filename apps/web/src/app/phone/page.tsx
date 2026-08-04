@@ -102,10 +102,10 @@ export default function PhoneRemotePage() {
             <h1 className="truncate text-sm font-bold text-white">Phone Remote</h1>
           </div>
           <Link
-            href="/founder-os"
+            href="/founder-ide"
             className="shrink-0 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-zinc-500 hover:text-white"
           >
-            Founder OS →
+            Founder IDE →
           </Link>
         </div>
       </header>

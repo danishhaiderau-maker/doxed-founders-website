@@ -37,4 +37,5 @@ if ($wh) {
     Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null
   } catch { }
 }
-try { msg * /TIME:30 "Doxed bot crashed (exit $code) on port $Port. See logs\last_crash.json" 2>$null } catch { }
+# Desktop toast popup permanently silenced per platform owner request.
+# Bot crashes still get logged to logs\last_crash.json + CRASH_NOTIFY_WEBHOOK above.

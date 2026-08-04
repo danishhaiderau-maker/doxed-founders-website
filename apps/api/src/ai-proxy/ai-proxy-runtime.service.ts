@@ -19,7 +19,12 @@ import { ContextBuilderService } from '../founder-ai-runtime/context-builder.ser
 import type { AiRuntimeIntent } from '../capability-registry/capability-registry.types';
 import { MODEL_ALIASES, MAX_PROMPT_TOKENS_SOFT_CAP, USE_ROUTING_ENGINE_V2, USE_SMART_INTENT_CLASSIFIER } from './ai-proxy.constants';
 import { IntentClassifierService, routerIntentToRuntimeIntent } from './intent-classifier.service';
-import type { ChatCompletionMessageDto, ChatCompletionRequestDto } from './dto/ai-proxy.dto';
+import { VisionPreprocessorService } from './vision-preprocessor.service';
+import type {
+  ChatCompletionMessageContentPart,
+  ChatCompletionMessageDto,
+  ChatCompletionRequestDto,
+} from './dto/ai-proxy.dto';
 import {
   forcedIntentForAlias,
   normalizeFounderAliasRoute,
@@ -108,6 +113,7 @@ export class AiProxyRuntimeService {
     private readonly retryDetector: RetryDetectorService,
     private readonly intentClassifier: IntentClassifierService,
     private readonly contextBuilder: ContextBuilderService,
+    private readonly visionPreprocessor: VisionPreprocessorService,
   ) {}
 
   /** Expand any model alias (or `founder-os-auto`) into a concrete provider+model+tier. */
@@ -125,8 +131,8 @@ export class AiProxyRuntimeService {
       .reverse()
       .find((m) => m.role === 'user');
     const systemMessage = body.messages?.find((m) => m.role === 'system');
-    const userPrompt = lastUserMessage?.content ?? '';
-    const systemPrompt = systemMessage?.content ?? '';
+    const userPrompt = flattenContentToString(lastUserMessage?.content);
+    const systemPrompt = flattenContentToString(systemMessage?.content);
     const requestId = randomUUID();
     const promptHash = this.computePromptHash(systemPrompt, userPrompt);
     const inferredIntent = await this.resolveIntent(userPrompt);
@@ -245,7 +251,15 @@ export class AiProxyRuntimeService {
 
     // Inject Memory Engine context into the system message (kernel §3).
     // Best-effort — empty memory or a store hiccup leaves messages unchanged.
-    const messages = await this.injectMemoryContext(auth.userId, body.messages);
+    const memoryInjected = await this.injectMemoryContext(auth.userId, body.messages);
+
+    // Vision preprocessing (GLM-4V): when a message contains image_url parts
+    // and the resolved route's model is vision-blind, route each image through
+    // GLM-4V first and substitute the text description. Best-effort — a
+    // preprocessor failure leaves the original image parts in place so the
+    // upstream model still receives the user's intent (most coding models
+    // will gracefully ignore image_url parts they cannot parse).
+    const messages = await this.maybePreprocessImages(memoryInjected, route);
 
     const payload = {
       model: route.model,
@@ -520,9 +534,27 @@ export class AiProxyRuntimeService {
     });
   }
 
-  /** Rough 4-chars-per-token estimate for budget warnings. */
-  private estimateTokens(messages: { role: string; content: string }[]): number {
-    const chars = messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
+  /** Rough 4-chars-per-token estimate for budget warnings. Accepts the post-preprocessing payload shape (string content) OR raw multimodal arrays. */
+  private estimateTokens(
+    messages: { role: string; content: unknown }[],
+  ): number {
+    const chars = messages.reduce((sum, m) => {
+      const c = m.content;
+      if (typeof c === 'string') return sum + c.length;
+      if (Array.isArray(c)) {
+        return (
+          sum +
+          c.reduce((acc: number, part) => {
+            if (part?.type === 'text' && typeof part.text === 'string') {
+              return acc + part.text.length;
+            }
+            if (part?.type === 'image_url') return acc + 200; // rough placeholder for image tokens
+            return acc;
+          }, 0)
+        );
+      }
+      return sum;
+    }, 0);
     return Math.ceil(chars / 4);
   }
 
@@ -648,10 +680,21 @@ export class AiProxyRuntimeService {
       const out = messages.map((m) => ({ ...m }));
       const sysIdx = out.findIndex((m) => m.role === 'system');
       if (sysIdx >= 0) {
-        out[sysIdx] = {
-          ...out[sysIdx],
-          content: `${memoryCtx}\n${out[sysIdx].content}`,
-        };
+        // Preserve the original content shape. If content is an array
+        // (multimodal), prepend the memory context as a new text part.
+        // Otherwise concatenate as before.
+        const current = out[sysIdx].content;
+        if (Array.isArray(current)) {
+          out[sysIdx] = {
+            ...out[sysIdx],
+            content: [{ type: 'text', text: memoryCtx }, ...current],
+          };
+        } else {
+          out[sysIdx] = {
+            ...out[sysIdx],
+            content: `${memoryCtx}\n${current ?? ''}`,
+          };
+        }
       } else {
         out.unshift({ role: 'system', content: memoryCtx });
       }
@@ -659,6 +702,66 @@ export class AiProxyRuntimeService {
     } catch (err) {
       this.logger.debug(
         `memory context inject failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return messages;
+    }
+  }
+
+  /**
+   * GLM-4V vision preprocessing step.
+   *
+   * For each message that contains `image_url` content parts, decide whether
+   * the resolved route's model can handle images natively (Capability.vision
+   * = true). If it can, pass the message through unchanged. If it cannot,
+   * route each image through GLM-4V and substitute the description text.
+   *
+   * Best-effort: Capability lookup failures, network errors, and empty
+   * descriptions all degrade gracefully — the original message is left in
+   * place so the upstream call still receives the user's intent.
+   */
+  private async maybePreprocessImages(
+    messages: ChatCompletionMessageDto[],
+    route: ResolvedRoute,
+  ): Promise<ChatCompletionMessageDto[]> {
+    try {
+      const hasAnyImage = messages.some((m) =>
+        this.visionPreprocessor.hasImageContent(
+          Array.isArray(m.content) ? m.content : undefined,
+        ),
+      );
+      if (!hasAnyImage) return messages;
+
+      // Vision-capable routes pass through untouched.
+      const cap = await this.prisma.capability.findUnique({
+        where: { provider_model: { provider: route.providerKey, model: route.model } },
+        select: { vision: true },
+      });
+      if (cap?.vision === true) {
+        this.logger.debug(
+          `vision_preprocessor skipped — route ${route.providerKey}/${route.model} is vision-capable`,
+        );
+        return messages;
+      }
+
+      const out: ChatCompletionMessageDto[] = [];
+      for (const m of messages) {
+        if (!Array.isArray(m.content)) {
+          out.push(m);
+          continue;
+        }
+        if (!this.visionPreprocessor.hasImageContent(m.content)) {
+          out.push(m);
+          continue;
+        }
+        const rewritten = await this.visionPreprocessor.rewriteContentWithDescriptions(
+          m.content,
+        );
+        out.push({ ...m, content: rewritten });
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(
+        `vision preprocessing skipped: ${err instanceof Error ? err.message : String(err)}`,
       );
       return messages;
     }
@@ -673,4 +776,27 @@ export class AiProxyRuntimeService {
   effectiveModel(): string {
     return getGlmDefaultModel();
   }
+}
+
+/**
+ * Coerce a message content (string OR array of OpenAI-style parts) into a
+ * flat string for hashing, intent classification, and prompt-token estimates.
+ * Image parts become a literal "[image]" placeholder. Used by decideRoute()
+ * only — the upstream payload preserves the original shape (or the
+ * preprocessor's rewritten string) via the runtime's payload builder.
+ */
+function flattenContentToString(
+  content: string | ChatCompletionMessageContentPart[] | undefined,
+): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return String(content ?? '');
+  return content
+    .map((part) => {
+      if (part?.type === 'text' && typeof part.text === 'string') return part.text;
+      if (part?.type === 'image_url') return '[image]';
+      return '';
+    })
+    .join(' ')
+    .trim();
 }

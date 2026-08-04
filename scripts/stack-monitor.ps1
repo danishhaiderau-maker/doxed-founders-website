@@ -158,7 +158,8 @@ if ($abnormalities.Count -gt 0) {
       Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -EA Stop | Out-Null
     } catch { }
   }
-  try { msg * /TIME:30 "Stack abnormality: $($abnormalities -join ', '). See logs\stack_health.json" 2>$null } catch { }
+  # Desktop toast popup permanently silenced per platform owner request.
+  # Stack abnormalities still go to logs\stack_health.json and CRASH_NOTIFY_WEBHOOK above.
 } elseif ($warnings.Count -gt 0) {
   Mon-Log ("WARN: " + ($warnings -join " | ") + " | bot=$botCode an=$anCode bridge=$bridgeCode tunnel=$tunnelCode api=$apiCode db=$dbStatus site=$siteCode gh=$ghNote")
 } else {

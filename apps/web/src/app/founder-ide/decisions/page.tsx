@@ -71,8 +71,8 @@ export default function DecisionLogPage() {
 
       <div className="mx-auto max-w-6xl px-6 py-8">
         <div className="mb-4 flex items-center justify-between">
-          <Link href="/founder-os" className="text-xs text-zinc-500 hover:text-white">
-            ← Founder OS
+          <Link href="/founder-ide" className="text-xs text-zinc-500 hover:text-white">
+            ← Founder IDE
           </Link>
           <button
             type="button"
@@ -87,7 +87,7 @@ export default function DecisionLogPage() {
 
         {!session?.accessToken ? (
           <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100">
-            <Link href="/login?callbackUrl=/founder-os/decisions" className="font-semibold underline">
+            <Link href="/login?callbackUrl=/founder-ide/decisions" className="font-semibold underline">
               Sign in
             </Link>{' '}
             to view your routing decisions.

@@ -76,8 +76,24 @@ export function FounderNodeInstallGuide() {
 
 function parseVersionFromTag(tag?: string): string | null {
   if (!tag) return null;
-  const match = /^founder-node-v(\d+\.\d+\.\d+)$/i.exec(tag);
-  return match?.[1] ?? null;
+  // Founder Stack bundle releases use `founder-stack-v<x.y.z>`; legacy
+  // Founder Node standalone releases use `founder-node-v<x.y.z>`. Both shapes
+  // are accepted so old GitHub releases still resolve, but the downloads UI
+  // prefers the stack bundle when both exist (see pickLatestRelease below).
+  const stackMatch = /^founder-stack-v(\d+\.\d+\.\d+)$/i.exec(tag);
+  if (stackMatch) return stackMatch[1];
+  const nodeMatch = /^founder-node-v(\d+\.\d+\.\d+)$/i.exec(tag);
+  return nodeMatch?.[1] ?? null;
+}
+
+/** Picks the newest relevant release, preferring Founder Stack bundles. */
+function pickLatestRelease(
+  releases: Array<{ tag_name?: string }> | null | undefined,
+): { tag_name?: string } | undefined {
+  if (!releases?.length) return undefined;
+  const stack = releases.find((r) => /^founder-stack-v\d/i.test(r.tag_name ?? ''));
+  if (stack) return stack;
+  return releases.find((r) => /^founder-node-v\d/i.test(r.tag_name ?? ''));
 }
 
 function detectOs(): 'windows' | 'mac' | 'linux' | 'unknown' {
@@ -103,7 +119,7 @@ export function FounderNodeDownloads({ showInstallGuide = false, sectionId = 'fo
     fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`)
       .then((res) => (res.ok ? res.json() : null))
       .then((releases: Array<{ tag_name?: string; assets?: ReleaseAsset[] }> | null) => {
-        const release = releases?.find((r) => r.tag_name?.startsWith('founder-node-v'));
+        const release = pickLatestRelease(releases);
         const assets = release?.assets ?? [];
         setReleaseVersion(parseVersionFromTag(release?.tag_name));
         setWinUrl(

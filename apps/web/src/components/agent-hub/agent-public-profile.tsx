@@ -17,7 +17,6 @@ import {
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
-import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentAnalyzerPanel } from '@/components/agent-hub/agent-analyzer-panel';
@@ -29,7 +28,6 @@ import { AgentDecisionPipelineStatus } from '@/components/agent-hub/agent-decisi
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
-import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import { ShareOnXButton } from '@/components/share-on-x-button';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
 import { resolveInitialAgentDesk } from '@/components/agent-hub/agent-live-execution-view';
@@ -1001,18 +999,6 @@ export function AgentPublicProfile({
               ) : null
             ) : null}
             {resolvedDesk === 'showcase' ? <AiHistoryDetail activity={deskActivity} /> : null}
-            {resolvedDesk === 'showcase' && (
-              <div className="grid gap-6 lg:grid-cols-2">
-                <AgentActivityFeed
-                  items={deskActivity.slice(0, 12)}
-                  title="Showcase bot feed"
-                />
-                <AgentPerformanceChart
-                  agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
-                  label="Showcase bot"
-                />
-              </div>
-            )}
           </div>
 
           {others.length > 0 && (

@@ -22,6 +22,29 @@ import {
 export const CAPABILITY_SEEDS: CapabilitySeed[] = [
   {
     provider: 'glm',
+    model: 'glm-4v',
+    displayName: 'GLM-4V (Vision preprocessor)',
+    // Used internally by AiProxyRuntimeService.maybePreprocessImages() to
+    // describe image attachments before they hit a vision-blind coding model.
+    // NOT selectable as a chat alias — the only entry point is the
+    // vision-preprocessor.service.ts dispatch.
+    isActive: true,
+    inputCostPer1M: 0.1,
+    outputCostPer1M: 0.3,
+    latencyP50Ms: 1500,
+    codeScore: 0.0,
+    reasoningScore: 0.4,
+    simpleQaScore: 0.5,
+    agentScore: 0.0,
+    visionScore: 0.9,
+    toolUse: false,
+    jsonMode: true,
+    largeContext: false,
+    largeContextWindow: null,
+    vision: true,
+  },
+  {
+    provider: 'glm',
     model: 'glm-5.2',
     displayName: 'GLM 5.2',
     // Disabled until its platform credential passes a real completion smoke.

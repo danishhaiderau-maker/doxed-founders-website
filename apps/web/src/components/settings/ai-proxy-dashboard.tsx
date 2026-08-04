@@ -201,7 +201,7 @@ export function AiProxyDashboard({ accessToken }: Props) {
         </h2>
         {summary.providers.length === 0 ? (
           <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-4 py-6 text-sm text-zinc-500">
-            No requests yet. Connect Cursor or another OpenAI-compatible client below to start
+            No requests yet. Connect Founder IDE or another OpenAI-compatible client below to start
             routing through the proxy.
           </div>
         ) : (
@@ -238,12 +238,12 @@ export function AiProxyDashboard({ accessToken }: Props) {
         )}
       </section>
 
-      {/* Connect Cursor */}
+      {/* Connect your IDE / OpenAI-compatible client */}
       <section className="rounded-xl border border-violet-500/30 bg-violet-950/10 p-5">
-        <h2 className="text-sm font-semibold text-violet-100">Connect Cursor</h2>
+        <h2 className="text-sm font-semibold text-violet-100">Connect your IDE</h2>
         <p className="mt-1 text-xs text-zinc-400">
-          Point Cursor (or any OpenAI-compatible client) at the Founder OS proxy. Your Founder
-          Node credentials act as the API key.
+          Point Founder IDE, Cursor, or any OpenAI-compatible client at the
+          Founder IDE proxy. Your Founder Node credentials act as the API key.
         </p>
         <div className="mt-4 space-y-3">
           <CopyableField label="Base URL" value={proxyBaseUrl} />

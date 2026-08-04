@@ -11,12 +11,30 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
+export type ChatCompletionMessageContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+
 export class ChatCompletionMessageDto {
   @IsString()
   role!: string;
 
-  @IsString()
-  content!: string;
+  /**
+   * OpenAI-compatible message content. May be a plain string (the common
+   * case) OR an array of content parts for multimodal requests:
+   *   [{ type: 'text', text }, { type: 'image_url', image_url: { url } }]
+   *
+   * When image parts are present and the resolved route's model has no
+   * vision capability, the runtime routes each image through GLM-4V first
+   * and replaces the image parts with a text description before invoking the
+   * coding model. See VisionPreprocessorService + docs/PRODUCTION-AI-KEYS.md §3.
+   *
+   * Validation is intentionally permissive — the runtime handles both shapes
+   * and coerces bad input to a safe fallback. class-validator's @IsString
+   * would reject multimodal arrays; @IsObject would reject plain strings.
+   */
+  @IsOptional()
+  content!: string | ChatCompletionMessageContentPart[];
 
   @IsOptional()
   @IsString()

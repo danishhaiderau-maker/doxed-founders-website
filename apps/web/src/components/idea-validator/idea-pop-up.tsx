@@ -105,7 +105,7 @@ export function IdeaPopUp({ accessToken }: Props) {
       </p>
       <div className="mt-3 flex items-center gap-3">
         <Link
-          href="/founder-os"
+          href="/founder-ide"
           className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-500"
         >
           View report →

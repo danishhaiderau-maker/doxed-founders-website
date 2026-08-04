@@ -651,7 +651,7 @@ export function FounderCopilotChat({
             const msg = [
               `**Builder Agent** is working on your repo.`,
               '',
-              'Progress streams here — you do not need to open Cursor.',
+              'Progress streams here — you do not need to open Cursor or Founder IDE.',
               result.agentUrl ? `\n[Optional: open full diff view](${result.agentUrl})` : '',
             ]
               .filter(Boolean)
