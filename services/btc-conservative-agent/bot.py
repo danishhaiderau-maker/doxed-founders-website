@@ -3703,8 +3703,45 @@ def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
     update_debug_state_always(tag, {"edge": edge_score, "golden_stack": True})
     return True
 
+def _rollover_daily_pnl_if_new_utc_day() -> tuple:
+    """Reset daily PnL / loss-streak counters at UTC midnight.
+
+    Without this, daily_pnl_usd only resets on process restart, so a single
+    losing day trips DAILY_DRAWDOWN and the bot stays paused forever — /api/resume
+    cannot clear it because the very next risk_trading_allowed() call re-trips
+    the same drawdown check on stale (yesterday's) PnL. This unblocks that
+    deadlock by resetting the calendar bucket when the UTC date advances.
+
+    Returns (rolled_over: bool, pause_reason_before_reset: str). The caller is
+    responsible for clearing a stale DAILY_DRAWDOWN pause OUTSIDE state_lock.
+    """
+    today = datetime.now(timezone.utc).date()
+    with state_lock:
+        last_day = state.get("current_trading_day")
+        if last_day == today:
+            return False, ""
+        prev_pnl = float(state.get("daily_pnl_usd", 0.0) or 0.0)
+        prev_reason = str(state.get("execution_reason") or "")
+        state["daily_pnl_usd"] = 0.0
+        state["consecutive_losses"] = 0
+        state["current_trading_day"] = today
+    logger.info(
+        f"[RISK] DAILY PnL rolled over for UTC day {today} "
+        f"(prev daily_pnl_usd={prev_pnl:.2f}) [PIPELINE ENFORCEMENT]"
+    )
+    return True, prev_reason
+
+
 def risk_trading_allowed() -> bool:
     now = time.time()
+    # UTC-day rollover runs first so the drawdown gate always evaluates
+    # against the current UTC calendar day, not yesterday's bucket. We do
+    # this BEFORE acquiring state_lock for the gates below, because clearing
+    # a stale DAILY_DRAWDOWN pause via set_execution_paused("") must not run
+    # while we hold state_lock (it cancels pending orders outside the lock).
+    rolled_over, pause_reason = _rollover_daily_pnl_if_new_utc_day()
+    if rolled_over and pause_reason == "DAILY_DRAWDOWN":
+        set_execution_paused("")
     with state_lock:
         pause_until = state.get("loss_pause_until", 0)
         if pause_until > now:
@@ -35421,6 +35458,12 @@ def apply_trade_pnl(trade_row):
         net = float(trade_row.get("net_pnl_usd") or trade_row.get("pnl_usd") or 0)
     except (TypeError, ValueError):
         net = 0.0
+    # Make sure the daily bucket is for today's UTC day before crediting PnL.
+    # If the day rolled over since the last trade close, reset first. Same
+    # helper used by risk_trading_allowed() so the rollover is consistent.
+    rolled_over, _prev_reason = _rollover_daily_pnl_if_new_utc_day()
+    if rolled_over and _prev_reason == "DAILY_DRAWDOWN":
+        set_execution_paused("")
     with state_lock:
         state["daily_pnl_usd"] = round(state.get("daily_pnl_usd", 0.0) + net, 4)
         if net < 0:
