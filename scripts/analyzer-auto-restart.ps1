@@ -1,3 +1,15 @@
+# =============================================================================
+# PERMANENTLY DISABLED 2026-08-04 by Danish
+# Reason: auto-restart loop caused the "Doxxed analyzer crashed exit 2 port 9001"
+# popup storm. The watchdog was respawning research_dashboard.py every ~5s
+# whenever it crashed, instead of letting it stay down.
+# Manual start only via RESTART-LAUNCHER.cmd or `python research_dashboard.py`.
+# =============================================================================
+Write-Host "analyzer-auto-restart.ps1 is permanently disabled. Start the analyzer manually if needed."
+exit 0
+
+# BELOW IS THE ORIGINAL (now-unreachable) SCRIPT BODY, PRESERVED FOR REFERENCE
+# -----------------------------------------------------------------------------
 # Watches a detached analyzer PID and relaunches the research analyzer
 # automatically with cooldown + exponential backoff + rate cap. Mirrors
 # scripts/bot-auto-restart.ps1 but for the analyzer on :9001.
@@ -157,7 +169,12 @@ try {
           Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null
         } catch { }
       }
-      try { msg * /TIME:30 "Doxed analyzer crashed (exit $Code) on port $Port. Auto-restarting. See logs\last_analyzer_crash.json" 2>$null } catch { }
+      # Desktop toast popup permanently silenced per platform owner request.
+      # The crash is still recorded in logs\last_analyzer_crash.json,
+      # logs\analyzer_crash_history.jsonl, and the CRASH_NOTIFY_WEBHOOK above
+      # (when configured). Only the interactive `msg *` toast is suppressed
+      # so analysts stop receiving "Doxed analyzer crashed" popups on every
+      # transient blip. The auto-restart logic below is unchanged.
     } catch { }
   }
 
@@ -386,7 +403,10 @@ try {
     }
     if ($restartTimes.Count -ge $MaxRestartsPerHour) {
       Write-RestartLog "rate_capped	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code	stopping_monitor"
-      try { msg * /TIME:60 "Doxed analyzer crash-loop on port ${Port}: $MaxRestartsPerHour restarts in 1h. Auto-restart HALTED to protect disk. See logs\analyzer-auto-restart.log" 2>$null } catch { }
+      # Desktop toast popup permanently silenced per platform owner request.
+      # Crash-loop is still logged to logs\analyzer-auto-restart.log so it
+      # remains observable; only the interactive `msg *` toast is suppressed.
+      Write-RestartLog "crash_loop_halting_no_toast	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code"
       break
     }
 

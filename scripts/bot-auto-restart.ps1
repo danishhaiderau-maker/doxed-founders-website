@@ -1,3 +1,15 @@
+# =============================================================================
+# PERMANENTLY DISABLED 2026-08-04 by Danish
+# Reason: Fly.io is now the canonical bot owner. Local bot auto-restart causes
+# duplicate-runtime race conditions against the canonical Fly owner. Also a
+# source of popup noise when the local bot crashes.
+# Manual start only via RESTART-LAUNCHER.cmd if you explicitly need a local mirror.
+# =============================================================================
+Write-Host "bot-auto-restart.ps1 is permanently disabled. Fly.io is the canonical bot owner."
+exit 0
+
+# BELOW IS THE ORIGINAL (now-unreachable) SCRIPT BODY, PRESERVED FOR REFERENCE
+# -----------------------------------------------------------------------------
 # Watches a detached bot PID, writes logs/last_crash.json on death, AND relaunches
 # the bot automatically with cooldown + exponential backoff + rate cap. Mirrors the
 # Fly restart loop (fly-entrypoint.sh) but for the local showcase bot on :7002.
@@ -337,7 +349,8 @@ try {
       }
       if ($restartTimes.Count -ge $MaxRestartsPerHour) {
         Write-RestartLog "rate_capped	restarts_in_last_hour=$($restartTimes.Count)	max=$MaxRestartsPerHour	pid=$currentPid	code=$code	stopping_monitor"
-        try { msg * /TIME:60 "Doxed bot crash-loop on port ${Port}: $MaxRestartsPerHour restarts in 1h. Auto-restart HALTED to protect disk. See logs\bot_restarts.log" 2>$null } catch { }
+        # Desktop toast popup permanently silenced per platform owner request.
+        # Crash-loop is still logged above (Write-RestartLog + bot_restarts.log).
         break
       }
 
