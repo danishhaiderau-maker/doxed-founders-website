@@ -3,17 +3,20 @@
 The previous R2 fix (commit 0f980ab4) raised MIN_SPREAD_FLOOR in
 type_b_hunter_v1, but live cont-* trades fire from the CONTINUOUS lane spawn
 path (bot.spawn_continuous_lane_from_ai_scan) which had NO spread floor of its
-own. This test pins the real fix: AI signals with a raw score gap < 40
-(bucket < 4 on the 0-100 -> 0-10 dashboard scale) must NOT reach the chase
-lifecycle. Backtest on 21 realized trades (commit b22acacd):
-  spread<4 cohort:  28.6% win rate, -$10.61 PnL  (the leak)
-  spread>=4 cohort: 71.4% win rate, -$0.15 PnL   (clean edge)
+own. The R2 floor gates AI signals before they reach the chase lifecycle.
 
-Score scale is 0-100 (long_score/short_score); bucket = raw/10. So:
-  raw gap 30 -> bucket 3 -> REJECTED
-  raw gap 40 -> bucket 4 -> ACCEPTED (== floor)
-  raw gap 50 -> bucket 5 -> ACCEPTED
-  raw gap 10 -> bucket 1 -> REJECTED
+Stage 1 Fix #4 (2026-08-06): the prior implementation multiplied the constant
+by 10, making the effective threshold raw gap >= 40 (8x stricter than the
+original R2 intent of raw gap >= ~5). The constant is now used as a RAW
+score-gap threshold directly, so raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR (= 4)
+passes the floor. This un-starves the Continuous lane of valid signals.
+
+Score scale is 0-100 (long_score/short_score). After Fix #4:
+  raw gap  3 -> REJECTED (< floor 4)
+  raw gap  4 -> ACCEPTED (== floor)
+  raw gap  5 -> ACCEPTED (> floor)
+  raw gap 10 -> ACCEPTED (well above floor)
+  raw gap 30 -> ACCEPTED (well above floor; previously REJECTED under * 10 bug)
 """
 
 from __future__ import annotations
@@ -65,33 +68,42 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch) -> bool:
 
 def test_floor_constant_is_four() -> None:
     assert bot.CONTINUOUS_MIN_SPREAD_FLOOR == 4, (
-        f"CONTINUOUS_MIN_SPREAD_FLOOR must stay 4 (R2 backtest); "
+        f"CONTINUOUS_MIN_SPREAD_FLOOR must stay 4 (R2 floor); "
         f"found {bot.CONTINUOUS_MIN_SPREAD_FLOOR}"
     )
 
 
-def test_raw_gap_30_bucket3_is_rejected(monkeypatch) -> None:
-    # long 20 / short 50 -> raw gap 30 -> bucket 3 -> REJECTED (< floor 4)
-    passed = _run_spawn(long_score=20, short_score=50, monkeypatch=monkeypatch)
-    assert passed is False, "raw gap 30 (bucket 3) must be REJECTED by R2 floor"
+def test_raw_gap_three_is_rejected(monkeypatch) -> None:
+    # long 50 / short 53 -> raw gap 3 -> REJECTED (< floor 4)
+    passed = _run_spawn(long_score=50, short_score=53, monkeypatch=monkeypatch)
+    assert passed is False, "raw gap 3 must be REJECTED by R2 floor (< 4)"
 
 
-def test_raw_gap_40_bucket4_is_accepted(monkeypatch) -> None:
-    # long 10 / short 50 -> raw gap 40 -> bucket 4 -> ACCEPTED (== floor 4)
-    passed = _run_spawn(long_score=10, short_score=50, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 40 (bucket 4) must be ACCEPTED (== floor)"
+def test_raw_gap_four_is_accepted(monkeypatch) -> None:
+    # long 50 / short 54 -> raw gap 4 -> ACCEPTED (== floor 4)
+    passed = _run_spawn(long_score=50, short_score=54, monkeypatch=monkeypatch)
+    assert passed is True, "raw gap 4 must be ACCEPTED (== floor)"
 
 
-def test_raw_gap_50_bucket5_is_accepted(monkeypatch) -> None:
-    # long 0 / short 50 -> raw gap 50 -> bucket 5 -> ACCEPTED (> floor 4)
-    passed = _run_spawn(long_score=0, short_score=50, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 50 (bucket 5) must be ACCEPTED (> floor)"
+def test_raw_gap_five_is_accepted(monkeypatch) -> None:
+    # long 0 / short 5 -> raw gap 5 -> ACCEPTED (> floor 4)
+    passed = _run_spawn(long_score=0, short_score=5, monkeypatch=monkeypatch)
+    assert passed is True, "raw gap 5 must be ACCEPTED (> floor)"
 
 
-def test_raw_gap_10_bucket1_is_rejected(monkeypatch) -> None:
-    # long 45 / short 55 -> raw gap 10 -> bucket 1 -> REJECTED (well below floor)
+def test_raw_gap_ten_is_accepted(monkeypatch) -> None:
+    # long 45 / short 55 -> raw gap 10 -> ACCEPTED (well above floor)
+    # Note: under the prior * 10 bug this was REJECTED. Fix #4 restored the
+    # intended semantics so this signal now correctly enters the lifecycle.
     passed = _run_spawn(long_score=45, short_score=55, monkeypatch=monkeypatch)
-    assert passed is False, "raw gap 10 (bucket 1) must be REJECTED by R2 floor"
+    assert passed is True, "raw gap 10 must be ACCEPTED (well above floor 4)"
+
+
+def test_raw_gap_thirty_is_accepted(monkeypatch) -> None:
+    # long 20 / short 50 -> raw gap 30 -> ACCEPTED (well above floor)
+    # Note: under the prior * 10 bug this was REJECTED at threshold 40.
+    passed = _run_spawn(long_score=20, short_score=50, monkeypatch=monkeypatch)
+    assert passed is True, "raw gap 30 must be ACCEPTED (well above floor 4)"
 
 
 def test_rejected_ai_does_not_reach_floor(monkeypatch) -> None:

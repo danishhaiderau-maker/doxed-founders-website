@@ -6340,7 +6340,12 @@ THESIS_EARLY_DECAY_DELTA = 2
 THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
 THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
-THESIS_MFE_PROTECT_PCT = 2.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 2% margin
+# Stage 1 Fix #5 (2026-08-06): raised from 2.0% to 5.0%. A +2% MFE spike is
+# chop noise (the 3 recent losers each spiked +2% early as fakeout breakouts
+# then bled to -$6). When 2% triggered, the -12% fast-cut was bypassed and
+# the position ran to the hard SL at -30%. A +5% MFE is a real move, so the
+# fast-cut actually fires when a trade goes bad.
+THESIS_MFE_PROTECT_PCT = 5.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 5% margin
 
 
 def should_skip_fast_cut_for_mfe_protection(
@@ -6541,8 +6546,11 @@ GOLDEN_STACK_SPREAD_MAX = 8
 # R2 spread floor (2026-08-04): backtest on 21 realized trades showed
 # spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
 # Applied to the CONTINUOUS lane spawn path (the live cont-* order path).
-# Score scale is 0-100; bucket = raw/10. Floor value is in BUCKETS, so the
-# raw-gap threshold is CONTINUOUS_MIN_SPREAD_FLOOR * 10.
+# Stage 1 Fix #4 (2026-08-06): the previous * 10 scaling made the effective
+# threshold raw gap >= 40, which is 8x stricter than intended and was starving
+# the Continuous lane of signals. The constant is now treated as a RAW score
+# gap directly (raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR), so raw gap >= 4
+# passes the floor. This aligns with the original R2 intent (gap >= ~5).
 CONTINUOUS_MIN_SPREAD_FLOOR = 4
 GOLDEN_STACK_SHORT_STRUCT_MAX = -3.0
 GOLDEN_STACK_EMA_DIST_MAX_PCT = 1.0
@@ -10528,23 +10536,13 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     trend_state = str(health.get("trend_state") or "MIXED")
     _record_regime_cycle(regime, trend_state)
     regime_mem = _regime_memory_snapshot()
-    regime_tracker = update_market_regime_tracker(health, ctx, ms, regime_mem)
+    # update_market_regime_tracker mutates state["market_regime_tracker"] as a
+    # side effect; keep the call but the tracker dict no longer flows into AI
+    # context (Stage 1 Fix #2 removed that surface to kill regime anchoring).
+    update_market_regime_tracker(health, ctx, ms, regime_mem)
     mc = ctx.get("market_context") or state.get("market_context") or {}
     market_structure_shift = compute_market_structure_shift(mc, health)
     reversal_probability = int(reversal_risk)
-    ema_regime = str(ctx.get("regime") or "UNKNOWN")
-    trend_base = str(health.get("base_state") or "MIXED")
-    struct_for_regime = float(
-        (ctx.get("market_context") or {}).get("market_structure", {}).get("structure_score")
-        or health.get("structure_score")
-        or 0
-    )
-    if struct_for_regime <= -3 or trend_base == "BEAR":
-        trend_regime = "BEAR"
-    elif struct_for_regime >= 3 or trend_base == "BULL":
-        trend_regime = "BULL"
-    else:
-        trend_regime = "RANGE"
     dist_micro_support = None
     dist_micro_resistance = None
     if price > 0 and ms.get("micro_support"):
@@ -10566,8 +10564,10 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
         "reversal_risk_score": reversal_risk,
         "reversal_probability": reversal_probability,
         "reversal_risk_note": "Higher score = more reversal risk (not approval probability)",
-        "regime_ema200": ema_regime,
-        "regime_trend_health": trend_regime,
+        # Stage 1 Fix #2: removed regime_ema200 and regime_trend_health. The
+        # raw `regime` field stays in ctx (one mention) and trend_health
+        # remains the full object below; these two redundant regime labels
+        # were anchored on by the AI and suppressed weighting of structure.
         "market_structure_shift": market_structure_shift,
         "micro_support": ms.get("micro_support"),
         "micro_resistance": ms.get("micro_resistance"),
@@ -10583,12 +10583,17 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
             "quality_score": quality.get("quality_score"),
         },
         "regime_change_count_60m": int(regime_mem.get("regime_changes_60m") or 0),
-        "trend_state_last_3_cycles": list(regime_mem.get("trend_state_last_3_cycles") or []),
-        "last_3_regimes": list(regime_mem.get("last_3_regimes") or []),
-        "last_3_signals": list(regime_mem.get("last_3_signals") or []),
+        # Stage 1 Fix #2: removed trend_state_last_3_cycles, last_3_regimes,
+        # last_3_signals. These three list-style regime labels plus the two
+        # above and market_regime_tracker below made 9 redundant BULL/BEAR
+        # cues in AI context; the model anchored on them and ignored
+        # market_structure_shift. regime_mem itself is unchanged (still used
+        # by classify_market_regime / update_market_regime_tracker).
         "entry_timing": entry_meta,
         "trend_health_detail": {
-            "base_state": health.get("base_state"),
+            # Stage 1 Fix #2: dropped base_state sub-field; it duplicates the
+            # raw `regime` field and trend_health_state. Keep bull_score /
+            # bear_score / interpretation as structure/order-flow evidence.
             "bull_score": health.get("bull_score"),
             "bear_score": health.get("bear_score"),
             "interpretation": _trend_health_interpretation(trend_state, health),
@@ -10600,11 +10605,12 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
             "rejects_micro_sr": bool(micro_eval.get("rejects_micro_sr")),
             "near_micro_sr": bool(micro_eval.get("near_micro_sr")),
         },
-        "market_regime_tracker": {
-            "current": regime_tracker.get("current"),
-            "duration_sec": regime_tracker.get("duration_sec"),
-            "recent_history": list(regime_tracker.get("history") or [])[-5:],
-        },
+        # Stage 1 Fix #2: removed market_regime_tracker sub-dict. The legacy
+        # log_ai_reason_outcome / log_trade_lifecycle readers use
+        # upgrade.get("market_regime_tracker") or {} (graceful), and
+        # log_trade_lifecycle falls back to ctx.get("market_regime_tracker")
+        # which is no longer set either - both will report market_regime=None,
+        # which is honest given the AI no longer sees this signal either.
         "edge_research_telemetry_only": EDGE_RESEARCH_TELEMETRY_ONLY,
         "historically_profitable_patterns": load_historically_profitable_patterns(),
     }
@@ -10632,9 +10638,9 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     ctx["liquidity_sweep_low"] = upgrade["liquidity_sweep_low"]
     ctx["quality_score_components"] = upgrade["quality_score_components"]
     ctx["regime_change_count_60m"] = upgrade["regime_change_count_60m"]
-    ctx["trend_state_last_3_cycles"] = upgrade["trend_state_last_3_cycles"]
-    ctx["last_3_signals"] = upgrade["last_3_signals"]
-    ctx["market_regime_tracker"] = upgrade["market_regime_tracker"]
+    # Stage 1 Fix #2: removed ctx["trend_state_last_3_cycles"] / ctx["last_3_signals"]
+    # / ctx["market_regime_tracker"] mirror assignments to match the upgrade
+    # dict slimming above.
     ctx["edge_research_telemetry_only"] = EDGE_RESEARCH_TELEMETRY_ONLY
     return ctx
 
@@ -10854,6 +10860,12 @@ def parse_ai_response_fields(text: str) -> dict:
     json_blob = extract_ai_json_blob(text)
     factors = parse_ai_factor_block(text)
 
+    # Stage 1 Fix #1: when AI returned zero / sub-threshold scores, force REJECT
+    # and DO NOT fall through to derive_candidate_direction (which defaults LONG)
+    # or derive_research_decision_tier (which would compute a meaningless gap on
+    # zeros). This keeps the continuous_shared_direction_gap_v1 policy honest.
+    zero_score_reject = bool(factors.get("zero_score_reject"))
+
     dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
     raw_direction = dir_match.group(1).upper() if dir_match else None
     if raw_direction not in ("LONG", "SHORT"):
@@ -10862,11 +10874,16 @@ def parse_ai_response_fields(text: str) -> dict:
             raw_direction = str(jd).upper()
     if raw_direction not in ("LONG", "SHORT", "NO_TRADE"):
         raw_direction = "NO_TRADE"
-    direction = derive_candidate_direction(
-        factors.get("long_score", 0),
-        factors.get("short_score", 0),
-        raw_direction,
-    )
+    if zero_score_reject:
+        # Preserve raw_direction for telemetry but do not derive a candidate
+        # side from inert zeros. direction stays NO_TRADE so no lane can spawn.
+        direction = "NO_TRADE"
+    else:
+        direction = derive_candidate_direction(
+            factors.get("long_score", 0),
+            factors.get("short_score", 0),
+            raw_direction,
+        )
 
     match = re.search(r"Win probability:\s*(\d+)", text)
     win_prob = int(match.group(1)) if match else 0
@@ -10893,7 +10910,13 @@ def parse_ai_response_fields(text: str) -> dict:
         if jd:
             decision = str(jd).upper()
     parsed_from_json = False
-    if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+    if zero_score_reject:
+        # Hard override: bypass derive_research_decision_tier so the gap policy
+        # never operates on the inert zeros. Reason is propagated via comment
+        # so downstream tranche logs capture the root cause.
+        decision = "REJECT"
+        parsed_from_json = True
+    elif is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
         decision = derive_research_decision_tier(
             win_prob,
             factors.get("long_score", 0),
@@ -10918,6 +10941,7 @@ def parse_ai_response_fields(text: str) -> dict:
         "factors": factors,
         "json_blob": json_blob,
         "parsed_decision_from_json": parsed_from_json,
+        "zero_score_reject": zero_score_reject,
     }
 
 
@@ -10969,6 +10993,11 @@ def parse_ai_factor_block(text: str) -> dict:
         "short_score": 0,
         "preferred_direction": None,
         "factor_parse_ok": False,
+        # Stage 1 Fix #1: flagged when AI returns scores summing < 50, i.e. the
+        # model is not committed to either side. parse_ai_response_fields honors
+        # this BEFORE derive_candidate_direction / derive_research_decision_tier
+        # so the continuous_shared_direction_gap_v1 policy never sees inert zeros.
+        "zero_score_reject": False,
     }
     if not text:
         return factors
@@ -11014,6 +11043,7 @@ def parse_ai_factor_block(text: str) -> dict:
         if pref:
             factors["preferred_direction"] = str(pref).upper()
         factors["factor_parse_ok"] = True
+        _apply_zero_score_reject_check(factors)
         return factors
     bull_m = re.search(r"Bull\s*score:\s*(\d+)", text, re.IGNORECASE)
     bear_m = re.search(r"Bear\s*score:\s*(\d+)", text, re.IGNORECASE)
@@ -11040,7 +11070,29 @@ def parse_ai_factor_block(text: str) -> dict:
         if block:
             factors["reasons_against"] = [ln.strip("- ").strip() for ln in block.group(1).splitlines() if ln.strip() and not ln.strip().lower().startswith("bull")]
     factors["factor_parse_ok"] = (factors["bull_score"] > 0 or factors["bear_score"] > 0 or len(factors["reasons_for"]) > 0)
+
+    _apply_zero_score_reject_check(factors)
     return factors
+
+
+def _apply_zero_score_reject_check(factors: dict) -> None:
+    """Stage 1 Fix #1: flag inert AI score payloads in-place.
+
+    DeepSeek was observed returning long_score=0, short_score=0 on 100% of
+    calls, making the continuous_shared_direction_gap_v1 gap policy inert
+    and letting direction fall through to derive_candidate_direction() which
+    defaults to LONG. A meaningful directional call must have at least one
+    side > 50 (the higher side is the picked direction); if both are < 50
+    the model is not committed. parse_ai_response_fields honors this flag
+    BEFORE derive_candidate_direction / derive_research_decision_tier run.
+    """
+    if factors.get("factor_parse_ok") and (int(factors.get("long_score") or 0) + int(factors.get("short_score") or 0)) < 50:
+        factors["zero_score_reject"] = True
+        logger.warning(
+            f"[AI_FACTOR_BLOCK] AI_RETURNED_ZERO_SCORES long_score={factors.get('long_score')} "
+            f"short_score={factors.get('short_score')} sum<50 - forcing REJECT before gap policy "
+            f"[PIPELINE ENFORCEMENT]"
+        )
 
 def ai_decision_should_execute(ai: dict) -> bool:
     """True when AI tier maps to real limit-order execution."""
@@ -11179,6 +11231,59 @@ def apply_trend_hierarchy_gate(ctx: dict, ai_result: dict) -> dict:
         ai_result["research_soft"] = "SOFT_REJECT"
         ai_result["execution_tier"] = "SOFT_REJECT"
     return ai_result
+
+
+def apply_structure_agreement_gate(ctx: dict, ai_result: dict) -> dict:
+    """Stage 1 Fix #3: hard reject when AI direction fights confirmed market structure.
+
+    Blocks the empirically worst loss pattern (14 of 20 recent LONG calls were
+    against BEAR_CONTINUATION structure). Unlike apply_trend_hierarchy_gate
+    (which only downgrades weak counter-trend APPROVEs to SOFT_REJECT for
+    shadow study), this gate fires regardless of trend-continuation context
+    and forces a hard REJECT so no lane can spawn an order against structure.
+    Honored only for execute-tier verdicts; shadow data collection still flows.
+    """
+    if not (is_research_data_collection() and AI_RESEARCH_MODE_ENABLED):
+        return ai_result
+    if ai_result.get("ai_error"):
+        return ai_result
+    tier = str(ai_result.get("execution_tier") or ai_result.get("research_soft") or ai_result.get("decision") or "").upper()
+    if tier not in AI_EXECUTE_TIERS:
+        return ai_result
+    direction = str(ai_result.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return ai_result
+
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    structure_shift = str(upgrade.get("market_structure_shift") or ctx.get("market_structure_shift") or "").upper()
+    market_ctx = ctx.get("market_context") or {}
+    market_struct = market_ctx.get("market_structure") or {}
+    structure_score = float(market_struct.get("structure_score") or 0)
+
+    gate = None
+    if direction == "LONG" and ("BEAR" in structure_shift or structure_score <= -2):
+        gate = (
+            f"AI_LONG_VS_BEAR_STRUCTURE shift={structure_shift} "
+            f"structure_score={structure_score}"
+        )
+    elif direction == "SHORT" and ("BULL" in structure_shift or structure_score >= 2):
+        gate = (
+            f"AI_SHORT_VS_BULL_STRUCTURE shift={structure_shift} "
+            f"structure_score={structure_score}"
+        )
+
+    if gate:
+        logger.warning(
+            f"[STRUCTURE_AGREEMENT] {gate} - hard REJECT (no lane spawn) [PIPELINE ENFORCEMENT]"
+        )
+        ai_result["pre_structure_agreement_decision"] = ai_result.get("decision")
+        ai_result["structure_agreement_gate"] = gate
+        ai_result["decision"] = "REJECT"
+        ai_result["approved"] = False
+        ai_result["research_soft"] = "REJECT"
+        ai_result["execution_tier"] = "REJECT"
+    return ai_result
+
 
 def double_confirm_ai(original_ai, ctx):
     try:
@@ -14716,22 +14821,27 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     # spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
     # Filter weak-edge signals before they enter the chase lifecycle. Only
     # applied when AI said execute; preserves shadow data collection when AI
-    # rejected. Score scale is 0-100, bucket = raw/10, so bucket<4 = raw<40.
+    # rejected.
+    #
+    # Stage 1 Fix #4 (2026-08-06): the prior implementation multiplied the
+    # constant by 10, making the effective threshold raw gap >= 40 (8x
+    # stricter than intended). The constant is now used as a RAW score-gap
+    # threshold directly (raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR).
     r2_floor_blocked = False
     if continuous_accept:
         long_score = int(ai.get("long_score", 0) or 0)
         short_score = int(ai.get("short_score", 0) or 0)
         spread = abs(long_score - short_score)
-        if spread < CONTINUOUS_MIN_SPREAD_FLOOR * 10:
+        if spread < CONTINUOUS_MIN_SPREAD_FLOOR:
             r2_floor_blocked = True
             continuous_accept = False
             continuous_reason = (
                 f"R2_SPREAD_FLOOR_BLOCKED spread={spread}"
-                f"<{CONTINUOUS_MIN_SPREAD_FLOOR * 10}"
+                f"<{CONTINUOUS_MIN_SPREAD_FLOOR}"
             )
             logger.info(
                 f"[CONTINUOUS LANE] skip trade_id={spawn_ctx.get('trade_id')} "
-                f"spread={spread}<{CONTINUOUS_MIN_SPREAD_FLOOR * 10} (R2 floor) "
+                f"spread={spread}<{CONTINUOUS_MIN_SPREAD_FLOOR} (R2 floor) "
                 f"[CONTINUOUS_R2_FLOOR]"
             )
     _stamp_shared_ai_lane_verdict(
@@ -15321,8 +15431,9 @@ def evaluate_signal_with_ai(
             "confidence_requested": False,
             "decision": decision,
             "override": override,
-            "comment": text,
-            "reason": str((parsed.get("json_blob") or {}).get("reason") or ""),
+            "comment": ("[AI_RETURNED_ZERO_SCORES] " + text) if parsed.get("zero_score_reject") else text,
+            "reason": ("AI_RETURNED_ZERO_SCORES" if parsed.get("zero_score_reject")
+                       else str((parsed.get("json_blob") or {}).get("reason") or "")),
             "ai_error": False,
             "factors": factors,
             "bull_score": factors.get("bull_score", 0),
@@ -15346,6 +15457,12 @@ def evaluate_signal_with_ai(
             "_type_b_research_v2_entry_context": frozen_entry_context,
         }
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
+        ai_result = normalize_research_ai_decision(ai_result)
+        # Stage 1 Fix #3: hard-reject counter-structure directions before lane
+        # spawn. Runs after trend_hierarchy (which may have already SOFT_REJECTed
+        # weak counter-trend verdicts) so the worst-case LONG-vs-BEAR_CONTINUATION
+        # pattern is blocked even when trend continuation does not hold.
+        ai_result = apply_structure_agreement_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
@@ -22241,7 +22358,7 @@ every one of them — your confidence does NOT override them.
 - When in doubt between APPROVE and REJECT, prefer REJECT.
   False positives destroy more value than missed opportunities.
 - The context data contains market_context.trend_health, market_context.market_structure,
-  market_regime_tracker, reversal_risk_score, and quality_score_components.
+  market_structure_shift, reversal_risk_score, and quality_score_components.
   Use ALL of these — they contain more signal than any single number.
 
 Respond ONLY with a JSON object in this format:
@@ -22338,6 +22455,10 @@ Rank the evidence in this order:
 2. trend health, ADX, and EMA alignment;
 3. order flow: delta, imbalance, volume ratio, and velocity;
 4. micro structure and support/resistance as timing context only.
+
+Do not anchor on the regime label - derive direction from structure, order flow,
+and EMA alignment in that order. A bullish EMA200 regime does NOT pre-qualify a
+LONG; you must confirm with structure and order flow.
 
 ADX measures trend strength, not direction. Apply it non-monotonically:
 - ADX 25-30 is an empirically weak/ambiguous band. Narrow the directional score
@@ -30212,7 +30333,21 @@ def _build_api_state_snapshot():
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
-        snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
+        # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
+        # after restart), report an honest "NO_AI_CALL_YET" status instead of
+        # silently falling back to state.feature_snapshot (a live orderflow
+        # buffer with different keys). The previous fallback made the dashboard
+        # look like AI features were "stripped" when they actually weren't.
+        if LAST_AI_PAYLOAD:
+            snapshot["ai_input"] = LAST_AI_PAYLOAD
+        else:
+            snapshot["ai_input"] = {
+                "status": "NO_AI_CALL_YET",
+                "message": (
+                    "No AI call has been made since startup. Real payload will "
+                    "appear here after the first scan cycle."
+                ),
+            }
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
         snapshot["data_quality"] = state.get("data_quality", 0.0)
