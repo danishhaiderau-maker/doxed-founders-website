@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-test(wipe): cover _seal_past_analysis_with_fallback degraded mode
+Merge branch 'founder-ide-landing-revamp': new Founder IDE landing page with clean download + pair flow
 
 ## Last Activity
 
