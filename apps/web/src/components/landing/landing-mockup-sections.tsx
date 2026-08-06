@@ -63,8 +63,8 @@ export function LandingSinglePage({
             <Link href="/downloads#founder-node" className="font-semibold text-violet-300 hover:text-violet-200">
               Founder Stack →
             </Link>
-            <Link href="/downloads#mobile" className="font-semibold text-emerald-300 hover:text-emerald-200">
-              Android app →
+            <Link href="/founder-ide" className="font-semibold text-emerald-300 hover:text-emerald-200">
+              Founder IDE →
             </Link>
             <Link href="/privacy" className="hover:text-zinc-300">
               Privacy

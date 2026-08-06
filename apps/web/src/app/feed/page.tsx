@@ -228,8 +228,8 @@ function FeedHubPage() {
                     Open Trading Alpha →
                   </Link>
                 ) : (
-                  <Link href="/founder-den" className="text-amber-300 hover:underline">
-                    Founder Den →
+                  <Link href="/founder-ide" className="text-amber-300 hover:underline">
+                    Founder IDE →
                   </Link>
                 )}
               </div>

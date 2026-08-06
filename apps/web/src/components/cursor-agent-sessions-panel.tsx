@@ -72,7 +72,7 @@ export function CursorAgentSessionsPanel({
         </button>
       )}
       <Link
-        href="/settings/builder#remote-builder"
+        href="/founder-ide"
         className="mt-1 block text-[9px] text-zinc-600 hover:text-zinc-400"
       >
         Agent settings →

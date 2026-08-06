@@ -94,10 +94,10 @@ export function DiscoverRankingRules() {
             ))}
           </ul>
           <Link
-            href="/founder-den"
+            href="/founder-ide"
             className="mt-3 inline-block text-xs font-semibold text-violet-300 hover:text-violet-200"
           >
-            Grow your score in Development Workspace →
+            Grow your score in Founder IDE →
           </Link>
         </div>
       </div>

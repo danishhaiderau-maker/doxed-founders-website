@@ -78,7 +78,7 @@ export function FounderAiTeamStrip({
   linkable?: boolean;
 }) {
   const needsAny = agents.some((a) => a.status === 'needs_setup');
-  const connectHref = agents.find((a) => a.connectHref)?.connectHref ?? '/settings/builder';
+  const connectHref = agents.find((a) => a.connectHref)?.connectHref ?? '/founder-ide/byok';
 
   if (compact) {
     return (

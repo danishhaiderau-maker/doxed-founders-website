@@ -56,7 +56,7 @@ function AgentPnlTease({ agent }: { agent: TradingAgentSummary }) {
 function FounderOsTease() {
   return (
     <Link
-      href="/founder-den?onboard=sovereign"
+      href="/founder-ide"
       className="group block rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/40 via-zinc-950/90 to-black p-4 transition hover:border-violet-400/50 hover:shadow-[0_0_40px_rgba(139,92,246,0.15)]"
     >
       <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Founder IDE</p>

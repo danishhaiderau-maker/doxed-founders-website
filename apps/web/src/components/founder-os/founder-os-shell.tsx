@@ -315,10 +315,10 @@ function AlreadyDoxxedCard() {
       </p>
       <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
         <Link
-          href="/founder-den"
+          href="/founder-ide"
           className="rounded-lg border border-zinc-700 px-3 py-2 text-center text-zinc-200 hover:border-zinc-500 hover:text-white"
         >
-          Founder Den →
+          Founder IDE →
         </Link>
         <Link
           href="/settings/ai-usage"
@@ -398,7 +398,7 @@ function LaunchTokenCard({ tier }: { tier: 'VISITOR' | 'DOXXED' | 'UNKNOWN' }) {
 function QuickLinksGrid() {
   const links = [
     { href: '/raise-room', label: 'Raise Room', desc: 'Discover founders · pledge DDollar', accent: 'text-amber-300' },
-    { href: '/founder-den', label: 'Founder Den', desc: 'Personal build dashboard', accent: 'text-violet-300' },
+    { href: '/founder-ide', label: 'Founder IDE', desc: 'Sovereign AI coding workspace', accent: 'text-violet-300' },
     { href: '/settings/ai-usage', label: 'AI Usage', desc: 'Proxy stats · connect Founder IDE', accent: 'text-amber-300' },
     { href: '/founder-ide/decisions', label: 'Decision Log', desc: 'Routing decisions · cache hits', accent: 'text-sky-300' },
   ];

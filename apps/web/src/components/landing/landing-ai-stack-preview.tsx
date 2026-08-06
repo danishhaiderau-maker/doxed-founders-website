@@ -235,7 +235,7 @@ export function LandingAiStackPreview({ accessToken }: { accessToken?: string })
     return (
       <p className="text-[11px] text-zinc-500">
         {error ?? 'Could not load stack.'}{' '}
-        <Link href="/settings/builder" className="text-sky-300 underline">
+        <Link href="/founder-ide/byok" className="text-sky-300 underline">
           Open AI Stack
         </Link>
       </p>

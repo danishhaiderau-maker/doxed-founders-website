@@ -164,8 +164,8 @@ export default function AgentDetailClient({ slug }: { slug: string }) {
                 </ul>
               </div>
             )}
-            <Link href="/founder-den?tab=build" className="inline-block text-sm text-emerald-400 hover:underline">
-              Open Founder Copilot →
+            <Link href="/founder-ide" className="inline-block text-sm text-emerald-400 hover:underline">
+              Open Founder IDE →
             </Link>
           </section>
         )}

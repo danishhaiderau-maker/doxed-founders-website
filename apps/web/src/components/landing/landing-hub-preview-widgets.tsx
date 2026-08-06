@@ -60,11 +60,11 @@ const WAYS_TO_SPEND = [
 ] as const;
 
 const FOUNDER_OS_ITEMS = [
-  { label: 'Development Workspace', href: '/founder-den', icon: '◆' },
-  { label: 'Tasks', href: '/founder-den?tab=activity', icon: '☑' },
-  { label: 'Agents', href: '/founder-den?tab=agents', icon: '🤖' },
-  { label: 'Copilot', href: '/founder-den', icon: '✦' },
-  { label: 'Progress', href: '/founder-den', icon: '📈' },
+  { label: 'Founder IDE', href: '/founder-ide', icon: '◆' },
+  { label: 'Pair your device', href: '/founder-ide#pair', icon: '☑' },
+  { label: 'AI providers (BYOK)', href: '/founder-ide/byok', icon: '🤖' },
+  { label: 'Routing decisions', href: '/founder-ide/decisions', icon: '✦' },
+  { label: 'Pricing', href: '/pricing', icon: '📈' },
 ] as const;
 
 const FOUNDER_NODE_ITEMS = [
@@ -366,10 +366,10 @@ export function LandingHubPreviewWidgets({
         <>
       <WidgetShell
         title="Founder OS"
-        subtitle="The cockpit — development workspace for builders."
+        subtitle="The cockpit — sovereign AI coding workspace for builders."
         headerClass="bg-violet-950/40"
-        href="/founder-den"
-        footerLabel="Open Development Workspace →"
+        href="/founder-ide"
+        footerLabel="Open Founder IDE →"
       >
         <ul className="space-y-0.5">
           {FOUNDER_OS_ITEMS.map((tool) => (
@@ -392,7 +392,7 @@ export function LandingHubPreviewWidgets({
         title="Founder Stack"
         subtitle="The vault + IDE — your data stays yours."
         headerClass="bg-emerald-950/35"
-        href="/settings/builder"
+        href="/founder-ide"
         footerLabel="Download Founder Stack →"
       >
         <ul className="space-y-1.5">
@@ -415,7 +415,7 @@ export function LandingHubPreviewWidgets({
         title="AI Stack"
         subtitle="Brain LLMs + code workers for your project agents."
         headerClass="bg-sky-950/30"
-        href="/settings/builder"
+        href="/founder-ide/byok"
         footerLabel={token ? 'Manage AI Stack →' : 'Connect providers →'}
       >
         <LandingAiStackPreview accessToken={token} />

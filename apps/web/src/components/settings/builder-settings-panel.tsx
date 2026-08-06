@@ -120,7 +120,7 @@ export function BuilderSettingsPanelWithAuth() {
   if (!session?.accessToken) {
     return (
       <div className='rounded-xl border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100'>
-        <Link href='/login?callbackUrl=/settings/builder' className='font-semibold underline'>
+        <Link href='/login?callbackUrl=/founder-ide' className='font-semibold underline'>
           Sign in
         </Link>{' '}
         to manage your integrations.

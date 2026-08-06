@@ -293,13 +293,13 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
             </p>
           )}
           {!promo.founderRegistered && (
-            <Link href="/founder-den?tab=build" className="mt-2 inline-block text-xs font-semibold underline">
+            <Link href="/founder-ide" className="mt-2 inline-block text-xs font-semibold underline">
               Register as founder →
             </Link>
           )}
           {promo.founderRegistered && !promo.eligible && (
             <Link
-              href="/settings/builder#connect-ai"
+              href="/founder-ide/byok"
               className="mt-2 inline-flex rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10"
             >
               Connect your own API keys →
@@ -314,7 +314,7 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
           instructions.
         </p>
         <Link
-          href="/settings/builder#connect-ai"
+          href="/founder-ide/byok"
           className="mt-3 inline-flex rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:bg-violet-500/10"
         >
           Full AI setup (Step 3) →
@@ -458,7 +458,7 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
                   )}
                   {app.provider === 'cursor' && (
                     <Link
-                      href="/settings/builder"
+                      href="/founder-ide/byok"
                       className="rounded-lg border border-violet-500/40 px-3 py-1.5 text-xs text-violet-200"
                     >
                       API key →
@@ -525,8 +525,8 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         <h3 className="text-sm font-semibold text-white">AI brain providers</h3>
         <p className="text-xs text-zinc-500">
           Copilot & Founder Brain — connect keys in{' '}
-          <Link href="/settings/builder#connect-ai" className="text-violet-300 underline">
-            Builder Step 3
+          <Link href="/founder-ide/byok" className="text-violet-300 underline">
+            Founder IDE → BYOK
           </Link>
           .
         </p>

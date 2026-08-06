@@ -15,8 +15,8 @@ export function PlatformSetupGuideContent() {
           <p className="font-medium text-violet-200">1. GitHub + project</p>
           <p className="mt-1 text-xs text-zinc-400">
             In{' '}
-            <Link href="/founder-den" className="text-emerald-400 underline">
-              Development Workspace
+            <Link href="/founder-ide" className="text-emerald-400 underline">
+              Founder IDE
             </Link>{' '}
             link your repo. Founder OS reads public commits and build feed — not your private vault files.
           </p>
@@ -37,7 +37,7 @@ export function PlatformSetupGuideContent() {
             <strong>local Ollama</strong> through Founder Node — install Ollama on your PC, not a localhost URL in the
             browser). That
             model powers Copilot <strong>Ask</strong> and every{' '}
-            <Link href="/founder-den?tab=agents" className="text-emerald-400 underline">
+            <Link href="/founder-ide" className="text-emerald-400 underline">
               project agent
             </Link>{' '}
             when they think, reply to community questions, or draft marketing. Platform code templates handle

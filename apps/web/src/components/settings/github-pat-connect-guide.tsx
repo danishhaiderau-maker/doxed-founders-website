@@ -46,8 +46,8 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
         <ol className="list-inside list-decimal space-y-2 text-xs text-cyan-100/85">
           <li>
             <strong className="text-cyan-50">Link your repository</strong> in{' '}
-            <Link href="/founder-den?tab=build" className="font-medium text-emerald-400 underline hover:text-white">
-              Founder Copilot (Development Workspace → Build)
+            <Link href="/founder-ide" className="font-medium text-emerald-400 underline hover:text-white">
+              Founder IDE
             </Link>
             : enter <code className="text-cyan-200">owner/repo</code> (e.g.{' '}
             <code className="text-cyan-200">you/my-startup</code>) and click connect, or use{' '}
@@ -117,7 +117,7 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
             <li>
               <strong>Founder Node vault</strong> (private notes, full task bodies, local markdown) — encrypted on your
               PC; we only receive optional metadata snapshots, not decrypted vault files (
-              <Link href="/settings/builder" className="underline hover:text-white">
+              <Link href="/founder-ide" className="underline hover:text-white">
                 Founder Vault mode
               </Link>
               ).

@@ -85,10 +85,10 @@ export function DiscoverVisibilityGuide() {
 
       <div className="mt-5 flex flex-wrap gap-3">
         <Link
-          href="/founder-den"
+          href="/founder-ide"
           className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500"
         >
-          Open Development Workspace
+          Open Founder IDE
         </Link>
         <Link
           href="/list-your-project"

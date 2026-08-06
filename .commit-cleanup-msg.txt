@@ -1,0 +1,43 @@
+chore(web): retire /founder-den, /settings/builder, and /downloads#mobile
+
+Delete three legacy surfaces per Danish:
+
+1. /founder-den page — legacy chat-dispatch surface that was ported to
+   /founder-ide. Page directory removed; every page-level link remapped
+   to /founder-ide. API endpoints under /api/founder-den/* are kept
+   (wire-protocol contracts used by discover, raise-room, feed, etc.).
+   next.config.ts adds a 301 redirect from /founder-den(./*) to /founder-ide
+   so bookmarks keep working.
+
+2. /settings/builder page — previously slimmed to a "Moved to Founder IDE"
+   redirect; now deleted entirely. 2FA / security lives at
+   /account?tab=security (canonical). Pairing/downloads/AI/infra all live
+   in Founder IDE now. References across the app remapped to /founder-ide,
+   /founder-ide/byok (AI keys), or /account?tab=security. next.config.ts
+   301-redirects /settings/builder(./*) to /account?tab=security.
+
+3. /downloads#mobile section — old Android APK + iOS install surface,
+   no longer relevant to current development. Stripped entirely. The
+   #founder-node section (Founder Stack desktop install, pairing) is
+   CURRENT — heavily wired into founder-onboarding, infra-connect-hub,
+   founder-cloud-panel, minimal-dev-workspace, etc., so it is kept.
+   android-app-downloads.tsx, ios-app-downloads.tsx, and the unused
+   lib/android-app-requirements.ts are deleted (no remaining importers).
+   /mobile redirect page now points at /founder-ide.
+
+Also:
+- /developers page deleted (was a redirect to /founder-den; next.config
+  now 301-redirects /developers to /founder-ide).
+- /settings/integrations alias page now redirects to /founder-ide
+  (or /account?tab=security if ?tab=security).
+- hub-nav-config.ts: removed Founder Den, Founder Stack, and Android app
+  entries from the Build dropdown.
+- site-nav.tsx: cleaned navActive() and profileActive predicates.
+- BuilderSettingsPanel component retained (still rendered inside
+  FounderWorkspace); only its sign-in callbackUrl was updated.
+
+Verification:
+- npm run build:utils — clean
+- npx tsc --noEmit (apps/web) — zero errors
+- grep /founder-den /settings/builder /downloads#mobile in apps/web/src
+  shows only legitimate matches (API endpoints + 1 explanatory comment)
