@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { getVisionApiBaseUrl, getVisionModel } from '../founder-os/glm-config';
+import { getVisionApiKey, getVisionApiBaseUrl, getVisionModel } from '../founder-os/glm-config';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { ChatCompletionMessageContentPart } from './dto/ai-proxy.dto';
 
@@ -51,10 +51,14 @@ export class VisionPreprocessorService {
     hint?: string,
   ): Promise<string> {
     const url = `${getVisionApiBaseUrl()}/chat/completions`;
-    const apiKey = await this.brainProviders.resolveApiKey('glm');
+    const envKey = getVisionApiKey();
+    const apiKey =
+      envKey ??
+      (await this.brainProviders.resolveApiKey('glm')) ??
+      null;
     if (!apiKey) {
-      this.logger.warn('vision_preprocessor skipped — no GLM API key configured');
-      return '[image: vision preprocessor unavailable — no GLM key]';
+      this.logger.warn('vision_preprocessor skipped — no vision API key configured');
+      return '[image: vision preprocessor unavailable — no vision key]';
     }
 
     const model = this.visionModel();
