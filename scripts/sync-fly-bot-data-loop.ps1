@@ -24,6 +24,73 @@ $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 $freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
 $mirrorDir = Join-Path $agentDir "fly-data-mirror"
+$sizeReportFile = Join-Path $mirrorDir "_size_report.json"
+
+# Compute local mirror size + merge Fly /api/data_size numbers into one report.
+# Written after every sync cycle so the dashboard always has fresh local info.
+function Write-SizeReport {
+  param(
+    [string]$MirrorPath,
+    [string]$ReportFile,
+    [string]$FlyApiUrl,
+    [int]$IntervalSec
+  )
+  try {
+    if (-not (Test-Path -LiteralPath $MirrorPath)) {
+      New-Item -ItemType Directory -Path $MirrorPath -Force | Out-Null
+    }
+    $localSizeBytes = 0
+    $localFileCount = 0
+    $mirrorItems = Get-ChildItem -LiteralPath $MirrorPath -Recurse -File -Force -ErrorAction SilentlyContinue
+    if ($mirrorItems) {
+      $localFileCount = @($mirrorItems).Count
+      $sum = ($mirrorItems | Measure-Object Length -Sum).Sum
+      if ($sum) { $localSizeBytes = [int64]$sum }
+    }
+    $localSizeMb = [Math]::Round($localSizeBytes / 1MB, 2)
+
+    $report = [ordered]@{
+      local_size_mb        = $localSizeMb
+      local_file_count     = $localFileCount
+      sync_interval_seconds = $IntervalSec
+      computed_at          = (Get-Date).ToUniversalTime().ToString("o")
+      fly_size_mb          = $null
+      fly_volume_pct       = $null
+      fly_top_files        = $null
+      fly_source           = $null
+      fly_error            = $null
+    }
+
+    # Pull Fly-side numbers so one file has both local + Fly data.
+    if ($env:BOT_ADMIN_TOKEN) {
+      try {
+        $flyHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
+        $flyRes = Invoke-RestMethod `
+          -Uri ($FlyApiUrl.TrimEnd("/") + "/api/data_size") `
+          -Headers $flyHeaders `
+          -TimeoutSec 15 `
+          -ErrorAction Stop
+        $report.fly_size_mb = $flyRes.runtime_size_mb
+        $report.fly_volume_pct = $flyRes.volume_pct
+        $report.fly_top_files = $flyRes.top_files
+        $report.fly_source = $flyRes.source
+        $report.fly_runtime_path = $flyRes.runtime_path
+        $report.fly_volume_total_mb = $flyRes.volume_total_mb
+        $report.fly_cleanup_status = $flyRes.cleanup_status
+        $report.fly_computed_at = $flyRes.computed_at
+      } catch {
+        $report.fly_error = $_.Exception.Message
+      }
+    }
+
+    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ReportFile -Encoding UTF8
+  } catch {
+    Add-Content -LiteralPath $logFile -Value (
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report failed: $($_.Exception.Message)"
+    )
+  }
+}
+
 
 if (-not (Test-Path (Split-Path -Parent $logFile))) {
   New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
@@ -158,6 +225,11 @@ try {
       )
     }
     $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
+    try {
+      Write-SizeReport -MirrorPath $mirrorDir -ReportFile $sizeReportFile -FlyApiUrl $SourceUrl -IntervalSec ([Math]::Max(15, $IntervalSec))
+    } catch {
+      Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report wrapper failed: $($_.Exception.Message)"
+    }
     Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))
   }
 } finally {

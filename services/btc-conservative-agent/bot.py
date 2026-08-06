@@ -23133,13 +23133,83 @@ def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
         _fresh_collection_lock.release()
 
 
+# === WIPE FIX: _seal_past_analysis_with_fallback helper ===
+def _seal_past_analysis_with_fallback(reason: str) -> dict:
+    """Seal a past-analysis record, degrading gracefully on Fly.
+
+    Fly's .dockerignore excludes the ``research/`` Python package from
+    the container image (only ``research_genome/`` is shipped). When the
+    wipe endpoint runs there, ``from research.past_analysis import
+    seal_past_analysis`` raises ImportError and the safety guard turns
+    that into HTTP 409 -- blocking every wipe.
+
+    This helper tries the real seal first (preserving strict behavior
+    for desktop / analyzer hosts that have the package). On ImportError
+    it builds a minimal archive dict from in-memory bot state so the
+    wipe can preserve a trade-by-trade audit trail without the research
+    package being installed.
+    """
+    try:
+        from research.past_analysis import seal_past_analysis
+    except ImportError:
+        # Fly image excludes research/ -- build a minimal archive dict
+        # inline using only stdlib + in-memory bot state.
+        ts = utc_iso()
+        with trade_lock:
+            trades_snapshot = list(trades)
+        trade_audit = [
+            {
+                "trade_id": t.get("trade_id"),
+                "close_ts": t.get("close_ts"),
+                "net_pnl_usd": t.get("net_pnl_usd"),
+            }
+            for t in trades_snapshot
+            if isinstance(t, dict)
+        ]
+        session_pnl = float(_session_realized_pnl_usd() or 0.0)
+        session_count = int(_session_trade_count() or 0)
+        fingerprint = f"{ts}:{session_count}:{session_pnl:.6f}:{len(trade_audit)}".encode("utf-8")
+        archive_id = "degraded_" + hashlib.sha1(fingerprint).hexdigest()[:16]
+        return {
+            "schema": "past_analysis_manifest_v1",
+            "archive_id": archive_id,
+            "created_at": ts,
+            "reason": reason,
+            "analysis_generated_at": ts,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "data_scope": None,
+            "performance": {
+                "trades": session_count,
+                "net_pnl_usd": session_pnl,
+            },
+            "coverage": {},
+            "key_findings": [],
+            "files": [],
+            "source_inventory": [],
+            "raw_payloads_included": False,
+            "integrity": {
+                "method": "in_memory_bot_state",
+                "file_count": 0,
+                "total_bytes": 0,
+            },
+            "degraded_mode": True,
+            "note": "research.past_analysis unavailable (Fly image excludes research/); built from in-memory bot state",
+            "trade_count_session": session_count,
+            "session_pnl_usd": session_pnl,
+            "trades": trade_audit,
+        }
+    # Package present -- defer to the real seal (strict behavior).
+    return seal_past_analysis(os.getcwd(), reason=reason)
+
+
+# === END WIPE FIX: helper ===
+
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     try:
-        from research.past_analysis import seal_past_analysis
-
-        past_analysis = seal_past_analysis(os.getcwd(), reason="fresh_collection_dashboard")
+        # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
+        past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
         past_analysis_id = str(past_analysis.get("archive_id") or "")
         archive_path = create_research_archive_receipt(
             past_analysis,
@@ -25631,6 +25701,42 @@ HTML = """<!DOCTYPE html>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 <p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
+<div id="dataStoragePanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
+  <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
+    Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
+    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> is synced every 60s by the desktop sync loop.
+  </p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
+    <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
+      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Fly runtime data</div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin:4px 0 2px 0;">
+        <span id="dataSizeFlyMb" style="font-size:1.5rem;font-weight:700;color:#58a6ff;">-</span>
+        <span style="color:#8b949e;font-size:0.85em;">MB of <span id="dataSizeVolumeTotal">1024</span> MB volume</span>
+      </div>
+      <div style="background:#21262d;border-radius:6px;height:12px;overflow:hidden;margin:8px 0 4px 0;border:1px solid #30363d;">
+        <div id="dataSizeVolumeBar" style="height:100%;width:0%;background:#3fb950;transition:width 0.4s ease, background 0.4s ease;"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.82em;color:#8b949e;">
+        <span><span id="dataSizeVolumePct">-</span>% used</span>
+        <span id="dataSizeCleanupBadge" style="padding:2px 8px;border-radius:10px;background:#1f2937;color:#8b949e;font-weight:600;font-size:0.78rem;">Cleanup: -</span>
+      </div>
+      <p id="dataSizeRuntimePath" style="color:#6e7681;font-size:0.74em;margin:6px 0 0 0;word-break:break-all;"></p>
+    </div>
+    <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
+      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Top 5 files on Fly</div>
+      <table id="dataSizeTopFiles" style="width:100%;margin-top:6px;font-size:0.82em;border-collapse:collapse;">
+        <thead><tr><th style="text-align:left;padding:2px 4px;color:#8b949e;">File</th><th style="text-align:right;padding:2px 4px;color:#8b949e;">MB</th><th style="text-align:right;padding:2px 4px;color:#8b949e;">Lines</th></tr></thead>
+        <tbody><tr><td colspan="3" style="padding:4px;color:#6e7681;">Loading...</td></tr></tbody>
+      </table>
+      <p style="color:#6e7681;font-size:0.74em;margin:8px 0 0 0;">Key files tracked: trades_3factor.csv, ai_reason_research.jsonl, signal_replay.jsonl</p>
+    </div>
+  </div>
+  <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
+    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync interval: <strong>60s</strong> &middot; last checked <span id="dataSizeLastCheck">-</span>
+  </p>
+</div>
+
 <h2 id="activityTables">Virtual Chase Candidates</h2>
 <p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
   Approved signals waiting for a selected chase count. These are <strong>not pending orders</strong>
@@ -26641,6 +26747,77 @@ DASHBOARD_JS = """(function () {
     function downloadDebug() {
       window.open('/api/export_debug', '_blank');
     }
+    let dataSizeRefreshInFlight = false;
+    function _formatDataSizeBytes(n) {
+      if (n == null || isNaN(n)) return '-';
+      return n.toLocaleString();
+    }
+    function _setDataSizeCleanup(pct, badgeEl, barEl) {
+      let color = '#3fb950';   // green
+      let label = 'Cleanup: ok';
+      if (pct != null && !isNaN(pct)) {
+        if (pct > 80) { color = '#ef4444'; label = 'Cleanup recommended'; }
+        else if (pct > 60) { color = '#d29922'; label = 'Cleanup: watch'; }
+      }
+      if (badgeEl) {
+        badgeEl.textContent = label;
+        badgeEl.style.background = pct != null && pct > 80 ? '#7f1d1d' : (pct != null && pct > 60 ? '#4a3a0a' : '#1f2937');
+        badgeEl.style.color = (pct != null && pct > 60) ? color : '#8b949e';
+      }
+      if (barEl) barEl.style.background = color;
+    }
+    async function refreshDataSize() {
+      if (dataSizeRefreshInFlight) return;
+      dataSizeRefreshInFlight = true;
+      const barEl = document.getElementById('dataSizeVolumeBar');
+      const badgeEl = document.getElementById('dataSizeCleanupBadge');
+      try {
+        const r = await fetch('/api/data_size?_=' + Date.now(), { cache: 'no-store' });
+        if (!r.ok) {
+          if (badgeEl) { badgeEl.textContent = 'Cleanup: unauthorized'; badgeEl.style.background = '#7f1d1d'; badgeEl.style.color = '#fecaca'; }
+          return;
+        }
+        const body = await r.json();
+        const mbEl = document.getElementById('dataSizeFlyMb');
+        const pctEl = document.getElementById('dataSizeVolumePct');
+        const totalEl = document.getElementById('dataSizeVolumeTotal');
+        const pathEl = document.getElementById('dataSizeRuntimePath');
+        const lastEl = document.getElementById('dataSizeLastCheck');
+        if (mbEl) mbEl.textContent = body.runtime_size_mb == null ? '-' : Number(body.runtime_size_mb).toFixed(1);
+        if (pctEl) pctEl.textContent = body.volume_pct == null ? '-' : Number(body.volume_pct).toFixed(1);
+        if (totalEl && body.volume_total_mb != null) totalEl.textContent = String(body.volume_total_mb);
+        if (pathEl) pathEl.textContent = body.runtime_path ? ('path: ' + body.runtime_path) : '';
+        if (lastEl) lastEl.textContent = new Date().toLocaleTimeString();
+        const pct = body.volume_pct == null ? null : Number(body.volume_pct);
+        _setDataSizeCleanup(pct, badgeEl, barEl);
+        if (barEl && body.volume_pct != null) {
+          const widthPct = Math.max(0, Math.min(100, Number(body.volume_pct)));
+          barEl.style.width = widthPct.toFixed(1) + '%';
+        } else if (barEl) {
+          barEl.style.width = '0%';
+        }
+        // Top-5 file table.
+        const tbody = document.querySelector('#dataSizeTopFiles tbody');
+        if (tbody) {
+          const files = Array.isArray(body.top_files) ? body.top_files : [];
+          if (!files.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="padding:4px;color:#6e7681;">No files</td></tr>';
+          } else {
+            tbody.innerHTML = files.map(function (f) {
+              const lc = body.line_counts && body.line_counts[f.name] != null ? body.line_counts[f.name].toLocaleString() : '-';
+              const mb = f.size_mb != null ? Number(f.size_mb).toFixed(2) : '-';
+              return '<tr><td style="padding:2px 4px;word-break:break-all;">' + (f.name || '') + '</td>'
+                   + '<td style="text-align:right;padding:2px 4px;">' + mb + '</td>'
+                   + '<td style="text-align:right;padding:2px 4px;">' + lc + '</td></tr>';
+            }).join('');
+          }
+        }
+      } catch (e) {
+        if (badgeEl) { badgeEl.textContent = 'Cleanup: fetch failed'; badgeEl.style.background = '#7f1d1d'; badgeEl.style.color = '#fecaca'; }
+      } finally {
+        dataSizeRefreshInFlight = false;
+      }
+    }
     let refreshInFlight = false;
     async function refresh() {
       if (refreshInFlight) return;
@@ -27550,6 +27727,8 @@ DASHBOARD_JS = """(function () {
         showPathwayTab(savedPathTab);
       }
       reconcileRecentExecutionGatesFromBrowser().finally(function () { refresh(); });
+      refreshDataSize();
+      setInterval(refreshDataSize, 30000);
     });
     window.refresh = refresh;
     window.toggleEarlyFail = toggleEarlyFail;
@@ -31365,6 +31544,187 @@ def wipe_fly_only():
         "wiped_at": wiped_at,
         "reset": result,
         "fresh_collection_signal_ts": float(state.get("fresh_collection_signal_ts") or 0.0),
+    })
+
+@app.get("/api/data_size")
+def api_data_size():
+    """Report Fly volume data size for the dashboard cleanup panel.
+
+    Returns the total size of the runtime data directory (``/app/data/runtime``
+    on Fly, or wherever ``BOT_DATA_DIR`` points), the percentage of the 1GB
+    Fly volume in use, the top-5 largest files, and line counts for the key
+    research evidence files. Local mirror size is reported by the desktop
+    sync loop into ``_size_report.json`` — this endpoint intentionally only
+    reports Fly-side numbers so the dashboard never confuses the two.
+    """
+    if not _admin_authed_strict():
+        return jsonify({
+            "status": "error",
+            "message": "admin token required",
+        }), 401
+
+    volume_total_mb = 1024.0
+    runtime_root = _data_sync_volume_root()
+    runtime_path = str(runtime_root)
+
+    def _run(cmd, timeout=10):
+        try:
+            out = subprocess.run(
+                cmd,
+                cwd=runtime_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if out.returncode != 0:
+                return ""
+            return (out.stdout or "").strip()
+        except Exception as exc:
+            logger.warning("[DATA SIZE] cmd %r failed: %s", cmd, exc)
+            return ""
+
+    def _run_bytes(cmd, timeout=10):
+        try:
+            out = subprocess.run(
+                cmd,
+                cwd=runtime_path,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if out.returncode != 0:
+                return b""
+            return out.stdout or b""
+        except Exception as exc:
+            logger.warning("[DATA SIZE] byte cmd %r failed: %s", cmd, exc)
+            return b""
+
+    # Total MB of the runtime dir via du -sm. du is present in the Fly image
+    # (Debian) and on the home analyzer host. Fallback to os.walk if missing.
+    total_mb = None
+    du_total = _run(["du", "-sm", runtime_path])
+    if du_total:
+        # Output: "<mb>	<path>"
+        first = du_total.splitlines()[0].split("	")[0].strip()
+        try:
+            total_mb = float(first)
+        except ValueError:
+            total_mb = None
+    if total_mb is None:
+        try:
+            bytes_total = 0
+            for dirpath, _dirs, files in os.walk(runtime_root):
+                for name in files:
+                    try:
+                        bytes_total += os.path.getsize(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+            total_mb = round(bytes_total / (1024.0 * 1024.0), 2)
+        except Exception as exc:
+            logger.warning("[DATA SIZE] os.walk size failed: %s", exc)
+            total_mb = None
+
+    # Top-5 largest files via du -sm <dir>/* | sort -rn | head -5. The shell
+    # pipeline is avoided per repo convention — do it in Python instead.
+    top_files = []
+    du_files = _run(["du", "-sm", runtime_path + "/*"])
+    if du_files:
+        rows = []
+        for line in du_files.splitlines():
+            parts = line.split("	", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                rows.append((float(parts[0].strip()), parts[1].strip()))
+            except ValueError:
+                continue
+        rows.sort(key=lambda r: r[0], reverse=True)
+        for size_mb, fpath in rows[:5]:
+            top_files.append({
+                "name": os.path.basename(fpath),
+                "path": fpath,
+                "size_mb": round(size_mb, 2),
+            })
+    if not top_files:
+        # Fallback: walk + sort in Python (works when du is unavailable).
+        try:
+            sized = []
+            for dirpath, _dirs, files in os.walk(runtime_root):
+                for name in files:
+                    fp = os.path.join(dirpath, name)
+                    try:
+                        sized.append((os.path.getsize(fp), fp))
+                    except OSError:
+                        continue
+            sized.sort(key=lambda r: r[0], reverse=True)
+            for bytes_size, fp in sized[:5]:
+                top_files.append({
+                    "name": os.path.basename(fp),
+                    "path": fp,
+                    "size_mb": round(bytes_size / (1024.0 * 1024.0), 2),
+                })
+        except Exception as exc:
+            logger.warning("[DATA SIZE] os.walk top-files failed: %s", exc)
+
+    # Line counts for the key research evidence files. Use wc -l when present,
+    # fall back to Python counting so the endpoint still works on hosts
+    # without coreutils.
+    key_files = ["trades_3factor.csv", "ai_reason_research.jsonl", "signal_replay.jsonl"]
+    line_counts = {}
+    wc_out = _run_bytes(["wc", "-l"] + [os.path.join(runtime_path, f) for f in key_files])
+    wc_parsed = {}
+    if wc_out:
+        try:
+            text = wc_out.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    count = int(parts[0].strip())
+                except ValueError:
+                    continue
+                fname = os.path.basename(parts[1].strip())
+                wc_parsed[fname] = count
+        except Exception as exc:
+            logger.warning("[DATA SIZE] wc parse failed: %s", exc)
+    for fname in key_files:
+        if fname in wc_parsed:
+            line_counts[fname] = wc_parsed[fname]
+            continue
+        # Fallback line counter.
+        fpath = runtime_root / fname
+        count = None
+        try:
+            if fpath.exists() and fpath.is_file():
+                with open(fpath, "rb") as fh:
+                    count = sum(1 for _ in fh)
+        except OSError as exc:
+            logger.warning("[DATA SIZE] count %s failed: %s", fname, exc)
+        line_counts[fname] = count
+
+    volume_pct = None
+    if total_mb is not None:
+        volume_pct = round((total_mb / volume_total_mb) * 100.0, 1)
+
+    cleanup_status = "ok"
+    if volume_pct is not None:
+        if volume_pct > 80.0:
+            cleanup_status = "critical"
+        elif volume_pct > 60.0:
+            cleanup_status = "warn"
+
+    return jsonify({
+        "status": "ok",
+        "source": "fly" if os.path.exists("/.dockerenv") or os.path.exists("/app/fly-entrypoint.sh") else "local",
+        "runtime_path": runtime_path,
+        "volume_total_mb": volume_total_mb,
+        "runtime_size_mb": total_mb,
+        "volume_pct": volume_pct,
+        "cleanup_status": cleanup_status,
+        "top_files": top_files,
+        "line_counts": line_counts,
+        "key_files": key_files,
+        "computed_at": int(time.time()),
     })
 
 def _arm_live_control() -> tuple:
