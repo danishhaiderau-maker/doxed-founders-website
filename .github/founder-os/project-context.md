@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (12 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-node): detect open Founder IDE projects in heartbeat
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
