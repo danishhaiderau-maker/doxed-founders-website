@@ -7047,6 +7047,12 @@ state = {
     "force_ai_every_signal": False,
     "debug_enabled": False,
     "fresh_collection_mode": False,
+    # Monotonic timestamp bumped whenever a Fresh Collection reset wipes Fly.
+    # The local sync loop reads this via /api/data-sync/manifest and uses a
+    # newer value as the signal to wipe its local mirror before re-syncing.
+    # /api/wipe_fly_only deliberately leaves this untouched so the local
+    # mirror is retained when only the Fly volume needs clearing.
+    "fresh_collection_signal_ts": 0.0,
     "profit_gates_lane_enabled": PROFIT_GATES_LANE_DEFAULT_ENABLED,
     "profit_gates_enforced": PROFIT_GATES_ENFORCED_DEFAULT,
     "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
@@ -23103,8 +23109,16 @@ def maintain_fresh_collection_files():
     if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_BYTES:
         _reset_runtime_log_handlers()
 
-def perform_fresh_collection_reset() -> dict:
-    """Dashboard-triggered archive+wipe: never delete without verified archive first."""
+def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
+    """Dashboard-triggered archive+wipe: never delete without verified archive first.
+
+    ``send_local_signal=True`` (the default, used by the Fresh Collection
+    toggle) bumps ``state['fresh_collection_signal_ts']`` so the local sync
+    loop wipes its mirror on the next manifest poll — a true fresh restart
+    everywhere. ``send_local_signal=False`` is used by the operational
+    ``/api/wipe_fly_only`` button which clears the Fly volume but retains
+    the local mirror for offline analysis.
+    """
     if not _fresh_collection_lock.acquire(blocking=False):
         logger.warning("[FRESH COLLECTION] Reset already in progress — ignored duplicate request [PIPELINE ENFORCEMENT]")
         return {
@@ -23114,12 +23128,12 @@ def perform_fresh_collection_reset() -> dict:
             "summary": "Reset already running — wait a few seconds and refresh",
         }
     try:
-        return _perform_fresh_collection_reset_locked()
+        return _perform_fresh_collection_reset_locked(send_local_signal=send_local_signal)
     finally:
         _fresh_collection_lock.release()
 
 
-def _perform_fresh_collection_reset_locked() -> dict:
+def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     try:
@@ -23192,11 +23206,22 @@ def _perform_fresh_collection_reset_locked() -> dict:
     with state_lock:
         state["last_fresh_reset_ts"] = time.time()
         state["last_fresh_reset_summary"] = summary
+        if send_local_signal:
+            # Bump the local-sync-loop signal so the mirror is wiped on the
+            # next manifest poll. /api/wipe_fly_only passes False here.
+            state["fresh_collection_signal_ts"] = time.time()
         state["execution_paused"] = False
         state["execution_reason"] = ""
         state["_pause_priority"] = 0
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
+    with state_lock:
+        signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
+    if send_local_signal:
+        logger.info(
+            f"[FRESH COLLECTION] Local-sync signal bumped to {signal_ts} "
+            f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
+        )
     return {
         "deleted": deleted,
         "errors": errors,
@@ -23208,6 +23233,8 @@ def _perform_fresh_collection_reset_locked() -> dict:
         "ts": utc_iso(),
         "ok": True,
         "wipe_aborted": False,
+        "fresh_collection_signal_ts": signal_ts,
+        "local_mirror_will_wipe": bool(send_local_signal),
     }
 
 replay_buffers: Dict[str, Dict] = {}
@@ -25436,7 +25463,8 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipes Fly volume AND signals local sync loop to wipe its mirror. Use for a true clean restart everywhere.">Fresh Collection (Fly + Local): <span id="freshCollectionLabel">OFF</span></button>
+    <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
 </div>
@@ -25596,9 +25624,12 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
-  <strong>Fresh Collection:</strong> turn ON to delete research CSVs, jsonl logs, debug/log files, and reset in-memory trades/session counters. The bot keeps running and starts collecting clean data. While ON, oversized aux logs are trimmed hourly.
+  <strong>Fresh Collection (Fly + Local):</strong> wipes the Fly volume (research CSVs, jsonl logs, debug/log files), resets in-memory trades/session counters, AND signals the local sync loop to wipe its mirror — a true clean restart everywhere. While ON, oversized aux logs are trimmed hourly.
+  <br><br>
+  <strong>Wipe Fly Data Only:</strong> same Fly wipe + in-memory reset, but the local sync mirror is retained for offline analysis history. Use when Fly is filling up but you want to keep local data.
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
+<p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
 <h2 id="activityTables">Virtual Chase Candidates</h2>
 <p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
@@ -26523,7 +26554,7 @@ DASHBOARD_JS = """(function () {
       const turningOn = !currentIsOn;
       if (turningOn) {
         const ok = confirm(
-          'Fresh Collection will DELETE all research CSVs, jsonl logs, debug/log files, and clear open/pending trades in memory.\\n\\nThe bot keeps running and starts collecting from zero.\\n\\nContinue?'
+          'Fresh Collection (Fly + Local) will DELETE all research CSVs, jsonl logs, debug/log files on the Fly volume, clear open/pending trades in memory, AND signal the local sync loop to also wipe its mirror.\\n\\nThe bot keeps running and starts collecting from zero everywhere.\\n\\nContinue?'
         );
         if (!ok) return;
       } else {
@@ -26564,6 +26595,47 @@ DASHBOARD_JS = """(function () {
         freshCollectionInFlight = false;
         if (freshBtn) freshBtn.disabled = false;
         refresh();
+      }
+    }
+    let wipeFlyOnlyInFlight = false;
+    async function wipeFlyOnly() {
+      if (wipeFlyOnlyInFlight) return;
+      const ok = confirm(
+        'Wipe ALL data on the Fly volume (research CSVs, jsonl logs, debug/log files) and reset in-memory trades?\\n\\n' +
+        'The LOCAL SYNC MIRROR will be RETAINED for offline analysis.\\n\\n' +
+        'Use this when Fly is filling up but you want to keep local history. Continue?'
+      );
+      if (!ok) return;
+      wipeFlyOnlyInFlight = true;
+      const btn = document.getElementById('wipeFlyOnlyBtn');
+      const status = document.getElementById('wipeFlyOnlyStatus');
+      if (btn) btn.disabled = true;
+      if (status) status.innerText = 'Wiping Fly...';
+      try {
+        const res = await post('/api/wipe_fly_only', {});
+        if (!res) {
+          // post() already alerted; surface on the status line too.
+          if (status) status.innerText = 'Failed: request error (see alert)';
+          return;
+        }
+        const body = await res.json();
+        if (body.status === 'error' || (body.reset && body.reset.ok === false)) {
+          const msg = body.message || (body.reset && (body.reset.summary || body.reset.error)) || 'unknown';
+          if (status) status.innerText = 'Failed: ' + msg;
+          alert('Wipe Fly Only failed: ' + msg);
+          return;
+        }
+        if (status) {
+          let msg = 'Fly wiped. Local retained. ✓';
+          if (body.reset && body.reset.summary) msg += ' (' + body.reset.summary + ')';
+          status.innerText = msg;
+        }
+        setTimeout(function () { location.reload(); }, 2000);
+      } catch (e) {
+        if (status) status.innerText = 'Failed: ' + (e && e.message ? e.message : 'network error');
+      } finally {
+        wipeFlyOnlyInFlight = false;
+        if (btn) btn.disabled = false;
       }
     }
     function downloadDebug() {
@@ -27484,6 +27556,7 @@ DASHBOARD_JS = """(function () {
     window.toggleInvert = toggleInvert;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
+    window.wipeFlyOnly = wipeFlyOnly;
     window.toggleContinuousAi = toggleContinuousAi;
     window.toggleResearchLane = toggleResearchLane;
     window.toggleProfitGates = toggleProfitGates;
@@ -31247,6 +31320,53 @@ def toggle_fresh_collection():
     logger.info("[FRESH COLLECTION] Mode turned OFF - no file wipe [PIPELINE ENFORCEMENT]")
     return jsonify({"fresh_collection_mode": False})
 
+@app.route('/api/wipe_fly_only', methods=['POST'])
+def wipe_fly_only():
+    """Operational wipe of Fly volume data WITHOUT signalling the local mirror.
+
+    Distinct from Fresh Collection: clears the Fly data files and resets
+    in-memory state exactly like Fresh Collection, but leaves
+    ``state['fresh_collection_signal_ts']`` untouched so the local sync loop
+    keeps its mirrored history for offline analysis. Use when the Fly volume
+    is filling up but local history should be retained.
+    """
+    if not _admin_authed_strict():
+        return jsonify({
+            "status": "error",
+            "message": "admin token required",
+        }), 401
+    with state_lock:
+        if state.get("live_armed"):
+            return jsonify({
+                "status": "error",
+                "message": "Disable LIVE ARM before wiping Fly data",
+            }), 400
+    wiped_at = time.time()
+    result = perform_fresh_collection_reset(send_local_signal=False)
+    if not result.get("ok"):
+        return jsonify({
+            "status": "error",
+            "message": result.get("summary") or result.get("error") or "wipe failed",
+            "reset": result,
+        }), 409
+    # Force fresh_collection_mode back off — this endpoint is a one-shot Fly
+    # clear, not the auto-trim Fresh Collection mode. The reset above set it
+    # True; flip it off so the hourly auto-trim doesn't kick in unexpectedly.
+    with state_lock:
+        state["fresh_collection_mode"] = False
+        save_persistent_config()
+    logger.warning(
+        "[WIPE FLY ONLY] Fly data wiped; local mirror retained by design "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "status": "ok",
+        "message": "Fly data wiped. Local mirror retained.",
+        "wiped_at": wiped_at,
+        "reset": result,
+        "fresh_collection_signal_ts": float(state.get("fresh_collection_signal_ts") or 0.0),
+    })
+
 def _arm_live_control() -> tuple:
     exchange_audit = _refresh_bitfinex_exposure_audit()
     # Private exchange rows are caller-internal recovery material, never an API
@@ -31789,6 +31909,8 @@ def api_data_sync_manifest():
     files = _data_sync_inventory()
     usage = shutil.disk_usage(_data_sync_volume_root())
     ack = _read_data_sync_ack()
+    with state_lock:
+        fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
     return jsonify({
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),
@@ -31798,6 +31920,10 @@ def api_data_sync_manifest():
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),
         "acknowledged_files": len(ack),
+        # Monotonic signal — local sync loop wipes its mirror when this advances.
+        # 0.0 means no Fresh Collection has run yet; the loop treats any
+        # strictly-greater value as a wipe trigger.
+        "fresh_collection_signal_ts": fresh_collection_signal_ts,
         "volume": {
             "total": int(usage.total),
             "used": int(usage.used),

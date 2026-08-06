@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
 $guardFile = Join-Path $machineLockDir ".fly-data-sync-loop.guard"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
+$freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
+$mirrorDir = Join-Path $agentDir "fly-data-mirror"
 
 if (-not (Test-Path (Split-Path -Parent $logFile))) {
   New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
@@ -64,6 +66,49 @@ try {
         -Uri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest") `
         -Headers $headers `
         -TimeoutSec 45
+
+      # Fresh Collection signal: when the Fly dashboard's Fresh Collection
+      # toggle wipes Fly, it bumps manifest.fresh_collection_signal_ts. The
+      # operational 'Wipe Fly Data Only' button leaves this field untouched
+      # so we keep the local mirror. Compare against the last-seen value
+      # persisted on disk so the wipe survives loop restarts and so a single
+      # signal is only honoured once.
+      $currentSignal = 0.0
+      if ($manifest.PSObject.Properties.Name -contains "fresh_collection_signal_ts") {
+        $currentSignal = [double]$manifest.fresh_collection_signal_ts
+      }
+      $lastSeenSignal = 0.0
+      if (Test-Path -LiteralPath $freshSignalFile) {
+        try {
+          $lastSeenRaw = Get-Content -LiteralPath $freshSignalFile -Raw | ConvertFrom-Json
+          if ($lastSeenRaw.PSObject.Properties.Name -contains "signal_ts") {
+            $lastSeenSignal = [double]$lastSeenRaw.signal_ts
+          }
+        } catch {
+          Add-Content -LiteralPath $logFile -Value (
+            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable fresh-signal state: $($_.Exception.Message)"
+          )
+        }
+      }
+      if ($currentSignal -gt $lastSeenSignal) {
+        Write-Host "[FRESH COLLECTION] Signal received ($currentSignal > $lastSeenSignal). Wiping local mirror before sync."
+        Add-Content -LiteralPath $logFile -Value (
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tlocal mirror wipe signalled ($currentSignal > $lastSeenSignal)"
+        )
+        if (Test-Path -LiteralPath $mirrorDir) {
+          Get-ChildItem -LiteralPath $mirrorDir -File -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+          # Drop the per-file sync state too so the next pass re-pulls every
+          # file from offset 0 against the freshly-wiped Fly volume.
+          $syncStatePath = Join-Path $mirrorDir ".fly-sync-state.json"
+          if (Test-Path -LiteralPath $syncStatePath) {
+            Remove-Item -LiteralPath $syncStatePath -Force -ErrorAction SilentlyContinue
+          }
+        }
+        @{$signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
+          ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
+      }
+
       # Keep the live analyzer current quickly. The very large lifecycle genome
       # is archival and is intentionally excluded from the minute-by-minute
       # loop; all trading, fills, exits, AI calls, replays, and compact genome

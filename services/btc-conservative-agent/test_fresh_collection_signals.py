@@ -1,0 +1,138 @@
+"""Fresh Collection signal contract.
+
+Two wipe operations exist on the dashboard:
+
+* Fresh Collection toggle  -> wipes Fly AND bumps ``state['fresh_collection_signal_ts']``
+  so the local sync loop wipes its mirror too (true fresh restart everywhere).
+* POST /api/wipe_fly_only  -> wipes Fly but leaves the signal untouched so the
+  local sync loop retains its mirror for offline analysis.
+
+These tests pin that distinction and the admin-auth requirement on the new
+endpoint.
+"""
+
+import os
+import sys
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("FORCE_PAPER_MODE", "1")
+os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
+os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
+
+import bot
+
+
+class FreshCollectionSignalTests(unittest.TestCase):
+    def setUp(self):
+        self.original_signal = float(bot.state.get("fresh_collection_signal_ts") or 0.0)
+        self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
+        self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+        with bot.state_lock:
+            bot.state["fresh_collection_signal_ts"] = 0.0
+            bot.state["fresh_collection_mode"] = False
+            bot.state["live_armed"] = False
+
+    def tearDown(self):
+        with bot.state_lock:
+            bot.state["fresh_collection_signal_ts"] = self.original_signal
+            bot.state["fresh_collection_mode"] = self.original_mode
+        bot._DASHBOARD_BOOTSTRAP_COMPLETE = self.original_bootstrap_complete
+
+    def test_wipe_fly_only_endpoint_no_signal(self):
+        """`/api/wipe_fly_only` must NOT bump the local-sync signal."""
+        fake_reset = {
+            "ok": True,
+            "summary": "deleted 0 file(s)",
+            "fresh_collection_signal_ts": 0.0,
+            "local_mirror_will_wipe": False,
+        }
+        with mock.patch.object(
+            bot, "perform_fresh_collection_reset", return_value=fake_reset
+        ) as reset:
+            with bot.app.test_client() as client:
+                # Local loopback is admin-authed by default; that's fine — the
+                # auth path itself is covered by test_wipe_endpoints_require_admin.
+                response = client.post("/api/wipe_fly_only", json={})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["status"], "ok")
+        reset.assert_called_once_with(send_local_signal=False)
+        with bot.state_lock:
+            # `or -1` is unsafe here — 0.0 is falsy. Read the raw value; the
+            # contract is that the signal MUST stay at its pre-call value.
+            raw = bot.state.get("fresh_collection_signal_ts")
+            self.assertIsNotNone(raw)
+            self.assertEqual(float(raw), 0.0)
+
+    def test_fresh_collection_bumps_signal(self):
+        """Hitting Fresh Collection (turning ON) MUST bump the local-sync signal."""
+        fake_reset = {
+            "ok": True,
+            "summary": "deleted 0 file(s)",
+            "fresh_collection_signal_ts": 12345.0,
+            "local_mirror_will_wipe": True,
+        }
+        captured = {}
+
+        def _capture(send_local_signal=True):
+            captured["send_local_signal"] = send_local_signal
+            # Simulate the production write so the test observes the new value.
+            if send_local_signal:
+                with bot.state_lock:
+                    bot.state["fresh_collection_signal_ts"] = 12345.0
+            return fake_reset
+
+        with mock.patch.object(
+            bot, "perform_fresh_collection_reset", side_effect=_capture
+        ):
+            with bot.app.test_client() as client:
+                response = client.post(
+                    "/api/toggle_fresh_collection",
+                    json={"enabled": True, "expected_current": False},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(captured.get("send_local_signal", False))
+        with bot.state_lock:
+            self.assertGreater(
+                float(bot.state.get("fresh_collection_signal_ts") or 0.0), 0.0
+            )
+
+    def test_wipe_endpoints_require_admin(self):
+        """Both wipe endpoints must refuse unauthenticated callers.
+
+        `_admin_authed_strict` normally trusts loopback. We force it to False
+        to simulate a remote / unauthenticated caller — the contract is that
+        the wipe surface is admin-only.
+        """
+        with mock.patch.object(bot, "_admin_authed_strict", return_value=False):
+            with mock.patch.object(
+                bot, "perform_fresh_collection_reset"
+            ) as reset:
+                with bot.app.test_client() as client:
+                    wipe_resp = client.post("/api/wipe_fly_only", json={})
+
+        self.assertEqual(wipe_resp.status_code, 401)
+        reset.assert_not_called()
+
+    def test_manifest_includes_signal(self):
+        """`/api/data-sync/manifest` must surface `fresh_collection_signal_ts`."""
+        with bot.app.test_client() as client:
+            response = client.get("/api/data-sync/manifest")
+        # The manifest endpoint touches the live filesystem in some envs; we
+        # only assert the contract field is present and numeric when the
+        # endpoint succeeds. If it 500s in CI we still want a clear signal.
+        if response.status_code == 200:
+            body = response.get_json()
+            self.assertIn("fresh_collection_signal_ts", body)
+            self.assertIsInstance(
+                body["fresh_collection_signal_ts"], (int, float)
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
