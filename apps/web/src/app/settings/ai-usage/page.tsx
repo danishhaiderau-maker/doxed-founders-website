@@ -25,11 +25,11 @@ export default function AiUsagePage() {
 
       <div className="mx-auto max-w-4xl px-6 py-8">
         <div className="mb-6 flex flex-wrap gap-4 text-sm">
-          <Link href="/settings/builder?tab=ai" className="text-violet-300 hover:underline">
-            ← AI providers
+          <Link href="/founder-ide" className="text-violet-300 hover:underline">
+            ← Founder IDE
           </Link>
-          <Link href="/settings/builder?tab=founder-node" className="text-zinc-500 hover:text-white">
-            Founder Stack →
+          <Link href="/founder-ide/byok" className="text-zinc-500 hover:text-white">
+            BYOK setup →
           </Link>
         </div>
 

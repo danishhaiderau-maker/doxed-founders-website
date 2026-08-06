@@ -198,7 +198,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
               GitHub, Cursor, GLM, OpenRouter, DeepSeek, Founder Stack — all configuration lives here.
             </p>
           </header>
-          <BuilderSettingsPanel accessToken={session.accessToken} />
+          <BuilderSettingsPanel />
           <DiscoverMyVisibilityPanel />
           {dashboard && (
             <OsSection title="Account stats" subtitle="Ddollar and readiness">
