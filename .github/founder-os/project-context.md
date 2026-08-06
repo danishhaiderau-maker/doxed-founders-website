@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-Merge: founder-ide post-pair chat dispatch UX, Team per-seat pricing, Local/BYOK routes, mic denial handling
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
