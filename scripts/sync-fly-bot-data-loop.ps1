@@ -1,6 +1,6 @@
 param(
   [string]$SourceUrl = "https://doxed-btc-bot.fly.dev",
-  [int]$IntervalSec = 60
+  [int]$IntervalSec = 180
 )
 
 $ErrorActionPreference = "Continue"

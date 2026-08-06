@@ -25705,7 +25705,7 @@ HTML = """<!DOCTYPE html>
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> is synced every 60s by the desktop sync loop.
+    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> is synced every 3 min by the desktop sync loop.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
@@ -25733,7 +25733,7 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync interval: <strong>60s</strong> &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync interval: <strong>3 min</strong> &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
