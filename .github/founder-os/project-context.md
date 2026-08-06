@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(founder-node): detect open Founder IDE projects in heartbeat
 
 ## Last Activity
 
