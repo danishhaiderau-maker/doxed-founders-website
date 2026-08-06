@@ -1,0 +1,32 @@
+"""
+Scenario C profit-lock ladder contract tests.
+
+Locks in the 2026-08-06 (Danish decision) first-rung change: both lanes
+(CONTINUOUS and TYPE_B_HUNTER_V1) must start with (8, 5).
+"""
+from scenario_c_config import (
+    TRAIL_LADDER_SCENARIO_C,
+    TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
+    SCENARIO_C_LADDER_LABEL,
+    SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
+)
+
+
+def test_continuous_first_rung_is_8_5():
+    assert TRAIL_LADDER_SCENARIO_C[0] == (8, 5)
+
+
+def test_type_b_first_rung_is_8_5():
+    assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[0] == (8, 5)
+
+
+def test_labels_show_8_5_first():
+    assert "8→5" in SCENARIO_C_LADDER_LABEL
+    assert "8→5" in SCENARIO_C_LEGACY_10_6_LADDER_LABEL
+
+
+def test_ladders_remain_monotonically_increasing():
+    # All ladder rungs should be sorted ascending by trigger (first element)
+    for ladder in [TRAIL_LADDER_SCENARIO_C, TRAIL_LADDER_SCENARIO_C_LEGACY_10_6]:
+        triggers = [rung[0] for rung in ladder]
+        assert triggers == sorted(triggers), f"Ladder not sorted: {ladder}"
