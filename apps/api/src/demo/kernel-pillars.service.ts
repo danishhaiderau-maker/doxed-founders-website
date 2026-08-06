@@ -303,15 +303,16 @@ export class KernelPillarsService {
         requestId: `demo-retry-1-${Date.now()}`,
         promptHash,
         userId: user.id,
-        chosenModel: 'glm-4-flash',
-        chosenProvider: 'glm',
+        // Synthetic probe label only — recordRequest stores metadata, it makes no LLM call.
+        chosenModel: 'deepseek-v4-flash',
+        chosenProvider: 'deepseek',
       });
       const second = await this.retryDetector.recordRequest({
         requestId: `demo-retry-2-${Date.now()}`,
         promptHash,
         userId: user.id,
-        chosenModel: 'glm-4-flash',
-        chosenProvider: 'glm',
+        chosenModel: 'deepseek-v4-flash',
+        chosenProvider: 'deepseek',
       });
       const ok = first.isRetry === false && second.isRetry === true;
       return ok

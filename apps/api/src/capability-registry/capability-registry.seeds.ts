@@ -23,12 +23,12 @@ export const CAPABILITY_SEEDS: CapabilitySeed[] = [
   {
     provider: 'glm',
     model: 'glm-4v',
-    displayName: 'GLM-4V (Vision preprocessor)',
-    // Used internally by AiProxyRuntimeService.maybePreprocessImages() to
-    // describe image attachments before they hit a vision-blind coding model.
-    // NOT selectable as a chat alias — the only entry point is the
-    // vision-preprocessor.service.ts dispatch.
-    isActive: true,
+    displayName: 'GLM-4V (Vision preprocessor) [DISABLED]',
+    // DISABLED: vision preprocessing is Gemini-only (GLM is reserved for Second Brain).
+    // Kept as a seed row for reference/future re-evaluation; the routing engine must
+    // never select it. The runtime guard (ai-proxy-runtime.service.ts) also refuses any
+    // non-deepseek provider, so even an active row here cannot spend GLM tokens.
+    isActive: false,
     inputCostPer1M: 0.1,
     outputCostPer1M: 0.3,
     latencyP50Ms: 1500,

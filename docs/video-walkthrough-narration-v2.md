@@ -28,7 +28,7 @@ Welcome to DoxxedCrypto — the platform where founders build in public and earn
 
 Signing in takes seconds. Use **Continue with X** if you are a builder who wants the fast track — that unlocks **Verified Builder** status. Use email if you are here to trade, scout, or vote.
 
-Expand **How free AI tokens work on Founder OS** to see the two tiers. **Verified Builder** gives you five hundred thousand tokens per day for thirty days, plus free DDollar and GLM five point two for ninety days — verify your X handle and connect GitHub and Cursor when you are ready. **Trial** is email-only: twenty-five thousand tokens per day to explore the product, with bring-your-own-key anytime. Real builders get the fast track — and upgrading is always one X verification and one commit away.
+Expand **How free AI tokens work on Founder OS** to see the two tiers. **Verified Builder** gives you five hundred thousand tokens per day for thirty days, plus free DDollar and DeepSeek for ninety days — verify your X handle and connect GitHub and Cursor when you are ready. **Trial** is email-only: twenty-five thousand tokens per day to explore the product, with bring-your-own-key anytime. Real builders get the fast track — and upgrading is always one X verification and one commit away.
 
 ---
 

@@ -82,7 +82,7 @@ else (unset, `false`, `0`, etc.) fails closed.
 **Default:** `true` (gate enabled)
 **Added:** 2026-07-03 (API abuse hotfix — patch 5)
 
-When `true`, free token grants (the 30M-token platform promo, GLM 5.2 free
+When `true`, free token grants (the 30M-token platform promo, DeepSeek free
 90 days, DDollar signup bonus) require the requesting user to have a
 verified Twitter account linked. Raises the cost of mass-creating abuse
 accounts — verified Twitter handles are harder to spin up than email
@@ -291,14 +291,14 @@ in `PlatformSettings.founderBrainProvidersJson`).
 **Default:** `deepseek`
 **Added:** 2026-07-06
 
-Provider slug for fast tier when two-model routing is on (`deepseek` or `glm`).
+Provider slug for fast tier when two-model routing is on (`deepseek` or `glm`). GLM is reserved exclusively for the Second Brain surface (cost rule); DeepSeek is the default fast lane.
 
 ## `FOUNDER_BRAIN_CODING_PROVIDER`
 
-**Default:** `glm`
-**Added:** 2026-07-06
+**Default:** `deepseek`
+**Added:** 2026-07-06 (updated 2026-08-07: GLM gated to Second Brain)
 
-Provider slug for coding / reasoning tier when two-model routing is on.
+Provider slug for coding / reasoning tier when two-model routing is on (`deepseek` or `glm`). GLM is reserved exclusively for the Second Brain surface (cost rule) and is no longer the default coding lane.
 
 ### Where Founder Brain provider env vars are read
 

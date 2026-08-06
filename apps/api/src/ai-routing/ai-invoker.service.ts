@@ -63,12 +63,24 @@ export class AiInvokerService {
 
   async invoke(options: InvokeOptions): Promise<InvokeResult> {
     const section = options.section;
-    const providerKey =
+    let providerKey =
       options.providerKey ?? (await this.resolveProviderKey(section));
     if (!providerKey) {
       throw new ServiceUnavailableException(
         `No AI provider routed for section "${section}". Configure it in /admin/control → AI Routing.`,
       );
+    }
+
+    // HARD COST RULE: GLM is reserved exclusively for the Second Brain surface.
+    // No general AI section (wall summarizer, share paraphrase, copilot, etc.) may
+    // spend GLM tokens, even if an admin overrides the section routing to 'glm'.
+    // Force DeepSeek and log loudly so the leak is visible. The only sanctioned
+    // GLM caller is apps/api/src/second-brain/second-brain.service.ts.
+    if (providerKey === 'glm') {
+      this.logger.warn(
+        `invoke(section="${section}") refused GLM provider (cost rule: Second-Brain-only); forcing deepseek.`,
+      );
+      providerKey = 'deepseek';
     }
 
     const provider = await this.prisma.aiRoutingProvider.findUnique({

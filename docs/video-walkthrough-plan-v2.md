@@ -37,7 +37,7 @@ This plan supersedes v1 for **new-user onboarding**. It adds Founder OS chat →
 | **Wait gate** | `text=Continue with X` after navigation |
 
 **Token tier copy (from UI — use verbatim tone):**
-- **Verified Builder:** verify X, 500k tokens/day, 30-day window, DDollar bonus + GLM-5.2 free 90 days, GitHub + Cursor + commit locks priority.
+- **Verified Builder:** verify X, 500k tokens/day, 30-day window, DDollar bonus + DeepSeek free 90 days, GitHub + Cursor + commit locks priority.
 - **Trial:** email-only, 25k tokens/day, paused when pool low, BYOK anytime; upgrade via X verification + one commit.
 
 ---

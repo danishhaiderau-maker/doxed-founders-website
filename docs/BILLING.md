@@ -14,7 +14,7 @@
 
 **Founder OS is free for founders. Founder OS eats AI cost as customer acquisition. Revenue comes from token launches via an integrated DEX (0.1% fee). DDollar is a virtual in-game currency that tracks founder contribution so that, if and when the platform ever does an airdrop or releases a token, DDollar balances make it easy to divide rewards fairly.**
 
-There is no subscription, no markup on AI, no BYOK. The platform runs GLM 5.2 + DeepSeek with a caching layer and gives every verified founder a daily token allowance. Founders who outgrow the allowance either install Founder Node + Ollama locally (still free) or earn more DDollar by contributing.
+There is no subscription, no markup on AI, no BYOK. The platform runs DeepSeek (general chat, code, reasoning) + Gemini (vision) with a caching layer and gives every verified founder a daily token allowance. GLM 5.2 is reserved exclusively for the Second Brain critical-review surface (cost rule) and is not a general routing target. Founders who outgrow the allowance either install Founder Node + Ollama locally (still free) or earn more DDollar by contributing.
 
 Every dollar spent on inference is a marketing dollar. The platform converts that spend into founder equity in the DDollar economy, which converts to launch volume at Phase 7+, which converts to DEX fee revenue.
 

@@ -73,20 +73,24 @@ Reference: `docs/GLM-ZAI-PROVIDER-SETUP.md`.
 
 ---
 
-## 3. GLM-4V vision preprocessing (NEW — ships with this commit)
+## 3. Vision preprocessing (Gemini-only)
 
 Multimodal preprocessor. When a request includes an image attachment and the
-selected coding model has no vision capability (DeepSeek, GLM 5.2 text), the
-AI Proxy first routes the image through GLM-4V, then injects the resulting
-text description into the coding model's prompt.
+selected coding model has no vision capability (DeepSeek text), the AI Proxy
+first routes the image through **Gemini** (the only sanctioned vision
+provider for general traffic), then injects the resulting text description
+into the coding model's prompt.
+
+> **Cost rule (hard):** GLM vision (`glm-4v`) is NOT used. GLM tokens are
+> reserved exclusively for the Second Brain surface. See
+> `apps/api/src/ai-proxy/vision-preprocessor.service.ts` and
+> `apps/api/src/founder-os/glm-config.ts:getVisionApiKey()`.
 
 ```bash
-# Optional — defaults shown.
-FOUNDER_VISION_MODEL=glm-4v                              # ZhipuAI vision model
-FOUNDER_VISION_BASE_URL=https://api.z.ai/api/paas/v4      # general z.ai endpoint
-# The vision provider reuses GLM_API_KEY if FOUNDER_VISION_API_KEY is unset.
-# Set a separate key here only if you want vision billed to a different account.
-FOUNDER_VISION_API_KEY=                                   # optional override
+# Optional — defaults shown. Gemini is the only vision provider.
+FOUNDER_VISION_MODEL=gemini-2.0-flash
+FOUNDER_VISION_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+FOUNDER_VISION_API_KEY=                              # Gemini API key (required for vision)
 ```
 
 **Where it's read:**
@@ -97,9 +101,8 @@ FOUNDER_VISION_API_KEY=                                   # optional override
 - `apps/api/src/ai-proxy/ai-proxy-runtime.service.ts` →
   `maybePreprocessImages()` (new step in the invoke path)
 
-**Cost attribution:** Vision preprocessing is logged as
-`source: 'ai-proxy:glm-4v'` in `AiTokenUsageLog`. DDollar spend uses the
-`fast` tier rate (same as `glm-4-flash`).
+**Cost attribution:** Vision preprocessing is logged in `AiTokenUsageLog`
+with the Gemini provider. DDollar spend uses the `fast` tier rate.
 
 **Trigger:** Activated automatically when a `ChatCompletionRequestDto` message
 `content` is an array containing an `image_url` part AND the resolved route's
@@ -114,7 +117,7 @@ These are not keys but behavior switches. Defaults are correct for production.
 
 ```bash
 USE_ROUTING_ENGINE_V2=true          # Capability Registry + Flight Recorder (default)
-USE_SMART_INTENT_CLASSIFIER=true    # hybrid heuristic + GLM-4-flash intent (default)
+USE_SMART_INTENT_CLASSIFIER=true    # heuristic intent classifier (GLM Layer-2 removed for cost)
 RATE_LIMIT_FAIL_OPEN=false          # fail closed if DB unreachable (default)
 TWITTER_VERIFIED_FREE_TOKEN_GATE=true # require Twitter for free credits (default)
 ```

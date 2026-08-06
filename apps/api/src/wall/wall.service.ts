@@ -579,7 +579,7 @@ export class WallService {
 
     // Charge 1,000 DDollar for the month. Throws if balance too low. The
     // aiSpend flag runs the tier-cap pre-check so parasite-tier accounts are
-    // rejected before the GLM summarizer call fires.
+    // rejected before the summarizer LLM call fires (DeepSeek; GLM reserved for Second Brain).
     await this.points.spend(userId, WALL_SUMMARIZER_COST_DDOLLAR, 'WALL_SUMMARIZER_MONTHLY', true);
 
     // Subscription date math: extend an active sub by 30d; otherwise start fresh.
@@ -750,7 +750,7 @@ export class WallService {
   /**
    * Call the routed AI provider for section `wall_summarizer` to summarize +
    * sentiment-analyze a message window. The provider/key is admin-configurable
-   * in /admin/control → AI Routing (default: GLM 5.2). Token usage is logged
+   * in /admin/control → AI Routing (default: DeepSeek — GLM is reserved for Second Brain). Token usage is logged
    * centrally by the AiInvokerService (billingSource = 'platform_promo' to
    * preserve the existing adoption-chart bucketing for the summarizer).
    * Returns a parsed {summary, sentimentLabel, reasoning}.

@@ -8,7 +8,7 @@ Ready to feed to ElevenLabs/TTS or read aloud. Scene numbers match `video-walkth
 ---
 
 **Scene 1 — Hero / Landing Offer**
-Welcome to DoxxedCrypto — where the founders are doxxed, not the traders. Sign up today and claim free DDollar, plus GLM 5.2 free for ninety days. No credit card. Just build.
+Welcome to DoxxedCrypto — where the founders are doxxed, not the traders. Sign up today and claim free DDollar, plus DeepSeek free for ninety days. No credit card. Just build.
 
 **Scene 2 — The Problem**
 Ninety-nine point six percent of Pump.fun traders have never realized over ten thousand dollars. The anonymous pump cycle keeps eating retail capital. We replaced it with doxxed founders and verifiable work.
@@ -47,7 +47,7 @@ Signing in takes seconds. Use X to list a project, or email to trade and vote. T
 Every claim here is backed by policy. The Privacy Policy explains what we collect. The Terms explain what you agree to. Both are linked right under the sign-in button.
 
 **Scene 14 — Founder Promo**
-New founders get GLM 5.2 free for ninety days — with Gemini and DeepSeek as fallbacks. Thirty million tokens, no credit card, no key to manage. When the promo ends, bring your own keys and keep building.
+New founders get DeepSeek free for ninety days — with Gemini as the cross-provider fallback. Thirty million tokens, no credit card, no key to manage. When the promo ends, bring your own keys and keep building.
 
 **Scene 15 — Closing CTA**
 Start Founder OS today. Hire the BTC agent with DDollar. Or grab the Android app and resume your work from anywhere. Your laptop is the compute. Your ideas are the work. We handle the rest.

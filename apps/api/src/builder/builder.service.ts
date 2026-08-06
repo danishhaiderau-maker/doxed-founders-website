@@ -71,7 +71,7 @@ import {
   FounderPromoService,
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
-import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
+import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 import { AiInvokerService } from '../ai-routing/ai-invoker.service';
 import { FounderAiRuntimeService } from '../founder-ai-runtime/founder-ai-runtime.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
@@ -1642,7 +1642,7 @@ export class BuilderService {
    * but has no BYOK key for that exact provider, the onboarding promo badge promises
    * them free LLM access. Honor that promise by routing through the platform's shared
    * promo keys: try the selected provider first, then fall across to the other promo
-   * providers (glm → deepseek → gemini) so the call still succeeds when the platform
+   * providers (deepseek → gemini) so the call still succeeds when the platform
    * only configured a subset. Returns null when no promo path applies so the caller
    * emits its standard missing-key error. */
   private async tryPromoFallbackForcedCompletion(
@@ -1660,7 +1660,9 @@ export class BuilderService {
 
     const order: PromoCredentialProvider[] = [];
     order.push(forcedPromoProvider);
-    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
+    // GLM removed from promo fallback (cost rule: Second-Brain-only). DeepSeek is the cheap workhorse;
+    // Gemini is the only cross-provider fallback when the selected provider has no platform promo key.
+    for (const p of ['deepseek', 'gemini'] as const) {
       if (!order.includes(p)) order.push(p);
     }
 
@@ -1756,8 +1758,8 @@ export class BuilderService {
     switch (provider) {
       case AiProvider.OPENAI:
         return this.callOpenAi(apiKey, system, userPrompt, model);
-      case AiProvider.GLM:
-        return this.callGlm(apiKey, system, userPrompt, model);
+      // GLM intentionally has no dispatch here: GLM is reserved exclusively for Second Brain
+      // (cost rule). A stray AiProvider.GLM falls through to `default` and returns null � no spend.
       case AiProvider.ANTHROPIC:
         return this.callAnthropic(apiKey, system, userPrompt, model);
       case AiProvider.GEMINI:
@@ -1797,14 +1799,7 @@ export class BuilderService {
           userPrompt,
           model ?? 'gpt-4o-mini',
         );
-      case AiProvider.GLM:
-        return yield* this.streamOpenAiCompatible(
-          `${getGlmApiBaseUrl()}/chat/completions`,
-          apiKey,
-          system,
-          userPrompt,
-          model ?? getGlmDefaultModel(),
-        );
+      // GLM streaming intentionally omitted: GLM is reserved for Second Brain (cost rule).
       case AiProvider.DEEPSEEK:
         return yield* this.streamOpenAiCompatible(
           'https://api.deepseek.com/chat/completions',
@@ -2499,7 +2494,9 @@ export class BuilderService {
 
     const order: PromoCredentialProvider[] = [];
     order.push(forcedPromoProvider);
-    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
+    // GLM removed from promo fallback (cost rule: Second-Brain-only). DeepSeek is the cheap workhorse;
+    // Gemini is the only cross-provider fallback when the selected provider has no platform promo key.
+    for (const p of ['deepseek', 'gemini'] as const) {
       if (!order.includes(p)) order.push(p);
     }
 
@@ -2754,12 +2751,13 @@ export class BuilderService {
   }
 
   private readonly brainProviderPriority: AiProvider[] = [
+    // GLM intentionally excluded: never auto-promote GLM as a chat brain (cost rule).
+    // GLM is reserved exclusively for Second Brain.
     AiProvider.PHALA,
     AiProvider.SURPLUS,
     AiProvider.JATEVO,
     AiProvider.OPENROUTER,
     AiProvider.DEEPSEEK,
-    AiProvider.GLM,
     AiProvider.OPENAI,
     AiProvider.ANTHROPIC,
     AiProvider.GEMINI,
@@ -2796,7 +2794,9 @@ export class BuilderService {
     const status = await this.founderPromo.getUserPromoStatus(userId);
     if (!status.eligible) return new Set();
     const out = new Set<string>();
-    for (const p of ['glm', 'gemini', 'deepseek'] as const) {
+    // GLM excluded: a stored GLM promo key must not surface as a general chat brain
+    // (cost rule). GLM is resolved only by SecondBrainService.
+    for (const p of ['gemini', 'deepseek'] as const) {
       if (await this.founderPromo.hasPromoProvider(userId, p)) out.add(p);
     }
     return out;
@@ -3039,30 +3039,8 @@ export class BuilderService {
     return { text, usage };
   }
 
-  /** GLM 5.2 (ZhipuAI) — OpenAI-compatible endpoint, cheapest promo LLM. */
-  private async callGlm(key: string, system: string, user: string, model?: string) {
-    const res = await fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: model ?? getGlmDefaultModel(),
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        temperature: 0.4,
-      }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    };
-    const text = data.choices?.[0]?.message?.content;
-    if (!text) return null;
-    const usage = parseOpenAiStyleUsage(data);
-    return { text, usage };
-  }
+  // callGlm() removed: GLM is reserved exclusively for Second Brain (cost rule). The only
+  // sanctioned GLM caller is apps/api/src/second-brain/second-brain.service.ts.
 
   private async callAnthropic(key: string, system: string, user: string, model?: string) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {

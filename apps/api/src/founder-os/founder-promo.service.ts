@@ -20,8 +20,11 @@ export type FounderPromoStatus = {
 
 /**
  * Promo LLM providers — cost-optimized for onboarding new founders.
- * GLM 5.2 (ZhipuAI) is the default: cheapest $/token with strong coding ability.
- * DeepSeek + Gemini kept as cheap fallbacks. Cursor/OpenAI/Anthropic removed
+ * DeepSeek is the promo default: cheap $/token and the general chat workhorse.
+ * Gemini is the cross-provider fallback. GLM is NOT a general chat brain - it is
+ * reserved exclusively for the Second Brain surface (cost rule). A platform GLM
+ * credential is still stored/decrypted here so SecondBrainService can use it, but
+ * GLM is never surfaced in the chat dropdown or promo marketing. Cursor/OpenAI/Anthropic removed
  * from promo to protect margins — founders can still BYOK those in Settings.
  */
 export type PromoCredentialProvider = 'glm' | 'gemini' | 'deepseek';
@@ -60,7 +63,7 @@ export class FounderPromoService {
       windowDays: row?.founderPromoWindowDays ?? 90,
       message:
         row?.founderPromoMessage?.trim() ||
-        'Sign up — get 3 months free GLM 5.2, Gemini & DeepSeek on Founder OS. No credit card needed.',
+        'Sign up — get 3 months free DeepSeek & Gemini on Founder OS. No credit card needed.',
       credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
@@ -440,9 +443,10 @@ export class FounderPromoService {
   /**
    * Returns the list of AI "brains" the calling user can pick from in the
    * workspace chat dropdown. Reflects what is actually wired up:
-   *   - GLM / Gemini / DeepSeek: available when an admin has saved a platform
-   *     promo key for that provider (any signed-up founder can use them while
-   *     the promo window is open).
+   *   - Gemini / DeepSeek: available when an admin has saved a platform promo
+   *     key for that provider (any signed-up founder can use them while the
+   *     promo window is open). GLM is deliberately NOT listed - it is reserved
+   *     exclusively for the Second Brain surface.
    *   - DeepSeek is also available when the legacy platform-brain DeepSeek key
    *     is configured (separate column on PlatformSettings).
    *   - OLLAMA: available when the user's own Founder Node has heartbeated in
@@ -457,13 +461,9 @@ export class FounderPromoService {
     ]);
 
     const creds = settings.credentialsStatus;
+    // GLM intentionally NOT surfaced here: it is reserved exclusively for Second Brain
+    // (cost rule). A platform GLM credential still exists for SecondBrainService.
     const brains: AvailableBrain[] = [
-      {
-        key: 'GLM',
-        label: 'GLM 5.2',
-        hint: 'Promo - fast',
-        available: Boolean(creds.glm),
-      },
       {
         key: 'DEEPSEEK',
         label: 'DeepSeek',

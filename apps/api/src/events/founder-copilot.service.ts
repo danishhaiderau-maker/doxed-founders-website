@@ -1717,7 +1717,7 @@ export class FounderCopilotService {
       const missingKeyError =
         `**${providerLabel} AI API key not configured.**\n\n` +
         `Your ${providerLabel} desktop app may show as "Connected" in the Integrations panel, but the AI API key used for chat completions is configured separately in **Settings \u2192 AI Stack**.\n\n` +
-        `To fix: connect a ${providerLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (GLM 5.2 is free during the promo and requires no key from you).`;
+        `To fix: connect a ${providerLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (DeepSeek is free during the promo and requires no key from you).`;
       answer = missingKeyError + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = 'NO_PROVIDER_KEY';
       llmErrors = aiResult.llmErrors;
@@ -2009,7 +2009,7 @@ export class FounderCopilotService {
         answer =
           `**${requestedLabel} AI API key not configured.**\n\n` +
           `Your ${requestedLabel} desktop app may show as "Connected" in the Integrations panel, but the AI API key used for chat completions is configured separately in **Settings \u2192 AI Stack**.\n\n` +
-          `To fix: connect a ${requestedLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (GLM 5.2 is free during the promo and requires no key from you).`;
+          `To fix: connect a ${requestedLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (DeepSeek is free during the promo and requires no key from you).`;
         providerLabel = 'NO_PROVIDER_KEY';
       }
       emit({
@@ -2175,7 +2175,7 @@ export class FounderCopilotService {
         kind: 'ai_key',
         label: 'AI key',
         detail:
-          'Add an AI API key (GLM 5.2 is free during the promo) so I can give you real answers, not rule-based fallbacks.',
+          'Add an AI API key (DeepSeek is free during the promo) so I can give you real answers, not rule-based fallbacks.',
         action: 'connect_ai',
       });
     }

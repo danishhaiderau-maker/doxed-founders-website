@@ -90,12 +90,14 @@ flowchart LR
 |--------|---------|-------------------|-----------|------|
 | Simple Q&A | Short prompt, status/hello | DeepSeek | `AI_RUNTIME_FAST_MODEL` | fast |
 | Reasoning | why/explain/regulatory/architecture | DeepSeek | `AI_RUNTIME_REASONING_MODEL` | reasoning |
-| Code | code_draft task, implement/refactor | GLM | `AI_RUNTIME_CODE_MODEL` | code |
-| Summarize | `wall_summarizer` section | GLM | `AI_RUNTIME_FAST_MODEL` | fast |
+| Code | code_draft task, implement/refactor | DeepSeek | `AI_RUNTIME_CODE_MODEL` | code |
+| Summarize | `wall_summarizer` section | DeepSeek | `AI_RUNTIME_FAST_MODEL` | fast |
 | Social draft | share_paraphrase, founder_draft | DeepSeek | `AI_RUNTIME_FAST_MODEL` | fast |
 | Unknown | default copilot | DeepSeek | `AI_RUNTIME_FAST_MODEL` | fast |
 
 Routing is **advisory in Phase 0** (logged + stored on cache entries). Phase 1 enforces route before provider call.
+
+> **Cost rule (hard):** GLM is reserved EXCLUSIVELY for the Second Brain critical-review surface. DeepSeek carries every general intent (simple Q&A, reasoning, code, summarize, social draft, unknown). GLM must NEVER be a general routing target. See `apps/api/src/second-brain/second-brain.service.ts`.
 
 ---
 

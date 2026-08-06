@@ -32,7 +32,7 @@ export const AI_SECTION_LABELS: Record<AiSectionSlug, string> = {
 /** Default provider key per section — matches the pre-routing behaviour. */
 export const AI_SECTION_DEFAULT_PROVIDER: Record<AiSectionSlug, string> = {
   share_paraphrase: 'deepseek',
-  wall_summarizer: 'glm',
+  wall_summarizer: 'deepseek', // GLM removed: reserved exclusively for Second Brain (cost rule).
   copilot: 'deepseek',
   quick_build: 'deepseek',
   founder_draft: 'deepseek',

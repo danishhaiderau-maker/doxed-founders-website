@@ -14,9 +14,9 @@ All claims are grounded in `docs/FOUNDER_OS_PRODUCT_SPECIFICATION.md`, `apps/api
 
 ## Scene 1 — Hero / Landing Offer
 - **URL:** https://doxxedcrypto.digital
-- **On-screen actions:** Load landing page. Hero headline fades in. Camera catches the offer strip: "Free DDollar · GLM 5.2 free 90 days". Slow scroll past the fold.
+- **On-screen actions:** Load landing page. Hero headline fades in. Camera catches the offer strip: "Free DDollar · DeepSeek free 90 days". Slow scroll past the fold.
 - **Camera direction:** Cinematic slow zoom from 1.0x → 1.15x on the hero headline, then smooth pan down to the offer CTA. Cursor rests on the "Get started" button without clicking.
-- **Narration:** Welcome to DoxxedCrypto — where the founders are doxxed, not the traders. Sign up today and claim free DDollar, plus GLM 5.2 free for ninety days. No credit card. Just build.
+- **Narration:** Welcome to DoxxedCrypto — where the founders are doxxed, not the traders. Sign up today and claim free DDollar, plus DeepSeek free for ninety days. No credit card. Just build.
 - **Duration:** 7s
 - **Transition:** Whip-pan right into the problem panel.
 
@@ -118,9 +118,9 @@ All claims are grounded in `docs/FOUNDER_OS_PRODUCT_SPECIFICATION.md`, `apps/api
 
 ## Scene 14 — Founder Promo
 - **URL:** https://doxxedcrypto.digital/login (banner) and [LOCAL DEV] `apps/api/src/founder-os/founder-promo.service.ts` — surfaced via Settings → Connected Accounts / promo status endpoint
-- **On-screen actions:** Founder promo banner animates in with "GLM 5.2 free 90 days". Cut to a Settings panel showing the promo status: 30M token cap, days remaining, providers list (GLM, DeepSeek, Gemini, OLLAMA_LOCAL).
+- **On-screen actions:** Founder promo banner animates in with "DeepSeek free 90 days". Cut to a Settings panel showing the promo status: 30M token cap, days remaining, providers list (DeepSeek, Gemini, OLLAMA_LOCAL). GLM is reserved for the Second Brain and is not part of the general chat promo.
 - **Camera direction:** Banner slides in from the top. Cut to the Settings panel. Cursor hovers each provider chip. Hold on the days-remaining counter.
-- **Narration:** New founders get GLM 5.2 free for ninety days — with Gemini and DeepSeek as fallbacks. Thirty million tokens, no credit card, no key to manage. When the promo ends, bring your own keys and keep building.
+- **Narration:** New founders get DeepSeek free for ninety days — with Gemini as the cross-provider fallback. Thirty million tokens, no credit card, no key to manage. When the promo ends, bring your own keys and keep building.
 - **Duration:** 8s
 - **Transition:** Wipe to the closing card.
 
@@ -164,7 +164,7 @@ Sits inside the 90–120s DemoMaker window. Trim each scene by ~1s to hit ~100s 
 - **Founder Node details** (pair code, 45s heartbeat, Ollama, no remote desktop / VPN / port forwarding): spec §4.4–4.5.
 - **Three runtime paths** (Sovereign / Hybrid / Founder Cloud) and "laptop is the compute" tagline: spec §1.4, §2.4, §3.3.
 - **Wall feature**: `apps/api/src/wall/wall.controller.ts` — public message stream, join, pin (DDollar spend), Chat Summarizer (1,000 DDollar / 30 days), aggregated feed, unread badges. Web component: `apps/web/src/components/project-wall.tsx`.
-- **Founder promo**: `apps/api/src/founder-os/founder-promo.service.ts` — GLM 5.2 default, Gemini + DeepSeek fallbacks, 90-day window, 30M token cap, no credit card, BYOK after.
+- **Founder promo**: `apps/api/src/founder-os/founder-promo.service.ts` — DeepSeek default, Gemini fallback, 90-day window, 30M token cap, no credit card, BYOK after. GLM is gated to the Second Brain (cost rule) and is NOT part of the general chat promo.
 - **Login**: `apps/web/src/app/login/page.client.tsx` — X (Twitter) for listing, email for trading/voting, 2FA (TOTP / recovery / passkey), referral code persistence, Terms + Privacy footer links, founder promo signup banner.
 - **BTC agent**: `services/btc-conservative-agent` on port :7002, public at https://bot.doxxedcrypto.digital, Bitfinex paper trading per repo context.
 - **DDollar economy**: 80% community owned, 10% airdrop, 70% over 10 years — per landing page offer (user-provided context).
