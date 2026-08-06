@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-fix(cost): gate GLM exclusively behind Second Brain; remove from general router, vision fallback, and chat dropdown
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
