@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(web): retire legacy /downloads page; redirect to /founder-ide
 
 ## Last Activity
 
