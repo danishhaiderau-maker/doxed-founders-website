@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-﻿fix(cost): close remaining GLM cost leaks; GLM now Second-Brain-only repo-wide in apps/api
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
