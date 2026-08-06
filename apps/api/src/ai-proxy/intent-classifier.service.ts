@@ -1,26 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
-import { getGlmApiBaseUrl } from '../founder-os/glm-config';
 
 /**
- * Intent Classifier Service — Phase 5b.
+ * Intent Classifier Service - Phase 5b (cost-hardened).
  *
- * Replaces the crude regex `inferIntent()` in AiProxyRuntimeService with a
- * hybrid classifier that routes prompts into one of three model tiers:
+ * Routes prompts into one of three model tiers:
  *
- *   - fast      → simple Q&A, autocomplete, lookups          (DeepSeek Flash)
- *   - code      → writing / debugging / refactoring code     (DeepSeek Pro)
- *   - reasoning → architecture, planning, analysis           (GLM 5.1)
+ *   - fast      -> simple Q&A, autocomplete, lookups          (DeepSeek Flash)
+ *   - code      -> writing / debugging / refactoring code     (DeepSeek Pro)
+ *   - reasoning -> architecture, planning, analysis           (DeepSeek Pro)
  *
- * The classification runs in three layers:
- *
- *   Layer 1 — Heuristic pre-filter (zero cost). Obvious patterns short-circuit
- *             and skip the model call entirely. Confidence > 0.8 wins.
- *   Layer 2 — GLM 4 Flash model call (only when heuristics are uncertain).
- *             Cheapest model, <200ms, one-word reply. ~$0.0001 / call.
- *   Layer 3 — Context-signal augmentation. File extension, stack traces,
- *             prompt length, and workspace phase bias the result.
+ * COST RULE (hard): GLM is reserved EXCLUSIVELY for the Second Brain
+ * critical-review surface. The previous Layer-2 GLM 4 Flash call has been
+ * removed from this hot path because it spent GLM tokens on every chat
+ * turn where heuristics were uncertain - that is general traffic and is
+ * cost-prohibitive. Intent classification now runs on heuristics + context
+ * signals only (Layers 1 and 3). If those are uncertain the request
+ * defaults to the DeepSeek reasoning tier, which is cheap.
  *
  * Every classification is logged (structured) so the Learning Engine can
  * later audit accuracy and refine the heuristic thresholds.
@@ -161,50 +158,16 @@ export class IntentClassifierService {
    * Returns null on any failure (timeout, network, parse, no API key) so the
    * caller can fall back to the heuristic result gracefully.
    */
-  private async classifyWithModel(prompt: string): Promise<RouterIntent | null> {
-    try {
-      const apiKey = await this.brainProviders.resolveApiKey('glm');
-      if (!apiKey) return null;
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.modelTimeoutMs);
-
-      const response = await fetch(`${getGlmApiBaseUrl()}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: this.classifierModel,
-          messages: [
-            { role: 'system', content: CLASSIFICATION_PROMPT },
-            { role: 'user', content: prompt.slice(0, 1000) },
-          ],
-          max_tokens: 10,
-          temperature: 0,
-        }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeout));
-
-      if (!response.ok) {
-        this.logger.debug(
-          `GLM classifier non-OK ${response.status}; falling back to heuristic`,
-        );
-        return null;
-      }
-
-      const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      const raw = data?.choices?.[0]?.message?.content?.trim().toLowerCase() ?? '';
-      return this.parseModelReply(raw);
-    } catch (err) {
-      this.logger.debug(
-        `GLM classifier call failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return null;
-    }
+  private async classifyWithModel(_prompt: string): Promise<RouterIntent | null> {
+    // COST RULE: GLM is reserved exclusively for the Second Brain surface.
+    // The previous Layer-2 GLM 4 Flash call has been removed from this hot
+    // path - it spent GLM tokens on every chat turn where heuristics were
+    // uncertain. Returning null here makes classify() fall back to the
+    // heuristic result (Layer 1) augmented by context signals (Layer 3).
+    // To re-enable a model classifier, wire it to a cheap non-GLM provider
+    // (e.g. DeepSeek) - never GLM. See SecondBrainService for the only
+    // sanctioned GLM call site.
+    return null;
   }
 
   /**

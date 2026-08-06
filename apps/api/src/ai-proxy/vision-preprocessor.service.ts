@@ -1,36 +1,37 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { getVisionApiKey, getVisionApiBaseUrl, getVisionModel } from '../founder-os/glm-config';
-import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import type { ChatCompletionMessageContentPart } from './dto/ai-proxy.dto';
 
 /**
- * GLM-4V vision preprocessor.
+ * Vision preprocessor (Gemini).
  *
  * Triggered by AiProxyRuntimeService.invoke() when an inbound chat request
  * contains image attachments AND the resolved route's model has no vision
  * capability (see Capability.vision). The preprocessor sends each image to
- * GLM-4V via the z.ai general endpoint, returns a short text description,
+ * the configured vision provider (default: Gemini via
+ * FOUNDER_VISION_API_KEY / GEMINI_API_KEY), returns a short text description,
  * and the runtime substitutes the image part with that text before invoking
  * the vision-blind coding model.
  *
- * Conservative by design — matches the existing GLM-5.2 wiring pattern:
- *   - Reuses FounderBrainProvidersService.resolveApiKey('glm') so the same
- *     credential pipeline (env → promo → routing) is honored.
- *   - Best-effort: any failure (network, non-2xx, malformed JSON) returns a
- *     placeholder string and logs at warn. The request never fails because
- *     vision preprocessing failed — the coding model just receives a less
- *     specific prompt.
+ * Cost note: GLM is NOT used here. GLM vision (glm-4v) is not activated on
+ * the Zhipu account (HTTP 1211) and GLM is cost-prohibitive anyway — see the
+ * hard rule in glm-config.ts:getVisionApiKey(). Gemini is the only sanctioned
+ * vision provider for general traffic. GLM tokens are reserved exclusively
+ * for the Second Brain critical-review surface.
  *
- * See docs/PRODUCTION-AI-KEYS.md §3 for env var reference.
+ * Conservative by design — best-effort: any failure (network, non-2xx,
+ * malformed JSON) returns a placeholder string and logs at warn. The request
+ * never fails because vision preprocessing failed — the coding model just
+ * receives a less specific prompt.
+ *
+ * See docs/PRODUCTION-AI-KEYS.md A3 for env var reference.
  */
 @Injectable()
 export class VisionPreprocessorService {
   private readonly logger = new Logger(VisionPreprocessorService.name);
 
-  /** Hard cap on the GLM-4V call — preprocessing must never stall the chat turn. */
+  /** Hard cap on the vision call — preprocessing must never stall the chat turn. */
   private readonly timeoutMs = 12_000;
-
-  constructor(private readonly brainProviders: FounderBrainProvidersService) {}
 
   /**
    * Returns true iff the message content array contains at least one
@@ -43,21 +44,17 @@ export class VisionPreprocessorService {
   }
 
   /**
-   * Send a single image to GLM-4V and return a short text description.
-   * Best-effort — never throws.
+   * Send a single image to the vision provider and return a short text
+   * description. Best-effort — never throws.
    */
   async describeImage(
     imageUrl: string,
     hint?: string,
   ): Promise<string> {
     const url = `${getVisionApiBaseUrl()}/chat/completions`;
-    const envKey = getVisionApiKey();
-    const apiKey =
-      envKey ??
-      (await this.brainProviders.resolveApiKey('glm')) ??
-      null;
+    const apiKey = getVisionApiKey();
     if (!apiKey) {
-      this.logger.warn('vision_preprocessor skipped — no vision API key configured');
+      this.logger.warn('vision_preprocessor skipped — no vision API key configured (FOUNDER_VISION_API_KEY / GEMINI_API_KEY)');
       return '[image: vision preprocessor unavailable — no vision key]';
     }
 
@@ -131,14 +128,14 @@ export class VisionPreprocessorService {
   }
 
   /**
-   * Replace image parts in a content array with their GLM-4V text descriptions.
+   * Replace image parts in a content array with their text descriptions.
    * Text parts are preserved verbatim. Returns a plain string if every part
    * was an image (the descriptions get concatenated), or the original array
    * with image parts rewritten, depending on shape.
    *
    * The audit hint passed to describeImage is the union of any text parts in
-   * the same message — this lets GLM-4V use the user's surrounding prompt as
-   * context when describing the image.
+   * the same message — this lets the vision provider use the user's
+   * surrounding prompt as context when describing the image.
    */
   async rewriteContentWithDescriptions(
     parts: ChatCompletionMessageContentPart[],
@@ -169,7 +166,7 @@ export class VisionPreprocessorService {
     return [...textParts, ...imageBlocks].join('\n\n').trim();
   }
 
-  /** Resolve the GLM-4V model name from env (FOUNDER_VISION_MODEL) or default. */
+  /** Resolve the vision model name from env (FOUNDER_VISION_MODEL) or default. */
   visionModel(): string {
     return getVisionModel();
   }

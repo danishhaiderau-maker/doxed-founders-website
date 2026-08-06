@@ -28,6 +28,10 @@ type ChatMsg = {
 /**
  * Options shown in the AI dropdown. "Auto", "Free", "Founder AI" stay in-chat
  * (no navigation). "Local" and "BYOK" navigate to dedicated routes.
+ *
+ * HARD COST RULE: GLM is never selectable here. GLM is cost-prohibitive and
+ * is reserved exclusively for the Second Brain critical-review surface.
+ * General chat uses DeepSeek (text) + Gemini (vision) only.
  */
 type AiOption = {
   key: string;
@@ -40,7 +44,7 @@ type AiOption = {
 const AI_OPTIONS: AiOption[] = [
   { key: 'auto', label: 'Auto', kind: 'chat', blurb: 'Founder IDE picks the best model for the task' },
   { key: 'free', label: 'Free', kind: 'chat', blurb: 'Daily free cloud quota + unlimited local' },
-  { key: 'founder-ai', label: 'Founder AI', kind: 'chat', blurb: 'Founder Brain routed model (GLM / DeepSeek / Gemini)' },
+  { key: 'founder-ai', label: 'Founder AI', kind: 'chat', blurb: 'Founder Brain routed model (DeepSeek text + Gemini vision)' },
   { key: 'local', label: 'Local', kind: 'nav', href: '/founder-ide/local', blurb: 'Pair a local llama.cpp / Ollama model' },
   { key: 'byok', label: 'BYOK', kind: 'nav', href: '/founder-ide/byok', blurb: 'Connect your own cloud API keys' },
 ];

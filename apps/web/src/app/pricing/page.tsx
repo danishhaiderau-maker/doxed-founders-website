@@ -45,7 +45,7 @@ export default function PricingPage() {
               <p className='mt-1 text-xs text-zinc-500'>forever</p>
               <ul className='mt-5 space-y-2 text-sm text-zinc-300'>
                 <li>Founder IDE app</li>
-                <li><strong className='text-white'>10 BYOK cloud models</strong> (OpenAI, Anthropic, GLM, +7)</li>
+                <li><strong className='text-white'>10 BYOK cloud models</strong> (OpenAI, Anthropic, DeepSeek, +7)</li>
                 <li><strong className='text-white'>Unlimited local models</strong> (Qwen, Llama, GGUF)</li>
                 <li>Tab autocomplete (always works)</li>
                 <li>Limited daily cloud quota</li>
@@ -123,8 +123,16 @@ export default function PricingPage() {
               <span className='text-zinc-200'>75 / 90 / 100% alerts</span>.
             </p>
           </div>
-        </section>
 
+          {/* SECOND BRAIN ADD-ON (GLM) */}
+          <div className='mt-4 rounded-xl border border-violet-900/40 bg-violet-950/20 p-4 text-center'>
+            <p className='text-sm text-zinc-300'>
+              <strong className='text-violet-200'>Second Brain add-on:</strong>{' '}
+              GLM-powered critical review of agent output - available as a premium add-on,
+              used sparingly to keep costs down. GLM is <em>not</em> part of general chat or any per-seat tier.
+            </p>
+          </div>
+        </section>
         {/* COMPARISON */}
         <section className='mb-12'>
           <div className='overflow-hidden rounded-2xl border border-zinc-800'>

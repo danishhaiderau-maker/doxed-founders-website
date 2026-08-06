@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+﻿import { Injectable } from '@nestjs/common';
 import { classifyFounderBrainTask } from '@dcf/utils';
 import { FounderBrainProvidersService } from './founder-brain-providers.service';
 import type {
@@ -14,6 +14,13 @@ const REASONING_PATTERN =
   /\b(why|explain|analyze|compare|tradeoff|strategy|architecture|regulatory|compliance|tokenomics|roadmap|plan)\b/i;
 const SIMPLE_PATTERN =
   /\b(what is|how do i|status|hello|thanks|yes|no|list|show me)\b/i;
+
+// GLM is reserved exclusively for the Second Brain critical-review surface.
+// Do NOT route general traffic here — it is cost-prohibitive. DeepSeek carries
+// every general intent (code, reasoning, simple_qa). Gemini handles vision
+// preprocessing. Only SecondBrainService may call GLM. See
+// apps/api/src/second-brain/second-brain.service.ts.
+const GENERAL_PROVIDER = 'deepseek' as const;
 
 type FastLane = {
   providerKey: string;
@@ -51,20 +58,20 @@ export class ModelRouterService {
 
     switch (intent) {
       case 'code':
-        fast = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
-        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
+        fast = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekCodingModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekCodingModel };
         tier = 'code';
         break;
       case 'reasoning':
-        fast = { providerKey: 'glm', model: cfg.glmCodingModel };
-        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        fast = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekCodingModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekFastModel };
         tier = 'reasoning';
         break;
       case 'summarize':
       case 'social_draft':
       case 'simple_qa':
-        fast = { providerKey: 'deepseek', model: cfg.deepseekFastModel };
-        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
+        fast = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekFastModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekFastModel };
         tier = 'fast';
         break;
       default:
@@ -88,17 +95,17 @@ export class ModelRouterService {
 
     switch (intent) {
       case 'code':
-        fallback = { providerKey: 'glm', model: cfg.glmCodingModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekCodingModel };
         tier = 'code';
         break;
       case 'reasoning':
-        fallback = { providerKey: 'deepseek', model: cfg.deepseekCodingModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekCodingModel };
         tier = 'reasoning';
         break;
       case 'summarize':
       case 'social_draft':
       case 'simple_qa':
-        fallback = { providerKey: 'glm', model: cfg.glmFastModel };
+        fallback = { providerKey: GENERAL_PROVIDER, model: cfg.deepseekFastModel };
         tier = 'fast';
         break;
       default:
@@ -118,17 +125,12 @@ export class ModelRouterService {
     section: AiRuntimeSection,
     cfg: { deepseekFastModel: string; glmFastModel: string },
   ): ModelRoute {
-    if (section === 'wall_summarizer') {
-      return {
-        intent,
-        providerKey: 'glm',
-        model: cfg.glmFastModel,
-        tier: 'fast',
-      };
-    }
+    // GLM must never be the default route for general traffic. The Wall
+    // Summarizer previously defaulted to GLM via this branch; it now shares
+    // the cheap DeepSeek fast lane with everything else.
     return {
       intent,
-      providerKey: 'deepseek',
+      providerKey: GENERAL_PROVIDER,
       model: cfg.deepseekFastModel,
       tier: 'fast',
     };

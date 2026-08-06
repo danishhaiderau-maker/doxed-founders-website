@@ -73,6 +73,7 @@ import { LamModule } from './lam/lam.module';
 import { DeploymentModesModule } from './deployment-modes/deployment-modes.module';
 import { FounderEconomicsModule } from './founder-economics/founder-economics.module';
 import { IntentEngineModule } from './intent-engine/intent-engine.module';
+import { SecondBrainModule } from './second-brain/second-brain.module';
 
 @Module({
   imports: [
@@ -150,6 +151,8 @@ import { IntentEngineModule } from './intent-engine/intent-engine.module';
     DebugSquasherModule,
     FounderEconomicsModule,
     IntentEngineModule,
+    SecondBrainModule,
+  
   ],
   providers: [
     {

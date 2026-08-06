@@ -184,7 +184,7 @@ export default function FounderIdePage() {
             <div className='rounded-xl border border-zinc-800 bg-zinc-950/40 p-5'>
               <h4 className='text-sm font-semibold text-white'>10 BYOK models</h4>
               <p className='mt-1.5 text-sm text-zinc-400'>
-                Bring keys from OpenAI, Anthropic, Google, DeepSeek, GLM, Mistral, Groq, xAI, Cohere, Together —
+                Bring keys from OpenAI, Anthropic, Google, DeepSeek, Mistral, Groq, xAI, Cohere, Together (GLM is BYOK-only) —
                 all work on the Free plan.
               </p>
             </div>

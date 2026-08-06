@@ -1,4 +1,4 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+﻿import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   AI_PROXY_DDOLLAR_COST,
@@ -10,7 +10,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SpendingEngine } from '../ddollar/spending-engine.service';
 import { ModelRouterService } from '../founder-ai-runtime/model-router.service';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
-import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
+// GLM is reserved exclusively for the Second Brain critical-review surface.
+// Do NOT route general traffic here — it is cost-prohibitive. DeepSeek carries
+// every general intent; Gemini handles vision. Only SecondBrainService may
+// call GLM. See apps/api/src/second-brain/second-brain.service.ts.
+import { DEEPSEEK_V4_FLASH_MODEL } from './deepseek-model-policy';
 import { DDOLLAR_ACTION_KEYS } from '../ddollar/ddollar.constants';
 import { FlightRecorderService } from '../flight-recorder/flight-recorder.service';
 import { RoutingEngineService } from '../routing-engine/routing-engine.service';
@@ -68,7 +72,7 @@ export type ProxyInvokeResult = {
  * everything they need without re-deriving state.
  *
  * `flightRecorderHasDecisionRow` is true when the Routing Engine v2 already
- * wrote a decision row at route time — in that case the post-request hook
+ * wrote a decision row at route time â€” in that case the post-request hook
  * UPDATES that row (latency/cost/tokens) instead of inserting a duplicate.
  */
 type ResolvedRoute = AiProxyRouteDecision & {
@@ -76,7 +80,7 @@ type ResolvedRoute = AiProxyRouteDecision & {
   promptHash: string;
   /** Profile that was effective for this request (always 'balanced' today). */
   profile: string;
-  /** Scored candidates snapshot — empty for the legacy path. */
+  /** Scored candidates snapshot â€” empty for the legacy path. */
   candidates: Array<{ provider: string; model: string; score: number }>;
   cacheKey?: string | null;
   cacheLevel: 'hit' | 'partial' | 'miss';
@@ -94,8 +98,8 @@ type ResolvedRoute = AiProxyRouteDecision & {
  * (DDollar spend + usage log + Flight Recorder row).
  *
  * Routing path:
- *   - USE_ROUTING_ENGINE_V2=true (default): Routing Engine v2 — cache
- *     lookup → capability gate → intent + cost-latency scoring. Falls
+ *   - USE_ROUTING_ENGINE_V2=true (default): Routing Engine v2 â€” cache
+ *     lookup â†’ capability gate â†’ intent + cost-latency scoring. Falls
  *     back to legacy on RoutingInfeasibleError / empty Capability table.
  *   - USE_ROUTING_ENGINE_V2=false: force the legacy ModelRouterService.
  */
@@ -123,7 +127,7 @@ export class AiProxyRuntimeService {
   ): Promise<ResolvedRoute> {
     const requestedAlias = body.model ?? FOUNDER_OS_AUTO_MODEL;
 
-    // Map alias → intent hint. The router does the real classification, but
+    // Map alias â†’ intent hint. The router does the real classification, but
     // the alias lets the founder force a tier from the IDE.
     const forcedIntent = forcedIntentForAlias(requestedAlias);
 
@@ -235,29 +239,36 @@ export class AiProxyRuntimeService {
     body: ChatCompletionRequestDto,
     route: ResolvedRoute,
   ): Promise<ProxyInvokeResult> {
-    const apiKey = await this.brainProviders.resolveApiKey(
-      route.providerKey as 'glm' | 'deepseek',
-    );
+    // Hard cost rule: the AI Auto Router only emits DeepSeek for general
+    // traffic (see ModelRouterService + FounderBrainProvidersService). GLM is
+    // never a general route — it is reserved for the Second Brain surface.
+    // We still guard against a stray 'glm' provider key here so a stale
+    // Capability row or cached decision cannot silently spend GLM tokens on
+    // general chat. If GLM somehow surfaces, we throw rather than call out.
+    if (route.providerKey !== 'deepseek') {
+      throw new ServiceUnavailableException(
+        `General chat refuses provider "${route.providerKey}" — only deepseek is permitted here. GLM is reserved for Second Brain.`,
+      );
+    }
+    const apiKey = await this.brainProviders.resolveApiKey('deepseek');
     if (!apiKey) {
       throw new ServiceUnavailableException(
         `No API key configured for provider "${route.providerKey}"`,
       );
     }
 
-    const url =
-      route.providerKey === 'glm'
-        ? `${getGlmApiBaseUrl()}/chat/completions`
-        : DEEPSEEK_CHAT_URL;
+    const url = DEEPSEEK_CHAT_URL;
 
-    // Inject Memory Engine context into the system message (kernel §3).
-    // Best-effort — empty memory or a store hiccup leaves messages unchanged.
+    // Inject Memory Engine context into the system message (kernel Â§3).
+    // Best-effort â€” empty memory or a store hiccup leaves messages unchanged.
     const memoryInjected = await this.injectMemoryContext(auth.userId, body.messages);
 
-    // Vision preprocessing (GLM-4V): when a message contains image_url parts
+    // Vision preprocessing (Gemini): when a message contains image_url parts
     // and the resolved route's model is vision-blind, route each image through
-    // GLM-4V first and substitute the text description. Best-effort — a
+    // the vision provider (Gemini) first and substitute the text description.
+    // GLM is NOT used here (reserved for Second Brain). Best-effort - a
     // preprocessor failure leaves the original image parts in place so the
-    // upstream model still receives the user's intent (most coding models
+    // upstream model still receives the user intent (most coding models
     // will gracefully ignore image_url parts they cannot parse).
     const messages = await this.maybePreprocessImages(memoryInjected, route);
 
@@ -346,7 +357,7 @@ export class AiProxyRuntimeService {
       promptTokens = parsed?.usage?.prompt_tokens;
       completionTokens = parsed?.usage?.completion_tokens;
     } catch {
-      // provider returned malformed JSON — leave token counts undefined
+      // provider returned malformed JSON â€” leave token counts undefined
     }
 
     void this.afterRequest(auth, route, {
@@ -408,7 +419,7 @@ export class AiProxyRuntimeService {
       );
     }
 
-    // Flight Recorder — unconditional so the Decision Log starts populating
+    // Flight Recorder â€” unconditional so the Decision Log starts populating
     // immediately. Best-effort: never fails the request.
     try {
       const costUsd = await this.computeCostUsd(
@@ -454,7 +465,7 @@ export class AiProxyRuntimeService {
       );
     }
 
-    // Learning Engine — retry detection. Fire-and-await: a duplicate request
+    // Learning Engine â€” retry detection. Fire-and-await: a duplicate request
     // within 60s with the same prompt hash marks the PREVIOUS decision as
     // retried=true. Never blocks request serving, never fails the request.
     try {
@@ -575,8 +586,8 @@ export class AiProxyRuntimeService {
   /**
    * Lightweight intent classifier used on the legacy path so the Flight
    * Recorder row has a meaningful `intent`. Mirrors what the Routing Engine
-   * v2's classifier would produce: short prompts → simple_qa, code fences /
-   * backticks → code, everything else → reasoning.
+   * v2's classifier would produce: short prompts â†’ simple_qa, code fences /
+   * backticks â†’ code, everything else â†’ reasoning.
    */
   private inferIntent(userPrompt: string): AiRuntimeIntent {
     if (/```|`/.test(userPrompt)) return 'code';
@@ -586,8 +597,8 @@ export class AiProxyRuntimeService {
 
   /**
    * Phase 5b intent dispatcher. When USE_SMART_INTENT_CLASSIFIER is on (the
-   * default), delegates to the hybrid classifier (heuristic pre-filter →
-   * GLM 4 Flash → context signals). When off, or if the classifier throws,
+   * default), delegates to the hybrid classifier (heuristic pre-filter â†’
+   * heuristic-only (GLM disabled for cost) â†’ context signals). When off, or if the classifier throws,
    * falls back to the legacy length/code-fence heuristic so routing never
    * breaks. Returns an AiRuntimeIntent so the Routing Engine v2 and Flight
    * Recorder rows keep their existing type.
@@ -618,8 +629,9 @@ export class AiProxyRuntimeService {
     if (intent === 'code') return 'code';
     if (intent === 'reasoning') return 'reasoning';
     if (intent === 'simple_qa') return 'fast';
-    // Default for agent/vision/unknown falls back to whatever the provider
-    // is good at — keep it cheap for glm, reasoning-tier for deepseek.
+    // Default for agent/vision/unknown. With GLM removed from general
+    // routing, only DeepSeek reaches here; reasoning-tier is the honest
+    // default for non-code/non-simple intents.
     return provider === 'deepseek' ? 'reasoning' : 'fast';
   }
 
@@ -653,22 +665,22 @@ export class AiProxyRuntimeService {
    * Build a Fill-In-the-Middle prompt for DeepSeek.
    *
    * DeepSeek's FIM format uses special tokens:
-   *   <|fim▁begin|>prefix<|fim▁hole|>suffix<|fim▁end|>
+   *   <|fimâ–begin|>prefix<|fimâ–hole|>suffix<|fimâ–end|>
    *
    * The model is expected to generate the completion that fills the gap
-   * between prefix and suffix. The stop token <|fim▁end|> is included
+   * between prefix and suffix. The stop token <|fimâ–end|> is included
    * in the request stop list to prevent the model from generating beyond
    * the completion.
    */
   private buildFimPrompt(prefix: string, suffix: string): string {
-    // DeepSeek FIM format: <|fim▁begin|>PREFIX<|fim▁hole|>SUFFIX<|fim▁end|>
-    // The ▁ is U+2581 (LOWER ONE EIGHTH BLOCK)
+    // DeepSeek FIM format: <|fimâ–begin|>PREFIX<|fimâ–hole|>SUFFIX<|fimâ–end|>
+    // The â– is U+2581 (LOWER ONE EIGHTH BLOCK)
     return `<|fim\u2581begin|>${prefix}<|fim\u2581hole|>${suffix}<|fim\u2581end|>`;
   }
 
   /**
    * Prepend Memory Engine context to the first system message (or insert
-   * one). Best-effort — never breaks the upstream call.
+   * one). Best-effort â€” never breaks the upstream call.
    */
   private async injectMemoryContext(
     userId: string,
@@ -708,15 +720,16 @@ export class AiProxyRuntimeService {
   }
 
   /**
-   * GLM-4V vision preprocessing step.
+   * Vision preprocessing step (Gemini).
    *
-   * For each message that contains `image_url` content parts, decide whether
+   * For each message that contains image_url content parts, decide whether
    * the resolved route's model can handle images natively (Capability.vision
    * = true). If it can, pass the message through unchanged. If it cannot,
-   * route each image through GLM-4V and substitute the description text.
+   * route each image through the vision provider (Gemini) and substitute the
+   * description text. GLM is NOT used here - it is reserved for Second Brain.
    *
    * Best-effort: Capability lookup failures, network errors, and empty
-   * descriptions all degrade gracefully — the original message is left in
+   * descriptions all degrade gracefully - the original message is left in
    * place so the upstream call still receives the user's intent.
    */
   private async maybePreprocessImages(
@@ -738,7 +751,7 @@ export class AiProxyRuntimeService {
       });
       if (cap?.vision === true) {
         this.logger.debug(
-          `vision_preprocessor skipped — route ${route.providerKey}/${route.model} is vision-capable`,
+          `vision_preprocessor skipped â€” route ${route.providerKey}/${route.model} is vision-capable`,
         );
         return messages;
       }
@@ -772,9 +785,13 @@ export class AiProxyRuntimeService {
     return { object: 'list', data: PROXY_MODEL_CATALOG };
   }
 
-  /** Convenience for tests / admin — exposes the current effective model. */
+  /**
+   * Convenience for tests / admin exposes the current effective general
+   * model. DeepSeek is the sole general-purpose provider now that GLM is
+   * gated behind Second Brain.
+   */
   effectiveModel(): string {
-    return getGlmDefaultModel();
+    return DEEPSEEK_V4_FLASH_MODEL;
   }
 }
 
@@ -782,7 +799,7 @@ export class AiProxyRuntimeService {
  * Coerce a message content (string OR array of OpenAI-style parts) into a
  * flat string for hashing, intent classification, and prompt-token estimates.
  * Image parts become a literal "[image]" placeholder. Used by decideRoute()
- * only — the upstream payload preserves the original shape (or the
+ * only â€” the upstream payload preserves the original shape (or the
  * preprocessor's rewritten string) via the runtime's payload builder.
  */
 function flattenContentToString(
