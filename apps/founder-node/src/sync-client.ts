@@ -20,13 +20,13 @@ import type {
 import { FOUNDER_NODE_LOCAL_VERSION } from './app-version';
 
 /**
- * Phase A — Desktop Runtime.
+ * Phase A - Desktop Runtime.
  *
- * The heartbeat type in @dcf/founder-vault is intentionally narrow. Founder
- * Node extends it here with capability + desktop metadata + discovered Cursor
- * workspaces/agents. The API currently persists only `desktopBridge` and
- * `founderCloud`; the extra fields are forward-compatible (NestJS accepts
- * them on the body) and will be consumed once the cloud side is extended.
+ * The heartbeat type in @dcf/founder-vault now declares workspaces/sessions
+ * (Phase A); Founder Node extends it here with capability + desktop metadata
+ * + discovered Cursor/Claude Code/Founder IDE workspaces, agents, and
+ * sessions. The API persists desktopBridge, founderCloud, workspaces, and
+ * sessions; capabilities/desktop are forward-compatible extras.
  */
 export type FounderNodeHeartbeatExt = FounderNodeHeartbeat & {
   capabilities?: BridgeCapabilityReport;

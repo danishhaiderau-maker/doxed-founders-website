@@ -1,4 +1,4 @@
-import {
+﻿import {
   BadRequestException,
   Inject,
   Injectable,
@@ -8,7 +8,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
-import { parseFounderCloudState, type BridgeSession, type BridgeWorkspace } from '@dcf/utils';
+import { parseFounderCloudState } from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
 import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -228,12 +228,9 @@ export class FounderNodeService {
       },
     });
     void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
-    const workspaces = (input as FounderNodeHeartbeat & {
-      workspaces?: BridgeWorkspace[];
-    }).workspaces;
-    const sessions = (input as FounderNodeHeartbeat & {
-      sessions?: BridgeSession[];
-    }).sessions;
+    // FounderNodeHeartbeat now declares workspaces/sessions (Phase A); no cast needed.
+    const workspaces = input.workspaces;
+    const sessions = input.sessions;
     await this.desktopBridge.saveBridgePayload(node.userId, node.nodeId, input.label, {
       bridge: input.desktopBridge,
       workspaces: Array.isArray(workspaces) ? workspaces : undefined,

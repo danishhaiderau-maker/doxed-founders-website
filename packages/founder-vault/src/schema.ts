@@ -1,4 +1,4 @@
-import type { DesktopBridgeInput, DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
+import type { BridgeSession, BridgeWorkspace, DesktopBridgeInput, DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
 
 export const FOUNDER_VAULT_SCHEMA_VERSION = 1 as const;
 export type FounderVaultMeta = {
@@ -49,6 +49,10 @@ export type FounderNodeHeartbeat = {
   desktopBridge?: DesktopBridgeInput;
   /** Phase 5 — local Founder Cloud stack status from tray. */
   founderCloud?: FounderCloudMode;
+  /** Discovered IDE workspaces surfaced from the desktop node (Phase A). */
+  workspaces?: BridgeWorkspace[];
+  /** Recent IDE chat/agent sessions read from on-disk IDE storage (Phase A). */
+  sessions?: BridgeSession[];
 };
 
 export type FounderNodeOllamaConfig = {

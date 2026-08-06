@@ -1,4 +1,4 @@
-import {
+﻿import {
   app,
   BrowserWindow,
   Tray,
@@ -57,6 +57,11 @@ import {
   discoverClaudeCodeSessions,
   discoverClaudeCodeWorkspaces,
 } from './claude-code-discovery';
+import {
+  discoverFounderIdeAgents,
+  discoverFounderIdeSessions,
+  discoverFounderIdeWorkspaces,
+} from './founder-ide-discovery';
 import {
   connectAllIdes,
   connectCursor,
@@ -474,9 +479,13 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     const claudeWorkspaces = discoverClaudeCodeWorkspaces();
     const claudeAgents = discoverClaudeCodeAgents();
     const claudeSessions = discoverClaudeCodeSessions();
-    const workspaces = [...cursorWorkspaces, ...claudeWorkspaces];
-    const agents = [...cursorAgents, ...claudeAgents];
-    const sessions = [...cursorSessions, ...claudeSessions];
+    // Phase A - discover real Founder IDE workspaces/agents/sessions.
+    const founderIdeWorkspaces = discoverFounderIdeWorkspaces();
+    const founderIdeAgents = discoverFounderIdeAgents();
+    const founderIdeSessions = discoverFounderIdeSessions();
+    const workspaces = [...cursorWorkspaces, ...claudeWorkspaces, ...founderIdeWorkspaces];
+    const agents = [...cursorAgents, ...claudeAgents, ...founderIdeAgents];
+    const sessions = [...cursorSessions, ...claudeSessions, ...founderIdeSessions];
     const activeWorkspace = workspaces[0];
 
     // The cloud persists `desktopBridge` and exposes it via
