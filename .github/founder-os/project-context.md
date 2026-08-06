@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-feat(vision): wire Gemini 3.5 Flash-Lite as vision preprocessor
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
