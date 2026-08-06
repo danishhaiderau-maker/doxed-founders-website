@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): restore showcase activity feed + performance chart in public profile
+feat(dashboard): add separate 'Wipe Fly Only' button + local sync signal
 
 ## Last Activity
 
