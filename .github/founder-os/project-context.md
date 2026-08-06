@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-Merge branch 'founder-ide-landing-revamp': new Founder IDE landing page with clean download + pair flow
+﻿chore(sync): increase loop interval to 3 min (180s) per user request
 
 ## Last Activity
 
