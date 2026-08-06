@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-feat(dashboard): add separate 'Wipe Fly Only' button + local sync signal
+test(wipe): cover _seal_past_analysis_with_fallback degraded mode
 
 ## Last Activity
 
