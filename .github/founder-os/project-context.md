@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-﻿chore(sync): increase loop interval to 3 min (180s) per user request
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
