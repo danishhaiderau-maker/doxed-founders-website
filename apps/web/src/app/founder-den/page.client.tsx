@@ -2,7 +2,7 @@
 
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { parseOnboardingPathParam, type OnboardingPathId } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { FounderWorkspace, WorkspaceTab } from '@/components/founder-workspace';
@@ -50,6 +50,7 @@ function parseTab(value: string | null): WorkspaceTab {
 export default function FounderDenPageClient() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const [tab, setTab] = useState<WorkspaceTab>(() => parseTab(searchParams.get('tab')));
   const [copilotPrompt, setCopilotPrompt] = useState<string | null>(() => searchParams.get('prompt'));
   const [dashboard, setDashboard] = useState<FounderDashboard | null>(null);
@@ -81,6 +82,15 @@ export default function FounderDenPageClient() {
   const [wizardDismissed, setWizardDismissed] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState<FounderOnboardingStatus | null>(null);
   const initialPath = parseOnboardingPathParam(searchParams.get('onboard'));
+
+  // The sovereign onboarding path now lives on /founder-ide (clean landing page
+  // with download + pair flow). Bounce any legacy ?onboard=sovereign deep links
+  // there instead of rendering the old Founder Stack install block below.
+  useEffect(() => {
+    if (searchParams.get('onboard') === 'sovereign') {
+      router.replace('/founder-ide');
+    }
+  }, [searchParams, router]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;

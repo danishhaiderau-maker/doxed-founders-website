@@ -1,3 +1,9 @@
+/**
+ * @deprecated The legacy "Founder Stack" install flow. Superseded by the new
+ * /founder-ide page (apps/web/src/app/founder-ide/page.tsx) and the
+ * founder-ide-pair component. New user-facing flows should NOT use this.
+ * Kept for backward compatibility with existing deep links only.
+ */
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
